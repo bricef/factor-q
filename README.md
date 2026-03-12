@@ -23,3 +23,5 @@ Inspired by Claude Code and OpenCode, it takes the concept of a terminal based A
 ## OpenAgent
 
 A dedicated, model agnostic agent framework allowing rapid prototyping and creation of agent based systems.
+
+See https://www.one-tab.com/page/8paQposyRNq7Lp_c9vpJgw for reserach context
