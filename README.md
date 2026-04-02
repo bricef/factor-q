@@ -20,8 +20,14 @@ Inspired by Claude Code and OpenCode, it takes the concept of a terminal based A
 - Productivity integrations and tooling out of the box
 - Focus on document authoring experience on the command line
 
-## OpenAgent
+## FactorQ
 
 A dedicated, model agnostic agent framework allowing rapid prototyping and creation of agent based systems.
 
 See https://www.one-tab.com/page/8paQposyRNq7Lp_c9vpJgw for reserach context
+
+## Prior Art
+
+- [Crush](/research/crush.md)
+- [OpenCode](/research/opencode.md)
+- https://open-agent.io/
