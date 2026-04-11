@@ -47,3 +47,7 @@ fq *args:
 
 # Run all quality checks
 ci: fmt-check lint test
+
+# Build the fq-runtime container image
+docker-build:
+    docker build -t factor-q/fq-runtime:latest .

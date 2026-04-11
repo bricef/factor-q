@@ -41,6 +41,10 @@ test:
 ci:
     cd {{runtime_dir}} && just ci
 
+# Build container images for all services
+docker-build:
+    cd {{runtime_dir}} && just docker-build
+
 # Run the fq CLI (e.g. `just fq --agents-dir ./agents agent list`)
 #
 # Preserves the user's invocation directory so relative paths in
