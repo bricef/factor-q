@@ -617,7 +617,7 @@ async fn query_events(
     }
 
     println!(
-        "{:<20} {:<12} {:<24} {:<12} {}",
+        "{:<20} {:<40} {:<14} {:<12} {}",
         "timestamp", "agent", "event", "cost", "invocation"
     );
     for row in rows {
@@ -627,14 +627,9 @@ async fn query_events(
             .total_cost
             .map(|c| format!("${c:.6}"))
             .unwrap_or_else(|| "-".to_string());
-        let agent_short = if row.agent_id.len() > 24 {
-            format!("{}...", &row.agent_id[..21])
-        } else {
-            row.agent_id.clone()
-        };
         println!(
-            "{:<20} {:<12} {:<24} {:<12} {}",
-            ts, agent_short, row.event_type, cost, inv_short
+            "{:<20} {:<40} {:<14} {:<12} {}",
+            ts, row.agent_id, row.event_type, cost, inv_short
         );
     }
     Ok(())

@@ -50,6 +50,25 @@ ci:
 docker-build:
     cd {{runtime_dir}} && just docker-build
 
+# Run the shell tool test battery inside a disposable container
+# with networking disabled, for extra blast-radius containment
+# while iterating on the sandbox.
+test-shell-sandbox:
+    cd {{runtime_dir}} && just test-shell-sandbox
+
+# Run end-to-end smoke tests against a real LLM. Exercises the
+# full walking skeleton: agent definitions parse, triggers run,
+# the tool-call loop drives file_read and shell built-ins against
+# Anthropic, events land in the SQLite projection, and the CLI
+# query commands read them back.
+#
+# Requires:
+#   - ANTHROPIC_API_KEY in the environment
+#   - NATS running (see `just infra-up`)
+#   - fq binary built (this recipe builds it first)
+smoke: build
+    {{justfile_directory()}}/tests/smoke/smoke.sh
+
 # Run the fq CLI (e.g. `just fq --agents-dir ./agents agent list`)
 #
 # Preserves the user's invocation directory so relative paths in
