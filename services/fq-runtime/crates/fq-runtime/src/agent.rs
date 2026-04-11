@@ -26,6 +26,9 @@
 //! ```
 
 pub mod definition;
+pub mod registry;
+
+pub use registry::{AgentRegistry, LoadError, LoadedAgent, RegistryError};
 
 use crate::events::{ConfigSnapshot, SandboxSnapshot};
 
