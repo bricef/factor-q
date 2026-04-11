@@ -8,6 +8,7 @@
 //! a [`FixtureClient`](crate::llm::fixture::FixtureClient) without needing
 //! any real provider credentials.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::Value;
@@ -22,18 +23,18 @@ use crate::events::{
     TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
-use crate::pricing::ModelPricing;
+use crate::pricing::PricingTable;
 
 /// The agent executor. Cheap to construct, takes shared references to the
-/// dependencies it uses. Clone is fine — both fields are already `Arc` or
-/// `Clone`.
+/// dependencies it uses.
 pub struct AgentExecutor {
     bus: EventBus,
+    pricing: Arc<PricingTable>,
 }
 
 impl AgentExecutor {
-    pub fn new(bus: EventBus) -> Self {
-        Self { bus }
+    pub fn new(bus: EventBus, pricing: Arc<PricingTable>) -> Self {
+        Self { bus, pricing }
     }
 
     /// Run a single invocation of an agent.
@@ -144,8 +145,8 @@ impl AgentExecutor {
         .await?;
 
         // Cost calculation. Unknown models get zero cost — a warning in the
-        // log lets operators know they need to add pricing.
-        let pricing = ModelPricing::lookup(agent.model());
+        // log lets operators know they need updated pricing data.
+        let pricing = self.pricing.lookup(agent.model());
         if pricing.is_none() {
             warn!(
                 model = agent.model(),
@@ -153,7 +154,6 @@ impl AgentExecutor {
             );
         }
         let (input_cost, output_cost, total_cost) = pricing
-            .as_ref()
             .map(|p| p.calculate(response.usage.input_tokens, response.usage.output_tokens))
             .unwrap_or((0.0, 0.0, 0.0));
 
@@ -300,12 +300,28 @@ mod tests {
     use super::*;
     use crate::events::{EventPayload, StopReason, TokenUsage};
     use crate::llm::fixture::FixtureClient;
+    use crate::pricing::ModelPricing;
     use futures::StreamExt;
     use serde_json::json;
+    use std::collections::HashMap;
     use std::time::Duration;
 
     fn unique_agent_id(prefix: &str) -> String {
         format!("{prefix}-{}", Uuid::now_v7().simple())
+    }
+
+    fn test_pricing() -> Arc<PricingTable> {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "claude-haiku".to_string(),
+            ModelPricing {
+                input_per_million: 1.0,
+                output_per_million: 5.0,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+            },
+        );
+        Arc::new(PricingTable::from_map(entries))
     }
 
     fn sample_agent() -> Agent {
@@ -341,7 +357,7 @@ mod tests {
         };
 
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
-        let executor = AgentExecutor::new(bus.clone());
+        let executor = AgentExecutor::new(bus.clone(), test_pricing());
         let agent = sample_agent();
 
         let llm = FixtureClient::new();
@@ -423,7 +439,7 @@ mod tests {
         };
 
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
-        let executor = AgentExecutor::new(bus.clone());
+        let executor = AgentExecutor::new(bus.clone(), test_pricing());
 
         let agent_id = unique_agent_id("overspender");
         let agent = Agent::builder()

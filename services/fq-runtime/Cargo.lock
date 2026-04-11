@@ -674,6 +674,7 @@ dependencies = [
  "fq-tools",
  "futures",
  "genai",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",

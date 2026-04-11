@@ -101,10 +101,17 @@ Enforce the "nothing by default" principle at the filesystem level.
 Built into the executor from the first LLM call.
 
 - Track input/output token counts per LLM call
-- Calculate cost based on model pricing (configurable per provider/model)
+- Calculate cost based on model pricing loaded from the LiteLLM pricing JSON
 - Emit cost events to NATS after each LLM call
 - Enforce per-agent budget ceiling — halt execution and emit a `budget.exceeded` event
 - Project cost data into SQLite for querying
+
+Pricing is fetched from the LiteLLM repository at startup, cached locally
+(default `$XDG_CACHE_HOME/factor-q/pricing.json`), and parsed into a
+`PricingTable`. On fetch failure the runtime falls back to the cached
+copy; on cache miss too it runs with an empty table (costs reported as
+$0 with a warning per unknown model). This gives us automatic coverage
+of hundreds of models without hand-maintaining entries.
 
 ### 8. SQLite projection consumer
 A NATS consumer that materialises events into a queryable SQLite database.
@@ -151,6 +158,33 @@ Add OpenAI as a second provider to prove model-agnosticism in practice, not just
 
 ### Hot-reload
 Watch agent definition directories for file changes and reload definitions without restarting the runtime. Requires file watching, debouncing, and safe swapping of definitions while the executor may be mid-run.
+
+## Deferred work (known phase 1 gaps)
+
+These are pieces we know we'll need once phase 1 is in place, but they
+don't block the walking skeleton.
+
+### Scheduled refresh of pricing data
+Phase 1 loads the LiteLLM pricing JSON once at startup. That's fine
+while the runtime is a foreground process that restarts often during
+development, but once factor-q is a continuously running service (per
+the self-hosted vision in ADR-0002), startup-only loading is not
+acceptable — prices drift, new models ship, and the runtime would keep
+using a stale cache indefinitely.
+
+The right place to fix this is a general internal job scheduler that
+also supports agent triggers (scheduled agents are already required by
+the phase 1 plan under "triggers"). When we build that, pricing refresh
+becomes one internal job among many:
+
+- Cron-style or interval-based
+- Refreshes the LiteLLM JSON, atomically replaces the `PricingTable`
+- Emits events on successful refresh and on failures
+- Observable via the same `fq events` commands as agent activity
+
+Tracking this as deferred rather than a hard phase 1 dependency because
+the cache fallback makes stale-but-usable the default behaviour, and
+phase 1's primary purpose is proving the walking skeleton.
 
 ## Out of scope
 

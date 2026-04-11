@@ -11,3 +11,4 @@ pub use bus::EventBus;
 pub use config::Config;
 pub use executor::{AgentExecutor, ExecutorError, InvocationOutcome};
 pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
+pub use pricing::{ModelPricing, PricingTable};
