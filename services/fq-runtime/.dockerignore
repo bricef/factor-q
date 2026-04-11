@@ -1,0 +1,15 @@
+# Rust build artefacts — built inside the container, never copied in.
+target/
+
+# Editor and OS junk.
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Anything our project keeps next to the sources that isn't relevant to
+# a production build.
+README.md
+justfile
+.dockerignore
+Dockerfile
