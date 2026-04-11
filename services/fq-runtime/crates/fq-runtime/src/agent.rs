@@ -193,6 +193,21 @@ impl Sandbox {
             env: self.env.clone(),
         }
     }
+
+    /// Materialise this declarative sandbox into a runtime
+    /// [`fq_tools::ToolSandbox`] that tools can check against. Each
+    /// string path is converted to a `PathBuf` as-is; canonicalisation
+    /// happens at tool-check time.
+    pub fn to_tool_sandbox(&self) -> fq_tools::ToolSandbox {
+        let mut sb = fq_tools::ToolSandbox::new();
+        for path in &self.fs_read {
+            sb = sb.allow_read(std::path::PathBuf::from(path));
+        }
+        for path in &self.fs_write {
+            sb = sb.allow_write(std::path::PathBuf::from(path));
+        }
+        sb
+    }
 }
 
 /// Fluent builder for constructing an [`Agent`].

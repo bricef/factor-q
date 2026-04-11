@@ -8,7 +8,7 @@ use fq_runtime::agent::{definition::parse_agent, AgentId, AgentRegistry};
 use fq_runtime::events::{Event, EventPayload, TriggerSource};
 use fq_runtime::executor::InvocationOutcome;
 use fq_runtime::llm::GenAiClient;
-use fq_runtime::{AgentExecutor, Config, EventBus, PricingTable};
+use fq_runtime::{AgentExecutor, Config, EventBus, PricingTable, ToolRegistry};
 use futures::StreamExt;
 use serde_json::Value;
 use tracing::error;
@@ -399,7 +399,8 @@ async fn trigger_agent(
         None => Value::Null,
     };
 
-    let executor = AgentExecutor::new(bus, pricing);
+    let tools = Arc::new(ToolRegistry::with_builtins());
+    let executor = AgentExecutor::new(bus, pricing, tools);
     println!("Running agent...");
     let outcome = match executor
         .run(
