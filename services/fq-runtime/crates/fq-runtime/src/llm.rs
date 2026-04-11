@@ -14,6 +14,8 @@
 pub mod fixture;
 pub mod genai;
 
+pub use genai::GenAiClient;
+
 use async_trait::async_trait;
 
 use crate::events::{Message, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolSchema};

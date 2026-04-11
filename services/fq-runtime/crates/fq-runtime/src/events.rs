@@ -160,8 +160,10 @@ pub struct Message {
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<MessageToolCall>,
+    /// ID correlating a `tool` role message with a prior assistant tool
+    /// call. Assigned by the LLM provider and carried through as-is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<Uuid>,
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,7 +177,10 @@ pub enum MessageRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageToolCall {
-    pub tool_call_id: Uuid,
+    /// ID assigned by the LLM provider. Carried through unchanged so
+    /// that `tool.call` and `tool.result` events can be correlated with
+    /// the raw provider response.
+    pub tool_call_id: String,
     pub tool_name: String,
     pub parameters: Value,
 }
@@ -228,7 +233,7 @@ pub struct TokenUsage {
 /// Published when the agent invokes a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallPayload {
-    pub tool_call_id: Uuid,
+    pub tool_call_id: String,
     pub tool_name: String,
     pub parameters: Value,
 }
@@ -236,7 +241,7 @@ pub struct ToolCallPayload {
 /// Published when a tool invocation completes (success or failure).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultPayload {
-    pub tool_call_id: Uuid,
+    pub tool_call_id: String,
     pub output: String,
     pub is_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -396,7 +401,7 @@ mod tests {
     #[test]
     fn tool_result_error_kind_serialises() {
         let payload = ToolResultPayload {
-            tool_call_id: Uuid::now_v7(),
+            tool_call_id: "toolu_01ABC".to_string(),
             output: "Path /etc/passwd is outside allowed scope".to_string(),
             is_error: true,
             error_kind: Some(ToolErrorKind::SandboxViolation),
@@ -410,7 +415,7 @@ mod tests {
     #[test]
     fn tool_result_success_omits_error_kind() {
         let payload = ToolResultPayload {
-            tool_call_id: Uuid::now_v7(),
+            tool_call_id: "toolu_01ABC".to_string(),
             output: "file contents".to_string(),
             is_error: false,
             error_kind: None,

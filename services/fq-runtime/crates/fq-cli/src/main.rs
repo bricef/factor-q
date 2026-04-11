@@ -5,12 +5,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use fq_runtime::agent::{definition::parse_agent, AgentId, AgentRegistry};
-use fq_runtime::events::{
-    Event, EventPayload, StopReason, TokenUsage, TriggerSource,
-};
+use fq_runtime::events::{Event, EventPayload, TriggerSource};
 use fq_runtime::executor::InvocationOutcome;
-use fq_runtime::llm::fixture::FixtureClient;
-use fq_runtime::llm::ChatResponse;
+use fq_runtime::llm::GenAiClient;
 use fq_runtime::{AgentExecutor, Config, EventBus, PricingTable};
 use futures::StreamExt;
 use serde_json::Value;
@@ -313,22 +310,9 @@ async fn trigger_agent(
     let pricing = Arc::new(PricingTable::load(&cache_path).await);
     println!("Loaded {} pricing entries", pricing.len());
 
-    // Stub LLM — canned echo response until the genai adapter lands.
-    let llm = FixtureClient::new();
-    llm.push_response(ChatResponse {
-        content: Some(format!(
-            "[stub response] agent '{agent_name}' received your trigger. \
-             Replace the FixtureClient with the genai adapter to get real LLM output."
-        )),
-        tool_calls: vec![],
-        stop_reason: StopReason::EndTurn,
-        usage: TokenUsage {
-            input_tokens: 50,
-            output_tokens: 30,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        },
-    });
+    // Real LLM client — genai resolves API keys from provider-specific
+    // environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc).
+    let llm = GenAiClient::new();
 
     // Parse trigger payload: try JSON first, fall back to string literal.
     let trigger_payload: Value = match payload {
@@ -338,7 +322,7 @@ async fn trigger_agent(
 
     let executor = AgentExecutor::new(bus, pricing);
     println!("Running agent...");
-    let outcome = executor
+    let outcome = match executor
         .run(
             &loaded.agent,
             &llm,
@@ -346,7 +330,22 @@ async fn trigger_agent(
             None,
             trigger_payload,
         )
-        .await?;
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(fq_runtime::ExecutorError::Llm(fq_runtime::LlmError::Auth(msg))) => {
+            anyhow::bail!(
+                "LLM authentication failed.\n\
+                 \n\
+                 This usually means the provider-specific API key environment\n\
+                 variable is not set. For Anthropic, export ANTHROPIC_API_KEY\n\
+                 before running `fq trigger`.\n\
+                 \n\
+                 Underlying error: {msg}"
+            );
+        }
+        Err(err) => return Err(err.into()),
+    };
 
     println!();
     match outcome {
