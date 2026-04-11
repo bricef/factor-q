@@ -1,0 +1,13 @@
+services:
+  nats:
+    image: nats:latest
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["--config", "/etc/nats/nats.conf"]
+    volumes:
+      - ./nats/nats.conf:/etc/nats/nats.conf:ro
+      - nats-data:/data/nats
+
+volumes:
+  nats-data:
