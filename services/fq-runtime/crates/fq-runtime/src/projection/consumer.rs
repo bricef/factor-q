@@ -229,17 +229,28 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move { consumer.run(shutdown_rx).await });
 
-        // Wait for the store to catch up.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        // Wait until *our* specific events have been projected.
+        // A durable consumer starts from the beginning of the
+        // stream, so `store.count()` may include events from
+        // previous test runs. Check agent-scoped rows only.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let agent_filter = super::super::store::EventFilter {
+            agent: Some(&agent_id),
+            ..Default::default()
+        };
         loop {
-            let count = store.count().await.unwrap();
-            if count >= 2 {
+            let rows = store.query_events(&agent_filter, 100).await.unwrap();
+            if rows.len() >= 2 {
                 break;
             }
             if tokio::time::Instant::now() > deadline {
-                panic!("store did not catch up in time; count={count}");
+                panic!(
+                    "store did not catch up in time for agent {}; rows={}",
+                    agent_id,
+                    rows.len()
+                );
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         shutdown_tx.send(()).unwrap();

@@ -29,6 +29,9 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
     for var in frontmatter.sandbox.env {
         sandbox = sandbox.env(var);
     }
+    for path in frontmatter.sandbox.exec_cwd {
+        sandbox = sandbox.exec_cwd(path);
+    }
 
     let mut builder = Agent::builder()
         .id(frontmatter.name)
@@ -71,6 +74,8 @@ struct SandboxFrontmatter {
     network: Vec<String>,
     #[serde(default)]
     env: Vec<String>,
+    #[serde(default)]
+    exec_cwd: Vec<String>,
 }
 
 fn split_frontmatter(content: &str) -> Result<(&str, &str), ParseError> {

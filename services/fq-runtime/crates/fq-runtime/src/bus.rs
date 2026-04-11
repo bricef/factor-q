@@ -204,6 +204,7 @@ mod tests {
                         fs_write: vec![],
                         network: vec![],
                         env: vec![],
+                        exec_cwd: vec![],
                     },
                     budget: None,
                 },

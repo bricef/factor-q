@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fq_tools::builtin::{FileReadTool, FileWriteTool};
+use fq_tools::builtin::{FileReadTool, FileWriteTool, ShellTool};
 use fq_tools::Tool;
 
 use crate::events::ToolSchema;
@@ -36,6 +36,7 @@ impl ToolRegistry {
         let mut registry = Self::new();
         registry.register(Arc::new(FileReadTool::new()));
         registry.register(Arc::new(FileWriteTool::new()));
+        registry.register(Arc::new(ShellTool::new()));
         registry
     }
 
@@ -83,11 +84,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn with_builtins_has_file_tools() {
+    fn with_builtins_has_file_and_shell_tools() {
         let reg = ToolRegistry::with_builtins();
         assert!(reg.get("file_read").is_some());
         assert!(reg.get("file_write").is_some());
-        assert_eq!(reg.len(), 2);
+        assert!(reg.get("shell").is_some());
+        assert_eq!(reg.len(), 3);
     }
 
     #[test]

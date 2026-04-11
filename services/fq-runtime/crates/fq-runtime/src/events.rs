@@ -142,6 +142,8 @@ pub struct SandboxSnapshot {
     pub network: Vec<String>,
     #[serde(default)]
     pub env: Vec<String>,
+    #[serde(default)]
+    pub exec_cwd: Vec<String>,
 }
 
 /// Published immediately before an LLM call is made.
@@ -350,6 +352,7 @@ mod tests {
                         fs_write: vec![],
                         network: vec![],
                         env: vec![],
+                        exec_cwd: vec![],
                     },
                     budget: Some(0.50),
                 },

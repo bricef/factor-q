@@ -142,6 +142,7 @@ pub struct Sandbox {
     fs_write: Vec<String>,
     network: Vec<String>,
     env: Vec<String>,
+    exec_cwd: Vec<String>,
 }
 
 impl Sandbox {
@@ -169,6 +170,13 @@ impl Sandbox {
         self
     }
 
+    /// Grant permission to run commands with this path as their
+    /// working directory. Distinct from read/write access.
+    pub fn exec_cwd(mut self, path: impl Into<String>) -> Self {
+        self.exec_cwd.push(path.into());
+        self
+    }
+
     pub fn fs_read_paths(&self) -> &[String] {
         &self.fs_read
     }
@@ -185,12 +193,17 @@ impl Sandbox {
         &self.env
     }
 
+    pub fn exec_cwd_paths(&self) -> &[String] {
+        &self.exec_cwd
+    }
+
     pub fn to_snapshot(&self) -> SandboxSnapshot {
         SandboxSnapshot {
             fs_read: self.fs_read.clone(),
             fs_write: self.fs_write.clone(),
             network: self.network.clone(),
             env: self.env.clone(),
+            exec_cwd: self.exec_cwd.clone(),
         }
     }
 
@@ -205,6 +218,9 @@ impl Sandbox {
         }
         for path in &self.fs_write {
             sb = sb.allow_write(std::path::PathBuf::from(path));
+        }
+        for path in &self.exec_cwd {
+            sb = sb.allow_exec_cwd(std::path::PathBuf::from(path));
         }
         sb
     }

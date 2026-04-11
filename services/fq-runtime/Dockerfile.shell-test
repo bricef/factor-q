@@ -1,0 +1,56 @@
+# Disposable test container for the fq-tools shell sandbox tests.
+#
+# The shell tool runs child processes as part of its test battery.
+# Even though every test uses tempdirs and well-known safe commands
+# (echo, true, false, sleep, env, pwd, seq), we want to run the
+# tests inside a disposable container with networking disabled so
+# that a bad test cannot affect the development host.
+#
+# Because test runs use `--network none`, cargo cannot reach
+# crates.io at runtime. We prime the registry and build cache at
+# image-build time (which does have network) by copying the
+# workspace manifests and running `cargo fetch`, so the subsequent
+# offline run has every dependency it needs.
+#
+# This Dockerfile copies just the manifests and stub source files
+# to populate the cache, then at runtime the real source is mounted
+# at /src read-only and cargo reuses the primed `~/.cargo` and
+# `/target` caches. See `just test-shell-sandbox` at the repo root
+# for the run command.
+
+FROM rust:1.85-slim-bookworm
+
+ENV CARGO_TARGET_DIR=/target
+
+WORKDIR /build
+
+# Prime the cargo registry by fetching dependencies at build time.
+# Copy manifests first, populate empty source files so cargo is
+# happy, fetch, then throw away the build staging area — the
+# registry lives in $CARGO_HOME (~/.cargo by default) and sticks
+# around.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/fq-cli/Cargo.toml crates/fq-cli/
+COPY crates/fq-runtime/Cargo.toml crates/fq-runtime/
+COPY crates/fq-tools/Cargo.toml crates/fq-tools/
+
+RUN mkdir -p crates/fq-cli/src crates/fq-runtime/src crates/fq-tools/src \
+    && echo 'fn main() {}' > crates/fq-cli/src/main.rs \
+    && echo '' > crates/fq-runtime/src/lib.rs \
+    && echo '' > crates/fq-tools/src/lib.rs \
+    && cargo fetch
+
+# Do an initial build so /target is pre-warmed with compiled
+# dependencies. This takes a minute or two at image-build time but
+# makes every subsequent test run nearly instant.
+RUN cargo build --package fq-tools \
+    && rm -rf crates/fq-cli/src crates/fq-runtime/src crates/fq-tools/src
+
+# At runtime the real workspace is mounted at /src read-only. The
+# named volume at /target carries compiled artefacts across runs.
+WORKDIR /src
+
+# Default command: run the fq-tools shell tests. Every test uses
+# well-known safe unix commands (echo, true, false, sleep, env,
+# pwd, seq) and confines all filesystem activity to tempdirs.
+CMD ["cargo", "test", "--package", "fq-tools", "shell"]

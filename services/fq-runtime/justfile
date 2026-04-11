@@ -57,3 +57,16 @@ ci: fmt-check lint test
 # Build the fq-runtime container image
 docker-build:
     docker build -t factor-q/fq-runtime:latest .
+
+# Run the fq-tools shell sandbox tests inside a disposable
+# container with networking disabled. The shell tool spawns child
+# processes, and even though the tests use safe commands we want
+# the blast radius contained to a throwaway container while we're
+# iterating on the sandbox. The workspace is mounted read-only;
+# the image has a primed cargo registry and /target cache so the
+# run can proceed offline.
+test-shell-sandbox:
+    docker build -t factor-q/shell-test -f Dockerfile.shell-test .
+    docker run --rm --network none \
+        -v {{justfile_directory()}}:/src:ro \
+        factor-q/shell-test

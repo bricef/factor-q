@@ -35,11 +35,13 @@
 
 use std::path::{Path, PathBuf};
 
-/// Runtime sandbox declaring which paths a tool may read or write.
+/// Runtime sandbox declaring which paths a tool may read, write, or
+/// execute commands in.
 #[derive(Debug, Clone, Default)]
 pub struct ToolSandbox {
     fs_read: Vec<PathBuf>,
     fs_write: Vec<PathBuf>,
+    exec_cwd: Vec<PathBuf>,
 }
 
 impl ToolSandbox {
@@ -62,12 +64,25 @@ impl ToolSandbox {
         self
     }
 
+    /// Grant exec access — allow commands to be run with this path as
+    /// their working directory. Distinct from read/write: an agent
+    /// with read or write access to a directory does NOT automatically
+    /// get permission to execute commands there.
+    pub fn allow_exec_cwd(mut self, path: impl Into<PathBuf>) -> Self {
+        self.exec_cwd.push(path.into());
+        self
+    }
+
     pub fn read_prefixes(&self) -> &[PathBuf] {
         &self.fs_read
     }
 
     pub fn write_prefixes(&self) -> &[PathBuf] {
         &self.fs_write
+    }
+
+    pub fn exec_cwd_prefixes(&self) -> &[PathBuf] {
+        &self.exec_cwd
     }
 
     /// Check that a target path is allowed for reading.
@@ -92,6 +107,38 @@ impl ToolSandbox {
             },
         })?;
         self.check_within(&canonical, &self.fs_read, target)
+    }
+
+    /// Check that a target directory is allowed as a command's working
+    /// directory. The target must already exist (you can't run a
+    /// process in a non-existent directory), and is canonicalised
+    /// before comparison against the allowed prefixes. This is the
+    /// first and only check for the shell tool — nothing else about
+    /// the command's execution is validated here.
+    pub fn check_exec_cwd(&self, target: &Path) -> Result<PathBuf, SandboxError> {
+        if self.exec_cwd.is_empty() {
+            return Err(SandboxError::PermissionDenied {
+                target: target.to_path_buf(),
+                reason: "no exec_cwd prefixes configured".to_string(),
+            });
+        }
+
+        let canonical = canonicalise_existing(target).map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => SandboxError::NotFound(target.to_path_buf()),
+            _ => SandboxError::Io {
+                path: target.to_path_buf(),
+                source: err,
+            },
+        })?;
+
+        if !canonical.is_dir() {
+            return Err(SandboxError::InvalidPath {
+                target: target.to_path_buf(),
+                reason: "exec cwd must be a directory".to_string(),
+            });
+        }
+
+        self.check_within(&canonical, &self.exec_cwd, target)
     }
 
     /// Check that a target path is allowed for writing.
@@ -224,6 +271,14 @@ mod tests {
         }
         for p in allowed_write {
             sb = sb.allow_write(*p);
+        }
+        sb
+    }
+
+    fn make_exec_sandbox(allowed_exec: &[&Path]) -> ToolSandbox {
+        let mut sb = ToolSandbox::new();
+        for p in allowed_exec {
+            sb = sb.allow_exec_cwd(*p);
         }
         sb
     }
@@ -429,6 +484,93 @@ mod tests {
         let file = write_file(dir.path(), "hi.txt", "hi");
         let sb = make_sandbox(&[], &[dir.path()]);
         let err = sb.check_read(&file).unwrap_err();
+        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    // --- exec cwd checks --------------------------------------------
+
+    #[test]
+    fn exec_cwd_within_allowed_prefix_is_ok() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("work");
+        fs::create_dir_all(&sub).unwrap();
+        let sb = make_exec_sandbox(&[dir.path()]);
+        let canonical = sb.check_exec_cwd(&sub).unwrap();
+        assert_eq!(canonical, fs::canonicalize(&sub).unwrap());
+    }
+
+    #[test]
+    fn exec_cwd_outside_allowed_prefix_is_denied() {
+        let allowed = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let sb = make_exec_sandbox(&[allowed.path()]);
+        let err = sb.check_exec_cwd(other.path()).unwrap_err();
+        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    #[test]
+    fn exec_cwd_with_parent_traversal_escape_is_denied() {
+        let allowed = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let sb = make_exec_sandbox(&[allowed.path()]);
+        let escape = allowed
+            .path()
+            .join("../")
+            .join(other.path().file_name().unwrap());
+        let err = sb.check_exec_cwd(&escape).unwrap_err();
+        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    #[test]
+    fn exec_cwd_non_directory_is_rejected() {
+        let dir = tempdir().unwrap();
+        let file = write_file(dir.path(), "not-a-dir.txt", "hi");
+        let sb = make_exec_sandbox(&[dir.path()]);
+        let err = sb.check_exec_cwd(&file).unwrap_err();
+        assert!(matches!(err, SandboxError::InvalidPath { .. }));
+    }
+
+    #[test]
+    fn exec_cwd_missing_directory_is_not_found() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("ghost");
+        let sb = make_exec_sandbox(&[dir.path()]);
+        let err = sb.check_exec_cwd(&missing).unwrap_err();
+        assert!(matches!(err, SandboxError::NotFound(_)));
+    }
+
+    #[test]
+    fn exec_cwd_through_symlink_pointing_outside_is_denied() {
+        let allowed = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let link = allowed.path().join("escape");
+        symlink(other.path(), &link).unwrap();
+        let sb = make_exec_sandbox(&[allowed.path()]);
+        let err = sb.check_exec_cwd(&link).unwrap_err();
+        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    #[test]
+    fn empty_exec_prefix_list_denies_everything() {
+        let dir = tempdir().unwrap();
+        let sb = ToolSandbox::new();
+        let err = sb.check_exec_cwd(dir.path()).unwrap_err();
+        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    #[test]
+    fn read_access_does_not_imply_exec() {
+        let dir = tempdir().unwrap();
+        let sb = make_sandbox(&[dir.path()], &[]);
+        let err = sb.check_exec_cwd(dir.path()).unwrap_err();
+        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    #[test]
+    fn write_access_does_not_imply_exec() {
+        let dir = tempdir().unwrap();
+        let sb = make_sandbox(&[], &[dir.path()]);
+        let err = sb.check_exec_cwd(dir.path()).unwrap_err();
         assert!(matches!(err, SandboxError::PermissionDenied { .. }));
     }
 }
