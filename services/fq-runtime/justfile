@@ -1,0 +1,44 @@
+# fq-runtime build tasks
+
+# Show available recipes
+default:
+    @just --list
+
+# Build the workspace
+build:
+    cargo build
+
+# Build in release mode
+build-release:
+    cargo build --release
+
+# Run all tests
+test:
+    cargo test
+
+# Type-check without building
+check:
+    cargo check
+
+# Format code
+fmt:
+    cargo fmt
+
+# Check formatting without modifying files
+fmt-check:
+    cargo fmt --check
+
+# Run clippy lints
+lint:
+    cargo clippy -- -D warnings
+
+# Clean build artefacts
+clean:
+    cargo clean
+
+# Run the fq CLI (pass args after --, e.g. `just fq -- --help`)
+fq *args:
+    cargo run --bin fq -- {{args}}
+
+# Run all quality checks
+ci: fmt-check lint test

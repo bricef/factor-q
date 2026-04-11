@@ -27,6 +27,69 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - **Agent definitions:** Markdown with YAML frontmatter
 - **Graph definitions:** YAML with JSON Schema
 
+## Project structure
+
+The repository is organised as a monorepo with independent services, shared content, and deployment infrastructure.
+
+```
+factor-q/
+├── services/              # Each service is self-contained with its own build system
+│   └── fq-runtime/        # Rust workspace — CLI, runtime, tools
+│       └── crates/
+│           ├── fq-cli/      # `fq` binary (argument parsing, command dispatch)
+│           ├── fq-runtime/  # Core library (agent loader, config, event schema)
+│           └── fq-tools/    # Built-in tool implementations
+│
+├── infrastructure/        # Deployment and local dev
+│   ├── docker-compose.yml # Local dev orchestration (NATS + services)
+│   └── nats/              # NATS server configuration
+│
+├── agents/                # Agent definitions (.md files with YAML frontmatter)
+│   └── examples/          # Sample agents shipped with the project
+│
+├── skills/                # Skill registry content (AgentSkills format)
+│
+├── docs/
+│   ├── adrs/              # Architectural Decision Records
+│   │   ├── accepted/      # Resolved decisions
+│   │   ├── draft/         # Open decisions under discussion
+│   │   └── deprecated/    # Superseded decisions
+│   └── plans/             # Phase plans and roadmaps
+│       ├── active/        # Current phase plans
+│       └── closed/        # Completed phase plans
+│
+├── research/              # Analysis of prior art
+├── VISION.md              # What factor-q is and why it exists
+├── ARCHITECTURE.md        # Core subsystems and cross-cutting concerns
+└── README.md
+```
+
+### Browsing the repository
+
+Rust build artefacts under `services/fq-runtime/target` can clutter directory listings. To view the project structure cleanly:
+
+```sh
+tree -I 'target|.git'
+```
+
+## Getting started
+
+Prerequisites: Rust toolchain, Docker, Docker Compose, [just](https://github.com/casey/just).
+
+```sh
+# Start infrastructure and build the runtime
+just up
+
+# Run the CLI
+just fq --help
+
+# Start the runtime in the foreground (brings up NATS, builds, and runs)
+just run
+
+# See all available recipes
+just
+```
+
 ## Prior Art
 
 - [Crush](research/crush.md) — architecture analysis
