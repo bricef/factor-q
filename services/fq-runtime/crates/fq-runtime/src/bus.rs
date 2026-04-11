@@ -147,16 +147,16 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    fn sample_event() -> Event {
+    fn sample_event(agent_id: &str) -> Event {
         Event::new(
-            "test-agent",
+            agent_id,
             Uuid::now_v7(),
             EventPayload::Triggered(TriggeredPayload {
                 trigger_source: TriggerSource::Manual,
                 trigger_subject: None,
                 trigger_payload: json!({"input": "hello"}),
                 config_snapshot: ConfigSnapshot {
-                    name: "test-agent".to_string(),
+                    name: agent_id.to_string(),
                     model: "claude-haiku".to_string(),
                     system_prompt: "Test.".to_string(),
                     tools: vec![],
@@ -189,11 +189,12 @@ mod tests {
         };
 
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
-        let event = sample_event();
+        let agent_id = format!("bus-test-{}", Uuid::now_v7().simple());
+        let event = sample_event(&agent_id);
         let expected_id = event.event_id;
 
         let mut subscriber = bus
-            .subscribe("fq.agent.test-agent.>")
+            .subscribe(format!("fq.agent.{agent_id}.>"))
             .await
             .expect("subscribe");
 
@@ -208,6 +209,6 @@ mod tests {
             .expect("deserialise");
 
         assert_eq!(received.event_id, expected_id);
-        assert_eq!(received.agent_id, "test-agent");
+        assert_eq!(received.agent_id, agent_id);
     }
 }
