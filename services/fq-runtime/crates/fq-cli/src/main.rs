@@ -181,7 +181,21 @@ fn list_agents(global: &GlobalArgs) -> anyhow::Result<()> {
     let dir = &config.agents.directory;
 
     if !dir.exists() {
-        println!("Agent directory {} does not exist.", dir.display());
+        // Show an absolute path so the user can see exactly where we
+        // looked — relative paths combined with `just`, cwd changes, or
+        // miscounted `../` can otherwise be hard to debug.
+        let absolute = if dir.is_absolute() {
+            dir.clone()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| normalise(&cwd.join(dir)))
+                .unwrap_or_else(|_| dir.clone())
+        };
+        println!(
+            "Agent directory {} does not exist (resolved: {}).",
+            dir.display(),
+            absolute.display()
+        );
         return Ok(());
     }
 
@@ -216,6 +230,26 @@ fn list_agents(global: &GlobalArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Collapse `.` and `..` components from a path without touching the
+/// filesystem. Used to produce a clean display path for error messages
+/// when `canonicalize` is not an option (path may not exist).
+fn normalise(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn validate_agent(path: &Path) -> anyhow::Result<()> {

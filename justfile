@@ -41,9 +41,14 @@ test:
 ci:
     cd {{runtime_dir}} && just ci
 
-# Run the fq CLI (e.g. `just fq -- --help`)
+# Run the fq CLI (e.g. `just fq --agents-dir ./agents agent list`)
+#
+# Preserves the user's invocation directory so relative paths in
+# arguments resolve against the directory where the user invoked `just`,
+# not the workspace or justfile directory.
+[no-cd]
 fq *args:
-    cd {{runtime_dir}} && just fq {{args}}
+    cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- {{args}}
 
 # === Full workflows ===
 
@@ -54,5 +59,6 @@ up: infra-up build
 down: infra-down
 
 # Start the runtime in the foreground (brings up infra, builds, runs)
+[no-cd]
 run: infra-up build
-    cd {{runtime_dir}} && just fq run
+    cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- run
