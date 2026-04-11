@@ -7,7 +7,7 @@
 //! See `docs/design/event-schema.md` for the event schema and subject
 //! hierarchy.
 
-use async_nats::jetstream::{self, stream};
+use async_nats::jetstream::{self, consumer, stream};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use std::pin::Pin;
@@ -119,6 +119,38 @@ impl EventBus {
             .await?
             .await?;
         Ok(())
+    }
+
+    /// Create (or open) a durable JetStream pull consumer on the
+    /// factor-q event stream.
+    ///
+    /// Durable consumers remember their position across restarts, so
+    /// the projection consumer can be stopped and restarted without
+    /// losing events or redelivering old ones. The returned
+    /// [`consumer::PullConsumer`] can be used with `.messages()` to
+    /// iterate over delivered messages.
+    pub async fn durable_consumer(
+        &self,
+        name: &str,
+    ) -> Result<consumer::PullConsumer, BusError> {
+        debug!(consumer = name, "getting/creating durable JetStream consumer");
+        let stream = self
+            .jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let consumer = stream
+            .get_or_create_consumer(
+                name,
+                consumer::pull::Config {
+                    durable_name: Some(name.to_string()),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        Ok(consumer)
     }
 
     /// Subscribe to events matching a subject filter.

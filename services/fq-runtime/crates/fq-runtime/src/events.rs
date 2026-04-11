@@ -132,7 +132,7 @@ pub struct ConfigSnapshot {
     pub budget: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SandboxSnapshot {
     #[serde(default)]
     pub fs_read: Vec<String>,

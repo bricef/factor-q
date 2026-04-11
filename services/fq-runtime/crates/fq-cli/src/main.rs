@@ -8,7 +8,11 @@ use fq_runtime::agent::{definition::parse_agent, AgentId, AgentRegistry};
 use fq_runtime::events::{Event, EventPayload, TriggerSource};
 use fq_runtime::executor::InvocationOutcome;
 use fq_runtime::llm::GenAiClient;
-use fq_runtime::{AgentExecutor, Config, EventBus, PricingTable, ToolRegistry};
+use fq_runtime::projection::store::EventFilter;
+use fq_runtime::{
+    AgentExecutor, Config, EventBus, PricingTable, ProjectionConsumer, ProjectionStore,
+    ToolRegistry,
+};
 use futures::StreamExt;
 use serde_json::Value;
 use tracing::error;
@@ -124,17 +128,21 @@ enum EventCommands {
         #[arg(long, default_value = "fq.>")]
         subject: String,
     },
-    /// Query the event history
+    /// Query the event history from the SQLite projection
     Query {
         /// Filter by agent
         #[arg(long)]
         agent: Option<String>,
-        /// Filter by event type
+        /// Filter by event type (triggered, llm_request, llm_response,
+        /// tool_call, tool_result, cost, completed, failed)
         #[arg(long, name = "type")]
         event_type: Option<String>,
-        /// Filter by time
+        /// Only show events at or after this RFC3339 timestamp
         #[arg(long)]
         since: Option<String>,
+        /// Maximum number of rows to return
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
     },
 }
 
@@ -160,13 +168,7 @@ async fn main() -> ExitCode {
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { force } => init_project(force)?,
-        Commands::Run => {
-            let config = cli.global.resolve_config()?;
-            println!("Loaded config: NATS at {}", config.nats.url);
-            println!("Agent directory: {}", config.agents.directory.display());
-            println!("Cache directory: {}", config.cache.directory.display());
-            println!("(Runtime not yet implemented.)");
-        }
+        Commands::Run => run_daemon(&cli.global).await?,
         Commands::Trigger { agent, payload } => {
             trigger_agent(&cli.global, &agent, payload.as_deref()).await?
         }
@@ -180,12 +182,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 agent,
                 event_type,
                 since,
-            } => {
-                println!("Querying events: agent={agent:?}, type={event_type:?}, since={since:?}");
-            }
+                limit,
+            } => query_events(&cli.global, agent.as_deref(), event_type.as_deref(), since.as_deref(), limit).await?,
         },
         Commands::Costs { agent, since } => {
-            println!("Cost breakdown: agent={agent:?}, since={since:?}");
+            show_costs(&cli.global, agent.as_deref(), since.as_deref()).await?
         }
     }
     Ok(())
@@ -525,6 +526,162 @@ fn print_event(event: &Event) {
         "{timestamp} [{invocation_short}] {agent}: {summary}",
         agent = event.agent_id
     );
+}
+
+/// Default location for the SQLite projection database, relative to
+/// the configured cache directory. Stored next to the pricing JSON
+/// rather than in its own subdirectory — one file, one location.
+fn projection_path(config: &Config) -> PathBuf {
+    config.cache.directory.join("events.db")
+}
+
+/// Long-running foreground runtime. Connects to NATS, opens the
+/// SQLite projection store, spawns the projection consumer task,
+/// and waits for Ctrl-C. A graceful shutdown signal tells the
+/// consumer to drain and exit before the process does.
+async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    println!("factor-q runtime starting");
+    println!("  NATS:             {}", config.nats.url);
+    println!("  agent directory:  {}", config.agents.directory.display());
+    println!("  cache directory:  {}", config.cache.directory.display());
+
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+
+    let db_path = projection_path(&config);
+    println!("  projection db:    {}", db_path.display());
+    let store = Arc::new(
+        ProjectionStore::open(&db_path)
+            .await
+            .with_context(|| format!("failed to open projection at {}", db_path.display()))?,
+    );
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let consumer = ProjectionConsumer::new(bus.clone(), store.clone());
+    let consumer_handle = tokio::spawn(async move { consumer.run(shutdown_rx).await });
+
+    println!();
+    println!("Projection consumer running. Press Ctrl-C to stop.");
+
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to install Ctrl-C handler")?;
+    println!();
+    println!("Received Ctrl-C, shutting down...");
+
+    let _ = shutdown_tx.send(());
+    match tokio::time::timeout(std::time::Duration::from_secs(5), consumer_handle).await {
+        Ok(Ok(Ok(()))) => println!("Projection consumer stopped cleanly."),
+        Ok(Ok(Err(err))) => {
+            tracing::error!(error = %err, "projection consumer exited with error");
+        }
+        Ok(Err(err)) => tracing::error!(error = %err, "projection consumer task panicked"),
+        Err(_) => tracing::warn!("projection consumer did not shut down within 5s"),
+    }
+    Ok(())
+}
+
+/// Query the SQLite projection for events matching the given
+/// filters. Read-only — does not require the projector to be
+/// currently running, only that it has been run at some point.
+async fn query_events(
+    global: &GlobalArgs,
+    agent: Option<&str>,
+    event_type: Option<&str>,
+    since: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+    let store = ProjectionStore::open_read_only(&db_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open projection at {}: has `fq run` been started?",
+                db_path.display()
+            )
+        })?;
+
+    let filter = EventFilter {
+        agent,
+        event_type,
+        since,
+    };
+    let rows = store.query_events(&filter, limit).await?;
+
+    if rows.is_empty() {
+        println!("No events matched.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<20} {:<12} {:<24} {:<12} {}",
+        "timestamp", "agent", "event", "cost", "invocation"
+    );
+    for row in rows {
+        let ts = row.timestamp.get(..19).unwrap_or(&row.timestamp);
+        let inv_short: String = row.invocation_id.chars().take(8).collect();
+        let cost = row
+            .total_cost
+            .map(|c| format!("${c:.6}"))
+            .unwrap_or_else(|| "-".to_string());
+        let agent_short = if row.agent_id.len() > 24 {
+            format!("{}...", &row.agent_id[..21])
+        } else {
+            row.agent_id.clone()
+        };
+        println!(
+            "{:<20} {:<12} {:<24} {:<12} {}",
+            ts, agent_short, row.event_type, cost, inv_short
+        );
+    }
+    Ok(())
+}
+
+/// Show per-agent cost totals from the SQLite projection.
+async fn show_costs(
+    global: &GlobalArgs,
+    agent: Option<&str>,
+    since: Option<&str>,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+    let store = ProjectionStore::open_read_only(&db_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open projection at {}: has `fq run` been started?",
+                db_path.display()
+            )
+        })?;
+
+    let summary = store.cost_summary(agent, since).await?;
+    if summary.is_empty() {
+        println!("No cost events recorded.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<30} {:<10} {:<14} {:<14} {}",
+        "agent", "events", "input_tokens", "output_tokens", "total_cost"
+    );
+    let mut grand_total = 0.0;
+    for row in summary {
+        println!(
+            "{:<30} {:<10} {:<14} {:<14} ${:.6}",
+            row.agent_id,
+            row.event_count,
+            row.total_input_tokens,
+            row.total_output_tokens,
+            row.total_cost
+        );
+        grand_total += row.total_cost;
+    }
+    println!();
+    println!("Total across all agents: ${grand_total:.6}");
+    Ok(())
 }
 
 /// Collapse `.` and `..` components from a path without touching the
