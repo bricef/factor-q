@@ -1,0 +1,28 @@
+# factor-q configuration
+#
+# All fields have sensible defaults — delete any section below if you
+# want to accept the default. Secrets are never stored in this file;
+# instead, each provider names an environment variable that holds its
+# key.
+#
+# Full documentation: https://github.com/bricef/factor-q
+
+[nats]
+# URL of the NATS server. JetStream must be enabled on the server.
+url = "nats://localhost:4222"
+
+[agents]
+# Directory containing agent definition files (.md with YAML frontmatter).
+# Relative paths are resolved against this config file's directory.
+directory = "agents"
+
+[cache]
+# Directory for runtime cache files (LiteLLM pricing JSON, etc).
+# If omitted, defaults to $XDG_CACHE_HOME/factor-q, then
+# $HOME/.cache/factor-q, then the system temp directory.
+# directory = "./cache"
+
+[providers.anthropic]
+# Environment variable holding the Anthropic API key. The runtime reads
+# the variable at call time; nothing is written back to this file.
+api_key_env = "ANTHROPIC_API_KEY"
