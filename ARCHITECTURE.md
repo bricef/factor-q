@@ -27,11 +27,11 @@ Defines and executes agent topologies — which agents exist, how they're connec
 
 ### Memory system
 Agents need memory that outlasts a single invocation. Three layers:
-- **Working memory** — current context window and conversation state for an active agent
+- **Working memory** — current context window and conversation state for an active agent (managed by the executor)
 - **Long-term memory** — per-agent learned knowledge, preferences, and past outcomes
 - **Collective memory** — shared knowledge across agents, the "team brain"
 
-factor-q owns the memory model (what gets remembered, who can access it, how it's structured) and manages concerns like RAG, memory compaction, and indexing. Storage and retrieval backends may be pluggable.
+Persistent memory (long-term and collective) is delivered as independent MCP services rather than built into the core runtime (see ADR-0013). Agents access memory through standard tool calls (`memory.store`, `memory.retrieve`, `memory.search`). Different memory backends (KV, RAG, vector search) can be different MCP servers behind the same interface. Working memory and context window management remain executor concerns.
 
 ### Tool and skill system
 Tools are the capabilities available to agents — file operations, shell execution, HTTP requests, database queries, or any custom action. Skills are higher-level, reusable bundles of prompt instructions and tool configurations that encode domain expertise (e.g. "code reviewer", "incident responder").
