@@ -300,4 +300,96 @@ You are an agent.
         assert!(registry.is_empty());
         assert!(registry.errors().is_empty());
     }
+
+    /// Load the real example agents from `agents/examples/` at the
+    /// repo root and confirm they all parse and round-trip through
+    /// the builder without errors. This catches schema drift: if
+    /// anything changes the agent format or sandbox shape, the
+    /// examples must be updated alongside the change.
+    #[test]
+    fn real_example_agents_parse_and_load() {
+        // Walk up from CARGO_MANIFEST_DIR (crates/fq-runtime) to the
+        // repo root, then into agents/examples.
+        //
+        // services/fq-runtime/crates/fq-runtime → ../../../.. = repo root
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let examples_dir = manifest
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("agents")
+            .join("examples");
+
+        if !examples_dir.exists() {
+            eprintln!(
+                "skipping: examples dir {} not found",
+                examples_dir.display()
+            );
+            return;
+        }
+
+        let registry =
+            AgentRegistry::load_from_directory(&examples_dir).expect("load examples");
+
+        assert!(
+            registry.errors().is_empty(),
+            "example agents failed to parse: {:?}",
+            registry.errors()
+        );
+        assert!(
+            registry.len() >= 5,
+            "expected at least 5 example agents, found {}",
+            registry.len()
+        );
+
+        // Spot-check the ones we care about most.
+        for name in [
+            "sample-agent",
+            "simple-responder",
+            "file-reader",
+            "shell-runner",
+            "project-inspector",
+        ] {
+            let id = AgentId::new(name).unwrap();
+            assert!(
+                registry.get(&id).is_some(),
+                "missing example agent '{name}'"
+            );
+        }
+    }
+
+    /// Verify the real shell-runner example declares an exec_cwd
+    /// sandbox — this is the key feature we added in this slice
+    /// and it should be reflected in the example that advertises
+    /// the shell tool.
+    #[test]
+    fn shell_runner_example_declares_exec_cwd() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let examples_dir = manifest
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("agents")
+            .join("examples");
+        if !examples_dir.exists() {
+            eprintln!(
+                "skipping: examples dir {} not found",
+                examples_dir.display()
+            );
+            return;
+        }
+        let registry = AgentRegistry::load_from_directory(&examples_dir).expect("load");
+        let id = AgentId::new("shell-runner").unwrap();
+        let agent = registry.get(&id).expect("shell-runner example");
+        assert!(
+            agent.tools().iter().any(|t| t == "shell"),
+            "shell-runner should list shell tool"
+        );
+        assert!(
+            !agent.sandbox().exec_cwd_paths().is_empty(),
+            "shell-runner should declare exec_cwd"
+        );
+    }
 }

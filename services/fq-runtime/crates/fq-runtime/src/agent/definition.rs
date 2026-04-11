@@ -180,6 +180,112 @@ Prompt.
     }
 
     #[test]
+    fn parses_exec_cwd_from_frontmatter() {
+        let content = r#"---
+name: shell-agent
+model: claude-haiku-4-5
+tools:
+  - shell
+sandbox:
+  exec_cwd:
+    - /tmp/fq-workspace
+    - /var/lib/factor-q
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        assert_eq!(
+            agent.sandbox().exec_cwd_paths(),
+            &["/tmp/fq-workspace".to_string(), "/var/lib/factor-q".to_string()]
+        );
+    }
+
+    #[test]
+    fn round_trips_exec_cwd_into_tool_sandbox() {
+        let content = r#"---
+name: shell-agent
+model: claude-haiku-4-5
+tools:
+  - shell
+sandbox:
+  exec_cwd:
+    - /tmp/fq-workspace
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        let tool_sandbox = agent.sandbox().to_tool_sandbox();
+        let prefixes = tool_sandbox.exec_cwd_prefixes();
+        assert_eq!(prefixes.len(), 1);
+        assert_eq!(
+            prefixes[0],
+            std::path::PathBuf::from("/tmp/fq-workspace")
+        );
+    }
+
+    #[test]
+    fn parses_full_sandbox_with_all_dimensions() {
+        let content = r#"---
+name: inspector
+model: claude-haiku-4-5
+tools:
+  - file_read
+  - file_write
+  - shell
+sandbox:
+  fs_read:
+    - /tmp/readable
+  fs_write:
+    - /tmp/writable
+  network:
+    - "*.example.com"
+  env:
+    - HOME
+    - PATH
+  exec_cwd:
+    - /tmp/workspace
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        let sb = agent.sandbox();
+        assert_eq!(sb.fs_read_paths(), &["/tmp/readable".to_string()]);
+        assert_eq!(sb.fs_write_paths(), &["/tmp/writable".to_string()]);
+        assert_eq!(sb.network_patterns(), &["*.example.com".to_string()]);
+        assert_eq!(sb.env_vars(), &["HOME".to_string(), "PATH".to_string()]);
+        assert_eq!(sb.exec_cwd_paths(), &["/tmp/workspace".to_string()]);
+
+        // And the round-trip to ToolSandbox preserves each
+        // dimension separately.
+        let ts = sb.to_tool_sandbox();
+        assert_eq!(ts.read_prefixes().len(), 1);
+        assert_eq!(ts.write_prefixes().len(), 1);
+        assert_eq!(ts.exec_cwd_prefixes().len(), 1);
+    }
+
+    #[test]
+    fn config_snapshot_includes_exec_cwd() {
+        let content = r#"---
+name: shell-agent
+model: claude-haiku-4-5
+tools:
+  - shell
+sandbox:
+  exec_cwd:
+    - /tmp/work
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        let snapshot = agent.to_snapshot();
+        assert_eq!(snapshot.sandbox.exec_cwd, vec!["/tmp/work".to_string()]);
+    }
+
+    #[test]
     fn rejects_negative_budget() {
         let content = r#"---
 name: broken
