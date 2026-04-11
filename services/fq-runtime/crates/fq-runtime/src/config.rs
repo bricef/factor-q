@@ -104,12 +104,28 @@ impl Config {
 
     /// Load configuration from a file, returning an error if the file is
     /// missing or malformed.
+    ///
+    /// Relative paths in the config are resolved against the directory
+    /// containing the config file, not the process's current working
+    /// directory. This matches the conventional expectation for config
+    /// files (`cargo`, `git`, etc).
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path).map_err(|err| ConfigError::ReadFile {
             path: path.to_path_buf(),
             source: err,
         })?;
-        Self::from_toml_str(&content)
+        let mut config = Self::from_toml_str(&content)?;
+        let base = path.parent().unwrap_or(Path::new(""));
+        config.resolve_paths_relative_to(base);
+        Ok(config)
+    }
+
+    /// Resolve any relative paths in the config against a given base
+    /// directory. Absolute paths are left unchanged.
+    fn resolve_paths_relative_to(&mut self, base: &Path) {
+        if self.agents.directory.is_relative() && !base.as_os_str().is_empty() {
+            self.agents.directory = base.join(&self.agents.directory);
+        }
     }
 
     /// Load configuration from a file, or return the default config if the
@@ -244,6 +260,76 @@ api_key_env = "{env_var}"
         assert_eq!(key, "sk-test-value");
 
         unsafe { std::env::remove_var(env_var) };
+    }
+
+    #[test]
+    fn relative_paths_in_config_file_resolve_to_config_dir() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("fq.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[agents]
+directory = "my-agents"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::from_file(&config_path).unwrap();
+        assert_eq!(config.agents.directory, dir.path().join("my-agents"));
+    }
+
+    #[test]
+    fn nested_relative_paths_in_config_file_resolve_to_config_dir() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("fq.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[agents]
+directory = "sub/agents"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::from_file(&config_path).unwrap();
+        assert_eq!(config.agents.directory, dir.path().join("sub/agents"));
+    }
+
+    #[test]
+    fn absolute_paths_in_config_file_are_unchanged() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("fq.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[agents]
+directory = "/var/lib/factor-q/agents"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::from_file(&config_path).unwrap();
+        assert_eq!(
+            config.agents.directory,
+            PathBuf::from("/var/lib/factor-q/agents")
+        );
+    }
+
+    #[test]
+    fn paths_from_toml_string_are_unchanged() {
+        let toml = r#"
+[agents]
+directory = "relative-agents"
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.agents.directory, PathBuf::from("relative-agents"));
     }
 
     #[test]
