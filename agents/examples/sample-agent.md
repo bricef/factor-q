@@ -1,6 +1,6 @@
 ---
 name: sample-agent
-model: claude-haiku
+model: claude-haiku-4-5
 tools:
   - read
   - shell

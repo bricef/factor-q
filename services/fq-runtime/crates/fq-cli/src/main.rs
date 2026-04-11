@@ -1,9 +1,19 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use fq_runtime::agent::{definition::parse_agent, AgentRegistry};
-use fq_runtime::Config;
+use fq_runtime::agent::{definition::parse_agent, AgentId, AgentRegistry};
+use fq_runtime::events::{
+    Event, EventPayload, StopReason, TokenUsage, TriggerSource,
+};
+use fq_runtime::executor::InvocationOutcome;
+use fq_runtime::llm::fixture::FixtureClient;
+use fq_runtime::llm::ChatResponse;
+use fq_runtime::{AgentExecutor, Config, EventBus, PricingTable};
+use futures::StreamExt;
+use serde_json::Value;
 use tracing::error;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -70,7 +80,7 @@ enum Commands {
     Trigger {
         /// Agent name
         agent: String,
-        /// Optional payload
+        /// Optional payload (JSON or plain string)
         payload: Option<String>,
     },
     /// Agent management commands
@@ -109,9 +119,9 @@ enum AgentCommands {
 enum EventCommands {
     /// Tail the event stream in real time
     Tail {
-        /// Subject filter
-        #[arg(long)]
-        subject: Option<String>,
+        /// Subject filter (defaults to all factor-q events)
+        #[arg(long, default_value = "fq.>")]
+        subject: String,
     },
     /// Query the event history
     Query {
@@ -159,16 +169,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("(Runtime not yet implemented.)");
         }
         Commands::Trigger { agent, payload } => {
-            println!("Triggering agent: {agent}, payload: {payload:?}");
+            trigger_agent(&cli.global, &agent, payload.as_deref()).await?
         }
         Commands::Agent { command } => match command {
             AgentCommands::List => list_agents(&cli.global)?,
             AgentCommands::Validate { path } => validate_agent(&path)?,
         },
         Commands::Events { command } => match command {
-            EventCommands::Tail { subject } => {
-                println!("Tailing events, filter: {subject:?}");
-            }
+            EventCommands::Tail { subject } => tail_events(&cli.global, &subject).await?,
             EventCommands::Query {
                 agent,
                 event_type,
@@ -189,9 +197,6 @@ fn list_agents(global: &GlobalArgs) -> anyhow::Result<()> {
     let dir = &config.agents.directory;
 
     if !dir.exists() {
-        // Show an absolute path so the user can see exactly where we
-        // looked — relative paths combined with `just`, cwd changes, or
-        // miscounted `../` can otherwise be hard to debug.
         let absolute = if dir.is_absolute() {
             dir.clone()
         } else {
@@ -240,6 +245,209 @@ fn list_agents(global: &GlobalArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_agent(path: &Path) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+
+    match parse_agent(&content) {
+        Ok(agent) => {
+            println!("✓ {} is valid", path.display());
+            println!("  id:      {}", agent.id().as_str());
+            println!("  model:   {}", agent.model());
+            println!("  tools:   {}", agent.tools().len());
+            if let Some(budget) = agent.budget() {
+                println!("  budget:  ${budget:.2}");
+            }
+            Ok(())
+        }
+        Err(err) => Err(anyhow::anyhow!("{} is invalid: {err}", path.display())),
+    }
+}
+
+/// Trigger an agent by name. Loads the registry, resolves the agent,
+/// connects to NATS, loads the pricing table, then runs the executor
+/// with a stub LLM client that returns a canned response (until the
+/// genai adapter is wired in).
+async fn trigger_agent(
+    global: &GlobalArgs,
+    agent_name: &str,
+    payload: Option<&str>,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+
+    // Resolve and load the registry.
+    let registry = AgentRegistry::load_from_directory(&config.agents.directory)
+        .context("failed to load agent registry")?;
+    let agent_id = AgentId::new(agent_name).with_context(|| format!("invalid agent name '{agent_name}'"))?;
+    let loaded = registry
+        .get_loaded(&agent_id)
+        .ok_or_else(|| {
+            let available: Vec<String> = registry
+                .iter()
+                .map(|l| l.agent.id().as_str().to_string())
+                .collect();
+            anyhow::anyhow!(
+                "agent '{agent_name}' not found in {}. Available: {}",
+                config.agents.directory.display(),
+                if available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available.join(", ")
+                }
+            )
+        })?;
+    println!(
+        "Loaded agent '{}' from {}",
+        loaded.agent.id(),
+        loaded.path.display()
+    );
+
+    // Connect to NATS.
+    println!("Connecting to NATS at {}...", config.nats.url);
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+
+    // Load pricing (cached path on disk, fetches on startup).
+    let cache_path = config.cache.directory.join("pricing.json");
+    let pricing = Arc::new(PricingTable::load(&cache_path).await);
+    println!("Loaded {} pricing entries", pricing.len());
+
+    // Stub LLM — canned echo response until the genai adapter lands.
+    let llm = FixtureClient::new();
+    llm.push_response(ChatResponse {
+        content: Some(format!(
+            "[stub response] agent '{agent_name}' received your trigger. \
+             Replace the FixtureClient with the genai adapter to get real LLM output."
+        )),
+        tool_calls: vec![],
+        stop_reason: StopReason::EndTurn,
+        usage: TokenUsage {
+            input_tokens: 50,
+            output_tokens: 30,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
+
+    // Parse trigger payload: try JSON first, fall back to string literal.
+    let trigger_payload: Value = match payload {
+        Some(raw) => serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
+        None => Value::Null,
+    };
+
+    let executor = AgentExecutor::new(bus, pricing);
+    println!("Running agent...");
+    let outcome = executor
+        .run(
+            &loaded.agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            trigger_payload,
+        )
+        .await?;
+
+    println!();
+    match outcome {
+        InvocationOutcome::Completed {
+            invocation_id,
+            response,
+            cost,
+            duration_ms,
+        } => {
+            println!("✓ Completed in {duration_ms}ms (cost: ${cost:.6})");
+            println!("  invocation: {invocation_id}");
+            if let Some(content) = response.content {
+                println!();
+                println!("Response:");
+                for line in content.lines() {
+                    println!("  {line}");
+                }
+            }
+        }
+        InvocationOutcome::BudgetExceeded {
+            invocation_id,
+            cost,
+        } => {
+            println!("✗ Budget exceeded: cost ${cost:.6}");
+            println!("  invocation: {invocation_id}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Tail the event stream from NATS, formatting each event as a single
+/// readable line.
+async fn tail_events(global: &GlobalArgs, subject: &str) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+
+    println!("Connecting to NATS at {}...", config.nats.url);
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+
+    println!("Subscribing to {subject}");
+    println!("Press Ctrl-C to exit.");
+    println!();
+
+    let mut stream = bus
+        .subscribe(subject.to_string())
+        .await
+        .context("failed to subscribe to events")?;
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(event) => print_event(&event),
+            Err(err) => eprintln!("deserialise error: {err}"),
+        }
+    }
+
+    Ok(())
+}
+
+/// Format one event as a single readable line.
+fn print_event(event: &Event) {
+    let timestamp = event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ");
+    let invocation = event.invocation_id.as_simple().to_string();
+    let invocation_short: String = invocation.chars().take(8).collect();
+
+    let summary = match &event.payload {
+        EventPayload::Triggered(p) => format!("triggered source={:?}", p.trigger_source),
+        EventPayload::LlmRequest(p) => format!(
+            "llm.request model={} messages={}",
+            p.model,
+            p.messages.len()
+        ),
+        EventPayload::LlmResponse(p) => format!(
+            "llm.response tokens={}/{} stop={:?}",
+            p.usage.input_tokens, p.usage.output_tokens, p.stop_reason
+        ),
+        EventPayload::ToolCall(p) => format!("tool.call {}", p.tool_name),
+        EventPayload::ToolResult(p) => format!(
+            "tool.result {}",
+            if p.is_error { "error" } else { "ok" }
+        ),
+        EventPayload::Cost(p) => format!(
+            "cost ${:.6} cumulative=${:.6}",
+            p.total_cost, p.cumulative_invocation_cost
+        ),
+        EventPayload::Completed(p) => format!(
+            "completed duration={}ms cost=${:.6}",
+            p.total_duration_ms, p.total_cost
+        ),
+        EventPayload::Failed(p) => {
+            format!("failed {:?} {}", p.error_kind, p.error_message)
+        }
+    };
+
+    println!(
+        "{timestamp} [{invocation_short}] {agent}: {summary}",
+        agent = event.agent_id
+    );
+}
+
 /// Collapse `.` and `..` components from a path without touching the
 /// filesystem. Used to produce a clean display path for error messages
 /// when `canonicalize` is not an option (path may not exist).
@@ -258,23 +466,4 @@ fn normalise(path: &Path) -> PathBuf {
         }
     }
     out
-}
-
-fn validate_agent(path: &Path) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
-
-    match parse_agent(&content) {
-        Ok(agent) => {
-            println!("✓ {} is valid", path.display());
-            println!("  id:      {}", agent.id().as_str());
-            println!("  model:   {}", agent.model());
-            println!("  tools:   {}", agent.tools().len());
-            if let Some(budget) = agent.budget() {
-                println!("  budget:  ${budget:.2}");
-            }
-            Ok(())
-        }
-        Err(err) => Err(anyhow::anyhow!("{} is invalid: {err}", path.display())),
-    }
 }
