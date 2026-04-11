@@ -1,71 +1,100 @@
+//! Parser for Markdown agent definition files with YAML frontmatter.
+//!
+//! See ADR-0005 for the format specification. The parser produces a
+//! validated [`Agent`] via the fluent builder — the intermediate
+//! deserialisation types are private to this module.
+
 use serde::Deserialize;
 
-/// Parsed agent definition from a Markdown file with YAML frontmatter.
-#[derive(Debug)]
-pub struct AgentDefinition {
-    pub frontmatter: AgentFrontmatter,
-    pub system_prompt: String,
-}
+use super::{Agent, BuildError, Sandbox};
 
-/// YAML frontmatter from an agent definition file.
-#[derive(Debug, Deserialize)]
-pub struct AgentFrontmatter {
-    pub name: String,
-    pub model: String,
-    #[serde(default)]
-    pub tools: Vec<String>,
-    #[serde(default)]
-    pub sandbox: SandboxConfig,
-    pub budget: Option<f64>,
-    pub trigger: Option<String>,
-}
+/// Parse an agent definition from the raw Markdown content.
+///
+/// The content must begin with a YAML frontmatter block delimited by `---`
+/// lines, followed by the system prompt in Markdown.
+pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
+    let (frontmatter_str, body) = split_frontmatter(content)?;
+    let frontmatter: Frontmatter = serde_yaml::from_str(frontmatter_str)?;
 
-/// Sandbox configuration for an agent.
-#[derive(Debug, Default, Deserialize)]
-pub struct SandboxConfig {
-    #[serde(default)]
-    pub fs_read: Vec<String>,
-    #[serde(default)]
-    pub fs_write: Vec<String>,
-    #[serde(default)]
-    pub network: Vec<String>,
-    #[serde(default)]
-    pub env: Vec<String>,
-}
-
-impl AgentDefinition {
-    /// Parse an agent definition from Markdown content with YAML frontmatter.
-    pub fn parse(content: &str) -> Result<Self, AgentParseError> {
-        let (frontmatter_str, body) = split_frontmatter(content)?;
-        let frontmatter: AgentFrontmatter =
-            serde_yaml::from_str(frontmatter_str).map_err(AgentParseError::InvalidYaml)?;
-        Ok(Self {
-            frontmatter,
-            system_prompt: body.to_string(),
-        })
+    let mut sandbox = Sandbox::new();
+    for path in frontmatter.sandbox.fs_read {
+        sandbox = sandbox.fs_read(path);
     }
+    for path in frontmatter.sandbox.fs_write {
+        sandbox = sandbox.fs_write(path);
+    }
+    for pattern in frontmatter.sandbox.network {
+        sandbox = sandbox.network(pattern);
+    }
+    for var in frontmatter.sandbox.env {
+        sandbox = sandbox.env(var);
+    }
+
+    let mut builder = Agent::builder()
+        .id(frontmatter.name)
+        .model(frontmatter.model)
+        .system_prompt(body)
+        .tools(frontmatter.tools)
+        .sandbox(sandbox);
+
+    if let Some(budget) = frontmatter.budget {
+        builder = builder.budget(budget);
+    }
+    if let Some(trigger) = frontmatter.trigger {
+        builder = builder.trigger(trigger);
+    }
+
+    Ok(builder.build()?)
 }
 
-fn split_frontmatter(content: &str) -> Result<(&str, &str), AgentParseError> {
+/// YAML frontmatter structure. Private to this module — callers work with
+/// [`Agent`] directly.
+#[derive(Debug, Deserialize)]
+struct Frontmatter {
+    name: String,
+    model: String,
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    sandbox: SandboxFrontmatter,
+    budget: Option<f64>,
+    trigger: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SandboxFrontmatter {
+    #[serde(default)]
+    fs_read: Vec<String>,
+    #[serde(default)]
+    fs_write: Vec<String>,
+    #[serde(default)]
+    network: Vec<String>,
+    #[serde(default)]
+    env: Vec<String>,
+}
+
+fn split_frontmatter(content: &str) -> Result<(&str, &str), ParseError> {
     let content = content.trim_start();
     if !content.starts_with("---") {
-        return Err(AgentParseError::MissingFrontmatter);
+        return Err(ParseError::MissingFrontmatter);
     }
     let after_opening = &content[3..];
     let closing = after_opening
         .find("\n---")
-        .ok_or(AgentParseError::MissingFrontmatter)?;
+        .ok_or(ParseError::MissingFrontmatter)?;
     let frontmatter = &after_opening[..closing];
     let body = &after_opening[closing + 4..];
     Ok((frontmatter.trim(), body.trim()))
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum AgentParseError {
+pub enum ParseError {
     #[error("missing or malformed YAML frontmatter")]
     MissingFrontmatter,
     #[error("invalid YAML: {0}")]
     InvalidYaml(#[from] serde_yaml::Error),
+    #[error("invalid agent: {0}")]
+    InvalidAgent(#[from] BuildError),
 }
 
 #[cfg(test)]
@@ -73,38 +102,92 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_valid_definition() {
+    fn parses_full_definition() {
         let content = r#"---
-name: test-agent
+name: researcher
 model: claude-haiku
 tools:
   - read
-  - shell
+  - web_search
 sandbox:
   fs_read:
-    - /tmp/test
+    - /project/docs
+  network:
+    - "*.api.internal"
 budget: 0.50
-trigger: tasks.test.*
+trigger: tasks.research.*
 ---
 
-You are a test agent. Do test things.
+You are a research agent.
 
 ## Guidelines
 
-- Be thorough
+- Cite your sources.
 "#;
-        let def = AgentDefinition::parse(content).unwrap();
-        assert_eq!(def.frontmatter.name, "test-agent");
-        assert_eq!(def.frontmatter.model, "claude-haiku");
-        assert_eq!(def.frontmatter.tools, vec!["read", "shell"]);
-        assert_eq!(def.frontmatter.sandbox.fs_read, vec!["/tmp/test"]);
-        assert_eq!(def.frontmatter.budget, Some(0.50));
-        assert!(def.system_prompt.contains("You are a test agent"));
+        let agent = parse_agent(content).unwrap();
+        assert_eq!(agent.id().as_str(), "researcher");
+        assert_eq!(agent.model(), "claude-haiku");
+        assert_eq!(agent.tools(), &["read", "web_search"]);
+        assert_eq!(agent.budget(), Some(0.50));
+        assert_eq!(agent.trigger(), Some("tasks.research.*"));
+        assert_eq!(
+            agent.sandbox().fs_read_paths(),
+            &["/project/docs".to_string()]
+        );
+        assert!(agent.system_prompt().contains("You are a research agent"));
     }
 
     #[test]
-    fn parse_missing_frontmatter() {
-        let content = "Just some markdown without frontmatter";
-        assert!(AgentDefinition::parse(content).is_err());
+    fn parses_minimal_definition() {
+        let content = r#"---
+name: minimal
+model: claude-haiku
+---
+
+Prompt body.
+"#;
+        let agent = parse_agent(content).unwrap();
+        assert_eq!(agent.id().as_str(), "minimal");
+        assert!(agent.tools().is_empty());
+        assert!(agent.budget().is_none());
+    }
+
+    #[test]
+    fn rejects_missing_frontmatter() {
+        let content = "Just markdown without frontmatter.";
+        assert!(matches!(
+            parse_agent(content).unwrap_err(),
+            ParseError::MissingFrontmatter
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_agent_id_from_frontmatter() {
+        let content = r#"---
+name: invalid.name
+model: claude-haiku
+---
+
+Prompt.
+"#;
+        let err = parse_agent(content).unwrap_err();
+        assert!(matches!(err, ParseError::InvalidAgent(BuildError::InvalidId(_))));
+    }
+
+    #[test]
+    fn rejects_negative_budget() {
+        let content = r#"---
+name: broken
+model: claude-haiku
+budget: -1.0
+---
+
+Prompt.
+"#;
+        let err = parse_agent(content).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidAgent(BuildError::InvalidBudget(_))
+        ));
     }
 }
