@@ -1,5 +1,8 @@
 # fq-runtime build tasks
 
+# Enable "$@" in recipe bodies so variadic *args preserve shell quoting.
+set positional-arguments
+
 # Show available recipes
 default:
     @just --list
@@ -41,9 +44,12 @@ clean:
 # Preserves the user's invocation directory so relative paths in
 # arguments resolve against the directory where the user invoked `just`,
 # not the justfile directory.
+#
+# Uses "$@" (enabled by `set positional-arguments`) so quoted arguments
+# are forwarded to fq intact.
 [no-cd]
 fq *args:
-    cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fq -- {{args}}
+    cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fq -- "$@"
 
 # Run all quality checks
 ci: fmt-check lint test

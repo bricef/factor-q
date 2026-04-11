@@ -2,6 +2,11 @@
 # Orchestrates services and infrastructure. Build details live in each service.
 # See https://github.com/casey/just
 
+# Enable "$@" in recipe bodies so variadic *args preserve the original
+# shell quoting. Without this, `just fq trigger sample-agent "hello world"`
+# loses the quotes and fq receives four arguments instead of two.
+set positional-arguments
+
 runtime_dir := "services/fq-runtime"
 infra_dir := "infrastructure"
 
@@ -50,9 +55,12 @@ docker-build:
 # Preserves the user's invocation directory so relative paths in
 # arguments resolve against the directory where the user invoked `just`,
 # not the workspace or justfile directory.
+#
+# Uses "$@" (enabled by `set positional-arguments`) so quoted arguments
+# are forwarded to fq intact.
 [no-cd]
 fq *args:
-    cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- {{args}}
+    cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- "$@"
 
 # === Full workflows ===
 
