@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use fq_runtime::agent::{definition::parse_agent, AgentRegistry};
 use fq_runtime::Config;
 use tracing::error;
@@ -12,12 +12,45 @@ const DEFAULT_CONFIG_PATH: &str = "fq.toml";
 #[derive(Parser)]
 #[command(name = "fq", about = "factor-q agent runtime")]
 struct Cli {
-    /// Path to the config file
-    #[arg(long, global = true, default_value = DEFAULT_CONFIG_PATH)]
-    config: PathBuf,
+    #[command(flatten)]
+    global: GlobalArgs,
 
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Global arguments available on every subcommand. Each flag has a
+/// corresponding environment variable, and together they override values
+/// loaded from the config file.
+///
+/// Precedence: CLI flag > env var > config file > default.
+#[derive(Args, Clone)]
+struct GlobalArgs {
+    /// Path to the factor-q config file
+    #[arg(long, env = "FQ_CONFIG", default_value = DEFAULT_CONFIG_PATH, global = true)]
+    config: PathBuf,
+
+    /// Override the agents directory from config
+    #[arg(long, env = "FQ_AGENTS_DIR", global = true)]
+    agents_dir: Option<PathBuf>,
+
+    /// Override the NATS URL from config
+    #[arg(long, env = "FQ_NATS_URL", global = true)]
+    nats_url: Option<String>,
+}
+
+impl GlobalArgs {
+    /// Load the config file (or defaults) and apply CLI/env overrides on top.
+    fn resolve_config(&self) -> anyhow::Result<Config> {
+        let mut config = Config::load_or_default(&self.config)?;
+        if let Some(dir) = &self.agents_dir {
+            config.agents.directory = dir.clone();
+        }
+        if let Some(url) = &self.nats_url {
+            config.nats.url = url.clone();
+        }
+        Ok(config)
+    }
 }
 
 #[derive(Subcommand)]
@@ -90,7 +123,9 @@ enum EventCommands {
 #[tokio::main]
 async fn main() -> ExitCode {
     fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -110,7 +145,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("factor-q project initialisation not yet implemented");
         }
         Commands::Run => {
-            let config = Config::load_or_default(&cli.config)?;
+            let config = cli.global.resolve_config()?;
             println!("Loaded config: NATS at {}", config.nats.url);
             println!("Agent directory: {}", config.agents.directory.display());
             println!("(Runtime not yet implemented.)");
@@ -119,7 +154,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("Triggering agent: {agent}, payload: {payload:?}");
         }
         Commands::Agent { command } => match command {
-            AgentCommands::List => list_agents(&cli.config)?,
+            AgentCommands::List => list_agents(&cli.global)?,
             AgentCommands::Validate { path } => validate_agent(&path)?,
         },
         Commands::Events { command } => match command {
@@ -141,8 +176,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn list_agents(config_path: &Path) -> anyhow::Result<()> {
-    let config = Config::load_or_default(config_path)?;
+fn list_agents(global: &GlobalArgs) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
     let dir = &config.agents.directory;
 
     if !dir.exists() {
