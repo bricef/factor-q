@@ -23,6 +23,8 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub providers: ProvidersConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,8 +50,21 @@ pub struct AnthropicConfig {
     pub api_key_env: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheConfig {
+    /// Directory where factor-q writes cache files (e.g. the LiteLLM
+    /// pricing snapshot). Defaults to the system cache directory — see
+    /// [`crate::pricing::default_cache_dir`] for the resolution order.
+    #[serde(default = "default_cache_dir_for_config")]
+    pub directory: PathBuf,
+}
+
 fn default_nats_url() -> String {
     "nats://localhost:4222".to_string()
+}
+
+fn default_cache_dir_for_config() -> PathBuf {
+    crate::pricing::default_cache_dir()
 }
 
 fn default_agents_directory() -> PathBuf {
@@ -84,6 +99,14 @@ impl Default for AnthropicConfig {
     }
 }
 
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            directory: default_cache_dir_for_config(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -92,6 +115,7 @@ impl Default for Config {
             providers: ProvidersConfig {
                 anthropic: Some(AnthropicConfig::default()),
             },
+            cache: CacheConfig::default(),
         }
     }
 }
@@ -123,8 +147,14 @@ impl Config {
     /// Resolve any relative paths in the config against a given base
     /// directory. Absolute paths are left unchanged.
     fn resolve_paths_relative_to(&mut self, base: &Path) {
-        if self.agents.directory.is_relative() && !base.as_os_str().is_empty() {
+        if base.as_os_str().is_empty() {
+            return;
+        }
+        if self.agents.directory.is_relative() {
             self.agents.directory = base.join(&self.agents.directory);
+        }
+        if self.cache.directory.is_relative() {
+            self.cache.directory = base.join(&self.cache.directory);
         }
     }
 

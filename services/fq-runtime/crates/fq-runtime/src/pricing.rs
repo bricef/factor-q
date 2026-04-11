@@ -213,20 +213,42 @@ fn write_cache(path: &Path, contents: &str) -> std::io::Result<()> {
     fs::write(path, contents)
 }
 
-/// Return the default cache path for the LiteLLM pricing JSON. Uses
-/// `$XDG_CACHE_HOME/factor-q/pricing.json` or `$HOME/.cache/factor-q/...`
-/// when available, falling back to `.fq-cache/pricing.json` in the cwd.
-pub fn default_cache_path() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        return PathBuf::from(xdg).join("factor-q").join("pricing.json");
+/// Return the default cache directory for factor-q.
+///
+/// Resolution order:
+/// 1. `$XDG_CACHE_HOME/factor-q` if set
+/// 2. `$HOME/.cache/factor-q` if set
+/// 3. `<system temp dir>/factor-q` as a last resort
+///
+/// The third fallback matters in distroless and other minimal
+/// containers where neither `HOME` nor `XDG_CACHE_HOME` is present and
+/// cwd may not be writable. `env::temp_dir()` returns `/tmp` on Linux,
+/// which is almost always writable even in stripped images. Operators
+/// deploying factor-q should still prefer setting `FQ_CACHE_DIR`
+/// explicitly to a mounted volume — the default only exists so a fresh
+/// binary runs without any configuration.
+pub fn default_cache_dir() -> PathBuf {
+    resolve_cache_dir(
+        std::env::var("XDG_CACHE_HOME").ok(),
+        std::env::var("HOME").ok(),
+        std::env::temp_dir(),
+    )
+}
+
+/// Pure resolution of the cache directory, for testing.
+fn resolve_cache_dir(xdg: Option<String>, home: Option<String>, temp_dir: PathBuf) -> PathBuf {
+    if let Some(xdg) = xdg.filter(|s| !s.is_empty()) {
+        return PathBuf::from(xdg).join("factor-q");
     }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home)
-            .join(".cache")
-            .join("factor-q")
-            .join("pricing.json");
+    if let Some(home) = home.filter(|s| !s.is_empty()) {
+        return PathBuf::from(home).join(".cache").join("factor-q");
     }
-    PathBuf::from(".fq-cache").join("pricing.json")
+    temp_dir.join("factor-q")
+}
+
+/// Default path to the pricing JSON cache file.
+pub fn default_pricing_cache_path() -> PathBuf {
+    default_cache_dir().join("pricing.json")
 }
 
 /// One entry in the LiteLLM pricing JSON. We only read the fields we
@@ -352,11 +374,51 @@ mod tests {
     }
 
     #[test]
-    fn default_cache_path_uses_xdg_or_home() {
+    fn default_pricing_cache_path_is_usable() {
         // This test just exercises the function without asserting on the
         // host's env — it should never panic and always return a path.
-        let path = default_cache_path();
+        let path = default_pricing_cache_path();
         assert!(path.file_name().is_some());
+        assert!(path.is_absolute(), "cache path should always be absolute");
+    }
+
+    #[test]
+    fn resolve_cache_dir_prefers_xdg() {
+        let dir = resolve_cache_dir(
+            Some("/xdg/cache".to_string()),
+            Some("/home/user".to_string()),
+            PathBuf::from("/tmp"),
+        );
+        assert_eq!(dir, PathBuf::from("/xdg/cache/factor-q"));
+    }
+
+    #[test]
+    fn resolve_cache_dir_falls_back_to_home_when_xdg_unset() {
+        let dir = resolve_cache_dir(
+            None,
+            Some("/home/user".to_string()),
+            PathBuf::from("/tmp"),
+        );
+        assert_eq!(dir, PathBuf::from("/home/user/.cache/factor-q"));
+    }
+
+    #[test]
+    fn resolve_cache_dir_falls_back_to_temp_dir_when_both_unset() {
+        let dir = resolve_cache_dir(None, None, PathBuf::from("/tmp"));
+        assert_eq!(dir, PathBuf::from("/tmp/factor-q"));
+    }
+
+    #[test]
+    fn resolve_cache_dir_treats_empty_env_vars_as_unset() {
+        // Empty env vars can occur in containers where something sets
+        // HOME="" by mistake — treat them as unset, don't produce a
+        // nonsensical "/factor-q" path.
+        let dir = resolve_cache_dir(
+            Some("".to_string()),
+            Some("".to_string()),
+            PathBuf::from("/tmp"),
+        );
+        assert_eq!(dir, PathBuf::from("/tmp/factor-q"));
     }
 
     /// Live network test: actually fetches LiteLLM's pricing JSON and

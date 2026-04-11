@@ -37,6 +37,10 @@ struct GlobalArgs {
     /// Override the NATS URL from config
     #[arg(long, env = "FQ_NATS_URL", global = true)]
     nats_url: Option<String>,
+
+    /// Override the cache directory from config
+    #[arg(long, env = "FQ_CACHE_DIR", global = true)]
+    cache_dir: Option<PathBuf>,
 }
 
 impl GlobalArgs {
@@ -48,6 +52,9 @@ impl GlobalArgs {
         }
         if let Some(url) = &self.nats_url {
             config.nats.url = url.clone();
+        }
+        if let Some(dir) = &self.cache_dir {
+            config.cache.directory = dir.clone();
         }
         Ok(config)
     }
@@ -148,6 +155,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let config = cli.global.resolve_config()?;
             println!("Loaded config: NATS at {}", config.nats.url);
             println!("Agent directory: {}", config.agents.directory.display());
+            println!("Cache directory: {}", config.cache.directory.display());
             println!("(Runtime not yet implemented.)");
         }
         Commands::Trigger { agent, payload } => {
