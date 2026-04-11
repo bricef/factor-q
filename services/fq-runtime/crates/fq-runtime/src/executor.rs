@@ -59,6 +59,10 @@ impl AgentExecutor {
             "starting invocation"
         );
 
+        // Build the user message content from the trigger payload before
+        // the payload is consumed by the Triggered event.
+        let user_message = payload_to_user_message(&trigger_payload);
+
         // Emit Triggered
         self.publish(Event::new(
             agent_id.clone(),
@@ -72,15 +76,28 @@ impl AgentExecutor {
         ))
         .await?;
 
-        // For phase 1 we do a single LLM call with the system prompt and no
-        // additional user context beyond the trigger. Later slices will
-        // build a richer message sequence and support tool-call loops.
-        let messages = vec![Message {
-            role: MessageRole::System,
-            content: Some(agent.system_prompt().to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        }];
+        // Phase 1 slice: a single LLM call with the agent's system prompt
+        // as the system role and the trigger payload as the user message.
+        // Later slices will build richer message sequences and support
+        // tool-call loops.
+        //
+        // The user message is required — Anthropic (and most providers)
+        // reject a messages array with only a system prompt. See the
+        // Triggered event for the full trigger context.
+        let messages = vec![
+            Message {
+                role: MessageRole::System,
+                content: Some(agent.system_prompt().to_string()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some(user_message),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+        ];
 
         let call_id = Uuid::now_v7();
         let request = ChatRequest {
@@ -265,6 +282,20 @@ impl AgentExecutor {
             }),
         ))
         .await
+    }
+}
+
+/// Convert a trigger payload into the string content of a user message.
+///
+/// - Null → a conventional empty prompt ("(no input)"), since most LLM
+///   providers reject a user message with truly empty content.
+/// - String → used as-is, so plain-text triggers behave naturally.
+/// - Anything else → pretty-printed JSON, so the agent can read it.
+fn payload_to_user_message(payload: &serde_json::Value) -> String {
+    match payload {
+        serde_json::Value::Null => "(no input)".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
     }
 }
 
