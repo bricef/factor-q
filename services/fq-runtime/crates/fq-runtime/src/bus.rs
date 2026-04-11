@@ -82,6 +82,12 @@ impl EventBus {
     }
 
     /// Ensure the factor-q event stream exists, creating it if necessary.
+    ///
+    /// S2 compression is enabled on creation. Events are text-heavy
+    /// (JSON with large system prompts and tool outputs) and compress
+    /// 2–4x with negligible CPU cost, which meaningfully extends the
+    /// retention window at a given storage budget. See
+    /// `docs/design/storage-and-scaling.md` for the rationale.
     async fn ensure_stream(&self) -> Result<(), BusError> {
         debug!(stream = STREAM_NAME, "ensuring JetStream stream exists");
         self.jetstream
@@ -91,6 +97,7 @@ impl EventBus {
                 retention: stream::RetentionPolicy::Limits,
                 storage: stream::StorageType::File,
                 max_age: DEFAULT_MAX_AGE,
+                compression: Some(stream::Compression::S2),
                 ..Default::default()
             })
             .await?;
