@@ -19,11 +19,52 @@ use crate::events::Event;
 /// Name of the JetStream stream that holds all factor-q events.
 pub const STREAM_NAME: &str = "fq-events";
 
-/// Subject pattern matching all factor-q events.
-pub const ALL_EVENTS_SUBJECT: &str = "fq.>";
+/// Subjects captured by the event stream.
+///
+/// We narrow this from the original `fq.>` so the separate trigger
+/// stream (`fq.trigger.>`) can claim its subject without overlap.
+/// NATS does not allow two JetStream streams to claim overlapping
+/// subjects.
+pub const EVENT_STREAM_SUBJECTS: &[&str] = &["fq.agent.>", "fq.system.>"];
 
 /// Default retention for the event stream.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60); // 30 days
+
+/// Name of the JetStream stream that holds pending agent triggers.
+/// Separate from the event stream because triggers have different
+/// semantics: work-queue delivery (one consumer per message), short
+/// retention, and no compression. See
+/// `docs/design/storage-and-scaling.md` for the rationale.
+pub const TRIGGER_STREAM_NAME: &str = "fq-triggers";
+
+/// Subject pattern matching all agent triggers.
+pub const ALL_TRIGGERS_SUBJECT: &str = "fq.trigger.>";
+
+/// Default retention for the trigger stream. Triggers are short-lived
+/// — the dispatcher consumes them within seconds under normal
+/// operation. A 24h window is a safety net against a runaway
+/// backlog, not a promise that normal triggers live that long.
+pub const DEFAULT_TRIGGER_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60); // 24 hours
+
+/// Build a trigger subject for a given agent id.
+pub fn trigger_subject(agent_id: &str) -> String {
+    format!("fq.trigger.{agent_id}")
+}
+
+/// Extract an agent id from a trigger subject of the form
+/// `fq.trigger.<agent_id>`. Agent ids are validated to contain no
+/// dots (see `AgentId::new`), so the subject has exactly three
+/// dot-separated tokens.
+pub fn agent_id_from_trigger_subject(subject: &str) -> Option<&str> {
+    let mut parts = subject.splitn(3, '.');
+    let first = parts.next()?;
+    let second = parts.next()?;
+    let third = parts.next()?;
+    if first != "fq" || second != "trigger" || third.is_empty() {
+        return None;
+    }
+    Some(third)
+}
 
 /// Errors from the event bus.
 #[derive(Debug, thiserror::Error)]
@@ -70,14 +111,16 @@ pub struct EventBus {
 }
 
 impl EventBus {
-    /// Connect to a NATS server and ensure the event stream exists.
+    /// Connect to a NATS server and ensure both the event and
+    /// trigger streams exist.
     pub async fn connect(url: &str) -> Result<Self, BusError> {
         info!(nats_url = url, "connecting to NATS");
         let client = async_nats::connect(url).await?;
         let jetstream = jetstream::new(client.clone());
 
         let bus = Self { client, jetstream };
-        bus.ensure_stream().await?;
+        bus.ensure_event_stream().await?;
+        bus.ensure_trigger_stream().await?;
         Ok(bus)
     }
 
@@ -88,16 +131,57 @@ impl EventBus {
     /// 2–4x with negligible CPU cost, which meaningfully extends the
     /// retention window at a given storage budget. See
     /// `docs/design/storage-and-scaling.md` for the rationale.
-    async fn ensure_stream(&self) -> Result<(), BusError> {
-        debug!(stream = STREAM_NAME, "ensuring JetStream stream exists");
+    async fn ensure_event_stream(&self) -> Result<(), BusError> {
+        debug!(stream = STREAM_NAME, "ensuring JetStream event stream exists");
         self.jetstream
             .get_or_create_stream(stream::Config {
                 name: STREAM_NAME.to_string(),
-                subjects: vec![ALL_EVENTS_SUBJECT.to_string()],
+                subjects: EVENT_STREAM_SUBJECTS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
                 retention: stream::RetentionPolicy::Limits,
                 storage: stream::StorageType::File,
                 max_age: DEFAULT_MAX_AGE,
                 compression: Some(stream::Compression::S2),
+                ..Default::default()
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Ensure the factor-q trigger stream exists, creating it if
+    /// necessary.
+    ///
+    /// Uses `Limits` retention with a short `max_age` rather than
+    /// `WorkQueue`. Work-queue streams disallow overlapping consumer
+    /// filters at the NATS level (error code 10100), which makes
+    /// parallel test consumers and broad production consumers
+    /// fundamentally incompatible. `Limits` retention allows any
+    /// number of consumers with any filters — each consumer just
+    /// tracks its own position, and messages age out after the
+    /// retention window.
+    ///
+    /// For phase 1 single-runtime deployments this is equivalent in
+    /// practice: the production dispatcher consumes each trigger
+    /// quickly, and the 24h retention window ensures space is
+    /// reclaimed even if the runtime is down. If horizontal
+    /// scaling of dispatchers becomes a concern, we will revisit
+    /// (likely with an explicit queue-group pattern on top of the
+    /// limits stream, or a separate stream per runtime instance).
+    ///
+    /// Unlike the event stream, the trigger stream is not compressed
+    /// — messages are short-lived and small, so the CPU cost of
+    /// compression is not justified.
+    async fn ensure_trigger_stream(&self) -> Result<(), BusError> {
+        debug!(stream = TRIGGER_STREAM_NAME, "ensuring JetStream trigger stream exists");
+        self.jetstream
+            .get_or_create_stream(stream::Config {
+                name: TRIGGER_STREAM_NAME.to_string(),
+                subjects: vec![ALL_TRIGGERS_SUBJECT.to_string()],
+                retention: stream::RetentionPolicy::Limits,
+                storage: stream::StorageType::File,
+                max_age: DEFAULT_TRIGGER_MAX_AGE,
                 ..Default::default()
             })
             .await?;
@@ -119,6 +203,77 @@ impl EventBus {
             .await?
             .await?;
         Ok(())
+    }
+
+    /// Publish a trigger for a given agent. The JSON-encoded
+    /// payload becomes the message body. The delivery is ack'd by
+    /// JetStream once it's durably accepted, so this returns only
+    /// after the trigger is persisted.
+    pub async fn publish_trigger(
+        &self,
+        agent_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), BusError> {
+        let subject = trigger_subject(agent_id);
+        let body = serde_json::to_vec(payload)?;
+        debug!(subject = %subject, "publishing trigger");
+        self.jetstream
+            .publish(subject, Bytes::from(body))
+            .await?
+            .await?;
+        Ok(())
+    }
+
+    /// Create (or open) a durable JetStream pull consumer on the
+    /// trigger stream, filtered to all trigger subjects.
+    pub async fn trigger_consumer(
+        &self,
+        name: &str,
+    ) -> Result<consumer::PullConsumer, BusError> {
+        self.trigger_consumer_with_filter(name, ALL_TRIGGERS_SUBJECT)
+            .await
+    }
+
+    /// Create (or open) a durable JetStream pull consumer on the
+    /// trigger stream with an explicit filter subject.
+    ///
+    /// Work-queue streams require every consumer to be "filtered".
+    /// Production callers use [`Self::trigger_consumer`] which
+    /// passes the broad `fq.trigger.>` pattern. Tests use
+    /// narrower filters (e.g. a specific agent's trigger subject)
+    /// so that parallel test consumers do not compete for each
+    /// other's messages on the same work-queue stream. NATS
+    /// delivers each published trigger to exactly one consumer
+    /// whose filter matches; with disjoint per-test filters, tests
+    /// do not cross-talk.
+    pub async fn trigger_consumer_with_filter(
+        &self,
+        name: &str,
+        filter_subject: &str,
+    ) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            filter = filter_subject,
+            "getting/creating durable trigger consumer"
+        );
+        let stream = self
+            .jetstream
+            .get_stream(TRIGGER_STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let consumer = stream
+            .get_or_create_consumer(
+                name,
+                consumer::pull::Config {
+                    durable_name: Some(name.to_string()),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    filter_subject: filter_subject.to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        Ok(consumer)
     }
 
     /// Create (or open) a durable JetStream pull consumer on the

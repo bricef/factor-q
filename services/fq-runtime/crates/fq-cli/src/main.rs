@@ -7,11 +7,11 @@ use clap::{Args, Parser, Subcommand};
 use fq_runtime::agent::{definition::parse_agent, AgentId, AgentRegistry};
 use fq_runtime::events::{Event, EventPayload, TriggerSource};
 use fq_runtime::executor::InvocationOutcome;
-use fq_runtime::llm::GenAiClient;
+use fq_runtime::llm::{GenAiClient, LlmClient};
 use fq_runtime::projection::store::EventFilter;
 use fq_runtime::{
     AgentExecutor, Config, EventBus, PricingTable, ProjectionConsumer, ProjectionStore,
-    ToolRegistry,
+    ToolRegistry, TriggerDispatcher,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -87,6 +87,11 @@ enum Commands {
         agent: String,
         /// Optional payload (JSON or plain string)
         payload: Option<String>,
+        /// Publish the trigger to NATS (fq.trigger.<agent>) and let a
+        /// running `fq run` daemon dispatch it, instead of running
+        /// the executor in-process.
+        #[arg(long)]
+        via_nats: bool,
     },
     /// Agent management commands
     Agent {
@@ -169,8 +174,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { force } => init_project(force)?,
         Commands::Run => run_daemon(&cli.global).await?,
-        Commands::Trigger { agent, payload } => {
-            trigger_agent(&cli.global, &agent, payload.as_deref()).await?
+        Commands::Trigger {
+            agent,
+            payload,
+            via_nats,
+        } => {
+            if via_nats {
+                publish_trigger(&cli.global, &agent, payload.as_deref()).await?
+            } else {
+                trigger_agent(&cli.global, &agent, payload.as_deref()).await?
+            }
         }
         Commands::Agent { command } => match command {
             AgentCommands::List => list_agents(&cli.global)?,
@@ -536,9 +549,10 @@ fn projection_path(config: &Config) -> PathBuf {
 }
 
 /// Long-running foreground runtime. Connects to NATS, opens the
-/// SQLite projection store, spawns the projection consumer task,
-/// and waits for Ctrl-C. A graceful shutdown signal tells the
-/// consumer to drain and exit before the process does.
+/// projection store, spawns two tokio tasks — the projection
+/// consumer and the NATS trigger dispatcher — and waits for
+/// Ctrl-C. Both tasks are given a oneshot shutdown channel and
+/// given five seconds to drain before the process exits.
 async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
     println!("factor-q runtime starting");
@@ -546,10 +560,36 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("  agent directory:  {}", config.agents.directory.display());
     println!("  cache directory:  {}", config.cache.directory.display());
 
+    // Load agents eagerly. A missing or empty directory is an
+    // error: the dispatcher would otherwise silently drop every
+    // trigger and operators would struggle to diagnose it.
+    let agents_dir = &config.agents.directory;
+    if !agents_dir.exists() {
+        anyhow::bail!(
+            "agent directory {} does not exist. Create it or pass --agents-dir.",
+            agents_dir.display()
+        );
+    }
+    let registry = fq_runtime::AgentRegistry::load_from_directory(agents_dir)
+        .with_context(|| format!("failed to load agents from {}", agents_dir.display()))?;
+    if !registry.errors().is_empty() {
+        for err in registry.errors() {
+            tracing::warn!(error = %err, "agent load error");
+        }
+    }
+    println!(
+        "  agents loaded:    {} (errors: {})",
+        registry.len(),
+        registry.errors().len()
+    );
+    let registry = Arc::new(registry);
+
+    // Connect NATS (ensures both streams exist).
     let bus = EventBus::connect(&config.nats.url)
         .await
         .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
 
+    // Open the projection store.
     let db_path = projection_path(&config);
     println!("  projection db:    {}", db_path.display());
     let store = Arc::new(
@@ -558,12 +598,35 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             .with_context(|| format!("failed to open projection at {}", db_path.display()))?,
     );
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let consumer = ProjectionConsumer::new(bus.clone(), store.clone());
-    let consumer_handle = tokio::spawn(async move { consumer.run(shutdown_rx).await });
+    // Load pricing (fetches from LiteLLM if network is available,
+    // falls back to the cache otherwise).
+    let pricing_cache = config.cache.directory.join("pricing.json");
+    let pricing = Arc::new(PricingTable::load(&pricing_cache).await);
+    println!(
+        "  pricing entries:  {} (cache: {})",
+        pricing.len(),
+        pricing_cache.display()
+    );
+
+    let tools = Arc::new(ToolRegistry::with_builtins());
+    let llm: Arc<dyn LlmClient> = Arc::new(GenAiClient::new());
+    let executor = Arc::new(AgentExecutor::new(bus.clone(), pricing, tools));
+
+    // Spawn the projection consumer.
+    let (proj_shutdown_tx, proj_shutdown_rx) = tokio::sync::oneshot::channel();
+    let projection_consumer = ProjectionConsumer::new(bus.clone(), store.clone());
+    let projection_handle =
+        tokio::spawn(async move { projection_consumer.run(proj_shutdown_rx).await });
+
+    // Spawn the trigger dispatcher.
+    let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
+    let dispatcher = TriggerDispatcher::new(bus.clone(), registry, executor, llm);
+    let dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
 
     println!();
-    println!("Projection consumer running. Press Ctrl-C to stop.");
+    println!("Runtime ready. Press Ctrl-C to stop.");
+    println!("  - projection consumer is materialising events into SQLite");
+    println!("  - trigger dispatcher is listening on fq.trigger.*");
 
     tokio::signal::ctrl_c()
         .await
@@ -571,15 +634,59 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!();
     println!("Received Ctrl-C, shutting down...");
 
-    let _ = shutdown_tx.send(());
-    match tokio::time::timeout(std::time::Duration::from_secs(5), consumer_handle).await {
-        Ok(Ok(Ok(()))) => println!("Projection consumer stopped cleanly."),
-        Ok(Ok(Err(err))) => {
-            tracing::error!(error = %err, "projection consumer exited with error");
-        }
+    let _ = proj_shutdown_tx.send(());
+    let _ = disp_shutdown_tx.send(());
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
+        Ok(Ok(Ok(()))) => println!("  projection consumer stopped cleanly."),
+        Ok(Ok(Err(err))) => tracing::error!(error = %err, "projection consumer exited with error"),
         Ok(Err(err)) => tracing::error!(error = %err, "projection consumer task panicked"),
         Err(_) => tracing::warn!("projection consumer did not shut down within 5s"),
     }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), dispatcher_handle).await {
+        Ok(Ok(Ok(()))) => println!("  trigger dispatcher stopped cleanly."),
+        Ok(Ok(Err(err))) => tracing::error!(error = %err, "trigger dispatcher exited with error"),
+        Ok(Err(err)) => tracing::error!(error = %err, "trigger dispatcher task panicked"),
+        Err(_) => tracing::warn!("trigger dispatcher did not shut down within 5s"),
+    }
+    Ok(())
+}
+
+/// Publish a trigger to NATS instead of running the executor
+/// in-process. A running `fq run` daemon picks up the trigger and
+/// dispatches it to the named agent.
+async fn publish_trigger(
+    global: &GlobalArgs,
+    agent_name: &str,
+    payload: Option<&str>,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+
+    // Validate the agent id format locally before going to NATS.
+    // This catches typos early without round-tripping through the
+    // cluster.
+    fq_runtime::AgentId::new(agent_name)
+        .with_context(|| format!("invalid agent name '{agent_name}'"))?;
+
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+
+    let trigger_payload: Value = match payload {
+        Some(raw) => serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
+        None => Value::Null,
+    };
+
+    bus.publish_trigger(agent_name, &trigger_payload)
+        .await
+        .with_context(|| format!("failed to publish trigger for '{agent_name}'"))?;
+
+    println!(
+        "Published trigger for '{}' on {}",
+        agent_name,
+        fq_runtime::bus::trigger_subject(agent_name)
+    );
+    println!("A running `fq run` daemon will pick this up and dispatch it.");
     Ok(())
 }
 

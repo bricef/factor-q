@@ -349,6 +349,67 @@ stop_fq_run() {
     RUN_PID=""
 }
 
+# Verify NATS-triggered execution: start fq run (which spawns
+# both the projection consumer and the trigger dispatcher),
+# publish a trigger via `fq trigger --via-nats` (which does NOT
+# run the executor in-process), and verify that the daemon picks
+# up the trigger and runs the agent to completion.
+test_nats_triggered_dispatch() {
+    local project
+    project="$(make_project nats-trigger)"
+    local agent_id
+    agent_id="$(unique_agent_id nats-trigger)"
+
+    write_agent "${project}" "q.md" "---
+name: ${agent_id}
+model: claude-haiku-4-5
+budget: 0.10
+---
+
+You are a concise assistant. Answer in one sentence."
+
+    start_fq_run "${project}/agents" "${project}/cache" || return 1
+
+    # Publish via NATS — this should return immediately without
+    # running the executor in-process.
+    local publish_out
+    publish_out="$("${FQ_BIN}" \
+        --agents-dir "${project}/agents" \
+        --cache-dir "${project}/cache" \
+        trigger --via-nats "${agent_id}" \
+        "Say exactly: nats dispatch OK." 2>&1)" || {
+        stop_fq_run
+        fail "fq trigger --via-nats failed"
+        printf '  %s\n' "${publish_out}"
+        return 1
+    }
+
+    assert_contains "${publish_out}" "Published trigger" "publish confirmation" || {
+        stop_fq_run
+        return 1
+    }
+
+    # Give the daemon up to 15s to pick up the trigger, run the
+    # agent, and project the events.
+    local agent_filter="${agent_id}"
+    local deadline=$((SECONDS + 15))
+    local rows=""
+    while (( SECONDS < deadline )); do
+        rows="$("${FQ_BIN}" --cache-dir "${project}/cache" \
+            events query --agent "${agent_filter}" --limit 20 2>&1 || true)"
+        if [[ "${rows}" == *"completed"* ]]; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    stop_fq_run
+
+    assert_contains "${rows}" "triggered"    "nats-dispatched event: triggered"  || return 1
+    assert_contains "${rows}" "completed"    "nats-dispatched event: completed"  || return 1
+    assert_contains "${rows}" "${agent_id}"  "nats-dispatched event: agent id"   || return 1
+}
+
 # Test the full runtime cycle: start fq run (which spawns the
 # projection consumer), fire a trigger to produce events, wait for
 # them to land in SQLite, then query them back via the CLI.
@@ -427,6 +488,7 @@ main() {
     run_test "trigger: shell tool in a loop"             test_trigger_with_shell_tool
     run_test "trigger: shell tool sandbox denial path"   test_shell_tool_sandbox_denial
     run_test "runtime: projection + query + costs"       test_run_projection_query_and_costs
+    run_test "runtime: NATS-triggered dispatch"          test_nats_triggered_dispatch
 
     printf '\n'
     if [[ "${TESTS_FAILED}" -eq 0 ]]; then
