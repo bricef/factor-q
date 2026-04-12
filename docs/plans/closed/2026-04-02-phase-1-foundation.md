@@ -1,5 +1,69 @@
 # Phase 1: Foundation
 
+**Status:** Closed on 2026-04-12. All core scope delivered and verified
+end-to-end against a real LLM. See the closing summary below for
+what shipped, what was deferred, and where deferred items live.
+
+## Closing summary
+
+### What shipped
+
+- `fq init` creates a ready-to-run project (config, agents dir, sample
+  agent, quickstart README) from embedded templates.
+- `fq run` is a real long-running process that hosts two tokio tasks:
+  a projection consumer (NATS → SQLite) and a trigger dispatcher
+  (NATS → executor).
+- `fq trigger [agent] [payload]` runs the executor in-process;
+  `fq trigger --via-nats` publishes to `fq.trigger.<agent>` and lets a
+  running daemon dispatch asynchronously.
+- `fq events tail` / `fq events query` / `fq costs` cover live and
+  historical inspection of the event stream and the SQLite projection.
+- NATS + JetStream as the event bus with S2 compression on the event
+  stream and Limits retention on the trigger stream. Event schema is
+  typed, versioned, and documented in `docs/design/event-schema.md`.
+- SQLite projection stores envelope + denormalised columns only
+  (~300–500 B per row), keeping growth predictable. NATS remains the
+  source of truth; the projection is rebuildable.
+- Anthropic integration via the genai crate, with a provider-agnostic
+  `LlmClient` trait and a `FixtureClient` for tests.
+- Built-in tools: `file_read`, `file_write`, `shell`. Each enforces a
+  per-agent runtime sandbox across four dimensions: `fs_read`,
+  `fs_write`, `exec_cwd`, and `env`. Path traversal and symlink
+  escapes are defeated by canonicalisation; the shell tool is argv-only
+  with a mandatory timeout and output cap.
+- Cost tracking driven by the LiteLLM pricing JSON, fetched at startup
+  with cache fallback. Per-agent budget ceilings halt execution with a
+  clear `Failed` event.
+- Deployment: distroless Dockerfile, docker-compose for NATS, `just`
+  recipes for every build/run/test workflow, and a disposable
+  network-disabled container runner for the shell tool test battery.
+- Documentation: vision, architecture, event schema, storage and
+  scaling analysis, 14 accepted ADRs, and an up-to-date README per
+  service.
+
+### What was deferred
+
+The following items were in the original phase 1 scope as stretch
+goals and did not land. They are tracked in
+[`docs/plans/backlog.md`](../backlog.md):
+
+- **Hot-reload of agent definitions** — the runtime currently loads
+  definitions once at start. Watching the agents directory and safely
+  swapping live definitions is deferred.
+- **Second model provider** — the `LlmClient` trait and the genai
+  adapter both support multiple providers structurally, but only
+  Anthropic is exercised end-to-end. Adding OpenAI is mechanical but
+  not yet done.
+
+### Test counts at close
+
+- **155 unit tests** across the workspace (fq-runtime 94, fq-tools 60,
+  1 doctest)
+- **6 smoke tests** exercising the full stack against real Anthropic
+  calls, including the shell tool and the NATS-triggered dispatch path
+- **16 shell tool tests** additionally run inside a disposable
+  `--network none` container via `just test-shell-sandbox`
+
 ## Goal
 
 Prove the core architecture end-to-end: an event goes in, an agent acts, events come out, a human can see what happened. Phase 1 delivers a working single-agent runtime with event-driven execution, cost controls, and CLI-based inspection.
