@@ -15,9 +15,15 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 ## Documentation
 
 - [Vision](VISION.md) — what factor-q is and why it exists
-- [Architecture](ARCHITECTURE.md) — core subsystems and cross-cutting concerns
-- [Phase 1 Plan](docs/plans/active/2026-04-02-phase-1-foundation.md) — current development scope
+- [Architecture](ARCHITECTURE.md) — core subsystems and implementation
+- [Contributing](CONTRIBUTING.md) — development setup, test tiers, code conventions
+- [Agent authoring guide](docs/guide/agent-definitions.md) — write your first agent
+- [Event schema](docs/design/event-schema.md) — the event model everything is built around
+- [Storage and scaling](docs/design/storage-and-scaling.md) — sizing analysis for NATS and SQLite
 - [ADRs](docs/adrs/) — architectural decision records ([accepted](docs/adrs/accepted/), [draft](docs/adrs/draft/))
+- [Phase 1 (closed)](docs/plans/closed/2026-04-02-phase-1-foundation.md) — what shipped in the walking skeleton
+- [Phase 2 (active)](docs/plans/active/2026-04-11-phase-2-mcp-and-memory.md) — MCP, memory, and skills
+- [Backlog](docs/plans/backlog.md) — deferred work
 
 ## Technology
 
@@ -29,47 +35,32 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 
 ## Project structure
 
-The repository is organised as a monorepo with independent services, shared content, and deployment infrastructure.
-
 ```
 factor-q/
-├── services/              # Each service is self-contained with its own build system
-│   └── fq-runtime/        # Rust workspace — CLI, runtime, tools
-│       └── crates/
-│           ├── fq-cli/      # `fq` binary (argument parsing, command dispatch)
-│           ├── fq-runtime/  # Core library (agent loader, config, event schema)
-│           └── fq-tools/    # Built-in tool implementations
+├── services/fq-runtime/       Rust workspace (CLI + runtime + tools)
+│   └── crates/
+│       ├── fq-cli/              fq binary (CLI commands, daemon host)
+│       ├── fq-runtime/          core library (bus, executor, projection, dispatcher)
+│       └── fq-tools/            built-in tools and sandbox enforcement
 │
-├── infrastructure/        # Deployment and local dev
-│   ├── docker-compose.yml # Local dev orchestration (NATS + services)
-│   └── nats/              # NATS server configuration
+├── infrastructure/            Deployment and local dev
+│   ├── docker-compose.yml       NATS + JetStream
+│   └── nats/                    NATS server configuration
 │
-├── agents/                # Agent definitions (.md files with YAML frontmatter)
-│   └── examples/          # Sample agents shipped with the project
-│
-├── skills/                # Skill registry content (AgentSkills format)
+├── agents/examples/           Sample agent definitions
+├── skills/                    Skill registry (future, AgentSkills format)
+├── tests/smoke/               End-to-end smoke tests against a real LLM
 │
 ├── docs/
-│   ├── adrs/              # Architectural Decision Records
-│   │   ├── accepted/      # Resolved decisions
-│   │   ├── draft/         # Open decisions under discussion
-│   │   └── deprecated/    # Superseded decisions
-│   └── plans/             # Phase plans and roadmaps
-│       ├── active/        # Current phase plans
-│       └── closed/        # Completed phase plans
+│   ├── adrs/                  Architectural decision records
+│   ├── design/                Event schema, storage and scaling specs
+│   ├── guide/                 User-facing guides (agent authoring)
+│   └── plans/                 Phase plans, backlog
 │
-├── research/              # Analysis of prior art
-├── VISION.md              # What factor-q is and why it exists
-├── ARCHITECTURE.md        # Core subsystems and cross-cutting concerns
+├── VISION.md
+├── ARCHITECTURE.md
+├── CONTRIBUTING.md
 └── README.md
-```
-
-### Browsing the repository
-
-Rust build artefacts under `services/fq-runtime/target` can clutter directory listings. To view the project structure cleanly:
-
-```sh
-tree -I 'target|.git'
 ```
 
 ## Getting started
@@ -77,18 +68,28 @@ tree -I 'target|.git'
 Prerequisites: Rust toolchain, Docker, Docker Compose, [just](https://github.com/casey/just).
 
 ```sh
-# Start infrastructure and build the runtime
+# Start NATS and build the runtime
 just up
 
-# Run the CLI
-just fq --help
+# Initialise a new project (creates fq.toml, agents/, sample agent)
+just fq init
 
-# Start the runtime in the foreground (brings up NATS, builds, and runs)
+# Trigger the sample agent
+export ANTHROPIC_API_KEY='sk-ant-...'
+just fq trigger sample-agent "Say hello in one sentence."
+
+# Watch events stream in real time (in another terminal)
+just fq events tail
+
+# Check runtime health
+just fq status
+
+# Run the daemon (projection consumer + trigger dispatcher)
 just run
-
-# See all available recipes
-just
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development
+setup and test tiers.
 
 ## Prior Art
 

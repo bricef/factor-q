@@ -66,26 +66,43 @@ just fq -- agent list
 
 ## The CLI
 
-The `fq` binary is the primary interface during phase 1. All commands are currently stubs — they parse arguments but do not yet perform their intended actions.
+```
+fq init [-f|--force]                        # create a new project (config, agents/, sample)
+fq run                                      # start the daemon (projection + dispatcher)
+fq trigger <agent> [payload]                # run an agent in-process
+fq trigger --via-nats <agent> [payload]     # publish a trigger to NATS for fq run to dispatch
+fq agent list                               # list agents in the configured directory
+fq agent validate <path>                    # validate an agent definition
+fq events tail [--subject fq.>]             # tail the live event stream
+fq events query [--agent] [--type] [--since] [--limit 50]
+                                            # query the SQLite projection
+fq costs [--agent] [--since]                # show per-agent cost totals
+fq status                                   # runtime health: NATS, streams, consumers, projection
+```
 
-```
-fq init                        # initialise a new factor-q project
-fq run                         # run the runtime in the foreground
-fq trigger <agent> [payload]   # manually trigger an agent
-fq agent list                  # list registered agent definitions
-fq agent validate <path>       # validate an agent definition
-fq events tail [--subject]     # tail the event stream
-fq events query [--agent]      # query event history
-fq costs [--agent] [--since]   # show cost breakdown
-```
+Global flags (`--config`, `--agents-dir`, `--nats-url`, `--cache-dir`)
+and their corresponding `FQ_*` environment variables are available on
+every subcommand. See `fq --help` for details.
+
+## Testing
+
+Three test tiers, each with different prerequisites:
+
+| Tier | Command | Prerequisites | Count |
+|---|---|---|---|
+| Unit + integration | `just test` | NATS (`just infra-up`, set `FQ_NATS_URL`) | ~155 |
+| Smoke (real LLM) | `just smoke` (repo root) | NATS + `ANTHROPIC_API_KEY` | 6 |
+| Shell sandbox (container) | `just test-shell-sandbox` | Docker | 16 |
+
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full testing
+guide.
 
 ## Design references
 
-This service implements decisions from the repository-level documentation:
-
 - [Project vision](../../VISION.md)
 - [Architecture](../../ARCHITECTURE.md)
-- [Phase 1 plan](../../docs/plans/active/2026-04-02-phase-1-foundation.md)
+- [Phase 1 closing summary](../../docs/plans/closed/2026-04-02-phase-1-foundation.md)
+- [Agent authoring guide](../../docs/guide/agent-definitions.md)
 - Relevant ADRs:
   - [0005 — Agent definition format](../../docs/adrs/accepted/0005-agent-definition-format.md)
   - [0009 — Rust as host language](../../docs/adrs/accepted/0009-technology-choices.md)
