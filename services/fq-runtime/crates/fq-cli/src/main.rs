@@ -5,7 +5,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use fq_runtime::agent::{definition::parse_agent, AgentId, AgentRegistry};
-use fq_runtime::events::{Event, EventPayload, TriggerSource};
+use fq_runtime::events::{
+    Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
+    TriggerSource,
+};
 use fq_runtime::executor::InvocationOutcome;
 use fq_runtime::llm::{GenAiClient, LlmClient};
 use fq_runtime::projection::store::EventFilter;
@@ -13,6 +16,7 @@ use fq_runtime::{
     AgentExecutor, Config, EventBus, PricingTable, ProjectionConsumer, ProjectionStore,
     ToolRegistry, TriggerDispatcher,
 };
+use uuid::Uuid;
 use futures::StreamExt;
 use serde_json::Value;
 use tracing::error;
@@ -112,6 +116,9 @@ enum Commands {
         #[arg(long)]
         since: Option<String>,
     },
+    /// Show a health overview of the runtime (NATS, streams,
+    /// consumers, projection)
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -201,6 +208,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Costs { agent, since } => {
             show_costs(&cli.global, agent.as_deref(), since.as_deref()).await?
         }
+        Commands::Status => show_status(&cli.global).await?,
     }
     Ok(())
 }
@@ -533,6 +541,18 @@ fn print_event(event: &Event) {
         EventPayload::Failed(p) => {
             format!("failed {:?} {}", p.error_kind, p.error_message)
         }
+        EventPayload::SystemStartup(p) => format!(
+            "system.startup version={} agents={} nats={}",
+            p.version, p.agents_loaded, p.nats_url
+        ),
+        EventPayload::SystemShutdown(p) => format!(
+            "system.shutdown reason={} clean={}",
+            p.reason, p.clean
+        ),
+        EventPayload::SystemTaskFailed(p) => format!(
+            "system.task_failed task={} error={}",
+            p.task_name, p.error_message
+        ),
     };
 
     println!(
@@ -548,21 +568,182 @@ fn projection_path(config: &Config) -> PathBuf {
     config.cache.directory.join("events.db")
 }
 
+/// Operational status of the runtime, derived from three sources:
+///
+/// 1. The NATS JetStream API (via the async-nats client that the
+///    EventBus already uses) — gives stream message counts, byte
+///    totals, and consumer positions.
+/// 2. The SQLite projection — row count and latest projected
+///    timestamp, so we can compare against NATS and surface
+///    projection lag directly.
+/// 3. Local config paths that we expect to be present.
+///
+/// Deliberately does not try to detect whether a `fq run` daemon
+/// is currently running; that would need a pidfile or a heartbeat
+/// event, both of which are more surface area than a status
+/// command should own. Operators can use `ps`/`systemctl` for
+/// process state.
+async fn show_status(global: &GlobalArgs) -> anyhow::Result<()> {
+    use async_nats::jetstream;
+
+    let config = global.resolve_config()?;
+
+    println!("factor-q status");
+    println!();
+    println!("Config");
+    println!("  NATS URL:         {}", config.nats.url);
+    println!("  agents dir:       {}", config.agents.directory.display());
+    println!("  cache dir:        {}", config.cache.directory.display());
+
+    // NATS.
+    println!();
+    println!("NATS");
+    let client = match async_nats::connect(&config.nats.url).await {
+        Ok(c) => {
+            println!("  connection:       ✓ connected at {}", config.nats.url);
+            c
+        }
+        Err(err) => {
+            println!("  connection:       ✗ failed: {err}");
+            anyhow::bail!("cannot reach NATS at {}", config.nats.url);
+        }
+    };
+    let js = jetstream::new(client);
+
+    report_stream(&js, "fq-events", "fq-projector").await;
+    report_stream(&js, "fq-triggers", "fq-dispatcher").await;
+
+    // Projection.
+    println!();
+    println!("Projection");
+    let db_path = projection_path(&config);
+    println!("  path:             {}", db_path.display());
+    if !db_path.exists() {
+        println!("  state:            not initialised (run `fq run` to create)");
+    } else {
+        match ProjectionStore::open_read_only(&db_path).await {
+            Ok(store) => match store.count().await {
+                Ok(count) => {
+                    println!("  rows:             {count}");
+                }
+                Err(err) => {
+                    println!("  rows:             ✗ failed to query: {err}");
+                }
+            },
+            Err(err) => {
+                println!("  state:            ✗ failed to open: {err}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Report the state of a single JetStream stream and one of its
+/// durable consumers. Prints lag for the consumer if its
+/// delivered sequence lags the stream's last sequence.
+async fn report_stream(
+    js: &async_nats::jetstream::Context,
+    stream_name: &str,
+    primary_consumer: &str,
+) {
+    println!();
+    println!("Stream: {stream_name}");
+    let mut stream = match js.get_stream(stream_name).await {
+        Ok(s) => s,
+        Err(err) => {
+            println!("  state:            ✗ stream not found: {err}");
+            return;
+        }
+    };
+    let info = match stream.info().await {
+        Ok(info) => info.clone(),
+        Err(err) => {
+            println!("  state:            ✗ failed to fetch info: {err}");
+            return;
+        }
+    };
+    println!("  messages:         {}", info.state.messages);
+    println!("  bytes:            {}", human_bytes(info.state.bytes));
+    println!("  first seq:        {}", info.state.first_sequence);
+    println!("  last seq:         {}", info.state.last_sequence);
+
+    // The primary consumer (fq-projector or fq-dispatcher).
+    match stream
+        .get_consumer::<async_nats::jetstream::consumer::pull::Config>(primary_consumer)
+        .await
+    {
+        Ok(mut consumer) => match consumer.info().await {
+            Ok(cinfo) => {
+                let delivered = cinfo.delivered.stream_sequence;
+                let lag = info.state.last_sequence.saturating_sub(delivered);
+                let status = if lag == 0 {
+                    "✓ caught up"
+                } else if lag < 10 {
+                    "◐ slightly behind"
+                } else {
+                    "✗ lagging"
+                };
+                println!(
+                    "  consumer {primary_consumer}: {status} (delivered {}, lag {})",
+                    delivered, lag
+                );
+                if cinfo.num_ack_pending > 0 {
+                    println!("    ack pending:    {}", cinfo.num_ack_pending);
+                }
+                if cinfo.num_pending > 0 {
+                    println!("    num pending:    {}", cinfo.num_pending);
+                }
+            }
+            Err(err) => {
+                println!("  consumer {primary_consumer}: ✗ info failed: {err}");
+            }
+        },
+        Err(_) => {
+            println!("  consumer {primary_consumer}: not present (no `fq run` has initialised it)");
+        }
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Long-running foreground runtime. Connects to NATS, opens the
 /// projection store, spawns two tokio tasks — the projection
 /// consumer and the NATS trigger dispatcher — and waits for
-/// Ctrl-C. Both tasks are given a oneshot shutdown channel and
-/// given five seconds to drain before the process exits.
+/// either Ctrl-C or a premature task failure.
+///
+/// Lifecycle events are published on `fq.system.*` so operators
+/// can see from the event stream when the daemon started, why it
+/// stopped, and which hosted task (if any) failed. A task that
+/// dies unexpectedly triggers an immediate shutdown of the other
+/// task and a non-zero process exit, rather than silently
+/// limping along with a broken dispatcher or projector.
 async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
+    let runtime_id = Uuid::now_v7();
+    let version = env!("CARGO_PKG_VERSION");
+
     let config = global.resolve_config()?;
     println!("factor-q runtime starting");
+    println!("  runtime id:       {runtime_id}");
+    println!("  version:          {version}");
     println!("  NATS:             {}", config.nats.url);
     println!("  agent directory:  {}", config.agents.directory.display());
     println!("  cache directory:  {}", config.cache.directory.display());
 
-    // Load agents eagerly. A missing or empty directory is an
-    // error: the dispatcher would otherwise silently drop every
-    // trigger and operators would struggle to diagnose it.
+    // Load agents eagerly. A missing directory is an error: the
+    // dispatcher would otherwise silently drop every trigger.
     let agents_dir = &config.agents.directory;
     if !agents_dir.exists() {
         anyhow::bail!(
@@ -577,9 +758,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             tracing::warn!(error = %err, "agent load error");
         }
     }
+    let agents_loaded = registry.len() as u32;
     println!(
         "  agents loaded:    {} (errors: {})",
-        registry.len(),
+        agents_loaded,
         registry.errors().len()
     );
     let registry = Arc::new(registry);
@@ -598,13 +780,13 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             .with_context(|| format!("failed to open projection at {}", db_path.display()))?,
     );
 
-    // Load pricing (fetches from LiteLLM if network is available,
-    // falls back to the cache otherwise).
+    // Load pricing.
     let pricing_cache = config.cache.directory.join("pricing.json");
     let pricing = Arc::new(PricingTable::load(&pricing_cache).await);
+    let pricing_entries = pricing.len() as u32;
     println!(
         "  pricing entries:  {} (cache: {})",
-        pricing.len(),
+        pricing_entries,
         pricing_cache.display()
     );
 
@@ -612,28 +794,94 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let llm: Arc<dyn LlmClient> = Arc::new(GenAiClient::new());
     let executor = Arc::new(AgentExecutor::new(bus.clone(), pricing, tools));
 
+    // Publish a system.startup event before spawning any tasks.
+    // If this fails the daemon cannot produce lifecycle events at
+    // all, which is a bad starting point — bail out loudly.
+    let startup_event = Event::system(
+        runtime_id,
+        EventPayload::SystemStartup(SystemStartupPayload {
+            runtime_id,
+            version: version.to_string(),
+            nats_url: config.nats.url.clone(),
+            agents_loaded,
+            pricing_entries,
+        }),
+    );
+    bus.publish(&startup_event)
+        .await
+        .context("failed to publish system.startup event")?;
+
     // Spawn the projection consumer.
     let (proj_shutdown_tx, proj_shutdown_rx) = tokio::sync::oneshot::channel();
     let projection_consumer = ProjectionConsumer::new(bus.clone(), store.clone());
-    let projection_handle =
+    let mut projection_handle =
         tokio::spawn(async move { projection_consumer.run(proj_shutdown_rx).await });
 
     // Spawn the trigger dispatcher.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
     let dispatcher = TriggerDispatcher::new(bus.clone(), registry, executor, llm);
-    let dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
+    let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
 
     println!();
     println!("Runtime ready. Press Ctrl-C to stop.");
     println!("  - projection consumer is materialising events into SQLite");
     println!("  - trigger dispatcher is listening on fq.trigger.*");
 
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to install Ctrl-C handler")?;
-    println!();
-    println!("Received Ctrl-C, shutting down...");
+    // Wait for either a Ctrl-C or one of the hosted tasks exiting
+    // prematurely. We watch the task handles in the same select so
+    // a silent-failing task is caught immediately instead of at
+    // shutdown time.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
 
+    let (shutdown_reason, clean_exit, failed_task): (&'static str, bool, Option<(&'static str, String)>) = tokio::select! {
+        res = &mut ctrl_c => {
+            match res {
+                Ok(()) => {
+                    println!();
+                    println!("Received Ctrl-C, shutting down...");
+                    ("ctrl_c", true, None)
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to listen for Ctrl-C");
+                    ("ctrl_c_error", false, None)
+                }
+            }
+        }
+        result = &mut projection_handle => {
+            let err_msg = describe_task_result("projection consumer", result);
+            ("task_failed", false, Some(("projection_consumer", err_msg)))
+        }
+        result = &mut dispatcher_handle => {
+            let err_msg = describe_task_result("trigger dispatcher", result);
+            ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
+        }
+    };
+
+    // If a task failed, publish a system.task_failed event with
+    // its details before we tear everything else down.
+    if let Some((task_name, error_message)) = failed_task.as_ref() {
+        tracing::error!(
+            task = task_name,
+            error = error_message.as_str(),
+            "hosted task exited unexpectedly"
+        );
+        let failed_event = Event::system(
+            runtime_id,
+            EventPayload::SystemTaskFailed(SystemTaskFailedPayload {
+                runtime_id,
+                task_name: task_name.to_string(),
+                error_message: error_message.clone(),
+            }),
+        );
+        if let Err(err) = bus.publish(&failed_event).await {
+            tracing::error!(error = %err, "failed to publish system.task_failed event");
+        }
+    }
+
+    // Signal both tasks to shut down. Either one may already be
+    // done (the one that returned from the select), but sending
+    // on a oneshot whose receiver was dropped is a no-op.
     let _ = proj_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
 
@@ -649,7 +897,40 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Ok(Err(err)) => tracing::error!(error = %err, "trigger dispatcher task panicked"),
         Err(_) => tracing::warn!("trigger dispatcher did not shut down within 5s"),
     }
+
+    // Publish a system.shutdown event on the way out. Best-effort —
+    // if NATS is already unreachable we just log and continue.
+    let shutdown_event = Event::system(
+        runtime_id,
+        EventPayload::SystemShutdown(SystemShutdownPayload {
+            runtime_id,
+            reason: shutdown_reason.to_string(),
+            clean: clean_exit,
+        }),
+    );
+    if let Err(err) = bus.publish(&shutdown_event).await {
+        tracing::warn!(error = %err, "failed to publish system.shutdown event");
+    }
+
+    if failed_task.is_some() {
+        anyhow::bail!("runtime exited because a hosted task failed");
+    }
     Ok(())
+}
+
+/// Convert a joined task result into a short error message. A
+/// clean early-exit (task returned Ok(())) is reported as a
+/// descriptive string so operators see *something* explaining
+/// why a task stopped without being asked to.
+fn describe_task_result<E: std::fmt::Display>(
+    name: &str,
+    result: Result<Result<(), E>, tokio::task::JoinError>,
+) -> String {
+    match result {
+        Ok(Ok(())) => format!("{name} exited before a shutdown signal was sent"),
+        Ok(Err(err)) => format!("{name} failed: {err}"),
+        Err(join_err) => format!("{name} task panicked: {join_err}"),
+    }
 }
 
 /// Publish a trigger to NATS instead of running the executor

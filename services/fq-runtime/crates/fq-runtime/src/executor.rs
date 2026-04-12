@@ -1009,6 +1009,9 @@ mod tests {
             EventPayload::Cost(_) => "cost",
             EventPayload::Completed(_) => "completed",
             EventPayload::Failed(_) => "failed",
+            EventPayload::SystemStartup(_) => "system_startup",
+            EventPayload::SystemShutdown(_) => "system_shutdown",
+            EventPayload::SystemTaskFailed(_) => "system_task_failed",
         }
     }
 }

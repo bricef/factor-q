@@ -656,6 +656,7 @@ name = "fq-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-nats",
  "clap",
  "fq-runtime",
  "futures",
@@ -663,6 +664,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

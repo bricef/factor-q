@@ -339,6 +339,13 @@ fn extract_fields(payload: &EventPayload) -> Fields {
             total_cost: Some(p.partial_totals.total_cost),
             ..Default::default()
         },
+        // System events carry no agent metadata. The projection
+        // still records them for visibility (useful for "when did
+        // the daemon restart" queries), but every denormalised
+        // column is NULL.
+        EventPayload::SystemStartup(_)
+        | EventPayload::SystemShutdown(_)
+        | EventPayload::SystemTaskFailed(_) => Fields::default(),
     }
 }
 
@@ -352,6 +359,9 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
         EventPayload::Cost(_) => "cost",
         EventPayload::Completed(_) => "completed",
         EventPayload::Failed(_) => "failed",
+        EventPayload::SystemStartup(_) => "system_startup",
+        EventPayload::SystemShutdown(_) => "system_shutdown",
+        EventPayload::SystemTaskFailed(_) => "system_task_failed",
     }
 }
 

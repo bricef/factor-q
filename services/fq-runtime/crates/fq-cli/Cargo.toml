@@ -10,9 +10,11 @@ path = "src/main.rs"
 [dependencies]
 fq-runtime = { path = "../fq-runtime" }
 anyhow = "1"
+async-nats = "0.38"
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v7"] }

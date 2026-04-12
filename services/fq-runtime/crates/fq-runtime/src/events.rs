@@ -13,6 +13,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub mod subjects {
     pub const SYSTEM_STARTUP: &str = "fq.system.startup";
     pub const SYSTEM_SHUTDOWN: &str = "fq.system.shutdown";
+    pub const SYSTEM_TASK_FAILED: &str = "fq.system.task_failed";
 
     pub fn agent_triggered(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.triggered")
@@ -72,6 +73,21 @@ impl Event {
         }
     }
 
+    /// Construct a system event. System events use the sentinel
+    /// agent id `"system"`; the runtime id doubles as the
+    /// invocation id so all events from a single daemon run share
+    /// a correlation key.
+    pub fn system(runtime_id: Uuid, payload: EventPayload) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            event_id: Uuid::now_v7(),
+            timestamp: Utc::now(),
+            agent_id: "system".to_string(),
+            invocation_id: runtime_id,
+            payload,
+        }
+    }
+
     /// Return the NATS subject this event should be published on.
     pub fn subject(&self) -> String {
         match &self.payload {
@@ -83,6 +99,9 @@ impl Event {
             EventPayload::Cost(_) => subjects::agent_cost(&self.agent_id),
             EventPayload::Completed(_) => subjects::agent_completed(&self.agent_id),
             EventPayload::Failed(_) => subjects::agent_failed(&self.agent_id),
+            EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
+            EventPayload::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
+            EventPayload::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
         }
     }
 }
@@ -91,6 +110,7 @@ impl Event {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "payload", rename_all = "snake_case")]
 pub enum EventPayload {
+    // Agent lifecycle
     Triggered(TriggeredPayload),
     LlmRequest(LlmRequestPayload),
     LlmResponse(LlmResponsePayload),
@@ -99,6 +119,11 @@ pub enum EventPayload {
     Cost(CostPayload),
     Completed(CompletedPayload),
     Failed(FailedPayload),
+
+    // Runtime lifecycle
+    SystemStartup(SystemStartupPayload),
+    SystemShutdown(SystemShutdownPayload),
+    SystemTaskFailed(SystemTaskFailedPayload),
 }
 
 /// Published when an agent invocation begins.
@@ -325,6 +350,54 @@ pub struct InvocationTotals {
     pub total_tool_calls: u32,
     pub total_cost: f64,
     pub total_duration_ms: u64,
+}
+
+/// Published when the `fq run` daemon starts up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemStartupPayload {
+    /// Unique id for this daemon run. All system events from a
+    /// single `fq run` invocation share this id.
+    pub runtime_id: Uuid,
+    /// Version of the fq binary (the value of `CARGO_PKG_VERSION`
+    /// at build time).
+    pub version: String,
+    /// NATS URL the daemon is connected to.
+    pub nats_url: String,
+    /// Number of agents loaded from the configured agents
+    /// directory at startup.
+    pub agents_loaded: u32,
+    /// Number of pricing entries loaded.
+    pub pricing_entries: u32,
+}
+
+/// Published when the `fq run` daemon shuts down.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemShutdownPayload {
+    pub runtime_id: Uuid,
+    /// Short machine-readable reason, e.g. `"ctrl_c"`,
+    /// `"task_failed"`, `"error"`.
+    pub reason: String,
+    /// True if the shutdown was requested gracefully (Ctrl-C,
+    /// operator intervention), false if it was triggered by an
+    /// unexpected task failure or error.
+    pub clean: bool,
+}
+
+/// Published when one of the hosted tasks inside `fq run` (the
+/// projection consumer, the trigger dispatcher, etc.) exits with
+/// an error before a graceful shutdown was requested.
+///
+/// These events are the canary for "the daemon looks alive but a
+/// piece of it silently stopped working". The runtime publishes
+/// one per task failure and then shuts itself down so operators
+/// don't unknowingly rely on a half-broken daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemTaskFailedPayload {
+    pub runtime_id: Uuid,
+    /// Symbolic name of the task that failed (e.g.
+    /// `projection_consumer`, `trigger_dispatcher`).
+    pub task_name: String,
+    pub error_message: String,
 }
 
 #[cfg(test)]

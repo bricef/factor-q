@@ -153,6 +153,41 @@ sharing a NATS), we need:
 
 Not needed until we have multi-runtime deployments to worry about.
 
+## Observability (deferred from initial floor)
+
+The initial observability floor shipped system lifecycle events
+(`system.startup`, `system.shutdown`, `system.task_failed`),
+immediate task-failure surfacing in `fq run`, and `fq status` for
+runtime health checks. The following items were scoped but
+deferred:
+
+### JSON structured log output
+The `tracing` subscriber uses default human-readable ANSI output.
+Production deployments behind a log aggregation pipeline (ELK,
+Loki, Datadog) need a JSON output format. The `tracing-subscriber`
+crate supports `fmt::layer().json()` — a small configuration
+change gated by a CLI flag (`--log-format json`) or config field.
+
+### Prometheus / OpenTelemetry metrics
+Exporting runtime metrics (invocations/sec, tool calls/sec, error
+rates, cost/sec, projection lag) to Prometheus or an OTLP
+collector. This is a real project — needs a metrics registry, an
+HTTP scrape endpoint, and decisions about cardinality (per-agent
+vs aggregate). Defer to a dedicated observability phase.
+
+### Consumer lag alerting
+`fq status` reports lag, but does not alert when lag grows. Future
+work: a health check endpoint that external monitors (Prometheus
+alerts, Grafana, etc.) can poll, or an internal watchdog that
+emits a `system.lag_warning` event when the projection falls
+behind by more than N events.
+
+### Agent throughput and error-rate aggregation via CLI
+`fq costs` aggregates cost. A companion `fq stats` could aggregate
+invocation counts, error rates, and mean duration per agent per
+time window — similar data, different dimension. Easy to build as
+another SQLite query once the need arises.
+
 ## Process and documentation gaps
 
 ### ADRs still in draft
