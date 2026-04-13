@@ -6,6 +6,21 @@ factor-q is a single-tenant, self-hosted agent runtime for power users who want 
 
 It is not a chatbot. It is not an interactive coding assistant. It is a continuously running agent orchestrator where human interaction is one input among many.
 
+## North Star: Q200
+
+The name "factor-q" comes from the Q factor in fusion physics — the ratio of energy output to energy input. The project's north star is **Q200**: for every day of human effort invested in factor-q, the system produces the equivalent of 200 days of work.
+
+### Milestones
+
+| Milestone | Q ratio | Description |
+|---|---|---|
+| **M0: Close the loop** | — | factor-q can be used to work on factor-q itself. The system is capable enough for complex code comprehension, multi-file changes, test validation, and git workflows. This is the bootstrapping milestone. |
+| **M1: Net zero** | Q1 | For every day of input, we get a day of work out. The system breaks even on productivity — it is no longer a net cost to operate. |
+| **M2: Parity** | Q20 | Leverage of 20x, roughly in line with the best AI harnesses available today. |
+| **M3: North star** | Q200 | The true target. Requires automated self-improvement, multi-agent orchestration, and minimal human intervention for routine work. |
+
+The path from Q20 to Q200 depends on the self-improvement loop — the system must be able to continuously improve its own workflows, prompts, and strategies without human intervention for each change. See `docs/design/shadow-mode-and-self-improvement.md`.
+
 ## Core Thesis
 
 The terminal-based AI agent UX (pioneered by tools like Claude Code and OpenCode) proved that agentic AI can be practical and productive. But these tools are anchored to a single interaction model: human types, agent responds, repeat.

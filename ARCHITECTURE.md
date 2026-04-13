@@ -252,5 +252,5 @@ These subsystems from the vision are not implemented:
 - Skill registry (AgentSkills format — scoped to phase 2)
 - API layer (REST/gRPC/WebSocket — ADR-0006 is still draft)
 - Continuous learning
-- Container-level isolation (ADR-0010 is still draft)
+- Container-level isolation (ADR-0010 accepted: containers by default, Kata+Firecracker upgrade path)
 - Scheduled triggers / internal job scheduler

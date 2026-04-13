@@ -97,6 +97,84 @@ entirely future work.
 This belongs in a later phase once we have stable multi-agent
 operation and real usage data to learn from.
 
+### Agent concurrency primitives
+**Source:** design discussion, April 2026.
+
+The runtime currently executes one agent per trigger, serially.
+Multi-agent workflows require concurrency primitives that agents
+can use to coordinate work:
+
+- **Spawn** — launch a sub-agent and continue without waiting
+- **Join** — wait for one or more sub-agents to complete
+- **Pipeline** — chain agents sequentially (output of A becomes
+  input of B)
+- **Fan-out / fan-in** — spawn N agents in parallel, aggregate
+  their results
+- **Fire and forget** — launch a sub-agent with no expectation of
+  a result
+
+These should be exposed as tools so agents can compose sub-agent
+flows dynamically. The orchestrator defines the static graph;
+individual agents define dynamic sub-flows at runtime using these
+primitives.
+
+Key design questions:
+- Where does scheduling live — in the runtime, or as a tool the
+  agent calls that publishes triggers to NATS?
+- How are concurrency limits enforced (max concurrent agents,
+  memory pressure)?
+- How does budget propagate — does a parent's budget cover its
+  children, or are they independent?
+
+Related: the task engine subsystem in `ARCHITECTURE.md` which
+owns fan-out/fan-in and dependency graphs.
+
+### External trigger adapters (input hooks)
+**Source:** design discussion, April 2026.
+
+The NATS trigger system (`fq.trigger.<agent>`) provides the
+inbound port for agent execution, but there are no adapters
+connecting external systems to it. Real-world use requires
+triggers from:
+
+- GitHub (issues opened, PRs created, reviews requested,
+  CI status changes)
+- Slack (messages in channels, DMs, mentions)
+- Email (inbound messages to a monitored address)
+- Webhooks (generic HTTP → NATS bridge)
+- SMS / Telegram / other messaging platforms
+
+Each adapter is a small service that listens to an external
+system and publishes structured trigger messages to NATS. The
+agent definition's `trigger:` pattern matches the subject, so
+agents can subscribe to specific event types (e.g.,
+`trigger: github.issue.opened`).
+
+The webhook adapter is the most general-purpose starting point —
+most of the above systems support outbound webhooks. A single
+HTTP-to-NATS bridge with configurable subject mapping would cover
+GitHub, Slack (via Events API), and generic integrations.
+
+### Network proxy
+**Source:** ADR-0010 (agent execution isolation) and design
+discussion on shadow mode, April 2026.
+
+A network proxy sitting between agent containers and external
+systems, serving as the trust enforcement point. Converges
+several capabilities:
+
+- Enforce `sandbox.network` allowlist patterns from agent
+  definitions
+- Record/replay for shadow mode workflow evaluation
+- Audit logging of all outbound requests
+- Caching of repeated identical requests
+- Rate limiting against external APIs
+- Trust-based access control (different allowlists per model
+  trust tier)
+
+See `docs/design/shadow-mode-and-self-improvement.md` and
+ADR-0010 for full context.
+
 ## Known gaps flagged during phase 1 implementation
 
 ### Agent env allowlist plumbed through ToolSandbox
