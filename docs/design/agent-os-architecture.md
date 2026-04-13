@@ -287,5 +287,64 @@ into individual agents.
   support delegation, or is the flat "declared in the agent
   definition" model sufficient?
 - **Inter-agent communication:** the event bus is pub/sub. Should
-  there also be direct agent-to-agent channels (like Erlang's
+  there also be direct agent-to-another channels (like Erlang's
   process mailboxes)? Or is pub/sub sufficient?
+
+## Addendum: factor-q as a single deployable unit
+
+A consequence of the WASM isolation model is that the entire
+factor-q runtime — including all agent isolation — can ship as
+a single container image or a single binary.
+
+Traditional container-based agent systems put agents *inside*
+containers, which means the host must manage container
+orchestration, Docker-in-Docker, or privileged access to a
+container runtime. With WASM, agent isolation is enforced
+*within the process* by the WASM runtime's compiler. No kernel
+namespaces, no cgroups, no seccomp, no mount operations. It's
+all userspace.
+
+This means:
+
+- **Distribution is trivial.** `docker run factorq` (or just
+  `./fq run`) and you have a running agent OS with full
+  isolation. No special privileges, no nested containers, no
+  runtime class configuration. It runs anywhere — CI systems,
+  cheap VPS providers, PaaS platforms that don't support nested
+  containers.
+
+- **Multi-node is N copies of the same thing.** Each node runs
+  the same image/binary. They connect via NATS. Agent invocations
+  are dispatched across nodes via the event bus. Because
+  capabilities are network-transparent, agents don't know which
+  node they're on. Scaling is horizontal replication of a
+  stateless service, not per-agent container orchestration.
+
+- **The security story inverts.** The outer container (if used)
+  protects the runtime from the host environment, not the other
+  way around. The trust boundary you care about — agent isolation
+  — is enforced by the WASM spec inside the process. The
+  deployment packaging is a convenience, not a security
+  mechanism.
+
+- **The orchestration question simplifies.** ADR-0010 deferred
+  the decision between self-managed containers and Kubernetes.
+  If factor-q manages its own isolation internally, you don't
+  need Kubernetes for isolation at all. You might still want it
+  for horizontal scaling (N replicas, rolling updates, health
+  checks), but that's a much simpler ask — commodity container
+  orchestration, not per-agent lifecycle management.
+
+- **The network proxy can be built-in.** Since the WASM host
+  mediates all outbound capability calls, the proxy logic
+  (recording, replay, allowlist enforcement, caching) can be a
+  component of the runtime itself rather than a separate sidecar.
+  Every outbound call already passes through the host — the host
+  *is* the proxy. This eliminates a moving part from the
+  deployment architecture.
+
+The single-binary deployment model is particularly appealing for
+the "personal tool" use case: download one binary, run it, point
+it at your agents directory. No Docker, no Kubernetes, no
+infrastructure. The same binary scales to a multi-node cluster
+when the workload demands it — just run more copies behind NATS.
