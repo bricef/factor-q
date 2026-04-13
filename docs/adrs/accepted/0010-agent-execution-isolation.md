@@ -66,6 +66,7 @@ The isolation tier is determined by deployment configuration, not by the agent d
 | Untrusted models | Container + restrictive network policy | Network proxy limits blast radius |
 | High-security / compliance | Kata + Firecracker microVM | Hypervisor-level isolation |
 | Multi-tenant cluster | Kata + Firecracker | Hard tenant isolation required |
+| Maximum isolation | WASM (Wasmtime/Wasmer) | Formally verifiable sandbox, capability-based security |
 
 This keeps the agent definition portable across environments. The same agent YAML works on a developer laptop and in a locked-down production cluster — only the enforcement strength changes.
 
@@ -82,6 +83,27 @@ In a containerised deployment, all meaningful agent actions are network calls �
 
 **Why Kata + Firecracker over other microVM options:**
 Kata Containers preserve the OCI API, so the orchestration layer doesn't need to know whether it's running containers or microVMs. Firecracker is purpose-built for multi-tenant isolation, is written in Rust (minimising memory safety vulnerabilities in the VMM itself), boots in ~125ms, and is battle-tested at AWS Lambda/Fargate scale. This combination provides the strongest isolation with the least architectural disruption.
+
+## Future investigation: WASM as an isolation tier
+
+WebAssembly offers a qualitatively different security model from containers and microVMs. Rather than restricting a full OS environment (and hoping the restriction has no holes), WASM starts with *nothing* — no filesystem, no network, no syscalls — and the host explicitly grants capabilities. The sandbox boundary is defined by the WASM spec and enforced by the runtime's compiler, not by OS kernel features that might have exploitable bugs. This makes the isolation *formally verifiable* rather than empirically tested.
+
+**Why this is worth investigating for factor-q:**
+
+- **Rust → WASM is a first-class path.** The agent harness code (tool dispatch, MCP client, sandbox enforcement) is written in Rust, which has mature WASM compilation support. The compilation path is straightforward.
+- **Capability-based security mirrors the agent sandbox model.** The agent definition already declares "nothing by default, explicitly grant access." WASM enforces this at the instruction level rather than the process/container level. The philosophical alignment is exact.
+- **WASI is growing.** WASI preview 2 covers filesystem, networking, clocks, and random number generation. Gaps in the WASI surface can be filled by factor-q's own tool system — since agents already access external capabilities through tools and MCP servers, the host can hydrate capabilities as needed rather than relying on OS-level access.
+- **Startup is near-instant** (~microseconds for a pre-compiled module), far faster than containers or microVMs.
+- **The strongest guarantee for untrusted models.** Container escapes are a known vulnerability class. VM escapes are rarer but exist. WASM sandbox escapes require a bug in the WASM runtime's compiler — a much smaller and more auditable attack surface.
+
+**Tradeoffs and open questions:**
+
+- Agent harness code must compile to `wasm32-wasi`, which excludes some Rust crates that depend on platform-specific features (e.g., raw socket access, certain async runtimes). The feasibility depends on the specific dependency graph.
+- MCP servers spawned as child processes (stdio transport) would need to run inside the WASM sandbox or be restructured as host-provided capabilities. This is a significant architectural change.
+- Performance overhead of the WASM runtime vs native execution. For LLM-bound workloads (where most time is spent waiting on API calls) this is likely negligible, but tool-heavy workloads with heavy local computation could be affected.
+- Ecosystem maturity — WASI networking and filesystem support is functional but not as battle-tested as container isolation.
+
+**Recommendation:** do not adopt WASM as an isolation tier now, but keep it on the radar as the WASI ecosystem matures. The capability-based model is the strongest theoretical fit for factor-q's security requirements. If a future evaluation shows that the agent harness compiles cleanly to `wasm32-wasi` and the WASI surface covers the required capabilities, WASM could become the preferred isolation tier for untrusted workloads, potentially replacing the Kata+Firecracker tier entirely.
 
 ## Deferred decision: container orchestration
 
