@@ -13,8 +13,8 @@ use fq_runtime::executor::InvocationOutcome;
 use fq_runtime::llm::{GenAiClient, LlmClient};
 use fq_runtime::projection::store::EventFilter;
 use fq_runtime::{
-    AgentExecutor, Config, EventBus, PricingTable, ProjectionConsumer, ProjectionStore,
-    ToolRegistry, TriggerDispatcher,
+    AgentExecutor, Config, EventBus, McpClientManager, McpServerConfig, PricingTable,
+    ProjectionConsumer, ProjectionStore, ToolRegistry, TriggerDispatcher,
 };
 use uuid::Uuid;
 use futures::StreamExt;
@@ -421,7 +421,40 @@ async fn trigger_agent(
         None => Value::Null,
     };
 
-    let tools = Arc::new(ToolRegistry::with_builtins());
+    // Build tool registry: built-ins + MCP servers declared by this agent.
+    let mut tools = ToolRegistry::with_builtins();
+    let mut mcp_manager = McpClientManager::new();
+    for decl in loaded.agent.mcp_servers() {
+        let config = McpServerConfig {
+            name: decl.server.clone(),
+            command: decl.command.clone(),
+            args: decl.args.clone(),
+            env: decl.env.clone(),
+        };
+        match mcp_manager.start_server(config).await {
+            Ok(mcp_tools) => {
+                for tool in mcp_tools {
+                    tools.register(tool);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    server = %decl.server,
+                    error = %err,
+                    "failed to start MCP server, its tools will be unavailable"
+                );
+            }
+        }
+    }
+    if !loaded.agent.mcp_servers().is_empty() {
+        println!(
+            "  MCP tools:        {} (from {} server(s))",
+            tools.len() - 3, // subtract the 3 builtins
+            loaded.agent.mcp_servers().len()
+        );
+    }
+
+    let tools = Arc::new(tools);
     let executor = AgentExecutor::new(bus, pricing, tools);
     println!("Running agent...");
     let outcome = match executor
@@ -436,6 +469,7 @@ async fn trigger_agent(
     {
         Ok(outcome) => outcome,
         Err(fq_runtime::ExecutorError::Llm(fq_runtime::LlmError::Auth(msg))) => {
+            mcp_manager.shutdown().await;
             anyhow::bail!(
                 "LLM authentication failed.\n\
                  \n\
@@ -446,8 +480,13 @@ async fn trigger_agent(
                  Underlying error: {msg}"
             );
         }
-        Err(err) => return Err(err.into()),
+        Err(err) => {
+            mcp_manager.shutdown().await;
+            return Err(err.into());
+        }
     };
+
+    mcp_manager.shutdown().await;
 
     println!();
     match outcome {
@@ -790,7 +829,40 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         pricing_cache.display()
     );
 
-    let tools = Arc::new(ToolRegistry::with_builtins());
+    // Build tool registry: built-ins + MCP servers from all agents.
+    let mut tools = ToolRegistry::with_builtins();
+    let mut mcp_manager = McpClientManager::new();
+    for loaded in registry.iter() {
+        for decl in loaded.agent.mcp_servers() {
+            let config = McpServerConfig {
+                name: decl.server.clone(),
+                command: decl.command.clone(),
+                args: decl.args.clone(),
+                env: decl.env.clone(),
+            };
+            match mcp_manager.start_server(config).await {
+                Ok(mcp_tools) => {
+                    for tool in mcp_tools {
+                        tools.register(tool);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        server = %decl.server,
+                        agent = %loaded.agent.id(),
+                        error = %err,
+                        "failed to start MCP server, its tools will be unavailable"
+                    );
+                }
+            }
+        }
+    }
+    let mcp_tool_count = tools.len() - 3; // subtract the 3 builtins
+    if mcp_tool_count > 0 {
+        println!("  MCP tools:        {mcp_tool_count}");
+    }
+
+    let tools = Arc::new(tools);
     let llm: Arc<dyn LlmClient> = Arc::new(GenAiClient::new());
     let executor = Arc::new(AgentExecutor::new(bus.clone(), pricing, tools));
 
@@ -897,6 +969,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Ok(Err(err)) => tracing::error!(error = %err, "trigger dispatcher task panicked"),
         Err(_) => tracing::warn!("trigger dispatcher did not shut down within 5s"),
     }
+
+    // Shut down MCP server processes.
+    mcp_manager.shutdown().await;
 
     // Publish a system.shutdown event on the way out. Best-effort —
     // if NATS is already unreachable we just log and continue.

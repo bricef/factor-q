@@ -32,6 +32,15 @@ pub use registry::{AgentRegistry, LoadError, LoadedAgent, RegistryError};
 
 use crate::events::{ConfigSnapshot, SandboxSnapshot};
 
+/// An MCP server declared in an agent definition.
+#[derive(Debug, Clone)]
+pub struct McpServerDeclaration {
+    pub server: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
 /// A validated agent ready to be executed.
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -42,6 +51,7 @@ pub struct Agent {
     sandbox: Sandbox,
     budget: Option<f64>,
     trigger: Option<String>,
+    mcp_servers: Vec<McpServerDeclaration>,
 }
 
 impl Agent {
@@ -76,6 +86,10 @@ impl Agent {
 
     pub fn trigger(&self) -> Option<&str> {
         self.trigger.as_deref()
+    }
+
+    pub fn mcp_servers(&self) -> &[McpServerDeclaration] {
+        &self.mcp_servers
     }
 
     /// Produce a [`ConfigSnapshot`] for inclusion in a `Triggered` event.
@@ -241,6 +255,7 @@ pub struct AgentBuilder {
     sandbox: Sandbox,
     budget: Option<f64>,
     trigger: Option<String>,
+    mcp_servers: Vec<McpServerDeclaration>,
 }
 
 impl AgentBuilder {
@@ -292,6 +307,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn mcp_servers(mut self, servers: Vec<McpServerDeclaration>) -> Self {
+        self.mcp_servers = servers;
+        self
+    }
+
     /// Finalise construction, validating required fields.
     pub fn build(self) -> Result<Agent, BuildError> {
         let id_str = self.id.ok_or(BuildError::MissingField("id"))?;
@@ -320,6 +340,7 @@ impl AgentBuilder {
             sandbox: self.sandbox,
             budget: self.budget,
             trigger: self.trigger,
+            mcp_servers: self.mcp_servers,
         })
     }
 }

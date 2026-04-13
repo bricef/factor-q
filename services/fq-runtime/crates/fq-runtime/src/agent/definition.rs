@@ -4,9 +4,11 @@
 //! validated [`Agent`] via the fluent builder — the intermediate
 //! deserialisation types are private to this module.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
-use super::{Agent, BuildError, Sandbox};
+use super::{Agent, BuildError, McpServerDeclaration, Sandbox};
 
 /// Parse an agent definition from the raw Markdown content.
 ///
@@ -33,12 +35,24 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
         sandbox = sandbox.exec_cwd(path);
     }
 
+    let mcp_servers: Vec<McpServerDeclaration> = frontmatter
+        .mcp
+        .into_iter()
+        .map(|m| McpServerDeclaration {
+            server: m.server,
+            command: m.command,
+            args: m.args,
+            env: m.env.into_iter().collect(),
+        })
+        .collect();
+
     let mut builder = Agent::builder()
         .id(frontmatter.name)
         .model(frontmatter.model)
         .system_prompt(body)
         .tools(frontmatter.tools)
-        .sandbox(sandbox);
+        .sandbox(sandbox)
+        .mcp_servers(mcp_servers);
 
     if let Some(budget) = frontmatter.budget {
         builder = builder.budget(budget);
@@ -62,6 +76,18 @@ struct Frontmatter {
     sandbox: SandboxFrontmatter,
     budget: Option<f64>,
     trigger: Option<String>,
+    #[serde(default)]
+    mcp: Vec<McpFrontmatter>,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpFrontmatter {
+    server: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -283,6 +309,55 @@ Prompt.
         let agent = parse_agent(content).unwrap();
         let snapshot = agent.to_snapshot();
         assert_eq!(snapshot.sandbox.exec_cwd, vec!["/tmp/work".to_string()]);
+    }
+
+    #[test]
+    fn parses_mcp_from_frontmatter() {
+        let content = r#"---
+name: mcp-agent
+model: claude-haiku
+tools:
+  - echo
+mcp:
+  - server: everything
+    command: npx
+    args:
+      - "@modelcontextprotocol/server-everything"
+  - server: custom
+    command: my-server
+    env:
+      API_KEY: secret
+---
+
+You are a test agent.
+"#;
+        let agent = parse_agent(content).unwrap();
+        assert_eq!(agent.mcp_servers().len(), 2);
+
+        let first = &agent.mcp_servers()[0];
+        assert_eq!(first.server, "everything");
+        assert_eq!(first.command, "npx");
+        assert_eq!(first.args, vec!["@modelcontextprotocol/server-everything"]);
+        assert!(first.env.is_empty());
+
+        let second = &agent.mcp_servers()[1];
+        assert_eq!(second.server, "custom");
+        assert_eq!(second.command, "my-server");
+        assert!(second.args.is_empty());
+        assert_eq!(second.env, vec![("API_KEY".to_string(), "secret".to_string())]);
+    }
+
+    #[test]
+    fn agent_without_mcp_has_empty_servers() {
+        let content = r#"---
+name: basic
+model: claude-haiku
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        assert!(agent.mcp_servers().is_empty());
     }
 
     #[test]
