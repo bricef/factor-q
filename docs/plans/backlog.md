@@ -70,30 +70,19 @@ pricing data" section for full rationale.
 Related future work: scheduled agent triggers themselves are in
 the design space but not yet scoped.
 
-### Container-level sandboxing (ADR-0010)
-**Source:** [`docs/adrs/draft/0010-agent-execution-isolation.md`](../adrs/draft/0010-agent-execution-isolation.md) and the shell tool known-gaps section.
+### Container-level sandboxing (ADR-0010 — decided)
+**Source:** [`docs/adrs/accepted/0010-agent-execution-isolation.md`](../adrs/accepted/0010-agent-execution-isolation.md) and the shell tool known-gaps section.
 
-The shell, file_read, and file_write tools enforce sandboxing at
-the **process level**: path canonicalisation for the file tools,
-`exec_cwd` plus argv-only invocation plus output caps for the
-shell tool. This defeats path traversal, symlink escape, and
-shell injection — but cannot defeat:
+ADR-0010 is now accepted: containers by default, with a Kata +
+Firecracker microVM upgrade path. A network proxy at the container
+boundary enforces `sandbox.network` patterns, enables shadow mode,
+and provides audit logging.
 
-- PATH-visible binaries (an agent with `shell` can call `curl`)
-- Network connections the child process opens itself
-- CPU/memory consumption above what cgroups can limit
-- Kernel-level escapes requiring seccomp
-
-Closing these requires container or VM-level isolation. ADR-0010
-is the open decision about which approach (per-invocation
-containers, rootless containers, firejail/bwrap, etc.) factor-q
-adopts.
-
-Not blocking for single-tenant self-hosted phase 1. Becomes
-urgent when:
-- Agents handle untrusted input
-- Multi-tenant or multi-user operation becomes a concern
-- Compliance or audit requirements appear
+Implementation work remaining:
+- Container image build pipeline for agent workloads
+- Runtime integration to launch agents in containers
+- Network proxy component (enforces network policy, records traffic)
+- Kata + Firecracker support (deferred until trust/compliance demands it)
 
 ### Continuous learning
 **Source:** `ARCHITECTURE.md` subsystems section.
@@ -197,8 +186,7 @@ deprecated:
 - ADR-0006 API design
 - ADR-0007 Inter-agent communication
 - ADR-0008 Extension model
-- ADR-0010 Agent execution isolation
 
-Phase 2 (MCP, memory, skills) will likely force ADR-0008 to
-resolution. ADR-0007 and ADR-0010 can wait for multi-agent and
-security-sensitive deployments respectively.
+ADR-0010 (agent execution isolation) has been accepted. Phase 2
+(MCP, memory, skills) will likely force ADR-0008 to resolution.
+ADR-0007 can wait for multi-agent deployments.
