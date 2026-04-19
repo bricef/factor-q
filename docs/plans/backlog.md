@@ -156,15 +156,21 @@ HTTP-to-NATS bridge with configurable subject mapping would cover
 GitHub, Slack (via Events API), and generic integrations.
 
 ### Network proxy
-**Source:** ADR-0010 (agent execution isolation) and design
-discussion on shadow mode, April 2026.
+**Source:** ADR-0010 (agent execution isolation), design
+discussion on shadow mode (April 2026), and the
+tool-isolation model
+(`docs/design/tool-isolation-model.md`).
 
-A network proxy sitting between agent containers and external
-systems, serving as the trust enforcement point. Converges
-several capabilities:
+A network proxy sitting between tools (and the host) and
+external systems, serving as the trust enforcement point.
+Under the per-tool isolation model this becomes
+disproportionately load-bearing — every network-touching
+tool passes through it. Responsibilities:
 
-- Enforce `sandbox.network` allowlist patterns from agent
-  definitions
+- Enforce per-tool network allowlists
+- Enforce aggregate per-agent network policy
+- Inject host-managed credentials at request time (tools
+  never see API keys directly)
 - Record/replay for shadow mode workflow evaluation
 - Audit logging of all outbound requests
 - Caching of repeated identical requests
@@ -172,8 +178,89 @@ several capabilities:
 - Trust-based access control (different allowlists per model
   trust tier)
 
-See `docs/design/shadow-mode-and-self-improvement.md` and
-ADR-0010 for full context.
+See `docs/design/shadow-mode-and-self-improvement.md`,
+`docs/design/tool-isolation-model.md`, and ADR-0010 for
+full context.
+
+### WASM-native POSIX sandbox for shell and file tools
+**Source:** `docs/design/wasm-posix-sandbox.md`, design
+discussion April 2026.
+
+Investigate compiling a POSIX utility bundle (BusyBox, Rust
+uutils + shell, or similar) to `wasm32-wasi-preview2` and
+running it under wasmtime as the isolation tier for the
+`shell` tool and related filesystem operations. Gives
+container-like isolation strength with subprocess-like
+startup cost, plus clean composition with workspace
+snapshotting via overlay filesystems.
+
+Not urgent. Becomes interesting after the container-based
+shell tier is working and can be used as a comparison
+baseline. Also gated on WASI ecosystem maturity — the
+design doc lists concrete "what would need to be true"
+conditions.
+
+Investigation shape:
+- Survey current WASM+WASI POSIX-toolkit projects
+  (BusyBox-in-WASI, uutils, wasi-shell, wasix)
+- Measure actual instantiation overhead and POSIX coverage
+- Prototype an overlay-filesystem shell tool and compare
+  behaviour and performance against the container tier
+
+### Agent tool catalogue design
+**Source:** Design discussion, April 2026. Related to
+`docs/design/tool-isolation-model.md`.
+
+The set of tools the runtime provides (beyond the phase-1
+`file_read` / `file_write` / `shell`) directly determines
+what models can usefully do. Models are trained on unix-like
+environments — pre-existing patterns like Claude Code's
+`Read` / `Write` / `Edit` / `Bash` / `Glob` / `Grep` /
+`WebFetch` set a useful benchmark.
+
+Design questions:
+- Which tools are first-party vs. MCP-supplied
+- Granularity (one big `shell` vs. many specific tools)
+- How closely to mirror Claude Code / Cursor conventions
+- Which tools fall away when workspaces are pre-loaded
+  (filesystem-as-interface reduces tool proliferation)
+- Each tool's isolation tier (from the tool-isolation
+  model)
+- Each tool's cost schedule (for budget tracking)
+
+Not urgent in the strict sense, but becomes concrete as the
+reducer-model harness lands and the first real multi-tool
+agents need to do useful work.
+
+### Workspace state: snapshotting and base layers
+**Source:** Design discussion, April 2026. Related to
+`docs/design/tool-isolation-model.md`.
+
+The tool-isolation model introduces per-agent workspaces as
+the third tier of invocation state (alongside harness state
+and external state). The workspace is the filesystem the
+agent's tools operate on, owned by the invocation,
+snapshotable for suspension and migration.
+
+Open design questions:
+- Snapshot mechanism: OverlayFS vs CRIU vs git-backed vs
+  stable paths. Starting position is stable paths for
+  phase 2; overlay is the likely phase-3 target.
+- Base-layer format: container images, tarballs, git refs,
+  or a factor-q-native format. Each has tradeoffs around
+  caching, distribution, and layering.
+- Workspace lifecycle: per-invocation ephemeral vs.
+  per-agent persistent vs. configurable.
+- Pre-loading story: how agent definitions declare their
+  required data/context and how that gets baked into the
+  base layer.
+- Migration protocol: transferring a workspace snapshot
+  across nodes.
+
+This is a real design doc, not just a backlog entry.
+Probably blocks any serious multi-node work but is not
+needed for the reducer-model prototype (which uses stable
+paths on a single host).
 
 ## Known gaps flagged during phase 1 implementation
 

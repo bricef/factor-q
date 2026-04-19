@@ -267,10 +267,25 @@ into individual agents.
 
 ## Open questions
 
-- **Guest/host boundary design:** what exactly are the WASM
-  imports? How are they versioned? How does the guest discover
-  available capabilities? This is the "syscall interface" and
-  needs careful design.
+- **Guest/host boundary design:** designed as a reducer.
+  See [`wasm-boundary-design.md`](./wasm-boundary-design.md).
+  Guest exports a single pure `step(StepInput) -> StepOutput`
+  function; zero imports. The host drives the loop, persists
+  state, executes `NextAction` variants (`call-model`,
+  `call-tool`, `call-tools-parallel`, `complete`, `failed`).
+  This collapses suspension, migration, fault recovery,
+  shadow-mode replay, and audit logging into one mechanism
+  at the harness level. Workspace state (filesystem the
+  agent operates on) is handled separately; see
+  [`tool-isolation-model.md`](./tool-isolation-model.md).
+- **Security boundary relocated to tools.** Because the
+  reducer harness is pure and trusted, isolation moves from
+  agent-scoped to tool-scoped. Each tool declares its own
+  isolation tier (in-process / subprocess / container /
+  wasm / microvm) based on its threat profile. Details in
+  [`tool-isolation-model.md`](./tool-isolation-model.md).
+  Remaining open: workspace-snapshot mechanism, tool
+  catalogue design, debugging tractability.
 - **Scheduling model:** preemptive (the host can interrupt an
   agent mid-execution) or cooperative (agents yield at capability
   call boundaries)? WASM naturally supports cooperative scheduling
