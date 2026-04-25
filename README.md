@@ -16,9 +16,12 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 
 - [Vision](VISION.md) — what factor-q is and why it exists
 - [Architecture](ARCHITECTURE.md) — core subsystems and implementation
+- [Design principles](docs/design/design-principles.md) — cross-cutting rules that guide design decisions
 - [Contributing](CONTRIBUTING.md) — development setup, test tiers, code conventions
 - [Agent authoring guide](docs/guide/agent-definitions.md) — write your first agent
 - [Event schema](docs/design/event-schema.md) — the event model everything is built around
+- [Agent orchestration tools](docs/design/agent-orchestration-tools.md) — wishlist for primitives to coordinate multi-agent work (graph substrate, handles, sinks, fragment library)
+- [Worker-side ergonomics](docs/design/worker-side-ergonomics.md) — primitives for what an agent has, knows, and controls while executing (introspection, checkpoints, structured errors)
 - [Storage and scaling](docs/design/storage-and-scaling.md) — sizing analysis for NATS and SQLite
 - [ADRs](docs/adrs/) — architectural decision records ([accepted](docs/adrs/accepted/), [draft](docs/adrs/draft/))
 - [Phase 1 (closed)](docs/plans/closed/2026-04-02-phase-1-foundation.md) — what shipped in the walking skeleton

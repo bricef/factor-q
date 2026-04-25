@@ -125,15 +125,63 @@ just test-shell-sandbox                          # containerised sandbox
   first line, body explains the "why" and links to ADRs where
   relevant.
 
+## Design sessions
+
+Design work that affects LLM-facing surfaces — tool shapes, agent
+interfaces, orchestration primitives, worker-side affordances — is
+conducted as co-design sessions between a human collaborator and an
+LLM, with both participants' contributions treated as primary
+material. This is a deliberate practice, grounded in the principle
+that [LLMs are first-class users and a source of requirements](docs/design/design-principles.md#1-llms-are-first-class-users-and-a-source-of-requirements).
+The shape of the orchestration-tools and worker-side-ergonomics
+specs was materially informed by an LLM surfacing friction in its
+own execution that a human working top-down would not have found.
+
+### When to run a co-design session
+
+A session is warranted when any of the following apply:
+
+- Specifying a new tool surface an LLM will call
+- Revising how agents express uncertainty, errors, or self-state
+- Designing composition or orchestration primitives
+- Debugging why agents repeatedly misuse or misunderstand a surface
+- Exploring what new capabilities would unlock, as distinct from
+  fixing existing ones
+
+Routine implementation, bug fixes, infrastructure plumbing, and
+documentation polish do not require a session, though nothing stops
+a collaborator from using one if it feels useful.
+
+### What a good session looks like
+
+- The LLM is asked about its felt experience of the current
+  surface, not just asked to review a spec that has already been
+  drafted.
+- Disagreements are worked through on their merits — neither
+  participant defers by default.
+- The session's output is the design document itself (or revisions
+  to one), not a transcript, summary, or checklist of follow-ups.
+- Open questions the session cannot resolve are captured in the
+  doc rather than forgotten.
+
+### Preserving the practice
+
+This collaboration is a first-class part of how factor-q is built,
+not a transitional phase. Future collaborators — human or
+otherwise — are expected to continue it. When design output ages
+and needs revision, revisions follow the same model.
+
 ## Architecture and design
 
 Start with these docs to understand the system:
 
 1. [VISION.md](VISION.md) — what factor-q is and why it exists
 2. [ARCHITECTURE.md](ARCHITECTURE.md) — subsystems and concerns
-3. [docs/design/event-schema.md](docs/design/event-schema.md) — the
+3. [docs/design/design-principles.md](docs/design/design-principles.md)
+   — cross-cutting rules that guide design decisions
+4. [docs/design/event-schema.md](docs/design/event-schema.md) — the
    event model that everything else is built around
-4. [docs/adrs/](docs/adrs/) — every significant design decision
+5. [docs/adrs/](docs/adrs/) — every significant design decision
    with rationale
 
 The [phase 1 closing summary](docs/plans/closed/2026-04-02-phase-1-foundation.md)

@@ -1,0 +1,78 @@
+# factor-q Design Principles
+
+## Purpose
+
+This document is the working list of design principles that guide decisions across the factor-q project. It is distinct from [VISION.md](../../VISION.md) (*what* factor-q is and *why* it exists) and [ARCHITECTURE.md](../../ARCHITECTURE.md) (*what* subsystems compose it and *how* they fit together). Principles are the *how we decide* layer — rules that should apply to a design choice regardless of which subsystem is in play.
+
+Principles are testable against new design decisions: when presented with a choice, we should be able to ask "does this honour the principles?" and get a clear answer. When a proposal appears to violate a principle, the resolution is either to change the proposal or to consciously revise the principle — never to ignore it silently.
+
+The list is expected to grow. Principles have emerged from specific design discussions and will continue to. A principle that is repeatedly invoked and never challenged graduates from "current working principle" to "settled bedrock"; one that is repeatedly inconvenient without clear benefit is a candidate for revision. This is a living document.
+
+---
+
+## Principles
+
+### 1. LLMs are first-class users and a source of requirements
+
+An LLM participating in a factor-q workflow is not merely an executor of tasks — it is a user of the system, with preferences, constraints, and feedback worth gathering. The ergonomics, clarity, and affordances of factor-q's tools are evaluated in part by how well they serve the models that call them, not only by how well they serve the humans who write the code.
+
+This rests on a practical observation: LLMs have structural ergonomic needs that differ from humans'. They benefit from structured over prose responses, suffer from context bloat in ways humans don't, need explicit state introspection to avoid confabulating about their own execution, and encounter failure modes around ambiguity and tool-use that a human operator would notice immediately. Systems built only with human developers in mind routinely fail LLMs in ways that silently degrade the quality of agent work — and therefore of the whole system's output.
+
+**What this rules out.** Designing on assumption alone. When a tool's shape or a subsystem's interface might affect how an LLM uses it, asking the LLM is not optional extra polish — it is primary requirements-gathering. Observing how agents actually use a surface, and treating that observation as a design signal, is a first-class activity.
+
+**What this demands in practice.**
+- Tool designs are evaluated against LLM-usability criteria (structured outputs, predictable failure modes, minimum ceremony, absence of context bloat), not only against human-readability.
+- Feedback channels that an LLM can use productively exist — structured errors, introspection, explicit uncertainty, confidence signals.
+- Documentation is as legible to an LLM reader as to a human reader. Code examples are complete and unambiguous; tables and structured formats are preferred over long prose where structure would help.
+
+**Practice: co-design sessions.** The direct consequence of this principle is a specific development practice: design work that affects LLM-facing surfaces is conducted as a co-design session between a human collaborator and an LLM, with both participants' contributions treated as primary material — not as a spec drafted in isolation with LLM review requested after the fact. This is a first-class practice in how factor-q is built, documented in [CONTRIBUTING.md § Design sessions](../../CONTRIBUTING.md#design-sessions). Collaborators joining the project are expected to continue it.
+
+### 2. No confabulation where data exists
+
+Any information the runtime tracks internally — budgets, context usage, tool versions, sandbox boundaries, handle state, spawn lineage, graph instance progress — that an agent (or any caller) might reasonably be asked about must be exposed through a tool, not left to inference.
+
+The failure mode of withholding such data is not that the agent answers "I don't know." The agent will produce a plausible-sounding answer, inferred from visible conversation length and pattern-matched from training data, indistinguishable from knowledge to a casual reader. These answers pass sniff tests often enough that nobody notices they're invented. Inference fills the gap whether the harness permits it or not. The harness must not allow the gap to exist.
+
+This principle is a direct corollary of treating LLMs as first-class users: an agent that confabulates about its own state is not being served by the system, it is being set up to produce subtly wrong answers. And the fix is near-free — the harness is already tracking every field worth exposing for its own purposes (budget enforcement, sandbox dispatch, event-bus correlation). Exposure is a read path over existing state, not new instrumentation.
+
+**What this rules out.** Any design where "the agent can't know about X" is the default. If the runtime knows X, the agent should be able to ask. Exceptions require a specific, stated reason (usually security — the agent must not know another agent's credentials, say).
+
+**What this demands in practice.** Every piece of runtime-tracked state that an agent might plausibly be asked about has a corresponding read path. `SelfInspect`, `AgentList`, `AgentPeek`, `ToolVersions`, `LoadCheckpoint`, and the introspection shape of handles are all instances of this principle.
+
+### 3. Sandbox by construction, not by policy
+
+Every agent execution runs in a context where nothing is available by default. Tools, filesystem scope, environment variables, network endpoints, and resource budgets must be explicitly granted in the agent definition, not implicitly assumed from a shared environment.
+
+This is a container-like isolation model, not a permissions layer layered on top of shared access. The difference matters: an allow-list defaulting to nothing fails *safe* when the system or the author missteps — an omitted grant produces a clean "access denied" rather than a silent success with wider-than-intended reach. A deny-list defaulting to everything fails *open* — an omitted deny lets anything through.
+
+**What this rules out.** Any design where capability is granted globally and removed selectively. Global defaults, ambient credentials, and "just make this work everywhere" tooling all violate this principle.
+
+**What this demands in practice.** Agent definitions declare exact scopes (read paths, write paths, working directories, environment variables, network endpoints, allowed tools). The executor provisions exactly what is declared — no more. Tool failures that hit sandbox boundaries are reported as structured errors to the agent, so it can adapt rather than silently fail.
+
+### 4. Cost is a first-order safety concern
+
+Autonomous agents spending money without human oversight is a risk category co-equal with destroying data, leaking credentials, or corrupting shared state. Budget tracking, per-agent limits, aggregate ceilings, and cost-aware scheduling are runtime-level primitives, not observability features layered on after an incident.
+
+**What this rules out.** Designs where cost is an afterthought — something to be measured and reported rather than enforced. It also rules out "eventually consistent" cost accounting: an agent that has just exceeded its budget must not be permitted another LLM call on the assumption that budget accounting will catch up in a moment.
+
+**What this demands in practice.** Cost appears in event schemas, agent definitions, composition primitives, and CLI surfaces. Budget limits are enforceable — when hit, they halt execution. Aggregate budgets inherit down spawn trees, so a recursive fan-out cannot invisibly explode cost by staying under each child's individual ceiling while blowing the total.
+
+### 5. The graph is the substrate for composition
+
+Multi-agent work is modelled as a directed graph (with cycles) executed by a single engine. Higher-level compositional primitives — fan-out, review loops, map-reduce — are canonical graph shapes shipped as library fragments, not special cases in the runtime.
+
+This keeps the number of things the runtime must be good at small. It also means that workflows are statically analysable, replayable, visualisable, and amenable to the kinds of transformation a self-improvement loop requires. A system that encodes its workflow logic in natural-language prompts is one that cannot reason about its own behaviour; a system that encodes it in graphs can.
+
+**What this rules out.** Adding a bespoke executor for a new compositional pattern. New patterns are published as fragments in the library — if the existing graph primitive cannot express a pattern, that is a signal to extend the graph primitive, not to add a parallel execution mechanism. Natural-language prompts that smuggle workflow control flow ("first do X, then if Y, do Z") are a sign the graph layer is being used wrong.
+
+**What this demands in practice.** Sugar tools (`AgentSpawn`, `AgentMap`, `AgentLoop`) compile to graph instances and the runtime handles them through the same executor as any other graph. The fragment library is the extension mechanism for new canonical patterns. Workflows that need dynamic branching, cycles, or multi-round convergence drop down to `AgentGraph` directly rather than encoding control flow in prompts.
+
+---
+
+## How this doc evolves
+
+Principles are added when they have been invoked or proposed in at least one concrete design discussion and appear generalisable beyond that single case. They are not added speculatively.
+
+Principles are revised when they repeatedly produce friction without corresponding benefit, or when a clearly better formulation emerges. Revision is explicit — a principle that no longer represents current practice should be rewritten or removed, not silently ignored.
+
+Where a principle first emerged from a specific design document, that document should reference the principle rather than restating it in full. This file is the canonical home.
