@@ -37,17 +37,23 @@ fq trigger greeter "Hello!"
 ## Adding tools
 
 Tools give the agent capabilities beyond text generation. factor-q
-ships three built-in tools:
+ships four built-in tools:
 
 | Tool | What it does | Sandbox dimension |
 |---|---|---|
 | `file_read` | Read a file's contents | `fs_read` |
 | `file_write` | Write/overwrite a file | `fs_write` |
 | `shell` | Run a command (argv, no shell) | `exec_cwd` |
+| `self_inspect` | Ask the runtime about this invocation's own state — budget, iteration count, model, available tools. | none — host-fulfilled |
 
 To grant a tool, list it in `tools:` and declare the corresponding
 sandbox paths. **Nothing is available by default** — an agent with
 no sandbox declaration cannot touch the filesystem or run commands.
+
+`self_inspect` is special: its data is synthesised by the runtime
+itself, not by an external process, so it has no sandbox dimension
+to declare. Granting it just adds it to the `tools:` list. See the
+[self-aware example](../../agents/examples/self-aware.md).
 
 ### File reader
 

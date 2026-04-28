@@ -156,6 +156,29 @@ projection and dispatcher).
 Budget enforcement runs after every LLM call and compares the
 cumulative cost against the agent's declared budget ceiling.
 
+### Reducer harness (`fq-runtime/src/reducer/`)
+
+A second execution path with the same canonical-event semantics
+as `AgentExecutor`. The harness is structured as a pure
+synchronous reducer (`step(StepInput) -> StepOutput`) and the
+host loop (`ReducerRunner`) drives the side effects. This shape
+gives suspension, replay, and migration as structural
+properties rather than features that need separate wiring.
+
+- `reducer/types.rs` — `Reducer` trait and the boundary types.
+- `reducer/harness.rs` — `Harness`, the explicit state-enum
+  reducer that mirrors `AgentExecutor` behaviourally.
+- `reducer/runner.rs` — `ReducerRunner`, the host loop that
+  composes the existing `LlmClient`, `ToolRegistry`, `EventBus`,
+  and `PricingTable`.
+
+Selected at runtime via `fq trigger --reducer`. The legacy
+executor remains the default. See the
+[reducer harness guide](docs/guide/reducer-harness.md) for the
+full surface and the
+[boundary design](docs/design/wasm-boundary-design.md) for the
+rationale.
+
 ### LLM abstraction (`fq-runtime/src/llm/`)
 
 - **`LlmClient` trait** — single-method async interface with
@@ -189,6 +212,7 @@ violations are reported as `tool.result` events with
 | `file_read` | `file_read.rs` | `check_read` |
 | `file_write` | `file_write.rs` | `check_write` |
 | `shell` | `shell.rs` | `check_exec_cwd` |
+| `self_inspect` | `self_inspect.rs` | none — host-fulfilled (see [guide](docs/guide/reducer-harness.md#host-fulfilled-tools)) |
 
 The shell tool uses argv (no shell invocation), mandatory timeout,
 output cap, and a fresh child env with only a pinned PATH.

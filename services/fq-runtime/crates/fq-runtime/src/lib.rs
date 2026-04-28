@@ -4,10 +4,12 @@ pub mod config;
 pub mod dispatcher;
 pub mod events;
 pub mod executor;
+pub mod introspection;
 pub mod llm;
 pub mod mcp;
 pub mod pricing;
 pub mod projection;
+pub mod reducer;
 pub mod tools;
 
 pub use agent::{Agent, AgentId, AgentRegistry, McpServerDeclaration, Sandbox};
@@ -19,4 +21,5 @@ pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
 pub use mcp::{McpClientManager, McpError, McpServerConfig};
 pub use pricing::{ModelPricing, PricingTable};
 pub use projection::{ProjectionConsumer, ProjectionStore};
+pub use reducer::{Harness, Reducer, ReducerRunner};
 pub use tools::ToolRegistry;

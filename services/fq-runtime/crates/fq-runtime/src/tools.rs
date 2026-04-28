@@ -14,8 +14,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fq_tools::builtin::{FileReadTool, FileWriteTool, ShellTool};
+use fq_tools::builtin::{FileReadTool, FileWriteTool, SelfInspectTool, ShellTool};
 use fq_tools::Tool;
+
+/// Number of tools registered by [`ToolRegistry::with_builtins`].
+/// Useful for callers that report "MCP tools = total - builtins".
+pub const BUILTIN_TOOL_COUNT: usize = 4;
 
 use crate::events::ToolSchema;
 
@@ -37,6 +41,7 @@ impl ToolRegistry {
         registry.register(Arc::new(FileReadTool::new()));
         registry.register(Arc::new(FileWriteTool::new()));
         registry.register(Arc::new(ShellTool::new()));
+        registry.register(Arc::new(SelfInspectTool::new()));
         registry
     }
 
@@ -89,7 +94,8 @@ mod tests {
         assert!(reg.get("file_read").is_some());
         assert!(reg.get("file_write").is_some());
         assert!(reg.get("shell").is_some());
-        assert_eq!(reg.len(), 3);
+        assert!(reg.get("self_inspect").is_some());
+        assert_eq!(reg.len(), BUILTIN_TOOL_COUNT);
     }
 
     #[test]

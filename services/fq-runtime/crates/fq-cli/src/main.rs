@@ -96,6 +96,11 @@ enum Commands {
         /// the executor in-process.
         #[arg(long)]
         via_nats: bool,
+        /// Run through the experimental reducer-model harness
+        /// instead of the legacy in-process executor.
+        /// See `docs/design/wasm-boundary-design.md`.
+        #[arg(long)]
+        reducer: bool,
     },
     /// Agent management commands
     Agent {
@@ -185,11 +190,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             agent,
             payload,
             via_nats,
+            reducer,
         } => {
             if via_nats {
                 publish_trigger(&cli.global, &agent, payload.as_deref()).await?
             } else {
-                trigger_agent(&cli.global, &agent, payload.as_deref()).await?
+                trigger_agent(&cli.global, &agent, payload.as_deref(), reducer).await?
             }
         }
         Commands::Agent { command } => match command {
@@ -370,6 +376,7 @@ async fn trigger_agent(
     global: &GlobalArgs,
     agent_name: &str,
     payload: Option<&str>,
+    reducer: bool,
 ) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
 
@@ -449,24 +456,39 @@ async fn trigger_agent(
     if !loaded.agent.mcp_servers().is_empty() {
         println!(
             "  MCP tools:        {} (from {} server(s))",
-            tools.len() - 3, // subtract the 3 builtins
+            tools.len() - fq_runtime::tools::BUILTIN_TOOL_COUNT,
             loaded.agent.mcp_servers().len()
         );
     }
 
     let tools = Arc::new(tools);
-    let executor = AgentExecutor::new(bus, pricing, tools);
-    println!("Running agent...");
-    let outcome = match executor
-        .run(
-            &loaded.agent,
-            &llm,
-            TriggerSource::Manual,
-            None,
-            trigger_payload,
-        )
-        .await
-    {
+    let path_label = if reducer { "reducer" } else { "legacy" };
+    println!("Running agent... (path: {path_label})");
+    let outcome_result = if reducer {
+        let runner = fq_runtime::ReducerRunner::new(bus, pricing, tools);
+        runner
+            .run(
+                &fq_runtime::Harness::new(),
+                &loaded.agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                trigger_payload,
+            )
+            .await
+    } else {
+        let executor = AgentExecutor::new(bus, pricing, tools);
+        executor
+            .run(
+                &loaded.agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                trigger_payload,
+            )
+            .await
+    };
+    let outcome = match outcome_result {
         Ok(outcome) => outcome,
         Err(fq_runtime::ExecutorError::Llm(fq_runtime::LlmError::Auth(msg))) => {
             mcp_manager.shutdown().await;
@@ -857,7 +879,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             }
         }
     }
-    let mcp_tool_count = tools.len() - 3; // subtract the 3 builtins
+    let mcp_tool_count = tools.len() - fq_runtime::tools::BUILTIN_TOOL_COUNT;
     if mcp_tool_count > 0 {
         println!("  MCP tools:        {mcp_tool_count}");
     }

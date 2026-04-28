@@ -170,7 +170,15 @@ impl AgentExecutor {
             // Execute each tool call in order and feed results back.
             for tool_call in &response.tool_calls {
                 let result = self
-                    .execute_tool_call(agent, &sandbox, &agent_id, invocation_id, tool_call)
+                    .execute_tool_call(
+                        agent,
+                        &sandbox,
+                        &agent_id,
+                        invocation_id,
+                        tool_call,
+                        &totals,
+                        start,
+                    )
                     .await?;
                 totals.total_tool_calls += 1;
                 messages.push(Message {
@@ -353,6 +361,7 @@ impl AgentExecutor {
     /// the next LLM request. Tool errors (including sandbox
     /// violations) are reported as non-fatal `tool.result` events
     /// with `is_error: true` so the LLM can read them and adapt.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_tool_call(
         &self,
         agent: &Agent,
@@ -360,6 +369,8 @@ impl AgentExecutor {
         agent_id: &str,
         invocation_id: Uuid,
         call: &MessageToolCall,
+        totals: &InvocationTotals,
+        start: Instant,
     ) -> Result<ToolResult, ExecutorError> {
         // Verify the tool is in the agent's allowed list. An LLM that
         // fabricates a tool name gets told no.
@@ -386,6 +397,15 @@ impl AgentExecutor {
             }),
         ))
         .await?;
+
+        // Host-fulfilled tools intercept before the registry. See
+        // `crate::introspection` for the synthesis function shared
+        // between this path and the reducer runner.
+        if call.tool_name == fq_tools::builtin::SELF_INSPECT_TOOL_NAME {
+            return self
+                .run_self_inspect(agent, agent_id, invocation_id, call, totals, start)
+                .await;
+        }
 
         let tool = match self.tools.get(&call.tool_name) {
             Some(t) => t,
@@ -445,6 +465,48 @@ impl AgentExecutor {
                 })
             }
         }
+    }
+
+    async fn run_self_inspect(
+        &self,
+        agent: &Agent,
+        agent_id: &str,
+        invocation_id: Uuid,
+        call: &MessageToolCall,
+        totals: &InvocationTotals,
+        start: Instant,
+    ) -> Result<ToolResult, ExecutorError> {
+        use crate::introspection::{synthesize_self_inspect, HostInvocationStats};
+
+        let tool_start = Instant::now();
+        let stats = HostInvocationStats {
+            agent_id,
+            model: agent.model(),
+            allowed_tool_names: agent.tools(),
+            budget: agent.budget(),
+            max_iterations: MAX_ITERATIONS,
+            totals: *totals,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        };
+        let output = synthesize_self_inspect(&stats, call.parameters.clone());
+        let duration_ms = tool_start.elapsed().as_millis() as u64;
+
+        self.publish(Event::new(
+            agent_id.to_string(),
+            invocation_id,
+            EventPayload::ToolResult(ToolResultPayload {
+                tool_call_id: call.tool_call_id.clone(),
+                output: output.clone(),
+                is_error: false,
+                error_kind: None,
+                duration_ms,
+            }),
+        ))
+        .await?;
+        Ok(ToolResult {
+            output,
+            is_error: false,
+        })
     }
 
     /// Emit a synthetic tool.result event for failures that happen

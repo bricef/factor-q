@@ -9,7 +9,7 @@ A Cargo workspace with three crates:
 | Crate | Purpose |
 |---|---|
 | [`fq-cli`](crates/fq-cli/) | The `fq` binary — command parsing and dispatch |
-| [`fq-runtime`](crates/fq-runtime/) | Core library — agent definition loader, config, event schema, executor |
+| [`fq-runtime`](crates/fq-runtime/) | Core library — agent definition loader, config, event schema, executor, reducer harness |
 | [`fq-tools`](crates/fq-tools/) | Built-in tool implementations and the `Tool` trait |
 
 ```
@@ -69,7 +69,8 @@ just fq -- agent list
 ```
 fq init [-f|--force]                        # create a new project (config, agents/, sample)
 fq run                                      # start the daemon (projection + dispatcher)
-fq trigger <agent> [payload]                # run an agent in-process
+fq trigger <agent> [payload]                # run an agent in-process (legacy executor)
+fq trigger <agent> [payload] --reducer      # run via the reducer harness (suspend/resume capable)
 fq trigger --via-nats <agent> [payload]     # publish a trigger to NATS for fq run to dispatch
 fq agent list                               # list agents in the configured directory
 fq agent validate <path>                    # validate an agent definition
@@ -79,6 +80,12 @@ fq events query [--agent] [--type] [--since] [--limit 50]
 fq costs [--agent] [--since]                # show per-agent cost totals
 fq status                                   # runtime health: NATS, streams, consumers, projection
 ```
+
+The `--reducer` flag selects the experimental reducer-model
+execution path documented in
+[`docs/guide/reducer-harness.md`](../../docs/guide/reducer-harness.md).
+Both paths emit the same canonical events; the reducer path
+adds suspend/resume as a structural property of the boundary.
 
 Global flags (`--config`, `--agents-dir`, `--nats-url`, `--cache-dir`)
 and their corresponding `FQ_*` environment variables are available on
