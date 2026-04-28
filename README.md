@@ -14,11 +14,13 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 
 ## Documentation
 
+- [Quickstart](QUICKSTART.md) — clone to running agent in under ten minutes
 - [Vision](VISION.md) — what factor-q is and why it exists
 - [Architecture](ARCHITECTURE.md) — core subsystems and implementation
 - [Design principles](docs/design/design-principles.md) — cross-cutting rules that guide design decisions
 - [Contributing](CONTRIBUTING.md) — development setup, test tiers, code conventions
 - [Agent authoring guide](docs/guide/agent-definitions.md) — write your first agent
+- [Reducer harness guide](docs/guide/reducer-harness.md) — the suspend/resume-capable execution path (`fq trigger --reducer`)
 - [Event schema](docs/design/event-schema.md) — the event model everything is built around
 - [Agent orchestration tools](docs/design/agent-orchestration-tools.md) — wishlist for primitives to coordinate multi-agent work (graph substrate, handles, sinks, fragment library)
 - [Worker-side ergonomics](docs/design/worker-side-ergonomics.md) — primitives for what an agent has, knows, and controls while executing (introspection, checkpoints, structured errors)
@@ -68,31 +70,18 @@ factor-q/
 
 ## Getting started
 
-Prerequisites: Rust toolchain, Docker, Docker Compose, [just](https://github.com/casey/just).
+See [QUICKSTART.md](QUICKSTART.md) for the full step-by-step path from a fresh clone to a running agent with event-trail inspection. The short version:
 
 ```sh
-# Start NATS and build the runtime
-just up
-
-# Initialise a new project (creates fq.toml, agents/, sample agent)
-just fq init
-
-# Trigger the sample agent
+just up                                 # NATS + build
+mkdir my-project && cd my-project
+just fq init                            # writes fq.toml, agents/, sample
 export ANTHROPIC_API_KEY='sk-ant-...'
-just fq trigger sample-agent "Say hello in one sentence."
-
-# Watch events stream in real time (in another terminal)
-just fq events tail
-
-# Check runtime health
-just fq status
-
-# Run the daemon (projection consumer + trigger dispatcher)
-just run
+just fq trigger sample-agent "Hello."   # run the agent
+just fq events tail                     # (another terminal) watch the events
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development
-setup and test tiers.
+For development setup and test tiers, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Prior Art
 
