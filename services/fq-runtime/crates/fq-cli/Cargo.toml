@@ -11,6 +11,7 @@ path = "src/main.rs"
 fq-runtime = { path = "../fq-runtime" }
 anyhow = "1"
 async-nats = "0.38"
+chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 serde_json = "1"

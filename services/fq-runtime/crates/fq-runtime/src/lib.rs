@@ -44,6 +44,9 @@ pub use bus::EventBus;
 pub use config::Config;
 pub use control_plane::dispatcher::{DispatcherError, TriggerDispatcher};
 pub use control_plane::projection::{ProjectionConsumer, ProjectionStore};
+pub use control_plane::{
+    CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError,
+};
 pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
 pub use mcp::{McpClientManager, McpError, McpServerConfig};
 pub use pricing::{ModelPricing, PricingTable};

@@ -634,6 +634,16 @@ fn projection_path(config: &Config) -> PathBuf {
     config.cache.directory.join("events.db")
 }
 
+/// Best-effort host label for the worker registration row.
+/// Operator-informational only — the value isn't load-bearing
+/// in v1 and a placeholder is fine when no hostname is
+/// available. v2 will likely prefer a syscall-backed lookup.
+fn local_host_label() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "local".to_string())
+}
+
 /// Operational status of the runtime, derived from three sources:
 ///
 /// 1. The NATS JetStream API (via the async-nats client that the
@@ -837,9 +847,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
 
-    // Open the projection store (control-plane) and the worker
-    // store. They share the same SQLite file in v1 — see the
-    // data-architecture.md §11 single-file collapse note.
+    // Open the three stores backing v1's single-file collapse.
+    // ProjectionStore (rebuildable from NATS), ControlPlaneStore
+    // (coordination/schedules/archive — source of truth), and
+    // WorkerStore (in-flight state and WAL — source of truth).
+    // See data-architecture.md §11 for the v1→v2 split path.
     let db_path = projection_path(&config);
     println!("  projection db:    {}", db_path.display());
     let store = Arc::new(
@@ -847,14 +859,40 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             .await
             .with_context(|| format!("failed to open projection at {}", db_path.display()))?,
     );
+    let cp_store = Arc::new(
+        fq_runtime::ControlPlaneStore::open(&db_path)
+            .await
+            .with_context(|| format!("failed to open control-plane store at {}", db_path.display()))?,
+    );
     let _worker_store = Arc::new(
         fq_runtime::WorkerStore::open(&db_path)
             .await
             .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
     );
     println!(
+        "  control plane:    v{}",
+        fq_runtime::CONTROL_PLANE_SCHEMA_VERSION
+    );
+    println!(
         "  worker schema:    v{}",
         fq_runtime::WORKER_SCHEMA_VERSION
+    );
+
+    // v1 single-process: this daemon plays both control-plane
+    // and worker. Self-register the worker side with the
+    // control-plane so the membership table reflects reality.
+    // The worker_id is the runtime_id; v2 will introduce
+    // separate worker ids when workers run in their own processes.
+    let worker_id = runtime_id.to_string();
+    let host_label = local_host_label();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    cp_store
+        .register_worker(&worker_id, &host_label, now_ms)
+        .await
+        .context("failed to self-register worker with control-plane")?;
+    println!(
+        "  worker:           {} (host: {})",
+        worker_id, host_label
     );
 
     // Load pricing.

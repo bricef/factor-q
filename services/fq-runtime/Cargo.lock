@@ -657,6 +657,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-nats",
+ "chrono",
  "clap",
  "fq-runtime",
  "futures",
