@@ -45,6 +45,7 @@ pub fn event_kind(event: &Event) -> &'static str {
         EventPayload::Cost(_) => "cost",
         EventPayload::Completed(_) => "completed",
         EventPayload::Failed(_) => "failed",
+        EventPayload::InvocationAmbiguous(_) => "invocation_ambiguous",
         EventPayload::SystemStartup(_) => "system_startup",
         EventPayload::SystemShutdown(_) => "system_shutdown",
         EventPayload::SystemTaskFailed(_) => "system_task_failed",

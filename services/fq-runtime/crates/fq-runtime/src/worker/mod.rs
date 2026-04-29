@@ -27,10 +27,14 @@
 
 pub mod executor;
 pub mod introspection;
+pub mod recovery;
 pub mod reducer;
 pub mod store;
 
 pub use executor::{AgentExecutor, ExecutorError, InvocationOutcome};
+pub use recovery::{
+    CategoryCounts, ClassifiedInvocation, RecoveryCategory, categorise, scan_in_flight,
+};
 pub use reducer::{Harness, Reducer, ReducerRunner};
 pub use store::{
     Compatibility, DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow,

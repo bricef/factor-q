@@ -622,6 +622,10 @@ fn print_event(event: &Event) {
         EventPayload::Failed(p) => {
             format!("failed {:?} {}", p.error_kind, p.error_message)
         }
+        EventPayload::InvocationAmbiguous(p) => format!(
+            "invocation.ambiguous entity={} call_id={}",
+            p.stuck_entity, p.stuck_call_id
+        ),
         EventPayload::SystemStartup(p) => format!(
             "system.startup version={} agents={} nats={}",
             p.version, p.agents_loaded, p.nats_url
@@ -878,7 +882,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             .await
             .with_context(|| format!("failed to open control-plane store at {}", db_path.display()))?,
     );
-    let _worker_store = Arc::new(
+    let worker_store = Arc::new(
         fq_runtime::WorkerStore::open(&db_path)
             .await
             .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
@@ -908,6 +912,81 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         "  worker:           {} (host: {})",
         worker_id, host_label
     );
+
+    // Worker recovery: scan in-flight invocations from the
+    // worker store, classify each, log the summary, and emit
+    // `invocation.ambiguous` events for the cases that can't
+    // be auto-recovered. Safe-resume / safe-replay execution
+    // is logged but deferred to a follow-up commit; the
+    // categorisation alone is the load-bearing contract that
+    // the rest of the runtime can rely on (data-architecture.md
+    // §3.1 / §7.1).
+    let classified =
+        fq_runtime::worker::scan_in_flight(worker_store.as_ref())
+            .await
+            .context("failed to scan in-flight invocations")?;
+    let mut counts = fq_runtime::worker::CategoryCounts::default();
+    for inv in &classified {
+        counts.record(inv.category.clone());
+    }
+    if counts.total() > 0 {
+        println!(
+            "  in-flight:        {} ({} safe-resume, {} safe-replay, {} ambiguous)",
+            counts.total(),
+            counts.safe_resume,
+            counts.safe_replay,
+            counts.ambiguous,
+        );
+        for inv in &classified {
+            if let Some((entity, call_id)) = inv.ambiguous_context() {
+                let event = Event::new(
+                    inv.state.agent_id.clone(),
+                    uuid::Uuid::parse_str(&inv.state.invocation_id).unwrap_or_else(|_| {
+                        // Fall back to a fresh uuid if the
+                        // stored id ever isn't valid (shouldn't
+                        // happen — every id is a v7 uuid).
+                        uuid::Uuid::now_v7()
+                    }),
+                    EventPayload::InvocationAmbiguous(
+                        fq_runtime::events::InvocationAmbiguousPayload {
+                            stuck_entity: entity.to_string(),
+                            stuck_call_id: call_id,
+                            note:
+                                "worker startup categorisation found a `dispatched` row without `completed`"
+                                    .to_string(),
+                        },
+                    ),
+                );
+                if let Err(err) = bus.publish(&event).await {
+                    tracing::warn!(
+                        invocation_id = %inv.state.invocation_id,
+                        error = %err,
+                        "failed to publish invocation.ambiguous"
+                    );
+                }
+                // Mark in coordination so `fq invocation list`
+                // and `fq recover` (step 9) can find it.
+                // Upsert: the trigger-dispatch path doesn't yet
+                // populate ownership rows (later plan step), so
+                // recovery may be the first writer.
+                if let Err(err) = cp_store
+                    .upsert_invocation_ownership(
+                        &inv.state.invocation_id,
+                        &worker_id,
+                        inv.state.started_at,
+                        fq_runtime::OwnerStatus::Ambiguous,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        invocation_id = %inv.state.invocation_id,
+                        error = %err,
+                        "failed to mark invocation ambiguous in coordination store"
+                    );
+                }
+            }
+        }
+    }
 
     // Load pricing.
     let pricing_cache = config.cache.directory.join("pricing.json");

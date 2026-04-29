@@ -508,6 +508,39 @@ impl ControlPlaneStore {
         Ok(res.rows_affected())
     }
 
+    /// Upsert the ownership row. Used by recovery: an
+    /// invocation may not have a pre-existing coordination
+    /// row (the trigger-dispatch path doesn't populate it
+    /// yet — that wiring lands later in the plan). The
+    /// recovery path needs to be able to record an
+    /// ambiguous status without depending on prior insert.
+    pub async fn upsert_invocation_ownership(
+        &self,
+        invocation_id: &str,
+        worker_id: &str,
+        assigned_at: i64,
+        status: OwnerStatus,
+    ) -> Result<(), ControlPlaneStoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO coordination_invocation_owner
+                (invocation_id, worker_id, assigned_at, status)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(invocation_id) DO UPDATE SET
+                worker_id = excluded.worker_id,
+                assigned_at = excluded.assigned_at,
+                status = excluded.status
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(worker_id)
+        .bind(assigned_at)
+        .bind(status.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_invocation_owner(
         &self,
         invocation_id: &str,

@@ -330,6 +330,7 @@ fn extract_fields(payload: &EventPayload) -> Fields {
         EventPayload::ToolCall(_) => Fields::default(),
         EventPayload::ToolDispatched(_) => Fields::default(),
         EventPayload::LlmDispatched(_) => Fields::default(),
+        EventPayload::InvocationAmbiguous(_) => Fields::default(),
         EventPayload::ToolResult(p) => Fields {
             error_kind: p.error_kind.map(|k| format!("{k:?}").to_lowercase()),
             duration_ms: Some(p.duration_ms as i64),
@@ -375,6 +376,7 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
         EventPayload::Cost(_) => "cost",
         EventPayload::Completed(_) => "completed",
         EventPayload::Failed(_) => "failed",
+        EventPayload::InvocationAmbiguous(_) => "invocation_ambiguous",
         EventPayload::SystemStartup(_) => "system_startup",
         EventPayload::SystemShutdown(_) => "system_shutdown",
         EventPayload::SystemTaskFailed(_) => "system_task_failed",

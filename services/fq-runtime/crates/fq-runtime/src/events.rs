@@ -43,6 +43,14 @@ pub mod subjects {
         format!("fq.agent.{agent_id}.llm.dispatched")
     }
 
+    /// An invocation cannot be auto-recovered (see
+    /// data-architecture.md §3.4). The worker publishes this
+    /// on startup when its WAL categorisation finds a
+    /// `dispatched`-without-`completed` row.
+    pub fn agent_invocation_ambiguous(agent_id: &str) -> String {
+        format!("fq.agent.{agent_id}.invocation.ambiguous")
+    }
+
     pub fn agent_cost(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.cost")
     }
@@ -106,6 +114,9 @@ impl Event {
             EventPayload::ToolDispatched(_) => subjects::agent_tool_dispatched(&self.agent_id),
             EventPayload::ToolResult(_) => subjects::agent_tool_result(&self.agent_id),
             EventPayload::LlmDispatched(_) => subjects::agent_llm_dispatched(&self.agent_id),
+            EventPayload::InvocationAmbiguous(_) => {
+                subjects::agent_invocation_ambiguous(&self.agent_id)
+            }
             EventPayload::Cost(_) => subjects::agent_cost(&self.agent_id),
             EventPayload::Completed(_) => subjects::agent_completed(&self.agent_id),
             EventPayload::Failed(_) => subjects::agent_failed(&self.agent_id),
@@ -139,6 +150,14 @@ pub enum EventPayload {
     Cost(CostPayload),
     Completed(CompletedPayload),
     Failed(FailedPayload),
+
+    /// An in-flight invocation could not be auto-recovered
+    /// on worker restart (see data-architecture.md §3.4).
+    /// The worker publishes this when its WAL categorisation
+    /// finds a `dispatched`-without-`completed` row. The
+    /// control-plane consumes the event to surface the case
+    /// via `fq recover` (step 9).
+    InvocationAmbiguous(InvocationAmbiguousPayload),
 
     // Runtime lifecycle
     SystemStartup(SystemStartupPayload),
@@ -308,6 +327,25 @@ pub struct ToolCallPayload {
 pub struct ToolDispatchedPayload {
     pub tool_call_id: String,
     pub tool_name: String,
+}
+
+/// Payload for [`EventPayload::InvocationAmbiguous`]. Carries
+/// the minimum context an operator needs to make a recovery
+/// decision: which kind of dispatch was stuck, and which
+/// call_id it was on. The full context (parameters, request
+/// payload, etc.) is in the worker's WAL and surfaced via
+/// `fq recover` (step 9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationAmbiguousPayload {
+    /// Which entity in the WAL was stuck: `tool_dispatch` or
+    /// `llm_dispatch`. Domain name, not a relational table
+    /// reference (see WorkerStoreError::WalTransitionFailed).
+    pub stuck_entity: String,
+    /// The `tool_call_id` (for tools) or `request_id` (for LLM
+    /// calls) of the stuck dispatch.
+    pub stuck_call_id: String,
+    /// Free-form note describing the operator-relevant context.
+    pub note: String,
 }
 
 /// Published when a tool invocation completes (success or failure).

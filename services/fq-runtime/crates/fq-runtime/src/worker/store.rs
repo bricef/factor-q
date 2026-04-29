@@ -764,6 +764,50 @@ impl WorkerStore {
             .await?;
         Ok(res.rows_affected())
     }
+
+    /// All tool-dispatch rows for one invocation, ordered by
+    /// `intent_at`. Used by the recovery categorisation logic
+    /// (step 6) which needs to inspect every dispatch row to
+    /// decide safe-resume / safe-replay / ambiguous.
+    pub async fn list_tool_dispatches_for_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Vec<ToolDispatchRow>, WorkerStoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT invocation_id, tool_call_id, tool_name, status, parameters,
+                   result, is_error, intent_at, dispatched_at, completed_at
+            FROM tool_dispatch
+            WHERE invocation_id = ?
+            ORDER BY intent_at
+            "#,
+        )
+        .bind(invocation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_tool_dispatch).collect()
+    }
+
+    /// Symmetric to [`list_tool_dispatches_for_invocation`] for
+    /// the LLM dispatch table.
+    pub async fn list_llm_dispatches_for_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Vec<LlmDispatchRow>, WorkerStoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT invocation_id, request_id, model, status, request_payload,
+                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at
+            FROM llm_dispatch
+            WHERE invocation_id = ?
+            ORDER BY intent_at
+            "#,
+        )
+        .bind(invocation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_llm_dispatch).collect()
+    }
 }
 
 /// Outcome of comparing the binary's expected schema version
