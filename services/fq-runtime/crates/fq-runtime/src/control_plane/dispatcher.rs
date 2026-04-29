@@ -222,6 +222,9 @@ impl TriggerDispatcher {
         match err {
             ExecutorError::Llm(e) => error!(error = %e, "llm error during dispatch"),
             ExecutorError::Bus(e) => error!(error = %e, "bus error during dispatch"),
+            ExecutorError::WorkerStore(msg) => {
+                error!(error = %msg, "worker store error during dispatch")
+            }
             ExecutorError::MaxIterationsExceeded => {
                 error!("agent exceeded max iterations during dispatch")
             }

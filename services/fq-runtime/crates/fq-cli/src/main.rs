@@ -472,7 +472,19 @@ async fn trigger_agent(
     let path_label = if reducer { "reducer" } else { "legacy" };
     println!("Running agent... (path: {path_label})");
     let outcome_result = if reducer {
-        let runner = fq_runtime::ReducerRunner::new(bus, pricing, tools);
+        // Reducer path persists tool/LLM dispatches through the
+        // worker WAL. The store opens against the same events.db
+        // the daemon would use; if `fq run` is also active the
+        // same file is shared (locks at the SQLite layer).
+        let db_path = projection_path(&config);
+        let worker_store = Arc::new(
+            fq_runtime::WorkerStore::open(&db_path)
+                .await
+                .with_context(|| {
+                    format!("failed to open worker store at {}", db_path.display())
+                })?,
+        );
+        let runner = fq_runtime::ReducerRunner::new(bus, pricing, tools, worker_store);
         runner
             .run(
                 &fq_runtime::Harness::new(),
@@ -594,6 +606,8 @@ fn print_event(event: &Event) {
             p.usage.input_tokens, p.usage.output_tokens, p.stop_reason
         ),
         EventPayload::ToolCall(p) => format!("tool.call {}", p.tool_name),
+        EventPayload::ToolDispatched(p) => format!("tool.dispatched {}", p.tool_name),
+        EventPayload::LlmDispatched(p) => format!("llm.dispatched model={}", p.model),
         EventPayload::ToolResult(p) => {
             format!("tool.result {}", if p.is_error { "error" } else { "ok" })
         }

@@ -291,7 +291,9 @@ impl ControlPlaneStore {
                     .await?;
             }
             Compatibility::Current => {
-                self.run_migrations(0, CONTROL_PLANE_SCHEMA_VERSION).await?;
+                // Recorded version matches the binary; nothing
+                // to do. Same reasoning as in the worker store:
+                // not every migration is idempotent.
             }
             Compatibility::NeedsUpgrade { from } => {
                 self.run_migrations(from, CONTROL_PLANE_SCHEMA_VERSION)

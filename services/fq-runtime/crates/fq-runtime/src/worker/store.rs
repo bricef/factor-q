@@ -53,7 +53,15 @@ pub const SCHEMA_CLASS: &str = "worker";
 /// Schema version this binary expects. Bump on incompatible
 /// schema changes; additive migrations between versions belong
 /// in [`run_migrations`].
-pub const WORKER_SCHEMA_VERSION: u32 = 1;
+///
+/// Versions:
+/// - **v1** — initial worker tables (`invocation_state`,
+///   `tool_dispatch`, `llm_dispatch`).
+/// - **v2** — adds `is_error INTEGER` to `llm_dispatch` so an
+///   LLM call that fails has a non-ambiguous final state
+///   (`completed` with `is_error=1`) rather than being stuck
+///   in `dispatched` and surfacing as ambiguous on recovery.
+pub const WORKER_SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA_META_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -109,6 +117,15 @@ CREATE TABLE IF NOT EXISTS llm_dispatch (
 CREATE INDEX IF NOT EXISTS idx_llm_dispatch_status ON llm_dispatch(status, dispatched_at);
 "#;
 
+/// v2 migration: add `is_error` to `llm_dispatch`.
+///
+/// `ALTER TABLE ... ADD COLUMN` is idempotent in SQLite *only*
+/// guarded by a check; we run this conditionally based on the
+/// recorded schema version, so re-running is safe.
+const WORKER_MIGRATION_V2_SQL: &str = r#"
+ALTER TABLE llm_dispatch ADD COLUMN is_error INTEGER;
+"#;
+
 /// One of the three WAL states a dispatch can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchStatus {
@@ -161,6 +178,10 @@ pub struct LlmDispatchRow {
     pub request_payload: String,
     pub response: Option<String>,
     pub cost_usd: Option<f64>,
+    /// `Some(true)` if the LLM call returned an error;
+    /// `Some(false)` for a successful response;
+    /// `None` until the dispatch reaches `completed`.
+    pub is_error: Option<bool>,
     pub intent_at: i64,
     pub dispatched_at: Option<i64>,
     pub completed_at: Option<i64>,
@@ -245,10 +266,11 @@ impl WorkerStore {
                 self.write_schema_version(WORKER_SCHEMA_VERSION).await?;
             }
             Compatibility::Current => {
-                // Existing tables are already at the right version.
-                // Re-run `IF NOT EXISTS` migrations for safety
-                // (no-op when they exist).
-                self.run_migrations(0, WORKER_SCHEMA_VERSION).await?;
+                // Recorded version matches the binary; nothing
+                // to do. Migrations are NOT re-run because not
+                // every migration is idempotent (e.g.
+                // `ALTER TABLE ADD COLUMN` errors on a second
+                // run with "duplicate column").
             }
             Compatibility::NeedsUpgrade { from } => {
                 self.run_migrations(from, WORKER_SCHEMA_VERSION).await?;
@@ -291,14 +313,21 @@ impl WorkerStore {
     }
 
     /// Apply the migrations needed to advance from `from` to
-    /// `to`. v1 has only one migration: 0 → 1 creates the tables.
+    /// `to`. Migrations are additive and gated on the recorded
+    /// version; re-running on an up-to-date DB is a no-op past
+    /// `IF NOT EXISTS`.
     async fn run_migrations(&self, from: u32, to: u32) -> Result<(), WorkerStoreError> {
         if from < 1 && to >= 1 {
             for stmt in split_sql(WORKER_TABLES_V1_SQL) {
                 sqlx::query(&stmt).execute(&self.pool).await?;
             }
         }
-        // Future migrations: 1 → 2, 2 → 3, etc.
+        if from < 2 && to >= 2 {
+            for stmt in split_sql(WORKER_MIGRATION_V2_SQL) {
+                sqlx::query(&stmt).execute(&self.pool).await?;
+            }
+        }
+        // Future migrations: 2 → 3, 3 → 4, etc.
         Ok(())
     }
 
@@ -517,18 +546,20 @@ impl WorkerStore {
         invocation_id: &str,
         request_id: &str,
         response: &str,
+        is_error: bool,
         cost_usd: f64,
         completed_at: i64,
     ) -> Result<(), WorkerStoreError> {
         let res = sqlx::query(
             r#"
             UPDATE llm_dispatch
-            SET status = ?, response = ?, cost_usd = ?, completed_at = ?
+            SET status = ?, response = ?, is_error = ?, cost_usd = ?, completed_at = ?
             WHERE invocation_id = ? AND request_id = ? AND status = ?
             "#,
         )
         .bind(DispatchStatus::Completed.as_str())
         .bind(response)
+        .bind(is_error as i64)
         .bind(cost_usd)
         .bind(completed_at)
         .bind(invocation_id)
@@ -555,7 +586,7 @@ impl WorkerStore {
         let row = sqlx::query(
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
-                   response, cost_usd, intent_at, dispatched_at, completed_at
+                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at
             FROM llm_dispatch
             WHERE invocation_id = ? AND request_id = ?
             "#,
@@ -576,7 +607,7 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
-                   response, cost_usd, intent_at, dispatched_at, completed_at
+                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at
             FROM llm_dispatch
             WHERE status = ?
             ORDER BY dispatched_at
@@ -743,6 +774,7 @@ fn row_to_llm_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<LlmDispatchRow, W
     let status_str: String = row.get("status");
     let status = DispatchStatus::parse(&status_str)
         .ok_or_else(|| WorkerStoreError::Malformed(format!("unknown status `{status_str}`")))?;
+    let is_error: Option<i64> = row.get("is_error");
     Ok(LlmDispatchRow {
         invocation_id: row.get("invocation_id"),
         request_id: row.get("request_id"),
@@ -751,6 +783,7 @@ fn row_to_llm_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<LlmDispatchRow, W
         request_payload: row.get("request_payload"),
         response: row.get("response"),
         cost_usd: row.get("cost_usd"),
+        is_error: is_error.map(|x| x != 0),
         intent_at: row.get("intent_at"),
         dispatched_at: row.get("dispatched_at"),
         completed_at: row.get("completed_at"),
@@ -1169,13 +1202,113 @@ mod tests {
         assert_eq!(r.status, DispatchStatus::Dispatched);
 
         store
-            .write_llm_completed(inv, req, r#"{"content":"hi"}"#, 0.0011, 300)
+            .write_llm_completed(inv, req, r#"{"content":"hi"}"#, false, 0.0011, 300)
             .await
             .unwrap();
         let r = store.get_llm_dispatch(inv, req).await.unwrap().unwrap();
         assert_eq!(r.status, DispatchStatus::Completed);
         assert_eq!(r.cost_usd, Some(0.0011));
+        assert_eq!(r.is_error, Some(false));
         assert_eq!(r.response.as_deref(), Some(r#"{"content":"hi"}"#));
+    }
+
+    #[tokio::test]
+    async fn llm_completed_with_error_round_trip() {
+        let (store, _dir) = open_fresh().await;
+        store
+            .write_llm_intent("inv-err", "r-err", "haiku", "{}", 1)
+            .await
+            .unwrap();
+        store
+            .write_llm_dispatched("inv-err", "r-err", 2)
+            .await
+            .unwrap();
+        store
+            .write_llm_completed("inv-err", "r-err", "rate limited", true, 0.0, 3)
+            .await
+            .unwrap();
+        let r = store.get_llm_dispatch("inv-err", "r-err").await.unwrap().unwrap();
+        assert_eq!(r.status, DispatchStatus::Completed);
+        assert_eq!(r.is_error, Some(true));
+        assert_eq!(r.cost_usd, Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn v1_to_v2_migration_adds_is_error_column() {
+        // Build a DB at schema v1 (the worker tables without
+        // the `is_error` column on `llm_dispatch`), then open
+        // it with the current binary and verify the migration
+        // adds the column without disturbing existing rows.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.db");
+
+        // Manually construct a v1 DB.
+        {
+            let url = format!("sqlite://{}?mode=rwc", path.display());
+            let opts = SqliteConnectOptions::from_str(&url).unwrap();
+            let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+            for stmt in split_sql(SCHEMA_META_SQL) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            for stmt in split_sql(WORKER_TABLES_V1_SQL) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)",
+            )
+            .bind(SCHEMA_CLASS)
+            .bind(1_i64)
+            .bind(0_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+            // Pre-existing v1 row to ensure migration preserves data.
+            sqlx::query(
+                "INSERT INTO llm_dispatch (invocation_id, request_id, model, status, request_payload, intent_at) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind("legacy-inv")
+            .bind("legacy-req")
+            .bind("claude-haiku")
+            .bind("intent")
+            .bind("{}")
+            .bind(1_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        // Open with current binary — runs v1 → v2 migration.
+        let store = WorkerStore::open(&path).await.expect("migrate v1 -> v2");
+        assert_eq!(
+            store.read_schema_version().await.unwrap(),
+            Some(WORKER_SCHEMA_VERSION)
+        );
+
+        // Existing row preserved.
+        let pre = store
+            .get_llm_dispatch("legacy-inv", "legacy-req")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pre.status, DispatchStatus::Intent);
+        assert_eq!(pre.is_error, None);
+
+        // New writes can use the is_error column.
+        store
+            .write_llm_dispatched("legacy-inv", "legacy-req", 10)
+            .await
+            .unwrap();
+        store
+            .write_llm_completed("legacy-inv", "legacy-req", "ok", false, 0.001, 20)
+            .await
+            .unwrap();
+        let post = store
+            .get_llm_dispatch("legacy-inv", "legacy-req")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(post.is_error, Some(false));
     }
 
     #[tokio::test]
@@ -1202,7 +1335,7 @@ mod tests {
             .unwrap();
         store.write_llm_dispatched("inv3", "r3", 5).await.unwrap();
         store
-            .write_llm_completed("inv3", "r3", "{}", 0.0, 6)
+            .write_llm_completed("inv3", "r3", "{}", false, 0.0, 6)
             .await
             .unwrap();
 

@@ -328,6 +328,8 @@ fn extract_fields(payload: &EventPayload) -> Fields {
             ..Default::default()
         },
         EventPayload::ToolCall(_) => Fields::default(),
+        EventPayload::ToolDispatched(_) => Fields::default(),
+        EventPayload::LlmDispatched(_) => Fields::default(),
         EventPayload::ToolResult(p) => Fields {
             error_kind: p.error_kind.map(|k| format!("{k:?}").to_lowercase()),
             duration_ms: Some(p.duration_ms as i64),
@@ -365,8 +367,10 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
     match payload {
         EventPayload::Triggered(_) => "triggered",
         EventPayload::LlmRequest(_) => "llm_request",
+        EventPayload::LlmDispatched(_) => "llm_dispatched",
         EventPayload::LlmResponse(_) => "llm_response",
         EventPayload::ToolCall(_) => "tool_call",
+        EventPayload::ToolDispatched(_) => "tool_dispatched",
         EventPayload::ToolResult(_) => "tool_result",
         EventPayload::Cost(_) => "cost",
         EventPayload::Completed(_) => "completed",

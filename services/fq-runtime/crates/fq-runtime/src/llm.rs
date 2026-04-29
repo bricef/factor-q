@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use crate::events::{Message, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolSchema};
 
 /// A request to an LLM, without the call_id (assigned by the executor).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
@@ -30,7 +30,7 @@ pub struct ChatRequest {
 }
 
 /// A response from an LLM, without the call_id.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<MessageToolCall>,

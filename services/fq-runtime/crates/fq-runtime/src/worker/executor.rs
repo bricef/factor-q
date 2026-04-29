@@ -619,6 +619,9 @@ pub enum ExecutorError {
     #[error("LLM error: {0}")]
     Llm(#[from] LlmError),
 
+    #[error("worker store error: {0}")]
+    WorkerStore(String),
+
     #[error("max iterations exceeded")]
     MaxIterationsExceeded,
 }

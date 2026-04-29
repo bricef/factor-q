@@ -37,8 +37,10 @@ pub fn event_kind(event: &Event) -> &'static str {
     match &event.payload {
         EventPayload::Triggered(_) => "triggered",
         EventPayload::LlmRequest(_) => "llm_request",
+        EventPayload::LlmDispatched(_) => "llm_dispatched",
         EventPayload::LlmResponse(_) => "llm_response",
         EventPayload::ToolCall(_) => "tool_call",
+        EventPayload::ToolDispatched(_) => "tool_dispatched",
         EventPayload::ToolResult(_) => "tool_result",
         EventPayload::Cost(_) => "cost",
         EventPayload::Completed(_) => "completed",

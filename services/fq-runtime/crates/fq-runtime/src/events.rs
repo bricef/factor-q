@@ -31,8 +31,16 @@ pub mod subjects {
         format!("fq.agent.{agent_id}.tool.call")
     }
 
+    pub fn agent_tool_dispatched(agent_id: &str) -> String {
+        format!("fq.agent.{agent_id}.tool.dispatched")
+    }
+
     pub fn agent_tool_result(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.tool.result")
+    }
+
+    pub fn agent_llm_dispatched(agent_id: &str) -> String {
+        format!("fq.agent.{agent_id}.llm.dispatched")
     }
 
     pub fn agent_cost(agent_id: &str) -> String {
@@ -95,7 +103,9 @@ impl Event {
             EventPayload::LlmRequest(_) => subjects::agent_llm_request(&self.agent_id),
             EventPayload::LlmResponse(_) => subjects::agent_llm_response(&self.agent_id),
             EventPayload::ToolCall(_) => subjects::agent_tool_call(&self.agent_id),
+            EventPayload::ToolDispatched(_) => subjects::agent_tool_dispatched(&self.agent_id),
             EventPayload::ToolResult(_) => subjects::agent_tool_result(&self.agent_id),
+            EventPayload::LlmDispatched(_) => subjects::agent_llm_dispatched(&self.agent_id),
             EventPayload::Cost(_) => subjects::agent_cost(&self.agent_id),
             EventPayload::Completed(_) => subjects::agent_completed(&self.agent_id),
             EventPayload::Failed(_) => subjects::agent_failed(&self.agent_id),
@@ -113,8 +123,18 @@ pub enum EventPayload {
     // Agent lifecycle
     Triggered(TriggeredPayload),
     LlmRequest(LlmRequestPayload),
+    /// WAL middle-state for LLM calls. Emitted between
+    /// `LlmRequest` and `LlmResponse` once the request has
+    /// returned control to the runtime, before the response is
+    /// durably written. See data-architecture.md §3.2.
+    LlmDispatched(LlmDispatchedPayload),
     LlmResponse(LlmResponsePayload),
     ToolCall(ToolCallPayload),
+    /// WAL middle-state for tool calls. Emitted between
+    /// `ToolCall` and `ToolResult` once the tool has returned
+    /// control to the runtime, before the result is durably
+    /// written. See data-architecture.md §3.1.
+    ToolDispatched(ToolDispatchedPayload),
     ToolResult(ToolResultPayload),
     Cost(CostPayload),
     Completed(CompletedPayload),
@@ -179,6 +199,16 @@ pub struct LlmRequestPayload {
     pub messages: Vec<Message>,
     pub tools_available: Vec<ToolSchema>,
     pub request_params: RequestParams,
+}
+
+/// WAL middle-state event for LLM dispatch. Emitted between
+/// [`LlmRequestPayload`] and [`LlmResponsePayload`] once the
+/// LLM call has returned control to the runtime — before the
+/// response is durably written.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmDispatchedPayload {
+    pub call_id: Uuid,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +293,21 @@ pub struct ToolCallPayload {
     pub tool_call_id: String,
     pub tool_name: String,
     pub parameters: Value,
+}
+
+/// WAL middle-state event for tool dispatch. Emitted between
+/// [`ToolCallPayload`] and [`ToolResultPayload`] once the tool
+/// has returned control to the runtime — before the result is
+/// durably written.
+///
+/// Operationally informational: downstream consumers can ignore
+/// it (existing consumers do). Recovery uses the matching
+/// `tool_dispatch.status = 'dispatched'` row in the worker
+/// store, not this event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDispatchedPayload {
+    pub tool_call_id: String,
+    pub tool_name: String,
 }
 
 /// Published when a tool invocation completes (success or failure).
