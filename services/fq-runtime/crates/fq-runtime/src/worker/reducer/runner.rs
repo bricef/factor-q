@@ -40,7 +40,7 @@ use crate::events::{
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
-use crate::worker::store::WorkerStore;
+use crate::worker::store::{InvocationStateRow, WorkerStore};
 use crate::worker::{ExecutorError, InvocationOutcome};
 
 /// Soft cap on the number of `step()` calls per invocation.
@@ -134,6 +134,7 @@ impl ReducerRunner {
 
         let mut state: Vec<u8> = Vec::new();
         let mut last_result: Option<CapabilityResult> = None;
+        let started_at_ms = unix_now_ms();
 
         for step_index in 0..HOST_STEP_BUDGET {
             let input = StepInput {
@@ -165,6 +166,29 @@ impl ReducerRunner {
 
             self.write_logs(&agent_id, invocation_id, &output.logs);
             self.emit_semantic_events(&output.events);
+
+            // Persist the post-step state to the worker store
+            // before initiating any side-effecting action. The
+            // `phase` and `terminal_at` are derived from the
+            // step's `next_action` — Complete/Failed mark the
+            // row terminal, everything else leaves it open.
+            let (phase_label, terminal_at) =
+                phase_and_terminal_from(&output.next_action, unix_now_ms());
+            self.store
+                .upsert_invocation_state(&InvocationStateRow {
+                    invocation_id: invocation_id.to_string(),
+                    agent_id: agent_id.clone(),
+                    schema_version: 1,
+                    phase: phase_label.to_string(),
+                    state_blob: output.state.clone(),
+                    iteration: step_index,
+                    started_at: started_at_ms,
+                    updated_at: unix_now_ms(),
+                    terminal_at,
+                    workspace_ref: None,
+                })
+                .await
+                .map_err(map_store_err)?;
             state = output.state;
 
             match output.next_action {
@@ -869,6 +893,25 @@ impl ReducerRunner {
 enum ModelOutcome {
     Response(ModelResponse),
     BudgetExceeded(f64),
+}
+
+/// Map the reducer's outgoing action to the `phase` label
+/// stored on the invocation_state row, and a `terminal_at`
+/// timestamp if the action is terminal.
+///
+/// Phase labels are operator-facing and used by recovery
+/// (step 6) to know what state the reducer was in. Deriving
+/// them from `next_action` keeps the runner from peeking into
+/// the reducer's opaque state blob.
+fn phase_and_terminal_from(action: &NextAction, now_ms: i64) -> (&'static str, Option<i64>) {
+    match action {
+        NextAction::Complete(_) => ("completed", Some(now_ms)),
+        NextAction::Failed(_) => ("failed", Some(now_ms)),
+        NextAction::CallModel(_) => ("awaiting_model", None),
+        NextAction::CallTool(_) | NextAction::CallToolsParallel(_) => {
+            ("dispatching_tools", None)
+        }
+    }
 }
 
 /// Current wall clock as Unix milliseconds. Used for WAL
@@ -1869,5 +1912,107 @@ mod tests {
                 .is_empty(),
             "tool error must not leave the row in `dispatched`"
         );
+    }
+
+    // -----------------------------------------------------------
+    // Step 5: per-step state persistence.
+    //
+    // These tests verify that the runner writes an
+    // `invocation_state` row at every step boundary and marks
+    // the row terminal on Complete/Failed. The matching
+    // recovery / resume semantics live in step 6 — these tests
+    // only assert the persistence side.
+    // -----------------------------------------------------------
+
+    #[tokio::test]
+    async fn state_row_written_on_completion_with_terminal_at_set() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        let agent_id = unique_agent_id("step5-state-completion");
+        let agent = simple_responder_agent(&agent_id);
+        let (store, events) = run_with_wal(
+            &url,
+            agent,
+            vec![end_turn_response("done.")],
+            6,
+            None,
+        )
+        .await;
+
+        let inv_str = events[0].invocation_id.to_string();
+        let row = store
+            .get_invocation_state(&inv_str)
+            .await
+            .unwrap()
+            .expect("state row should exist after run");
+
+        assert_eq!(row.invocation_id, inv_str);
+        assert_eq!(row.phase, "completed");
+        assert!(
+            row.terminal_at.is_some(),
+            "terminal_at must be set on Complete"
+        );
+        assert!(
+            !row.state_blob.is_empty(),
+            "state_blob must contain the reducer's final state"
+        );
+        assert_eq!(row.workspace_ref, None);
+        // The state blob is reducer-readable JSON.
+        let _: serde_json::Value = serde_json::from_slice(&row.state_blob)
+            .expect("state_blob deserialises as JSON");
+    }
+
+    #[tokio::test]
+    async fn state_row_iteration_advances_with_each_step() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        // A two-turn invocation (tool call + final summary) goes
+        // through enough reducer steps that `iteration` should
+        // advance past 0.
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("hello.md");
+        std::fs::write(&target, "# hi").unwrap();
+
+        let agent_id = unique_agent_id("step5-state-iter");
+        let agent = Agent::builder()
+            .id(&agent_id)
+            .model("claude-haiku")
+            .system_prompt("Use tools.")
+            .tools(["file_read"])
+            .sandbox(Sandbox::new().fs_read(dir.path().to_string_lossy().to_string()))
+            .budget(1.0)
+            .build()
+            .unwrap();
+
+        let responses = vec![
+            tool_call_response(
+                "file_read",
+                "tc_iter",
+                json!({"path": target.to_string_lossy().to_string()}),
+            ),
+            end_turn_response("read."),
+        ];
+
+        let (store, events) = run_with_wal(&url, agent, responses, 13, Some(dir.path())).await;
+        let inv_str = events[0].invocation_id.to_string();
+        let row = store
+            .get_invocation_state(&inv_str)
+            .await
+            .unwrap()
+            .expect("state row");
+        assert_eq!(row.phase, "completed");
+        assert!(
+            row.iteration > 0,
+            "iteration must advance past 0 for a multi-step invocation; got {}",
+            row.iteration
+        );
+        assert!(row.started_at <= row.updated_at);
+        assert!(row.terminal_at.unwrap_or(0) >= row.updated_at);
     }
 }

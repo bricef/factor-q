@@ -61,7 +61,22 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   LLM call that fails has a non-ambiguous final state
 ///   (`completed` with `is_error=1`) rather than being stuck
 ///   in `dispatched` and surfacing as ambiguous on recovery.
-pub const WORKER_SCHEMA_VERSION: u32 = 2;
+/// - **v3** — adds `workspace_ref TEXT NULL` to
+///   `invocation_state`. The column is currently unused (always
+///   `NULL`); it reserves the slot for a future
+///   workspace-storage layer (likely content-addressed) without
+///   forcing a schema change at that point. See
+///   data-architecture.md §3.3.
+pub const WORKER_SCHEMA_VERSION: u32 = 3;
+
+/// Soft warning threshold for the `state_blob` size, in bytes.
+/// At this size, a write logs a warning to give the operator
+/// data on whether the inline-in-SQLite assumption is holding.
+/// If the threshold is regularly crossed, the architectural
+/// next step is to move blobs to a filesystem layer with the
+/// `state_blob` column becoming a reference. See
+/// data-architecture.md §6 and the step-5 design discussion.
+pub const STATE_BLOB_WARN_THRESHOLD_BYTES: usize = 10 * 1024 * 1024;
 
 const SCHEMA_META_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -126,6 +141,14 @@ const WORKER_MIGRATION_V2_SQL: &str = r#"
 ALTER TABLE llm_dispatch ADD COLUMN is_error INTEGER;
 "#;
 
+/// v3 migration: add `workspace_ref` to `invocation_state`.
+///
+/// Reserves the column for a future workspace-storage layer.
+/// Currently always populated as NULL.
+const WORKER_MIGRATION_V3_SQL: &str = r#"
+ALTER TABLE invocation_state ADD COLUMN workspace_ref TEXT;
+"#;
+
 /// One of the three WAL states a dispatch can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchStatus {
@@ -188,6 +211,11 @@ pub struct LlmDispatchRow {
 }
 
 /// One in-flight invocation row.
+///
+/// `state_blob` holds the reducer's conversation state only —
+/// not the agent's filesystem state, which is a separate
+/// future concern (see `workspace_ref`). See data-architecture.md
+/// §3.3 and the step-5 design discussion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvocationStateRow {
     pub invocation_id: String,
@@ -199,6 +227,11 @@ pub struct InvocationStateRow {
     pub started_at: i64,
     pub updated_at: i64,
     pub terminal_at: Option<i64>,
+    /// Reference to the agent's workspace state at the time
+    /// this row was last written. Currently always `None`;
+    /// reserved for the future workspace-storage layer
+    /// (likely content-addressed).
+    pub workspace_ref: Option<String>,
 }
 
 /// Worker-side store. Cheap to clone (the underlying connection
@@ -327,7 +360,12 @@ impl WorkerStore {
                 sqlx::query(&stmt).execute(&self.pool).await?;
             }
         }
-        // Future migrations: 2 → 3, 3 → 4, etc.
+        if from < 3 && to >= 3 {
+            for stmt in split_sql(WORKER_MIGRATION_V3_SQL) {
+                sqlx::query(&stmt).execute(&self.pool).await?;
+            }
+        }
+        // Future migrations: 3 → 4, 4 → 5, etc.
         Ok(())
     }
 
@@ -623,25 +661,37 @@ impl WorkerStore {
     // Invocation-state operations.
     // -----------------------------------------------------------
 
-    /// Insert or update an invocation's persisted state. Used
-    /// once per reducer step boundary in v1 (step 5 wires this
-    /// into [`crate::ReducerRunner`]).
+    /// Insert or update an invocation's persisted state.
+    ///
+    /// Logs a warning at [`STATE_BLOB_WARN_THRESHOLD_BYTES`] —
+    /// useful telemetry on whether the inline-in-SQLite
+    /// assumption is holding for the operator's workload.
     pub async fn upsert_invocation_state(
         &self,
         row: &InvocationStateRow,
     ) -> Result<(), WorkerStoreError> {
+        if row.state_blob.len() > STATE_BLOB_WARN_THRESHOLD_BYTES {
+            tracing::warn!(
+                invocation_id = %row.invocation_id,
+                agent_id = %row.agent_id,
+                blob_size_bytes = row.state_blob.len(),
+                threshold_bytes = STATE_BLOB_WARN_THRESHOLD_BYTES,
+                "state_blob exceeds soft threshold; consider moving to filesystem-backed storage"
+            );
+        }
         sqlx::query(
             r#"
             INSERT INTO invocation_state
                 (invocation_id, agent_id, schema_version, phase, state_blob,
-                 iteration, started_at, updated_at, terminal_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 iteration, started_at, updated_at, terminal_at, workspace_ref)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(invocation_id) DO UPDATE SET
                 phase = excluded.phase,
                 state_blob = excluded.state_blob,
                 iteration = excluded.iteration,
                 updated_at = excluded.updated_at,
-                terminal_at = excluded.terminal_at
+                terminal_at = excluded.terminal_at,
+                workspace_ref = excluded.workspace_ref
             "#,
         )
         .bind(&row.invocation_id)
@@ -653,6 +703,7 @@ impl WorkerStore {
         .bind(row.started_at)
         .bind(row.updated_at)
         .bind(row.terminal_at)
+        .bind(&row.workspace_ref)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -666,7 +717,7 @@ impl WorkerStore {
         let row = sqlx::query(
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   iteration, started_at, updated_at, terminal_at
+                   iteration, started_at, updated_at, terminal_at, workspace_ref
             FROM invocation_state
             WHERE invocation_id = ?
             "#,
@@ -689,7 +740,7 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   iteration, started_at, updated_at, terminal_at
+                   iteration, started_at, updated_at, terminal_at, workspace_ref
             FROM invocation_state
             WHERE terminal_at IS NULL
             ORDER BY started_at
@@ -803,6 +854,7 @@ fn row_to_invocation_state(
         started_at: row.get("started_at"),
         updated_at: row.get("updated_at"),
         terminal_at: row.get("terminal_at"),
+        workspace_ref: row.get("workspace_ref"),
     })
 }
 
@@ -1119,6 +1171,7 @@ mod tests {
             started_at: 1_000,
             updated_at: 1_010,
             terminal_at: None,
+            workspace_ref: None,
         };
         store.upsert_invocation_state(&row).await.unwrap();
         let back = store.get_invocation_state("inv-x").await.unwrap().unwrap();
@@ -1147,6 +1200,7 @@ mod tests {
             started_at: 1,
             updated_at: 1,
             terminal_at: None,
+            workspace_ref: None,
         };
         let mut done = alive.clone();
         done.invocation_id = "done".to_string();
@@ -1174,6 +1228,7 @@ mod tests {
             started_at: 1,
             updated_at: 1,
             terminal_at: Some(2),
+            workspace_ref: None,
         };
         store.upsert_invocation_state(&row).await.unwrap();
         let n = store.delete_invocation_state("to-delete").await.unwrap();
@@ -1343,6 +1398,80 @@ mod tests {
         assert_eq!(ambiguous.len(), 1);
         assert_eq!(ambiguous[0].invocation_id, "inv2");
         assert_eq!(ambiguous[0].request_id, "r2");
+    }
+
+    #[tokio::test]
+    async fn v2_to_v3_migration_adds_workspace_ref_column() {
+        // Pre-populate a v2 DB (initial tables + the v2
+        // is_error column on llm_dispatch, but no workspace_ref
+        // on invocation_state). Open with current binary;
+        // verify the v3 migration adds workspace_ref without
+        // disturbing existing rows.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.db");
+
+        {
+            let url = format!("sqlite://{}?mode=rwc", path.display());
+            let opts = SqliteConnectOptions::from_str(&url).unwrap();
+            let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+            for stmt in split_sql(SCHEMA_META_SQL) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            for stmt in split_sql(WORKER_TABLES_V1_SQL) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            for stmt in split_sql(WORKER_MIGRATION_V2_SQL) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)")
+                .bind(SCHEMA_CLASS)
+                .bind(2_i64)
+                .bind(0_i64)
+                .execute(&pool)
+                .await
+                .unwrap();
+            // Pre-existing v2 row.
+            sqlx::query(
+                "INSERT INTO invocation_state (invocation_id, agent_id, schema_version, phase, state_blob, iteration, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("legacy-inv")
+            .bind("a")
+            .bind(1_i64)
+            .bind("awaiting_model")
+            .bind(b"".as_slice())
+            .bind(0_i64)
+            .bind(1_i64)
+            .bind(1_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        let store = WorkerStore::open(&path).await.expect("migrate v2 -> v3");
+        assert_eq!(
+            store.read_schema_version().await.unwrap(),
+            Some(WORKER_SCHEMA_VERSION)
+        );
+
+        // Existing row preserved; workspace_ref reads as None.
+        let pre = store
+            .get_invocation_state("legacy-inv")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pre.workspace_ref, None);
+
+        // Future writes can populate workspace_ref.
+        let mut updated = pre.clone();
+        updated.workspace_ref = Some("placeholder-ref".to_string());
+        store.upsert_invocation_state(&updated).await.unwrap();
+        let post = store
+            .get_invocation_state("legacy-inv")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(post.workspace_ref, Some("placeholder-ref".to_string()));
     }
 
     #[tokio::test]
