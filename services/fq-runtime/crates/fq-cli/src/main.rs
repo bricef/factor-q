@@ -986,26 +986,14 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                         "failed to publish invocation.ambiguous"
                     );
                 }
-                // Mark in coordination so `fq invocation list`
-                // and `fq recover` (step 9) can find it.
-                // Upsert: the trigger-dispatch path doesn't yet
-                // populate ownership rows (later plan step), so
-                // recovery may be the first writer.
-                if let Err(err) = cp_store
-                    .upsert_invocation_ownership(
-                        &inv.state.invocation_id,
-                        &worker_id,
-                        inv.state.started_at,
-                        fq_runtime::OwnerStatus::Ambiguous,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        invocation_id = %inv.state.invocation_id,
-                        error = %err,
-                        "failed to mark invocation ambiguous in coordination store"
-                    );
-                }
+                // The coordination consumer (spawned below)
+                // picks up the `invocation.ambiguous` event we
+                // just published and upserts the
+                // coordination_invocation_owner row. v1
+                // collapsed-process used to write directly
+                // here; that's now the consumer's job, which
+                // matches v2's split-process expectation
+                // (worker emits, control-plane writes).
             }
         }
     }
@@ -1170,6 +1158,16 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let mut projection_handle =
         tokio::spawn(async move { projection_consumer.run(proj_shutdown_rx).await });
 
+    // Spawn the coordination consumer. Subscribes to
+    // invocation lifecycle events and maintains the
+    // coordination_invocation_owner / coordination_worker
+    // state. Stale-worker sweep runs on a timer.
+    let (coord_shutdown_tx, coord_shutdown_rx) = tokio::sync::oneshot::channel();
+    let coord_consumer = fq_runtime::CoordinationConsumer::new(bus.clone(), cp_store.clone())
+        .with_self_worker_id(worker_id.clone());
+    let mut coord_handle =
+        tokio::spawn(async move { coord_consumer.run(coord_shutdown_rx).await });
+
     // Spawn the trigger dispatcher.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
     let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker, llm);
@@ -1209,6 +1207,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             let err_msg = describe_task_result("projection consumer", result);
             ("task_failed", false, Some(("projection_consumer", err_msg)))
         }
+        result = &mut coord_handle => {
+            let err_msg = describe_task_result("coordination consumer", result);
+            ("task_failed", false, Some(("coordination_consumer", err_msg)))
+        }
         result = &mut dispatcher_handle => {
             let err_msg = describe_task_result("trigger dispatcher", result);
             ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
@@ -1240,6 +1242,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // done (the one that returned from the select), but sending
     // on a oneshot whose receiver was dropped is a no-op.
     let _ = proj_shutdown_tx.send(());
+    let _ = coord_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
@@ -1247,6 +1250,12 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Ok(Ok(Err(err))) => tracing::error!(error = %err, "projection consumer exited with error"),
         Ok(Err(err)) => tracing::error!(error = %err, "projection consumer task panicked"),
         Err(_) => tracing::warn!("projection consumer did not shut down within 5s"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), coord_handle).await {
+        Ok(Ok(Ok(()))) => println!("  coordination consumer stopped cleanly."),
+        Ok(Ok(Err(err))) => tracing::error!(error = %err, "coordination consumer exited with error"),
+        Ok(Err(err)) => tracing::error!(error = %err, "coordination consumer task panicked"),
+        Err(_) => tracing::warn!("coordination consumer did not shut down within 5s"),
     }
     match tokio::time::timeout(std::time::Duration::from_secs(5), dispatcher_handle).await {
         Ok(Ok(Ok(()))) => println!("  trigger dispatcher stopped cleanly."),

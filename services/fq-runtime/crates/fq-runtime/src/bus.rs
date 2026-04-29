@@ -311,6 +311,43 @@ impl EventBus {
         Ok(consumer)
     }
 
+    /// Durable JetStream consumer scoped to a subject filter.
+    ///
+    /// Used by the coordination consumer (step 7) which only
+    /// cares about a small subset of events
+    /// (`fq.agent.*.invocation.*`); subscribing to the whole
+    /// event stream would force every coordination consumer
+    /// instance to handle messages it doesn't act on.
+    pub async fn durable_consumer_with_filter(
+        &self,
+        name: &str,
+        filter_subject: &str,
+    ) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            filter = filter_subject,
+            "getting/creating filtered durable JetStream consumer"
+        );
+        let stream = self
+            .jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let consumer = stream
+            .get_or_create_consumer(
+                name,
+                consumer::pull::Config {
+                    durable_name: Some(name.to_string()),
+                    filter_subject: filter_subject.to_string(),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        Ok(consumer)
+    }
+
     /// Subscribe to events matching a subject filter.
     ///
     /// Uses core NATS subscribe (not a durable JetStream consumer), so the

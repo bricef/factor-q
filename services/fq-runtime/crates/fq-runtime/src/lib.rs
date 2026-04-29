@@ -45,7 +45,8 @@ pub use config::Config;
 pub use control_plane::dispatcher::{DispatcherError, TriggerDispatcher};
 pub use control_plane::projection::{ProjectionConsumer, ProjectionStore};
 pub use control_plane::{
-    CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError, OwnerStatus,
+    CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError, CoordinationConsumer,
+    CoordinationConsumerError, OwnerStatus,
 };
 pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
 pub use mcp::{McpClientManager, McpError, McpServerConfig};

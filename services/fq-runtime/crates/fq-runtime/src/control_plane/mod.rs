@@ -22,10 +22,12 @@
 //! pending waits, completed-invocation archive) lands here as
 //! the `data-architecture-v1` plan steps progress.
 
+pub mod coordination_consumer;
 pub mod dispatcher;
 pub mod projection;
 pub mod store;
 
+pub use coordination_consumer::{CoordinationConsumer, CoordinationConsumerError};
 pub use store::{
     CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError,
     InvocationArchiveRow, OwnerRow, OwnerStatus, PendingWaitRow, ScheduleEntryRow, WorkerRow,
