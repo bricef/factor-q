@@ -40,7 +40,9 @@ use crate::events::{
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
-use crate::worker::store::{InvocationStateRow, WorkerStore};
+use crate::worker::store::{
+    DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow, WorkerStore,
+};
 use crate::worker::{ExecutorError, InvocationOutcome};
 
 /// Soft cap on the number of `step()` calls per invocation.
@@ -89,7 +91,7 @@ impl ReducerRunner {
         let invocation_id = Uuid::now_v7();
         let start = Instant::now();
         let agent_id = agent.id().as_str().to_string();
-        let mut totals = InvocationTotals::default();
+        let totals = InvocationTotals::default();
 
         info!(
             agent_id = %agent_id,
@@ -132,11 +134,205 @@ impl ReducerRunner {
         ))
         .await?;
 
+        let state: Vec<u8> = Vec::new();
+        let last_result: Option<CapabilityResult> = None;
+        let started_at_ms = unix_now_ms();
+        let step_index_start: u32 = 0;
+
+        self.run_loop_inner(
+            reducer,
+            agent,
+            llm,
+            invocation_id,
+            &agent_id,
+            &agent_config,
+            &trigger,
+            &sandbox,
+            state,
+            last_result,
+            step_index_start,
+            totals,
+            start,
+            started_at_ms,
+        )
+        .await
+    }
+
+    /// Resume an in-flight invocation that was persisted but
+    /// not terminal. Loads the state row, deterministically
+    /// replays the reducer through every completed WAL action
+    /// to rebuild `state` and `last_result`, then continues
+    /// the run loop from there.
+    ///
+    /// **Refuses ambiguous invocations** (any WAL row in
+    /// `dispatched` state). Those need operator triage via
+    /// `fq recover` (step 9) per the §3.4 contract; the
+    /// runtime cannot auto-resume them under the
+    /// tool-idempotency constraint.
+    ///
+    /// Re-running a pending intent (intent-only WAL row) is
+    /// safe: the loop's normal flow re-emits the intent (idempotent
+    /// `INSERT OR REPLACE`), runs the action, and continues.
+    /// No special handling needed.
+    pub async fn resume<R: Reducer + Send + Sync>(
+        &self,
+        reducer: &R,
+        agent: &Agent,
+        llm: &dyn LlmClient,
+        invocation_id: Uuid,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        let inv_str = invocation_id.to_string();
+        let state_row = self
+            .store
+            .get_invocation_state(&inv_str)
+            .await
+            .map_err(map_store_err)?
+            .ok_or_else(|| {
+                ExecutorError::WorkerStore(format!(
+                    "no state row for {invocation_id}; nothing to resume"
+                ))
+            })?;
+        if state_row.terminal_at.is_some() {
+            return Err(ExecutorError::WorkerStore(format!(
+                "invocation {invocation_id} is already terminal; nothing to resume"
+            )));
+        }
+
+        let agent_id = state_row.agent_id.clone();
+        info!(
+            invocation_id = %invocation_id,
+            agent_id = %agent_id,
+            "resuming reducer invocation"
+        );
+
+        // Refuse ambiguous WAL state.
+        let tools = self
+            .store
+            .list_tool_dispatches_for_invocation(&inv_str)
+            .await
+            .map_err(map_store_err)?;
+        let llms = self
+            .store
+            .list_llm_dispatches_for_invocation(&inv_str)
+            .await
+            .map_err(map_store_err)?;
+        if tools.iter().any(|r| r.status == DispatchStatus::Dispatched)
+            || llms.iter().any(|r| r.status == DispatchStatus::Dispatched)
+        {
+            return Err(ExecutorError::WorkerStore(format!(
+                "invocation {invocation_id} has ambiguous WAL state; \
+                 use `fq recover` to triage"
+            )));
+        }
+
+        // Build chronological list of completed capabilities.
+        let mut completed: Vec<(i64, CapabilityResult)> = Vec::new();
+        for r in &tools {
+            if r.status == DispatchStatus::Completed {
+                completed.push((r.completed_at.unwrap_or(0), tool_row_to_capability(r)));
+            }
+        }
+        for r in &llms {
+            if r.status == DispatchStatus::Completed {
+                completed.push((
+                    r.completed_at.unwrap_or(0),
+                    llm_row_to_capability(r)?,
+                ));
+            }
+        }
+        completed.sort_by_key(|x| x.0);
+
+        // Set up agent context (mirrors run()).
+        let sandbox = agent.sandbox().to_tool_sandbox();
+        let tool_schemas = self.tools.build_schemas(agent.tools());
+        let agent_config = AgentConfig {
+            agent_id: agent_id.clone(),
+            model: agent.model().to_string(),
+            system_prompt: agent.system_prompt().to_string(),
+            tools_available: tool_schemas,
+            allowed_tool_names: agent.tools().to_vec(),
+            max_iterations: 0,
+        };
+        // Trigger payload is past us: the original `triggered`
+        // event was emitted on initial run. Pass a null trigger;
+        // the harness only consumes it on step 0, which we've
+        // moved past via replay.
+        let trigger = TriggerPayload {
+            source: TriggerSourceKind::Manual,
+            subject: None,
+            payload: Value::Null,
+        };
+
+        // Replay the reducer deterministically through every
+        // completed action. The reducer is pure; reading the
+        // sequence of (state, last_result, step_index) tuples
+        // out of nothing rebuilds state cheaply.
         let mut state: Vec<u8> = Vec::new();
         let mut last_result: Option<CapabilityResult> = None;
-        let started_at_ms = unix_now_ms();
+        let mut step_index: u32 = 0;
+        for (_, capability) in &completed {
+            let input = StepInput {
+                config: agent_config.clone(),
+                trigger: trigger.clone(),
+                state,
+                last_result,
+                now_ms: now_ms(),
+                random_seed: rand_u64(),
+                step_index,
+            };
+            let output = reducer.step(input).map_err(|e| {
+                ExecutorError::WorkerStore(format!("replay step {step_index} failed: {e}"))
+            })?;
+            state = output.state;
+            last_result = Some(capability.clone());
+            step_index += 1;
+        }
 
-        for step_index in 0..HOST_STEP_BUDGET {
+        // Continue the loop from the replayed point.
+        let totals = InvocationTotals::default();
+        let start = Instant::now();
+        self.run_loop_inner(
+            reducer,
+            agent,
+            llm,
+            invocation_id,
+            &agent_id,
+            &agent_config,
+            &trigger,
+            &sandbox,
+            state,
+            last_result,
+            step_index,
+            totals,
+            start,
+            state_row.started_at,
+        )
+        .await
+    }
+
+    /// The reducer-loop body extracted so `run` and `resume`
+    /// can share it. Caller threads in the prepared
+    /// `(state, last_result, step_index, totals)` plus all the
+    /// invocation-scoped context.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_loop_inner<R: Reducer + Send + Sync>(
+        &self,
+        reducer: &R,
+        agent: &Agent,
+        llm: &dyn LlmClient,
+        invocation_id: Uuid,
+        agent_id: &str,
+        agent_config: &AgentConfig,
+        trigger: &TriggerPayload,
+        sandbox: &ToolSandbox,
+        mut state: Vec<u8>,
+        mut last_result: Option<CapabilityResult>,
+        step_index_start: u32,
+        mut totals: InvocationTotals,
+        start: Instant,
+        started_at_ms: i64,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        for step_index in step_index_start..HOST_STEP_BUDGET {
             let input = StepInput {
                 config: agent_config.clone(),
                 trigger: trigger.clone(),
@@ -177,7 +373,7 @@ impl ReducerRunner {
             self.store
                 .upsert_invocation_state(&InvocationStateRow {
                     invocation_id: invocation_id.to_string(),
-                    agent_id: agent_id.clone(),
+                    agent_id: agent_id.to_string(),
                     schema_version: 1,
                     phase: phase_label.to_string(),
                     state_blob: output.state.clone(),
@@ -197,7 +393,7 @@ impl ReducerRunner {
                     totals.total_duration_ms = duration_ms;
                     let summary = if text.is_empty() { None } else { Some(text) };
                     self.publish(Event::new(
-                        agent_id.clone(),
+                        agent_id.to_string(),
                         invocation_id,
                         EventPayload::Completed(CompletedPayload {
                             result_summary: summary.clone(),
@@ -893,6 +1089,47 @@ impl ReducerRunner {
 enum ModelOutcome {
     Response(ModelResponse),
     BudgetExceeded(f64),
+}
+
+/// Reconstruct a [`CapabilityResult::ToolResult`] from a
+/// completed `tool_dispatch` row. Used by `resume()` to feed
+/// the result of a previously-completed action back into the
+/// reducer.
+fn tool_row_to_capability(row: &ToolDispatchRow) -> CapabilityResult {
+    CapabilityResult::ToolResult(ToolCallResult {
+        tool_call_id: row.tool_call_id.clone(),
+        output: row.result.clone().unwrap_or_default(),
+        is_error: row.is_error.unwrap_or(false),
+        error_kind: None,
+        duration_ms: 0,
+    })
+}
+
+/// Reconstruct a [`CapabilityResult::ModelResult`] from a
+/// completed `llm_dispatch` row. The stored response is
+/// the JSON-serialised `ChatResponse` from
+/// [`ReducerRunner::run_model_with_llm`].
+fn llm_row_to_capability(
+    row: &LlmDispatchRow,
+) -> Result<CapabilityResult, ExecutorError> {
+    let response_json = row.response.as_deref().ok_or_else(|| {
+        ExecutorError::WorkerStore(format!(
+            "completed llm_dispatch row {}/{} has no response",
+            row.invocation_id, row.request_id
+        ))
+    })?;
+    let response: ChatResponse = serde_json::from_str(response_json).map_err(|err| {
+        ExecutorError::WorkerStore(format!(
+            "failed to deserialise stored llm response for {}/{}: {err}",
+            row.invocation_id, row.request_id
+        ))
+    })?;
+    Ok(CapabilityResult::ModelResult(ModelResponse {
+        content: response.content,
+        tool_calls: response.tool_calls,
+        stop_reason: response.stop_reason,
+        usage: response.usage,
+    }))
 }
 
 /// Map the reducer's outgoing action to the `phase` label
@@ -1963,6 +2200,193 @@ mod tests {
         // The state blob is reducer-readable JSON.
         let _: serde_json::Value = serde_json::from_slice(&row.state_blob)
             .expect("state_blob deserialises as JSON");
+    }
+
+    #[tokio::test]
+    async fn resume_safe_replay_continues_to_completion() {
+        // Pre-populate a worker store so that resuming the
+        // invocation continues from a "step 0 complete, action
+        // 0 (LLM call) completed with end-turn" state — i.e.
+        // the safe-replay case. The reducer should pick up the
+        // persisted result, produce Complete, and finish.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        use crate::worker::reducer::types::{AgentConfig, StepInput, TriggerPayload, TriggerSourceKind};
+
+        let dir = tempdir().unwrap();
+        let store_path = dir.path().join("events.db");
+        let store = Arc::new(WorkerStore::open(&store_path).await.unwrap());
+
+        let agent_id_str = unique_agent_id("step6-resume-replay");
+        let agent = Agent::builder()
+            .id(&agent_id_str)
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .budget(1.0)
+            .build()
+            .unwrap();
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        // Manually run harness step 0 to produce the state we
+        // would have persisted at iteration=0 (post-step).
+        let harness = Harness::new();
+        let agent_config = AgentConfig {
+            agent_id: agent_id_str.clone(),
+            model: "claude-haiku".to_string(),
+            system_prompt: "You are a test agent.".to_string(),
+            tools_available: vec![],
+            allowed_tool_names: vec![],
+            max_iterations: 0,
+        };
+        let trigger = TriggerPayload {
+            source: TriggerSourceKind::Manual,
+            subject: None,
+            payload: json!("hello"),
+        };
+        let s0_input = StepInput {
+            config: agent_config.clone(),
+            trigger: trigger.clone(),
+            state: vec![],
+            last_result: None,
+            now_ms: 0,
+            random_seed: 0,
+            step_index: 0,
+        };
+        let s0_output = harness.step(s0_input).expect("step 0");
+
+        store
+            .upsert_invocation_state(&InvocationStateRow {
+                invocation_id: inv_str.clone(),
+                agent_id: agent_id_str.clone(),
+                schema_version: 1,
+                phase: "awaiting_model".to_string(),
+                state_blob: s0_output.state,
+                iteration: 0,
+                started_at: 1_000,
+                updated_at: 1_000,
+                terminal_at: None,
+                workspace_ref: None,
+            })
+            .await
+            .unwrap();
+
+        // Pre-populate a completed LLM dispatch row whose
+        // serialized response is end-turn.
+        let response = ChatResponse {
+            content: Some("done.".to_string()),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 50,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        };
+        let response_json = serde_json::to_string(&response).unwrap();
+        store
+            .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
+            .await
+            .unwrap();
+        store.write_llm_dispatched(&inv_str, "req-0", 2).await.unwrap();
+        store
+            .write_llm_completed(&inv_str, "req-0", &response_json, false, 0.0001, 3)
+            .await
+            .unwrap();
+
+        // Resume.
+        let bus = EventBus::connect(&url).await.unwrap();
+        let runner = ReducerRunner::new(
+            bus,
+            test_pricing(),
+            Arc::new(ToolRegistry::with_builtins()),
+            store.clone(),
+        );
+        let llm = FixtureClient::new(); // no live responses needed
+
+        let outcome = runner
+            .resume(&Harness::new(), &agent, &llm, invocation_id)
+            .await
+            .expect("resume completes");
+
+        match outcome {
+            InvocationOutcome::Completed {
+                invocation_id: inv,
+                response,
+                ..
+            } => {
+                assert_eq!(inv, invocation_id);
+                assert_eq!(response.content.as_deref(), Some("done."));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+
+        // State row is now terminal.
+        let row = store.get_invocation_state(&inv_str).await.unwrap().unwrap();
+        assert!(row.terminal_at.is_some());
+        assert_eq!(row.phase, "completed");
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_ambiguous_invocation() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("events.db"))
+                .await
+                .unwrap(),
+        );
+
+        let agent_id = unique_agent_id("step6-resume-refuse");
+        let agent = simple_responder_agent(&agent_id);
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        // State row + ambiguous tool dispatch (dispatched, no
+        // completed).
+        store
+            .upsert_invocation_state(&InvocationStateRow {
+                invocation_id: inv_str.clone(),
+                agent_id: agent_id.clone(),
+                schema_version: 1,
+                phase: "dispatching_tools".to_string(),
+                state_blob: vec![],
+                iteration: 0,
+                started_at: 1_000,
+                updated_at: 1_000,
+                terminal_at: None,
+                workspace_ref: None,
+            })
+            .await
+            .unwrap();
+        store.write_tool_intent(&inv_str, "tc1", "shell", "{}", 1).await.unwrap();
+        store.write_tool_dispatched(&inv_str, "tc1", 2).await.unwrap();
+        // No completed.
+
+        let bus = EventBus::connect(&url).await.unwrap();
+        let runner = ReducerRunner::new(
+            bus,
+            test_pricing(),
+            Arc::new(ToolRegistry::with_builtins()),
+            store,
+        );
+        let llm = FixtureClient::new();
+        let err = runner
+            .resume(&Harness::new(), &agent, &llm, invocation_id)
+            .await
+            .expect_err("resume should refuse ambiguous");
+        assert!(
+            format!("{err}").contains("ambiguous"),
+            "expected ambiguous error, got: {err}"
+        );
     }
 
     #[tokio::test]

@@ -360,7 +360,8 @@ fn extract_fields(payload: &EventPayload) -> Fields {
         // column is NULL.
         EventPayload::SystemStartup(_)
         | EventPayload::SystemShutdown(_)
-        | EventPayload::SystemTaskFailed(_) => Fields::default(),
+        | EventPayload::SystemTaskFailed(_)
+        | EventPayload::SystemRecovery(_) => Fields::default(),
     }
 }
 
@@ -380,6 +381,7 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
         EventPayload::SystemStartup(_) => "system_startup",
         EventPayload::SystemShutdown(_) => "system_shutdown",
         EventPayload::SystemTaskFailed(_) => "system_task_failed",
+        EventPayload::SystemRecovery(_) => "system_recovery",
     }
 }
 

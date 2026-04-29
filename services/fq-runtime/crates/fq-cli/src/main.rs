@@ -633,6 +633,10 @@ fn print_event(event: &Event) {
         EventPayload::SystemShutdown(p) => {
             format!("system.shutdown reason={} clean={}", p.reason, p.clean)
         }
+        EventPayload::SystemRecovery(p) => format!(
+            "system.recovery total={} safe_resume={} safe_replay={} ambiguous={}",
+            p.total, p.safe_resume, p.safe_replay, p.ambiguous
+        ),
         EventPayload::SystemTaskFailed(p) => format!(
             "system.task_failed task={} error={}",
             p.task_name, p.error_message
@@ -929,6 +933,24 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     for inv in &classified {
         counts.record(inv.category.clone());
     }
+    // Always emit system.recovery so historical recovery
+    // counts are queryable through the projection (even when
+    // there's nothing to recover — counts would all be zero
+    // and that's still informational for `fq events query`).
+    let recovery_event = Event::system(
+        runtime_id,
+        EventPayload::SystemRecovery(fq_runtime::events::SystemRecoveryPayload {
+            runtime_id,
+            worker_id: worker_id.clone(),
+            safe_resume: counts.safe_resume,
+            safe_replay: counts.safe_replay,
+            ambiguous: counts.ambiguous,
+            total: counts.total(),
+        }),
+    );
+    if let Err(err) = bus.publish(&recovery_event).await {
+        tracing::warn!(error = %err, "failed to publish system.recovery event");
+    }
     if counts.total() > 0 {
         println!(
             "  in-flight:        {} ({} safe-resume, {} safe-replay, {} ambiguous)",
@@ -988,6 +1010,19 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Stash the recoverable invocations for resume after the
+    // runner is constructed below.
+    let recoverable: Vec<_> = classified
+        .into_iter()
+        .filter(|c| {
+            matches!(
+                c.category,
+                fq_runtime::worker::RecoveryCategory::SafeResume
+                    | fq_runtime::worker::RecoveryCategory::SafeReplay
+            )
+        })
+        .collect();
+
     // Load pricing.
     let pricing_cache = config.cache.directory.join("pricing.json");
     let pricing = Arc::new(PricingTable::load(&pricing_cache).await);
@@ -1033,8 +1068,84 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
 
     let tools = Arc::new(tools);
     let llm: Arc<dyn LlmClient> = Arc::new(GenAiClient::new());
-    let worker: Arc<dyn fq_runtime::Worker> =
-        Arc::new(AgentExecutor::new(bus.clone(), pricing, tools));
+    let worker: Arc<dyn fq_runtime::Worker> = Arc::new(AgentExecutor::new(
+        bus.clone(),
+        pricing.clone(),
+        tools.clone(),
+    ));
+    // A separate ReducerRunner handles auto-resume of in-flight
+    // invocations. The dispatcher (above) uses the legacy
+    // AgentExecutor for new triggers; resumes need the
+    // reducer-path runner because the WAL is wired through it.
+    let resume_runner = Arc::new(fq_runtime::ReducerRunner::new(
+        bus.clone(),
+        pricing,
+        tools,
+        worker_store.clone(),
+    ));
+
+    // Spawn auto-resume tasks for each safe-resume / safe-replay
+    // invocation found by the recovery scan. Ambiguous cases
+    // were already surfaced; safe cases proceed automatically.
+    // Each resume runs as a detached task — if one fails, others
+    // continue. The resume-runner shares the same NATS bus and
+    // tool registry as new triggers.
+    let resume_count = recoverable.len();
+    for inv in recoverable {
+        let inv_id = match uuid::Uuid::parse_str(&inv.state.invocation_id) {
+            Ok(id) => id,
+            Err(err) => {
+                tracing::warn!(
+                    invocation_id = %inv.state.invocation_id,
+                    error = %err,
+                    "invalid invocation_id; skipping resume"
+                );
+                continue;
+            }
+        };
+        let agent_id = match fq_runtime::AgentId::new(&inv.state.agent_id) {
+            Ok(id) => id,
+            Err(err) => {
+                tracing::warn!(
+                    agent_id = %inv.state.agent_id,
+                    error = %err,
+                    "invalid agent_id; skipping resume"
+                );
+                continue;
+            }
+        };
+        let loaded = match registry.get_loaded(&agent_id) {
+            Some(l) => l,
+            None => {
+                tracing::warn!(
+                    agent_id = %inv.state.agent_id,
+                    "agent not in registry; skipping resume — drop the invocation manually"
+                );
+                continue;
+            }
+        };
+        let agent = loaded.agent.clone();
+        let runner = resume_runner.clone();
+        let llm_arc = llm.clone();
+        tokio::spawn(async move {
+            let harness = fq_runtime::Harness::new();
+            match runner.resume(&harness, &agent, llm_arc.as_ref(), inv_id).await {
+                Ok(outcome) => tracing::info!(
+                    invocation_id = %inv_id,
+                    ?outcome,
+                    "resume completed"
+                ),
+                Err(err) => tracing::warn!(
+                    invocation_id = %inv_id,
+                    error = %err,
+                    "resume failed"
+                ),
+            }
+        });
+    }
+    if resume_count > 0 {
+        println!("  resume tasks:     {resume_count} spawned");
+    }
 
     // Publish a system.startup event before spawning any tasks.
     // If this fails the daemon cannot produce lifecycle events at

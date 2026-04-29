@@ -14,6 +14,7 @@ pub mod subjects {
     pub const SYSTEM_STARTUP: &str = "fq.system.startup";
     pub const SYSTEM_SHUTDOWN: &str = "fq.system.shutdown";
     pub const SYSTEM_TASK_FAILED: &str = "fq.system.task_failed";
+    pub const SYSTEM_RECOVERY: &str = "fq.system.recovery";
 
     pub fn agent_triggered(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.triggered")
@@ -123,6 +124,7 @@ impl Event {
             EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
             EventPayload::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
             EventPayload::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
+            EventPayload::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
         }
     }
 }
@@ -163,6 +165,15 @@ pub enum EventPayload {
     SystemStartup(SystemStartupPayload),
     SystemShutdown(SystemShutdownPayload),
     SystemTaskFailed(SystemTaskFailedPayload),
+
+    /// Emitted once per daemon startup with the counts of
+    /// in-flight invocations classified by recovery category
+    /// (data-architecture.md §7.1). The projection records
+    /// these so operators can see recovery history via
+    /// `fq events query --type=system_recovery` without
+    /// needing a Prometheus-style endpoint. A live snapshot
+    /// is also available via `fq status`.
+    SystemRecovery(SystemRecoveryPayload),
 }
 
 /// Published when an agent invocation begins.
@@ -481,6 +492,33 @@ pub struct SystemTaskFailedPayload {
     /// `projection_consumer`, `trigger_dispatcher`).
     pub task_name: String,
     pub error_message: String,
+}
+
+/// Counts of in-flight invocations classified by recovery
+/// category at daemon startup. Emitted once per `fq run`
+/// after the worker recovery scan completes.
+///
+/// The same counts are surfaced live via `fq status`; this
+/// event records the snapshot so historical recovery
+/// behaviour is queryable through the existing event
+/// projection (`fq events query --type=system_recovery`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRecoveryPayload {
+    pub runtime_id: Uuid,
+    pub worker_id: String,
+    /// Number of invocations classified as safe-resume
+    /// (intent-only or no dispatches; can be auto-recovered
+    /// by re-running from the persisted state).
+    pub safe_resume: u32,
+    /// Number of invocations classified as safe-replay
+    /// (action completed; result fed to next reducer step).
+    pub safe_replay: u32,
+    /// Number of invocations classified as ambiguous
+    /// (dispatched-without-completed; surfaced to operator
+    /// rather than auto-recovered).
+    pub ambiguous: u32,
+    /// Total = safe_resume + safe_replay + ambiguous.
+    pub total: u32,
 }
 
 #[cfg(test)]

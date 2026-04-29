@@ -373,9 +373,15 @@ impl WorkerStore {
     // Tool-dispatch WAL operations.
     // -----------------------------------------------------------
 
-    /// Record `intent` for a tool dispatch. Inserts a fresh row;
-    /// fails if a row for the same `(invocation_id, tool_call_id)`
-    /// already exists.
+    /// Record `intent` for a tool dispatch.
+    ///
+    /// Idempotent on `(invocation_id, tool_call_id)` via
+    /// `INSERT OR REPLACE`: re-issuing intent during recovery
+    /// (when a stale row exists from a crash) succeeds. The
+    /// stale row is overwritten with fresh `intent_at`. Safe
+    /// because the row's later transitions
+    /// (`dispatched`/`completed`) are also tied to the same
+    /// PK, so concurrent transitions can't race.
     pub async fn write_tool_intent(
         &self,
         invocation_id: &str,
@@ -386,7 +392,7 @@ impl WorkerStore {
     ) -> Result<(), WorkerStoreError> {
         sqlx::query(
             r#"
-            INSERT INTO tool_dispatch
+            INSERT OR REPLACE INTO tool_dispatch
                 (invocation_id, tool_call_id, tool_name, status, parameters, intent_at)
             VALUES (?, ?, ?, ?, ?, ?)
             "#,
@@ -522,6 +528,9 @@ impl WorkerStore {
     // semantics.
     // -----------------------------------------------------------
 
+    /// Record `intent` for an LLM dispatch. Idempotent via
+    /// `INSERT OR REPLACE`; same reasoning as
+    /// [`Self::write_tool_intent`].
     pub async fn write_llm_intent(
         &self,
         invocation_id: &str,
@@ -532,7 +541,7 @@ impl WorkerStore {
     ) -> Result<(), WorkerStoreError> {
         sqlx::query(
             r#"
-            INSERT INTO llm_dispatch
+            INSERT OR REPLACE INTO llm_dispatch
                 (invocation_id, request_id, model, status, request_payload, intent_at)
             VALUES (?, ?, ?, ?, ?, ?)
             "#,
