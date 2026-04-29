@@ -1070,19 +1070,5 @@ mod tests {
         assert!(saw_failed, "did not see Failed event");
     }
 
-    fn event_kind(e: &Event) -> &'static str {
-        match &e.payload {
-            EventPayload::Triggered(_) => "triggered",
-            EventPayload::LlmRequest(_) => "llm_request",
-            EventPayload::LlmResponse(_) => "llm_response",
-            EventPayload::ToolCall(_) => "tool_call",
-            EventPayload::ToolResult(_) => "tool_result",
-            EventPayload::Cost(_) => "cost",
-            EventPayload::Completed(_) => "completed",
-            EventPayload::Failed(_) => "failed",
-            EventPayload::SystemStartup(_) => "system_startup",
-            EventPayload::SystemShutdown(_) => "system_shutdown",
-            EventPayload::SystemTaskFailed(_) => "system_task_failed",
-        }
-    }
+    use crate::test_support::events::event_kind;
 }

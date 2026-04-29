@@ -12,6 +12,9 @@ pub mod projection;
 pub mod reducer;
 pub mod tools;
 
+#[cfg(test)]
+pub mod test_support;
+
 pub use agent::{Agent, AgentId, AgentRegistry, McpServerDeclaration, Sandbox};
 pub use bus::EventBus;
 pub use config::Config;

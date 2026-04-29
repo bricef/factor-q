@@ -567,49 +567,40 @@ mod tests {
         // The crux of the suspend/resume claim: drop the reducer
         // mid-flight, recreate it, feed in the persisted state,
         // and continue with no observable difference.
-        let h1 = Harness::new();
-        let s0 = h1.step(step_input(vec![], None, 0)).unwrap();
-        let s1 = h1
-            .step(step_input(
-                s0.state,
-                Some(CapabilityResult::ModelResult(tool_use_response(
-                    "echo",
-                    "call_1",
-                    json!({}),
-                ))),
-                1,
-            ))
-            .unwrap();
-        let suspended_state = s1.state.clone();
+        //
+        // Implemented via the shared `ManualStepper` helper, which
+        // is the same primitive crash-simulation tests will use
+        // once the WAL lands.
+        use crate::test_support::stepper::ManualStepper;
 
-        // Drop the first harness, instantiate a fresh one.
-        drop(h1);
-        let h2 = Harness::new();
+        let mut s1 = ManualStepper::new(Harness::new(), config(), trigger(json!("hello")));
+        let _ = s1.step(None);
+        let _ = s1.step(Some(CapabilityResult::ModelResult(tool_use_response(
+            "echo",
+            "call_1",
+            json!({}),
+        ))));
 
-        let s2 = h2
-            .step(step_input(
-                suspended_state,
-                Some(CapabilityResult::ToolResult(ToolCallResult {
-                    tool_call_id: "call_1".to_string(),
-                    output: "echoed".to_string(),
-                    is_error: false,
-                    error_kind: None,
-                    duration_ms: 1,
-                })),
-                2,
-            ))
-            .unwrap();
-        let s3 = h2
-            .step(step_input(
-                s2.state,
-                Some(CapabilityResult::ModelResult(end_turn_response(
-                    "after-resume.",
-                ))),
-                3,
-            ))
-            .unwrap();
+        let snapshot = s1.snapshot_state();
+        let saved_index = s1.step_index();
+        drop(s1);
 
-        match s3.next_action {
+        let mut s2 = ManualStepper::new(Harness::new(), config(), trigger(json!("hello")));
+        s2.restore_state(snapshot);
+        s2.set_step_index(saved_index);
+
+        let _ = s2.step(Some(CapabilityResult::ToolResult(ToolCallResult {
+            tool_call_id: "call_1".to_string(),
+            output: "echoed".to_string(),
+            is_error: false,
+            error_kind: None,
+            duration_ms: 1,
+        })));
+        let final_step = s2.step(Some(CapabilityResult::ModelResult(end_turn_response(
+            "after-resume.",
+        ))));
+
+        match final_step.next_action {
             NextAction::Complete(text) => assert_eq!(text, "after-resume."),
             other => panic!("expected Complete after resume, got {other:?}"),
         }
