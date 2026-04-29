@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use fq_runtime::agent::{definition::parse_agent, AgentId, AgentRegistry};
+use fq_runtime::agent::{AgentId, AgentRegistry, definition::parse_agent};
 use fq_runtime::events::{
     Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
     TriggerSource,
@@ -16,11 +16,11 @@ use fq_runtime::{
     AgentExecutor, Config, EventBus, McpClientManager, McpServerConfig, PricingTable,
     ProjectionConsumer, ProjectionStore, ToolRegistry, TriggerDispatcher,
 };
-use uuid::Uuid;
 use futures::StreamExt;
 use serde_json::Value;
 use tracing::error;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
+use uuid::Uuid;
 
 const DEFAULT_CONFIG_PATH: &str = "fq.toml";
 
@@ -209,7 +209,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 event_type,
                 since,
                 limit,
-            } => query_events(&cli.global, agent.as_deref(), event_type.as_deref(), since.as_deref(), limit).await?,
+            } => {
+                query_events(
+                    &cli.global,
+                    agent.as_deref(),
+                    event_type.as_deref(),
+                    since.as_deref(),
+                    limit,
+                )
+                .await?
+            }
         },
         Commands::Costs { agent, since } => {
             show_costs(&cli.global, agent.as_deref(), since.as_deref()).await?
@@ -292,8 +301,7 @@ fn init_project(force: bool) -> anyhow::Result<()> {
 }
 
 fn write_file(path: &Path, contents: &str) -> anyhow::Result<()> {
-    std::fs::write(path, contents)
-        .with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn list_agents(global: &GlobalArgs) -> anyhow::Result<()> {
@@ -383,24 +391,23 @@ async fn trigger_agent(
     // Resolve and load the registry.
     let registry = AgentRegistry::load_from_directory(&config.agents.directory)
         .context("failed to load agent registry")?;
-    let agent_id = AgentId::new(agent_name).with_context(|| format!("invalid agent name '{agent_name}'"))?;
-    let loaded = registry
-        .get_loaded(&agent_id)
-        .ok_or_else(|| {
-            let available: Vec<String> = registry
-                .iter()
-                .map(|l| l.agent.id().as_str().to_string())
-                .collect();
-            anyhow::anyhow!(
-                "agent '{agent_name}' not found in {}. Available: {}",
-                config.agents.directory.display(),
-                if available.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    available.join(", ")
-                }
-            )
-        })?;
+    let agent_id =
+        AgentId::new(agent_name).with_context(|| format!("invalid agent name '{agent_name}'"))?;
+    let loaded = registry.get_loaded(&agent_id).ok_or_else(|| {
+        let available: Vec<String> = registry
+            .iter()
+            .map(|l| l.agent.id().as_str().to_string())
+            .collect();
+        anyhow::anyhow!(
+            "agent '{agent_name}' not found in {}. Available: {}",
+            config.agents.directory.display(),
+            if available.is_empty() {
+                "(none)".to_string()
+            } else {
+                available.join(", ")
+            }
+        )
+    })?;
     println!(
         "Loaded agent '{}' from {}",
         loaded.agent.id(),
@@ -587,10 +594,9 @@ fn print_event(event: &Event) {
             p.usage.input_tokens, p.usage.output_tokens, p.stop_reason
         ),
         EventPayload::ToolCall(p) => format!("tool.call {}", p.tool_name),
-        EventPayload::ToolResult(p) => format!(
-            "tool.result {}",
-            if p.is_error { "error" } else { "ok" }
-        ),
+        EventPayload::ToolResult(p) => {
+            format!("tool.result {}", if p.is_error { "error" } else { "ok" })
+        }
         EventPayload::Cost(p) => format!(
             "cost ${:.6} cumulative=${:.6}",
             p.total_cost, p.cumulative_invocation_cost
@@ -606,10 +612,9 @@ fn print_event(event: &Event) {
             "system.startup version={} agents={} nats={}",
             p.version, p.agents_loaded, p.nats_url
         ),
-        EventPayload::SystemShutdown(p) => format!(
-            "system.shutdown reason={} clean={}",
-            p.reason, p.clean
-        ),
+        EventPayload::SystemShutdown(p) => {
+            format!("system.shutdown reason={} clean={}", p.reason, p.clean)
+        }
         EventPayload::SystemTaskFailed(p) => format!(
             "system.task_failed task={} error={}",
             p.task_name, p.error_message
@@ -928,7 +933,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
 
-    let (shutdown_reason, clean_exit, failed_task): (&'static str, bool, Option<(&'static str, String)>) = tokio::select! {
+    let (shutdown_reason, clean_exit, failed_task): (
+        &'static str,
+        bool,
+        Option<(&'static str, String)>,
+    ) = tokio::select! {
         res = &mut ctrl_c => {
             match res {
                 Ok(()) => {
@@ -1102,8 +1111,8 @@ async fn query_events(
     }
 
     println!(
-        "{:<20} {:<40} {:<14} {:<12} {}",
-        "timestamp", "agent", "event", "cost", "invocation"
+        "{:<20} {:<40} {:<14} {:<12} invocation",
+        "timestamp", "agent", "event", "cost"
     );
     for row in rows {
         let ts = row.timestamp.get(..19).unwrap_or(&row.timestamp);
@@ -1144,8 +1153,8 @@ async fn show_costs(
     }
 
     println!(
-        "{:<30} {:<10} {:<14} {:<14} {}",
-        "agent", "events", "input_tokens", "output_tokens", "total_cost"
+        "{:<30} {:<10} {:<14} {:<14} total_cost",
+        "agent", "events", "input_tokens", "output_tokens"
     );
     let mut grand_total = 0.0;
     for row in summary {

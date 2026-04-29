@@ -261,7 +261,9 @@ fn tool_results_step(
     Ok(StepOutput {
         next_action: NextAction::CallModel(request),
         state: state.save()?,
-        logs: vec![log_info("tool results integrated; requesting next model turn")],
+        logs: vec![log_info(
+            "tool results integrated; requesting next model turn",
+        )],
         events: vec![],
     })
 }
@@ -331,10 +333,8 @@ mod tests {
 
     use super::*;
     use crate::events::{StopReason, TokenUsage, ToolSchema};
-    use crate::reducer::types::{
-        ModelResponse, ToolCallResult, TriggerPayload, TriggerSourceKind,
-    };
-    use serde_json::{json, Value};
+    use crate::reducer::types::{ModelResponse, ToolCallResult, TriggerPayload, TriggerSourceKind};
+    use serde_json::{Value, json};
 
     fn config() -> AgentConfig {
         AgentConfig {

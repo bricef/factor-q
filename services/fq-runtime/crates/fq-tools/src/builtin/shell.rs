@@ -64,7 +64,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -173,11 +173,7 @@ impl Tool for ShellTool {
         })
     }
 
-    async fn execute(
-        &self,
-        ctx: &ToolContext<'_>,
-        params: Value,
-    ) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, ctx: &ToolContext<'_>, params: Value) -> Result<ToolResult, ToolError> {
         let params: ShellParams = serde_json::from_value(params)
             .map_err(|err| ToolError::InvalidParameters(err.to_string()))?;
 
@@ -199,7 +195,7 @@ impl Tool for ShellTool {
 
         // Clamp timeout.
         let timeout_duration = match params.timeout_secs {
-            Some(secs) if secs == 0 => {
+            Some(0) => {
                 return Err(ToolError::InvalidParameters(
                     "timeout_secs must be > 0".to_string(),
                 ));
@@ -279,7 +275,10 @@ impl Tool for ShellTool {
             Err(_) => {
                 // Killing on drop is set, but be explicit so the
                 // captured output tasks finish promptly.
-                warn!(timeout_ms = timeout_duration.as_millis() as u64, "shell timeout fired — killing child");
+                warn!(
+                    timeout_ms = timeout_duration.as_millis() as u64,
+                    "shell timeout fired — killing child"
+                );
                 if let Err(err) = child.start_kill() {
                     warn!(error = %err, "failed to start_kill after timeout");
                 }

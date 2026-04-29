@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fq_tools::builtin::{FileReadTool, FileWriteTool, SelfInspectTool, ShellTool};
 use fq_tools::Tool;
+use fq_tools::builtin::{FileReadTool, FileWriteTool, SelfInspectTool, ShellTool};
 
 /// Number of tools registered by [`ToolRegistry::with_builtins`].
 /// Useful for callers that report "MCP tools = total - builtins".

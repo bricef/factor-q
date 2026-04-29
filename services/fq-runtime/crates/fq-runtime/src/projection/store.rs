@@ -50,10 +50,10 @@ impl ProjectionStore {
     /// so concurrent readers (the CLI's query commands) can run
     /// alongside the projection consumer's writes.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(StoreError::CreateDir)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(StoreError::CreateDir)?;
         }
 
         let options = SqliteConnectOptions::new()

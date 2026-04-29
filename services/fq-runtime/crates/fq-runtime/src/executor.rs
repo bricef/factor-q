@@ -23,9 +23,9 @@ use crate::agent::Agent;
 use crate::bus::{BusError, EventBus};
 use crate::events::{
     CompletedPayload, CostPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
-    InvocationTotals, LlmRequestPayload, LlmResponsePayload, Message, MessageRole,
-    MessageToolCall, RequestParams, ToolCallPayload, ToolErrorKind, ToolResultPayload,
-    TriggerSource, TriggeredPayload,
+    InvocationTotals, LlmRequestPayload, LlmResponsePayload, Message, MessageRole, MessageToolCall,
+    RequestParams, ToolCallPayload, ToolErrorKind, ToolResultPayload, TriggerSource,
+    TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
 use crate::pricing::PricingTable;
@@ -131,26 +131,26 @@ impl AgentExecutor {
             };
 
             // Budget check after every LLM call.
-            if let Some(budget) = agent.budget() {
-                if totals.total_cost > budget {
-                    totals.total_duration_ms = start.elapsed().as_millis() as u64;
-                    self.emit_failed(
-                        &agent_id,
-                        invocation_id,
-                        FailureKind::BudgetExceeded,
-                        format!(
-                            "cost ${:.6} exceeded budget ${budget:.2}",
-                            totals.total_cost
-                        ),
-                        FailurePhase::LlmResponse,
-                        totals,
-                    )
-                    .await?;
-                    return Ok(InvocationOutcome::BudgetExceeded {
-                        invocation_id,
-                        cost: totals.total_cost,
-                    });
-                }
+            if let Some(budget) = agent.budget()
+                && totals.total_cost > budget
+            {
+                totals.total_duration_ms = start.elapsed().as_millis() as u64;
+                self.emit_failed(
+                    &agent_id,
+                    invocation_id,
+                    FailureKind::BudgetExceeded,
+                    format!(
+                        "cost ${:.6} exceeded budget ${budget:.2}",
+                        totals.total_cost
+                    ),
+                    FailurePhase::LlmResponse,
+                    totals,
+                )
+                .await?;
+                return Ok(InvocationOutcome::BudgetExceeded {
+                    invocation_id,
+                    cost: totals.total_cost,
+                });
             }
 
             if response.tool_calls.is_empty() {
@@ -476,7 +476,7 @@ impl AgentExecutor {
         totals: &InvocationTotals,
         start: Instant,
     ) -> Result<ToolResult, ExecutorError> {
-        use crate::introspection::{synthesize_self_inspect, HostInvocationStats};
+        use crate::introspection::{HostInvocationStats, synthesize_self_inspect};
 
         let tool_start = Instant::now();
         let stats = HostInvocationStats {
@@ -757,7 +757,13 @@ mod tests {
         let kinds: Vec<&str> = events.iter().map(event_kind).collect();
         assert_eq!(
             kinds,
-            vec!["triggered", "llm_request", "llm_response", "cost", "completed"],
+            vec![
+                "triggered",
+                "llm_request",
+                "llm_response",
+                "cost",
+                "completed"
+            ],
         );
 
         let first_invocation = events[0].invocation_id;
@@ -1003,7 +1009,10 @@ mod tests {
                 .expect("deserialise");
             if let EventPayload::ToolResult(p) = &event.payload {
                 assert!(p.is_error);
-                assert!(matches!(p.error_kind, Some(ToolErrorKind::PermissionDenied)));
+                assert!(matches!(
+                    p.error_kind,
+                    Some(ToolErrorKind::PermissionDenied)
+                ));
                 saw_denied = true;
                 break;
             }

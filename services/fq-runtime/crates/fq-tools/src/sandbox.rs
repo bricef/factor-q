@@ -206,10 +206,12 @@ fn canonicalise_for_write(target: &Path) -> Result<PathBuf, SandboxError> {
         target: target.to_path_buf(),
         reason: "path has no parent directory".to_string(),
     })?;
-    let filename = target.file_name().ok_or_else(|| SandboxError::InvalidPath {
-        target: target.to_path_buf(),
-        reason: "path has no final component".to_string(),
-    })?;
+    let filename = target
+        .file_name()
+        .ok_or_else(|| SandboxError::InvalidPath {
+            target: target.to_path_buf(),
+            reason: "path has no final component".to_string(),
+        })?;
     // An empty parent means the target is relative with no directory
     // component, e.g. `"foo.txt"`. Treat the current directory as the
     // parent in that case.
@@ -391,7 +393,10 @@ mod tests {
         let sb = make_sandbox(&[], &[dir.path()]);
         let target = dir.path().join("new.txt");
         let resolved = sb.check_write(&target).unwrap();
-        assert_eq!(resolved, fs::canonicalize(dir.path()).unwrap().join("new.txt"));
+        assert_eq!(
+            resolved,
+            fs::canonicalize(dir.path()).unwrap().join("new.txt")
+        );
     }
 
     #[test]

@@ -326,10 +326,10 @@ impl AgentBuilder {
         if system_prompt.trim().is_empty() {
             return Err(BuildError::EmptyField("system_prompt"));
         }
-        if let Some(budget) = self.budget {
-            if !budget.is_finite() || budget < 0.0 {
-                return Err(BuildError::InvalidBudget(budget));
-            }
+        if let Some(budget) = self.budget
+            && (!budget.is_finite() || budget < 0.0)
+        {
+            return Err(BuildError::InvalidBudget(budget));
         }
 
         Ok(Agent {

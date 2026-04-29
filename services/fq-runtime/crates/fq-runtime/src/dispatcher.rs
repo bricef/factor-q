@@ -38,7 +38,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
-use crate::bus::{agent_id_from_trigger_subject, BusError, EventBus};
+use crate::bus::{BusError, EventBus, agent_id_from_trigger_subject};
 use crate::events::TriggerSource;
 use crate::executor::{AgentExecutor, ExecutorError};
 use crate::llm::LlmClient;
@@ -237,9 +237,9 @@ pub enum DispatcherError {
 mod tests {
     use super::*;
     use crate::agent::{Agent, Sandbox};
-    use crate::events::{EventPayload, StopReason, TokenUsage};
-    use crate::llm::fixture::FixtureClient;
+    use crate::events::{StopReason, TokenUsage};
     use crate::llm::ChatResponse;
+    use crate::llm::fixture::FixtureClient;
     use crate::pricing::{ModelPricing, PricingTable};
     use crate::tools::ToolRegistry;
     use serde_json::json;
@@ -415,7 +415,11 @@ You are a test agent."#
             c
         });
 
-        let executor = Arc::new(AgentExecutor::new(bus.clone(), test_pricing(), test_tools()));
+        let executor = Arc::new(AgentExecutor::new(
+            bus.clone(),
+            test_pricing(),
+            test_tools(),
+        ));
 
         // Projection store, so we can verify events landed.
         let store = Arc::new(
@@ -425,8 +429,7 @@ You are a test agent."#
         );
 
         // Spawn a projection consumer so events are materialised.
-        let proj_consumer =
-            crate::projection::ProjectionConsumer::new(bus.clone(), store.clone());
+        let proj_consumer = crate::projection::ProjectionConsumer::new(bus.clone(), store.clone());
         let (proj_tx, proj_rx) = oneshot::channel();
         let proj_handle = tokio::spawn(async move { proj_consumer.run(proj_rx).await });
 

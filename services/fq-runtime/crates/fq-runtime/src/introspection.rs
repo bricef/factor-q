@@ -22,7 +22,7 @@
 
 use fq_tools::builtin::SELF_INSPECT_SECTIONS;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::events::InvocationTotals;
 
@@ -59,8 +59,7 @@ struct SelfInspectParams {
 /// matches what the executor expects from its synthesis path so
 /// adding error branches later is a one-line change.
 pub fn synthesize_self_inspect(stats: &HostInvocationStats<'_>, parameters: Value) -> String {
-    let params: SelfInspectParams =
-        serde_json::from_value(parameters).unwrap_or_default();
+    let params: SelfInspectParams = serde_json::from_value(parameters).unwrap_or_default();
     let want = section_filter(params.include.as_deref());
 
     let mut out = serde_json::Map::new();
@@ -198,18 +197,14 @@ mod tests {
     fn unknown_include_value_is_silently_ignored() {
         // A model that asks for "capabilities" gets nothing,
         // not an error.
-        let raw = synthesize_self_inspect(
-            &stats(),
-            json!({"include": ["capabilities"]}),
-        );
+        let raw = synthesize_self_inspect(&stats(), json!({"include": ["capabilities"]}));
         let v: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v.as_object().unwrap().len(), 0);
     }
 
     #[test]
     fn empty_include_returns_empty_object() {
-        let raw =
-            synthesize_self_inspect(&stats(), json!({"include": []}));
+        let raw = synthesize_self_inspect(&stats(), json!({"include": []}));
         let v: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v.as_object().unwrap().len(), 0);
     }

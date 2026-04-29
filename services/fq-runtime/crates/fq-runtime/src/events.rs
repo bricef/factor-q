@@ -452,7 +452,10 @@ mod tests {
     #[test]
     fn subjects_for_all_event_types() {
         let agent = "test-agent";
-        assert_eq!(subjects::agent_triggered(agent), "fq.agent.test-agent.triggered");
+        assert_eq!(
+            subjects::agent_triggered(agent),
+            "fq.agent.test-agent.triggered"
+        );
         assert_eq!(
             subjects::agent_llm_request(agent),
             "fq.agent.test-agent.llm.request"
@@ -461,7 +464,10 @@ mod tests {
             subjects::agent_llm_response(agent),
             "fq.agent.test-agent.llm.response"
         );
-        assert_eq!(subjects::agent_tool_call(agent), "fq.agent.test-agent.tool.call");
+        assert_eq!(
+            subjects::agent_tool_call(agent),
+            "fq.agent.test-agent.tool.call"
+        );
         assert_eq!(
             subjects::agent_tool_result(agent),
             "fq.agent.test-agent.tool.result"

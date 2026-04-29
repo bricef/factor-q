@@ -31,11 +31,7 @@ pub trait Tool: Send + Sync {
     fn parameters_schema(&self) -> Value;
 
     /// Execute the tool with the given parameters.
-    async fn execute(
-        &self,
-        ctx: &ToolContext<'_>,
-        params: Value,
-    ) -> Result<ToolResult, ToolError>;
+    async fn execute(&self, ctx: &ToolContext<'_>, params: Value) -> Result<ToolResult, ToolError>;
 }
 
 /// Result of a tool execution.
@@ -76,13 +72,13 @@ pub enum ToolError {
 impl From<SandboxError> for ToolError {
     fn from(err: SandboxError) -> Self {
         match err {
-            SandboxError::PermissionDenied { target, reason } => ToolError::PermissionDenied(
-                format!("{reason} ({})", target.display()),
-            ),
+            SandboxError::PermissionDenied { target, reason } => {
+                ToolError::PermissionDenied(format!("{reason} ({})", target.display()))
+            }
             SandboxError::NotFound(path) => ToolError::NotFound(path),
-            SandboxError::InvalidPath { target, reason } => ToolError::InvalidParameters(
-                format!("{reason} ({})", target.display()),
-            ),
+            SandboxError::InvalidPath { target, reason } => {
+                ToolError::InvalidParameters(format!("{reason} ({})", target.display()))
+            }
             SandboxError::Io { path, source } => {
                 ToolError::Io(format!("{}: {source}", path.display()))
             }

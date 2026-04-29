@@ -394,11 +394,7 @@ mod tests {
 
     #[test]
     fn resolve_cache_dir_falls_back_to_home_when_xdg_unset() {
-        let dir = resolve_cache_dir(
-            None,
-            Some("/home/user".to_string()),
-            PathBuf::from("/tmp"),
-        );
+        let dir = resolve_cache_dir(None, Some("/home/user".to_string()), PathBuf::from("/tmp"));
         assert_eq!(dir, PathBuf::from("/home/user/.cache/factor-q"));
     }
 

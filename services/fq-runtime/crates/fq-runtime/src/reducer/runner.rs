@@ -235,7 +235,15 @@ impl ReducerRunner {
                 }
                 NextAction::CallTool(req) => {
                     let result = self
-                        .run_tool(agent, &sandbox, &agent_id, invocation_id, req, &totals, start)
+                        .run_tool(
+                            agent,
+                            &sandbox,
+                            &agent_id,
+                            invocation_id,
+                            req,
+                            &totals,
+                            start,
+                        )
                         .await?;
                     totals.total_tool_calls += 1;
                     last_result = Some(CapabilityResult::ToolResult(result));
@@ -250,7 +258,15 @@ impl ReducerRunner {
                     let mut results = Vec::with_capacity(reqs.len());
                     for req in reqs {
                         let result = self
-                            .run_tool(agent, &sandbox, &agent_id, invocation_id, req, &totals, start)
+                            .run_tool(
+                                agent,
+                                &sandbox,
+                                &agent_id,
+                                invocation_id,
+                                req,
+                                &totals,
+                                start,
+                            )
                             .await?;
                         totals.total_tool_calls += 1;
                         results.push(result);
@@ -274,6 +290,7 @@ impl ReducerRunner {
         Err(ExecutorError::MaxIterationsExceeded)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_tool(
         &self,
         agent: &Agent,
@@ -393,7 +410,7 @@ impl ReducerRunner {
         totals: &InvocationTotals,
         start: Instant,
     ) -> Result<ToolCallResult, ExecutorError> {
-        use crate::introspection::{synthesize_self_inspect, HostInvocationStats};
+        use crate::introspection::{HostInvocationStats, synthesize_self_inspect};
 
         let tool_start = Instant::now();
         let stats = HostInvocationStats {
@@ -633,23 +650,23 @@ impl ReducerRunner {
         ))
         .await?;
 
-        if let Some(budget) = budget {
-            if totals.total_cost > budget {
-                totals.total_duration_ms = start.elapsed().as_millis() as u64;
-                self.emit_failed(
-                    agent_id,
-                    invocation_id,
-                    FailureKind::BudgetExceeded,
-                    format!(
-                        "cost ${:.6} exceeded budget ${budget:.2}",
-                        totals.total_cost
-                    ),
-                    FailurePhase::LlmResponse,
-                    *totals,
-                )
-                .await?;
-                return Ok(ModelOutcome::BudgetExceeded(totals.total_cost));
-            }
+        if let Some(budget) = budget
+            && totals.total_cost > budget
+        {
+            totals.total_duration_ms = start.elapsed().as_millis() as u64;
+            self.emit_failed(
+                agent_id,
+                invocation_id,
+                FailureKind::BudgetExceeded,
+                format!(
+                    "cost ${:.6} exceeded budget ${budget:.2}",
+                    totals.total_cost
+                ),
+                FailurePhase::LlmResponse,
+                *totals,
+            )
+            .await?;
+            return Ok(ModelOutcome::BudgetExceeded(totals.total_cost));
         }
 
         Ok(ModelOutcome::Response(ModelResponse {
@@ -820,23 +837,60 @@ mod tests {
     ) -> (Vec<&'static str>, Vec<&'static str>) {
         let bus = EventBus::connect(url).await.expect("connect to NATS");
 
-        let collect_events =
-            async |agent: Agent, ev_count: usize| -> Vec<Event> {
-                let mut sub = bus
-                    .subscribe(format!("fq.agent.{}.>", agent.id().as_str()))
+        let collect_events = async |agent: Agent, ev_count: usize| -> Vec<Event> {
+            let mut sub = bus
+                .subscribe(format!("fq.agent.{}.>", agent.id().as_str()))
+                .await
+                .expect("subscribe");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let llm = FixtureClient::new();
+            for r in responses() {
+                llm.push_response(r);
+            }
+            let outcome = AgentExecutor::new(
+                bus.clone(),
+                test_pricing(),
+                Arc::new(ToolRegistry::with_builtins()),
+            )
+            .run(
+                &agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                json!({"input": "go"}),
+            )
+            .await;
+            let _ = outcome;
+            let mut out = Vec::new();
+            for _ in 0..ev_count {
+                let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
                     .await
-                    .expect("subscribe");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                let llm = FixtureClient::new();
-                for r in responses() {
-                    llm.push_response(r);
-                }
-                let outcome = AgentExecutor::new(
-                    bus.clone(),
-                    test_pricing(),
-                    Arc::new(ToolRegistry::with_builtins()),
-                )
+                    .expect("legacy timeout")
+                    .expect("legacy stream closed")
+                    .expect("legacy deserialise");
+                out.push(event);
+            }
+            out
+        };
+
+        let collect_reducer = async |agent: Agent, ev_count: usize| -> Vec<Event> {
+            let mut sub = bus
+                .subscribe(format!("fq.agent.{}.>", agent.id().as_str()))
+                .await
+                .expect("subscribe");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let llm = FixtureClient::new();
+            for r in responses() {
+                llm.push_response(r);
+            }
+            let runner = ReducerRunner::new(
+                bus.clone(),
+                test_pricing(),
+                Arc::new(ToolRegistry::with_builtins()),
+            );
+            let _ = runner
                 .run(
+                    &Harness::new(),
                     &agent,
                     &llm,
                     TriggerSource::Manual,
@@ -844,56 +898,17 @@ mod tests {
                     json!({"input": "go"}),
                 )
                 .await;
-                let _ = outcome;
-                let mut out = Vec::new();
-                for _ in 0..ev_count {
-                    let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
-                        .await
-                        .expect("legacy timeout")
-                        .expect("legacy stream closed")
-                        .expect("legacy deserialise");
-                    out.push(event);
-                }
-                out
-            };
-
-        let collect_reducer =
-            async |agent: Agent, ev_count: usize| -> Vec<Event> {
-                let mut sub = bus
-                    .subscribe(format!("fq.agent.{}.>", agent.id().as_str()))
+            let mut out = Vec::new();
+            for _ in 0..ev_count {
+                let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
                     .await
-                    .expect("subscribe");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                let llm = FixtureClient::new();
-                for r in responses() {
-                    llm.push_response(r);
-                }
-                let runner = ReducerRunner::new(
-                    bus.clone(),
-                    test_pricing(),
-                    Arc::new(ToolRegistry::with_builtins()),
-                );
-                let _ = runner
-                    .run(
-                        &Harness::new(),
-                        &agent,
-                        &llm,
-                        TriggerSource::Manual,
-                        None,
-                        json!({"input": "go"}),
-                    )
-                    .await;
-                let mut out = Vec::new();
-                for _ in 0..ev_count {
-                    let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
-                        .await
-                        .expect("reducer timeout")
-                        .expect("reducer stream closed")
-                        .expect("reducer deserialise");
-                    out.push(event);
-                }
-                out
-            };
+                    .expect("reducer timeout")
+                    .expect("reducer stream closed")
+                    .expect("reducer deserialise");
+                out.push(event);
+            }
+            out
+        };
 
         let legacy_events =
             collect_events(agent_factory(unique_agent_id("legacy")), expected_events).await;
@@ -901,8 +916,7 @@ mod tests {
             collect_reducer(agent_factory(unique_agent_id("reducer")), expected_events).await;
 
         let legacy_kinds: Vec<&'static str> = legacy_events.iter().map(event_kind).collect();
-        let reducer_kinds: Vec<&'static str> =
-            reducer_events.iter().map(event_kind).collect();
+        let reducer_kinds: Vec<&'static str> = reducer_events.iter().map(event_kind).collect();
         (legacy_kinds, reducer_kinds)
     }
 
@@ -931,9 +945,18 @@ mod tests {
 
         assert_eq!(
             legacy,
-            vec!["triggered", "llm_request", "llm_response", "cost", "completed"]
+            vec![
+                "triggered",
+                "llm_request",
+                "llm_response",
+                "cost",
+                "completed"
+            ]
         );
-        assert_eq!(reducer, legacy, "reducer path must match legacy event order");
+        assert_eq!(
+            reducer, legacy,
+            "reducer path must match legacy event order"
+        );
     }
 
     #[tokio::test]
@@ -1091,12 +1114,7 @@ mod tests {
 
         let llm = FixtureClient::new();
         // Turn 1: model asks for self_inspect.
-        llm.push_response(tool_use(
-            "self_inspect",
-            "call_si",
-            json!({}),
-            (100, 50),
-        ));
+        llm.push_response(tool_use("self_inspect", "call_si", json!({}), (100, 50)));
         // Turn 2: model summarises and finishes.
         llm.push_response(canned("I have one budget left.", 150, 30));
 
@@ -1158,7 +1176,7 @@ mod tests {
     /// must match a non-suspended run.
     #[tokio::test]
     async fn reducer_suspends_and_resumes_across_tool_dispatch() {
-        use crate::introspection::{synthesize_self_inspect, HostInvocationStats};
+        use crate::introspection::{HostInvocationStats, synthesize_self_inspect};
         use crate::reducer::types::{
             AgentConfig, CapabilityResult, ModelResponse, NextAction, StepInput, ToolCallResult,
             TriggerPayload, TriggerSourceKind,
@@ -1297,4 +1315,3 @@ mod tests {
         }
     }
 }
-

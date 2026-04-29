@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
@@ -62,11 +62,7 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn execute(
-        &self,
-        ctx: &ToolContext<'_>,
-        params: Value,
-    ) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, ctx: &ToolContext<'_>, params: Value) -> Result<ToolResult, ToolError> {
         let params: FileWriteParams = serde_json::from_value(params)
             .map_err(|err| ToolError::InvalidParameters(err.to_string()))?;
         let target = PathBuf::from(&params.path);
@@ -307,7 +303,9 @@ mod tests {
         // distinct.
         let dir = tempdir().unwrap();
         let sandbox = ToolSandbox::new().allow_write(dir.path());
-        let err = sandbox.check_read(&dir.path().join("anything")).unwrap_err();
+        let err = sandbox
+            .check_read(&dir.path().join("anything"))
+            .unwrap_err();
         assert!(matches!(
             err,
             crate::sandbox::SandboxError::PermissionDenied { .. }

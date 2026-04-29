@@ -184,9 +184,10 @@ impl Config {
             .anthropic
             .as_ref()
             .ok_or(ConfigError::ProviderNotConfigured("anthropic"))?;
-        let value = std::env::var(&anthropic.api_key_env).map_err(|_| ConfigError::SecretNotSet {
-            env_var: anthropic.api_key_env.clone(),
-        })?;
+        let value =
+            std::env::var(&anthropic.api_key_env).map_err(|_| ConfigError::SecretNotSet {
+                env_var: anthropic.api_key_env.clone(),
+            })?;
         if value.is_empty() {
             return Err(ConfigError::SecretNotSet {
                 env_var: anthropic.api_key_env.clone(),

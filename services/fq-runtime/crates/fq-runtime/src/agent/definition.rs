@@ -202,7 +202,10 @@ model: claude-haiku
 Prompt.
 "#;
         let err = parse_agent(content).unwrap_err();
-        assert!(matches!(err, ParseError::InvalidAgent(BuildError::InvalidId(_))));
+        assert!(matches!(
+            err,
+            ParseError::InvalidAgent(BuildError::InvalidId(_))
+        ));
     }
 
     #[test]
@@ -223,7 +226,10 @@ Prompt.
         let agent = parse_agent(content).unwrap();
         assert_eq!(
             agent.sandbox().exec_cwd_paths(),
-            &["/tmp/fq-workspace".to_string(), "/var/lib/factor-q".to_string()]
+            &[
+                "/tmp/fq-workspace".to_string(),
+                "/var/lib/factor-q".to_string()
+            ]
         );
     }
 
@@ -245,10 +251,7 @@ Prompt.
         let tool_sandbox = agent.sandbox().to_tool_sandbox();
         let prefixes = tool_sandbox.exec_cwd_prefixes();
         assert_eq!(prefixes.len(), 1);
-        assert_eq!(
-            prefixes[0],
-            std::path::PathBuf::from("/tmp/fq-workspace")
-        );
+        assert_eq!(prefixes[0], std::path::PathBuf::from("/tmp/fq-workspace"));
     }
 
     #[test]
@@ -344,7 +347,10 @@ You are a test agent.
         assert_eq!(second.server, "custom");
         assert_eq!(second.command, "my-server");
         assert!(second.args.is_empty());
-        assert_eq!(second.env, vec![("API_KEY".to_string(), "secret".to_string())]);
+        assert_eq!(
+            second.env,
+            vec![("API_KEY".to_string(), "secret".to_string())]
+        );
     }
 
     #[test]

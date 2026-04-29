@@ -64,7 +64,14 @@ impl LlmClient for GenAiClient {
 /// tuple that `genai::Client::exec_chat` expects.
 fn into_provider_request(
     request: ChatRequest,
-) -> Result<(String, provider::chat::ChatRequest, provider::chat::ChatOptions), LlmError> {
+) -> Result<
+    (
+        String,
+        provider::chat::ChatRequest,
+        provider::chat::ChatOptions,
+    ),
+    LlmError,
+> {
     let ChatRequest {
         model,
         messages,
@@ -101,9 +108,7 @@ fn convert_message(msg: Message) -> Result<provider::chat::ChatMessage, LlmError
     // matching tool_call_id from the earlier assistant message.
     if matches!(role, MessageRole::Tool) {
         let call_id = tool_call_id.ok_or_else(|| {
-            LlmError::InvalidResponse(
-                "tool role message is missing tool_call_id".to_string(),
-            )
+            LlmError::InvalidResponse("tool role message is missing tool_call_id".to_string())
         })?;
         let content = content.unwrap_or_default();
         let tool_response = provider::chat::ToolResponse::new(call_id, content);
@@ -120,10 +125,10 @@ fn convert_message(msg: Message) -> Result<provider::chat::ChatMessage, LlmError
     // content parts alongside any text.
     if matches!(role, MessageRole::Assistant) && !tool_calls.is_empty() {
         let mut parts: Vec<provider::chat::ContentPart> = Vec::new();
-        if let Some(text) = content {
-            if !text.is_empty() {
-                parts.push(provider::chat::ContentPart::Text(text));
-            }
+        if let Some(text) = content
+            && !text.is_empty()
+        {
+            parts.push(provider::chat::ContentPart::Text(text));
         }
         for call in tool_calls {
             parts.push(provider::chat::ContentPart::ToolCall(
@@ -169,10 +174,11 @@ fn convert_tool_schema(tool: ToolSchema) -> provider::chat::Tool {
 }
 
 fn convert_params(params: RequestParams) -> provider::chat::ChatOptions {
-    let mut options = provider::chat::ChatOptions::default();
-    options.temperature = params.temperature;
-    options.max_tokens = params.max_tokens;
-    options
+    provider::chat::ChatOptions {
+        temperature: params.temperature,
+        max_tokens: params.max_tokens,
+        ..Default::default()
+    }
 }
 
 /// Convert a genai `ChatResponse` into our internal shape.
@@ -363,9 +369,7 @@ mod tests {
             messages: vec![
                 Message {
                     role: MessageRole::System,
-                    content: Some(
-                        "You are a test. Reply in exactly one word: OK".to_string(),
-                    ),
+                    content: Some("You are a test. Reply in exactly one word: OK".to_string()),
                     tool_calls: vec![],
                     tool_call_id: None,
                 },

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
@@ -55,11 +55,7 @@ impl Tool for FileReadTool {
         })
     }
 
-    async fn execute(
-        &self,
-        ctx: &ToolContext<'_>,
-        params: Value,
-    ) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, ctx: &ToolContext<'_>, params: Value) -> Result<ToolResult, ToolError> {
         let params: FileReadParams = serde_json::from_value(params)
             .map_err(|err| ToolError::InvalidParameters(err.to_string()))?;
         let target = PathBuf::from(&params.path);

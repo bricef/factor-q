@@ -132,7 +132,10 @@ impl EventBus {
     /// retention window at a given storage budget. See
     /// `docs/design/storage-and-scaling.md` for the rationale.
     async fn ensure_event_stream(&self) -> Result<(), BusError> {
-        debug!(stream = STREAM_NAME, "ensuring JetStream event stream exists");
+        debug!(
+            stream = STREAM_NAME,
+            "ensuring JetStream event stream exists"
+        );
         self.jetstream
             .get_or_create_stream(stream::Config {
                 name: STREAM_NAME.to_string(),
@@ -174,7 +177,10 @@ impl EventBus {
     /// — messages are short-lived and small, so the CPU cost of
     /// compression is not justified.
     async fn ensure_trigger_stream(&self) -> Result<(), BusError> {
-        debug!(stream = TRIGGER_STREAM_NAME, "ensuring JetStream trigger stream exists");
+        debug!(
+            stream = TRIGGER_STREAM_NAME,
+            "ensuring JetStream trigger stream exists"
+        );
         self.jetstream
             .get_or_create_stream(stream::Config {
                 name: TRIGGER_STREAM_NAME.to_string(),
@@ -226,10 +232,7 @@ impl EventBus {
 
     /// Create (or open) a durable JetStream pull consumer on the
     /// trigger stream, filtered to all trigger subjects.
-    pub async fn trigger_consumer(
-        &self,
-        name: &str,
-    ) -> Result<consumer::PullConsumer, BusError> {
+    pub async fn trigger_consumer(&self, name: &str) -> Result<consumer::PullConsumer, BusError> {
         self.trigger_consumer_with_filter(name, ALL_TRIGGERS_SUBJECT)
             .await
     }
@@ -284,11 +287,11 @@ impl EventBus {
     /// losing events or redelivering old ones. The returned
     /// [`consumer::PullConsumer`] can be used with `.messages()` to
     /// iterate over delivered messages.
-    pub async fn durable_consumer(
-        &self,
-        name: &str,
-    ) -> Result<consumer::PullConsumer, BusError> {
-        debug!(consumer = name, "getting/creating durable JetStream consumer");
+    pub async fn durable_consumer(&self, name: &str) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            "getting/creating durable JetStream consumer"
+        );
         let stream = self
             .jetstream
             .get_stream(STREAM_NAME)
@@ -337,7 +340,9 @@ impl EventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{ConfigSnapshot, EventPayload, SandboxSnapshot, TriggerSource, TriggeredPayload};
+    use crate::events::{
+        ConfigSnapshot, EventPayload, SandboxSnapshot, TriggerSource, TriggeredPayload,
+    };
     use serde_json::json;
     use uuid::Uuid;
 

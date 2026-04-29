@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use super::{definition::parse_agent, definition::ParseError, Agent, AgentId};
+use super::{Agent, AgentId, definition::ParseError, definition::parse_agent};
 
 /// Result of scanning a directory for agent definitions.
 #[derive(Debug, Default)]
@@ -286,10 +286,9 @@ You are an agent.
 
     #[test]
     fn missing_directory_is_error() {
-        let err = AgentRegistry::load_from_directory(Path::new(
-            "/tmp/factor-q-test-does-not-exist-xyz",
-        ))
-        .unwrap_err();
+        let err =
+            AgentRegistry::load_from_directory(Path::new("/tmp/factor-q-test-does-not-exist-xyz"))
+                .unwrap_err();
         assert!(matches!(err, RegistryError::DirectoryNotFound(_)));
     }
 
@@ -329,8 +328,7 @@ You are an agent.
             return;
         }
 
-        let registry =
-            AgentRegistry::load_from_directory(&examples_dir).expect("load examples");
+        let registry = AgentRegistry::load_from_directory(&examples_dir).expect("load examples");
 
         assert!(
             registry.errors().is_empty(),

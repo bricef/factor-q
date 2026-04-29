@@ -53,7 +53,10 @@ async fn discovers_tools_from_everything_server() {
     assert!(echo.is_some(), "should discover the echo tool");
 
     let echo = echo.unwrap();
-    assert!(!echo.description().is_empty(), "echo should have a description");
+    assert!(
+        !echo.description().is_empty(),
+        "echo should have a description"
+    );
     assert!(
         echo.parameters_schema().is_object(),
         "echo should have an object schema"

@@ -216,7 +216,9 @@ mod tests {
         let ev1 = triggered(&agent_id);
         let inv = ev1.invocation_id;
         bus.publish(&ev1).await.expect("publish 1");
-        bus.publish(&completed(&agent_id, inv)).await.expect("publish 2");
+        bus.publish(&completed(&agent_id, inv))
+            .await
+            .expect("publish 2");
 
         // Spin up the consumer with a fresh name so it starts from
         // the beginning of the stream.

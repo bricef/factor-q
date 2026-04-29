@@ -11,10 +11,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
+use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
-use rmcp::ServiceExt;
 use serde_json::Value;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -88,8 +88,7 @@ impl Tool for McpTool {
             }
         };
 
-        let request =
-            CallToolRequestParams::new(self.tool_name.clone()).with_arguments(arguments);
+        let request = CallToolRequestParams::new(self.tool_name.clone()).with_arguments(arguments);
 
         let result = self
             .client
@@ -131,6 +130,12 @@ pub struct McpClientManager {
     started: HashSet<(String, Vec<String>)>,
 }
 
+impl Default for McpClientManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpClientManager {
     pub fn new() -> Self {
         Self {
@@ -169,27 +174,25 @@ impl McpClientManager {
         // Build the child process command.
         let env_vars = config.env.clone();
         let args = config.args.clone();
-        let transport = TokioChildProcess::new(
-            Command::new(&config.command).configure(|cmd| {
-                cmd.args(&args);
-                for (k, v) in &env_vars {
-                    cmd.env(k, v);
-                }
-            }),
-        )
+        let transport = TokioChildProcess::new(Command::new(&config.command).configure(|cmd| {
+            cmd.args(&args);
+            for (k, v) in &env_vars {
+                cmd.env(k, v);
+            }
+        }))
         .map_err(|err| McpError::ServerStart {
             command: config.command.clone(),
             reason: err.to_string(),
         })?;
 
         // Perform the MCP initialize handshake.
-        let client = ()
-            .serve(transport)
-            .await
-            .map_err(|err| McpError::ServerStart {
-                command: config.command.clone(),
-                reason: err.to_string(),
-            })?;
+        let client =
+            ().serve(transport)
+                .await
+                .map_err(|err| McpError::ServerStart {
+                    command: config.command.clone(),
+                    reason: err.to_string(),
+                })?;
 
         let client = Arc::new(client);
 
@@ -213,17 +216,11 @@ impl McpClientManager {
 
         for mcp_tool in mcp_tools {
             let name = mcp_tool.name.to_string();
-            let description = mcp_tool
-                .description
-                .as_deref()
-                .unwrap_or("")
-                .to_string();
+            let description = mcp_tool.description.as_deref().unwrap_or("").to_string();
 
             // Convert the Arc<JsonObject> input_schema to a serde_json::Value.
-            let input_schema =
-                serde_json::to_value(&*mcp_tool.input_schema).unwrap_or(Value::Object(
-                    serde_json::Map::new(),
-                ));
+            let input_schema = serde_json::to_value(&*mcp_tool.input_schema)
+                .unwrap_or(Value::Object(serde_json::Map::new()));
 
             debug!(
                 server = %config.name,
