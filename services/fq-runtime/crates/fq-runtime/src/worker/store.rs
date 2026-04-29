@@ -358,7 +358,7 @@ impl WorkerStore {
         .await?;
         if res.rows_affected() == 0 {
             return Err(WorkerStoreError::WalTransitionFailed {
-                table: "tool_dispatch",
+                entity: "tool_dispatch",
                 invocation_id: invocation_id.to_string(),
                 call_id: tool_call_id.to_string(),
                 reason: "no row in `intent` state".to_string(),
@@ -395,7 +395,7 @@ impl WorkerStore {
         .await?;
         if res.rows_affected() == 0 {
             return Err(WorkerStoreError::WalTransitionFailed {
-                table: "tool_dispatch",
+                entity: "tool_dispatch",
                 invocation_id: invocation_id.to_string(),
                 call_id: tool_call_id.to_string(),
                 reason: "no row in `dispatched` state".to_string(),
@@ -503,7 +503,7 @@ impl WorkerStore {
         .await?;
         if res.rows_affected() == 0 {
             return Err(WorkerStoreError::WalTransitionFailed {
-                table: "llm_dispatch",
+                entity: "llm_dispatch",
                 invocation_id: invocation_id.to_string(),
                 call_id: request_id.to_string(),
                 reason: "no row in `intent` state".to_string(),
@@ -538,7 +538,7 @@ impl WorkerStore {
         .await?;
         if res.rows_affected() == 0 {
             return Err(WorkerStoreError::WalTransitionFailed {
-                table: "llm_dispatch",
+                entity: "llm_dispatch",
                 invocation_id: invocation_id.to_string(),
                 call_id: request_id.to_string(),
                 reason: "no row in `dispatched` state".to_string(),
@@ -774,10 +774,17 @@ fn row_to_invocation_state(
 }
 
 /// Errors from the worker store.
+///
+/// The `Backend` variant deliberately carries a `String` rather
+/// than a backend-specific error type, so swapping the
+/// underlying storage (today: SQLite via sqlx) does not break
+/// downstream consumers' match arms. Internal code uses the
+/// `From<sqlx::Error>` impl below for ergonomic propagation;
+/// the public variant only exposes a message.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerStoreError {
-    #[error("database error: {0}")]
-    Sql(#[from] sqlx::Error),
+    #[error("worker store backend error: {0}")]
+    Backend(String),
 
     #[error("failed to create database directory: {0}")]
     CreateDir(std::io::Error),
@@ -795,10 +802,14 @@ pub enum WorkerStoreError {
     },
 
     #[error(
-        "WAL transition failed for {table} ({invocation_id}/{call_id}): {reason}"
+        "WAL transition failed for {entity} ({invocation_id}/{call_id}): {reason}"
     )]
     WalTransitionFailed {
-        table: &'static str,
+        /// Domain name of the entity whose transition failed
+        /// (currently `tool_dispatch` or `llm_dispatch`). Named
+        /// to avoid baking in "I am a relational table" — the
+        /// value is the domain concept, not the storage row.
+        entity: &'static str,
         invocation_id: String,
         call_id: String,
         reason: String,
@@ -806,6 +817,12 @@ pub enum WorkerStoreError {
 
     #[error("malformed row from worker store: {0}")]
     Malformed(String),
+}
+
+impl From<sqlx::Error> for WorkerStoreError {
+    fn from(err: sqlx::Error) -> Self {
+        WorkerStoreError::Backend(err.to_string())
+    }
 }
 
 #[cfg(test)]

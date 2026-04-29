@@ -277,16 +277,28 @@ pub struct EventFilter<'a> {
 }
 
 /// Errors from the projection store.
+///
+/// `Backend` carries a `String` rather than a backend-specific
+/// error type so swapping the underlying storage (today: SQLite
+/// via sqlx) does not break downstream consumers' match arms.
+/// Internal code uses `From<sqlx::Error>` for ergonomic
+/// propagation; the public variant only exposes a message.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("database error: {0}")]
-    Sql(#[from] sqlx::Error),
+    #[error("projection store backend error: {0}")]
+    Backend(String),
 
     #[error("failed to create database directory: {0}")]
     CreateDir(std::io::Error),
 
     #[error("projection database not initialised at {0} (has `fq run` been started?)")]
     NotInitialised(PathBuf),
+}
+
+impl From<sqlx::Error> for StoreError {
+    fn from(err: sqlx::Error) -> Self {
+        StoreError::Backend(err.to_string())
+    }
 }
 
 /// Denormalised fields extracted from an event for indexing.
