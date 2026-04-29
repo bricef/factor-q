@@ -28,9 +28,14 @@
 pub mod executor;
 pub mod introspection;
 pub mod reducer;
+pub mod store;
 
 pub use executor::{AgentExecutor, ExecutorError, InvocationOutcome};
 pub use reducer::{Harness, Reducer, ReducerRunner};
+pub use store::{
+    Compatibility, DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow,
+    WORKER_SCHEMA_VERSION, WorkerStore, WorkerStoreError,
+};
 
 use async_trait::async_trait;
 use serde_json::Value;

@@ -49,5 +49,6 @@ pub use mcp::{McpClientManager, McpError, McpServerConfig};
 pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;
 pub use worker::{
-    AgentExecutor, ExecutorError, Harness, InvocationOutcome, Reducer, ReducerRunner, Worker,
+    AgentExecutor, ExecutorError, Harness, InvocationOutcome, Reducer, ReducerRunner,
+    WORKER_SCHEMA_VERSION, Worker, WorkerStore, WorkerStoreError,
 };

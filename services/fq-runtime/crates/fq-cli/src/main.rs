@@ -837,13 +837,24 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
 
-    // Open the projection store.
+    // Open the projection store (control-plane) and the worker
+    // store. They share the same SQLite file in v1 — see the
+    // data-architecture.md §11 single-file collapse note.
     let db_path = projection_path(&config);
     println!("  projection db:    {}", db_path.display());
     let store = Arc::new(
         ProjectionStore::open(&db_path)
             .await
             .with_context(|| format!("failed to open projection at {}", db_path.display()))?,
+    );
+    let _worker_store = Arc::new(
+        fq_runtime::WorkerStore::open(&db_path)
+            .await
+            .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
+    );
+    println!(
+        "  worker schema:    v{}",
+        fq_runtime::WORKER_SCHEMA_VERSION
     );
 
     // Load pricing.
