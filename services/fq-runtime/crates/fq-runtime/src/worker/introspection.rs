@@ -6,7 +6,7 @@
 //! [`fq_tools::ToolContext`] cannot reach any of it — the
 //! context only carries the sandbox. So both the legacy
 //! [`crate::AgentExecutor`] and the reducer
-//! [`crate::reducer::ReducerRunner`] intercept tool calls
+//! [`crate::worker::reducer::ReducerRunner`] intercept tool calls
 //! whose name is [`fq_tools::builtin::SELF_INSPECT_TOOL_NAME`]
 //! and call [`synthesize_self_inspect`] to produce the result.
 //!

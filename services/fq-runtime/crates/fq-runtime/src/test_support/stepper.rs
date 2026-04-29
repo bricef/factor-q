@@ -20,7 +20,7 @@
 //! It does not run a real LLM or tools. The test supplies the
 //! [`CapabilityResult`] for each step.
 
-use crate::reducer::types::{
+use crate::worker::reducer::types::{
     AgentConfig, CapabilityResult, NextAction, Reducer, StepInput, StepOutput, TriggerPayload,
 };
 
@@ -128,7 +128,7 @@ mod tests {
     use super::*;
     use crate::Harness;
     use crate::events::{MessageToolCall, StopReason, TokenUsage, ToolSchema};
-    use crate::reducer::types::{
+    use crate::worker::reducer::types::{
         CapabilityResult, ModelResponse, ToolCallResult, TriggerSourceKind,
     };
     use serde_json::{Value, json};
@@ -267,7 +267,7 @@ mod tests {
             fn step(
                 &self,
                 input: StepInput,
-            ) -> Result<StepOutput, crate::reducer::types::HarnessError> {
+            ) -> Result<StepOutput, crate::worker::reducer::types::HarnessError> {
                 *self.seen.lock().unwrap() =
                     Some((input.now_ms, input.random_seed, input.step_index));
                 Ok(StepOutput {

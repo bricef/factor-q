@@ -12,7 +12,7 @@
 //!   worker tests as they land.
 //! - [`stepper`] — drive a [`crate::Reducer`] through individual
 //!   steps with full control, for tests that suspend mid-flight,
-//!   inject specific [`crate::reducer::types::CapabilityResult`]s,
+//!   inject specific [`crate::worker::reducer::types::CapabilityResult`]s,
 //!   or verify state shape after every step.
 
 pub mod events;

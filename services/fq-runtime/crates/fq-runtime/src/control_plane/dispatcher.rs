@@ -40,18 +40,24 @@ use tracing::{debug, error, info, warn};
 use crate::agent::{AgentId, AgentRegistry};
 use crate::bus::{BusError, EventBus, agent_id_from_trigger_subject};
 use crate::events::TriggerSource;
-use crate::executor::{AgentExecutor, ExecutorError};
 use crate::llm::LlmClient;
+use crate::worker::{ExecutorError, Worker};
 
 /// Name of the durable JetStream consumer the dispatcher creates.
 pub const CONSUMER_NAME: &str = "fq-dispatcher";
 
 /// NATS-triggered dispatcher. Owns references to the pieces of the
 /// runtime it needs — call [`TriggerDispatcher::run`] to drive it.
+///
+/// The dispatcher lives on the control-plane side of the role
+/// boundary; it talks to workers exclusively through the
+/// [`Worker`] trait. v1 hands it an in-process worker
+/// (`Arc::new(AgentExecutor::new(...))`); v2 will hand it a
+/// remote-worker adapter that proxies over NATS.
 pub struct TriggerDispatcher {
     bus: EventBus,
     registry: Arc<AgentRegistry>,
-    executor: Arc<AgentExecutor>,
+    worker: Arc<dyn Worker>,
     llm: Arc<dyn LlmClient>,
 }
 
@@ -59,13 +65,13 @@ impl TriggerDispatcher {
     pub fn new(
         bus: EventBus,
         registry: Arc<AgentRegistry>,
-        executor: Arc<AgentExecutor>,
+        worker: Arc<dyn Worker>,
         llm: Arc<dyn LlmClient>,
     ) -> Self {
         Self {
             bus,
             registry,
-            executor,
+            worker,
             llm,
         }
     }
@@ -172,8 +178,8 @@ impl TriggerDispatcher {
         );
 
         let outcome = self
-            .executor
-            .run(
+            .worker
+            .run_invocation(
                 &loaded.agent,
                 self.llm.as_ref(),
                 TriggerSource::Subject,
@@ -242,6 +248,7 @@ mod tests {
     use crate::llm::fixture::FixtureClient;
     use crate::pricing::{ModelPricing, PricingTable};
     use crate::tools::ToolRegistry;
+    use crate::worker::AgentExecutor;
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -305,7 +312,7 @@ mod tests {
     struct TestDispatcher {
         bus: EventBus,
         registry: Arc<AgentRegistry>,
-        executor: Arc<AgentExecutor>,
+        worker: Arc<dyn Worker>,
         llm: Arc<dyn LlmClient>,
         consumer_name: String,
         filter_subject: String,
@@ -325,7 +332,7 @@ mod tests {
             let dispatcher = TriggerDispatcher::new(
                 self.bus.clone(),
                 self.registry.clone(),
-                self.executor.clone(),
+                self.worker.clone(),
                 self.llm.clone(),
             );
 
@@ -373,7 +380,7 @@ mod tests {
             return;
         };
         use crate::bus::EventBus;
-        use crate::projection::store::{EventFilter, ProjectionStore};
+        use crate::control_plane::projection::store::{EventFilter, ProjectionStore};
 
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let agent_id_str = unique_agent_id("dispatch-test");
@@ -415,7 +422,7 @@ You are a test agent."#
             c
         });
 
-        let executor = Arc::new(AgentExecutor::new(
+        let worker: Arc<dyn Worker> = Arc::new(AgentExecutor::new(
             bus.clone(),
             test_pricing(),
             test_tools(),
@@ -429,7 +436,7 @@ You are a test agent."#
         );
 
         // Spawn a projection consumer so events are materialised.
-        let proj_consumer = crate::projection::ProjectionConsumer::new(bus.clone(), store.clone());
+        let proj_consumer = crate::control_plane::projection::ProjectionConsumer::new(bus.clone(), store.clone());
         let (proj_tx, proj_rx) = oneshot::channel();
         let proj_handle = tokio::spawn(async move { proj_consumer.run(proj_rx).await });
 
@@ -439,7 +446,7 @@ You are a test agent."#
         let dispatcher = TestDispatcher {
             bus: bus.clone(),
             registry: registry.clone(),
-            executor: executor.clone(),
+            worker: worker.clone(),
             llm: llm.clone(),
             consumer_name: unique_consumer_name(),
             filter_subject: crate::bus::trigger_subject(&agent_id_str),

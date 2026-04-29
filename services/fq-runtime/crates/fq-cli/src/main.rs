@@ -9,9 +9,9 @@ use fq_runtime::events::{
     Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
     TriggerSource,
 };
-use fq_runtime::executor::InvocationOutcome;
+use fq_runtime::worker::InvocationOutcome;
 use fq_runtime::llm::{GenAiClient, LlmClient};
-use fq_runtime::projection::store::EventFilter;
+use fq_runtime::control_plane::projection::store::EventFilter;
 use fq_runtime::{
     AgentExecutor, Config, EventBus, McpClientManager, McpServerConfig, PricingTable,
     ProjectionConsumer, ProjectionStore, ToolRegistry, TriggerDispatcher,
@@ -891,7 +891,8 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
 
     let tools = Arc::new(tools);
     let llm: Arc<dyn LlmClient> = Arc::new(GenAiClient::new());
-    let executor = Arc::new(AgentExecutor::new(bus.clone(), pricing, tools));
+    let worker: Arc<dyn fq_runtime::Worker> =
+        Arc::new(AgentExecutor::new(bus.clone(), pricing, tools));
 
     // Publish a system.startup event before spawning any tasks.
     // If this fails the daemon cannot produce lifecycle events at
@@ -918,7 +919,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
 
     // Spawn the trigger dispatcher.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
-    let dispatcher = TriggerDispatcher::new(bus.clone(), registry, executor, llm);
+    let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker, llm);
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
 
     println!();

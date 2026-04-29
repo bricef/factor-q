@@ -476,7 +476,7 @@ impl AgentExecutor {
         totals: &InvocationTotals,
         start: Instant,
     ) -> Result<ToolResult, ExecutorError> {
-        use crate::introspection::{HostInvocationStats, synthesize_self_inspect};
+        use crate::worker::introspection::{HostInvocationStats, synthesize_self_inspect};
 
         let tool_start = Instant::now();
         let stats = HostInvocationStats {

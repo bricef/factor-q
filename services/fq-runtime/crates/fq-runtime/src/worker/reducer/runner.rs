@@ -37,7 +37,7 @@ use crate::events::{
     FailurePhase, InvocationTotals, LlmRequestPayload, LlmResponsePayload, ToolCallPayload,
     ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
 };
-use crate::executor::{ExecutorError, InvocationOutcome};
+use crate::worker::{ExecutorError, InvocationOutcome};
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
@@ -410,7 +410,7 @@ impl ReducerRunner {
         totals: &InvocationTotals,
         start: Instant,
     ) -> Result<ToolCallResult, ExecutorError> {
-        use crate::introspection::{HostInvocationStats, synthesize_self_inspect};
+        use crate::worker::introspection::{HostInvocationStats, synthesize_self_inspect};
 
         let tool_start = Instant::now();
         let stats = HostInvocationStats {
@@ -422,7 +422,7 @@ impl ReducerRunner {
             // when AgentConfig.max_iterations is 0. Mirror that so
             // self_inspect's reported value matches what actually
             // bounds the agent.
-            max_iterations: crate::reducer::harness::DEFAULT_MAX_ITERATIONS,
+            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
             totals: *totals,
             elapsed_ms: start.elapsed().as_millis() as u64,
         };
@@ -748,10 +748,10 @@ mod tests {
     use crate::agent::{Agent, Sandbox};
     use crate::bus::EventBus;
     use crate::events::{StopReason, TokenUsage};
-    use crate::executor::AgentExecutor;
+    use crate::worker::executor::AgentExecutor;
     use crate::llm::fixture::FixtureClient;
     use crate::pricing::ModelPricing;
-    use crate::reducer::Harness;
+    use crate::worker::reducer::Harness;
     use crate::tools::ToolRegistry;
     use crate::{events::EventPayload, llm::ChatResponse};
     use futures::StreamExt;
@@ -1014,7 +1014,7 @@ mod tests {
         // reducer-state level (no host bus interleaving),
         // matching the unit-test `state_round_trips` pattern
         // but starting from the runner-built `AgentConfig`.
-        use crate::reducer::types::{
+        use crate::worker::reducer::types::{
             AgentConfig, CapabilityResult, ModelResponse, NextAction, StepInput, TriggerPayload,
             TriggerSourceKind,
         };
@@ -1162,8 +1162,8 @@ mod tests {
     /// must match a non-suspended run.
     #[tokio::test]
     async fn reducer_suspends_and_resumes_across_tool_dispatch() {
-        use crate::introspection::{HostInvocationStats, synthesize_self_inspect};
-        use crate::reducer::types::{
+        use crate::worker::introspection::{HostInvocationStats, synthesize_self_inspect};
+        use crate::worker::reducer::types::{
             AgentConfig, CapabilityResult, ModelResponse, NextAction, StepInput, ToolCallResult,
             TriggerPayload, TriggerSourceKind,
         };

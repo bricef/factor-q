@@ -333,7 +333,7 @@ mod tests {
 
     use super::*;
     use crate::events::{StopReason, TokenUsage, ToolSchema};
-    use crate::reducer::types::{ModelResponse, ToolCallResult, TriggerPayload, TriggerSourceKind};
+    use crate::worker::reducer::types::{ModelResponse, ToolCallResult, TriggerPayload, TriggerSourceKind};
     use serde_json::{Value, json};
 
     fn config() -> AgentConfig {
