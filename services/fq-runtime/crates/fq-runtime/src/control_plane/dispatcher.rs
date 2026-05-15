@@ -439,7 +439,8 @@ You are a test agent."#
         );
 
         // Spawn a projection consumer so events are materialised.
-        let proj_consumer = crate::control_plane::projection::ProjectionConsumer::new(bus.clone(), store.clone());
+        let proj_consumer =
+            crate::control_plane::projection::ProjectionConsumer::new(bus.clone(), store.clone());
         let (proj_tx, proj_rx) = oneshot::channel();
         let proj_handle = tokio::spawn(async move { proj_consumer.run(proj_rx).await });
 

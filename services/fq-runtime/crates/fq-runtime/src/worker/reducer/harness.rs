@@ -65,9 +65,7 @@ struct HarnessState {
     iteration: u32,
 }
 
-#[derive(
-    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, strum::EnumCount,
-)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, strum::EnumCount)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
     /// Pre-step-0: nothing has happened yet. The reducer seeds
@@ -331,9 +329,11 @@ mod tests {
     //! `step()` function directly.
 
     use super::*;
-    use crate::events::{StopReason, TokenUsage, ToolSchema};
     use crate::agent::AgentId;
-    use crate::worker::reducer::types::{ModelResponse, ToolCallResult, TriggerPayload, TriggerSourceKind};
+    use crate::events::{StopReason, TokenUsage, ToolSchema};
+    use crate::worker::reducer::types::{
+        ModelResponse, ToolCallResult, TriggerPayload, TriggerSourceKind,
+    };
     use serde_json::{Value, json};
     use strum::EnumCount;
 
@@ -365,9 +365,7 @@ mod tests {
     #[test]
     fn phase_variant_count_is_within_comfort_threshold() {
         const _COMFORT: () = if Phase::COUNT >= 10 {
-            panic!(
-                "Phase variant count exceeded the under-ten comfort threshold — note the trend"
-            );
+            panic!("Phase variant count exceeded the under-ten comfort threshold — note the trend");
         };
         const _ALARM: () = if Phase::COUNT >= 50 {
             panic!(

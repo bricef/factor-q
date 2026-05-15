@@ -775,9 +775,11 @@ mod tests {
         assert!((cost_meta.total_cost - 0.0011).abs() < 1e-9);
 
         let first_invocation = events[0].envelope.invocation_id;
-        assert!(events
-            .iter()
-            .all(|e| e.envelope.invocation_id == first_invocation));
+        assert!(
+            events
+                .iter()
+                .all(|e| e.envelope.invocation_id == first_invocation)
+        );
     }
 
     #[tokio::test]
@@ -873,9 +875,7 @@ mod tests {
         let response_costs: Vec<f64> = events
             .iter()
             .filter_map(|e| match &e.payload {
-                EventPayload::LlmResponse(_) => {
-                    e.envelope.cost.as_ref().map(|c| c.total_cost)
-                }
+                EventPayload::LlmResponse(_) => e.envelope.cost.as_ref().map(|c| c.total_cost),
                 _ => None,
             })
             .collect();

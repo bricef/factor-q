@@ -253,10 +253,7 @@ impl ReducerRunner {
         }
         for r in &llms {
             if r.status == DispatchStatus::Completed {
-                completed.push((
-                    r.completed_at.unwrap_or(0),
-                    llm_row_to_capability(r)?,
-                ));
+                completed.push((r.completed_at.unwrap_or(0), llm_row_to_capability(r)?));
             }
         }
         completed.sort_by_key(|x| x.0);
@@ -1094,8 +1091,7 @@ impl ReducerRunner {
             ),
         )
         .await?;
-        let response_json =
-            serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
         self.store
             .write_llm_completed(
                 &inv_str,
@@ -1196,8 +1192,8 @@ fn tool_row_to_capability(row: &ToolDispatchRow) -> CapabilityResult {
     // corrupt (empty string), the resume path surfaces it as an
     // error via the reducer's normal error handling — here we fall
     // back to a sentinel so this conversion stays infallible.
-    let tool_call_id = crate::events::ToolCallId::new(row.tool_call_id.clone())
-        .unwrap_or_else(|_| {
+    let tool_call_id =
+        crate::events::ToolCallId::new(row.tool_call_id.clone()).unwrap_or_else(|_| {
             crate::events::ToolCallId::new("corrupt-empty-tool-call-id".to_string())
                 .expect("sentinel is non-empty")
         });
@@ -1214,9 +1210,7 @@ fn tool_row_to_capability(row: &ToolDispatchRow) -> CapabilityResult {
 /// completed `llm_dispatch` row. The stored response is
 /// the JSON-serialised `ChatResponse` from
 /// [`ReducerRunner::run_model_with_llm`].
-fn llm_row_to_capability(
-    row: &LlmDispatchRow,
-) -> Result<CapabilityResult, ExecutorError> {
+fn llm_row_to_capability(row: &LlmDispatchRow) -> Result<CapabilityResult, ExecutorError> {
     let response_json = row.response.as_deref().ok_or_else(|| {
         ExecutorError::WorkerStore(format!(
             "completed llm_dispatch row {}/{} has no response",
@@ -1250,9 +1244,7 @@ fn phase_and_terminal_from(action: &NextAction, now_ms: i64) -> (&'static str, O
         NextAction::Complete(_) => ("completed", Some(now_ms)),
         NextAction::Failed(_) => ("failed", Some(now_ms)),
         NextAction::CallModel(_) => ("awaiting_model", None),
-        NextAction::CallTool(_) | NextAction::CallToolsParallel(_) => {
-            ("dispatching_tools", None)
-        }
+        NextAction::CallTool(_) | NextAction::CallToolsParallel(_) => ("dispatching_tools", None),
     }
 }
 
@@ -1415,7 +1407,9 @@ mod tests {
             let pos = kinds[from..]
                 .iter()
                 .position(|s| s == k)
-                .unwrap_or_else(|| panic!("kind {k:?} not found at or after {from}; got {kinds:?}"));
+                .unwrap_or_else(|| {
+                    panic!("kind {k:?} not found at or after {from}; got {kinds:?}")
+                });
             from += pos + 1;
         }
     }
@@ -1624,7 +1618,7 @@ mod tests {
             },
             // After envelope-refactor step 3, no separate cost event.
             // Legacy: 8 (was 10); reducer: 11 (was 13).
-            8, // legacy: 8 events (no dispatched, no cost)
+            8,  // legacy: 8 events (no dispatched, no cost)
             11, // reducer: legacy + 2 llm_dispatched + 1 tool_dispatched
         )
         .await;
@@ -2174,14 +2168,8 @@ mod tests {
         // After envelope-refactor step 3, no separate cost event:
         // triggered, llm.request, llm.dispatched, llm.response,
         // completed = 5 events.
-        let (store, events) = run_with_wal(
-            &url,
-            agent,
-            vec![end_turn_response("done.")],
-            5,
-            None,
-        )
-        .await;
+        let (store, events) =
+            run_with_wal(&url, agent, vec![end_turn_response("done.")], 5, None).await;
         // Six events: triggered, llm.request, llm.dispatched, llm.response, cost, completed.
         // We only asked for 5 above; let's ask for one more so the assertion below works cleanly.
         let _ = events; // (subset captured; the count is conservative for assertion below)
@@ -2259,18 +2247,23 @@ mod tests {
             &["llm_request", "llm_dispatched", "llm_response"],
         );
         // The tool.dispatched event is present at all.
-        assert!(
-            kinds.contains(&"tool_dispatched"),
-            "kinds: {kinds:?}"
-        );
+        assert!(kinds.contains(&"tool_dispatched"), "kinds: {kinds:?}");
 
         // Every WAL row should be `completed` at end-of-invocation.
         assert!(
-            store.find_ambiguous_tool_dispatches().await.unwrap().is_empty(),
+            store
+                .find_ambiguous_tool_dispatches()
+                .await
+                .unwrap()
+                .is_empty(),
             "tool_dispatch rows must all be completed"
         );
         assert!(
-            store.find_ambiguous_llm_dispatches().await.unwrap().is_empty(),
+            store
+                .find_ambiguous_llm_dispatches()
+                .await
+                .unwrap()
+                .is_empty(),
             "llm_dispatch rows must all be completed"
         );
 
@@ -2361,14 +2354,8 @@ mod tests {
 
         let agent_id = unique_agent_id("step5-state-completion");
         let agent = simple_responder_agent(&agent_id);
-        let (store, events) = run_with_wal(
-            &url,
-            agent,
-            vec![end_turn_response("done.")],
-            6,
-            None,
-        )
-        .await;
+        let (store, events) =
+            run_with_wal(&url, agent, vec![end_turn_response("done.")], 6, None).await;
 
         let inv_str = events[0].envelope.invocation_id.to_string();
         let row = store
@@ -2389,8 +2376,8 @@ mod tests {
         );
         assert_eq!(row.workspace_ref, None);
         // The state blob is reducer-readable JSON.
-        let _: serde_json::Value = serde_json::from_slice(&row.state_blob)
-            .expect("state_blob deserialises as JSON");
+        let _: serde_json::Value =
+            serde_json::from_slice(&row.state_blob).expect("state_blob deserialises as JSON");
     }
 
     #[tokio::test]
@@ -2405,7 +2392,9 @@ mod tests {
             return;
         };
 
-        use crate::worker::reducer::types::{AgentConfig, StepInput, TriggerPayload, TriggerSourceKind};
+        use crate::worker::reducer::types::{
+            AgentConfig, StepInput, TriggerPayload, TriggerSourceKind,
+        };
 
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("events.db");
@@ -2483,7 +2472,10 @@ mod tests {
             .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
             .await
             .unwrap();
-        store.write_llm_dispatched(&inv_str, "req-0", 2).await.unwrap();
+        store
+            .write_llm_dispatched(&inv_str, "req-0", 2)
+            .await
+            .unwrap();
         store
             .write_llm_completed(&inv_str, "req-0", &response_json, false, 0.0001, 3)
             .await
@@ -2558,8 +2550,14 @@ mod tests {
             })
             .await
             .unwrap();
-        store.write_tool_intent(&inv_str, "tc1", "shell", "{}", 1).await.unwrap();
-        store.write_tool_dispatched(&inv_str, "tc1", 2).await.unwrap();
+        store
+            .write_tool_intent(&inv_str, "tc1", "shell", "{}", 1)
+            .await
+            .unwrap();
+        store
+            .write_tool_dispatched(&inv_str, "tc1", 2)
+            .await
+            .unwrap();
         // No completed.
 
         let bus = EventBus::connect(&url).await.unwrap();

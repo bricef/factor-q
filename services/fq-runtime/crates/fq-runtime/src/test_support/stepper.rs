@@ -231,7 +231,9 @@ mod tests {
         let _ = s2.step(Some(CapabilityResult::ToolResult(tool_result(
             "call_1", "echoed",
         ))));
-        let final_step = s2.step(Some(CapabilityResult::ModelResult(end_turn("after-resume."))));
+        let final_step = s2.step(Some(CapabilityResult::ModelResult(end_turn(
+            "after-resume.",
+        ))));
 
         match final_step.next_action {
             NextAction::Complete(text) => assert_eq!(text, "after-resume."),
@@ -281,9 +283,7 @@ mod tests {
         }
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<(u64, u64, u32)>));
-        let cap = Capturing {
-            seen: seen.clone(),
-        };
+        let cap = Capturing { seen: seen.clone() };
         let mut stepper = ManualStepper::new(cap, config(), trigger(json!("hi")));
         let _ = stepper.step_with_clock(None, 42, 99);
         assert_eq!(seen.lock().unwrap().unwrap(), (42, 99, 0));

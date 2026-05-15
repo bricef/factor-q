@@ -405,7 +405,10 @@ mod tests {
             .write_tool_intent("safe-replay", "tc2", "shell", "{}", 10)
             .await
             .unwrap();
-        store.write_tool_dispatched("safe-replay", "tc2", 11).await.unwrap();
+        store
+            .write_tool_dispatched("safe-replay", "tc2", 11)
+            .await
+            .unwrap();
         store
             .write_tool_completed("safe-replay", "tc2", "ok", false, 12)
             .await
@@ -416,7 +419,10 @@ mod tests {
             .write_tool_intent("ambiguous", "tc3", "shell", "{}", 10)
             .await
             .unwrap();
-        store.write_tool_dispatched("ambiguous", "tc3", 11).await.unwrap();
+        store
+            .write_tool_dispatched("ambiguous", "tc3", 11)
+            .await
+            .unwrap();
 
         // Also a terminal invocation that should NOT appear.
         let mut terminal_row = InvocationStateRow {

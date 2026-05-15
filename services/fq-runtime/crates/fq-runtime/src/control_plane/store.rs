@@ -418,18 +418,13 @@ impl ControlPlaneStore {
     /// exit. The coordination-consumer's stale-worker sweep
     /// promotes alive→stale; only an explicit operator
     /// action or graceful exit moves to shutdown.
-    pub async fn mark_worker_stale(
-        &self,
-        worker_id: &str,
-    ) -> Result<(), ControlPlaneStoreError> {
-        sqlx::query(
-            "UPDATE coordination_worker SET status = ? WHERE worker_id = ? AND status = ?",
-        )
-        .bind(WorkerStatus::Stale.as_str())
-        .bind(worker_id)
-        .bind(WorkerStatus::Alive.as_str())
-        .execute(&self.pool)
-        .await?;
+    pub async fn mark_worker_stale(&self, worker_id: &str) -> Result<(), ControlPlaneStoreError> {
+        sqlx::query("UPDATE coordination_worker SET status = ? WHERE worker_id = ? AND status = ?")
+            .bind(WorkerStatus::Stale.as_str())
+            .bind(worker_id)
+            .bind(WorkerStatus::Alive.as_str())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -619,10 +614,7 @@ impl ControlPlaneStore {
     // Pending waits
     // -----------------------------------------------------------
 
-    pub async fn insert_wait(
-        &self,
-        row: &PendingWaitRow,
-    ) -> Result<(), ControlPlaneStoreError> {
+    pub async fn insert_wait(&self, row: &PendingWaitRow) -> Result<(), ControlPlaneStoreError> {
         sqlx::query(
             r#"
             INSERT INTO pending_wait (invocation_id, kind, descriptor, expires_at, created_at)
@@ -657,10 +649,7 @@ impl ControlPlaneStore {
 
     /// Remove a pending wait — i.e. signal it. Returns the row
     /// count (0 if no wait existed; 1 if one was removed).
-    pub async fn signal_wait(
-        &self,
-        invocation_id: &str,
-    ) -> Result<u64, ControlPlaneStoreError> {
+    pub async fn signal_wait(&self, invocation_id: &str) -> Result<u64, ControlPlaneStoreError> {
         let res = sqlx::query("DELETE FROM pending_wait WHERE invocation_id = ?")
             .bind(invocation_id)
             .execute(&self.pool)
@@ -714,11 +703,10 @@ impl ControlPlaneStore {
         &self,
         id: &str,
     ) -> Result<Option<ScheduleEntryRow>, ControlPlaneStoreError> {
-        let row =
-            sqlx::query("SELECT id, kind, fire_at, payload FROM schedule_entry WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = sqlx::query("SELECT id, kind, fire_at, payload FROM schedule_entry WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(row_to_schedule))
     }
 
@@ -795,10 +783,7 @@ impl ControlPlaneStore {
     /// Bulk-delete archive rows whose `archived_at` is older
     /// than `cutoff_ms`. Used by the retention sweep in step 10.
     /// Returns the number of rows deleted.
-    pub async fn sweep_archive(
-        &self,
-        cutoff_ms: i64,
-    ) -> Result<u64, ControlPlaneStoreError> {
+    pub async fn sweep_archive(&self, cutoff_ms: i64) -> Result<u64, ControlPlaneStoreError> {
         let res = sqlx::query("DELETE FROM invocation_archive WHERE archived_at < ?")
             .bind(cutoff_ms)
             .execute(&self.pool)
@@ -1081,7 +1066,10 @@ mod tests {
     #[tokio::test]
     async fn worker_registration_round_trip() {
         let (store, _dir) = open_fresh().await;
-        store.register_worker("w-001", "prod-1", 1_000).await.unwrap();
+        store
+            .register_worker("w-001", "prod-1", 1_000)
+            .await
+            .unwrap();
         let w = store.get_worker("w-001").await.unwrap().unwrap();
         assert_eq!(w.worker_id, "w-001");
         assert_eq!(w.host, "prod-1");
@@ -1090,7 +1078,10 @@ mod tests {
         assert_eq!(w.status, WorkerStatus::Alive);
 
         // Re-register with a different host: row updated in place.
-        store.register_worker("w-001", "prod-2", 2_000).await.unwrap();
+        store
+            .register_worker("w-001", "prod-2", 2_000)
+            .await
+            .unwrap();
         let w = store.get_worker("w-001").await.unwrap().unwrap();
         assert_eq!(w.host, "prod-2");
         assert_eq!(w.registered_at, 2_000);

@@ -586,10 +586,10 @@ mod tests {
         // with a malformed agent_id must fail to deserialise
         // rather than landing in the runtime as a bypass.
         let cases = [
-            "\"\"",          // empty
-            "\"foo.bar\"",   // contains dot — would break NATS subjects
-            "\"agent*\"",    // contains wildcard
-            "\"agent>\"",    // contains wildcard
+            "\"\"",        // empty
+            "\"foo.bar\"", // contains dot — would break NATS subjects
+            "\"agent*\"",  // contains wildcard
+            "\"agent>\"",  // contains wildcard
             "\"with space\"",
         ];
         for raw in cases {

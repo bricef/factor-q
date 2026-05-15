@@ -5,13 +5,13 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use fq_runtime::agent::{AgentId, AgentRegistry, definition::parse_agent};
+use fq_runtime::control_plane::projection::store::EventFilter;
 use fq_runtime::events::{
     Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
     TriggerSource,
 };
-use fq_runtime::worker::InvocationOutcome;
 use fq_runtime::llm::{GenAiClient, LlmClient};
-use fq_runtime::control_plane::projection::store::EventFilter;
+use fq_runtime::worker::InvocationOutcome;
 use fq_runtime::{
     AgentExecutor, Config, EventBus, McpClientManager, McpServerConfig, PricingTable,
     ProjectionConsumer, ProjectionStore, ToolRegistry, TriggerDispatcher,
@@ -480,9 +480,7 @@ async fn trigger_agent(
         let worker_store = Arc::new(
             fq_runtime::WorkerStore::open(&db_path)
                 .await
-                .with_context(|| {
-                    format!("failed to open worker store at {}", db_path.display())
-                })?,
+                .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
         );
         let runner = fq_runtime::ReducerRunner::new(bus, pricing, tools, worker_store);
         runner
@@ -897,7 +895,12 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let cp_store = Arc::new(
         fq_runtime::ControlPlaneStore::open(&db_path)
             .await
-            .with_context(|| format!("failed to open control-plane store at {}", db_path.display()))?,
+            .with_context(|| {
+                format!(
+                    "failed to open control-plane store at {}",
+                    db_path.display()
+                )
+            })?,
     );
     let worker_store = Arc::new(
         fq_runtime::WorkerStore::open(&db_path)
@@ -908,10 +911,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         "  control plane:    v{}",
         fq_runtime::CONTROL_PLANE_SCHEMA_VERSION
     );
-    println!(
-        "  worker schema:    v{}",
-        fq_runtime::WORKER_SCHEMA_VERSION
-    );
+    println!("  worker schema:    v{}", fq_runtime::WORKER_SCHEMA_VERSION);
 
     // v1 single-process: this daemon plays both control-plane
     // and worker. Self-register the worker side with the
@@ -925,10 +925,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         .register_worker(&worker_id, &host_label, now_ms)
         .await
         .context("failed to self-register worker with control-plane")?;
-    println!(
-        "  worker:           {} (host: {})",
-        worker_id, host_label
-    );
+    println!("  worker:           {} (host: {})", worker_id, host_label);
 
     // Worker recovery: scan in-flight invocations from the
     // worker store, classify each, log the summary, and emit
@@ -938,10 +935,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // categorisation alone is the load-bearing contract that
     // the rest of the runtime can rely on (data-architecture.md
     // §3.1 / §7.1).
-    let classified =
-        fq_runtime::worker::scan_in_flight(worker_store.as_ref())
-            .await
-            .context("failed to scan in-flight invocations")?;
+    let classified = fq_runtime::worker::scan_in_flight(worker_store.as_ref())
+        .await
+        .context("failed to scan in-flight invocations")?;
     let mut counts = fq_runtime::worker::CategoryCounts::default();
     for inv in &classified {
         counts.record(inv.category.clone());
@@ -1146,7 +1142,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         let llm_arc = llm.clone();
         tokio::spawn(async move {
             let harness = fq_runtime::Harness::new();
-            match runner.resume(&harness, &agent, llm_arc.as_ref(), inv_id).await {
+            match runner
+                .resume(&harness, &agent, llm_arc.as_ref(), inv_id)
+                .await
+            {
                 Ok(outcome) => tracing::info!(
                     invocation_id = %inv_id,
                     ?outcome,
@@ -1194,8 +1193,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let (coord_shutdown_tx, coord_shutdown_rx) = tokio::sync::oneshot::channel();
     let coord_consumer = fq_runtime::CoordinationConsumer::new(bus.clone(), cp_store.clone())
         .with_self_worker_id(worker_id.clone());
-    let mut coord_handle =
-        tokio::spawn(async move { coord_consumer.run(coord_shutdown_rx).await });
+    let mut coord_handle = tokio::spawn(async move { coord_consumer.run(coord_shutdown_rx).await });
 
     // Spawn the trigger dispatcher.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -1282,7 +1280,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     }
     match tokio::time::timeout(std::time::Duration::from_secs(5), coord_handle).await {
         Ok(Ok(Ok(()))) => println!("  coordination consumer stopped cleanly."),
-        Ok(Ok(Err(err))) => tracing::error!(error = %err, "coordination consumer exited with error"),
+        Ok(Ok(Err(err))) => {
+            tracing::error!(error = %err, "coordination consumer exited with error")
+        }
         Ok(Err(err)) => tracing::error!(error = %err, "coordination consumer task panicked"),
         Err(_) => tracing::warn!("coordination consumer did not shut down within 5s"),
     }

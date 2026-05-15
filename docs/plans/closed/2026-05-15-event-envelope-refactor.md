@@ -1,7 +1,7 @@
 # Plan: Event Envelope / Payload / Annotations Refactor
 
 **Date**: 2026-05-15
-**Status**: Active
+**Status**: Closed (2026-05-16)
 **Design references**:
 - [`docs/design/inter-node-contracts-and-event-layers.md`](../../design/inter-node-contracts-and-event-layers.md) — the three-layer event model.
 - [`docs/adrs/ADR-0016-typed-operations-no-free-form-apis.md`](../../adrs/ADR-0016-typed-operations-no-free-form-apis.md) — typed-operations discipline that motivates the annotation barrier.

@@ -654,11 +654,19 @@ mod tests {
     async fn cost_summary_aggregates_by_agent() {
         let (store, _dir) = open_store().await;
         store
-            .insert_event(&sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.10))
+            .insert_event(&sample_llm_response_with_cost(
+                "alpha",
+                Uuid::now_v7(),
+                0.10,
+            ))
             .await
             .unwrap();
         store
-            .insert_event(&sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.05))
+            .insert_event(&sample_llm_response_with_cost(
+                "alpha",
+                Uuid::now_v7(),
+                0.05,
+            ))
             .await
             .unwrap();
         store
@@ -684,7 +692,11 @@ mod tests {
     async fn cost_summary_filters_by_agent() {
         let (store, _dir) = open_store().await;
         store
-            .insert_event(&sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.10))
+            .insert_event(&sample_llm_response_with_cost(
+                "alpha",
+                Uuid::now_v7(),
+                0.10,
+            ))
             .await
             .unwrap();
         store

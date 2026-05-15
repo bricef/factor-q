@@ -939,9 +939,7 @@ pub enum WorkerStoreError {
         binary_version: u32,
     },
 
-    #[error(
-        "WAL transition failed for {entity} ({invocation_id}/{call_id}): {reason}"
-    )]
+    #[error("WAL transition failed for {entity} ({invocation_id}/{call_id}): {reason}")]
     WalTransitionFailed {
         /// Domain name of the entity whose transition failed
         /// (currently `tool_dispatch` or `llm_dispatch`). Named
@@ -1194,16 +1192,28 @@ mod tests {
         let (store, _dir) = open_fresh().await;
 
         // intent only — not ambiguous (safe-resume).
-        store.write_tool_intent("inv1", "a", "shell", "{}", 1).await.unwrap();
+        store
+            .write_tool_intent("inv1", "a", "shell", "{}", 1)
+            .await
+            .unwrap();
 
         // dispatched without completed — ambiguous.
-        store.write_tool_intent("inv2", "b", "shell", "{}", 2).await.unwrap();
+        store
+            .write_tool_intent("inv2", "b", "shell", "{}", 2)
+            .await
+            .unwrap();
         store.write_tool_dispatched("inv2", "b", 3).await.unwrap();
 
         // fully completed — safe-replay.
-        store.write_tool_intent("inv3", "c", "shell", "{}", 4).await.unwrap();
+        store
+            .write_tool_intent("inv3", "c", "shell", "{}", 4)
+            .await
+            .unwrap();
         store.write_tool_dispatched("inv3", "c", 5).await.unwrap();
-        store.write_tool_completed("inv3", "c", "{}", false, 6).await.unwrap();
+        store
+            .write_tool_completed("inv3", "c", "{}", false, 6)
+            .await
+            .unwrap();
 
         let ambiguous = store.find_ambiguous_tool_dispatches().await.unwrap();
         assert_eq!(ambiguous.len(), 1);
@@ -1286,7 +1296,13 @@ mod tests {
         store.upsert_invocation_state(&row).await.unwrap();
         let n = store.delete_invocation_state("to-delete").await.unwrap();
         assert_eq!(n, 1);
-        assert!(store.get_invocation_state("to-delete").await.unwrap().is_none());
+        assert!(
+            store
+                .get_invocation_state("to-delete")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1335,7 +1351,11 @@ mod tests {
             .write_llm_completed("inv-err", "r-err", "rate limited", true, 0.0, 3)
             .await
             .unwrap();
-        let r = store.get_llm_dispatch("inv-err", "r-err").await.unwrap().unwrap();
+        let r = store
+            .get_llm_dispatch("inv-err", "r-err")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(r.status, DispatchStatus::Completed);
         assert_eq!(r.is_error, Some(true));
         assert_eq!(r.cost_usd, Some(0.0));
@@ -1361,15 +1381,13 @@ mod tests {
             for stmt in split_sql(WORKER_TABLES_V1_SQL) {
                 sqlx::query(&stmt).execute(&pool).await.unwrap();
             }
-            sqlx::query(
-                "INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)",
-            )
-            .bind(SCHEMA_CLASS)
-            .bind(1_i64)
-            .bind(0_i64)
-            .execute(&pool)
-            .await
-            .unwrap();
+            sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)")
+                .bind(SCHEMA_CLASS)
+                .bind(1_i64)
+                .bind(0_i64)
+                .execute(&pool)
+                .await
+                .unwrap();
             // Pre-existing v1 row to ensure migration preserves data.
             sqlx::query(
                 "INSERT INTO llm_dispatch (invocation_id, request_id, model, status, request_payload, intent_at) VALUES (?, ?, ?, ?, ?, ?)",

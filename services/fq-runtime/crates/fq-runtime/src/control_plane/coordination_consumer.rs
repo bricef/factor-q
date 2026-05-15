@@ -112,10 +112,7 @@ impl CoordinationConsumer {
         self,
         mut shutdown: oneshot::Receiver<()>,
     ) -> Result<(), CoordinationConsumerError> {
-        info!(
-            filter = FILTER_SUBJECT,
-            "coordination consumer starting"
-        );
+        info!(filter = FILTER_SUBJECT, "coordination consumer starting");
         let consumer = self
             .bus
             .durable_consumer_with_filter(CONSUMER_NAME, FILTER_SUBJECT)
@@ -125,8 +122,7 @@ impl CoordinationConsumer {
             .await
             .map_err(|err| CoordinationConsumerError::Stream(err.to_string()))?;
 
-        let mut sweep_timer =
-            tokio::time::interval(Duration::from_millis(self.sweep_interval_ms));
+        let mut sweep_timer = tokio::time::interval(Duration::from_millis(self.sweep_interval_ms));
 
         loop {
             tokio::select! {
@@ -311,12 +307,7 @@ mod tests {
         // the store.
         let invocation_id = Uuid::now_v7().to_string();
         store
-            .upsert_invocation_ownership(
-                &invocation_id,
-                "agent-x",
-                1_000,
-                OwnerStatus::Ambiguous,
-            )
+            .upsert_invocation_ownership(&invocation_id, "agent-x", 1_000, OwnerStatus::Ambiguous)
             .await
             .unwrap();
 
@@ -328,15 +319,14 @@ mod tests {
         // Re-publishing (idempotent path): same invocation
         // gets upserted again with no error.
         store
-            .upsert_invocation_ownership(
-                &invocation_id,
-                "agent-x",
-                2_000,
-                OwnerStatus::Ambiguous,
-            )
+            .upsert_invocation_ownership(&invocation_id, "agent-x", 2_000, OwnerStatus::Ambiguous)
             .await
             .unwrap();
-        let owner = store.get_invocation_owner(&invocation_id).await.unwrap().unwrap();
+        let owner = store
+            .get_invocation_owner(&invocation_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(owner.assigned_at, 2_000);
 
         // Avoid unused warnings
@@ -373,8 +363,7 @@ mod tests {
         // Use a unique invocation id and a unique consumer
         // name so this test can run alongside others.
         let invocation_id = Uuid::now_v7();
-        let agent_id =
-            AgentId::new(format!("coord-test-{}", Uuid::now_v7().simple())).unwrap();
+        let agent_id = AgentId::new(format!("coord-test-{}", Uuid::now_v7().simple())).unwrap();
         let consumer_name = format!("fq-coordination-test-{}", Uuid::now_v7().simple());
 
         // Spawn the consumer with a custom durable name so
@@ -416,9 +405,10 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(row) = store.get_invocation_owner(&inv_str).await.unwrap()
-                && row.status == OwnerStatus::Ambiguous {
-                    break;
-                }
+                && row.status == OwnerStatus::Ambiguous
+            {
+                break;
+            }
             if tokio::time::Instant::now() > deadline {
                 panic!("coordination row did not appear in time");
             }

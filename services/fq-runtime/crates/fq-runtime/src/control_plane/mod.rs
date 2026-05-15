@@ -29,7 +29,6 @@ pub mod store;
 
 pub use coordination_consumer::{CoordinationConsumer, CoordinationConsumerError};
 pub use store::{
-    CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError,
-    InvocationArchiveRow, OwnerRow, OwnerStatus, PendingWaitRow, ScheduleEntryRow, WorkerRow,
-    WorkerStatus,
+    CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow,
+    OwnerRow, OwnerStatus, PendingWaitRow, ScheduleEntryRow, WorkerRow, WorkerStatus,
 };
