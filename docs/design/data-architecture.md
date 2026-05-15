@@ -804,7 +804,7 @@ and retention sweep) is committed.
 `tool.call` and `tool.result`:
 
 ```
-triggered → llm.intent → llm.dispatched → llm.response → cost
+triggered → llm.request → llm.dispatched → llm.response (cost on envelope)
           → tool.call  → tool.dispatched → tool.result
           → ... → completed
           → invocation.archived  (after worker hand-off)
@@ -814,6 +814,12 @@ Today's schema uses `tool.call` (≈ intent) and `tool.result` (≈
 completed). Adding `tool.dispatched` is non-breaking; existing
 consumers ignore unknown events. Same for `llm.dispatched`
 between `llm.request` and `llm.response`.
+
+After the envelope refactor (see
+`docs/plans/active/2026-05-15-event-envelope-refactor.md`),
+cost rides on the `llm.response` envelope rather than as a
+separate event; the canonical sequence shortens by one event
+per LLM turn.
 
 `invocation.archived` is a new event published by a worker once
 it has determined an invocation is terminal and is ready to hand

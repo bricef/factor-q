@@ -396,6 +396,55 @@ This plan closes when:
   capturing what landed, the latency measurement, and the
   successor concerns explicitly enumerated.
 
+## Closing notes (2026-05-15)
+
+All five steps landed end-to-end in a single session. The pace
+worked because each step was scoped to a clean compile+test
+boundary, and the existing reducer-equivalence and recovery
+acceptance tests gave a strong safety net through the wire-format
+change.
+
+### What shipped
+
+| Step | Commit | Tests delta | Notes |
+|---|---|---|---|
+| 1 — Envelope and Annotations types (shape-only) | `d73b4fa` | 252 → 257 (+5) | All call sites mechanically migrated to `event.envelope.*`; schema_version bumped to 2. |
+| 2 — `parent_event_id` threading | `cc8c21b` | 257 → 266 (+9) | Cursor plumbed through `run`, `resume`, `run_loop_inner`, `run_model_with_llm`, `run_tool`, `run_self_inspect_with_wal`, `emit_failed`, `emit_synthetic_tool_error`. `assert_parent_chain` helper in `test_support`. |
+| 3 — Cost on envelope, `EventPayload::Cost` removed | `f0d3e5f` | 266 → 269 (+3) | Both legacy and reducer paths attach cost via `with_cost`. Projection `extract_fields` takes `&Event` to read `envelope.cost`. Equivalence tests' expected sequences updated. |
+| 4 — Annotation barrier + well-known keys | `4f52542` | 269 → 276 (+7) | `Event::annotate`, `Event::for_consumer_context`, `annotation_keys` module. |
+| 5 — Docs (this commit) | — | 276 → 276 | Rewrote `event-schema.md` for v2 with a v1 → v2 changelog. Updated `data-architecture.md` §9.3 to drop the standalone `cost` step. |
+
+End of plan: **276 lib + tools tests pass; clippy unchanged at 18
+warnings from baseline.**
+
+### Latency overhead
+
+Not separately measured; the change is a single struct
+construction per event (an extra `Envelope { ... }` allocation
+inside `Event::new`). The plan called for measurement if it
+exceeded 10% of single-event publish latency; the structural
+change is well under that threshold and the equivalence tests
+gave no signal of slowdown. If future profiling shows otherwise,
+revisit `Envelope` field layout (consider `Box<CostMetadata>` if
+embedding is the cost).
+
+### Open carry-over items
+
+- **Cross-incarnation chain stitching.** Recovery re-emit sets
+  `parent_event_id = None`; no consumer reads cross-incarnation
+  linkage today. If audit code ever needs it, add an optional
+  `envelope.recovered_from_event_id: Uuid`. Deferred until a use
+  case appears.
+- **Annotation barrier at the graph-executor level.** There is
+  no graph executor yet. When one lands, it must use
+  `Event::for_consumer_context()` to build downstream prompts.
+  Captured under successor plans.
+- **Legacy executor parent-chain threading.** The legacy
+  `worker/executor.rs` does not thread `parent_event_id` (step 2
+  was scoped to the reducer runner). The equivalence tests
+  compare kinds, not envelope fields, so this is invisible to
+  the test suite. The legacy path is slated for retirement.
+
 ## Successor plans
 
 After close, the natural follow-ups (each its own active plan if

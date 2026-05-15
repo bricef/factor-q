@@ -1,29 +1,115 @@
 # Event Schema
 
-This document specifies the event schema emitted by the factor-q runtime. It covers the envelope, per-event-type payloads, subject hierarchy, and the design rationale for each choice.
+This document specifies the event schema emitted by the factor-q runtime. It covers the three structural layers of every event (envelope, payload, annotations), per-event-type payloads, subject hierarchy, and the design rationale for each choice.
 
 Events are the primary observability and audit surface of factor-q. Every meaningful action in the system is an event, published to NATS JetStream, and later projected into SQLite for querying.
 
+**Schema version: 2.** See the [v1 → v2 changelog](#changelog-v1--v2) at the bottom for the breaking changes.
+
+## The three-layer model
+
+Every event has three structurally distinct layers, each with different write permissions, read audiences, and rules. The rationale lives in `docs/design/inter-node-contracts-and-event-layers.md` and ADR-0016; the table below summarises:
+
+| Layer | Written by | Read by | Mutability |
+|---|---|---|---|
+| Envelope | Runtime | Everyone | Immutable, closed schema |
+| Payload | Producing agent | Consuming agents | Validated against producer + consumer schemas |
+| Annotations | Producing agent | Humans, meta-agents, learning loop | **Never read by consuming agents** |
+
+The on-the-wire JSON shape:
+
+```json
+{
+  "envelope": { "...closed system metadata..." },
+  "payload":  { "...typed contract between graph nodes..." },
+  "annotations": { "notes": "...", "confidence": 0.7 }   // omitted when empty
+}
+```
+
+The three layers are separate JSON keys (not flattened) so the trust boundary is structurally enforced.
+
 ## Envelope
 
-Every event carries the same envelope fields before the type-specific payload:
+Closed schema — if a new field is needed, the runtime grows. Producing agents do not touch the envelope; the runtime stamps it.
 
 | Field | Type | Purpose |
 |---|---|---|
-| `schema_version` | `u32` | Monotonic version of the event schema. Incremented on breaking changes. |
+| `schema_version` | `u32` | Always `2`. Monotonic version of the envelope shape. |
 | `event_id` | `string` (UUID v7) | Globally unique event identifier. UUID v7 gives time-ordered IDs. |
+| `parent_event_id` | `string` (UUID v7), optional | The previous event in this invocation, if any. Omitted on the `triggered` event, on system events, and on the first event of a recovery re-emit. |
+| `trace_id` | `string` (UUID v7) | Trace correlation id. Equal to `invocation_id` for now; reserved as a separate field so multi-invocation traces (graph workflows spanning multiple invocations) can be stitched together later without a wire-format change. |
+| `agent_id` | `string` | Which agent this event belongs to. The sentinel value `"system"` is used for runtime-lifecycle events. |
+| `invocation_id` | `string` (UUID v7) | Groups events from a single agent invocation. The primary key for grouping in projections and CLI queries. |
+| `schema_id` | `string` | Stable identifier for the payload schema, e.g. `"factor-q/triggered@1"`. Versioned from day one so payloads can evolve without becoming an archaeological dig. |
 | `timestamp` | `string` (RFC3339 with nanoseconds) | When the event was generated. |
-| `agent_id` | `string` | Which agent this event belongs to. Matches the `name` field in the agent definition. |
-| `invocation_id` | `string` (UUID v7) | Groups events from a single agent invocation. All events within one run of an agent share this ID. |
-| `event_type` | enum | Discriminator for the payload shape. |
-| `payload` | type-specific | See below. |
+| `cost` | object, optional | Cost metadata for cost-bearing events (today: `llm.response`). See [Cost metadata](#cost-metadata) below. |
 
 ### Rationale
 
-- **`invocation_id` is load-bearing.** An agent can be triggered many times; reconstructing the trace of a single run requires a stable ID. This is the primary key for grouping in projections and CLI queries.
-- **`schema_version` from day one.** Even if we never break the schema, declaring a version makes migrations possible without inventing a mechanism later.
-- **UUID v7 for IDs.** Time-ordered UUIDs mean events sort naturally and stream in a sensible order without needing a separate timestamp index.
-- **JSON encoding, not binary.** Human-readable, debuggable with `nats sub "fq.>"` during development. Throughput optimisation can come later if it proves necessary.
+- **`parent_event_id` for happens-before reconstruction.** The projection (and any future replay or graph runtime) reconstructs causal order from the envelope chain rather than timestamps. Two events generated in the same nanosecond have unambiguous ordering; clocks across machines do not need to be tightly synchronised.
+- **`trace_id` as a separate field even when redundant.** It lets multi-invocation graph traces land later without a wire-format change.
+- **`schema_id` per payload variant.** Payloads will evolve. Versioned ids let consumers degrade gracefully (or refuse) when the producer is ahead.
+- **`cost` on the envelope, not as its own event.** Cost is system-level accounting, not part of the typed contract between graph nodes (ADR-0016 §7). Riding on the envelope means one publish per LLM response instead of two, and consumers can filter on `envelope.cost IS NOT NULL` instead of subscribing to a separate subject.
+
+### Cost metadata
+
+When present (on `llm.response` events), `envelope.cost` has:
+
+```json
+{
+  "call_id": "llm-01HXJ...",
+  "model": "claude-haiku",
+  "input_tokens": 1234,
+  "output_tokens": 567,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "input_cost": 0.000308,
+  "output_cost": 0.000710,
+  "total_cost": 0.001018,
+  "cumulative_invocation_cost": 0.004523,
+  "cumulative_agent_cost": 0.127890
+}
+```
+
+All currency amounts are USD.
+
+## Annotations
+
+Open key/value commentary from the producing agent. `Map<string, JsonValue>` with a registry of well-known keys; unknown keys are permitted.
+
+```json
+{
+  "notes": "tried two approaches before settling on this",
+  "confidence": 0.7,
+  "reasoning": "...chain-of-thought...",
+  "sources_considered": [ "...citation array..." ],
+  "flags": [ "needs_human_review" ]
+}
+```
+
+The field is omitted entirely when empty.
+
+### Well-known keys
+
+| Key | Type | Semantics |
+|---|---|---|
+| `notes` | string | Free-form commentary from the producing agent. |
+| `confidence` | number | Self-reported confidence. Advisory only — calibrated confidence comes from a verifier node, not from the producer. |
+| `reasoning` | string | Chain-of-thought / working. The fresh-context discipline depends on this never reaching a downstream agent's prompt. |
+| `sources_considered` | array of `Citation` | Sources looked at but not directly used in the payload. Sources actually used belong in a typed `Citation[]` field on the payload. |
+| `flags` | array of strings | Markers the producer wants downstream humans (or a meta-agent) to see. |
+
+### The annotation barrier
+
+The single rule that makes the three-layer model work: **the executor strips annotations from the input context when building the prompt for a consuming agent.** A consuming agent sees the payload and selected envelope fields, never the annotations from upstream events.
+
+This is enforced by [`Event::for_consumer_context`](#consumer-view) in the runtime, not by convention.
+
+### Consumer view
+
+`Event::for_consumer_context()` returns a `ConsumerView { envelope, payload }` whose `Serialize` impl produces `{"envelope": ..., "payload": ...}` with no `annotations` key — even when the underlying event has annotations. This is the only sanctioned way to feed an upstream event into a downstream agent's prompt context.
+
+Direct access to `event.annotations` remains available for humans, meta-agents, and the learning loop. Only the consumer-prompt path is barred.
 
 ## Subject Hierarchy
 
@@ -40,20 +126,25 @@ Concrete subjects:
 |---|---|
 | `fq.agent.{agent_id}.triggered` | An invocation has started |
 | `fq.agent.{agent_id}.llm.request` | LLM call about to be made |
-| `fq.agent.{agent_id}.llm.response` | LLM call has returned |
+| `fq.agent.{agent_id}.llm.dispatched` | LLM call has returned to the runtime (WAL middle-state) |
+| `fq.agent.{agent_id}.llm.response` | LLM call has returned and the response is durably written (carries `envelope.cost`) |
 | `fq.agent.{agent_id}.tool.call` | Agent is invoking a tool |
+| `fq.agent.{agent_id}.tool.dispatched` | Tool has returned to the runtime (WAL middle-state) |
 | `fq.agent.{agent_id}.tool.result` | Tool invocation has completed (success or failure) |
-| `fq.agent.{agent_id}.cost` | Cost update from an LLM call |
+| `fq.agent.{agent_id}.invocation.ambiguous` | A worker found an `dispatched`-without-`completed` WAL row on restart and is surfacing it to the operator |
 | `fq.agent.{agent_id}.completed` | Invocation has finished successfully |
 | `fq.agent.{agent_id}.failed` | Invocation has terminated with an error |
 | `fq.system.startup` | Runtime lifecycle — startup |
 | `fq.system.shutdown` | Runtime lifecycle — shutdown |
+| `fq.system.task_failed` | A hosted task inside `fq run` exited with an error |
+| `fq.system.recovery` | Daemon-startup snapshot of in-flight invocation categorisation |
 
 ### Rationale
 
-- **Agent ID in the subject, not just the payload.** This enables subject-based filtering — a consumer can subscribe to `fq.agent.researcher.>` to only see events from the researcher agent, without filtering in application code.
+- **Agent ID in the subject, not just the payload.** A consumer can subscribe to `fq.agent.researcher.>` to only see events from the researcher agent without filtering in application code.
 - **Hierarchical types** (`llm.request` vs `llm.response`). Allows wildcards: `fq.agent.*.llm.>` matches all LLM events across all agents.
 - **System events are a separate namespace.** Runtime lifecycle is not tied to any agent.
+- **WAL middle-state events** (`llm.dispatched`, `tool.dispatched`) sit between the request and result. They're an operational signal — recovery uses the SQLite WAL rows, not these events, but they let observers see "the call has returned, we're about to write the result."
 
 ## Event Types
 
@@ -81,8 +172,8 @@ Published when an agent invocation begins. Carries a snapshot of the agent's con
 ```
 
 **Design notes:**
-- **`config_snapshot` is a full capture.** This is what makes replay meaningful — if the agent definition is later changed, the trace still shows exactly what was running. It is the source of truth for "what did this invocation actually do."
-- **`trigger_source` indicates who initiated.** For phase 1, only `manual` and `subject` matter.
+- **`config_snapshot` is a full capture.** This is what makes replay meaningful — if the agent definition is later changed, the trace still shows exactly what was running.
+- **`trigger_source` indicates who initiated.** `manual`, `subject`, or `schedule`.
 - **`trigger_payload` is opaque.** Any JSON value, defined by the trigger source.
 
 ### `llm.request`
@@ -110,13 +201,28 @@ Published immediately before an LLM call is made.
 ```
 
 **Design notes:**
-- **Full message history is sent every time.** Reconstructing context from earlier events would be fragile; carrying the full history makes each `llm.request` self-contained. The cost is larger events, accepted for correctness and replay simplicity.
-- **`tools_available` is a snapshot.** Tool schemas can change between calls (rare in phase 1, possible later with dynamic skill activation). Capturing the snapshot per call preserves replay fidelity.
-- **`call_id` correlates with the response.** Matches the `call_id` in the corresponding `llm.response` event.
+- **Full message history is sent every time.** Reconstructing context from earlier events would be fragile.
+- **`tools_available` is a snapshot per call.** Tool schemas can change between calls.
+- **`call_id` correlates with the response.**
+
+### `llm.dispatched`
+
+WAL middle-state event for LLM calls. Emitted between `llm.request` and `llm.response` once the request has returned control to the runtime, before the response is durably written.
+
+```json
+{
+  "call_id": "llm-01HXJ...",
+  "model": "claude-haiku"
+}
+```
+
+**Design notes:**
+- **Operationally informational.** Downstream consumers can ignore it; recovery uses the `llm_dispatch.status = 'dispatched'` row in the worker store, not this event.
+- **Same call_id as the matching `llm.request` / `llm.response`.**
 
 ### `llm.response`
 
-Published when an LLM call returns. Includes token usage, which drives the subsequent `cost` event.
+Published when an LLM call returns and the response is durably written. The envelope carries cost metadata (`envelope.cost`) — there is no separate cost event.
 
 ```json
 {
@@ -140,9 +246,9 @@ Published when an LLM call returns. Includes token usage, which drives the subse
 ```
 
 **Design notes:**
-- **`tool_call_id` is assigned by the LLM** (or normalised from its response) and is referenced by subsequent `tool.call` and `tool.result` events.
-- **`usage` carries raw token counts.** The `cost` event computes monetary cost from these and the provider's pricing.
-- **Cache token fields are present from the start.** Some providers (Anthropic) return these; including them now avoids schema migrations later.
+- **Cost rides on the envelope.** See [Cost metadata](#cost-metadata) above. Consumers query `WHERE event_type = 'llm_response' AND total_cost IS NOT NULL` for cost-bearing events.
+- **`tool_call_id` is assigned by the LLM.**
+- **`usage` carries raw token counts**, mirrored in `envelope.cost` along with the computed dollar values.
 
 ### `tool.call`
 
@@ -156,12 +262,20 @@ Published when the agent invokes a tool. Each tool call in a single LLM response
 }
 ```
 
-**Design notes:**
-- **`tool_call_id` correlates with the `tool.result`.** Needed for parallel tool calls even though phase 1 only uses sequential calls. Cheap to include from the start.
+### `tool.dispatched`
+
+WAL middle-state event for tool calls, mirroring `llm.dispatched`. Emitted between `tool.call` and `tool.result`.
+
+```json
+{
+  "tool_call_id": "tool-01HXJ...",
+  "tool_name": "read"
+}
+```
 
 ### `tool.result`
 
-Published when a tool invocation completes — successfully or with an error. Sandbox violations are reported here with `is_error: true`, not as a separate event.
+Published when a tool invocation completes. Sandbox violations and other tool errors surface here with `is_error: true`, not as separate events.
 
 ```json
 {
@@ -184,38 +298,27 @@ Error case:
 }
 ```
 
-**Design notes:**
-- **One shape for success and failure.** Sandbox violations, execution errors, and invalid parameters all become `tool.result` events with `is_error: true`. This keeps the LLM's view consistent — a failed tool is just a tool that returned an error message — and simplifies downstream consumers.
-- **`error_kind` is enumerated when `is_error` is true.** Values: `sandbox_violation`, `invalid_parameters`, `execution_failed`, `timeout`, `permission_denied`.
+`error_kind` values: `sandbox_violation`, `invalid_parameters`, `execution_failed`, `timeout`, `permission_denied`.
 
-### `cost`
+### `invocation.ambiguous`
 
-Published after each `llm.response` event. Tracks cost attribution at multiple levels.
+Published by the worker on startup when its WAL categorisation finds an invocation in the ambiguous state (a `dispatched`-without-`completed` row). See `docs/design/data-architecture.md` §3.4.
 
 ```json
 {
-  "call_id": "llm-01HXJ...",
-  "model": "claude-haiku",
-  "input_tokens": 1234,
-  "output_tokens": 567,
-  "cache_read_tokens": 0,
-  "cache_write_tokens": 0,
-  "input_cost": 0.000308,
-  "output_cost": 0.000710,
-  "total_cost": 0.001018,
-  "cumulative_invocation_cost": 0.004523,
-  "cumulative_agent_cost": 0.127890
+  "stuck_entity": "tool_dispatch | llm_dispatch",
+  "stuck_call_id": "tool-01HXJ...",
+  "note": "Tool returned but no completion record"
 }
 ```
 
 **Design notes:**
-- **Cost is separate from `llm.response`** even though it's derived from it. This means cost enforcement, queries, and budget alerts can subscribe to `fq.agent.*.cost` without processing every LLM event. It also means the cost calculation is an explicit, auditable step.
-- **Cumulative costs are included.** Avoids requiring downstream consumers to aggregate across events. The cumulative values are computed by the executor using its running state.
-- **All currency amounts are USD.** Phase 1 assumes a single currency; multi-currency is deferred.
+- **Operator-triage event.** The control-plane consumes this and surfaces the case via `fq recover` (a follow-up step in the data-architecture-v1 plan).
+- **Full context lives in the worker's WAL**, not on the wire. This payload is the minimum needed for an operator to find the row.
 
 ### `completed`
 
-Published when an agent invocation finishes successfully (no errors, budget not exceeded).
+Published when an invocation finishes successfully.
 
 ```json
 {
@@ -226,10 +329,6 @@ Published when an agent invocation finishes successfully (no errors, budget not 
   "total_duration_ms": 12345
 }
 ```
-
-**Design notes:**
-- **`result_summary` is optional and freeform.** It may be produced by the agent itself as its final output, or omitted.
-- **Totals are denormalised.** Querying "how many tool calls did this invocation make" without aggregating across events is common enough to justify the denormalisation.
 
 ### `failed`
 
@@ -249,45 +348,95 @@ Published when an invocation terminates with an error.
 }
 ```
 
-**Design notes:**
-- **`phase` indicates where in the loop the failure occurred.** Useful for debugging and metrics — distinguishing "LLM failed to respond" from "tool execution failed" matters operationally.
-- **`partial_totals` captures what got done before the failure.** Same denormalisation rationale as `completed`.
-
-### `system.startup` and `system.shutdown`
-
-Runtime lifecycle events, published when the factor-q process starts and stops.
+### `system.startup`
 
 ```json
 {
+  "runtime_id": "01HXJ...",
   "version": "0.1.0",
-  "config_hash": "sha256:..."
+  "nats_url": "nats://localhost:4222",
+  "agents_loaded": 3,
+  "pricing_entries": 12
 }
 ```
 
-**Design notes:**
-- **`config_hash` captures the runtime's configuration.** Useful for correlating events with a specific configuration state — if behaviour changes, a new hash indicates config was reloaded.
-- **Only startup and shutdown for now.** Config reload events can be added later if hot-reload is implemented.
+System events share a sentinel `agent_id` of `"system"`; their envelope's `invocation_id` and `trace_id` are set to `runtime_id` so all events from a single daemon run share a correlation key. `parent_event_id` is always absent on system events.
+
+### `system.shutdown`
+
+```json
+{
+  "runtime_id": "01HXJ...",
+  "reason": "ctrl_c | task_failed | error",
+  "clean": true
+}
+```
+
+### `system.task_failed`
+
+A hosted task inside `fq run` (the projection consumer, the trigger dispatcher, the coordination consumer, etc.) exited with an error before a graceful shutdown was requested. The daemon then shuts itself down so operators don't unknowingly rely on a half-broken daemon.
+
+```json
+{
+  "runtime_id": "01HXJ...",
+  "task_name": "coordination_consumer",
+  "error_message": "..."
+}
+```
+
+### `system.recovery`
+
+Emitted once per daemon startup with the counts of in-flight invocations classified by recovery category (see `docs/design/data-architecture.md` §7.1).
+
+```json
+{
+  "runtime_id": "01HXJ...",
+  "worker_id": "worker-001",
+  "safe_resume": 2,
+  "safe_replay": 0,
+  "ambiguous": 1,
+  "total": 3
+}
+```
 
 ## Invariants
 
 The following invariants hold across the event stream and are assumed by consumers:
 
-1. **Events within one `invocation_id` are totally ordered** by `timestamp` and `event_id` (UUID v7 is time-sortable).
-2. **Every invocation starts with a `triggered` event** and ends with either `completed` or `failed`. No orphan invocations.
-3. **Every `llm.request` is followed by exactly one `llm.response` or one `failed`.** No dangling requests.
-4. **Every `tool.call` is followed by exactly one `tool.result`.** Tool failures are reported as `tool.result` with `is_error: true`, not as missing results.
-5. **`cost` events follow `llm.response` events.** The `call_id` links them.
+1. **Events within one `invocation_id` are totally ordered** by the envelope chain. Sorting by `event_id` (UUID v7 is time-sortable) is a good fallback; following `parent_event_id` is authoritative.
+2. **Every invocation starts with a `triggered` event** and ends with either `completed` or `failed`. The `triggered` event is the chain root (`parent_event_id` absent).
+3. **Every `llm.request` is followed by `llm.dispatched` then `llm.response`** in the reducer path. The legacy executor path skips `llm.dispatched` (no WAL).
+4. **Every `tool.call` is followed by `tool.dispatched` then `tool.result`** in the reducer path. Tool failures surface as `tool.result` with `is_error: true`, not as missing results.
+5. **`envelope.cost` is present on `llm.response`** events that bill. There is no separate cost event.
 6. **`config_snapshot` in `triggered` is immutable for the invocation.** Config changes during an invocation are ignored; they apply to the next invocation.
+7. **`invocation.ambiguous` is emitted by the worker on startup** for any invocation whose WAL classification returns "ambiguous." The chain root for that emission is the new event itself (`parent_event_id` absent — recovery starts a fresh chain; see the recovery rationale in `data-architecture.md` §3.4).
 
 ## Storage and Retention
 
-- **All events are published to JetStream streams** with file-based persistence.
-- **Retention policy is `LimitsPolicy` with configurable `MaxAge`** (default: 30 days for phase 1).
-- **Events are projected into SQLite** for complex queries (see the projection consumer in the phase 1 plan).
-- **The projection store is a read-optimised view, not the source of truth.** Events can be re-projected from the NATS stream at any time.
+- All events are published to JetStream streams with file-based persistence.
+- Retention policy is `LimitsPolicy` with a configurable `MaxAge` (default: 30 days).
+- Events are projected into SQLite for complex queries.
+- The projection store is a read-optimised view, not the source of truth. Events can be re-projected from the NATS stream at any time.
 
 ## Open Questions
 
-- **Binary payloads.** Large tool outputs (e.g. file contents, command output) inflate event sizes. Options: compression, reference-by-hash to an object store, truncation with a pointer to full content. Deferred until it's a problem.
-- **Schema evolution.** When a breaking change is needed, how are old events handled? Options: migration scripts, version-aware consumers, never break. Deferred.
-- **Cross-agent events.** When multi-agent orchestration arrives, events like "agent A spawned agent B" need a place in the schema. Likely a new `agent.spawned` event type with both IDs.
+- **Cross-incarnation chain stitching.** Recovery re-emits start a fresh chain (`parent_event_id` absent). If audit code ever needs to thread the pre-crash and post-recovery chains together, an optional `envelope.recovered_from_event_id: Uuid` could be added.
+- **Binary payloads.** Large tool outputs inflate event sizes. Options: compression, reference-by-hash to an object store, truncation with a pointer. Deferred until it's a problem.
+- **Schema evolution past v2.** When a breaking change is needed, the version field and per-payload `schema_id` give us the substrate; the migration story (rolling upgrades, multi-version consumers) is a separate design.
+- **Cross-agent graph events.** When multi-agent graph orchestration arrives, events like "edge fired" or "node spawned" need their own types. The `trace_id` field is reserved for that.
+
+## Changelog: v1 → v2
+
+This was a breaking change with no wire-format compatibility shim. v1 events do not parse against v2 deserialisers and vice versa. Acceptable because no production deployment existed at the time of the change.
+
+| Change | Reason |
+|---|---|
+| `schema_version` bumped 1 → 2 | Marks the wire-format break. |
+| Top-level shape split: `{schema_version, event_id, timestamp, agent_id, invocation_id, event_type, payload}` → `{envelope, payload, annotations}` | Three structurally distinct layers express the trust/visibility boundary in the type system rather than by convention (ADR-0016, `inter-node-contracts-and-event-layers.md`). |
+| Envelope gains `parent_event_id` | Reconstruct happens-before from the chain rather than timestamps. |
+| Envelope gains `trace_id` | Reserved for multi-invocation graph traces; equal to `invocation_id` for now. |
+| Envelope gains `schema_id` per payload variant | Versioned-from-day-one payload evolution. |
+| Envelope gains optional `cost` | Cost is system-level accounting, not a typed contract between graph nodes (ADR-0016 §7). |
+| `Cost` event type removed; `fq.agent.*.cost` subject removed | Cost folds into `envelope.cost` on `llm.response` events. |
+| `Annotations` layer added (top-level `annotations` field, omitted when empty) | Substrate for advisory commentary; never read by consuming agents. The runtime enforces the consumer barrier via `Event::for_consumer_context`. |
+| Well-known annotation keys: `notes`, `confidence`, `reasoning`, `sources_considered`, `flags` | Stable vocabulary for the learning loop; unknown keys still permitted. |
