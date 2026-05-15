@@ -167,10 +167,11 @@ pub fn assert_single_invocation(events: &[Event]) -> Uuid {
     let first = events
         .first()
         .expect("expected at least one event")
+        .envelope
         .invocation_id;
     for (i, e) in events.iter().enumerate() {
         assert_eq!(
-            e.invocation_id,
+            e.envelope.invocation_id,
             first,
             "event {i} (kind={}) has different invocation_id than event 0",
             event_kind(e)

@@ -202,7 +202,7 @@ impl EventBus {
     pub async fn publish(&self, event: &Event) -> Result<(), BusError> {
         let subject = event.subject();
         let payload = serde_json::to_vec(event)?;
-        debug!(subject = %subject, event_id = %event.event_id, "publishing event");
+        debug!(subject = %subject, event_id = %event.envelope.event_id, "publishing event");
 
         self.jetstream
             .publish(subject, Bytes::from(payload))
@@ -428,7 +428,7 @@ mod tests {
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
         let agent_id = format!("bus-test-{}", Uuid::now_v7().simple());
         let event = sample_event(&agent_id);
-        let expected_id = event.event_id;
+        let expected_id = event.envelope.event_id;
 
         let mut subscriber = bus
             .subscribe(format!("fq.agent.{agent_id}.>"))
@@ -445,7 +445,7 @@ mod tests {
             .expect("stream closed")
             .expect("deserialise");
 
-        assert_eq!(received.event_id, expected_id);
-        assert_eq!(received.agent_id, agent_id);
+        assert_eq!(received.envelope.event_id, expected_id);
+        assert_eq!(received.envelope.agent_id, agent_id);
     }
 }

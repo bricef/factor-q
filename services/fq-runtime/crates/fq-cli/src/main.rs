@@ -590,8 +590,8 @@ async fn tail_events(global: &GlobalArgs, subject: &str) -> anyhow::Result<()> {
 
 /// Format one event as a single readable line.
 fn print_event(event: &Event) {
-    let timestamp = event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ");
-    let invocation = event.invocation_id.as_simple().to_string();
+    let timestamp = event.envelope.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ");
+    let invocation = event.envelope.invocation_id.as_simple().to_string();
     let invocation_short: String = invocation.chars().take(8).collect();
 
     let summary = match &event.payload {
@@ -645,7 +645,7 @@ fn print_event(event: &Event) {
 
     println!(
         "{timestamp} [{invocation_short}] {agent}: {summary}",
-        agent = event.agent_id
+        agent = event.envelope.agent_id
     );
 }
 

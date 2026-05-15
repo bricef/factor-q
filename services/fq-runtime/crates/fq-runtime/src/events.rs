@@ -1,13 +1,28 @@
 //! Event schema for factor-q.
 //!
-//! See `docs/design/event-schema.md` for the full specification.
+//! Every event on the bus has three structurally distinct layers:
+//!
+//! - [`Envelope`] — runtime-written system metadata. Closed schema.
+//! - [`EventPayload`] — typed contract between graph nodes. The only
+//!   thing that drives downstream agent behaviour.
+//! - [`Annotations`] — open key/value commentary from the producing
+//!   agent. **Never** read by consuming agents — the runtime will
+//!   strip annotations when building a downstream prompt (the
+//!   barrier lands in step 4 of the envelope-refactor plan).
+//!
+//! Each layer has different write permissions, read audiences, and
+//! mutability rules; see
+//! `docs/design/inter-node-contracts-and-event-layers.md` for the
+//! rationale.
+
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Subject hierarchy for factor-q events.
 pub mod subjects {
@@ -65,67 +80,161 @@ pub mod subjects {
     }
 }
 
-/// Envelope wrapping every factor-q event.
+/// A complete event: envelope + payload + annotations.
+///
+/// The three layers are kept as separate fields rather than
+/// flattened so the trust/visibility boundary between them is
+/// expressed in the type system. Producing agents do not touch the
+/// envelope; consuming agents must not read annotations (step 4
+/// adds the runtime-enforced barrier via
+/// [`Event::for_consumer_context`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
-    pub schema_version: u32,
-    pub event_id: Uuid,
-    pub timestamp: DateTime<Utc>,
-    pub agent_id: String,
-    pub invocation_id: Uuid,
-    #[serde(flatten)]
+    pub envelope: Envelope,
     pub payload: EventPayload,
+    #[serde(default, skip_serializing_if = "Annotations::is_empty")]
+    pub annotations: Annotations,
 }
 
 impl Event {
     /// Construct a new event for the given agent and invocation.
+    /// The envelope is stamped with a fresh `event_id`, the current
+    /// time, `trace_id = invocation_id` (single-trace-per-invocation
+    /// for now), and `schema_id` derived from the payload variant.
+    /// `parent_event_id` is `None`; chain it later with
+    /// [`Event::with_parent`] (step 2 of the envelope refactor).
     pub fn new(agent_id: impl Into<String>, invocation_id: Uuid, payload: EventPayload) -> Self {
-        Self {
+        let agent_id = agent_id.into();
+        let envelope = Envelope {
             schema_version: SCHEMA_VERSION,
             event_id: Uuid::now_v7(),
-            timestamp: Utc::now(),
-            agent_id: agent_id.into(),
+            parent_event_id: None,
+            trace_id: invocation_id,
+            agent_id,
             invocation_id,
+            schema_id: schema_id_for(&payload).to_string(),
+            timestamp: Utc::now(),
+        };
+        Self {
+            envelope,
             payload,
+            annotations: Annotations::default(),
         }
     }
 
     /// Construct a system event. System events use the sentinel
     /// agent id `"system"`; the runtime id doubles as the
-    /// invocation id so all events from a single daemon run share
-    /// a correlation key.
+    /// invocation id and trace id so every system event from a
+    /// single daemon run shares a correlation key.
     pub fn system(runtime_id: Uuid, payload: EventPayload) -> Self {
-        Self {
+        let envelope = Envelope {
             schema_version: SCHEMA_VERSION,
             event_id: Uuid::now_v7(),
-            timestamp: Utc::now(),
+            parent_event_id: None,
+            trace_id: runtime_id,
             agent_id: "system".to_string(),
             invocation_id: runtime_id,
+            schema_id: schema_id_for(&payload).to_string(),
+            timestamp: Utc::now(),
+        };
+        Self {
+            envelope,
             payload,
+            annotations: Annotations::default(),
         }
     }
 
     /// Return the NATS subject this event should be published on.
     pub fn subject(&self) -> String {
         match &self.payload {
-            EventPayload::Triggered(_) => subjects::agent_triggered(&self.agent_id),
-            EventPayload::LlmRequest(_) => subjects::agent_llm_request(&self.agent_id),
-            EventPayload::LlmResponse(_) => subjects::agent_llm_response(&self.agent_id),
-            EventPayload::ToolCall(_) => subjects::agent_tool_call(&self.agent_id),
-            EventPayload::ToolDispatched(_) => subjects::agent_tool_dispatched(&self.agent_id),
-            EventPayload::ToolResult(_) => subjects::agent_tool_result(&self.agent_id),
-            EventPayload::LlmDispatched(_) => subjects::agent_llm_dispatched(&self.agent_id),
-            EventPayload::InvocationAmbiguous(_) => {
-                subjects::agent_invocation_ambiguous(&self.agent_id)
+            EventPayload::Triggered(_) => subjects::agent_triggered(&self.envelope.agent_id),
+            EventPayload::LlmRequest(_) => subjects::agent_llm_request(&self.envelope.agent_id),
+            EventPayload::LlmResponse(_) => subjects::agent_llm_response(&self.envelope.agent_id),
+            EventPayload::ToolCall(_) => subjects::agent_tool_call(&self.envelope.agent_id),
+            EventPayload::ToolDispatched(_) => {
+                subjects::agent_tool_dispatched(&self.envelope.agent_id)
             }
-            EventPayload::Cost(_) => subjects::agent_cost(&self.agent_id),
-            EventPayload::Completed(_) => subjects::agent_completed(&self.agent_id),
-            EventPayload::Failed(_) => subjects::agent_failed(&self.agent_id),
+            EventPayload::ToolResult(_) => subjects::agent_tool_result(&self.envelope.agent_id),
+            EventPayload::LlmDispatched(_) => {
+                subjects::agent_llm_dispatched(&self.envelope.agent_id)
+            }
+            EventPayload::InvocationAmbiguous(_) => {
+                subjects::agent_invocation_ambiguous(&self.envelope.agent_id)
+            }
+            EventPayload::Cost(_) => subjects::agent_cost(&self.envelope.agent_id),
+            EventPayload::Completed(_) => subjects::agent_completed(&self.envelope.agent_id),
+            EventPayload::Failed(_) => subjects::agent_failed(&self.envelope.agent_id),
             EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
             EventPayload::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
             EventPayload::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
             EventPayload::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
         }
+    }
+}
+
+/// Stable identifier for an event's payload schema. Versioned from
+/// day one so payloads can evolve without becoming an archaeological
+/// dig — see decision §4 of `inter-node-contracts-and-event-layers.md`.
+pub fn schema_id_for(payload: &EventPayload) -> &'static str {
+    match payload {
+        EventPayload::Triggered(_) => "factor-q/triggered@1",
+        EventPayload::LlmRequest(_) => "factor-q/llm_request@1",
+        EventPayload::LlmDispatched(_) => "factor-q/llm_dispatched@1",
+        EventPayload::LlmResponse(_) => "factor-q/llm_response@1",
+        EventPayload::ToolCall(_) => "factor-q/tool_call@1",
+        EventPayload::ToolDispatched(_) => "factor-q/tool_dispatched@1",
+        EventPayload::ToolResult(_) => "factor-q/tool_result@1",
+        EventPayload::Cost(_) => "factor-q/cost@1",
+        EventPayload::Completed(_) => "factor-q/completed@1",
+        EventPayload::Failed(_) => "factor-q/failed@1",
+        EventPayload::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
+        EventPayload::SystemStartup(_) => "factor-q/system_startup@1",
+        EventPayload::SystemShutdown(_) => "factor-q/system_shutdown@1",
+        EventPayload::SystemTaskFailed(_) => "factor-q/system_task_failed@1",
+        EventPayload::SystemRecovery(_) => "factor-q/system_recovery@1",
+    }
+}
+
+/// System-generated metadata. Closed schema — if a new field is
+/// needed, the runtime grows. Producing agents do not touch the
+/// envelope; the runtime stamps it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    pub schema_version: u32,
+    pub event_id: Uuid,
+    /// The previous event in this invocation, if any. `None` on the
+    /// initial `triggered` event, on system events, and on the first
+    /// event emitted by a recovery re-emit (where it explicitly
+    /// starts a new chain — see step 2 of the envelope-refactor
+    /// plan). Threaded through subsequent publishes by the reducer
+    /// runner in step 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<Uuid>,
+    /// Trace correlation id. Equal to `invocation_id` for now;
+    /// reserved as a separate field so multi-invocation traces
+    /// (e.g. a graph workflow spanning multiple invocations) can be
+    /// stitched together later without a wire-format change.
+    pub trace_id: Uuid,
+    pub agent_id: String,
+    pub invocation_id: Uuid,
+    /// Stable identifier for the payload schema, e.g.
+    /// `"factor-q/triggered@1"`. See [`schema_id_for`].
+    pub schema_id: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Open key/value commentary. Producing agents may attach anything
+/// here. Step 4 of the envelope-refactor plan introduces the
+/// well-known keys module, the [`Event::annotate`] builder, and the
+/// consumer-context barrier method that strips annotations before
+/// they reach a downstream agent's prompt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Annotations(pub BTreeMap<String, Value>);
+
+impl Annotations {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -381,6 +490,11 @@ pub enum ToolErrorKind {
 }
 
 /// Published after each LLM response with cost attribution.
+///
+/// Slated for removal in step 3 of the envelope-refactor plan:
+/// cost is system-level accounting, not part of the typed contract
+/// between graph nodes, so it folds into `envelope.cost` on
+/// `LlmResponse` events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostPayload {
     pub call_id: Uuid,
@@ -554,13 +668,19 @@ mod tests {
         );
 
         assert_eq!(event.subject(), "fq.agent.researcher.triggered");
-        assert_eq!(event.schema_version, SCHEMA_VERSION);
-        assert_eq!(event.agent_id, "researcher");
+        assert_eq!(event.envelope.schema_version, SCHEMA_VERSION);
+        assert_eq!(event.envelope.agent_id, "researcher");
+        assert_eq!(event.envelope.trace_id, event.envelope.invocation_id);
+        assert!(event.envelope.parent_event_id.is_none());
+        assert_eq!(event.envelope.schema_id, "factor-q/triggered@1");
 
         let json = serde_json::to_string(&event).unwrap();
         let round_tripped: Event = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_tripped.agent_id, event.agent_id);
-        assert_eq!(round_tripped.invocation_id, event.invocation_id);
+        assert_eq!(round_tripped.envelope.agent_id, event.envelope.agent_id);
+        assert_eq!(
+            round_tripped.envelope.invocation_id,
+            event.envelope.invocation_id
+        );
         match round_tripped.payload {
             EventPayload::Triggered(p) => {
                 assert!(matches!(p.trigger_source, TriggerSource::Manual));
@@ -627,5 +747,197 @@ mod tests {
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json.get("error_kind"), None);
         assert_eq!(json["is_error"], false);
+    }
+
+    #[test]
+    fn envelope_default_fields_on_new_event() {
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "test-agent",
+            invocation_id,
+            EventPayload::LlmDispatched(LlmDispatchedPayload {
+                call_id: Uuid::now_v7(),
+                model: "claude-haiku".to_string(),
+            }),
+        );
+        assert!(event.envelope.parent_event_id.is_none());
+        assert_eq!(event.envelope.trace_id, invocation_id);
+        assert_eq!(event.envelope.invocation_id, invocation_id);
+        assert_eq!(event.envelope.agent_id, "test-agent");
+        assert_eq!(event.envelope.schema_id, "factor-q/llm_dispatched@1");
+        assert!(event.annotations.is_empty());
+    }
+
+    #[test]
+    fn event_for_system_uses_runtime_id_as_trace_id() {
+        let runtime_id = Uuid::now_v7();
+        let event = Event::system(
+            runtime_id,
+            EventPayload::SystemStartup(SystemStartupPayload {
+                runtime_id,
+                version: "0.1.0".to_string(),
+                nats_url: "nats://localhost:4222".to_string(),
+                agents_loaded: 0,
+                pricing_entries: 0,
+            }),
+        );
+        assert_eq!(event.envelope.trace_id, runtime_id);
+        assert_eq!(event.envelope.invocation_id, runtime_id);
+        assert_eq!(event.envelope.agent_id, "system");
+        assert!(event.envelope.parent_event_id.is_none());
+    }
+
+    #[test]
+    fn annotations_skip_serialise_when_empty() {
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "test-agent",
+            invocation_id,
+            EventPayload::Triggered(TriggeredPayload {
+                trigger_source: TriggerSource::Manual,
+                trigger_subject: None,
+                trigger_payload: json!({}),
+                config_snapshot: ConfigSnapshot {
+                    name: "t".to_string(),
+                    model: "m".to_string(),
+                    system_prompt: String::new(),
+                    tools: vec![],
+                    sandbox: SandboxSnapshot::default(),
+                    budget: None,
+                },
+            }),
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json.get("annotations").is_none());
+        assert!(json.get("envelope").is_some());
+    }
+
+    #[test]
+    fn schema_version_constant_is_two() {
+        assert_eq!(SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn schema_id_for_every_payload_variant() {
+        // Exhaustive check that every payload variant resolves to a
+        // non-empty `factor-q/<name>@<v>` schema_id. The match in
+        // `schema_id_for` is exhaustive, so adding a new payload
+        // variant without a schema_id mapping will fail to compile.
+        let inv = Uuid::now_v7();
+        let cases: Vec<EventPayload> = vec![
+            EventPayload::Triggered(TriggeredPayload {
+                trigger_source: TriggerSource::Manual,
+                trigger_subject: None,
+                trigger_payload: json!({}),
+                config_snapshot: ConfigSnapshot {
+                    name: "t".into(),
+                    model: "m".into(),
+                    system_prompt: String::new(),
+                    tools: vec![],
+                    sandbox: SandboxSnapshot::default(),
+                    budget: None,
+                },
+            }),
+            EventPayload::LlmRequest(LlmRequestPayload {
+                call_id: inv,
+                model: "m".into(),
+                messages: vec![],
+                tools_available: vec![],
+                request_params: RequestParams {
+                    temperature: None,
+                    max_tokens: None,
+                },
+            }),
+            EventPayload::LlmDispatched(LlmDispatchedPayload {
+                call_id: inv,
+                model: "m".into(),
+            }),
+            EventPayload::LlmResponse(LlmResponsePayload {
+                call_id: inv,
+                content: None,
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+            EventPayload::ToolCall(ToolCallPayload {
+                tool_call_id: "tc".into(),
+                tool_name: "n".into(),
+                parameters: json!({}),
+            }),
+            EventPayload::ToolDispatched(ToolDispatchedPayload {
+                tool_call_id: "tc".into(),
+                tool_name: "n".into(),
+            }),
+            EventPayload::ToolResult(ToolResultPayload {
+                tool_call_id: "tc".into(),
+                output: String::new(),
+                is_error: false,
+                error_kind: None,
+                duration_ms: 0,
+            }),
+            EventPayload::Cost(CostPayload {
+                call_id: inv,
+                model: "m".into(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                input_cost: 0.0,
+                output_cost: 0.0,
+                total_cost: 0.0,
+                cumulative_invocation_cost: 0.0,
+                cumulative_agent_cost: 0.0,
+            }),
+            EventPayload::Completed(CompletedPayload {
+                result_summary: None,
+                total_llm_calls: 0,
+                total_tool_calls: 0,
+                total_cost: 0.0,
+                total_duration_ms: 0,
+            }),
+            EventPayload::Failed(FailedPayload {
+                error_kind: FailureKind::RuntimeError,
+                error_message: String::new(),
+                phase: FailurePhase::Setup,
+                partial_totals: InvocationTotals::default(),
+            }),
+            EventPayload::InvocationAmbiguous(InvocationAmbiguousPayload {
+                stuck_entity: "tool_dispatch".into(),
+                stuck_call_id: "tc".into(),
+                note: String::new(),
+            }),
+            EventPayload::SystemStartup(SystemStartupPayload {
+                runtime_id: inv,
+                version: String::new(),
+                nats_url: String::new(),
+                agents_loaded: 0,
+                pricing_entries: 0,
+            }),
+            EventPayload::SystemShutdown(SystemShutdownPayload {
+                runtime_id: inv,
+                reason: String::new(),
+                clean: true,
+            }),
+            EventPayload::SystemTaskFailed(SystemTaskFailedPayload {
+                runtime_id: inv,
+                task_name: String::new(),
+                error_message: String::new(),
+            }),
+            EventPayload::SystemRecovery(SystemRecoveryPayload {
+                runtime_id: inv,
+                worker_id: String::new(),
+                safe_resume: 0,
+                safe_replay: 0,
+                ambiguous: 0,
+                total: 0,
+            }),
+        ];
+        for payload in cases {
+            let id = schema_id_for(&payload);
+            assert!(
+                id.starts_with("factor-q/") && id.ends_with("@1"),
+                "schema_id_for produced {id:?}"
+            );
+        }
     }
 }

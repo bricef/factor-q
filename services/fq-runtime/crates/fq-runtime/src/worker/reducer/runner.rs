@@ -2086,7 +2086,7 @@ mod tests {
         // The tool dispatch row exists with status=completed
         // and is_error=false.
         let row = store
-            .get_tool_dispatch(&events[0].invocation_id.to_string(), "tc_1")
+            .get_tool_dispatch(&events[0].envelope.invocation_id.to_string(), "tc_1")
             .await
             .unwrap()
             .expect("tool_dispatch row");
@@ -2130,7 +2130,7 @@ mod tests {
         let (store, events) = run_with_wal(&url, agent, responses, 13, Some(dir.path())).await;
 
         let row = store
-            .get_tool_dispatch(&events[0].invocation_id.to_string(), "tc_err")
+            .get_tool_dispatch(&events[0].envelope.invocation_id.to_string(), "tc_err")
             .await
             .unwrap()
             .expect("tool_dispatch row");
@@ -2179,7 +2179,7 @@ mod tests {
         )
         .await;
 
-        let inv_str = events[0].invocation_id.to_string();
+        let inv_str = events[0].envelope.invocation_id.to_string();
         let row = store
             .get_invocation_state(&inv_str)
             .await
@@ -2424,7 +2424,7 @@ mod tests {
         ];
 
         let (store, events) = run_with_wal(&url, agent, responses, 13, Some(dir.path())).await;
-        let inv_str = events[0].invocation_id.to_string();
+        let inv_str = events[0].envelope.invocation_id.to_string();
         let row = store
             .get_invocation_state(&inv_str)
             .await

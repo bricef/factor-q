@@ -98,21 +98,21 @@ impl ProjectionConsumer {
         };
 
         debug!(
-            event_id = %event.event_id,
-            agent_id = %event.agent_id,
+            event_id = %event.envelope.event_id,
+            agent_id = %event.envelope.agent_id,
             "projecting event"
         );
 
         match self.store.insert_event(&event).await {
             Ok(()) => {
                 if let Err(err) = msg.ack().await {
-                    error!(error = %err, event_id = %event.event_id, "failed to ack after insert");
+                    error!(error = %err, event_id = %event.envelope.event_id, "failed to ack after insert");
                 }
             }
             Err(err) => {
                 error!(
                     error = %err,
-                    event_id = %event.event_id,
+                    event_id = %event.envelope.event_id,
                     "failed to insert event — will be redelivered"
                 );
                 // Nak to trigger redelivery after the ack timeout.
@@ -214,7 +214,7 @@ mod tests {
         // stream history.
         let agent_id = format!("proj-test-{}", Uuid::now_v7().simple());
         let ev1 = triggered(&agent_id);
-        let inv = ev1.invocation_id;
+        let inv = ev1.envelope.invocation_id;
         bus.publish(&ev1).await.expect("publish 1");
         bus.publish(&completed(&agent_id, inv))
             .await

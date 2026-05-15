@@ -193,7 +193,7 @@ impl CoordinationConsumer {
                 if let Err(err) = msg.ack().await {
                     error!(
                         error = %err,
-                        event_id = %event.event_id,
+                        event_id = %event.envelope.event_id,
                         "failed to ack coordination message"
                     );
                 }
@@ -201,7 +201,7 @@ impl CoordinationConsumer {
             Err(err) => {
                 error!(
                     error = %err,
-                    event_id = %event.event_id,
+                    event_id = %event.envelope.event_id,
                     "coordination handler failed; will be redelivered"
                 );
                 if let Err(e) = msg
@@ -219,7 +219,7 @@ impl CoordinationConsumer {
         event: &Event,
         _payload: &crate::events::InvocationAmbiguousPayload,
     ) -> Result<(), ControlPlaneStoreError> {
-        let invocation_id = event.invocation_id.to_string();
+        let invocation_id = event.envelope.invocation_id.to_string();
         debug!(
             invocation_id = %invocation_id,
             "marking invocation ambiguous in coordination store"
@@ -234,7 +234,7 @@ impl CoordinationConsumer {
         self.store
             .upsert_invocation_ownership(
                 &invocation_id,
-                &event.agent_id,
+                &event.envelope.agent_id,
                 Utc::now().timestamp_millis(),
                 OwnerStatus::Ambiguous,
             )
@@ -465,8 +465,8 @@ mod tests {
                             };
                             if let EventPayload::InvocationAmbiguous(_) = &event.payload {
                                 let _ = store.upsert_invocation_ownership(
-                                    &event.invocation_id.to_string(),
-                                    &event.agent_id,
+                                    &event.envelope.invocation_id.to_string(),
+                                    &event.envelope.agent_id,
                                     Utc::now().timestamp_millis(),
                                     OwnerStatus::Ambiguous,
                                 ).await;

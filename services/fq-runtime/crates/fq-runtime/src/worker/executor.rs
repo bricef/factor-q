@@ -769,8 +769,10 @@ mod tests {
             ],
         );
 
-        let first_invocation = events[0].invocation_id;
-        assert!(events.iter().all(|e| e.invocation_id == first_invocation));
+        let first_invocation = events[0].envelope.invocation_id;
+        assert!(events
+            .iter()
+            .all(|e| e.envelope.invocation_id == first_invocation));
     }
 
     #[tokio::test]
