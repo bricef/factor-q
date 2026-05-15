@@ -65,7 +65,9 @@ struct HarnessState {
     iteration: u32,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, strum::EnumCount,
+)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
     /// Pre-step-0: nothing has happened yet. The reducer seeds
@@ -335,6 +337,50 @@ mod tests {
     use crate::events::{StopReason, TokenUsage, ToolSchema};
     use crate::worker::reducer::types::{ModelResponse, ToolCallResult, TriggerPayload, TriggerSourceKind};
     use serde_json::{Value, json};
+    use strum::EnumCount;
+
+    /// Calibration test for the persistent state's variant count.
+    ///
+    /// ADR-0014 (agent harness as reducer) is load-bearing for
+    /// large parts of the runtime; if the state machine balloons
+    /// once retries, partial dispatch, skill composition, or
+    /// other features get folded in, that's the signal the model
+    /// is the wrong shape and ADR-0014 needs a re-read.
+    ///
+    /// Calibration thresholds (carried over from the May-5
+    /// reducer-prototype plan, where they were the variant-count
+    /// alarm convention):
+    ///
+    /// - **Under 10 variants** is comfortable — the current shape.
+    /// - **Dozens** is tolerable — note the trend and consider a
+    ///   refactor, but no architectural alarm yet.
+    /// - **50+** is the alarm threshold — revisit ADR-0014.
+    ///
+    /// The count is derived from the enum via `strum::EnumCount`
+    /// rather than pinned manually, so adding or removing a
+    /// `Phase` variant automatically updates `Phase::COUNT` at
+    /// compile time. The if/panic const-block pattern is used in
+    /// place of `assert!` because clippy's
+    /// `assertions_on_constants` (denied workspace-wide) flags
+    /// any assertion whose result is compile-time constant —
+    /// even when that's the whole point.
+    #[test]
+    fn phase_variant_count_is_within_comfort_threshold() {
+        const _COMFORT: () = if Phase::COUNT >= 10 {
+            panic!(
+                "Phase variant count exceeded the under-ten comfort threshold — note the trend"
+            );
+        };
+        const _ALARM: () = if Phase::COUNT >= 50 {
+            panic!(
+                "Phase variant count hit the alarm threshold; revisit ADR-0014 (agent harness as reducer)"
+            );
+        };
+        // The const-blocks above already do the work at compile
+        // time; the test function exists so the calibration is
+        // explicit in the test runner's output. The body is
+        // empty by design.
+    }
 
     fn config() -> AgentConfig {
         AgentConfig {
