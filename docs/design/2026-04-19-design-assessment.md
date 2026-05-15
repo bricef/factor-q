@@ -342,3 +342,22 @@ The right move on resumption is not more design. It is a
 prototype that validates (or refutes) the reducer claim —
 which is the load-bearing one — before any further layers
 are committed to.
+
+---
+
+## Verdict (added 2026-05-15)
+
+The reducer prototype landed and the architectural claim
+survived contact with code. The full verdict — what got
+shipped, the verification criteria results, the honest
+enumeration of what the prototype did *not* validate, and
+recommended next forks — lives in
+[`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md).
+
+In short: state enum stayed small (four phases),
+suspension/resumption is structural rather than incidental,
+parallel tool dispatch composes cleanly, and the code is
+subjectively maintainable. Live-NATS and real-Anthropic
+runs corroborated the in-process evidence. The follow-up
+work that built on the validated claim is tracked in
+[`docs/plans/active/2026-04-28-data-architecture-v1.md`](../plans/active/2026-04-28-data-architecture-v1.md).
