@@ -112,37 +112,111 @@ impl Agent {
 /// A validated agent identifier.
 ///
 /// Enforces that agent IDs are non-empty and compatible with NATS subject
-/// tokens (no dots, wildcards, or whitespace).
+/// tokens (no dots, wildcards, or whitespace). The serde Deserialize impl
+/// applies the same validation — events arriving over the wire with a
+/// bogus `agent_id` fail to parse rather than landing in the runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AgentId(String);
 
 impl AgentId {
+    /// The sentinel agent id used for runtime/system events. System events
+    /// share this id so they group together while staying disjoint from
+    /// any real agent.
+    pub const SYSTEM_STR: &'static str = "system";
+
     /// Construct an agent id from a string, validating its shape.
     pub fn new(s: impl Into<String>) -> Result<Self, BuildError> {
         let s = s.into();
-        if s.is_empty() {
-            return Err(BuildError::InvalidId(
-                "agent id must not be empty".to_string(),
-            ));
-        }
-        for ch in s.chars() {
-            if ch == '.' || ch == '*' || ch == '>' || ch.is_whitespace() {
-                return Err(BuildError::InvalidId(format!(
-                    "agent id must not contain '.', '*', '>', or whitespace: {s:?}"
-                )));
-            }
-        }
+        validate(&s)?;
         Ok(Self(s))
+    }
+
+    /// The system sentinel as an [`AgentId`]. Equivalent to
+    /// `AgentId::new(Self::SYSTEM_STR).unwrap()` but infallible.
+    pub fn system() -> Self {
+        // "system" passes `validate`; this never panics. The
+        // expect-message documents the invariant.
+        Self::new(Self::SYSTEM_STR).expect("`system` is a valid agent id")
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Consume the newtype and return the inner `String`. Used at
+    /// boundaries that need owned strings (CLI args, etc.).
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+/// Shared validation predicate. Used by both [`AgentId::new`] and the
+/// [`serde::Deserialize`] impl so the wire-boundary check is identical to
+/// the construction-time check.
+fn validate(s: &str) -> Result<(), BuildError> {
+    if s.is_empty() {
+        return Err(BuildError::InvalidId(
+            "agent id must not be empty".to_string(),
+        ));
+    }
+    for ch in s.chars() {
+        if ch == '.' || ch == '*' || ch == '>' || ch.is_whitespace() {
+            return Err(BuildError::InvalidId(format!(
+                "agent id must not contain '.', '*', '>', or whitespace: {s:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for AgentId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+impl AsRef<str> for AgentId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for AgentId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for AgentId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<AgentId> for str {
+    fn eq(&self, other: &AgentId) -> bool {
+        self == other.0.as_str()
+    }
+}
+
+impl std::str::FromStr for AgentId {
+    type Err = BuildError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+impl serde::Serialize for AgentId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        validate(&s).map_err(serde::de::Error::custom)?;
+        Ok(Self(s))
     }
 }
 
@@ -486,6 +560,53 @@ mod tests {
             AgentId::new("").unwrap_err(),
             BuildError::InvalidId(_)
         ));
+    }
+
+    #[test]
+    fn agent_id_serialises_as_a_bare_string() {
+        // Newtype must serialise transparently — no `{"AgentId": ...}`
+        // wrapper. The wire format is unchanged versus what
+        // `String` would produce.
+        let id = AgentId::new("researcher").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"researcher\"");
+    }
+
+    #[test]
+    fn agent_id_round_trips_through_serde() {
+        let id = AgentId::new("researcher").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        let parsed: AgentId = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn agent_id_deserialise_rejects_invalid_input() {
+        // Wire-boundary protection. An event arriving from NATS
+        // with a malformed agent_id must fail to deserialise
+        // rather than landing in the runtime as a bypass.
+        let cases = [
+            "\"\"",          // empty
+            "\"foo.bar\"",   // contains dot — would break NATS subjects
+            "\"agent*\"",    // contains wildcard
+            "\"agent>\"",    // contains wildcard
+            "\"with space\"",
+        ];
+        for raw in cases {
+            let result: Result<AgentId, _> = serde_json::from_str(raw);
+            assert!(
+                result.is_err(),
+                "AgentId deserialise should have rejected {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_id_system_sentinel_is_valid() {
+        // `AgentId::system()` must never panic — the "system"
+        // string is statically known to be NATS-subject-safe.
+        let id = AgentId::system();
+        assert_eq!(id.as_str(), "system");
     }
 
     #[test]

@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::agent::AgentId;
+
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// Well-known annotation keys. Kept as documented constants so the
@@ -128,8 +130,7 @@ impl Event {
     /// for now), and `schema_id` derived from the payload variant.
     /// `parent_event_id` is `None`; chain it later with
     /// [`Event::with_parent`] (step 2 of the envelope refactor).
-    pub fn new(agent_id: impl Into<String>, invocation_id: Uuid, payload: EventPayload) -> Self {
-        let agent_id = agent_id.into();
+    pub fn new(agent_id: AgentId, invocation_id: Uuid, payload: EventPayload) -> Self {
         let envelope = Envelope {
             schema_version: SCHEMA_VERSION,
             event_id: Uuid::now_v7(),
@@ -158,7 +159,7 @@ impl Event {
             event_id: Uuid::now_v7(),
             parent_event_id: None,
             trace_id: runtime_id,
-            agent_id: "system".to_string(),
+            agent_id: AgentId::system(),
             invocation_id: runtime_id,
             schema_id: schema_id_for(&payload).to_string(),
             timestamp: Utc::now(),
@@ -232,23 +233,18 @@ impl Event {
 
     /// Return the NATS subject this event should be published on.
     pub fn subject(&self) -> String {
+        let agent = self.envelope.agent_id.as_str();
         match &self.payload {
-            EventPayload::Triggered(_) => subjects::agent_triggered(&self.envelope.agent_id),
-            EventPayload::LlmRequest(_) => subjects::agent_llm_request(&self.envelope.agent_id),
-            EventPayload::LlmResponse(_) => subjects::agent_llm_response(&self.envelope.agent_id),
-            EventPayload::ToolCall(_) => subjects::agent_tool_call(&self.envelope.agent_id),
-            EventPayload::ToolDispatched(_) => {
-                subjects::agent_tool_dispatched(&self.envelope.agent_id)
-            }
-            EventPayload::ToolResult(_) => subjects::agent_tool_result(&self.envelope.agent_id),
-            EventPayload::LlmDispatched(_) => {
-                subjects::agent_llm_dispatched(&self.envelope.agent_id)
-            }
-            EventPayload::InvocationAmbiguous(_) => {
-                subjects::agent_invocation_ambiguous(&self.envelope.agent_id)
-            }
-            EventPayload::Completed(_) => subjects::agent_completed(&self.envelope.agent_id),
-            EventPayload::Failed(_) => subjects::agent_failed(&self.envelope.agent_id),
+            EventPayload::Triggered(_) => subjects::agent_triggered(agent),
+            EventPayload::LlmRequest(_) => subjects::agent_llm_request(agent),
+            EventPayload::LlmResponse(_) => subjects::agent_llm_response(agent),
+            EventPayload::ToolCall(_) => subjects::agent_tool_call(agent),
+            EventPayload::ToolDispatched(_) => subjects::agent_tool_dispatched(agent),
+            EventPayload::ToolResult(_) => subjects::agent_tool_result(agent),
+            EventPayload::LlmDispatched(_) => subjects::agent_llm_dispatched(agent),
+            EventPayload::InvocationAmbiguous(_) => subjects::agent_invocation_ambiguous(agent),
+            EventPayload::Completed(_) => subjects::agent_completed(agent),
+            EventPayload::Failed(_) => subjects::agent_failed(agent),
             EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
             EventPayload::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
             EventPayload::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
@@ -313,7 +309,7 @@ pub struct Envelope {
     /// (e.g. a graph workflow spanning multiple invocations) can be
     /// stitched together later without a wire-format change.
     pub trace_id: Uuid,
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub invocation_id: Uuid,
     /// Stable identifier for the payload schema, e.g.
     /// `"factor-q/triggered@1"`. See [`schema_id_for`].
@@ -745,7 +741,7 @@ mod tests {
     fn round_trip_triggered_event() {
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "researcher",
+            AgentId::new("researcher").unwrap(),
             invocation_id,
             EventPayload::Triggered(TriggeredPayload {
                 trigger_source: TriggerSource::Manual,
@@ -853,7 +849,7 @@ mod tests {
     fn envelope_default_fields_on_new_event() {
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "test-agent",
+            AgentId::new("test-agent").unwrap(),
             invocation_id,
             EventPayload::LlmDispatched(LlmDispatchedPayload {
                 call_id: Uuid::now_v7(),
@@ -891,7 +887,7 @@ mod tests {
     fn annotations_skip_serialise_when_empty() {
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "test-agent",
+            AgentId::new("test-agent").unwrap(),
             invocation_id,
             EventPayload::Triggered(TriggeredPayload {
                 trigger_source: TriggerSource::Manual,
@@ -921,7 +917,7 @@ mod tests {
     fn event_with_parent_sets_envelope_field() {
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "agent",
+            AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmDispatched(LlmDispatchedPayload {
                 call_id: Uuid::now_v7(),
@@ -980,7 +976,7 @@ mod tests {
     fn event_with_cost_sets_envelope_cost() {
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "agent",
+            AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),
@@ -1024,7 +1020,7 @@ mod tests {
             cumulative_agent_cost: 0.3,
         };
         let event = Event::new(
-            "agent",
+            AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),
@@ -1044,7 +1040,7 @@ mod tests {
     fn envelope_cost_omits_when_none() {
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "agent",
+            AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),
@@ -1063,7 +1059,7 @@ mod tests {
     fn event_annotate_inserts_key() {
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "agent",
+            AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::Triggered(TriggeredPayload {
                 trigger_source: TriggerSource::Manual,
@@ -1095,7 +1091,7 @@ mod tests {
     fn event_annotate_replaces_existing_key() {
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "agent",
+            AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmDispatched(LlmDispatchedPayload {
                 call_id: Uuid::now_v7(),
@@ -1116,7 +1112,7 @@ mod tests {
         // The registry is advisory; arbitrary keys are still legal.
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "agent",
+            AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmDispatched(LlmDispatchedPayload {
                 call_id: Uuid::now_v7(),
@@ -1143,7 +1139,7 @@ mod tests {
         // envelope and payload but no annotations field.
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "agent",
+            AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),
@@ -1177,7 +1173,7 @@ mod tests {
         // through the consumer barrier.
         let invocation_id = Uuid::now_v7();
         let event = Event::new(
-            "producer",
+            AgentId::new("producer").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),
@@ -1209,7 +1205,7 @@ mod tests {
         let invocation_id = Uuid::now_v7();
         let parent = Uuid::now_v7();
         let event = Event::new(
-            "agent",
+            AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::ToolDispatched(ToolDispatchedPayload {
                 tool_call_id: "tc".to_string(),

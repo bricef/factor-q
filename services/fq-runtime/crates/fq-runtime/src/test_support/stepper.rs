@@ -127,6 +127,7 @@ impl<R: Reducer> ManualStepper<R> {
 mod tests {
     use super::*;
     use crate::Harness;
+    use crate::agent::AgentId;
     use crate::events::{MessageToolCall, StopReason, TokenUsage, ToolSchema};
     use crate::worker::reducer::types::{
         CapabilityResult, ModelResponse, ToolCallResult, TriggerSourceKind,
@@ -135,7 +136,7 @@ mod tests {
 
     fn config() -> AgentConfig {
         AgentConfig {
-            agent_id: "stepper-test".to_string(),
+            agent_id: AgentId::new("stepper-test").unwrap(),
             model: "claude-haiku".to_string(),
             system_prompt: "You are a test agent.".to_string(),
             tools_available: vec![ToolSchema {

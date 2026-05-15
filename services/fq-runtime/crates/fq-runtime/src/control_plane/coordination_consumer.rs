@@ -234,7 +234,7 @@ impl CoordinationConsumer {
         self.store
             .upsert_invocation_ownership(
                 &invocation_id,
-                &event.envelope.agent_id,
+                event.envelope.agent_id.as_str(),
                 Utc::now().timestamp_millis(),
                 OwnerStatus::Ambiguous,
             )
@@ -284,6 +284,7 @@ pub enum CoordinationConsumerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentId;
 
     // Pure unit test: handler-shape verification using a
     // wrapper that simulates dispatch without a real bus.
@@ -340,7 +341,7 @@ mod tests {
 
         // Avoid unused warnings
         let _ = (Event::new(
-            "agent-x",
+            AgentId::new("agent-x").unwrap(),
             Uuid::now_v7(),
             EventPayload::InvocationAmbiguous(InvocationAmbiguousPayload {
                 stuck_entity: "tool_dispatch".to_string(),
@@ -372,7 +373,8 @@ mod tests {
         // Use a unique invocation id and a unique consumer
         // name so this test can run alongside others.
         let invocation_id = Uuid::now_v7();
-        let agent_id = format!("coord-test-{}", Uuid::now_v7().simple());
+        let agent_id =
+            AgentId::new(format!("coord-test-{}", Uuid::now_v7().simple())).unwrap();
         let consumer_name = format!("fq-coordination-test-{}", Uuid::now_v7().simple());
 
         // Spawn the consumer with a custom durable name so
@@ -440,7 +442,7 @@ mod tests {
         store: Arc<ControlPlaneStore>,
         consumer_name: String,
         filter_subject: &str,
-        _agent_filter: String,
+        _agent_filter: AgentId,
         mut shutdown: oneshot::Receiver<()>,
     ) -> Result<(), CoordinationConsumerError> {
         let consumer = bus
@@ -465,7 +467,7 @@ mod tests {
                             if let EventPayload::InvocationAmbiguous(_) = &event.payload {
                                 let _ = store.upsert_invocation_ownership(
                                     &event.envelope.invocation_id.to_string(),
-                                    &event.envelope.agent_id,
+                                    event.envelope.agent_id.as_str(),
                                     Utc::now().timestamp_millis(),
                                     OwnerStatus::Ambiguous,
                                 ).await;

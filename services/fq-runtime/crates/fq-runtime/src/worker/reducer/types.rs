@@ -23,6 +23,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::agent::AgentId;
 use crate::events::{
     Message, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolErrorKind, ToolSchema,
 };
@@ -32,7 +33,7 @@ use crate::events::{
 /// every time is what keeps `step` pure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub model: String,
     pub system_prompt: String,
     pub tools_available: Vec<ToolSchema>,

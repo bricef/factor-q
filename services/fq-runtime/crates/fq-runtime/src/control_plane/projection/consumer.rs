@@ -146,6 +146,7 @@ pub enum ConsumerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentId;
     use crate::events::{
         CompletedPayload, ConfigSnapshot, Event, EventPayload, SandboxSnapshot, TriggerSource,
         TriggeredPayload,
@@ -156,9 +157,15 @@ mod tests {
     use tokio::sync::oneshot;
     use uuid::Uuid;
 
+    /// Wrap `&str` test input in `AgentId`. Panics on invalid
+    /// inputs — only the hardcoded fixture strings flow through.
+    fn aid(s: &str) -> AgentId {
+        AgentId::new(s).expect("test agent id must be valid")
+    }
+
     fn triggered(agent: &str) -> Event {
         Event::new(
-            agent,
+            aid(agent),
             Uuid::now_v7(),
             EventPayload::Triggered(TriggeredPayload {
                 trigger_source: TriggerSource::Manual,
@@ -178,7 +185,7 @@ mod tests {
 
     fn completed(agent: &str, inv: Uuid) -> Event {
         Event::new(
-            agent,
+            aid(agent),
             inv,
             EventPayload::Completed(CompletedPayload {
                 result_summary: Some("ok".to_string()),

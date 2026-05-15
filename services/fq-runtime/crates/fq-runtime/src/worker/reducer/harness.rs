@@ -335,6 +335,7 @@ mod tests {
 
     use super::*;
     use crate::events::{StopReason, TokenUsage, ToolSchema};
+    use crate::agent::AgentId;
     use crate::worker::reducer::types::{ModelResponse, ToolCallResult, TriggerPayload, TriggerSourceKind};
     use serde_json::{Value, json};
     use strum::EnumCount;
@@ -384,7 +385,7 @@ mod tests {
 
     fn config() -> AgentConfig {
         AgentConfig {
-            agent_id: "test".to_string(),
+            agent_id: AgentId::new("test").unwrap(),
             model: "claude-haiku".to_string(),
             system_prompt: "You are a test agent.".to_string(),
             tools_available: vec![ToolSchema {

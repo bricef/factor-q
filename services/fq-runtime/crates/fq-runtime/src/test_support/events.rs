@@ -241,10 +241,15 @@ mod tests {
     //! test that uses it across the wider crate.
 
     use super::*;
+    use crate::agent::AgentId;
     use crate::events::{
         ConfigSnapshot, Event, EventPayload, LlmResponsePayload, SandboxSnapshot, StopReason,
         TokenUsage, ToolCallPayload, ToolResultPayload, TriggerSource, TriggeredPayload,
     };
+
+    fn aid(s: &str) -> AgentId {
+        AgentId::new(s).expect("test agent id must be valid")
+    }
     use serde_json::json;
 
     fn config_snapshot() -> ConfigSnapshot {
@@ -260,7 +265,7 @@ mod tests {
 
     fn triggered(invocation_id: Uuid) -> Event {
         Event::new(
-            "test-agent",
+            aid("test-agent"),
             invocation_id,
             EventPayload::Triggered(TriggeredPayload {
                 trigger_source: TriggerSource::Manual,
@@ -273,7 +278,7 @@ mod tests {
 
     fn tool_call(invocation_id: Uuid) -> Event {
         Event::new(
-            "test-agent",
+            aid("test-agent"),
             invocation_id,
             EventPayload::ToolCall(ToolCallPayload {
                 tool_call_id: "c1".to_string(),
@@ -285,7 +290,7 @@ mod tests {
 
     fn tool_result(invocation_id: Uuid) -> Event {
         Event::new(
-            "test-agent",
+            aid("test-agent"),
             invocation_id,
             EventPayload::ToolResult(ToolResultPayload {
                 tool_call_id: "c1".to_string(),
@@ -299,7 +304,7 @@ mod tests {
 
     fn llm_response(invocation_id: Uuid) -> Event {
         Event::new(
-            "test-agent",
+            aid("test-agent"),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),

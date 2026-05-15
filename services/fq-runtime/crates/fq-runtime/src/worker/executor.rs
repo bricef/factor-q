@@ -19,7 +19,7 @@ use serde_json::Value;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentId};
 use crate::bus::{BusError, EventBus};
 use crate::events::{
     CompletedPayload, CostMetadata, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
@@ -64,7 +64,7 @@ impl AgentExecutor {
     ) -> Result<InvocationOutcome, ExecutorError> {
         let invocation_id = Uuid::now_v7();
         let start = Instant::now();
-        let agent_id = agent.id().as_str().to_string();
+        let agent_id: AgentId = agent.id().clone();
         let mut totals = InvocationTotals::default();
 
         info!(
@@ -258,7 +258,7 @@ impl AgentExecutor {
         &self,
         agent: &Agent,
         llm: &dyn LlmClient,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         messages: &[Message],
         tools: &[crate::events::ToolSchema],
@@ -277,7 +277,7 @@ impl AgentExecutor {
         };
 
         self.publish(Event::new(
-            agent_id.to_string(),
+            agent_id.clone(),
             invocation_id,
             EventPayload::LlmRequest(LlmRequestPayload {
                 call_id,
@@ -325,7 +325,7 @@ impl AgentExecutor {
 
         self.publish(
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::LlmResponse(LlmResponsePayload {
                     call_id,
@@ -364,7 +364,7 @@ impl AgentExecutor {
         &self,
         agent: &Agent,
         sandbox: &ToolSandbox,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         call: &MessageToolCall,
         totals: &InvocationTotals,
@@ -386,7 +386,7 @@ impl AgentExecutor {
 
         // Publish tool.call before running.
         self.publish(Event::new(
-            agent_id.to_string(),
+            agent_id.clone(),
             invocation_id,
             EventPayload::ToolCall(ToolCallPayload {
                 tool_call_id: call.tool_call_id.clone(),
@@ -428,7 +428,7 @@ impl AgentExecutor {
         match outcome {
             Ok(result) => {
                 self.publish(Event::new(
-                    agent_id.to_string(),
+                    agent_id.clone(),
                     invocation_id,
                     EventPayload::ToolResult(ToolResultPayload {
                         tool_call_id: call.tool_call_id.clone(),
@@ -444,7 +444,7 @@ impl AgentExecutor {
             Err(err) => {
                 let (kind, message) = classify_tool_error(&err);
                 self.publish(Event::new(
-                    agent_id.to_string(),
+                    agent_id.clone(),
                     invocation_id,
                     EventPayload::ToolResult(ToolResultPayload {
                         tool_call_id: call.tool_call_id.clone(),
@@ -468,7 +468,7 @@ impl AgentExecutor {
     async fn run_self_inspect(
         &self,
         agent: &Agent,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         call: &MessageToolCall,
         totals: &InvocationTotals,
@@ -478,7 +478,7 @@ impl AgentExecutor {
 
         let tool_start = Instant::now();
         let stats = HostInvocationStats {
-            agent_id,
+            agent_id: agent_id.as_str(),
             model: agent.model(),
             allowed_tool_names: agent.tools(),
             budget: agent.budget(),
@@ -490,7 +490,7 @@ impl AgentExecutor {
         let duration_ms = tool_start.elapsed().as_millis() as u64;
 
         self.publish(Event::new(
-            agent_id.to_string(),
+            agent_id.clone(),
             invocation_id,
             EventPayload::ToolResult(ToolResultPayload {
                 tool_call_id: call.tool_call_id.clone(),
@@ -513,14 +513,14 @@ impl AgentExecutor {
     /// feed back to the LLM.
     async fn emit_tool_error(
         &self,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         call: &MessageToolCall,
         kind: ToolErrorKind,
         message: String,
     ) -> Result<ToolResult, ExecutorError> {
         self.publish(Event::new(
-            agent_id.to_string(),
+            agent_id.clone(),
             invocation_id,
             EventPayload::ToolResult(ToolResultPayload {
                 tool_call_id: call.tool_call_id.clone(),
@@ -544,7 +544,7 @@ impl AgentExecutor {
 
     async fn emit_failed(
         &self,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         error_kind: FailureKind,
         error_message: String,
@@ -558,7 +558,7 @@ impl AgentExecutor {
             "invocation failed"
         );
         self.publish(Event::new(
-            agent_id.to_string(),
+            agent_id.clone(),
             invocation_id,
             EventPayload::Failed(FailedPayload {
                 error_kind,

@@ -117,7 +117,7 @@ impl ProjectionStore {
         )
         .bind(event.envelope.event_id.to_string())
         .bind(event.envelope.timestamp.to_rfc3339())
-        .bind(&event.envelope.agent_id)
+        .bind(event.envelope.agent_id.as_str())
         .bind(event.envelope.invocation_id.to_string())
         .bind(event_type)
         .bind(fields.model)
@@ -394,6 +394,7 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentId;
     use crate::events::{
         CompletedPayload, ConfigSnapshot, CostMetadata, Event, EventPayload, FailedPayload,
         FailureKind, FailurePhase, InvocationTotals, LlmRequestPayload, LlmResponsePayload,
@@ -404,9 +405,16 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
+    /// Tiny helper for fixtures: `AgentId::new(s).unwrap()` would be
+    /// noise at every call site. Panics on invalid input — only used
+    /// in test code where the inputs are hardcoded by us.
+    fn aid(s: &str) -> AgentId {
+        AgentId::new(s).expect("test agent id must be valid")
+    }
+
     fn sample_triggered(agent: &str, inv: Uuid) -> Event {
         Event::new(
-            agent,
+            aid(agent),
             inv,
             EventPayload::Triggered(TriggeredPayload {
                 trigger_source: TriggerSource::Manual,
@@ -429,7 +437,7 @@ mod tests {
     /// `llm.response` envelope rather than as its own event.
     fn sample_llm_response_with_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
         Event::new(
-            agent,
+            aid(agent),
             inv,
             EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),
@@ -461,7 +469,7 @@ mod tests {
 
     fn sample_completed(agent: &str, inv: Uuid) -> Event {
         Event::new(
-            agent,
+            aid(agent),
             inv,
             EventPayload::Completed(CompletedPayload {
                 result_summary: Some("done".to_string()),
@@ -475,7 +483,7 @@ mod tests {
 
     fn sample_failed(agent: &str, inv: Uuid) -> Event {
         Event::new(
-            agent,
+            aid(agent),
             inv,
             EventPayload::Failed(FailedPayload {
                 error_kind: FailureKind::BudgetExceeded,
@@ -493,7 +501,7 @@ mod tests {
 
     fn sample_llm_request(agent: &str, inv: Uuid) -> Event {
         Event::new(
-            agent,
+            aid(agent),
             inv,
             EventPayload::LlmRequest(LlmRequestPayload {
                 call_id: Uuid::now_v7(),
@@ -515,7 +523,7 @@ mod tests {
 
     fn sample_llm_response(agent: &str, inv: Uuid) -> Event {
         Event::new(
-            agent,
+            aid(agent),
             inv,
             EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),

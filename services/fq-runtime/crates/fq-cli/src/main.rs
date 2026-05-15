@@ -974,8 +974,24 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         );
         for inv in &classified {
             if let Some((entity, call_id)) = inv.ambiguous_context() {
+                // Re-validate the agent_id pulled from the store
+                // before publishing it. If the stored value somehow
+                // fails AgentId validation, skip the recovery event
+                // and surface the problem in logs — better than
+                // panicking or emitting a malformed event.
+                let agent_id = match AgentId::new(inv.state.agent_id.clone()) {
+                    Ok(id) => id,
+                    Err(err) => {
+                        tracing::error!(
+                            stored_agent_id = %inv.state.agent_id,
+                            error = %err,
+                            "stored agent_id fails validation; skipping ambiguous-recovery event"
+                        );
+                        continue;
+                    }
+                };
                 let event = Event::new(
-                    inv.state.agent_id.clone(),
+                    agent_id,
                     uuid::Uuid::parse_str(&inv.state.invocation_id).unwrap_or_else(|_| {
                         // Fall back to a fresh uuid if the
                         // stored id ever isn't valid (shouldn't

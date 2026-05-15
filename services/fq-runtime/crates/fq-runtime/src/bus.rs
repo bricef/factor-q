@@ -377,15 +377,20 @@ impl EventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentId;
     use crate::events::{
         ConfigSnapshot, EventPayload, SandboxSnapshot, TriggerSource, TriggeredPayload,
     };
     use serde_json::json;
     use uuid::Uuid;
 
+    fn aid(s: &str) -> AgentId {
+        AgentId::new(s).expect("test agent id must be valid")
+    }
+
     fn sample_event(agent_id: &str) -> Event {
         Event::new(
-            agent_id,
+            aid(agent_id),
             Uuid::now_v7(),
             EventPayload::Triggered(TriggeredPayload {
                 trigger_source: TriggerSource::Manual,
@@ -446,7 +451,7 @@ mod tests {
             .expect("deserialise");
 
         assert_eq!(received.envelope.event_id, expected_id);
-        assert_eq!(received.envelope.agent_id, agent_id);
+        assert_eq!(received.envelope.agent_id.as_str(), agent_id);
     }
 
     /// Annotations live on the wire — the barrier (envelope-refactor

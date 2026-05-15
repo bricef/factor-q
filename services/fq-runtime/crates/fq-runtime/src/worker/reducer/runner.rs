@@ -30,7 +30,7 @@ use super::types::{
     ModelResponse, NextAction, Reducer, StepInput, ToolCallRequest, ToolCallResult, TriggerPayload,
     TriggerSourceKind,
 };
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentId};
 use crate::bus::EventBus;
 use crate::events::{
     self, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
@@ -90,7 +90,7 @@ impl ReducerRunner {
     ) -> Result<InvocationOutcome, ExecutorError> {
         let invocation_id = Uuid::now_v7();
         let start = Instant::now();
-        let agent_id = agent.id().as_str().to_string();
+        let agent_id: AgentId = agent.id().clone();
         let totals = InvocationTotals::default();
 
         info!(
@@ -208,7 +208,16 @@ impl ReducerRunner {
             )));
         }
 
-        let agent_id = state_row.agent_id.clone();
+        // Re-validate the agent_id pulled from the store. It was
+        // validated on insert (the runtime only writes through
+        // AgentId), so a failure here means the database row was
+        // tampered with or written by a future, looser version.
+        let agent_id: AgentId = AgentId::new(state_row.agent_id.clone()).map_err(|err| {
+            ExecutorError::WorkerStore(format!(
+                "stored agent_id {:?} fails AgentId validation: {err}",
+                state_row.agent_id
+            ))
+        })?;
         info!(
             invocation_id = %invocation_id,
             agent_id = %agent_id,
@@ -339,7 +348,7 @@ impl ReducerRunner {
         agent: &Agent,
         llm: &dyn LlmClient,
         invocation_id: Uuid,
-        agent_id: &str,
+        agent_id: &AgentId,
         agent_config: &AgentConfig,
         trigger: &TriggerPayload,
         sandbox: &ToolSandbox,
@@ -393,7 +402,7 @@ impl ReducerRunner {
             self.store
                 .upsert_invocation_state(&InvocationStateRow {
                     invocation_id: invocation_id.to_string(),
-                    agent_id: agent_id.to_string(),
+                    agent_id: agent_id.as_str().to_string(),
                     schema_version: 1,
                     phase: phase_label.to_string(),
                     state_blob: output.state.clone(),
@@ -415,7 +424,7 @@ impl ReducerRunner {
                     self.publish_chained(
                         cursor,
                         Event::new(
-                            agent_id.to_string(),
+                            agent_id.clone(),
                             invocation_id,
                             EventPayload::Completed(CompletedPayload {
                                 result_summary: summary.clone(),
@@ -553,7 +562,7 @@ impl ReducerRunner {
         &self,
         agent: &Agent,
         sandbox: &ToolSandbox,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         req: ToolCallRequest,
         totals: &InvocationTotals,
@@ -596,7 +605,7 @@ impl ReducerRunner {
         self.publish_chained(
             cursor,
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::ToolCall(ToolCallPayload {
                     tool_call_id: req.tool_call_id.clone(),
@@ -674,7 +683,7 @@ impl ReducerRunner {
         self.publish_chained(
             cursor,
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::ToolDispatched(events::ToolDispatchedPayload {
                     tool_call_id: req.tool_call_id.clone(),
@@ -699,7 +708,7 @@ impl ReducerRunner {
                 self.publish_chained(
                     cursor,
                     Event::new(
-                        agent_id.to_string(),
+                        agent_id.clone(),
                         invocation_id,
                         EventPayload::ToolResult(ToolResultPayload {
                             tool_call_id: req.tool_call_id.clone(),
@@ -734,7 +743,7 @@ impl ReducerRunner {
                 self.publish_chained(
                     cursor,
                     Event::new(
-                        agent_id.to_string(),
+                        agent_id.clone(),
                         invocation_id,
                         EventPayload::ToolResult(ToolResultPayload {
                             tool_call_id: req.tool_call_id.clone(),
@@ -764,7 +773,7 @@ impl ReducerRunner {
     async fn run_self_inspect_with_wal(
         &self,
         agent: &Agent,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         req: ToolCallRequest,
         totals: &InvocationTotals,
@@ -776,7 +785,7 @@ impl ReducerRunner {
 
         let tool_start = Instant::now();
         let stats = HostInvocationStats {
-            agent_id,
+            agent_id: agent_id.as_str(),
             model: agent.model(),
             allowed_tool_names: agent.tools(),
             budget: agent.budget(),
@@ -799,7 +808,7 @@ impl ReducerRunner {
         self.publish_chained(
             cursor,
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::ToolDispatched(events::ToolDispatchedPayload {
                     tool_call_id: req.tool_call_id.clone(),
@@ -822,7 +831,7 @@ impl ReducerRunner {
         self.publish_chained(
             cursor,
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::ToolResult(ToolResultPayload {
                     tool_call_id: req.tool_call_id.clone(),
@@ -846,7 +855,7 @@ impl ReducerRunner {
 
     async fn emit_synthetic_tool_error(
         &self,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         req: &ToolCallRequest,
         kind: ToolErrorKind,
@@ -856,7 +865,7 @@ impl ReducerRunner {
         self.publish_chained(
             cursor,
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::ToolResult(ToolResultPayload {
                     tool_call_id: req.tool_call_id.clone(),
@@ -901,7 +910,7 @@ impl ReducerRunner {
     #[allow(clippy::too_many_arguments)]
     async fn emit_failed(
         &self,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         error_kind: FailureKind,
         error_message: String,
@@ -918,7 +927,7 @@ impl ReducerRunner {
         self.publish_chained(
             cursor,
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::Failed(FailedPayload {
                     error_kind,
@@ -931,7 +940,7 @@ impl ReducerRunner {
         .await
     }
 
-    fn write_logs(&self, agent_id: &str, invocation_id: Uuid, logs: &[LogEntry]) {
+    fn write_logs(&self, agent_id: &AgentId, invocation_id: Uuid, logs: &[LogEntry]) {
         for entry in logs {
             match entry.level {
                 LogLevel::Trace => tracing::trace!(
@@ -979,7 +988,7 @@ impl ReducerRunner {
         &self,
         llm: &dyn LlmClient,
         budget: Option<f64>,
-        agent_id: &str,
+        agent_id: &AgentId,
         invocation_id: Uuid,
         request: ModelRequest,
         totals: &mut InvocationTotals,
@@ -1015,7 +1024,7 @@ impl ReducerRunner {
         self.publish_chained(
             cursor,
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::LlmRequest(LlmRequestPayload {
                     call_id,
@@ -1076,7 +1085,7 @@ impl ReducerRunner {
         self.publish_chained(
             cursor,
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::LlmDispatched(events::LlmDispatchedPayload {
                     call_id,
@@ -1117,7 +1126,7 @@ impl ReducerRunner {
         self.publish_chained(
             cursor,
             Event::new(
-                agent_id.to_string(),
+                agent_id.clone(),
                 invocation_id,
                 EventPayload::LlmResponse(LlmResponsePayload {
                     call_id,
@@ -1737,7 +1746,7 @@ mod tests {
         };
 
         let cfg = AgentConfig {
-            agent_id: "suspend-resume".to_string(),
+            agent_id: AgentId::new("suspend-resume").unwrap(),
             model: "claude-haiku".to_string(),
             system_prompt: "be brief.".to_string(),
             tools_available: vec![],
@@ -1895,7 +1904,7 @@ mod tests {
         };
 
         let cfg = AgentConfig {
-            agent_id: "suspend-tools".to_string(),
+            agent_id: AgentId::new("suspend-tools").unwrap(),
             model: "claude-haiku".to_string(),
             system_prompt: "introspect on demand.".to_string(),
             tools_available: vec![],
@@ -2407,7 +2416,7 @@ mod tests {
         // would have persisted at iteration=0 (post-step).
         let harness = Harness::new();
         let agent_config = AgentConfig {
-            agent_id: agent_id_str.clone(),
+            agent_id: AgentId::new(&agent_id_str).unwrap(),
             model: "claude-haiku".to_string(),
             system_prompt: "You are a test agent.".to_string(),
             tools_available: vec![],
