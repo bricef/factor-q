@@ -1,5 +1,23 @@
 # Plan: MCP Client Support (Phase 2, Workstream 1)
 
+**Date**: 2026-04-13
+**Status**: Closed (2026-05-16)
+
+## Closing notes (2026-05-16)
+
+Shipped in commit `4efde8a Add MCP client support via rmcp crate`.
+Every Critical files entry below was touched as planned;
+`tests/mcp_integration.rs` and `agents/examples/mcp-echo.md`
+both landed. The implementation followed the plan's
+"Approach" section without significant deviation.
+
+The remaining phase-2 workstreams (memory, skills, vector
+DB) are still tracked under
+[`2026-04-11-phase-2-mcp-and-memory.md`](../active/2026-04-11-phase-2-mcp-and-memory.md);
+those have not begun.
+
+---
+
 ## Context
 
 Phase 1 delivered a working single-agent runtime with built-in tools (shell, file_read, file_write), event-driven execution via NATS, and cost controls. Phase 2 begins with MCP client support — enabling agents to use tools provided by external MCP servers. This is the foundation for the memory and skill registry services (phase 2 workstreams 3 and 4), which are themselves MCP servers.

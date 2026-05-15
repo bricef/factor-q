@@ -356,6 +356,34 @@ Gated on `FQ_NATS_URL`.
 
 ### Step 7 — Control-plane recovery path
 
+**Status (2026-05-16): partially landed.** The coordination
+consumer for `invocation.ambiguous` shipped in commit
+`a63ef8c`, including the periodic stale-worker sweep wired
+into `fq run` startup. Three items remain before this step is
+fully closed:
+
+1. **Worker heartbeat emission.** The sweep marks stale based
+   on `last_heartbeat`, but workers don't emit heartbeats —
+   only the one-shot self-registration on startup. Without
+   periodic heartbeats, the sweep mass-marks every worker
+   stale after 30s. Fix: spawn a heartbeat task per worker
+   that updates `coordination_worker.last_heartbeat` every
+   ~10s. The daemon's `with_self_worker_id` already passes
+   the local worker_id to the consumer for self-skip; the
+   producer side is the missing piece. Small (~30 lines).
+2. **`invocation.archived` / `invocation.archive_acked`
+   handling.** Deferred to step 8 (where the events are
+   first published). The consumer's `_ => Ok(())` arm
+   catches unknown variants today.
+3. **Acceptance test surface.** The test as written needs
+   `fq invocation list --status=ambiguous` and `fq workers
+   stale` CLI commands which belong to step 9. The step's
+   acceptance can land alongside the CLI work in step 9.
+
+The natural sequencing for the next session: knock out (1) as
+the first commit, then move to step 8 (archive hand-off) which
+will pull (2) along with it as a natural consequence.
+
 **Goal.** Control-plane on restart subscribes to
 `invocation.ambiguous`, `invocation.archived`,
 `invocation.archive_acked`, and reconciles coordination state
