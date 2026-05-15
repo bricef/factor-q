@@ -104,7 +104,7 @@ impl ProjectionStore {
     /// Insert an event into the store. Idempotent on `event_id` —
     /// re-delivery from a durable consumer is a no-op.
     pub async fn insert_event(&self, event: &Event) -> Result<(), StoreError> {
-        let fields = extract_fields(&event.payload);
+        let fields = extract_fields(event);
         let event_type = event_type_name(&event.payload);
 
         sqlx::query(
@@ -200,7 +200,10 @@ impl ProjectionStore {
         Ok(events)
     }
 
-    /// Aggregate cost events into per-agent totals.
+    /// Aggregate cost-bearing events into per-agent totals. Cost
+    /// now rides on `llm.response` envelopes (envelope-refactor
+    /// plan step 3), so the filter is `total_cost IS NOT NULL`
+    /// instead of `event_type = 'cost'`.
     pub async fn cost_summary(
         &self,
         agent: Option<&str>,
@@ -213,7 +216,7 @@ impl ProjectionStore {
              COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
              COALESCE(SUM(output_tokens), 0) AS total_output_tokens \
              FROM events \
-             WHERE event_type = 'cost'",
+             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL",
         );
         if agent.is_some() {
             sql.push_str(" AND agent_id = ?");
@@ -312,8 +315,8 @@ struct Fields {
     duration_ms: Option<i64>,
 }
 
-fn extract_fields(payload: &EventPayload) -> Fields {
-    match payload {
+fn extract_fields(event: &Event) -> Fields {
+    match &event.payload {
         EventPayload::Triggered(p) => Fields {
             model: Some(p.config_snapshot.model.clone()),
             ..Default::default()
@@ -322,11 +325,22 @@ fn extract_fields(payload: &EventPayload) -> Fields {
             model: Some(p.model.clone()),
             ..Default::default()
         },
-        EventPayload::LlmResponse(p) => Fields {
-            input_tokens: Some(p.usage.input_tokens as i64),
-            output_tokens: Some(p.usage.output_tokens as i64),
-            ..Default::default()
-        },
+        // Cost now rides on the envelope (envelope-refactor plan
+        // step 3); pull from envelope.cost when present so the
+        // existing total_cost / input_tokens / output_tokens
+        // columns stay populated.
+        EventPayload::LlmResponse(p) => {
+            let mut f = Fields {
+                input_tokens: Some(p.usage.input_tokens as i64),
+                output_tokens: Some(p.usage.output_tokens as i64),
+                ..Default::default()
+            };
+            if let Some(cost) = &event.envelope.cost {
+                f.model = Some(cost.model.clone());
+                f.total_cost = Some(cost.total_cost);
+            }
+            f
+        }
         EventPayload::ToolCall(_) => Fields::default(),
         EventPayload::ToolDispatched(_) => Fields::default(),
         EventPayload::LlmDispatched(_) => Fields::default(),
@@ -334,13 +348,6 @@ fn extract_fields(payload: &EventPayload) -> Fields {
         EventPayload::ToolResult(p) => Fields {
             error_kind: p.error_kind.map(|k| format!("{k:?}").to_lowercase()),
             duration_ms: Some(p.duration_ms as i64),
-            ..Default::default()
-        },
-        EventPayload::Cost(p) => Fields {
-            model: Some(p.model.clone()),
-            input_tokens: Some(p.input_tokens as i64),
-            output_tokens: Some(p.output_tokens as i64),
-            total_cost: Some(p.total_cost),
             ..Default::default()
         },
         EventPayload::Completed(p) => Fields {
@@ -374,7 +381,6 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
         EventPayload::ToolCall(_) => "tool_call",
         EventPayload::ToolDispatched(_) => "tool_dispatched",
         EventPayload::ToolResult(_) => "tool_result",
-        EventPayload::Cost(_) => "cost",
         EventPayload::Completed(_) => "completed",
         EventPayload::Failed(_) => "failed",
         EventPayload::InvocationAmbiguous(_) => "invocation_ambiguous",
@@ -389,7 +395,7 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
 mod tests {
     use super::*;
     use crate::events::{
-        CompletedPayload, ConfigSnapshot, CostPayload, Event, EventPayload, FailedPayload,
+        CompletedPayload, ConfigSnapshot, CostMetadata, Event, EventPayload, FailedPayload,
         FailureKind, FailurePhase, InvocationTotals, LlmRequestPayload, LlmResponsePayload,
         Message, MessageRole, RequestParams, SandboxSnapshot, StopReason, TokenUsage,
         TriggerSource, TriggeredPayload,
@@ -418,24 +424,39 @@ mod tests {
         )
     }
 
-    fn sample_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
+    /// LLM response with cost attached via envelope. After step 3
+    /// of the envelope-refactor plan, cost rides on the
+    /// `llm.response` envelope rather than as its own event.
+    fn sample_llm_response_with_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
         Event::new(
             agent,
             inv,
-            EventPayload::Cost(CostPayload {
+            EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),
-                model: "claude-haiku-4-5".to_string(),
-                input_tokens: 100,
-                output_tokens: 50,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                input_cost: 0.0001,
-                output_cost: 0.00025,
-                total_cost: cost,
-                cumulative_invocation_cost: cost,
-                cumulative_agent_cost: cost,
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                },
             }),
         )
+        .with_cost(CostMetadata {
+            call_id: Uuid::now_v7(),
+            model: "claude-haiku-4-5".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            input_cost: 0.0001,
+            output_cost: 0.00025,
+            total_cost: cost,
+            cumulative_invocation_cost: cost,
+            cumulative_agent_cost: cost,
+        })
     }
 
     fn sample_completed(agent: &str, inv: Uuid) -> Event {
@@ -533,7 +554,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .insert_event(&sample_cost("alpha", inv, 0.0011))
+            .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.0011))
             .await
             .unwrap();
         store
@@ -586,7 +607,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .insert_event(&sample_cost("alpha", inv, 0.01))
+            .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.01))
             .await
             .unwrap();
         store
@@ -594,13 +615,16 @@ mod tests {
             .await
             .unwrap();
 
+        // After step 3 of the envelope-refactor plan, cost rides on
+        // `llm.response` envelopes; filter by the response event
+        // type and check the cost denormalised onto the row.
         let filter = EventFilter {
-            event_type: Some("cost"),
+            event_type: Some("llm_response"),
             ..Default::default()
         };
         let rows = store.query_events(&filter, 100).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].event_type, "cost");
+        assert_eq!(rows[0].event_type, "llm_response");
         assert_eq!(rows[0].total_cost, Some(0.01));
     }
 
@@ -622,15 +646,15 @@ mod tests {
     async fn cost_summary_aggregates_by_agent() {
         let (store, _dir) = open_store().await;
         store
-            .insert_event(&sample_cost("alpha", Uuid::now_v7(), 0.10))
+            .insert_event(&sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.10))
             .await
             .unwrap();
         store
-            .insert_event(&sample_cost("alpha", Uuid::now_v7(), 0.05))
+            .insert_event(&sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.05))
             .await
             .unwrap();
         store
-            .insert_event(&sample_cost("beta", Uuid::now_v7(), 0.20))
+            .insert_event(&sample_llm_response_with_cost("beta", Uuid::now_v7(), 0.20))
             .await
             .unwrap();
 
@@ -652,11 +676,11 @@ mod tests {
     async fn cost_summary_filters_by_agent() {
         let (store, _dir) = open_store().await;
         store
-            .insert_event(&sample_cost("alpha", Uuid::now_v7(), 0.10))
+            .insert_event(&sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.10))
             .await
             .unwrap();
         store
-            .insert_event(&sample_cost("beta", Uuid::now_v7(), 0.20))
+            .insert_event(&sample_llm_response_with_cost("beta", Uuid::now_v7(), 0.20))
             .await
             .unwrap();
 
@@ -682,7 +706,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .insert_event(&sample_cost("alpha", inv, 0.01))
+            .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.01))
             .await
             .unwrap();
         store

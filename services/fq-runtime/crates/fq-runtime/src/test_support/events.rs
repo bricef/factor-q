@@ -42,7 +42,6 @@ pub fn event_kind(event: &Event) -> &'static str {
         EventPayload::ToolCall(_) => "tool_call",
         EventPayload::ToolDispatched(_) => "tool_dispatched",
         EventPayload::ToolResult(_) => "tool_result",
-        EventPayload::Cost(_) => "cost",
         EventPayload::Completed(_) => "completed",
         EventPayload::Failed(_) => "failed",
         EventPayload::InvocationAmbiguous(_) => "invocation_ambiguous",
@@ -243,8 +242,8 @@ mod tests {
 
     use super::*;
     use crate::events::{
-        ConfigSnapshot, CostPayload, Event, EventPayload, SandboxSnapshot, ToolCallPayload,
-        ToolResultPayload, TriggerSource, TriggeredPayload,
+        ConfigSnapshot, Event, EventPayload, LlmResponsePayload, SandboxSnapshot, StopReason,
+        TokenUsage, ToolCallPayload, ToolResultPayload, TriggerSource, TriggeredPayload,
     };
     use serde_json::json;
 
@@ -298,22 +297,16 @@ mod tests {
         )
     }
 
-    fn cost(invocation_id: Uuid) -> Event {
+    fn llm_response(invocation_id: Uuid) -> Event {
         Event::new(
             "test-agent",
             invocation_id,
-            EventPayload::Cost(CostPayload {
+            EventPayload::LlmResponse(LlmResponsePayload {
                 call_id: Uuid::now_v7(),
-                model: "claude-haiku".to_string(),
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                input_cost: 0.0,
-                output_cost: 0.0,
-                total_cost: 0.0,
-                cumulative_invocation_cost: 0.0,
-                cumulative_agent_cost: 0.0,
+                content: Some("hi".to_string()),
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
             }),
         )
     }
@@ -323,7 +316,7 @@ mod tests {
         let inv = Uuid::now_v7();
         assert_eq!(event_kind(&triggered(inv)), "triggered");
         assert_eq!(event_kind(&tool_call(inv)), "tool_call");
-        assert_eq!(event_kind(&cost(inv)), "cost");
+        assert_eq!(event_kind(&llm_response(inv)), "llm_response");
     }
 
     #[test]
@@ -359,7 +352,12 @@ mod tests {
     #[test]
     fn assert_kinds_appear_in_relative_order_passes_with_interleaving() {
         let inv = Uuid::now_v7();
-        let events = vec![triggered(inv), tool_call(inv), cost(inv), tool_result(inv)];
+        let events = vec![
+            triggered(inv),
+            tool_call(inv),
+            llm_response(inv),
+            tool_result(inv),
+        ];
         assert_kinds_appear_in_relative_order(&events, &["tool_call", "tool_result"]);
     }
 

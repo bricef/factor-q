@@ -67,10 +67,6 @@ pub mod subjects {
         format!("fq.agent.{agent_id}.invocation.ambiguous")
     }
 
-    pub fn agent_cost(agent_id: &str) -> String {
-        format!("fq.agent.{agent_id}.cost")
-    }
-
     pub fn agent_completed(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.completed")
     }
@@ -114,6 +110,7 @@ impl Event {
             invocation_id,
             schema_id: schema_id_for(&payload).to_string(),
             timestamp: Utc::now(),
+            cost: None,
         };
         Self {
             envelope,
@@ -136,6 +133,7 @@ impl Event {
             invocation_id: runtime_id,
             schema_id: schema_id_for(&payload).to_string(),
             timestamp: Utc::now(),
+            cost: None,
         };
         Self {
             envelope,
@@ -158,6 +156,17 @@ impl Event {
         self
     }
 
+    /// Attach cost metadata to the envelope. Per ADR-0016 and §7 of
+    /// `inter-node-contracts-and-event-layers.md`, cost is
+    /// system-level accounting (not part of the typed contract
+    /// between graph nodes) so it rides on the envelope rather than
+    /// as a payload variant. Populated on `llm.response` events;
+    /// absent on events that do not bill.
+    pub fn with_cost(mut self, cost: CostMetadata) -> Self {
+        self.envelope.cost = Some(cost);
+        self
+    }
+
     /// Return the NATS subject this event should be published on.
     pub fn subject(&self) -> String {
         match &self.payload {
@@ -175,7 +184,6 @@ impl Event {
             EventPayload::InvocationAmbiguous(_) => {
                 subjects::agent_invocation_ambiguous(&self.envelope.agent_id)
             }
-            EventPayload::Cost(_) => subjects::agent_cost(&self.envelope.agent_id),
             EventPayload::Completed(_) => subjects::agent_completed(&self.envelope.agent_id),
             EventPayload::Failed(_) => subjects::agent_failed(&self.envelope.agent_id),
             EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
@@ -198,7 +206,6 @@ pub fn schema_id_for(payload: &EventPayload) -> &'static str {
         EventPayload::ToolCall(_) => "factor-q/tool_call@1",
         EventPayload::ToolDispatched(_) => "factor-q/tool_dispatched@1",
         EventPayload::ToolResult(_) => "factor-q/tool_result@1",
-        EventPayload::Cost(_) => "factor-q/cost@1",
         EventPayload::Completed(_) => "factor-q/completed@1",
         EventPayload::Failed(_) => "factor-q/failed@1",
         EventPayload::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
@@ -235,6 +242,33 @@ pub struct Envelope {
     /// `"factor-q/triggered@1"`. See [`schema_id_for`].
     pub schema_id: String,
     pub timestamp: DateTime<Utc>,
+    /// Cost incurred at this event, if any. Populated on
+    /// `llm.response` events; absent on events that do not bill.
+    /// Lives on the envelope because cost is system-level
+    /// accounting, not part of the typed contract between graph
+    /// nodes (ADR-0016 §7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostMetadata>,
+}
+
+/// Cost metadata attached to events that incur cost. Currently
+/// rides on `llm.response` envelopes; a future tool-cost story
+/// could attach it to `tool.result` envelopes too.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CostMetadata {
+    pub call_id: Uuid,
+    pub model: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    #[serde(default)]
+    pub cache_read_tokens: u32,
+    #[serde(default)]
+    pub cache_write_tokens: u32,
+    pub input_cost: f64,
+    pub output_cost: f64,
+    pub total_cost: f64,
+    pub cumulative_invocation_cost: f64,
+    pub cumulative_agent_cost: f64,
 }
 
 /// Open key/value commentary. Producing agents may attach anything
@@ -272,7 +306,6 @@ pub enum EventPayload {
     /// written. See data-architecture.md §3.1.
     ToolDispatched(ToolDispatchedPayload),
     ToolResult(ToolResultPayload),
-    Cost(CostPayload),
     Completed(CompletedPayload),
     Failed(FailedPayload),
 
@@ -503,29 +536,6 @@ pub enum ToolErrorKind {
     PermissionDenied,
 }
 
-/// Published after each LLM response with cost attribution.
-///
-/// Slated for removal in step 3 of the envelope-refactor plan:
-/// cost is system-level accounting, not part of the typed contract
-/// between graph nodes, so it folds into `envelope.cost` on
-/// `LlmResponse` events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CostPayload {
-    pub call_id: Uuid,
-    pub model: String,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    #[serde(default)]
-    pub cache_read_tokens: u32,
-    #[serde(default)]
-    pub cache_write_tokens: u32,
-    pub input_cost: f64,
-    pub output_cost: f64,
-    pub total_cost: f64,
-    pub cumulative_invocation_cost: f64,
-    pub cumulative_agent_cost: f64,
-}
-
 /// Published when an invocation finishes successfully.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletedPayload {
@@ -727,7 +737,6 @@ mod tests {
             subjects::agent_tool_result(agent),
             "fq.agent.test-agent.tool.result"
         );
-        assert_eq!(subjects::agent_cost(agent), "fq.agent.test-agent.cost");
         assert_eq!(
             subjects::agent_completed(agent),
             "fq.agent.test-agent.completed"
@@ -891,6 +900,89 @@ mod tests {
     }
 
     #[test]
+    fn event_with_cost_sets_envelope_cost() {
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "agent",
+            invocation_id,
+            EventPayload::LlmResponse(LlmResponsePayload {
+                call_id: Uuid::now_v7(),
+                content: None,
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        );
+        let cost = CostMetadata {
+            call_id: Uuid::now_v7(),
+            model: "claude-haiku".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            input_cost: 0.0001,
+            output_cost: 0.0005,
+            total_cost: 0.0006,
+            cumulative_invocation_cost: 0.0006,
+            cumulative_agent_cost: 0.0006,
+        };
+        let event = event.with_cost(cost.clone());
+        assert_eq!(event.envelope.cost.as_ref(), Some(&cost));
+    }
+
+    #[test]
+    fn cost_metadata_round_trips_on_envelope() {
+        let invocation_id = Uuid::now_v7();
+        let cost = CostMetadata {
+            call_id: Uuid::now_v7(),
+            model: "m".to_string(),
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            input_cost: 0.1,
+            output_cost: 0.2,
+            total_cost: 0.3,
+            cumulative_invocation_cost: 0.3,
+            cumulative_agent_cost: 0.3,
+        };
+        let event = Event::new(
+            "agent",
+            invocation_id,
+            EventPayload::LlmResponse(LlmResponsePayload {
+                call_id: Uuid::now_v7(),
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        )
+        .with_cost(cost.clone());
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.envelope.cost.as_ref(), Some(&cost));
+    }
+
+    #[test]
+    fn envelope_cost_omits_when_none() {
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "agent",
+            invocation_id,
+            EventPayload::LlmResponse(LlmResponsePayload {
+                call_id: Uuid::now_v7(),
+                content: None,
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        let envelope = json.get("envelope").expect("envelope present");
+        assert!(envelope.get("cost").is_none());
+    }
+
+    #[test]
     fn event_with_parent_round_trips_through_serde() {
         let invocation_id = Uuid::now_v7();
         let parent = Uuid::now_v7();
@@ -965,19 +1057,6 @@ mod tests {
                 is_error: false,
                 error_kind: None,
                 duration_ms: 0,
-            }),
-            EventPayload::Cost(CostPayload {
-                call_id: inv,
-                model: "m".into(),
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                input_cost: 0.0,
-                output_cost: 0.0,
-                total_cost: 0.0,
-                cumulative_invocation_cost: 0.0,
-                cumulative_agent_cost: 0.0,
             }),
             EventPayload::Completed(CompletedPayload {
                 result_summary: None,

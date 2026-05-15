@@ -601,20 +601,33 @@ fn print_event(event: &Event) {
             p.model,
             p.messages.len()
         ),
-        EventPayload::LlmResponse(p) => format!(
-            "llm.response tokens={}/{} stop={:?}",
-            p.usage.input_tokens, p.usage.output_tokens, p.stop_reason
-        ),
+        EventPayload::LlmResponse(p) => {
+            // Cost rides on the llm.response envelope (envelope-refactor
+            // plan step 3). Render it inline when present so the
+            // operator gets the same per-call cost visibility the
+            // separate cost event used to provide.
+            let cost_suffix = event
+                .envelope
+                .cost
+                .as_ref()
+                .map(|c| {
+                    format!(
+                        " cost=${:.6} cumulative=${:.6}",
+                        c.total_cost, c.cumulative_invocation_cost
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "llm.response tokens={}/{} stop={:?}{cost_suffix}",
+                p.usage.input_tokens, p.usage.output_tokens, p.stop_reason
+            )
+        }
         EventPayload::ToolCall(p) => format!("tool.call {}", p.tool_name),
         EventPayload::ToolDispatched(p) => format!("tool.dispatched {}", p.tool_name),
         EventPayload::LlmDispatched(p) => format!("llm.dispatched model={}", p.model),
         EventPayload::ToolResult(p) => {
             format!("tool.result {}", if p.is_error { "error" } else { "ok" })
         }
-        EventPayload::Cost(p) => format!(
-            "cost ${:.6} cumulative=${:.6}",
-            p.total_cost, p.cumulative_invocation_cost
-        ),
         EventPayload::Completed(p) => format!(
             "completed duration={}ms cost=${:.6}",
             p.total_duration_ms, p.total_cost

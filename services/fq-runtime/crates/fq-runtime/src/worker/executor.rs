@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::bus::{BusError, EventBus};
 use crate::events::{
-    CompletedPayload, CostPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
+    CompletedPayload, CostMetadata, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
     InvocationTotals, LlmRequestPayload, LlmResponsePayload, Message, MessageRole, MessageToolCall,
     RequestParams, ToolCallPayload, ToolErrorKind, ToolResultPayload, TriggerSource,
     TriggeredPayload,
@@ -308,20 +308,9 @@ impl AgentExecutor {
 
         totals.total_llm_calls += 1;
 
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::LlmResponse(LlmResponsePayload {
-                call_id,
-                content: response.content.clone(),
-                tool_calls: response.tool_calls.clone(),
-                stop_reason: response.stop_reason,
-                usage: response.usage,
-            }),
-        ))
-        .await?;
-
-        // Cost calculation.
+        // Cost folds into the llm.response envelope (envelope-refactor
+        // plan step 3). Compute before publishing so the response
+        // event carries its cost in one publish, not two.
         let pricing = self.pricing.lookup(agent.model());
         if pricing.is_none() {
             warn!(
@@ -334,10 +323,19 @@ impl AgentExecutor {
             .unwrap_or((0.0, 0.0, 0.0));
         totals.total_cost += total_cost;
 
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::Cost(CostPayload {
+        self.publish(
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::LlmResponse(LlmResponsePayload {
+                    call_id,
+                    content: response.content.clone(),
+                    tool_calls: response.tool_calls.clone(),
+                    stop_reason: response.stop_reason,
+                    usage: response.usage,
+                }),
+            )
+            .with_cost(CostMetadata {
                 call_id,
                 model: agent.model().to_string(),
                 input_tokens: response.usage.input_tokens,
@@ -350,7 +348,7 @@ impl AgentExecutor {
                 cumulative_invocation_cost: totals.total_cost,
                 cumulative_agent_cost: totals.total_cost,
             }),
-        ))
+        )
         .await?;
 
         Ok(response)
@@ -747,8 +745,10 @@ mod tests {
             other => panic!("expected Completed, got {other:?}"),
         }
 
+        // After envelope-refactor step 3, cost rides on the
+        // llm.response envelope; no separate cost event.
         let mut events = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..4 {
             let event = tokio::time::timeout(Duration::from_secs(2), subscriber.next())
                 .await
                 .expect("timeout waiting for event")
@@ -760,14 +760,19 @@ mod tests {
         let kinds: Vec<&str> = events.iter().map(event_kind).collect();
         assert_eq!(
             kinds,
-            vec![
-                "triggered",
-                "llm_request",
-                "llm_response",
-                "cost",
-                "completed"
-            ],
+            vec!["triggered", "llm_request", "llm_response", "completed"],
         );
+        // The llm.response envelope must carry the cost.
+        let response = events
+            .iter()
+            .find(|e| matches!(e.payload, EventPayload::LlmResponse(_)))
+            .expect("llm.response present");
+        let cost_meta = response
+            .envelope
+            .cost
+            .as_ref()
+            .expect("llm.response must carry cost on envelope");
+        assert!((cost_meta.total_cost - 0.0011).abs() < 1e-9);
 
         let first_invocation = events[0].envelope.invocation_id;
         assert!(events
@@ -832,14 +837,15 @@ mod tests {
             other => panic!("expected Completed, got {other:?}"),
         }
 
-        // Expected event sequence:
+        // Expected event sequence (envelope-refactor step 3: cost
+        // rides on llm.response envelopes, no separate cost event):
         //  triggered
-        //  llm_request (1)  llm_response (tool call)  cost
+        //  llm_request (1)  llm_response (tool call, with cost)
         //  tool_call  tool_result
-        //  llm_request (2)  llm_response (end)        cost
+        //  llm_request (2)  llm_response (end, with cost)
         //  completed
         let mut events = Vec::new();
-        for _ in 0..10 {
+        for _ in 0..8 {
             let event = tokio::time::timeout(Duration::from_secs(2), subscriber.next())
                 .await
                 .expect("timeout waiting for event")
@@ -855,16 +861,25 @@ mod tests {
                 "triggered",
                 "llm_request",
                 "llm_response",
-                "cost",
                 "tool_call",
                 "tool_result",
                 "llm_request",
                 "llm_response",
-                "cost",
                 "completed",
             ],
             "got {kinds:?}"
         );
+        // Both llm.response events carry cost on the envelope.
+        let response_costs: Vec<f64> = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::LlmResponse(_) => {
+                    e.envelope.cost.as_ref().map(|c| c.total_cost)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(response_costs.len(), 2, "two cost-bearing responses");
 
         // The tool.result should contain the file content and not be
         // an error.

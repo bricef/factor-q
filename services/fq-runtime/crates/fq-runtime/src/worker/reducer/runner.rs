@@ -33,9 +33,9 @@ use super::types::{
 use crate::agent::Agent;
 use crate::bus::EventBus;
 use crate::events::{
-    self, CompletedPayload, CostPayload, Event, EventPayload, FailedPayload, FailureKind,
-    FailurePhase, InvocationTotals, LlmRequestPayload, LlmResponsePayload, ToolCallPayload,
-    ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
+    self, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
+    InvocationTotals, LlmRequestPayload, LlmResponsePayload, ToolCallPayload, ToolErrorKind,
+    ToolResultPayload, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::pricing::PricingTable;
@@ -1099,22 +1099,9 @@ impl ReducerRunner {
             .await
             .map_err(map_store_err)?;
 
-        self.publish_chained(
-            cursor,
-            Event::new(
-                agent_id.to_string(),
-                invocation_id,
-                EventPayload::LlmResponse(LlmResponsePayload {
-                    call_id,
-                    content: response.content.clone(),
-                    tool_calls: response.tool_calls.clone(),
-                    stop_reason: response.stop_reason,
-                    usage: response.usage,
-                }),
-            ),
-        )
-        .await?;
-
+        // Cost folds into the llm.response envelope (envelope-refactor
+        // plan step 3). Compute before publishing so the response
+        // event carries its cost in one publish, not two.
         let pricing = self.pricing.lookup(&request.model);
         if pricing.is_none() {
             warn!(
@@ -1132,20 +1119,27 @@ impl ReducerRunner {
             Event::new(
                 agent_id.to_string(),
                 invocation_id,
-                EventPayload::Cost(CostPayload {
+                EventPayload::LlmResponse(LlmResponsePayload {
                     call_id,
-                    model: request.model.clone(),
-                    input_tokens: response.usage.input_tokens,
-                    output_tokens: response.usage.output_tokens,
-                    cache_read_tokens: response.usage.cache_read_tokens,
-                    cache_write_tokens: response.usage.cache_write_tokens,
-                    input_cost,
-                    output_cost,
-                    total_cost,
-                    cumulative_invocation_cost: totals.total_cost,
-                    cumulative_agent_cost: totals.total_cost,
+                    content: response.content.clone(),
+                    tool_calls: response.tool_calls.clone(),
+                    stop_reason: response.stop_reason,
+                    usage: response.usage,
                 }),
-            ),
+            )
+            .with_cost(events::CostMetadata {
+                call_id,
+                model: request.model.clone(),
+                input_tokens: response.usage.input_tokens,
+                output_tokens: response.usage.output_tokens,
+                cache_read_tokens: response.usage.cache_read_tokens,
+                cache_write_tokens: response.usage.cache_write_tokens,
+                input_cost,
+                output_cost,
+                total_cost,
+                cumulative_invocation_cost: totals.total_cost,
+                cumulative_agent_cost: totals.total_cost,
+            }),
         )
         .await?;
 
@@ -1547,20 +1541,17 @@ mod tests {
                     .unwrap()
             },
             || vec![canned("Hello.", 100, 50)],
+            // After envelope-refactor step 3, cost rides on the
+            // llm.response envelope; no separate cost event.
+            // Legacy: 4 (was 5); reducer: 5 (was 6).
+            4,
             5,
-            6,
         )
         .await;
 
         assert_eq!(
             legacy,
-            vec![
-                "triggered",
-                "llm_request",
-                "llm_response",
-                "cost",
-                "completed"
-            ]
+            vec!["triggered", "llm_request", "llm_response", "completed"]
         );
         // The reducer sequence equals the legacy sequence after
         // stripping the new WAL middle-state events that the
@@ -1612,8 +1603,10 @@ mod tests {
                     canned("Got it.", 150, 20),
                 ]
             },
-            10, // legacy: 10 events (no dispatched events)
-            13, // reducer: legacy + 2 llm_dispatched + 1 tool_dispatched
+            // After envelope-refactor step 3, no separate cost event.
+            // Legacy: 8 (was 10); reducer: 11 (was 13).
+            8, // legacy: 8 events (no dispatched, no cost)
+            11, // reducer: legacy + 2 llm_dispatched + 1 tool_dispatched
         )
         .await;
 
@@ -1621,12 +1614,10 @@ mod tests {
             "triggered",
             "llm_request",
             "llm_response",
-            "cost",
             "tool_call",
             "tool_result",
             "llm_request",
             "llm_response",
-            "cost",
             "completed",
         ];
         assert_eq!(legacy, expected_legacy);
@@ -1704,11 +1695,13 @@ mod tests {
             )
             .await;
 
-        // Drain. tool-call loop emits: triggered + 2 turns × (llm_request,
-        // llm_dispatched, llm_response, cost) + 1 × (tool_call,
-        // tool_dispatched, tool_result) + completed = 13 events.
+        // Drain. tool-call loop emits: triggered + 2 turns ×
+        // (llm_request, llm_dispatched, llm_response with envelope.cost)
+        // + 1 × (tool_call, tool_dispatched, tool_result) + completed
+        // = 11 events after envelope-refactor step 3 (no separate
+        // cost event).
         let mut events = Vec::new();
-        for _ in 0..13 {
+        for _ in 0..11 {
             let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
                 .await
                 .expect("chain timeout")
@@ -2156,11 +2149,14 @@ mod tests {
         let agent = simple_responder_agent(&agent_id);
 
         // 1 LLM turn, end immediately.
+        // After envelope-refactor step 3, no separate cost event:
+        // triggered, llm.request, llm.dispatched, llm.response,
+        // completed = 5 events.
         let (store, events) = run_with_wal(
             &url,
             agent,
             vec![end_turn_response("done.")],
-            5, // triggered, llm.request, llm.dispatched, llm.response, cost, completed
+            5,
             None,
         )
         .await;
@@ -2208,21 +2204,20 @@ mod tests {
             end_turn_response("read it."),
         ];
 
-        // Events emitted (per turn):
+        // Events emitted (after envelope-refactor step 3, cost
+        // rides on llm.response envelopes, no separate cost event):
         // 1. triggered
         // 2. llm.request (turn 1)
         // 3. llm.dispatched (turn 1)
-        // 4. llm.response (turn 1, with tool calls)
-        // 5. cost (turn 1)
-        // 6. tool.call
-        // 7. tool.dispatched
-        // 8. tool.result
-        // 9. llm.request (turn 2)
-        // 10. llm.dispatched (turn 2)
-        // 11. llm.response (turn 2)
-        // 12. cost (turn 2)
-        // 13. completed
-        let (store, events) = run_with_wal(&url, agent, responses, 13, Some(dir.path())).await;
+        // 4. llm.response (turn 1, with tool calls, envelope.cost set)
+        // 5. tool.call
+        // 6. tool.dispatched
+        // 7. tool.result
+        // 8. llm.request (turn 2)
+        // 9. llm.dispatched (turn 2)
+        // 10. llm.response (turn 2, envelope.cost set)
+        // 11. completed
+        let (store, events) = run_with_wal(&url, agent, responses, 11, Some(dir.path())).await;
 
         let kinds: Vec<&str> = events
             .iter()
@@ -2301,7 +2296,7 @@ mod tests {
             end_turn_response("done."),
         ];
 
-        let (store, events) = run_with_wal(&url, agent, responses, 13, Some(dir.path())).await;
+        let (store, events) = run_with_wal(&url, agent, responses, 11, Some(dir.path())).await;
 
         let row = store
             .get_tool_dispatch(&events[0].envelope.invocation_id.to_string(), "tc_err")
@@ -2597,7 +2592,7 @@ mod tests {
             end_turn_response("read."),
         ];
 
-        let (store, events) = run_with_wal(&url, agent, responses, 13, Some(dir.path())).await;
+        let (store, events) = run_with_wal(&url, agent, responses, 11, Some(dir.path())).await;
         let inv_str = events[0].envelope.invocation_id.to_string();
         let row = store
             .get_invocation_state(&inv_str)
