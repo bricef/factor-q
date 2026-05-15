@@ -121,17 +121,26 @@ impl ReducerRunner {
             payload: trigger_payload.clone(),
         };
 
+        // Thread parent_event_id through every publish for this
+        // invocation. The Triggered event is the chain root
+        // (parent = None); each subsequent publish updates the
+        // cursor inside publish_chained.
+        let mut cursor: Option<Uuid> = None;
+
         // Emit `triggered` once, mirroring the legacy executor.
-        self.publish(Event::new(
-            agent_id.clone(),
-            invocation_id,
-            EventPayload::Triggered(TriggeredPayload {
-                trigger_source,
-                trigger_subject,
-                trigger_payload,
-                config_snapshot: agent.to_snapshot(),
-            }),
-        ))
+        self.publish_chained(
+            &mut cursor,
+            Event::new(
+                agent_id.clone(),
+                invocation_id,
+                EventPayload::Triggered(TriggeredPayload {
+                    trigger_source,
+                    trigger_subject,
+                    trigger_payload,
+                    config_snapshot: agent.to_snapshot(),
+                }),
+            ),
+        )
         .await?;
 
         let state: Vec<u8> = Vec::new();
@@ -154,6 +163,7 @@ impl ReducerRunner {
             totals,
             start,
             started_at_ms,
+            &mut cursor,
         )
         .await
     }
@@ -288,9 +298,16 @@ impl ReducerRunner {
             step_index += 1;
         }
 
-        // Continue the loop from the replayed point.
+        // Continue the loop from the replayed point. Recovery
+        // re-emits start a fresh chain — parent_event_id resets to
+        // None for the first event the resumed runner emits. The
+        // projection links the pre-crash and post-resume chains by
+        // invocation_id only. A `recovered_from_event_id` envelope
+        // field could be added later if audit needs cross-incarnation
+        // stitching (see step 2 of the envelope-refactor plan).
         let totals = InvocationTotals::default();
         let start = Instant::now();
+        let mut cursor: Option<Uuid> = None;
         self.run_loop_inner(
             reducer,
             agent,
@@ -306,6 +323,7 @@ impl ReducerRunner {
             totals,
             start,
             state_row.started_at,
+            &mut cursor,
         )
         .await
     }
@@ -331,6 +349,7 @@ impl ReducerRunner {
         mut totals: InvocationTotals,
         start: Instant,
         started_at_ms: i64,
+        cursor: &mut Option<Uuid>,
     ) -> Result<InvocationOutcome, ExecutorError> {
         for step_index in step_index_start..HOST_STEP_BUDGET {
             let input = StepInput {
@@ -354,6 +373,7 @@ impl ReducerRunner {
                         format!("reducer step failed: {err}"),
                         FailurePhase::LlmResponse,
                         totals,
+                        cursor,
                     )
                     .await?;
                     return Err(ExecutorError::MaxIterationsExceeded);
@@ -392,17 +412,20 @@ impl ReducerRunner {
                     let duration_ms = start.elapsed().as_millis() as u64;
                     totals.total_duration_ms = duration_ms;
                     let summary = if text.is_empty() { None } else { Some(text) };
-                    self.publish(Event::new(
-                        agent_id.to_string(),
-                        invocation_id,
-                        EventPayload::Completed(CompletedPayload {
-                            result_summary: summary.clone(),
-                            total_llm_calls: totals.total_llm_calls,
-                            total_tool_calls: totals.total_tool_calls,
-                            total_cost: totals.total_cost,
-                            total_duration_ms: duration_ms,
-                        }),
-                    ))
+                    self.publish_chained(
+                        cursor,
+                        Event::new(
+                            agent_id.to_string(),
+                            invocation_id,
+                            EventPayload::Completed(CompletedPayload {
+                                result_summary: summary.clone(),
+                                total_llm_calls: totals.total_llm_calls,
+                                total_tool_calls: totals.total_tool_calls,
+                                total_cost: totals.total_cost,
+                                total_duration_ms: duration_ms,
+                            }),
+                        ),
+                    )
                     .await?;
 
                     info!(
@@ -435,6 +458,7 @@ impl ReducerRunner {
                         err.message.clone(),
                         FailurePhase::LlmResponse,
                         totals,
+                        cursor,
                     )
                     .await?;
                     return Err(ExecutorError::MaxIterationsExceeded);
@@ -449,6 +473,7 @@ impl ReducerRunner {
                             request,
                             &mut totals,
                             start,
+                            cursor,
                         )
                         .await?;
                     match outcome {
@@ -473,6 +498,7 @@ impl ReducerRunner {
                             req,
                             &totals,
                             start,
+                            cursor,
                         )
                         .await?;
                     totals.total_tool_calls += 1;
@@ -496,6 +522,7 @@ impl ReducerRunner {
                                 req,
                                 &totals,
                                 start,
+                                cursor,
                             )
                             .await?;
                         totals.total_tool_calls += 1;
@@ -515,6 +542,7 @@ impl ReducerRunner {
             format!("host step budget exhausted ({HOST_STEP_BUDGET})"),
             FailurePhase::LlmResponse,
             totals,
+            cursor,
         )
         .await?;
         Err(ExecutorError::MaxIterationsExceeded)
@@ -530,6 +558,7 @@ impl ReducerRunner {
         req: ToolCallRequest,
         totals: &InvocationTotals,
         start: Instant,
+        cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
         if !agent.tools().iter().any(|name| name == &req.tool_name) {
             return self
@@ -539,6 +568,7 @@ impl ReducerRunner {
                     &req,
                     ToolErrorKind::PermissionDenied,
                     format!("tool '{}' is not available to this agent", req.tool_name),
+                    cursor,
                 )
                 .await;
         }
@@ -563,15 +593,18 @@ impl ReducerRunner {
             .await
             .map_err(map_store_err)?;
 
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::ToolCall(ToolCallPayload {
-                tool_call_id: req.tool_call_id.clone(),
-                tool_name: req.tool_name.clone(),
-                parameters: req.parameters.clone(),
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::ToolCall(ToolCallPayload {
+                    tool_call_id: req.tool_call_id.clone(),
+                    tool_name: req.tool_name.clone(),
+                    parameters: req.parameters.clone(),
+                }),
+            ),
+        )
         .await?;
 
         // self_inspect is a host-fulfilled tool: the registry has the
@@ -588,6 +621,7 @@ impl ReducerRunner {
                     totals,
                     start,
                     &inv_str,
+                    cursor,
                 )
                 .await;
         }
@@ -620,6 +654,7 @@ impl ReducerRunner {
                         &req,
                         ToolErrorKind::ExecutionFailed,
                         msg,
+                        cursor,
                     )
                     .await;
             }
@@ -636,14 +671,17 @@ impl ReducerRunner {
             .write_tool_dispatched(&inv_str, &req.tool_call_id, unix_now_ms())
             .await
             .map_err(map_store_err)?;
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::ToolDispatched(events::ToolDispatchedPayload {
-                tool_call_id: req.tool_call_id.clone(),
-                tool_name: req.tool_name.clone(),
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::ToolDispatched(events::ToolDispatchedPayload {
+                    tool_call_id: req.tool_call_id.clone(),
+                    tool_name: req.tool_name.clone(),
+                }),
+            ),
+        )
         .await?;
 
         match outcome {
@@ -658,17 +696,20 @@ impl ReducerRunner {
                     )
                     .await
                     .map_err(map_store_err)?;
-                self.publish(Event::new(
-                    agent_id.to_string(),
-                    invocation_id,
-                    EventPayload::ToolResult(ToolResultPayload {
-                        tool_call_id: req.tool_call_id.clone(),
-                        output: result.output.clone(),
-                        is_error: result.is_error,
-                        error_kind: None,
-                        duration_ms,
-                    }),
-                ))
+                self.publish_chained(
+                    cursor,
+                    Event::new(
+                        agent_id.to_string(),
+                        invocation_id,
+                        EventPayload::ToolResult(ToolResultPayload {
+                            tool_call_id: req.tool_call_id.clone(),
+                            output: result.output.clone(),
+                            is_error: result.is_error,
+                            error_kind: None,
+                            duration_ms,
+                        }),
+                    ),
+                )
                 .await?;
                 Ok(ToolCallResult {
                     tool_call_id: req.tool_call_id,
@@ -690,17 +731,20 @@ impl ReducerRunner {
                     )
                     .await
                     .map_err(map_store_err)?;
-                self.publish(Event::new(
-                    agent_id.to_string(),
-                    invocation_id,
-                    EventPayload::ToolResult(ToolResultPayload {
-                        tool_call_id: req.tool_call_id.clone(),
-                        output: message.clone(),
-                        is_error: true,
-                        error_kind: Some(kind),
-                        duration_ms,
-                    }),
-                ))
+                self.publish_chained(
+                    cursor,
+                    Event::new(
+                        agent_id.to_string(),
+                        invocation_id,
+                        EventPayload::ToolResult(ToolResultPayload {
+                            tool_call_id: req.tool_call_id.clone(),
+                            output: message.clone(),
+                            is_error: true,
+                            error_kind: Some(kind),
+                            duration_ms,
+                        }),
+                    ),
+                )
                 .await?;
                 Ok(ToolCallResult {
                     tool_call_id: req.tool_call_id,
@@ -726,6 +770,7 @@ impl ReducerRunner {
         totals: &InvocationTotals,
         start: Instant,
         inv_str: &str,
+        cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
         use crate::worker::introspection::{HostInvocationStats, synthesize_self_inspect};
 
@@ -751,14 +796,17 @@ impl ReducerRunner {
             .write_tool_dispatched(inv_str, &req.tool_call_id, unix_now_ms())
             .await
             .map_err(map_store_err)?;
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::ToolDispatched(events::ToolDispatchedPayload {
-                tool_call_id: req.tool_call_id.clone(),
-                tool_name: req.tool_name.clone(),
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::ToolDispatched(events::ToolDispatchedPayload {
+                    tool_call_id: req.tool_call_id.clone(),
+                    tool_name: req.tool_name.clone(),
+                }),
+            ),
+        )
         .await?;
         self.store
             .write_tool_completed(
@@ -771,17 +819,20 @@ impl ReducerRunner {
             .await
             .map_err(map_store_err)?;
 
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::ToolResult(ToolResultPayload {
-                tool_call_id: req.tool_call_id.clone(),
-                output: output.clone(),
-                is_error: false,
-                error_kind: None,
-                duration_ms,
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::ToolResult(ToolResultPayload {
+                    tool_call_id: req.tool_call_id.clone(),
+                    output: output.clone(),
+                    is_error: false,
+                    error_kind: None,
+                    duration_ms,
+                }),
+            ),
+        )
         .await?;
 
         Ok(ToolCallResult {
@@ -800,18 +851,22 @@ impl ReducerRunner {
         req: &ToolCallRequest,
         kind: ToolErrorKind,
         message: String,
+        cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::ToolResult(ToolResultPayload {
-                tool_call_id: req.tool_call_id.clone(),
-                output: message.clone(),
-                is_error: true,
-                error_kind: Some(kind),
-                duration_ms: 0,
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::ToolResult(ToolResultPayload {
+                    tool_call_id: req.tool_call_id.clone(),
+                    output: message.clone(),
+                    is_error: true,
+                    error_kind: Some(kind),
+                    duration_ms: 0,
+                }),
+            ),
+        )
         .await?;
         Ok(ToolCallResult {
             tool_call_id: req.tool_call_id.clone(),
@@ -822,11 +877,28 @@ impl ReducerRunner {
         })
     }
 
-    async fn publish(&self, event: Event) -> Result<(), ExecutorError> {
+    /// Publish an event and chain it to the prior event in the
+    /// current invocation. The cursor is updated to the published
+    /// event's `event_id` so the next call picks it up as
+    /// `parent_event_id`. See `inter-node-contracts-and-event-layers.md`
+    /// §5 and the `parent_event_id` doc on [`events::Envelope`] for
+    /// the rationale.
+    async fn publish_chained(
+        &self,
+        cursor: &mut Option<Uuid>,
+        mut event: Event,
+    ) -> Result<(), ExecutorError> {
+        if let Some(parent) = *cursor {
+            event.envelope.parent_event_id = Some(parent);
+        }
+        let id = event.envelope.event_id;
         debug!(event_type = ?event.payload, "publishing event");
-        self.bus.publish(&event).await.map_err(ExecutorError::Bus)
+        self.bus.publish(&event).await.map_err(ExecutorError::Bus)?;
+        *cursor = Some(id);
+        Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn emit_failed(
         &self,
         agent_id: &str,
@@ -835,6 +907,7 @@ impl ReducerRunner {
         error_message: String,
         phase: FailurePhase,
         partial_totals: InvocationTotals,
+        cursor: &mut Option<Uuid>,
     ) -> Result<(), ExecutorError> {
         warn!(
             agent_id = %agent_id,
@@ -842,16 +915,19 @@ impl ReducerRunner {
             error_kind = ?error_kind,
             "reducer invocation failed"
         );
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::Failed(FailedPayload {
-                error_kind,
-                error_message,
-                phase,
-                partial_totals,
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::Failed(FailedPayload {
+                    error_kind,
+                    error_message,
+                    phase,
+                    partial_totals,
+                }),
+            ),
+        )
         .await
     }
 
@@ -898,6 +974,7 @@ impl ReducerRunner {
 /// stays readable.
 impl ReducerRunner {
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     async fn run_model_with_llm(
         &self,
         llm: &dyn LlmClient,
@@ -907,6 +984,7 @@ impl ReducerRunner {
         request: ModelRequest,
         totals: &mut InvocationTotals,
         start: Instant,
+        cursor: &mut Option<Uuid>,
     ) -> Result<ModelOutcome, ExecutorError> {
         let call_id = Uuid::now_v7();
         let inv_str = invocation_id.to_string();
@@ -934,17 +1012,20 @@ impl ReducerRunner {
             .await
             .map_err(map_store_err)?;
 
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::LlmRequest(LlmRequestPayload {
-                call_id,
-                model: chat_request.model.clone(),
-                messages: chat_request.messages.clone(),
-                tools_available: chat_request.tools.clone(),
-                request_params: chat_request.params.clone(),
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::LlmRequest(LlmRequestPayload {
+                    call_id,
+                    model: chat_request.model.clone(),
+                    messages: chat_request.messages.clone(),
+                    tools_available: chat_request.tools.clone(),
+                    request_params: chat_request.params.clone(),
+                }),
+            ),
+        )
         .await?;
 
         let response = match llm.chat(chat_request).await {
@@ -976,6 +1057,7 @@ impl ReducerRunner {
                     err.to_string(),
                     FailurePhase::LlmRequest,
                     *totals,
+                    cursor,
                 )
                 .await?;
                 return Err(ExecutorError::Llm(err));
@@ -991,14 +1073,17 @@ impl ReducerRunner {
             .write_llm_dispatched(&inv_str, &req_str, unix_now_ms())
             .await
             .map_err(map_store_err)?;
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::LlmDispatched(events::LlmDispatchedPayload {
-                call_id,
-                model: request.model.clone(),
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::LlmDispatched(events::LlmDispatchedPayload {
+                    call_id,
+                    model: request.model.clone(),
+                }),
+            ),
+        )
         .await?;
         let response_json =
             serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
@@ -1014,17 +1099,20 @@ impl ReducerRunner {
             .await
             .map_err(map_store_err)?;
 
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::LlmResponse(LlmResponsePayload {
-                call_id,
-                content: response.content.clone(),
-                tool_calls: response.tool_calls.clone(),
-                stop_reason: response.stop_reason,
-                usage: response.usage,
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::LlmResponse(LlmResponsePayload {
+                    call_id,
+                    content: response.content.clone(),
+                    tool_calls: response.tool_calls.clone(),
+                    stop_reason: response.stop_reason,
+                    usage: response.usage,
+                }),
+            ),
+        )
         .await?;
 
         let pricing = self.pricing.lookup(&request.model);
@@ -1039,23 +1127,26 @@ impl ReducerRunner {
             .unwrap_or((0.0, 0.0, 0.0));
         totals.total_cost += total_cost;
 
-        self.publish(Event::new(
-            agent_id.to_string(),
-            invocation_id,
-            EventPayload::Cost(CostPayload {
-                call_id,
-                model: request.model.clone(),
-                input_tokens: response.usage.input_tokens,
-                output_tokens: response.usage.output_tokens,
-                cache_read_tokens: response.usage.cache_read_tokens,
-                cache_write_tokens: response.usage.cache_write_tokens,
-                input_cost,
-                output_cost,
-                total_cost,
-                cumulative_invocation_cost: totals.total_cost,
-                cumulative_agent_cost: totals.total_cost,
-            }),
-        ))
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.to_string(),
+                invocation_id,
+                EventPayload::Cost(CostPayload {
+                    call_id,
+                    model: request.model.clone(),
+                    input_tokens: response.usage.input_tokens,
+                    output_tokens: response.usage.output_tokens,
+                    cache_read_tokens: response.usage.cache_read_tokens,
+                    cache_write_tokens: response.usage.cache_write_tokens,
+                    input_cost,
+                    output_cost,
+                    total_cost,
+                    cumulative_invocation_cost: totals.total_cost,
+                    cumulative_agent_cost: totals.total_cost,
+                }),
+            ),
+        )
         .await?;
 
         if let Some(budget) = budget
@@ -1072,6 +1163,7 @@ impl ReducerRunner {
                 ),
                 FailurePhase::LlmResponse,
                 *totals,
+                cursor,
             )
             .await?;
             return Ok(ModelOutcome::BudgetExceeded(totals.total_cost));
@@ -1550,6 +1642,88 @@ mod tests {
         // turns) and tool_dispatched (between tool_call/tool_result).
         assert_relative_order(&reducer, &["tool_call", "tool_dispatched", "tool_result"]);
         assert_relative_order(&reducer, &["llm_request", "llm_dispatched", "llm_response"]);
+    }
+
+    #[tokio::test]
+    async fn reducer_invocation_emits_single_parent_chain() {
+        // Step 2 of the envelope-refactor plan: the reducer threads
+        // parent_event_id through every publish for an invocation.
+        // The captured event stream must form a single chain
+        // rooted at `triggered`, with no orphans, no branches, and
+        // no multiple roots. Reconstructable without consulting
+        // timestamps.
+        let Some(url) = crate::test_support::events::require_nats() else {
+            return;
+        };
+        let bus = EventBus::connect(&url).await.expect("connect to NATS");
+        let agent_id = unique_agent_id("chain");
+        let agent = Agent::builder()
+            .id(&agent_id)
+            .model("claude-haiku")
+            .system_prompt("be brief")
+            .budget(1.0)
+            .build()
+            .unwrap();
+
+        let target_path = "Cargo.toml".to_string();
+        let llm = FixtureClient::new();
+        llm.push_response(tool_use(
+            "file_read",
+            "call_chain_1",
+            json!({"path": target_path.clone()}),
+            (50, 25),
+        ));
+        llm.push_response(canned("read.", 80, 10));
+
+        let mut sub = bus
+            .subscribe(format!("fq.agent.{}.>", agent.id().as_str()))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let store_dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            WorkerStore::open(&store_dir.path().join("events.db"))
+                .await
+                .expect("worker store"),
+        );
+        let runner = ReducerRunner::new(
+            bus.clone(),
+            test_pricing(),
+            Arc::new(ToolRegistry::with_builtins()),
+            store,
+        );
+        let _ = runner
+            .run(
+                &Harness::new(),
+                &agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                json!({"input": "go"}),
+            )
+            .await;
+
+        // Drain. tool-call loop emits: triggered + 2 turns × (llm_request,
+        // llm_dispatched, llm_response, cost) + 1 × (tool_call,
+        // tool_dispatched, tool_result) + completed = 13 events.
+        let mut events = Vec::new();
+        for _ in 0..13 {
+            let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
+                .await
+                .expect("chain timeout")
+                .expect("chain stream closed")
+                .expect("chain deserialise");
+            events.push(event);
+        }
+
+        crate::test_support::events::assert_parent_chain(&events);
+        // Schema version on every envelope must be the v2 constant.
+        for e in &events {
+            assert_eq!(e.envelope.schema_version, crate::events::SCHEMA_VERSION);
+            assert_eq!(e.envelope.trace_id, e.envelope.invocation_id);
+            assert!(!e.envelope.schema_id.is_empty());
+        }
     }
 
     #[tokio::test]

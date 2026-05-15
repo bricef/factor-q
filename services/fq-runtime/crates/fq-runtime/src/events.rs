@@ -144,6 +144,20 @@ impl Event {
         }
     }
 
+    /// Chain this event's envelope to a prior event in the same
+    /// invocation. The reducer runner threads the previously-
+    /// published event's id through each subsequent publish so the
+    /// projection (and any future replay) can reconstruct
+    /// happens-before from the envelope chain rather than from
+    /// timestamps. System events and recovery re-emits leave the
+    /// parent unset (the chain restarts) — see the
+    /// `parent_event_id` field doc on [`Envelope`] for the
+    /// resolved semantics.
+    pub fn with_parent(mut self, parent_event_id: Uuid) -> Self {
+        self.envelope.parent_event_id = Some(parent_event_id);
+        self
+    }
+
     /// Return the NATS subject this event should be published on.
     pub fn subject(&self) -> String {
         match &self.payload {
@@ -815,6 +829,83 @@ mod tests {
     #[test]
     fn schema_version_constant_is_two() {
         assert_eq!(SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn event_with_parent_sets_envelope_field() {
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "agent",
+            invocation_id,
+            EventPayload::LlmDispatched(LlmDispatchedPayload {
+                call_id: Uuid::now_v7(),
+                model: "m".to_string(),
+            }),
+        );
+        let parent = Uuid::now_v7();
+        let event = event.with_parent(parent);
+        assert_eq!(event.envelope.parent_event_id, Some(parent));
+    }
+
+    #[test]
+    fn system_events_have_null_parent() {
+        // Resolved decision from step 2 of the envelope-refactor
+        // plan: SystemStartup, SystemRecovery, SystemShutdown,
+        // SystemTaskFailed are not part of any invocation chain.
+        let runtime_id = Uuid::now_v7();
+        let cases = vec![
+            EventPayload::SystemStartup(SystemStartupPayload {
+                runtime_id,
+                version: String::new(),
+                nats_url: String::new(),
+                agents_loaded: 0,
+                pricing_entries: 0,
+            }),
+            EventPayload::SystemShutdown(SystemShutdownPayload {
+                runtime_id,
+                reason: String::new(),
+                clean: true,
+            }),
+            EventPayload::SystemTaskFailed(SystemTaskFailedPayload {
+                runtime_id,
+                task_name: String::new(),
+                error_message: String::new(),
+            }),
+            EventPayload::SystemRecovery(SystemRecoveryPayload {
+                runtime_id,
+                worker_id: String::new(),
+                safe_resume: 0,
+                safe_replay: 0,
+                ambiguous: 0,
+                total: 0,
+            }),
+        ];
+        for p in cases {
+            let event = Event::system(runtime_id, p);
+            assert!(
+                event.envelope.parent_event_id.is_none(),
+                "system events must not chain to a parent: schema_id={}",
+                event.envelope.schema_id
+            );
+        }
+    }
+
+    #[test]
+    fn event_with_parent_round_trips_through_serde() {
+        let invocation_id = Uuid::now_v7();
+        let parent = Uuid::now_v7();
+        let event = Event::new(
+            "agent",
+            invocation_id,
+            EventPayload::ToolDispatched(ToolDispatchedPayload {
+                tool_call_id: "tc".to_string(),
+                tool_name: "t".to_string(),
+            }),
+        )
+        .with_parent(parent);
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.envelope.parent_event_id, Some(parent));
     }
 
     #[test]

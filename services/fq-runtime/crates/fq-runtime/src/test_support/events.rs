@@ -161,6 +161,61 @@ pub fn assert_kinds_appear_in_relative_order(events: &[Event], expected_order: &
     }
 }
 
+/// Assert the given events form a single `parent_event_id`-rooted
+/// chain.
+///
+/// Per the resolved decisions in step 2 of the envelope-refactor
+/// plan:
+///
+/// - Exactly one event must have `parent_event_id == None`, and it
+///   must be a `Triggered` event (the chain root).
+/// - Every other event's `parent_event_id` must refer to the
+///   `event_id` of some other event in the input.
+/// - No two events may share the same `parent_event_id` (no
+///   branches) — the loop is linear.
+///
+/// On violation, panics with a message naming the violating event
+/// and the kind.
+pub fn assert_parent_chain(events: &[Event]) {
+    use std::collections::{HashMap, HashSet};
+    let ids: HashSet<Uuid> = events.iter().map(|e| e.envelope.event_id).collect();
+    let mut roots: Vec<usize> = Vec::new();
+    let mut parents_seen: HashMap<Uuid, usize> = HashMap::new();
+    for (i, e) in events.iter().enumerate() {
+        match e.envelope.parent_event_id {
+            None => roots.push(i),
+            Some(p) => {
+                assert!(
+                    ids.contains(&p),
+                    "event {i} (kind={}) has orphan parent {p}",
+                    event_kind(e)
+                );
+                if let Some(prior) = parents_seen.insert(p, i) {
+                    panic!(
+                        "events {prior} and {i} both claim parent {p} \
+                         (kinds={} and {}); chain must be linear",
+                        event_kind(&events[prior]),
+                        event_kind(e)
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        roots.len(),
+        1,
+        "expected exactly one root (parent_event_id = None); found {}: indices {:?}",
+        roots.len(),
+        roots
+    );
+    let root_idx = roots[0];
+    let root_kind = event_kind(&events[root_idx]);
+    assert_eq!(
+        root_kind, "triggered",
+        "chain root must be a `triggered` event, was {root_kind}"
+    );
+}
+
 /// Assert all events share a single `invocation_id`. Returns the
 /// id for further assertions.
 pub fn assert_single_invocation(events: &[Event]) -> Uuid {
@@ -328,5 +383,53 @@ mod tests {
     fn assert_single_invocation_panics_when_mixed() {
         let events = vec![triggered(Uuid::now_v7()), tool_call(Uuid::now_v7())];
         assert_single_invocation(&events);
+    }
+
+    #[test]
+    fn assert_parent_chain_passes_on_linear_chain() {
+        let inv = Uuid::now_v7();
+        let e1 = triggered(inv);
+        let e2 = tool_call(inv).with_parent(e1.envelope.event_id);
+        let e3 = tool_result(inv).with_parent(e2.envelope.event_id);
+        assert_parent_chain(&[e1, e2, e3]);
+    }
+
+    #[test]
+    #[should_panic(expected = "orphan parent")]
+    fn parent_chain_helper_detects_orphan() {
+        let inv = Uuid::now_v7();
+        let e1 = triggered(inv);
+        // tool_call points at a parent uuid that doesn't exist in
+        // the captured set.
+        let e2 = tool_call(inv).with_parent(Uuid::now_v7());
+        assert_parent_chain(&[e1, e2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected exactly one root")]
+    fn parent_chain_helper_detects_multiple_roots() {
+        let inv = Uuid::now_v7();
+        let e1 = triggered(inv);
+        let e2 = triggered(inv); // second root — parent is None
+        assert_parent_chain(&[e1, e2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "both claim parent")]
+    fn parent_chain_helper_detects_branching() {
+        let inv = Uuid::now_v7();
+        let e1 = triggered(inv);
+        let e2 = tool_call(inv).with_parent(e1.envelope.event_id);
+        // Same parent as e2 — that's a branch.
+        let e3 = tool_result(inv).with_parent(e1.envelope.event_id);
+        assert_parent_chain(&[e1, e2, e3]);
+    }
+
+    #[test]
+    #[should_panic(expected = "chain root must be a `triggered`")]
+    fn parent_chain_helper_rejects_non_triggered_root() {
+        let inv = Uuid::now_v7();
+        let root = tool_call(inv); // not triggered
+        assert_parent_chain(&[root]);
     }
 }
