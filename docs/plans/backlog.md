@@ -342,6 +342,149 @@ invocation counts, error rates, and mean duration per agent per
 time window — similar data, different dimension. Easy to build as
 another SQLite query once the need arises.
 
+## Reducer boundary invariants (flagged 2026-05-15)
+
+A design pass on validation at the reducer host/guest boundary
+during the envelope-refactor work surfaced three threads. The
+first two are worth doing now; the third is deferred to the
+graph-executor work that will need it for its own reasons.
+
+See `docs/design/inter-node-contracts-and-event-layers.md` §2
+("validation runs at both ends") for the longer-term picture.
+The items below are the *cheap* pieces that pay off before any
+graph executor exists.
+
+### Stronger types at the reducer boundary
+
+**Source:** discussion 2026-05-15 (envelope-refactor closeout).
+
+`StepInput` / `StepOutput` / `AgentConfig` carry several values
+that today are bare primitives but have real invariants which
+the type system could enforce at compile time. Lifting these
+into newtypes catches a category of bugs without any runtime
+check, and shrinks whatever validation hook ends up being
+needed later.
+
+Concrete candidates, in priority order:
+
+- **`AgentId(String)`** — `AgentConfig::agent_id` is currently
+  `String`, used to build NATS subjects (`fq.agent.{agent_id}.…`).
+  Newtype with a construction-time validator (non-empty,
+  matches an allowed character set for subject safety) is a
+  one-shot win — every site that takes an `AgentId` is then
+  guaranteed to have already passed validation.
+- **`MaxIterations(NonZeroU32)`** — `AgentConfig::max_iterations`
+  is `u32`; zero is meaningless (no iteration would ever run).
+  `NonZeroU32` or a thin newtype removes a class of "what
+  happens if it's zero" branches.
+- **`StepIndex`** with `next(self) -> StepIndex` — `StepInput::step_index`
+  is `u32` and the host increments it. Wrapping it in a type
+  whose only construction is "zero" or "previous + 1" turns
+  monotonicity into a compile-time guarantee.
+- **`ToolCallId(String)`** — used as a correlation key between
+  `tool.call`, `tool.dispatched`, `tool.result`, and the WAL
+  rows. Today's bare-string typing means a misplaced `String`
+  could accidentally land in a `tool_call_id` field without
+  the compiler noticing.
+
+Out of scope for this entry: `InvocationId`, `EventId`,
+`TraceId`. These are already `Uuid`, which is a strong enough
+type for the bug classes they participate in.
+
+Work needed:
+- For each newtype, pick a construction story (`new` /
+  `try_new` / `From<String>` with validation) and a `Display`
+  impl. Add the newtype, then ride the compile errors through
+  every call site.
+- Update the test fixtures that synthesise these values.
+- Decide whether to also lift them through the event schema
+  (probably yes for `AgentId` and `ToolCallId`, since the
+  envelope already exposes them); the envelope's serde shape
+  doesn't need to change (newtypes serialise as their inner
+  type via `#[serde(transparent)]`).
+
+Cost is bounded; mostly mechanical once the first newtype
+lands. The biggest decision is whether `AgentId` validation
+rejects ambiguous-but-currently-allowed names — that's a
+small behavioural change worth flagging if it happens.
+
+### Round-trip invariants on `HarnessState`
+
+**Source:** discussion 2026-05-15. See
+`services/fq-runtime/crates/fq-runtime/src/worker/reducer/harness.rs:88`
+(`HarnessState::load` / `save`).
+
+The opaque state blob crosses the host/guest boundary as
+`Vec<u8>` and is deserialised by `HarnessState::load`. Serde
+catches structural malformation; nothing today catches
+semantic violations of the state machine — e.g.
+`phase == AwaitingModel` with empty `messages`, or
+`phase == DispatchingTools` with no pending tool calls in the
+last assistant message.
+
+Work needed:
+- Add `HarnessState::validate(&self) -> Result<(), HarnessError>`
+  with the phase ↔ contents invariants the state machine
+  actually enforces (write them out by reading
+  `initial_step` / `model_response_step` / `tool_results_step`
+  in `harness.rs`).
+- Call it from `load` (after deserialise) and `save` (before
+  serialise). Both are the right boundary — `load` catches a
+  corrupt or stale persisted state; `save` catches a reducer
+  bug that produced an inconsistent state in-memory.
+- Surface as `HarnessErrorKind::InternalError` (existing
+  variant) with a message naming which invariant failed.
+
+Specific invariants to encode (non-exhaustive — add as they
+surface):
+- `phase == Initial` ⇒ `messages.is_empty()`.
+- `phase == AwaitingModel` ⇒ `!messages.is_empty()` and the
+  last message is `System` or `User` or `Tool`.
+- `phase == DispatchingTools` ⇒ the last message is
+  `Assistant` and carries non-empty `tool_calls`.
+- `iteration >= max(message-count-implied-iterations)` (rough
+  check — exact form depends on how iteration is incremented).
+
+This is the validation hook the longer design conversation
+was reaching for, in its cheap and concrete form: a single
+function with a small set of invariants, on the one boundary
+that actually has an opaque payload to validate. Future graph-
+executor work can grow the *system-wide* validation story
+without touching this.
+
+### Tool-parameter schema validation against `parameters_schema`
+
+**Source:** discussion 2026-05-15. Related: design doc §2
+("validation runs at both ends") in
+`docs/design/inter-node-contracts-and-event-layers.md`,
+ADR-0016 (typed operations).
+
+When the LLM produces a tool call, the runtime today executes
+it without validating `parameters` against the tool's declared
+`parameters_schema`. The LLM provider does some validation
+upstream; each tool's `execute` impl catches gross errors via
+its own `serde_json::from_value` parse. The gap is the middle
+ground: syntactically valid JSON that matches the wrong
+fields.
+
+**Deferred** until either:
+- The bug class shows up in practice (frontier models
+  produce malformed-but-syntactically-valid tool calls
+  effectively never against schemas the provider has seen),
+  or
+- The graph-executor work begins, where typed contracts
+  between graph nodes become load-bearing. At that point,
+  schema-validation infrastructure (`jsonschema` crate,
+  schemas attached to graph-node declarations, retry-as-
+  feedback semantics) lands as a system, and tool-parameter
+  validation falls out as one site among many that uses it.
+
+Doing it standalone now would mean picking the validator
+crate, building schemas that today are mostly hand-written
+placeholders, and designing the retry semantics — for a bug
+class that hasn't been observed. The cost is real; the value
+is marginal until one of the triggers above fires.
+
 ## Process and documentation gaps
 
 ### ADRs still in draft
