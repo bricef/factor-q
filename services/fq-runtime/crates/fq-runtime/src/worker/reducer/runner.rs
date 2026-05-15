@@ -108,7 +108,7 @@ impl ReducerRunner {
             system_prompt: agent.system_prompt().to_string(),
             tools_available: tool_schemas.clone(),
             allowed_tool_names: agent.tools().to_vec(),
-            max_iterations: 0, // 0 = use harness default
+            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
         };
 
         let trigger = TriggerPayload {
@@ -270,7 +270,7 @@ impl ReducerRunner {
             system_prompt: agent.system_prompt().to_string(),
             tools_available: tool_schemas,
             allowed_tool_names: agent.tools().to_vec(),
-            max_iterations: 0,
+            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
         };
         // Trigger payload is past us: the original `triggered`
         // event was emitted on initial run. Pass a null trigger;
@@ -1761,7 +1761,7 @@ mod tests {
             system_prompt: "be brief.".to_string(),
             tools_available: vec![],
             allowed_tool_names: vec![],
-            max_iterations: 0,
+            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
         };
         let trig = TriggerPayload {
             source: TriggerSourceKind::Manual,
@@ -1919,7 +1919,7 @@ mod tests {
             system_prompt: "introspect on demand.".to_string(),
             tools_available: vec![],
             allowed_tool_names: vec!["self_inspect".to_string()],
-            max_iterations: 0,
+            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
         };
         let trig = TriggerPayload {
             source: TriggerSourceKind::Manual,
@@ -2431,7 +2431,7 @@ mod tests {
             system_prompt: "You are a test agent.".to_string(),
             tools_available: vec![],
             allowed_tool_names: vec![],
-            max_iterations: 0,
+            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
         };
         let trigger = TriggerPayload {
             source: TriggerSourceKind::Manual,

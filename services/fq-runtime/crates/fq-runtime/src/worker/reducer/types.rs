@@ -39,6 +39,13 @@ pub struct AgentConfig {
     pub system_prompt: String,
     pub tools_available: Vec<ToolSchema>,
     pub allowed_tool_names: Vec<String>,
+    /// Maximum LLM turns this invocation may take before the
+    /// runtime forces termination with a `MaxIterations` failure.
+    /// The value is **literal** — `0` is a valid stop signal
+    /// (no turns allowed) and the runtime will terminate
+    /// immediately at step 1. Resolve the harness default at the
+    /// producer site rather than relying on a sentinel here. See
+    /// `worker::reducer::harness::DEFAULT_MAX_ITERATIONS`.
     pub max_iterations: u32,
 }
 

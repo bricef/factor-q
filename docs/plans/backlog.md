@@ -358,55 +358,74 @@ graph executor exists.
 
 **Source:** discussion 2026-05-15 (envelope-refactor closeout).
 
-`StepInput` / `StepOutput` / `AgentConfig` carry several values
-that today are bare primitives but have real invariants which
-the type system could enforce at compile time. Lifting these
-into newtypes catches a category of bugs without any runtime
-check, and shrinks whatever validation hook ends up being
-needed later.
+Status update (2026-05-16): **partly landed.** Original list
+of four candidates re-evaluated through implementation; the
+useful subset shipped, the rest were retired with rationale.
 
-Concrete candidates, in priority order:
+Done:
+- **`AgentId(String)`** — promoted from a parse-time wrapper to
+  the actual type on `Envelope::agent_id` and
+  `AgentConfig::agent_id`, with NATS-subject-safety validation
+  at the wire boundary (deserialise runs the same predicate as
+  construction). Commit `ce16740`.
+- **`ToolCallId(String)`** — wraps the correlation key across
+  events, the WAL, and the reducer types. Validation: non-empty
+  only (providers vary in shape, so we don't enforce one).
+  Commit `11ed9c3`.
 
-- **`AgentId(String)`** — `AgentConfig::agent_id` is currently
-  `String`, used to build NATS subjects (`fq.agent.{agent_id}.…`).
-  Newtype with a construction-time validator (non-empty,
-  matches an allowed character set for subject safety) is a
-  one-shot win — every site that takes an `AgentId` is then
-  guaranteed to have already passed validation.
-- **`MaxIterations(NonZeroU32)`** — `AgentConfig::max_iterations`
-  is `u32`; zero is meaningless (no iteration would ever run).
-  `NonZeroU32` or a thin newtype removes a class of "what
-  happens if it's zero" branches.
-- **`StepIndex`** with `next(self) -> StepIndex` — `StepInput::step_index`
-  is `u32` and the host increments it. Wrapping it in a type
-  whose only construction is "zero" or "previous + 1" turns
-  monotonicity into a compile-time guarantee.
-- **`ToolCallId(String)`** — used as a correlation key between
-  `tool.call`, `tool.dispatched`, `tool.result`, and the WAL
-  rows. Today's bare-string typing means a misplaced `String`
-  could accidentally land in a `tool_call_id` field without
-  the compiler noticing.
+Retired (won't do, with reasons preserved for future context):
+- **`MaxIterations(NonZeroU32)`** — the framing turned out to
+  be wrong. `0` is a *meaningful* value (the natural reading is
+  "stop signal — no LLM turns allowed"), so wrapping in
+  `NonZeroU32` would forbid an expressive case. The real bug
+  was the runtime's sentinel-zero hack treating `0` as "use
+  default" — fixed separately by removing
+  `effective_max_iterations` and making producers pass
+  `DEFAULT_MAX_ITERATIONS` explicitly. The field stays `u32`
+  with literal semantics. A rich type may earn its keep at the
+  agent-definition parser boundary later (see "Successor:
+  rich MaxIterationsConfig at the agent-definition boundary"
+  below).
+- **`StepIndex` with monotonicity constructor** — the existing
+  `for step_index in step_index_start..HOST_STEP_BUDGET` loop
+  in the reducer runner already enforces monotonicity at the
+  type level (it's a `Range<u32>` iterator). Wrapping the
+  primitive doesn't catch a bug class the loop doesn't already
+  prevent.
 
-Out of scope for this entry: `InvocationId`, `EventId`,
-`TraceId`. These are already `Uuid`, which is a strong enough
-type for the bug classes they participate in.
+Out of scope going forward: `InvocationId`, `EventId`,
+`TraceId`. Already `Uuid`, which is strong enough for the bug
+classes they participate in.
 
-Work needed:
-- For each newtype, pick a construction story (`new` /
-  `try_new` / `From<String>` with validation) and a `Display`
-  impl. Add the newtype, then ride the compile errors through
-  every call site.
-- Update the test fixtures that synthesise these values.
-- Decide whether to also lift them through the event schema
-  (probably yes for `AgentId` and `ToolCallId`, since the
-  envelope already exposes them); the envelope's serde shape
-  doesn't need to change (newtypes serialise as their inner
-  type via `#[serde(transparent)]`).
+#### Successor: rich MaxIterationsConfig at the agent-definition boundary
 
-Cost is bounded; mostly mechanical once the first newtype
-lands. The biggest decision is whether `AgentId` validation
-rejects ambiguous-but-currently-allowed names — that's a
-small behavioural change worth flagging if it happens.
+When agent definitions gain a `max_iterations` field (likely
+soon — the markdown frontmatter parser has an obvious slot for
+it), introduce a richer type *at the parser boundary*:
+
+```rust
+pub enum MaxIterationsConfig {
+    Default,                       // resolve to DEFAULT_MAX_ITERATIONS
+    Stop,                          // 0 — agent explicitly disabled
+    Explicit(NonZeroU32),          // an explicit positive cap
+}
+
+impl MaxIterationsConfig {
+    pub fn resolve(self, default: NonZeroU32) -> u32 { ... }
+}
+```
+
+The resolved `u32` flows into `AgentConfig::max_iterations`;
+the runtime hot path never sees the variants. The enum earns
+its keep because (a) it lets the parser distinguish "user
+explicitly disabled this agent" from "user didn't set anything"
+— useful for observability and for `fq invocation list`
+filtering, and (b) the construction shape prevents
+`Iterations(0)` at compile time.
+
+Don't do it before the parser slot exists. Doing it now means
+designing for an audience that doesn't consume the
+distinctions.
 
 ### Round-trip invariants on `HarnessState`
 

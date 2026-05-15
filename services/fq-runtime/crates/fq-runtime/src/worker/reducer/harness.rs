@@ -177,7 +177,12 @@ fn model_response_step(
         tool_call_id: None,
     });
 
-    let max_iter = effective_max_iterations(&input.config);
+    // `max_iterations` is literal. Zero is a valid stop signal —
+    // the loop terminates immediately at iteration 1 (>= 0) and
+    // the agent never runs another LLM turn. Producers that want
+    // the harness default pass `DEFAULT_MAX_ITERATIONS` explicitly
+    // rather than relying on a sentinel.
+    let max_iter = input.config.max_iterations;
     if state.iteration >= max_iter {
         return terminal(
             state,
@@ -289,14 +294,6 @@ fn build_model_request(config: &AgentConfig, messages: &[Message]) -> ModelReque
             temperature: None,
             max_tokens: Some(4096),
         },
-    }
-}
-
-fn effective_max_iterations(config: &AgentConfig) -> u32 {
-    if config.max_iterations == 0 {
-        DEFAULT_MAX_ITERATIONS
-    } else {
-        config.max_iterations
     }
 }
 
@@ -569,6 +566,49 @@ mod tests {
         match s1.next_action {
             NextAction::CallToolsParallel(calls) => assert_eq!(calls.len(), 2),
             other => panic!("expected CallToolsParallel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_iterations_zero_is_a_stop_signal() {
+        // `max_iterations = 0` means "no LLM turns allowed". After
+        // the harness handles a model response and is about to
+        // dispatch a tool turn, the iteration counter is 1 which
+        // is already past the 0 cap — the loop terminates with
+        // `MaxIterations`. This pins the behaviour against
+        // accidental regressions back to the old "0 means
+        // default" sentinel pattern.
+        let h = Harness::new();
+
+        let mut cfg = config();
+        cfg.max_iterations = 0;
+        let trig = trigger(json!("loop"));
+
+        let mk = |state, last, idx| StepInput {
+            config: cfg.clone(),
+            trigger: trig.clone(),
+            state,
+            last_result: last,
+            now_ms: idx as u64,
+            random_seed: idx as u64,
+            step_index: idx,
+        };
+
+        let s0 = h.step(mk(vec![], None, 0)).unwrap();
+        let s1 = h
+            .step(mk(
+                s0.state,
+                Some(CapabilityResult::ModelResult(tool_use_response(
+                    "echo",
+                    "c1",
+                    json!({}),
+                ))),
+                1,
+            ))
+            .unwrap();
+        match s1.next_action {
+            NextAction::Failed(err) => assert_eq!(err.kind, HarnessErrorKind::MaxIterations),
+            other => panic!("expected Failed(MaxIterations) for stop signal, got {other:?}"),
         }
     }
 
