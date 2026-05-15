@@ -448,4 +448,47 @@ mod tests {
         assert_eq!(received.envelope.event_id, expected_id);
         assert_eq!(received.envelope.agent_id, agent_id);
     }
+
+    /// Annotations live on the wire — the barrier (envelope-refactor
+    /// plan step 4) is at the consumer-context boundary, not at the
+    /// bus. A producer can attach annotations to a published event
+    /// and a subscriber that deserialises the same event sees them
+    /// intact; only `Event::for_consumer_context` strips them when
+    /// building a downstream agent's prompt input.
+    #[tokio::test]
+    async fn annotations_preserved_through_publish_round_trip() {
+        use crate::events::annotation_keys;
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        let bus = EventBus::connect(&url).await.expect("connect to NATS");
+        let agent_id = format!("bus-anno-{}", Uuid::now_v7().simple());
+        let event = sample_event(&agent_id)
+            .annotate(annotation_keys::NOTES, json!("hi"))
+            .annotate(annotation_keys::CONFIDENCE, json!(0.8));
+
+        let mut subscriber = bus
+            .subscribe(format!("fq.agent.{agent_id}.>"))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        bus.publish(&event).await.expect("publish");
+
+        let received = tokio::time::timeout(Duration::from_secs(2), subscriber.next())
+            .await
+            .expect("timeout waiting for event")
+            .expect("stream closed")
+            .expect("deserialise");
+
+        assert_eq!(received.annotations.0.len(), 2);
+        assert_eq!(
+            received.annotations.0.get(annotation_keys::NOTES),
+            Some(&json!("hi"))
+        );
+        assert_eq!(
+            received.annotations.0.get(annotation_keys::CONFIDENCE),
+            Some(&json!(0.8))
+        );
+    }
 }

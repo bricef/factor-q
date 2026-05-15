@@ -24,6 +24,35 @@ use uuid::Uuid;
 
 pub const SCHEMA_VERSION: u32 = 2;
 
+/// Well-known annotation keys. Kept as documented constants so the
+/// learning loop has a stable vocabulary; unknown keys are still
+/// permitted in the [`Annotations`] map.
+///
+/// Per §6 of `inter-node-contracts-and-event-layers.md`, every key
+/// here is **advisory** — annotations are never read by consuming
+/// agents. The runtime strips them at the consumer-context
+/// boundary via [`Event::for_consumer_context`]; downstream prompts
+/// see envelope + payload only.
+pub mod annotation_keys {
+    /// Free-form commentary from the producing agent.
+    pub const NOTES: &str = "notes";
+    /// Self-reported confidence. Advisory only — never read by
+    /// consumers. Calibrated confidence comes from a verifier
+    /// node, not from the producer.
+    pub const CONFIDENCE: &str = "confidence";
+    /// Chain-of-thought / working. Never read by consumers — the
+    /// fresh-context discipline depends on the reasoning trace
+    /// never reaching a downstream agent's prompt.
+    pub const REASONING: &str = "reasoning";
+    /// Sources looked at but not directly used in the payload.
+    /// Sources actually used belong in a typed `Citation[]` field
+    /// on the payload.
+    pub const SOURCES_CONSIDERED: &str = "sources_considered";
+    /// Markers the producer wants downstream humans (or a meta-
+    /// agent) to see.
+    pub const FLAGS: &str = "flags";
+}
+
 /// Subject hierarchy for factor-q events.
 pub mod subjects {
     pub const SYSTEM_STARTUP: &str = "fq.system.startup";
@@ -167,6 +196,40 @@ impl Event {
         self
     }
 
+    /// Add or replace an annotation. Annotations are advisory and
+    /// never reach consuming agents — the runtime strips them when
+    /// building a downstream prompt via
+    /// [`Event::for_consumer_context`]. See the
+    /// [`annotation_keys`] module for well-known keys; unknown keys
+    /// are permitted and logged.
+    pub fn annotate(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.annotations.0.insert(key.into(), value);
+        self
+    }
+
+    /// Build the consumer-facing view of this event: envelope and
+    /// payload only, annotations stripped.
+    ///
+    /// This is the **only** sanctioned way to feed an upstream
+    /// event into a downstream agent's prompt context. A consumer
+    /// that reads annotations turns them into a structured-bypass
+    /// channel for cross-node coupling, which destroys the
+    /// path-independence that justifies multi-invocation in the
+    /// first place (§6 of
+    /// `inter-node-contracts-and-event-layers.md`).
+    ///
+    /// The reasoning-trace case matters specifically: fresh-context
+    /// verification only works if the verifier does not see the
+    /// producer's reasoning. If reasoning leaks via annotations
+    /// into a downstream agent's input, the path-independence is
+    /// lost.
+    pub fn for_consumer_context(&self) -> ConsumerView<'_> {
+        ConsumerView {
+            envelope: &self.envelope,
+            payload: &self.payload,
+        }
+    }
+
     /// Return the NATS subject this event should be published on.
     pub fn subject(&self) -> String {
         match &self.payload {
@@ -192,6 +255,20 @@ impl Event {
             EventPayload::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
         }
     }
+}
+
+/// Consumer-facing view of an event: envelope + payload, with
+/// annotations stripped at the type level.
+///
+/// Constructed via [`Event::for_consumer_context`]. Carries
+/// references, so it's zero-copy; serialise it to JSON and pass
+/// it to a downstream agent's prompt builder. Direct access to
+/// `event.annotations` remains available for humans, meta-agents,
+/// and the learning loop — only the consumer path is barred.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConsumerView<'a> {
+    pub envelope: &'a Envelope,
+    pub payload: &'a EventPayload,
 }
 
 /// Stable identifier for an event's payload schema. Versioned from
@@ -980,6 +1057,151 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         let envelope = json.get("envelope").expect("envelope present");
         assert!(envelope.get("cost").is_none());
+    }
+
+    #[test]
+    fn event_annotate_inserts_key() {
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "agent",
+            invocation_id,
+            EventPayload::Triggered(TriggeredPayload {
+                trigger_source: TriggerSource::Manual,
+                trigger_subject: None,
+                trigger_payload: json!({}),
+                config_snapshot: ConfigSnapshot {
+                    name: "t".to_string(),
+                    model: "m".to_string(),
+                    system_prompt: String::new(),
+                    tools: vec![],
+                    sandbox: SandboxSnapshot::default(),
+                    budget: None,
+                },
+            }),
+        )
+        .annotate(annotation_keys::NOTES, json!("hello"))
+        .annotate(annotation_keys::CONFIDENCE, json!(0.7));
+        assert_eq!(
+            event.annotations.0.get(annotation_keys::NOTES),
+            Some(&json!("hello"))
+        );
+        assert_eq!(
+            event.annotations.0.get(annotation_keys::CONFIDENCE),
+            Some(&json!(0.7))
+        );
+    }
+
+    #[test]
+    fn event_annotate_replaces_existing_key() {
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "agent",
+            invocation_id,
+            EventPayload::LlmDispatched(LlmDispatchedPayload {
+                call_id: Uuid::now_v7(),
+                model: "m".to_string(),
+            }),
+        )
+        .annotate(annotation_keys::NOTES, json!("first"))
+        .annotate(annotation_keys::NOTES, json!("second"));
+        assert_eq!(
+            event.annotations.0.get(annotation_keys::NOTES),
+            Some(&json!("second"))
+        );
+        assert_eq!(event.annotations.0.len(), 1);
+    }
+
+    #[test]
+    fn unknown_annotation_keys_permitted() {
+        // The registry is advisory; arbitrary keys are still legal.
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "agent",
+            invocation_id,
+            EventPayload::LlmDispatched(LlmDispatchedPayload {
+                call_id: Uuid::now_v7(),
+                model: "m".to_string(),
+            }),
+        )
+        .annotate("my_custom_key", json!({"shape": "blob"}));
+        assert!(event.annotations.0.contains_key("my_custom_key"));
+    }
+
+    #[test]
+    fn well_known_annotation_keys_are_constants() {
+        assert_eq!(annotation_keys::NOTES, "notes");
+        assert_eq!(annotation_keys::CONFIDENCE, "confidence");
+        assert_eq!(annotation_keys::REASONING, "reasoning");
+        assert_eq!(annotation_keys::SOURCES_CONSIDERED, "sources_considered");
+        assert_eq!(annotation_keys::FLAGS, "flags");
+    }
+
+    #[test]
+    fn consumer_view_strips_annotations_round_trip() {
+        // Step 4 acceptance test: an event with payload + two
+        // annotations serialises via for_consumer_context with
+        // envelope and payload but no annotations field.
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "agent",
+            invocation_id,
+            EventPayload::LlmResponse(LlmResponsePayload {
+                call_id: Uuid::now_v7(),
+                content: Some("hello".to_string()),
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        )
+        .annotate(annotation_keys::NOTES, json!("thinking aloud"))
+        .annotate(annotation_keys::CONFIDENCE, json!(0.9));
+
+        let view = event.for_consumer_context();
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(json.get("envelope").is_some(), "envelope present");
+        assert!(json.get("payload").is_some(), "payload present");
+        assert!(
+            json.get("annotations").is_none(),
+            "annotations must be stripped from consumer view"
+        );
+        // Original event still has the annotations — the barrier is
+        // a serialisation property of the view, not a mutation of
+        // the source.
+        assert_eq!(event.annotations.0.len(), 2);
+    }
+
+    #[test]
+    fn consumer_view_serialises_without_annotations_field_even_with_annotations() {
+        // Same property as above, but with the most common attack
+        // path: a producer trying to smuggle a reasoning trace
+        // through the consumer barrier.
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            "producer",
+            invocation_id,
+            EventPayload::LlmResponse(LlmResponsePayload {
+                call_id: Uuid::now_v7(),
+                content: Some("answer: 42".to_string()),
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        )
+        .annotate(
+            annotation_keys::REASONING,
+            json!("I tried 41, then 42, and decided 42"),
+        );
+
+        let view = event.for_consumer_context();
+        let serialised = serde_json::to_string(&view).unwrap();
+        assert!(
+            !serialised.contains("reasoning"),
+            "reasoning trace must not leak through consumer view"
+        );
+        assert!(
+            !serialised.contains("I tried 41"),
+            "annotation value must not leak through consumer view"
+        );
     }
 
     #[test]
