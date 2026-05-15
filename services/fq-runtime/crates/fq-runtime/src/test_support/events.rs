@@ -281,7 +281,7 @@ mod tests {
             aid("test-agent"),
             invocation_id,
             EventPayload::ToolCall(ToolCallPayload {
-                tool_call_id: "c1".to_string(),
+                tool_call_id: crate::events::ToolCallId::new("c1").unwrap(),
                 tool_name: "test_tool".to_string(),
                 parameters: json!({}),
             }),
@@ -293,7 +293,7 @@ mod tests {
             aid("test-agent"),
             invocation_id,
             EventPayload::ToolResult(ToolResultPayload {
-                tool_call_id: "c1".to_string(),
+                tool_call_id: crate::events::ToolCallId::new("c1").unwrap(),
                 output: "ok".to_string(),
                 is_error: false,
                 error_kind: None,

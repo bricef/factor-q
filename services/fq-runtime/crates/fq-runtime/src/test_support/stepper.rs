@@ -170,7 +170,7 @@ mod tests {
         ModelResponse {
             content: None,
             tool_calls: vec![MessageToolCall {
-                tool_call_id: call_id.to_string(),
+                tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
                 tool_name: name.to_string(),
                 parameters: json!({}),
             }],
@@ -181,7 +181,7 @@ mod tests {
 
     fn tool_result(call_id: &str, output: &str) -> ToolCallResult {
         ToolCallResult {
-            tool_call_id: call_id.to_string(),
+            tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
             output: output.to_string(),
             is_error: false,
             error_kind: None,

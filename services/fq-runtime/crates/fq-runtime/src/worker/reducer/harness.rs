@@ -435,7 +435,7 @@ mod tests {
         ModelResponse {
             content: None,
             tool_calls: vec![MessageToolCall {
-                tool_call_id: call_id.to_string(),
+                tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
                 tool_name: name.to_string(),
                 parameters: params,
             }],
@@ -508,7 +508,7 @@ mod tests {
             .step(step_input(
                 s1.state,
                 Some(CapabilityResult::ToolResult(ToolCallResult {
-                    tool_call_id: "call_1".to_string(),
+                    tool_call_id: crate::events::ToolCallId::new("call_1").unwrap(),
                     output: "echoed".to_string(),
                     is_error: false,
                     error_kind: None,
@@ -545,12 +545,12 @@ mod tests {
             content: None,
             tool_calls: vec![
                 MessageToolCall {
-                    tool_call_id: "a".to_string(),
+                    tool_call_id: crate::events::ToolCallId::new("a").unwrap(),
                     tool_name: "echo".to_string(),
                     parameters: json!({}),
                 },
                 MessageToolCall {
-                    tool_call_id: "b".to_string(),
+                    tool_call_id: crate::events::ToolCallId::new("b").unwrap(),
                     tool_name: "echo".to_string(),
                     parameters: json!({}),
                 },
@@ -637,7 +637,7 @@ mod tests {
         s2.set_step_index(saved_index);
 
         let _ = s2.step(Some(CapabilityResult::ToolResult(ToolCallResult {
-            tool_call_id: "call_1".to_string(),
+            tool_call_id: crate::events::ToolCallId::new("call_1").unwrap(),
             output: "echoed".to_string(),
             is_error: false,
             error_kind: None,

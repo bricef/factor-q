@@ -594,7 +594,7 @@ impl ReducerRunner {
         self.store
             .write_tool_intent(
                 &inv_str,
-                &req.tool_call_id,
+                req.tool_call_id.as_str(),
                 &req.tool_name,
                 &parameters_json,
                 intent_at,
@@ -642,14 +642,14 @@ impl ReducerRunner {
                 // a non-ambiguous error so recovery doesn't see
                 // it as `dispatched` forever.
                 self.store
-                    .write_tool_dispatched(&inv_str, &req.tool_call_id, unix_now_ms())
+                    .write_tool_dispatched(&inv_str, req.tool_call_id.as_str(), unix_now_ms())
                     .await
                     .map_err(map_store_err)?;
                 let msg = format!("no implementation registered for tool '{}'", req.tool_name);
                 self.store
                     .write_tool_completed(
                         &inv_str,
-                        &req.tool_call_id,
+                        req.tool_call_id.as_str(),
                         &msg,
                         true,
                         unix_now_ms(),
@@ -677,7 +677,7 @@ impl ReducerRunner {
         // Tool returned control. Mark dispatched (the
         // ambiguous-window state) before processing the result.
         self.store
-            .write_tool_dispatched(&inv_str, &req.tool_call_id, unix_now_ms())
+            .write_tool_dispatched(&inv_str, req.tool_call_id.as_str(), unix_now_ms())
             .await
             .map_err(map_store_err)?;
         self.publish_chained(
@@ -698,7 +698,7 @@ impl ReducerRunner {
                 self.store
                     .write_tool_completed(
                         &inv_str,
-                        &req.tool_call_id,
+                        req.tool_call_id.as_str(),
                         &result.output,
                         result.is_error,
                         unix_now_ms(),
@@ -733,7 +733,7 @@ impl ReducerRunner {
                 self.store
                     .write_tool_completed(
                         &inv_str,
-                        &req.tool_call_id,
+                        req.tool_call_id.as_str(),
                         &message,
                         true,
                         unix_now_ms(),
@@ -802,7 +802,7 @@ impl ReducerRunner {
 
         // Close the WAL: dispatched, then completed.
         self.store
-            .write_tool_dispatched(inv_str, &req.tool_call_id, unix_now_ms())
+            .write_tool_dispatched(inv_str, req.tool_call_id.as_str(), unix_now_ms())
             .await
             .map_err(map_store_err)?;
         self.publish_chained(
@@ -820,7 +820,7 @@ impl ReducerRunner {
         self.store
             .write_tool_completed(
                 inv_str,
-                &req.tool_call_id,
+                req.tool_call_id.as_str(),
                 &output,
                 false,
                 unix_now_ms(),
@@ -1191,8 +1191,18 @@ enum ModelOutcome {
 /// the result of a previously-completed action back into the
 /// reducer.
 fn tool_row_to_capability(row: &ToolDispatchRow) -> CapabilityResult {
+    // The WAL row's `tool_call_id` was written through `ToolCallId`
+    // so non-empty is structurally guaranteed. If the row is
+    // corrupt (empty string), the resume path surfaces it as an
+    // error via the reducer's normal error handling — here we fall
+    // back to a sentinel so this conversion stays infallible.
+    let tool_call_id = crate::events::ToolCallId::new(row.tool_call_id.clone())
+        .unwrap_or_else(|_| {
+            crate::events::ToolCallId::new("corrupt-empty-tool-call-id".to_string())
+                .expect("sentinel is non-empty")
+        });
     CapabilityResult::ToolResult(ToolCallResult {
-        tool_call_id: row.tool_call_id.clone(),
+        tool_call_id,
         output: row.result.clone().unwrap_or_default(),
         is_error: row.is_error.unwrap_or(false),
         error_kind: None,
@@ -1377,7 +1387,7 @@ mod tests {
         ChatResponse {
             content: None,
             tool_calls: vec![crate::events::MessageToolCall {
-                tool_call_id: call_id.to_string(),
+                tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
                 tool_name: name.to_string(),
                 parameters: params,
             }],
@@ -1938,7 +1948,7 @@ mod tests {
                 Some(CapabilityResult::ModelResult(ModelResponse {
                     content: None,
                     tool_calls: vec![crate::events::MessageToolCall {
-                        tool_call_id: "si".to_string(),
+                        tool_call_id: crate::events::ToolCallId::new("si").unwrap(),
                         tool_name: "self_inspect".to_string(),
                         parameters: json!({"include": ["budget"]}),
                     }],
@@ -1993,7 +2003,7 @@ mod tests {
             .step(mk(
                 suspended_state,
                 Some(CapabilityResult::ToolResult(ToolCallResult {
-                    tool_call_id: "si".to_string(),
+                    tool_call_id: crate::events::ToolCallId::new("si").unwrap(),
                     output: tool_output.clone(),
                     is_error: false,
                     error_kind: None,
@@ -2125,7 +2135,7 @@ mod tests {
         ChatResponse {
             content: None,
             tool_calls: vec![crate::events::MessageToolCall {
-                tool_call_id: call_id.to_string(),
+                tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
                 tool_name: tool.to_string(),
                 parameters: params,
             }],

@@ -25,7 +25,8 @@ use serde_json::Value;
 
 use crate::agent::AgentId;
 use crate::events::{
-    Message, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolErrorKind, ToolSchema,
+    Message, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolCallId, ToolErrorKind,
+    ToolSchema,
 };
 
 /// Static-for-the-invocation configuration the host hands to the
@@ -147,14 +148,14 @@ pub struct ModelResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequest {
-    pub tool_call_id: String,
+    pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub parameters: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallResult {
-    pub tool_call_id: String,
+    pub tool_call_id: ToolCallId,
     pub output: String,
     pub is_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

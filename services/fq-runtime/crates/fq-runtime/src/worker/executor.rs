@@ -692,7 +692,7 @@ mod tests {
         ChatResponse {
             content: None,
             tool_calls: vec![MessageToolCall {
-                tool_call_id: call_id.to_string(),
+                tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
                 tool_name: tool_name.to_string(),
                 parameters: params,
             }],

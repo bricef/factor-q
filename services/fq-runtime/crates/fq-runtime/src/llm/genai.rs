@@ -111,7 +111,7 @@ fn convert_message(msg: Message) -> Result<provider::chat::ChatMessage, LlmError
             LlmError::InvalidResponse("tool role message is missing tool_call_id".to_string())
         })?;
         let content = content.unwrap_or_default();
-        let tool_response = provider::chat::ToolResponse::new(call_id, content);
+        let tool_response = provider::chat::ToolResponse::new(call_id.into_inner(), content);
         return Ok(provider::chat::ChatMessage {
             role: provider::chat::ChatRole::Tool,
             content: provider::chat::MessageContent::from_parts(vec![
@@ -133,7 +133,7 @@ fn convert_message(msg: Message) -> Result<provider::chat::ChatMessage, LlmError
         for call in tool_calls {
             parts.push(provider::chat::ContentPart::ToolCall(
                 provider::chat::ToolCall {
-                    call_id: call.tool_call_id,
+                    call_id: call.tool_call_id.into_inner(),
                     fn_name: call.tool_name,
                     fn_arguments: call.parameters,
                 },
@@ -191,15 +191,22 @@ fn from_provider_response(
     // Clone tool calls out of the content before consuming it. The
     // response's own `into_tool_calls` consumes the whole response, so
     // we collect both text and calls via separate accessors.
+    // Wrap tool_call_id at the provider->internal boundary. A
+    // provider returning an empty string is a protocol bug we
+    // surface immediately rather than letting it propagate.
     let tool_calls: Vec<MessageToolCall> = response
         .tool_calls()
         .into_iter()
-        .map(|tc| MessageToolCall {
-            tool_call_id: tc.call_id.clone(),
-            tool_name: tc.fn_name.clone(),
-            parameters: tc.fn_arguments.clone(),
+        .map(|tc| {
+            let tool_call_id = crate::events::ToolCallId::new(tc.call_id.clone())
+                .map_err(|err| LlmError::InvalidResponse(err.to_string()))?;
+            Ok::<_, LlmError>(MessageToolCall {
+                tool_call_id,
+                tool_name: tc.fn_name.clone(),
+                parameters: tc.fn_arguments.clone(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let stop_reason = if !tool_calls.is_empty() {
         StopReason::ToolUse
@@ -316,7 +323,7 @@ mod tests {
             role: MessageRole::Tool,
             content: Some("file contents".to_string()),
             tool_calls: vec![],
-            tool_call_id: Some("toolu_01ABC".to_string()),
+            tool_call_id: Some(crate::events::ToolCallId::new("toolu_01ABC").unwrap()),
         })
         .unwrap();
         assert!(matches!(msg.role, provider::chat::ChatRole::Tool));
@@ -340,7 +347,7 @@ mod tests {
             role: MessageRole::Assistant,
             content: Some("I'll read that file.".to_string()),
             tool_calls: vec![MessageToolCall {
-                tool_call_id: "toolu_01ABC".to_string(),
+                tool_call_id: crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
                 tool_name: "read_file".to_string(),
                 parameters: serde_json::json!({"path": "/tmp/x"}),
             }],
