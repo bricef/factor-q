@@ -813,8 +813,8 @@ mod tests {
             &[],
         );
         assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
-        assert!(env.get("HOME").is_none());
-        assert!(env.get("SECRET").is_none());
+        assert!(!env.contains_key("HOME"));
+        assert!(!env.contains_key("SECRET"));
         assert_eq!(env.len(), 1);
     }
 
@@ -830,6 +830,6 @@ mod tests {
         );
         assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
         assert_eq!(env.get("HOME"), Some(&"/home/user".to_string()));
-        assert!(env.get("SECRET").is_none());
+        assert!(!env.contains_key("SECRET"));
     }
 }

@@ -10,3 +10,21 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+
+# Workspace-wide lint policy. Every member opts in via
+# `[lints] workspace = true` in its Cargo.toml. The intent: a
+# bare `cargo build` / `cargo check` / `cargo clippy` runs
+# cleanly with zero warnings, and failures here block commits
+# the same way test failures do.
+#
+# If a specific lint genuinely doesn't fit a code site, use a
+# targeted `#[allow(...)]` with a short comment naming the
+# reason — treat that as a code smell rather than the default.
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+# clippy::all covers correctness, suspicious, style, complexity,
+# and perf. We don't currently enable pedantic / nursery / cargo
+# groups because they trade false-positives for marginal value.
+all = "deny"

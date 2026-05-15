@@ -367,7 +367,7 @@ impl ReducerRunner {
                 Err(err) => {
                     totals.total_duration_ms = start.elapsed().as_millis() as u64;
                     self.emit_failed(
-                        &agent_id,
+                        agent_id,
                         invocation_id,
                         FailureKind::RuntimeError,
                         format!("reducer step failed: {err}"),
@@ -380,7 +380,7 @@ impl ReducerRunner {
                 }
             };
 
-            self.write_logs(&agent_id, invocation_id, &output.logs);
+            self.write_logs(agent_id, invocation_id, &output.logs);
             self.emit_semantic_events(&output.events);
 
             // Persist the post-step state to the worker store
@@ -452,7 +452,7 @@ impl ReducerRunner {
                     totals.total_duration_ms = start.elapsed().as_millis() as u64;
                     let kind = harness_error_to_failure_kind(&err);
                     self.emit_failed(
-                        &agent_id,
+                        agent_id,
                         invocation_id,
                         kind,
                         err.message.clone(),
@@ -468,7 +468,7 @@ impl ReducerRunner {
                         .run_model_with_llm(
                             llm,
                             agent.budget(),
-                            &agent_id,
+                            agent_id,
                             invocation_id,
                             request,
                             &mut totals,
@@ -492,8 +492,8 @@ impl ReducerRunner {
                     let result = self
                         .run_tool(
                             agent,
-                            &sandbox,
-                            &agent_id,
+                            sandbox,
+                            agent_id,
                             invocation_id,
                             req,
                             &totals,
@@ -516,8 +516,8 @@ impl ReducerRunner {
                         let result = self
                             .run_tool(
                                 agent,
-                                &sandbox,
-                                &agent_id,
+                                sandbox,
+                                agent_id,
                                 invocation_id,
                                 req,
                                 &totals,
@@ -536,7 +536,7 @@ impl ReducerRunner {
         // Host step budget exhausted. Surface as a runtime failure.
         totals.total_duration_ms = start.elapsed().as_millis() as u64;
         self.emit_failed(
-            &agent_id,
+            agent_id,
             invocation_id,
             FailureKind::RuntimeError,
             format!("host step budget exhausted ({HOST_STEP_BUDGET})"),
@@ -1765,8 +1765,10 @@ mod tests {
         // Suspended snapshot.
         let snapshot = s0.state.clone();
 
-        // Drop and replace the reducer.
-        drop(h1);
+        // Drop and replace the reducer. `Harness` has no Drop
+        // impl, so the move-into-wildcard pattern is the way to
+        // express "throw this away" without clippy's `drop_non_drop`.
+        let _ = h1;
         let h2 = Harness::new();
 
         let s1 = h2
@@ -1949,8 +1951,9 @@ mod tests {
 
         // Drop the entire harness and conjure a fresh one. This
         // is the load-bearing assertion: nothing in-process state
-        // survives the boundary.
-        drop(h);
+        // survives the boundary. (`Harness` has no Drop impl, so
+        // we use the move-into-wildcard pattern instead of `drop`.)
+        let _ = h;
 
         // Synthesise the tool result host-side, exactly like the
         // runner would have. This is the "tool was dispatched

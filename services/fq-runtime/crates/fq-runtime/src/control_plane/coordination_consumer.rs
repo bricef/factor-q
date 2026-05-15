@@ -413,11 +413,10 @@ mod tests {
         let inv_str = invocation_id.to_string();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(row) = store.get_invocation_owner(&inv_str).await.unwrap() {
-                if row.status == OwnerStatus::Ambiguous {
+            if let Some(row) = store.get_invocation_owner(&inv_str).await.unwrap()
+                && row.status == OwnerStatus::Ambiguous {
                     break;
                 }
-            }
             if tokio::time::Instant::now() > deadline {
                 panic!("coordination row did not appear in time");
             }
