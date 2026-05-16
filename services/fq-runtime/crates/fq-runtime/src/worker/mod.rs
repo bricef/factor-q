@@ -26,6 +26,7 @@
 //! without caring which one it picked.
 
 pub mod executor;
+pub mod heartbeat;
 pub mod id;
 pub mod introspection;
 pub mod recovery;
@@ -33,6 +34,7 @@ pub mod reducer;
 pub mod store;
 
 pub use executor::{AgentExecutor, ExecutorError, InvocationOutcome};
+pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, HeartbeatProducer};
 pub use id::WorkerId;
 pub use recovery::{
     CategoryCounts, ClassifiedInvocation, RecoveryCategory, categorise, scan_in_flight,
