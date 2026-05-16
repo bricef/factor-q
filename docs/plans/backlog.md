@@ -504,6 +504,74 @@ placeholders, and designing the retry semantics — for a bug
 class that hasn't been observed. The cost is real; the value
 is marginal until one of the triggers above fires.
 
+## Data-architecture follow-ups (flagged 2026-05-16)
+
+### Stuck-invocation detection
+
+**Source:** discussion 2026-05-16 (worker heartbeat design).
+Related: `docs/plans/active/2026-04-28-data-architecture-v1.md`
+steps 5 (state persisted at every step boundary) and 7
+(control-plane recovery).
+
+The worker heartbeat we're about to land covers
+**worker-process liveness**. A separate concern is
+**per-invocation liveness**: is *this specific* harness
+making progress, or has it wedged inside a tool call, a model
+call, or a tight loop? The two are different — a healthy
+worker can host a wedged invocation.
+
+The good news: a per-invocation heartbeat event is *not*
+needed. The data-architecture-v1 step 5 work persists
+`invocation_state.updated_at` at every reducer step
+boundary. That column is already a "last activity" timestamp
+per invocation. Plus every emitted event for an invocation
+carries an envelope timestamp.
+
+So the detection is a periodic sweep:
+
+```sql
+SELECT invocation_id, agent_id, phase, updated_at
+  FROM invocation_state
+ WHERE terminal_at IS NULL
+   AND updated_at < (now_ms - stuck_threshold_ms)
+```
+
+Each offender gets an `invocation.stuck` event (new payload
+variant, similar shape to `invocation.ambiguous` but with
+`last_progress_ms` instead of `stuck_entity`/`stuck_call_id`).
+The operator triages via `fq recover` alongside ambiguous
+cases.
+
+Open design questions:
+
+- **Threshold.** A flat threshold is too coarse — the
+  TradingAgents reference workload (minute-scale invocations)
+  would be flagged stuck on a normal LLM turn under any
+  threshold tight enough to catch real wedges. Probably needs
+  to be per-agent (agent definition declares its expected
+  step latency) with a generous default. Don't ship with a
+  flat 60s default; that's a foot-gun.
+- **Where the sweep lives.** Natural home is the control-plane
+  side, alongside the existing stale-worker sweep in
+  `coordination_consumer.rs`. Same cadence, same shape.
+- **What "stuck" does next.** Emit-and-surface for operator
+  triage is the minimum. A more aggressive option is to
+  attempt a recovery (re-emit intent? kill the worker? mark
+  ambiguous?). Defer the "what to do" question until we have
+  a real stuck-invocation example to reason from.
+
+**Cost:** small (~80 lines). The new event type, the sweep
+function, the consumer arm (or reuse coordination consumer's
+existing infrastructure). Should land after the heartbeat
+work and likely after step 8 (archive hand-off), so the
+"stuck" event has all the context it needs to be useful.
+
+**Deferred** until either:
+- A real stuck-invocation example shows up in practice and
+  forces the threshold decision, or
+- Step 9's `fq recover` CLI is being built and the stuck
+  case fits naturally alongside ambiguous in its UI.
+
 ## Process and documentation gaps
 
 ### ADRs still in draft
