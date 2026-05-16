@@ -135,6 +135,15 @@ pub mod subjects {
     pub fn agent_failed(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.failed")
     }
+
+    /// Worker liveness signal. Emitted periodically by each
+    /// worker; the control-plane's heartbeat consumer updates
+    /// `coordination_worker.last_heartbeat` on receipt. The
+    /// stale-worker sweep in the coordination consumer marks a
+    /// worker stale when this signal falls behind its threshold.
+    pub fn worker_heartbeat(worker_id: &str) -> String {
+        format!("fq.worker.{worker_id}.heartbeat")
+    }
 }
 
 /// A complete event: envelope + payload + annotations.
@@ -279,6 +288,10 @@ impl Event {
             EventPayload::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
             EventPayload::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
             EventPayload::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
+            // Worker events read their subject token from the
+            // payload's `worker_id`, not from `envelope.agent_id`
+            // (which is the system sentinel for non-agent events).
+            EventPayload::WorkerHeartbeat(p) => subjects::worker_heartbeat(p.worker_id.as_str()),
         }
     }
 }
@@ -395,6 +408,7 @@ pub fn schema_id_for(payload: &EventPayload) -> &'static str {
         EventPayload::SystemShutdown(_) => "factor-q/system_shutdown@1",
         EventPayload::SystemTaskFailed(_) => "factor-q/system_task_failed@1",
         EventPayload::SystemRecovery(_) => "factor-q/system_recovery@1",
+        EventPayload::WorkerHeartbeat(_) => "factor-q/worker_heartbeat@1",
     }
 }
 
@@ -512,6 +526,14 @@ pub enum EventPayload {
     /// needing a Prometheus-style endpoint. A live snapshot
     /// is also available via `fq status`.
     SystemRecovery(SystemRecoveryPayload),
+
+    /// Worker liveness signal. Emitted periodically by each
+    /// worker; the control-plane's heartbeat consumer updates
+    /// `coordination_worker.last_heartbeat` on receipt. The
+    /// timestamp lives on the envelope (`envelope.timestamp`),
+    /// not in the payload, so there's only one source of
+    /// truth for "when did this beat arrive."
+    WorkerHeartbeat(WorkerHeartbeatPayload),
 }
 
 /// Published when an agent invocation begins.
@@ -841,6 +863,21 @@ pub struct SystemRecoveryPayload {
     pub total: u32,
 }
 
+/// Payload for [`EventPayload::WorkerHeartbeat`]. Identifies
+/// which worker the heartbeat is for; the timestamp lives on
+/// the envelope.
+///
+/// The payload is deliberately minimal. Future "what is this
+/// worker up to" fields (in-flight invocation count, load,
+/// version, host info) belong here when there's a consumer
+/// that uses them — today the only consumer is the
+/// coordination consumer's `last_heartbeat` update, which
+/// reads only the `worker_id` and the envelope timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerHeartbeatPayload {
+    pub worker_id: crate::worker::WorkerId,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,6 +961,33 @@ mod tests {
             "fq.agent.test-agent.completed"
         );
         assert_eq!(subjects::agent_failed(agent), "fq.agent.test-agent.failed");
+    }
+
+    #[test]
+    fn worker_heartbeat_subject_reads_from_payload_not_envelope() {
+        // The subject for a WorkerHeartbeat is built from the
+        // payload's `worker_id`, not from `envelope.agent_id`
+        // (which is the system sentinel for runtime-tier events).
+        // This is the design call made on 2026-05-16 — worker is
+        // its own scope, parallel to agent.
+        let runtime_id = Uuid::now_v7();
+        let worker_id = crate::worker::WorkerId::new("worker-007").unwrap();
+        let event = Event::system(
+            runtime_id,
+            EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
+                worker_id: worker_id.clone(),
+            }),
+        );
+        assert_eq!(event.subject(), "fq.worker.worker-007.heartbeat");
+        assert_eq!(event.envelope.schema_id, "factor-q/worker_heartbeat@1");
+        // The envelope's agent_id remains the system sentinel —
+        // worker events aren't tied to an agent. The payload is
+        // where the worker_id lives.
+        assert_eq!(event.envelope.agent_id.as_str(), "system");
+        match &event.payload {
+            EventPayload::WorkerHeartbeat(p) => assert_eq!(p.worker_id, worker_id),
+            other => panic!("wrong payload variant: {other:?}"),
+        }
     }
 
     #[test]
@@ -1487,6 +1551,9 @@ mod tests {
                 safe_replay: 0,
                 ambiguous: 0,
                 total: 0,
+            }),
+            EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
+                worker_id: crate::worker::WorkerId::new("w").unwrap(),
             }),
         ];
         for payload in cases {

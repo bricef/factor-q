@@ -652,6 +652,7 @@ fn print_event(event: &Event) {
             "system.task_failed task={} error={}",
             p.task_name, p.error_message
         ),
+        EventPayload::WorkerHeartbeat(p) => format!("worker.heartbeat worker_id={}", p.worker_id),
     };
 
     println!(

@@ -49,6 +49,7 @@ pub fn event_kind(event: &Event) -> &'static str {
         EventPayload::SystemShutdown(_) => "system_shutdown",
         EventPayload::SystemTaskFailed(_) => "system_task_failed",
         EventPayload::SystemRecovery(_) => "system_recovery",
+        EventPayload::WorkerHeartbeat(_) => "worker_heartbeat",
     }
 }
 
