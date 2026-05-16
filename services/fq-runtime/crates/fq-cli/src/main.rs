@@ -919,11 +919,17 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // control-plane so the membership table reflects reality.
     // The worker_id is the runtime_id; v2 will introduce
     // separate worker ids when workers run in their own processes.
-    let worker_id = runtime_id.to_string();
+    // The worker_id is the runtime_id formatted as a UUID
+    // string. UUIDs are NATS-subject-token safe (alphanumeric +
+    // hyphens), so the WorkerId::new call is infallible — but we
+    // unwrap explicitly so a future change that produces an
+    // unsafe form fails loudly rather than silently.
+    let worker_id = fq_runtime::worker::WorkerId::new(runtime_id.to_string())
+        .expect("runtime UUID is a valid WorkerId");
     let host_label = local_host_label();
     let now_ms = chrono::Utc::now().timestamp_millis();
     cp_store
-        .register_worker(&worker_id, &host_label, now_ms)
+        .register_worker(worker_id.as_str(), &host_label, now_ms)
         .await
         .context("failed to self-register worker with control-plane")?;
     println!("  worker:           {} (host: {})", worker_id, host_label);
@@ -951,7 +957,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         runtime_id,
         EventPayload::SystemRecovery(fq_runtime::events::SystemRecoveryPayload {
             runtime_id,
-            worker_id: worker_id.clone(),
+            worker_id: worker_id.as_str().to_string(),
             safe_resume: counts.safe_resume,
             safe_replay: counts.safe_replay,
             ambiguous: counts.ambiguous,
@@ -1193,8 +1199,30 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // state. Stale-worker sweep runs on a timer.
     let (coord_shutdown_tx, coord_shutdown_rx) = tokio::sync::oneshot::channel();
     let coord_consumer = fq_runtime::CoordinationConsumer::new(bus.clone(), cp_store.clone())
-        .with_self_worker_id(worker_id.clone());
+        .with_self_worker_id(worker_id.as_str().to_string());
     let mut coord_handle = tokio::spawn(async move { coord_consumer.run(coord_shutdown_rx).await });
+
+    // Spawn the worker heartbeat consumer (control-plane side).
+    // Receives `fq.worker.*.heartbeat` events and updates
+    // `coordination_worker.last_heartbeat` so the stale-worker
+    // sweep actually has fresh data to work with.
+    let (hb_consumer_shutdown_tx, hb_consumer_shutdown_rx) = tokio::sync::oneshot::channel();
+    let hb_consumer = fq_runtime::HeartbeatConsumer::new(bus.clone(), cp_store.clone());
+    let mut hb_consumer_handle =
+        tokio::spawn(async move { hb_consumer.run(hb_consumer_shutdown_rx).await });
+
+    // Spawn the worker heartbeat producer (worker side). Fires
+    // a heartbeat immediately and then every 10s (the default
+    // interval). Without this, the coordination consumer's
+    // stale-worker sweep would mass-mark every worker stale at
+    // 30s. In v2 this task moves into the dedicated Worker
+    // process; in v1 it lives in the daemon alongside the other
+    // managed tasks.
+    let (hb_producer_shutdown_tx, hb_producer_shutdown_rx) = tokio::sync::oneshot::channel();
+    let hb_producer =
+        fq_runtime::worker::HeartbeatProducer::new(bus.clone(), worker_id.clone(), runtime_id);
+    let mut hb_producer_handle =
+        tokio::spawn(async move { hb_producer.run(hb_producer_shutdown_rx).await });
 
     // Spawn the trigger dispatcher.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -1239,6 +1267,14 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             let err_msg = describe_task_result("coordination consumer", result);
             ("task_failed", false, Some(("coordination_consumer", err_msg)))
         }
+        result = &mut hb_consumer_handle => {
+            let err_msg = describe_task_result("heartbeat consumer", result);
+            ("task_failed", false, Some(("heartbeat_consumer", err_msg)))
+        }
+        result = &mut hb_producer_handle => {
+            let err_msg = describe_task_result("heartbeat producer", result);
+            ("task_failed", false, Some(("heartbeat_producer", err_msg)))
+        }
         result = &mut dispatcher_handle => {
             let err_msg = describe_task_result("trigger dispatcher", result);
             ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
@@ -1266,11 +1302,13 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Signal both tasks to shut down. Either one may already be
-    // done (the one that returned from the select), but sending
-    // on a oneshot whose receiver was dropped is a no-op.
+    // Signal all tasks to shut down. Any one may already be done
+    // (the one that returned from the select), but sending on a
+    // oneshot whose receiver was dropped is a no-op.
     let _ = proj_shutdown_tx.send(());
     let _ = coord_shutdown_tx.send(());
+    let _ = hb_consumer_shutdown_tx.send(());
+    let _ = hb_producer_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
@@ -1286,6 +1324,22 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
         Ok(Err(err)) => tracing::error!(error = %err, "coordination consumer task panicked"),
         Err(_) => tracing::warn!("coordination consumer did not shut down within 5s"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), hb_consumer_handle).await {
+        Ok(Ok(Ok(()))) => println!("  heartbeat consumer stopped cleanly."),
+        Ok(Ok(Err(err))) => {
+            tracing::error!(error = %err, "heartbeat consumer exited with error")
+        }
+        Ok(Err(err)) => tracing::error!(error = %err, "heartbeat consumer task panicked"),
+        Err(_) => tracing::warn!("heartbeat consumer did not shut down within 5s"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), hb_producer_handle).await {
+        Ok(Ok(Ok(()))) => println!("  heartbeat producer stopped cleanly."),
+        Ok(Ok(Err(err))) => {
+            tracing::error!(error = %err, "heartbeat producer exited with error")
+        }
+        Ok(Err(err)) => tracing::error!(error = %err, "heartbeat producer task panicked"),
+        Err(_) => tracing::warn!("heartbeat producer did not shut down within 5s"),
     }
     match tokio::time::timeout(std::time::Duration::from_secs(5), dispatcher_handle).await {
         Ok(Ok(Ok(()))) => println!("  trigger dispatcher stopped cleanly."),

@@ -108,10 +108,7 @@ mod tests {
 
     #[test]
     fn worker_id_rejects_subject_unsafe_input() {
-        assert!(matches!(
-            WorkerId::new(""),
-            Err(SubjectTokenError::Empty)
-        ));
+        assert!(matches!(WorkerId::new(""), Err(SubjectTokenError::Empty)));
         for bad in ["foo.bar", "w*", "w>", "has space"] {
             assert!(
                 matches!(WorkerId::new(bad), Err(SubjectTokenError::InvalidChar(_))),
