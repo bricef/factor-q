@@ -62,6 +62,36 @@ pub mod subjects {
     pub const SYSTEM_TASK_FAILED: &str = "fq.system.task_failed";
     pub const SYSTEM_RECOVERY: &str = "fq.system.recovery";
 
+    /// Validate that `s` is safe to use as a single NATS subject
+    /// token. NATS subjects are dot-separated tokens; a token
+    /// must be non-empty and must not contain `.`, `*`, `>`, or
+    /// whitespace. This is the shared predicate used by every
+    /// id-newtype whose value lands in a subject string
+    /// (currently [`crate::agent::AgentId`] and
+    /// [`crate::worker::WorkerId`]). Wrapping the constraint in
+    /// a single function means the validation can't drift
+    /// between sites.
+    pub fn validate_token(s: &str) -> Result<(), SubjectTokenError> {
+        if s.is_empty() {
+            return Err(SubjectTokenError::Empty);
+        }
+        for ch in s.chars() {
+            if ch == '.' || ch == '*' || ch == '>' || ch.is_whitespace() {
+                return Err(SubjectTokenError::InvalidChar(s.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Failure mode from [`validate_token`].
+    #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+    pub enum SubjectTokenError {
+        #[error("must not be empty")]
+        Empty,
+        #[error("must not contain '.', '*', '>', or whitespace: {0:?}")]
+        InvalidChar(String),
+    }
+
     pub fn agent_triggered(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.triggered")
     }
@@ -894,6 +924,43 @@ mod tests {
             "fq.agent.test-agent.completed"
         );
         assert_eq!(subjects::agent_failed(agent), "fq.agent.test-agent.failed");
+    }
+
+    #[test]
+    fn validate_token_accepts_typical_ids() {
+        for ok in [
+            "agent",
+            "agent_1",
+            "agent-1",
+            "a",
+            "system",
+            "worker-001",
+            "01HXJABC0123456789", // ulid-shaped
+        ] {
+            assert!(
+                subjects::validate_token(ok).is_ok(),
+                "expected {ok:?} to be a valid subject token"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_token_rejects_dot_wildcard_whitespace_and_empty() {
+        use subjects::SubjectTokenError;
+        assert_eq!(
+            subjects::validate_token(""),
+            Err(SubjectTokenError::Empty),
+            "empty token should be rejected"
+        );
+        for bad in ["foo.bar", "agent*", "agent>", "has space", "has\ttab"] {
+            assert!(
+                matches!(
+                    subjects::validate_token(bad),
+                    Err(SubjectTokenError::InvalidChar(_))
+                ),
+                "expected {bad:?} to be rejected as invalid"
+            );
+        }
     }
 
     #[test]

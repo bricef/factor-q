@@ -150,23 +150,14 @@ impl AgentId {
     }
 }
 
-/// Shared validation predicate. Used by both [`AgentId::new`] and the
-/// [`serde::Deserialize`] impl so the wire-boundary check is identical to
-/// the construction-time check.
+/// Local wrapper around [`crate::events::subjects::validate_token`].
+/// Used by both [`AgentId::new`] and the [`serde::Deserialize`] impl
+/// so the wire-boundary check is identical to the construction-time
+/// check, and so the same predicate applies as for any other NATS-
+/// subject-token newtype (e.g. `WorkerId`).
 fn validate(s: &str) -> Result<(), BuildError> {
-    if s.is_empty() {
-        return Err(BuildError::InvalidId(
-            "agent id must not be empty".to_string(),
-        ));
-    }
-    for ch in s.chars() {
-        if ch == '.' || ch == '*' || ch == '>' || ch.is_whitespace() {
-            return Err(BuildError::InvalidId(format!(
-                "agent id must not contain '.', '*', '>', or whitespace: {s:?}"
-            )));
-        }
-    }
-    Ok(())
+    crate::events::subjects::validate_token(s)
+        .map_err(|err| BuildError::InvalidId(format!("agent id {err}")))
 }
 
 impl std::fmt::Display for AgentId {
