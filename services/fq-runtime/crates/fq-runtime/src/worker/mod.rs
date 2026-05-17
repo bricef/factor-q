@@ -26,6 +26,7 @@
 //! without caring which one it picked.
 
 pub mod archive_ack;
+pub mod archive_retry;
 pub mod executor;
 pub mod heartbeat;
 pub mod id;
@@ -35,6 +36,7 @@ pub mod reducer;
 pub mod store;
 
 pub use archive_ack::{ArchiveAckConsumer, ArchiveAckError};
+pub use archive_retry::{ArchiveRetryError, ArchiveRetrySweeper};
 pub use executor::{AgentExecutor, ExecutorError, InvocationOutcome};
 pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, HeartbeatProducer};
 pub use id::WorkerId;

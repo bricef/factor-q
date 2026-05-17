@@ -25,6 +25,48 @@ pub struct Config {
     pub providers: ProvidersConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub worker: WorkerConfig,
+}
+
+/// Worker-side knobs. Today only the archive hand-off retry
+/// cadence and the warn-after threshold are operator-tunable;
+/// the heartbeat cadence is a const because changing it
+/// independently of the control-plane's stale threshold would
+/// change semantics.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkerConfig {
+    /// How often the archive retry sweeper republishes pending
+    /// `invocation.archived` events, in milliseconds. Default
+    /// 10_000 (10s). Lower values shorten time-to-recovery
+    /// after a control-plane restart at the cost of more NATS
+    /// traffic during sustained outages.
+    #[serde(default = "default_archive_retry_interval_ms")]
+    pub archive_retry_interval_ms: u64,
+    /// How long after `terminal_at` (in ms) the sweeper logs a
+    /// warning once per pending row. Default 60_000 (60s). The
+    /// sweeper keeps republishing past this point — the warn is
+    /// the operator-visible signal that the control-plane is
+    /// not acknowledging in a reasonable time.
+    #[serde(default = "default_archive_warn_after_ms")]
+    pub archive_warn_after_ms: i64,
+}
+
+fn default_archive_retry_interval_ms() -> u64 {
+    crate::worker::archive_retry::DEFAULT_RETRY_INTERVAL_MS
+}
+
+fn default_archive_warn_after_ms() -> i64 {
+    crate::worker::archive_retry::DEFAULT_WARN_AFTER_MS
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            archive_retry_interval_ms: default_archive_retry_interval_ms(),
+            archive_warn_after_ms: default_archive_warn_after_ms(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -116,6 +158,7 @@ impl Default for Config {
                 anthropic: Some(AnthropicConfig::default()),
             },
             cache: CacheConfig::default(),
+            worker: WorkerConfig::default(),
         }
     }
 }
