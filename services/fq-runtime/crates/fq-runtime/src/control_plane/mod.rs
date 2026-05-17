@@ -17,10 +17,21 @@
 //!   [`crate::worker::Worker`].
 //! - [`projection`] — the SQLite projection over the audit log
 //!   and the consumer that materialises events into it.
+//! - [`coordination_consumer`] — subscribes to
+//!   `fq.agent.*.invocation.*` and maintains the
+//!   coordination_invocation_owner / coordination_worker tables.
+//!   Handles `invocation.ambiguous` (step 7) and
+//!   `invocation.archived` (step 8); for the latter, writes the
+//!   `invocation_archive` row and publishes
+//!   `fq.worker.{worker_id}.invocation.archive_acked` back to
+//!   the originating worker.
+//! - [`heartbeat_consumer`] — subscribes to
+//!   `fq.worker.*.heartbeat` and updates
+//!   `coordination_worker.last_heartbeat`.
 //!
-//! Future control-plane work (schedules, coordination tables,
-//! pending waits, completed-invocation archive) lands here as
-//! the `data-architecture-v1` plan steps progress.
+//! Future control-plane work (schedules, pending waits,
+//! retention sweep) lands here as the `data-architecture-v1`
+//! plan steps progress.
 
 pub mod coordination_consumer;
 pub mod dispatcher;
