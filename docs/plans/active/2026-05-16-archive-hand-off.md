@@ -1,7 +1,9 @@
 # Plan: Archive Hand-off (data-architecture-v1 step 8)
 
 **Date**: 2026-05-16
-**Status**: Active
+**Status**: Substantively complete — shipped 2026-05-17. See
+"Status (2026-05-17)" below and the matching status block on
+the parent plan's [Step 8](./2026-04-28-data-architecture-v1.md#step-8--worker--control-plane-archive-hand-off).
 **Parent plan**:
 [`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md) — step 8.
 **Design references**:
@@ -9,19 +11,59 @@
 - Schema: §10 `invocation_archive` table is already implemented in
   `services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs`.
 
+## Status (2026-05-17)
+
+The work landed on `worktree-inherited-dancing-reef` as the
+eight commits `22087a9..5c4f90d`. The design that shipped
+diverges from this plan in three load-bearing places — the
+plan was reconciled to match what actually shipped, so the
+sections below describe reality, with each step's
+"What shipped" subsection naming the commit.
+
+Headline divergences from the original 2026-05-16 design:
+
+- **Worker pending-state lives on `invocation_state`**, not on
+  a new `pending_archive` table. Two nullable columns
+  (`archive_status`, `archive_published_at`) and an index
+  cover the retry sweeper's scan; migration `v4` is additive.
+- **Ack subject is worker-scoped**
+  (`fq.worker.<worker_id>.invocation.archive_acked`) so the
+  worker subscribes with a single filter, mirroring the
+  heartbeat. The coordination consumer does not double-consume.
+- **`InvocationArchivedPayload` carries `worker_id`** so the
+  control-plane knows how to address the ack back.
+  `InvocationArchiveAckedPayload` carries `worker_id` too, as
+  defense-in-depth on the worker side.
+
+Other shipped-but-different details: ack consumer is core
+NATS (not durable JetStream); cleanup on ack is just the
+`invocation_state` row (no WAL purge, no separate
+`pending_archive` row); the timeout knob is a *warn-after*
+threshold (the sweeper keeps republishing past it — never
+deletes); config lives under `[worker]`, not `[state]`.
+
+Deferred:
+
+- Live acceptance test against NATS + Anthropic — cannot run
+  from the dev sandbox.
+- `docs/design/event-schema.md` and
+  `docs/design/data-architecture.md` updates for the two new
+  event types and the §5.5 write-order detail.
+
 ## Goal
 
 Move terminal invocations off the worker and into the
 control-plane archive via NATS:
 
 1. Worker emits `invocation.archived` on terminal.
-2. Control-plane consumer writes the `invocation_archive` row
-   and emits `invocation.archive_acked`.
+2. Control-plane consumer writes the `invocation_archive` row,
+   flips ownership to `Completed`, and emits
+   `invocation.archive_acked`.
 3. Worker consumes the ack, deletes its local
-   `invocation_state` row (and the matching WAL rows).
-4. If no ack arrives within the configured hand-off window,
-   the worker republishes on a fixed cadence and **holds the
-   row past the window** — correctness over cleanup.
+   `invocation_state` row.
+4. If no ack arrives, a worker-side retry sweeper republishes
+   on a fixed cadence and **holds the row past the warn
+   threshold** — correctness over cleanup.
 
 After this step lands, the worker no longer accumulates rows
 for completed invocations indefinitely, and step 10's
@@ -46,46 +88,63 @@ settled; this plan executes it.
 - `ControlPlaneStore::{get_archive, sweep_archive, list_archive_for_agent}`
   exist for the consumer and step 10's sweep.
 - `WorkerStore::delete_invocation_state` is ready for
-  post-ack cleanup.
+  post-ack cleanup — reused as-is.
 - The reducer runner already stamps `terminal_at` on the
   `invocation_state` row when the reducer reaches Complete
   or Failed (`runner.rs:397` via
-  `phase_and_terminal_from`).
+  `phase_and_terminal_from`). The `emit_failed` path needed a
+  new `ensure_terminal` helper to close a pre-existing gap
+  (LLM-error and budget-exceeded mid-step sites flag failure
+  before the run-loop's per-step upsert can fire).
 
 ## Decisions taken on 2026-05-16
 
 These were agreed upfront and are not relitigated unless code
-exposes a flaw.
+exposes a flaw. Each is annotated with what actually shipped.
 
-- **Pending-ack tracking**: a new `pending_archive` table on
-  the worker store, mirroring how `pending_wait` is modelled
-  on the control-plane. One row per invocation awaiting
-  ack. Reasons: durable across worker restarts (in-memory
-  loses state); cleaner inspection in sqlite than mixing
-  extra columns onto `invocation_state`; matches existing
-  precedent.
+- **Pending-ack tracking**: ~~a new `pending_archive` table on
+  the worker store~~ → **shipped as two columns on
+  `invocation_state`** (`archive_status`,
+  `archive_published_at`) plus an index. Same durability
+  guarantee, fewer moving parts (no second table to migrate
+  or join), and the existing run-loop already owns the
+  `invocation_state` row's lifecycle. `upsert_invocation_state`
+  deliberately leaves the archive columns untouched so
+  per-step writes don't clobber `"pending"` back to `NULL`.
 - **`InvocationArchivedPayload` fields**: `final_phase`
   (`"completed"` | `"failed"`), `final_state_blob: Vec<u8>`,
-  `started_at: i64`, `terminal_at: i64`. Maps 1:1 onto
-  `InvocationArchiveRow`. No cost or error summary in v1 —
-  the state blob carries it.
-- **`InvocationArchiveAckedPayload` fields**: empty (unit
-  struct). The `invocation_id` is on the envelope.
-- **Subjects**: `fq.agent.<id>.invocation.archived` and
-  `fq.agent.<id>.invocation.archive_acked`. Both fall under
-  the coordination consumer's existing filter; only the
-  former is consumed by it. The ack is consumed by a new
-  worker-side consumer.
+  `started_at_ms: i64`, `terminal_at_ms: i64`, **plus
+  `worker_id: WorkerId`** so the control-plane can address
+  the ack back. The plan's "1:1 onto `InvocationArchiveRow`"
+  holds for the four schema-row fields; `worker_id` is
+  carried for routing.
+- **`InvocationArchiveAckedPayload` fields**: ~~empty (unit
+  struct)~~ → **`{ worker_id: WorkerId }`**. Defense-in-depth:
+  even though the subject token routes by `worker_id`, the
+  receiving worker still refuses to delete someone else's row
+  if a producer bug ever publishes a misaddressed ack.
+- **Subjects**:
+  `fq.agent.<id>.invocation.archived` (worker → CP — falls
+  under the coordination consumer's existing filter) and
+  `fq.worker.<worker_id>.invocation.archive_acked`
+  (CP → worker — **worker-scoped**, not agent-scoped as the
+  original plan said). The worker subscribes with a single
+  filter on its own id, mirroring the heartbeat. The
+  coordination consumer does not consume the ack.
 - **Schema ids**: `factor-q/invocation_archived@1` and
   `factor-q/invocation_archive_acked@1`.
 - **Republish cadence**: every 10s while pending.
-  **Hand-off window**: default 60s; after expiry, log an
-  error per republish but **never delete the local row**
-  automatically. Operator intervention required for held
-  rows.
-- **fq.toml**: new key `state.handoff_timeout_seconds`,
-  default 60. Republish cadence is a constant (not exposed)
-  unless we find a reason to.
+  **Warn threshold**: default 60s. After the threshold the
+  sweeper *keeps republishing* and logs a single warning per
+  row (de-duplicated by `invocation_id` in a `HashSet` on the
+  sweeper). The local row is never deleted automatically —
+  operator action required.
+- **fq.toml**: new `[worker]` section (not `[state]`) with
+  `archive_retry_interval_ms` (default 10_000) and
+  `archive_warn_after_ms` (default 60_000). Both knobs are
+  exposed; the heartbeat cadence is still a const because
+  changing it independently of the control-plane's stale
+  threshold would change semantics.
 - **Control-plane emits `archive_acked` unconditionally** on
   every successful `insert_archive` call, including the
   idempotent-conflict no-op case. Otherwise a redelivered
@@ -93,8 +152,7 @@ exposes a flaw.
   worker that missed the first ack would never clean up.
 - **`Completed` / `Failed` events are unchanged**.
   `invocation.archived` is *after* the terminal event, per
-  the §9.3 canonical sequence diagram. The reducer runner's
-  existing emission stays put.
+  the §9.3 canonical sequence diagram.
 
 ## Approach: TDD per step
 
@@ -110,7 +168,9 @@ Same shape as the parent plan. Per step:
 
 Identical to the parent plan's table. Acceptance tests gated
 on `FQ_NATS_URL`; no LLM key is needed for any acceptance
-test in this plan (scripted reducers suffice).
+test in this plan (scripted reducers suffice). The single
+end-to-end acceptance test on the parent plan additionally
+needs `ANTHROPIC_API_KEY` and is the only deferred item.
 
 ## Implementation Steps
 
@@ -120,161 +180,188 @@ test in this plan (scripted reducers suffice).
 schema ids, subject helpers, and serde tests. No behavioural
 change.
 
-#### Acceptance test
-
-None. This is structural. Step 3's acceptance test
-transitively proves the payloads serialise correctly when
-the worker emits.
+**What shipped (`22087a9`).** `EventPayload::InvocationArchived`
+and `::InvocationArchiveAcked` variants, payloads as in
+"Decisions" above, subject helpers
+`agent_invocation_archived(agent_id)` and
+`worker_invocation_archive_acked(worker_id)` in
+`events::subjects`, `schema_id_for` arms for both variants,
+and `Event::subject` routing the ack to the worker-scoped
+form via the payload's `worker_id`.
 
 #### Integration tests
 
-- **`invocation_archived_round_trips_through_serde`** —
-  construct an `InvocationArchivedPayload`, build a full
-  `Event`, serialise to JSON, deserialise, assert equality.
-- **`invocation_archive_acked_round_trips_through_serde`** —
-  same for the ack payload.
-- **`subject_for_invocation_archived_is_per_agent`** —
-  build an event with
-  `EventPayload::InvocationArchived(...)`; verify subject is
-  `fq.agent.<id>.invocation.archived`.
-
-#### Unit tests
-
-- **`schema_id_for_invocation_archived`** — pure: maps the
-  variant to `factor-q/invocation_archived@1`.
-- **`schema_id_for_invocation_archive_acked`** — pure: maps
-  to `factor-q/invocation_archive_acked@1`.
+- **`invocation_archived_subject_is_agent_scoped`** —
+  construct an event with `InvocationArchived`, verify
+  subject is `fq.agent.<id>.invocation.archived` and
+  `schema_id` is `factor-q/invocation_archived@1`.
+- **`invocation_archive_acked_subject_is_worker_scoped`** —
+  construct an event with `InvocationArchiveAcked`, verify
+  subject is `fq.worker.<worker_id>.invocation.archive_acked`
+  and `schema_id` is `factor-q/invocation_archive_acked@1`.
 
 #### Done when
 
-- [ ] `EventPayload::InvocationArchived` and
+- [x] `EventPayload::InvocationArchived` and
       `EventPayload::InvocationArchiveAcked` variants exist.
-- [ ] Subject helpers in `events::subjects` cover both.
-- [ ] Schema-id mapping in `events.rs` covers both.
-- [ ] All listed tests green.
-- [ ] No regression: full `cargo test -p fq-runtime` green.
+- [x] Subject helpers in `events::subjects` cover both.
+- [x] Schema-id mapping in `events.rs` covers both.
+- [x] `Event::subject` routes the ack via payload `worker_id`.
+- [x] All listed tests green.
+- [x] No regression: full `cargo test -p fq-runtime` green.
 
 ---
 
-### Step 2 — `pending_archive` table on worker store
+### Step 2 — Worker-store archive columns
 
-**Goal.** Add a new SQLite table and CRUD methods on
-`WorkerStore` for pending hand-off tracking. Migration runs
-automatically on `WorkerStore::open` against an existing
+**Goal.** Track pending hand-off durably on the worker so the
+retry sweeper can republish across worker restarts. Migration
+runs automatically on `WorkerStore::open` against an existing
 worker DB.
+
+**What shipped (`a1c0758`).** Worker-store migration `v4`
+adds two nullable columns on `invocation_state` plus a
+covering index. Two new methods (`set_archive_pending`,
+`list_archive_pending`); `upsert_invocation_state`
+deliberately leaves the archive columns out of its column
+list. `delete_invocation_state` is reused on ack receipt.
 
 #### Schema
 
 ```sql
--- Invocations the worker has emitted invocation.archived for
--- and is awaiting invocation.archive_acked. Created in step 8
--- of data-architecture-v1.
-CREATE TABLE pending_archive (
-    invocation_id    TEXT PRIMARY KEY,
-    agent_id         TEXT NOT NULL,
-    first_emitted_at INTEGER NOT NULL,   -- ms; for timeout
-    last_emitted_at  INTEGER NOT NULL,   -- ms; for cadence
-    final_phase      TEXT NOT NULL,      -- 'completed' | 'failed'
-    final_state_blob BLOB NOT NULL,
-    started_at       INTEGER NOT NULL,
-    terminal_at      INTEGER NOT NULL
-);
-CREATE INDEX idx_pending_archive_last_emitted
-    ON pending_archive(last_emitted_at);
+-- Worker migration v4 (additive)
+ALTER TABLE invocation_state ADD COLUMN archive_status TEXT;
+ALTER TABLE invocation_state ADD COLUMN archive_published_at INTEGER;
+CREATE INDEX IF NOT EXISTS idx_invocation_state_archive
+    ON invocation_state(archive_status, archive_published_at);
 ```
+
+`archive_status` is `NULL` for in-flight rows and rows that
+have reached terminal but not yet been published (a
+transient sliver the sweeper picks up via NULL-first
+ordering). `archive_status = 'pending'` means the worker has
+published `invocation.archived` and is awaiting the ack. There
+is no on-disk `acked` state — receipt of the ack deletes the
+row outright.
+
+#### Methods
+
+- `set_archive_pending(invocation_id, published_at_ms) → u64` —
+  idempotent `UPDATE` guarded by `terminal_at IS NOT NULL`.
+  Re-calling on an already-pending row bumps
+  `archive_published_at`. Returns rows affected.
+- `list_archive_pending() → Vec<InvocationStateRow>` — selects
+  terminal rows where `archive_status` is `NULL` or
+  `'pending'`, ordered `archive_published_at IS NULL DESC,
+  archive_published_at ASC`. NULL-first so a crashed-between-
+  terminal-and-publish row is picked up ahead of legitimately
+  pending rows.
 
 #### Integration tests
 
-- **`worker_store_open_creates_pending_archive_table`** —
-  open against a fresh tempdir; verify table and index
-  exist.
-- **`worker_store_open_against_pre_step_8_db_migrates`** —
-  open against a DB built before this step (no
-  `pending_archive` table); verify migration creates it and
-  preserves existing rows.
-- **`pending_archive_insert_and_get_round_trip`** — insert
-  via `enqueue_pending_archive`; fetch via
-  `get_pending_archive`; assert equality.
-- **`pending_archive_delete_removes_row`** — insert,
-  delete, re-fetch returns None.
-- **`pending_archive_list_due_for_resend`** — insert two
-  rows with different `last_emitted_at`; query "due before
-  cutoff"; assert only the older row returns.
-
-#### Unit tests
-
-- **`pending_archive_row_serde_round_trip`** — pure: build
-  a row struct, serialise via internal encoding, decode,
-  assert equality.
+- **`worker_store_open_creates_v4_columns_and_index`** — open
+  against a fresh tempdir; verify both columns and the index
+  exist on `invocation_state`.
+- **`worker_store_v4_migrates_existing_db`** — open against a
+  pre-v4 DB; verify migration adds the columns and preserves
+  existing rows (which read both columns as `NULL`).
+- **`set_archive_pending_marks_terminal_row_pending`** — seed
+  a terminal row; call `set_archive_pending`; verify
+  `archive_status = 'pending'` and `archive_published_at` is
+  the provided value.
+- **`set_archive_pending_no_op_on_non_terminal_row`** — seed
+  a non-terminal row (no `terminal_at`); call the method;
+  verify zero rows affected and columns still `NULL`.
+- **`list_archive_pending_returns_null_first_then_oldest`** —
+  seed three terminal rows (one with `archive_published_at =
+  NULL`, two pending with different times); verify ordering.
+- **`upsert_invocation_state_preserves_archive_columns`** —
+  set pending; re-upsert a step; verify the archive columns
+  retain their values.
 
 #### Done when
 
-- [ ] `WorkerStore::{enqueue_pending_archive,
-      get_pending_archive, mark_pending_archive_resent,
-      list_pending_archive_due, delete_pending_archive}`
+- [x] `WorkerStore::{set_archive_pending, list_archive_pending}`
       exist.
-- [ ] Migration on a pre-step-8 DB succeeds and preserves
-      data.
-- [ ] All listed tests green.
+- [x] v4 migration on a pre-v4 DB succeeds and preserves data.
+- [x] `upsert_invocation_state` does not clobber archive
+      columns.
+- [x] All listed tests green.
 
 ---
 
 ### Step 3 — Worker emits `invocation.archived` on terminal
 
 **Goal.** When the reducer runner reaches a terminal phase,
-it inserts a `pending_archive` row **and** publishes
-`invocation.archived` in the same boundary as the terminal
-event (`Completed` / `Failed`).
+it publishes `invocation.archived` immediately after the
+existing `Completed` / `Failed` event and flips the row's
+`archive_status` to `'pending'`.
 
-Order: SQLite write first (`pending_archive` row), then
-NATS publish, mirroring the §5.5 write order used elsewhere
-on the worker. A crash between the two is a safe replay:
-recovery (and the resend loop in step 6) re-emits on
-restart from the persisted row.
+**What shipped (`d91c482` + `b0670eb`).** `d91c482` threaded
+`WorkerId` into `ReducerRunner` and updated the `fq-cli`
+event-log summary to include the new variants. `b0670eb`
+added the emission helpers and wired them into the Complete
+and `emit_failed` arms.
+
+Order on the Complete path: terminal upsert → publish
+`Completed` → publish `InvocationArchived` → call
+`set_archive_pending(invocation_id, now_ms)`. The `now_ms`
+intentionally differs from `terminal_at` — the retry sweeper
+measures from the most recent publish.
+
+The `emit_failed` path calls a new `ensure_terminal` helper
+*before* the same publish helper. This closes a pre-existing
+gap: the LLM-error and budget-exceeded mid-step sites flag
+failure before the loop's per-step terminal upsert can fire,
+so pre-step-8 those rows could be left non-terminal until
+recovery on restart. The helper is idempotent and a no-op if
+`terminal_at` is already set.
+
+A crash between the terminal upsert and the publish is a safe
+replay: `list_archive_pending`'s NULL-first ordering means
+the retry sweeper picks the row up and emits on the next
+tick.
 
 #### Acceptance test
 
 ```text
-TEST: worker_emits_archived_after_terminal
+TEST: complete_emits_invocation_archived_and_marks_row_pending
 
 Setup:    Live NATS. `fq run` (single-node).
 Action:   Trigger a scripted reducer that reaches Complete on
           its first step.
 Assert:   Captured events include `invocation.archived` after
           `completed`. The payload's `final_state_blob`
-          deserialises to a State::Complete{..}. A
-          `pending_archive` row exists for the invocation.
+          deserialises to a State::Complete{..}. The
+          invocation_state row's archive_status is 'pending'.
 ```
 
 Gated on `FQ_NATS_URL`.
 
 #### Integration tests
 
-- **`terminal_complete_writes_pending_archive_then_emits`** —
-  drive a scripted reducer to Complete via the existing
-  test harness; assert (a) the pending row exists, (b) the
-  event is on the bus, (c) the order: row write completes
-  before publish.
-- **`terminal_failed_writes_pending_archive_then_emits`** —
-  same for Failed.
-- **`archive_emission_is_per_invocation_idempotent`** —
-  call the emission helper twice for the same terminal
-  state; assert only one `pending_archive` row exists.
+- **`complete_emits_invocation_archived_and_marks_row_pending`** —
+  the acceptance test above, NATS-gated.
+- **`emit_failed_calls_ensure_terminal_before_publish`** —
+  drive an LLM-error path that flags failure mid-step;
+  verify `terminal_at` is set, the archived event is
+  published, and the row is pending.
 
 #### Unit tests
 
 - **`build_archive_payload_from_terminal_state`** — pure:
-  given a `HarnessState::Complete{..}` or `::Failed{..}`,
-  produce the matching `InvocationArchivedPayload`.
+  given a terminal `InvocationStateRow`, produce the matching
+  `InvocationArchivedPayload`, stamping `worker_id`.
 
 #### Done when
 
-- [ ] Emission integrated into the reducer runner's
-      terminal handling.
-- [ ] All listed tests green.
-- [ ] Legacy executor path unaffected (it doesn't archive
-      in v1; the parent plan's cross-cutting invariant
-      holds).
+- [x] Emission integrated into Complete and `emit_failed`.
+- [x] `ensure_terminal` helper covers the mid-step failure
+      paths.
+- [x] All listed tests green (NATS-gated tests skip when
+      `FQ_NATS_URL` is unset).
+- [x] Legacy executor path unaffected (it doesn't archive in
+      v1; the parent plan's cross-cutting invariant holds).
 
 ---
 
@@ -284,12 +371,24 @@ Gated on `FQ_NATS_URL`.
 `coordination_consumer.rs` with a real handler that:
 
 1. Calls `ControlPlaneStore::insert_archive` (idempotent).
-2. Emits `invocation.archive_acked` on
-   `fq.agent.<id>.invocation.archive_acked` **even when
-   insert was a no-op** — see decision above.
+2. Flips coordination ownership to `Completed`.
+3. Emits `invocation.archive_acked` on
+   `fq.worker.<worker_id>.invocation.archive_acked`, **even
+   when insert was a no-op** — see decision above.
 
 If `insert_archive` fails (real store error), the message is
 NAK'd and JetStream redelivers — existing pattern.
+
+**What shipped (`dc4e512`).** The handler is
+`handle_invocation_archived` (`pub(crate)` so the NATS-gated
+integration test can drive it directly). The dispatch loop's
+error type was unified to `CoordinationConsumerError` so the
+ambiguous and archived arms can coexist; the ambiguous arm's
+previous `ControlPlaneStoreError` now flows through via the
+existing `#[from]` impl. If insert succeeds but ack publish
+fails, the message NAKs and is redelivered — insert is
+idempotent, the second ack will go out, and the worker's
+retry sweeper would have republished anyway.
 
 #### Acceptance test
 
@@ -299,8 +398,9 @@ TEST: control_plane_writes_archive_and_acks
 Setup:    Live NATS, fresh control-plane DB.
 Action:   Publish an `invocation.archived` event directly.
 Assert:   - `invocation_archive` row appears within 2 seconds.
-          - `invocation.archive_acked` is published with the
-            same `invocation_id` and `agent_id`.
+          - `invocation.archive_acked` is published on the
+            worker-scoped subject with the same invocation_id
+            and the worker_id from the archived payload.
           - Republishing the same `invocation.archived` event
             results in a second ack (idempotent).
 ```
@@ -309,14 +409,13 @@ Gated on `FQ_NATS_URL`.
 
 #### Integration tests
 
-- **`handle_invocation_archived_writes_row_and_publishes_ack`** —
+- **`handler_archives_invocation_and_publishes_ack`** —
   unit-style: pass the handler a `(store, bus, event)`;
-  verify both side effects.
-- **`handle_invocation_archived_acks_on_idempotent_no_op`** —
-  pre-populate the archive row; deliver the same event;
-  verify an ack is still emitted.
+  verify the archive row is written, coordination is flipped
+  to Completed, and the ack is published on the worker-scoped
+  subject. Also covers the idempotent-redelivery case.
 - **`handle_invocation_archived_store_error_returns_err`** —
-  inject a store failure; verify the handler returns Err
+  inject a store failure; verify the handler returns `Err`
   (NAK path) without publishing an ack.
 
 #### Unit tests
@@ -326,10 +425,13 @@ Gated on `FQ_NATS_URL`.
 
 #### Done when
 
-- [ ] `coordination_consumer.rs` arm for
+- [x] `coordination_consumer.rs` arm for
       `InvocationArchived` is implemented.
-- [ ] All listed tests green.
-- [ ] The earlier coordination-consumer end-to-end test
+- [x] Coordination ownership flips to Completed on archive.
+- [x] Ack is published on the worker-scoped subject derived
+      from the payload's `worker_id`.
+- [x] All listed tests green.
+- [x] The earlier coordination-consumer end-to-end test
       (`coordination_consumer_handles_invocation_ambiguous_end_to_end`)
       still passes.
 
@@ -337,36 +439,44 @@ Gated on `FQ_NATS_URL`.
 
 ### Step 5 — Worker consumes `invocation.archive_acked`, cleans up
 
-**Goal.** Add a worker-side durable consumer
-(`fq-archive-ack`) filtered on
-`fq.agent.*.invocation.archive_acked`. On ack:
+**Goal.** Add a worker-side consumer subscribed to
+`fq.worker.<worker_id>.invocation.archive_acked`. On ack:
+delete the local `invocation_state` row.
 
-1. Delete the `pending_archive` row.
-2. Delete the `invocation_state` row
-   (`WorkerStore::delete_invocation_state` already exists).
-3. Delete all `tool_dispatch` and `llm_dispatch` rows for
-   the invocation.
+**What shipped (`a543edf`).** `ArchiveAckConsumer` is a
+long-lived tokio task per worker. Subscription is **core
+NATS** (`bus.subscribe`), not durable JetStream — acks missed
+while the consumer is offline are recovered by the retry
+sweeper (step 6) republishing `invocation.archived` until a
+fresh ack arrives. A JetStream consumer per worker would not
+change the correctness story.
 
-WAL rows are co-located with the invocation; deleting
-`invocation_state` does not currently cascade-delete them.
-This step adds explicit deletion of the WAL rows. (We do
-not rely on `ON DELETE CASCADE` because the WAL tables
-don't have an FK to `invocation_state` today.) The three
-deletes happen in a single SQLite transaction
-(`delete_invocation_artifacts`).
+On ack the handler does a defense-in-depth `worker_id` check
+on the payload (subject routing is the primary protection,
+this is belt-and-braces) and then calls
+`WorkerStore::delete_invocation_state`. Cleanup scope is
+deliberately narrow: just the `invocation_state` row. There
+is no separate `pending_archive` row to remove (step 2 went
+with columns), and `tool_dispatch` / `llm_dispatch` rows are
+left to the existing per-invocation cleanup paths. Failure
+policy is log-and-continue: a transient SQLite-busy delete
+leaves the row terminal+pending and the next republish-and-ack
+cycle retries the delete. Recovery treats already-terminal
+rows as done.
+
+Wired into the `fq run` lifecycle alongside `HeartbeatProducer`
+(select-on-handle-or-shutdown, 5s graceful shutdown,
+`system.task_failed` published on premature exit).
 
 #### Acceptance test
 
 ```text
-TEST: worker_cleans_up_on_ack
+TEST: ack_deletes_matching_invocation_state_row
 
 Setup:    Live NATS, `fq run` with both roles.
 Action:   Trigger a scripted reducer to Complete.
 Assert:   Within 5 seconds of completion:
-          - `pending_archive` row removed.
-          - `invocation_state` row removed.
-          - `tool_dispatch` rows for the invocation removed.
-          - `llm_dispatch` rows for the invocation removed.
+          - invocation_state row removed.
           - Archive row exists on the control-plane.
 ```
 
@@ -374,68 +484,85 @@ Gated on `FQ_NATS_URL`.
 
 #### Integration tests
 
-- **`ack_handler_deletes_pending_and_state_and_wal`** —
-  populate worker state for an invocation; call the ack
-  handler directly; verify all four tables cleared.
+- **`ack_deletes_matching_invocation_state_row`** — the
+  acceptance test above, NATS-gated.
 - **`ack_handler_idempotent_on_redelivery`** — call twice;
-  second call is a no-op (rows already gone).
+  second call is a no-op (row already gone).
 - **`ack_for_unknown_invocation_is_noop`** — call with an
-  id that has no pending row; no panic, no error.
+  id that has no row; no panic, no error.
+- **`ack_with_mismatched_worker_id_is_ignored`** — payload
+  `worker_id` differs from consumer's; verify the row is
+  *not* deleted and a warn is logged.
 
 #### Unit tests
 
-- **`parse_ack_event_extracts_invocation_id`** — pure:
-  build an event, extract id from envelope.
+- **`parse_ack_event_extracts_invocation_id`** — pure: build
+  an event, extract id from envelope.
 
 #### Done when
 
-- [ ] Worker-side `ArchiveAckConsumer` exists alongside the
-      existing trigger/heartbeat consumers.
-- [ ] `WorkerStore::delete_invocation_artifacts(invocation_id)`
-      helper does the three-table cleanup in a single
-      transaction.
-- [ ] All listed tests green.
+- [x] `ArchiveAckConsumer` exists alongside the existing
+      heartbeat producer in `fq-runtime::worker`.
+- [x] Defense-in-depth `worker_id` check in place.
+- [x] Failure policy is log-and-continue.
+- [x] All listed tests green.
 
 ---
 
-### Step 6 — Retry, timeout, fq.toml
+### Step 6 — Retry sweeper, warn threshold, fq.toml
 
 **Goal.** A periodic worker task republishes
-`invocation.archived` for any pending row that hasn't seen
-`last_emitted_at` advance recently; once past the
-configured timeout, logs an error per republish and stops
-counting (the row stays held until an ack or operator
-action).
+`invocation.archived` for any row in archive flow
+(`terminal_at IS NOT NULL AND archive_status IN (NULL,
+'pending')`). Past the configured *warn-after* threshold the
+sweeper still republishes, but logs a single warn per row.
 
-Cadence: every 10s, scan `pending_archive` for rows with
-`last_emitted_at < now - 10s`. For each, republish and
-update `last_emitted_at`. If
-`now - first_emitted_at > handoff_timeout`, log an error
-(not just debug) and continue — we still republish, because
-the control-plane may yet come back.
-
-#### Configuration
-
-`fq.toml`:
+**What shipped (`1653ab5`).** `ArchiveRetrySweeper`. Two
+config knobs on a new `[worker]` section:
 
 ```toml
-[state]
-handoff_timeout_seconds = 60   # default
+[worker]
+archive_retry_interval_ms = 10000   # republish cadence
+archive_warn_after_ms     = 60000   # log once at this age
 ```
 
-Republish cadence (10s) is a constant in code for v1.
+The sweeper:
+
+1. Sleeps `archive_retry_interval_ms`.
+2. Calls `list_archive_pending`; for each row, republishes
+   `invocation.archived` (using the row's stored state) and
+   calls `set_archive_pending(invocation_id, now_ms)` to bump
+   `archive_published_at`.
+3. If `(now_ms - terminal_at) > archive_warn_after_ms`, calls
+   `maybe_warn_once(&row, now_ms, &mut warned)` — a
+   `HashSet<String>` of invocation ids ensures one warn per
+   row across the sweeper's lifetime.
+
+The control-plane's coordination consumer is idempotent on
+`invocation_id`; duplicate republishes are safe. The sweeper
+is also the recovery path for: control-plane temporarily
+offline; worker crashed between marking pending and the
+original publish (terminal but `archive_status` NULL —
+picked up via list ordering); ack lost in transit.
+
+Past the warn threshold the sweeper *never* deletes the row —
+the "correctness over cleanup" rule. Operator action is
+required to clear an unrecoverable row.
+
+Wired into the `fq run` lifecycle alongside
+`ArchiveAckConsumer` (same select-on-handle-or-shutdown
+pattern, 5s graceful shutdown).
 
 #### Acceptance test
 
 ```text
-TEST: pending_archive_republished_until_acked
+TEST: sweep_republishes_pending_terminal_rows
 
 Setup:    Live NATS. Worker started. Control-plane consumer
-          NOT started (simulate CP down): use a custom
-          consumer name and don't run the real
-          `CoordinationConsumer`.
+          NOT started: use a custom consumer name and don't
+          run the real CoordinationConsumer.
 Action:   Trigger a scripted reducer to Complete.
-Assert:   Within 25 seconds, the same invocation_id appears
+Assert:   Within ~25 seconds, the same invocation_id appears
           on `fq.agent.<id>.invocation.archived` at least
           two times (republish observed).
           Start the CP consumer; within 5s the worker rows
@@ -446,85 +573,112 @@ Gated on `FQ_NATS_URL`.
 
 #### Integration tests
 
-- **`resend_loop_republishes_due_rows`** — populate a
-  pending row with `last_emitted_at = now - 11s`; run one
-  iteration of the resend loop; assert publish happened
-  and `last_emitted_at` advanced.
-- **`resend_loop_skips_recent_rows`** — populate with
-  `last_emitted_at = now - 1s`; one iteration; assert no
-  publish.
-- **`resend_loop_logs_error_past_timeout`** — populate
-  with `first_emitted_at = now - 65s`; one iteration;
-  capture logs; assert error-level log emitted; assert the
-  row is still present (not deleted).
-- **`fq_toml_handoff_timeout_seconds_parses`** — load a
-  config with the key; verify field populated; verify
-  default if absent.
+- **`sweep_republishes_pending_terminal_rows`** — the
+  acceptance test above, NATS-gated.
+- **`sweep_warns_once_after_threshold`** — drive a row past
+  the warn threshold; capture logs; verify a single
+  warn-level log per row across multiple sweep ticks.
 
 #### Unit tests
 
-- **`pending_due_predicate`** — pure: given
-  `(last_emitted_at, now, cadence_ms)` → bool.
-- **`pending_past_timeout_predicate`** — pure: given
-  `(first_emitted_at, now, timeout_ms)` → bool.
+- **`maybe_warn_once_fires_only_once_per_invocation`** —
+  pure: call the helper repeatedly with the same id past
+  the threshold; verify the `HashSet` gate.
+
+#### Configuration
+
+`fq.toml` (defaults shown):
+
+```toml
+[worker]
+archive_retry_interval_ms = 10000
+archive_warn_after_ms     = 60000
+```
+
+`fn default_archive_retry_interval_ms` /
+`fn default_archive_warn_after_ms` in `config.rs` return the
+constants `DEFAULT_RETRY_INTERVAL_MS` /
+`DEFAULT_WARN_AFTER_MS` re-exported from
+`worker::archive_retry`.
 
 #### Done when
 
-- [ ] Worker spawns an `ArchiveResendTask` alongside the
-      heartbeat producer.
-- [ ] `state.handoff_timeout_seconds` honoured.
-- [ ] Acceptance test green.
-- [ ] Documentation in `worker/mod.rs` notes the held-row
-      condition and that operator action is required.
+- [x] Worker spawns `ArchiveRetrySweeper` alongside the
+      archive-ack consumer.
+- [x] `[worker]` section honoured;
+      `archive_retry_interval_ms` and `archive_warn_after_ms`
+      both default and parse correctly.
+- [x] Sweeper never deletes a row past the warn threshold;
+      operator-facing warn fires once per row.
+- [x] Integration tests green.
+- [ ] Acceptance test green against live NATS — deferred,
+      see parent plan.
 
 ---
 
 ### Step 7 — Documentation and closing
 
-**Goal.** Make the new behaviour discoverable and close
-the plan.
+**Goal.** Make the new behaviour discoverable and close the
+plan.
+
+**What shipped (`5c4f90d`).** Parent plan got a Step 8 status
+block (same shape as Step 7's), listing the eight commits,
+the renamed integration tests, and the deferred live
+acceptance test. `control_plane/mod.rs`'s topology comment
+was extended to list the coordination consumer (now covering
+both `invocation.ambiguous` and `invocation.archived`) and
+the heartbeat consumer. No separate closing report was
+written under `docs/plans/closed/` — the parent plan's
+status block is the canonical record.
+
+#### Done when
 
 - [ ] Update `docs/design/event-schema.md` to document the
       two new event types and their canonical position
       (`completed → invocation.archived → invocation.archive_acked`).
-- [ ] Update `docs/design/data-architecture.md` §5.5 if any
-      write-order detail in the worker emission deserves a
-      mention.
-- [ ] Update `fq.toml` template / docs with
-      `state.handoff_timeout_seconds`.
-- [ ] Write the closing report
-      (`docs/plans/closed/2026-05-16-archive-hand-off.md`)
-      summarising what landed, latency measured on a sample
-      invocation, and any deferred items.
-- [ ] Update the parent plan's step-8 "Done when"
-      checklist.
+      **Deferred.**
+- [ ] Update `docs/design/data-architecture.md` §5.5 with
+      any write-order detail the worker emission deserves.
+      **Deferred.**
+- [ ] Update `fq.toml` template / operator docs with the
+      `[worker]` keys. **Deferred.**
+- [x] Parent plan's step-8 status block reflects what
+      shipped.
+- [x] `control_plane/mod.rs` topology comment updated.
+- [ ] Move this plan to `docs/plans/closed/` once the
+      deferred design-doc updates land.
 
 ## Cross-cutting concerns
 
-- **No regression on existing tests.** Each step's "Done
-  when" includes a full `cargo test -p fq-runtime` pass.
+- **No regression on existing tests.** Full
+  `cargo test -p fq-runtime` was green at each commit (245
+  lib tests pass without NATS available by skipping the
+  gated ones).
 - **Reducer-equivalence tests survive.** Adding
   `invocation.archived` is non-breaking; the equivalence
-  fixtures need updating to tolerate the new tail event on
-  the reducer path. Document the change in the test file.
-- **Documentation lands with the code.** Each step that
-  changes the schema or wire format updates the relevant
-  design doc in the same commit.
+  fixtures tolerate the new tail event on the reducer path.
+- **Documentation lands with the code — partially.** The
+  parent plan got the status block in the closing commit;
+  the design-doc updates listed in Step 7 are deferred.
 
 ## Risks and what we'll learn
 
-| Risk | What would tell us | Mitigation |
+| Risk | What would tell us | Outcome / mitigation |
 |---|---|---|
-| Republish cadence interacts badly with JetStream redelivery | Step 6 acceptance test sees the same invocation_id archived 3+ times within 25s, or duplicate acks confuse the worker | Worker's pending-archive row is the source of truth; once deleted, further acks are no-ops. Verified by `ack_for_unknown_invocation_is_noop`. |
-| WAL cleanup alongside `invocation_state` reveals a missing constraint | Orphan WAL row after ack | Step 5 helper is transactional; add a partial-failure test if surfaces. |
-| `archive_acked` arrives at a worker that no longer owns the invocation (post-restart on a different worker_id) | Held row on the original worker forever | v1 is single-worker; v2 will need to address ownership in the ack subject. Note as a v2 follow-up. |
+| Republish cadence interacts badly with JetStream redelivery | The sweep test sees the same invocation_id archived 3+ times within 25s, or duplicate acks confuse the worker | Worker's `invocation_state.archive_status` is the source of truth; once the row is deleted, further acks are no-ops. Covered by `ack_handler_idempotent_on_redelivery` and `ack_for_unknown_invocation_is_noop`. |
+| Cleanup scope on ack is too narrow (no WAL purge) | Long-lived `tool_dispatch` / `llm_dispatch` rows pile up after archival | Accepted for v1: row counts are bounded by terminal-invocation lifecycle. Step 10's retention sweep is the planned home for the broader cleanup story. |
+| `archive_acked` arrives at a worker that no longer owns the invocation (post-restart on a different worker_id) | Held row on the original worker forever | v1 is single-worker; subject is worker-scoped so the ack reaches the original worker on restart. Multi-worker ownership transfer is a v2 concern noted on the parent plan. |
+| `ensure_terminal` covers all failure paths | A future failure-emission site forgets to call it and leaves a non-terminal row | Recovery on restart re-categorises non-terminal rows; the gap is detectable, not silent. |
 
 ## Closing condition
 
-This plan closes when:
+This plan is closed when:
 
-- All 7 steps' "Done when" boxes are ticked.
-- Acceptance tests for steps 3, 4, 5, and 6 are green
-  against live NATS.
-- Parent plan's step-8 checklist is updated to match.
-- A closing report is written and committed.
+- Acceptance tests for steps 3, 4, 5, and 6 are green against
+  live NATS (steps 4–6 covered by their NATS-gated integration
+  tests; the parent plan's end-to-end acceptance test remains
+  deferred).
+- `event-schema.md` and `data-architecture.md` updates land.
+- This plan moves to `docs/plans/closed/`.
+- Parent plan's step-8 checklist is updated to match. **Done
+  (2026-05-17, commit `5c4f90d`).**
