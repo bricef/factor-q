@@ -128,6 +128,15 @@ pub mod subjects {
         format!("fq.agent.{agent_id}.invocation.ambiguous")
     }
 
+    /// Worker → control-plane archive hand-off (step 8 of
+    /// data-architecture.md). Emitted by the worker after an
+    /// invocation reaches terminal state, carrying the final
+    /// state blob the control-plane writes into
+    /// `invocation_archive`.
+    pub fn agent_invocation_archived(agent_id: &str) -> String {
+        format!("fq.agent.{agent_id}.invocation.archived")
+    }
+
     pub fn agent_completed(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.completed")
     }
@@ -143,6 +152,15 @@ pub mod subjects {
     /// worker stale when this signal falls behind its threshold.
     pub fn worker_heartbeat(worker_id: &str) -> String {
         format!("fq.worker.{worker_id}.heartbeat")
+    }
+
+    /// Control-plane → worker acknowledgement of an
+    /// `invocation.archived` hand-off. Worker-scoped so a worker
+    /// can subscribe to its own acks with a single filter
+    /// (mirrors the heartbeat naming). The invocation_id lives
+    /// on the envelope.
+    pub fn worker_invocation_archive_acked(worker_id: &str) -> String {
+        format!("fq.worker.{worker_id}.invocation.archive_acked")
     }
 }
 
@@ -282,6 +300,7 @@ impl Event {
             EventPayload::ToolResult(_) => subjects::agent_tool_result(agent),
             EventPayload::LlmDispatched(_) => subjects::agent_llm_dispatched(agent),
             EventPayload::InvocationAmbiguous(_) => subjects::agent_invocation_ambiguous(agent),
+            EventPayload::InvocationArchived(_) => subjects::agent_invocation_archived(agent),
             EventPayload::Completed(_) => subjects::agent_completed(agent),
             EventPayload::Failed(_) => subjects::agent_failed(agent),
             EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
@@ -292,6 +311,9 @@ impl Event {
             // payload's `worker_id`, not from `envelope.agent_id`
             // (which is the system sentinel for non-agent events).
             EventPayload::WorkerHeartbeat(p) => subjects::worker_heartbeat(p.worker_id.as_str()),
+            EventPayload::InvocationArchiveAcked(p) => {
+                subjects::worker_invocation_archive_acked(p.worker_id.as_str())
+            }
         }
     }
 }
@@ -404,6 +426,8 @@ pub fn schema_id_for(payload: &EventPayload) -> &'static str {
         EventPayload::Completed(_) => "factor-q/completed@1",
         EventPayload::Failed(_) => "factor-q/failed@1",
         EventPayload::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
+        EventPayload::InvocationArchived(_) => "factor-q/invocation_archived@1",
+        EventPayload::InvocationArchiveAcked(_) => "factor-q/invocation_archive_acked@1",
         EventPayload::SystemStartup(_) => "factor-q/system_startup@1",
         EventPayload::SystemShutdown(_) => "factor-q/system_shutdown@1",
         EventPayload::SystemTaskFailed(_) => "factor-q/system_task_failed@1",
@@ -512,6 +536,23 @@ pub enum EventPayload {
     /// control-plane consumes the event to surface the case
     /// via `fq recover` (step 9).
     InvocationAmbiguous(InvocationAmbiguousPayload),
+
+    /// Worker → control-plane archive hand-off (step 8 of
+    /// data-architecture.md). Emitted after an invocation
+    /// reaches terminal state with the final reducer-state blob
+    /// the control-plane needs to write
+    /// `invocation_archive`. The worker holds onto its local
+    /// `invocation_state` row until the corresponding
+    /// [`InvocationArchiveAcked`] arrives.
+    InvocationArchived(InvocationArchivedPayload),
+
+    /// Control-plane → worker acknowledgement of an
+    /// [`InvocationArchived`] event. On receipt the worker
+    /// deletes the local `invocation_state` row. The invocation
+    /// id lives on the envelope; the payload carries `worker_id`
+    /// only because the subject is built from it (mirroring
+    /// [`WorkerHeartbeat`]).
+    InvocationArchiveAcked(InvocationArchiveAckedPayload),
 
     // Runtime lifecycle
     SystemStartup(SystemStartupPayload),
@@ -717,6 +758,44 @@ pub struct InvocationAmbiguousPayload {
     pub stuck_call_id: String,
     /// Free-form note describing the operator-relevant context.
     pub note: String,
+}
+
+/// Payload for [`EventPayload::InvocationArchived`]. Carries
+/// the data the control-plane needs to populate
+/// `invocation_archive`: emitting worker, terminal phase, final
+/// state blob, and the timestamps the archive row's primary
+/// index uses. `agent_id` and `invocation_id` live on the
+/// envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationArchivedPayload {
+    /// Worker that owned the invocation. The control-plane uses
+    /// this to address the ack back at
+    /// `fq.worker.{worker_id}.invocation.archive_acked`.
+    pub worker_id: crate::worker::WorkerId,
+    /// Phase label as written into `invocation_state.phase` at
+    /// terminal — `completed` or `failed`. Domain string, not a
+    /// typed enum, because the phase vocabulary lives in the
+    /// reducer harness, not the events layer.
+    pub final_phase: String,
+    /// Reducer state at the time of terminal. Opaque blob; the
+    /// control-plane stores it as-is. Default serde encoding
+    /// (JSON array of integers) is used to keep parity with the
+    /// worker store's `state_blob` shape; if blob sizes start to
+    /// strain the wire format, swap in `serde_bytes` here and
+    /// in `InvocationStateRow`.
+    pub final_state_blob: Vec<u8>,
+    /// `invocation_state.started_at` (unix ms).
+    pub started_at_ms: i64,
+    /// `invocation_state.terminal_at` (unix ms).
+    pub terminal_at_ms: i64,
+}
+
+/// Payload for [`EventPayload::InvocationArchiveAcked`]. The
+/// invocation id lives on the envelope; the payload carries
+/// `worker_id` only because the subject token comes from there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationArchiveAckedPayload {
+    pub worker_id: crate::worker::WorkerId,
 }
 
 /// Published when a tool invocation completes (success or failure).
@@ -961,6 +1040,67 @@ mod tests {
             "fq.agent.test-agent.completed"
         );
         assert_eq!(subjects::agent_failed(agent), "fq.agent.test-agent.failed");
+    }
+
+    #[test]
+    fn invocation_archived_subject_is_agent_scoped() {
+        // `InvocationArchived` rides on the same agent-scoped
+        // namespace as `InvocationAmbiguous` so the coordination
+        // consumer's `fq.agent.*.invocation.*` filter catches it.
+        let agent_id = AgentId::new("researcher").unwrap();
+        let invocation_id = Uuid::now_v7();
+        let worker_id = crate::worker::WorkerId::new("worker-007").unwrap();
+        let event = Event::new(
+            agent_id,
+            invocation_id,
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: worker_id.clone(),
+                final_phase: "completed".to_string(),
+                final_state_blob: vec![1, 2, 3],
+                started_at_ms: 1_700_000_000_000,
+                terminal_at_ms: 1_700_000_001_000,
+            }),
+        );
+        assert_eq!(event.subject(), "fq.agent.researcher.invocation.archived");
+        assert_eq!(event.envelope.schema_id, "factor-q/invocation_archived@1");
+        assert_eq!(event.envelope.invocation_id, invocation_id);
+        match &event.payload {
+            EventPayload::InvocationArchived(p) => {
+                assert_eq!(p.worker_id, worker_id);
+                assert_eq!(p.final_phase, "completed");
+                assert_eq!(p.final_state_blob, vec![1, 2, 3]);
+            }
+            other => panic!("wrong payload variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invocation_archive_acked_subject_is_worker_scoped() {
+        // The ack rides on `fq.worker.{worker_id}.invocation.archive_acked`
+        // so a worker can subscribe to its own acks with a
+        // single filter. Coordination consumer's
+        // `fq.agent.*.invocation.*` filter does not match.
+        let agent_id = AgentId::new("researcher").unwrap();
+        let invocation_id = Uuid::now_v7();
+        let worker_id = crate::worker::WorkerId::new("worker-007").unwrap();
+        let event = Event::new(
+            agent_id,
+            invocation_id,
+            EventPayload::InvocationArchiveAcked(InvocationArchiveAckedPayload {
+                worker_id: worker_id.clone(),
+            }),
+        );
+        assert_eq!(
+            event.subject(),
+            "fq.worker.worker-007.invocation.archive_acked"
+        );
+        assert_eq!(
+            event.envelope.schema_id,
+            "factor-q/invocation_archive_acked@1"
+        );
+        // Envelope keeps the real invocation_id so the worker
+        // can identify which row to delete.
+        assert_eq!(event.envelope.invocation_id, invocation_id);
     }
 
     #[test]
