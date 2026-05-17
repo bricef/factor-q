@@ -209,6 +209,8 @@ mod tests {
             updated_at: 0,
             terminal_at: None,
             workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
         }
     }
 
@@ -390,6 +392,8 @@ mod tests {
                     updated_at: 1,
                     terminal_at: None,
                     workspace_ref: None,
+                    archive_status: None,
+                    archive_published_at: None,
                 })
                 .await
                 .unwrap();
@@ -436,6 +440,8 @@ mod tests {
             updated_at: 1,
             terminal_at: Some(2),
             workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
         };
         store.upsert_invocation_state(&terminal_row).await.unwrap();
         terminal_row.invocation_id = "terminal-2".to_string();

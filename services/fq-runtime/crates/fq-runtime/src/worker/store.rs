@@ -67,7 +67,17 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   workspace-storage layer (likely content-addressed) without
 ///   forcing a schema change at that point. See
 ///   data-architecture.md §3.3.
-pub const WORKER_SCHEMA_VERSION: u32 = 3;
+/// - **v4** — adds `archive_status TEXT NULL` and
+///   `archive_published_at INTEGER NULL` to `invocation_state`,
+///   tracking the worker → control-plane archive hand-off (step
+///   8 of data-architecture-v1). Values: `NULL` (no archive
+///   flow yet, pre-terminal); `"pending"` (an
+///   `invocation.archived` event has been published and the
+///   worker is awaiting the control-plane ack). The retry
+///   sweeper uses `archive_published_at` to decide when to
+///   republish. On `invocation.archive_acked` the row is
+///   deleted outright.
+pub const WORKER_SCHEMA_VERSION: u32 = 4;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -147,6 +157,16 @@ ALTER TABLE llm_dispatch ADD COLUMN is_error INTEGER;
 /// Currently always populated as NULL.
 const WORKER_MIGRATION_V3_SQL: &str = r#"
 ALTER TABLE invocation_state ADD COLUMN workspace_ref TEXT;
+"#;
+
+/// v4 migration: add `archive_status` and `archive_published_at`
+/// to `invocation_state`, plus an index supporting the retry
+/// sweeper's "pending and stale" lookup.
+const WORKER_MIGRATION_V4_SQL: &str = r#"
+ALTER TABLE invocation_state ADD COLUMN archive_status TEXT;
+ALTER TABLE invocation_state ADD COLUMN archive_published_at INTEGER;
+CREATE INDEX IF NOT EXISTS idx_invocation_state_archive
+    ON invocation_state(archive_status, archive_published_at);
 "#;
 
 /// One of the three WAL states a dispatch can be in.
@@ -232,6 +252,16 @@ pub struct InvocationStateRow {
     /// reserved for the future workspace-storage layer
     /// (likely content-addressed).
     pub workspace_ref: Option<String>,
+    /// Archive hand-off state. `None` while the invocation is
+    /// in flight (no archive yet). `Some("pending")` once the
+    /// worker has published `invocation.archived` and is
+    /// awaiting the control-plane ack. There is no `acked`
+    /// state on disk — receipt of the ack deletes the row.
+    pub archive_status: Option<String>,
+    /// When the most recent `invocation.archived` event was
+    /// published, in unix ms. Used by the retry sweeper to
+    /// decide when to republish.
+    pub archive_published_at: Option<i64>,
 }
 
 /// Worker-side store. Cheap to clone (the underlying connection
@@ -365,7 +395,12 @@ impl WorkerStore {
                 sqlx::query(&stmt).execute(&self.pool).await?;
             }
         }
-        // Future migrations: 3 → 4, 4 → 5, etc.
+        if from < 4 && to >= 4 {
+            for stmt in split_sql(WORKER_MIGRATION_V4_SQL) {
+                sqlx::query(&stmt).execute(&self.pool).await?;
+            }
+        }
+        // Future migrations: 4 → 5, etc.
         Ok(())
     }
 
@@ -675,6 +710,11 @@ impl WorkerStore {
     /// Logs a warning at [`STATE_BLOB_WARN_THRESHOLD_BYTES`] —
     /// useful telemetry on whether the inline-in-SQLite
     /// assumption is holding for the operator's workload.
+    ///
+    /// Does **not** write `archive_status` /
+    /// `archive_published_at` — those are owned by
+    /// [`Self::set_archive_pending`] and preserved across
+    /// upserts. The fields on `row` are ignored.
     pub async fn upsert_invocation_state(
         &self,
         row: &InvocationStateRow,
@@ -718,6 +758,63 @@ impl WorkerStore {
         Ok(())
     }
 
+    /// Mark a terminal invocation as awaiting archive ack.
+    /// Called after the worker publishes `invocation.archived`;
+    /// the retry sweeper uses `archive_published_at` to decide
+    /// when to republish, and the ack consumer deletes the row
+    /// outright on receipt of `invocation.archive_acked`.
+    ///
+    /// Idempotent: re-calling on a pending row simply bumps
+    /// `archive_published_at`, which is what the sweeper wants
+    /// when republishing.
+    pub async fn set_archive_pending(
+        &self,
+        invocation_id: &str,
+        published_at: i64,
+    ) -> Result<u64, WorkerStoreError> {
+        let res = sqlx::query(
+            r#"
+            UPDATE invocation_state
+            SET archive_status = 'pending',
+                archive_published_at = ?
+            WHERE invocation_id = ?
+              AND terminal_at IS NOT NULL
+            "#,
+        )
+        .bind(published_at)
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// All rows in archive-flow: terminal but the
+    /// control-plane has not yet acked. Returned in
+    /// `archive_published_at`-ascending order so the retry
+    /// sweeper sees the oldest pending hand-offs first.
+    /// `archive_published_at IS NULL` rows are included and
+    /// sort first (terminal but the publish step has not yet
+    /// run — typically a transient sliver, but the sweeper
+    /// republishes them too so the flow is self-healing).
+    pub async fn list_archive_pending(
+        &self,
+    ) -> Result<Vec<InvocationStateRow>, WorkerStoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT invocation_id, agent_id, schema_version, phase, state_blob,
+                   iteration, started_at, updated_at, terminal_at, workspace_ref,
+                   archive_status, archive_published_at
+            FROM invocation_state
+            WHERE terminal_at IS NOT NULL
+              AND (archive_status IS NULL OR archive_status = 'pending')
+            ORDER BY archive_published_at IS NULL DESC, archive_published_at ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_invocation_state).collect()
+    }
+
     /// Fetch one invocation's persisted state by id.
     pub async fn get_invocation_state(
         &self,
@@ -726,7 +823,8 @@ impl WorkerStore {
         let row = sqlx::query(
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   iteration, started_at, updated_at, terminal_at, workspace_ref
+                   iteration, started_at, updated_at, terminal_at, workspace_ref,
+                   archive_status, archive_published_at
             FROM invocation_state
             WHERE invocation_id = ?
             "#,
@@ -749,7 +847,8 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   iteration, started_at, updated_at, terminal_at, workspace_ref
+                   iteration, started_at, updated_at, terminal_at, workspace_ref,
+                   archive_status, archive_published_at
             FROM invocation_state
             WHERE terminal_at IS NULL
             ORDER BY started_at
@@ -908,6 +1007,8 @@ fn row_to_invocation_state(
         updated_at: row.get("updated_at"),
         terminal_at: row.get("terminal_at"),
         workspace_ref: row.get("workspace_ref"),
+        archive_status: row.get("archive_status"),
+        archive_published_at: row.get("archive_published_at"),
     })
 }
 
@@ -1235,6 +1336,8 @@ mod tests {
             updated_at: 1_010,
             terminal_at: None,
             workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
         };
         store.upsert_invocation_state(&row).await.unwrap();
         let back = store.get_invocation_state("inv-x").await.unwrap().unwrap();
@@ -1264,6 +1367,8 @@ mod tests {
             updated_at: 1,
             terminal_at: None,
             workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
         };
         let mut done = alive.clone();
         done.invocation_id = "done".to_string();
@@ -1292,6 +1397,8 @@ mod tests {
             updated_at: 1,
             terminal_at: Some(2),
             workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
         };
         store.upsert_invocation_state(&row).await.unwrap();
         let n = store.delete_invocation_state("to-delete").await.unwrap();
@@ -1303,6 +1410,121 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn terminal_state_row(id: &str, terminal_at_ms: i64) -> InvocationStateRow {
+        InvocationStateRow {
+            invocation_id: id.to_string(),
+            agent_id: "a".to_string(),
+            schema_version: 1,
+            phase: "completed".to_string(),
+            state_blob: vec![],
+            iteration: 0,
+            started_at: 1,
+            updated_at: terminal_at_ms,
+            terminal_at: Some(terminal_at_ms),
+            workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn set_archive_pending_marks_terminal_row_pending() {
+        let (store, _dir) = open_fresh().await;
+        store
+            .upsert_invocation_state(&terminal_state_row("inv-1", 100))
+            .await
+            .unwrap();
+
+        let updated = store.set_archive_pending("inv-1", 200).await.unwrap();
+        assert_eq!(updated, 1);
+
+        let back = store.get_invocation_state("inv-1").await.unwrap().unwrap();
+        assert_eq!(back.archive_status.as_deref(), Some("pending"));
+        assert_eq!(back.archive_published_at, Some(200));
+    }
+
+    #[tokio::test]
+    async fn set_archive_pending_no_op_on_non_terminal_row() {
+        // Guards the `terminal_at IS NOT NULL` WHERE clause: an
+        // archive flow only makes sense after terminal. If a
+        // non-terminal row somehow reaches this path it must
+        // not be marked pending.
+        let (store, _dir) = open_fresh().await;
+        let mut row = terminal_state_row("inv-still-going", 100);
+        row.terminal_at = None;
+        row.phase = "awaiting_model".to_string();
+        store.upsert_invocation_state(&row).await.unwrap();
+
+        let updated = store
+            .set_archive_pending("inv-still-going", 200)
+            .await
+            .unwrap();
+        assert_eq!(updated, 0);
+
+        let back = store
+            .get_invocation_state("inv-still-going")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(back.archive_status, None);
+        assert_eq!(back.archive_published_at, None);
+    }
+
+    #[tokio::test]
+    async fn set_archive_pending_bumps_published_at_on_retry() {
+        // Re-calling is the retry sweeper's primary action; it
+        // should leave the row pending and bump the published-at
+        // so the next retry-window check measures from now.
+        let (store, _dir) = open_fresh().await;
+        store
+            .upsert_invocation_state(&terminal_state_row("inv-1", 100))
+            .await
+            .unwrap();
+
+        store.set_archive_pending("inv-1", 200).await.unwrap();
+        store.set_archive_pending("inv-1", 250).await.unwrap();
+
+        let back = store.get_invocation_state("inv-1").await.unwrap().unwrap();
+        assert_eq!(back.archive_status.as_deref(), Some("pending"));
+        assert_eq!(back.archive_published_at, Some(250));
+    }
+
+    #[tokio::test]
+    async fn list_archive_pending_returns_terminal_rows_in_published_order() {
+        let (store, _dir) = open_fresh().await;
+
+        // One in-flight row — must not appear.
+        let mut alive = terminal_state_row("alive", 100);
+        alive.terminal_at = None;
+        alive.phase = "awaiting_model".to_string();
+        store.upsert_invocation_state(&alive).await.unwrap();
+
+        // Two terminal-pending rows with different publish times.
+        store
+            .upsert_invocation_state(&terminal_state_row("older", 100))
+            .await
+            .unwrap();
+        store
+            .upsert_invocation_state(&terminal_state_row("newer", 100))
+            .await
+            .unwrap();
+        store.set_archive_pending("newer", 250).await.unwrap();
+        store.set_archive_pending("older", 200).await.unwrap();
+
+        // One terminal row that has not yet been published — the
+        // transient "terminal but pre-publish" sliver. The
+        // sweeper should see it and republish, so it ranks
+        // before pending rows.
+        store
+            .upsert_invocation_state(&terminal_state_row("no-publish-yet", 100))
+            .await
+            .unwrap();
+
+        let pending = store.list_archive_pending().await.unwrap();
+        let ids: Vec<_> = pending.iter().map(|r| r.invocation_id.as_str()).collect();
+        assert_eq!(ids, vec!["no-publish-yet", "older", "newer"]);
     }
 
     #[tokio::test]
@@ -1543,6 +1765,92 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(post.workspace_ref, Some("placeholder-ref".to_string()));
+    }
+
+    #[tokio::test]
+    async fn v3_to_v4_migration_adds_archive_columns() {
+        // Pre-populate a v3 DB (initial tables + v2 is_error
+        // + v3 workspace_ref, but no archive_status /
+        // archive_published_at). Open with current binary;
+        // verify the v4 migration adds the archive columns
+        // without disturbing existing rows.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.db");
+
+        {
+            let url = format!("sqlite://{}?mode=rwc", path.display());
+            let opts = SqliteConnectOptions::from_str(&url).unwrap();
+            let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+            for stmt in split_sql(SCHEMA_META_SQL) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            for stmt in split_sql(WORKER_TABLES_V1_SQL) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            for stmt in split_sql(WORKER_MIGRATION_V2_SQL) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            for stmt in split_sql(WORKER_MIGRATION_V3_SQL) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)")
+                .bind(SCHEMA_CLASS)
+                .bind(3_i64)
+                .bind(0_i64)
+                .execute(&pool)
+                .await
+                .unwrap();
+            // Pre-existing v3 terminal row.
+            sqlx::query(
+                "INSERT INTO invocation_state (invocation_id, agent_id, schema_version, phase, state_blob, iteration, started_at, updated_at, terminal_at, workspace_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("legacy-terminal")
+            .bind("a")
+            .bind(1_i64)
+            .bind("completed")
+            .bind(b"".as_slice())
+            .bind(0_i64)
+            .bind(1_i64)
+            .bind(2_i64)
+            .bind(2_i64)
+            .bind::<Option<String>>(None)
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        let store = WorkerStore::open(&path).await.expect("migrate v3 -> v4");
+        assert_eq!(
+            store.read_schema_version().await.unwrap(),
+            Some(WORKER_SCHEMA_VERSION)
+        );
+
+        // Existing terminal row preserved; archive columns
+        // read as None — pre-existing rows weren't part of the
+        // hand-off flow and stay that way.
+        let pre = store
+            .get_invocation_state("legacy-terminal")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pre.archive_status, None);
+        assert_eq!(pre.archive_published_at, None);
+
+        // The new write path can flip the legacy terminal row
+        // into archive-pending, exercising the migrated
+        // columns.
+        store
+            .set_archive_pending("legacy-terminal", 999)
+            .await
+            .unwrap();
+        let post = store
+            .get_invocation_state("legacy-terminal")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(post.archive_status.as_deref(), Some("pending"));
+        assert_eq!(post.archive_published_at, Some(999));
     }
 
     #[tokio::test]

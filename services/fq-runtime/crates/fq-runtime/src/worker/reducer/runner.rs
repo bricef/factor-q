@@ -408,6 +408,8 @@ impl ReducerRunner {
                     updated_at: unix_now_ms(),
                     terminal_at,
                     workspace_ref: None,
+                    archive_status: None,
+                    archive_published_at: None,
                 })
                 .await
                 .map_err(map_store_err)?;
@@ -2450,6 +2452,8 @@ mod tests {
                 updated_at: 1_000,
                 terminal_at: None,
                 workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
             })
             .await
             .unwrap();
@@ -2547,6 +2551,8 @@ mod tests {
                 updated_at: 1_000,
                 terminal_at: None,
                 workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
             })
             .await
             .unwrap();
