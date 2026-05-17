@@ -10,7 +10,9 @@
 //!   `coordination_invocation_owner` row to status=ambiguous.
 //! - `fq.agent.*.invocation.archived` — workers publish on
 //!   terminal handoff (step 8). The control-plane writes the
-//!   `invocation_archive` row and acks. Not yet wired in step 7.
+//!   `invocation_archive` row and publishes
+//!   `invocation.archive_acked` back on the worker-scoped
+//!   `fq.worker.{worker_id}.invocation.archive_acked` subject.
 //!
 //! The consumer also runs a periodic stale-worker sweep:
 //! workers whose `last_heartbeat` is older than the
@@ -38,9 +40,11 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use crate::bus::{BusError, EventBus};
-use crate::events::{Event, EventPayload};
+use crate::events::{Event, EventPayload, InvocationArchiveAckedPayload, InvocationArchivedPayload};
 
-use super::store::{ControlPlaneStore, ControlPlaneStoreError, OwnerStatus, WorkerStatus};
+use super::store::{
+    ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerStatus, WorkerStatus,
+};
 
 /// Name of the durable JetStream consumer the coordination
 /// consumer creates. Distinct from the projection consumer's
@@ -169,12 +173,13 @@ impl CoordinationConsumer {
             }
         };
 
-        let result = match &event.payload {
+        let result: Result<(), CoordinationConsumerError> = match &event.payload {
             EventPayload::InvocationAmbiguous(payload) => {
                 self.handle_invocation_ambiguous(&event, payload).await
             }
-            // Other invocation lifecycle events go here as
-            // they're added (invocation.archived in step 8).
+            EventPayload::InvocationArchived(payload) => {
+                self.handle_invocation_archived(&event, payload).await
+            }
             _ => {
                 // Unknown invocation event variant — ack and
                 // move on. We only filter to invocation.*
@@ -210,11 +215,11 @@ impl CoordinationConsumer {
         }
     }
 
-    async fn handle_invocation_ambiguous(
+    pub(crate) async fn handle_invocation_ambiguous(
         &self,
         event: &Event,
         _payload: &crate::events::InvocationAmbiguousPayload,
-    ) -> Result<(), ControlPlaneStoreError> {
+    ) -> Result<(), CoordinationConsumerError> {
         let invocation_id = event.envelope.invocation_id.to_string();
         debug!(
             invocation_id = %invocation_id,
@@ -235,6 +240,70 @@ impl CoordinationConsumer {
                 OwnerStatus::Ambiguous,
             )
             .await?;
+        Ok(())
+    }
+
+    /// Step 8: worker → control-plane archive hand-off.
+    ///
+    /// 1. Write the archive row (idempotent on `invocation_id`
+    ///    via `ON CONFLICT DO NOTHING` — a redelivery is a
+    ///    no-op).
+    /// 2. Mark the ownership row `completed` so the worker
+    ///    drops out of "in-flight" accounting.
+    /// 3. Publish `invocation.archive_acked` on
+    ///    `fq.worker.{worker_id}.invocation.archive_acked` so
+    ///    the originating worker can delete its local row.
+    ///
+    /// If step 3 fails the message is NAK'd: insert is
+    /// idempotent and the worker's retry sweeper will republish
+    /// `invocation.archived` anyway, so duplicates are safe.
+    pub(crate) async fn handle_invocation_archived(
+        &self,
+        event: &Event,
+        payload: &InvocationArchivedPayload,
+    ) -> Result<(), CoordinationConsumerError> {
+        let invocation_id = event.envelope.invocation_id.to_string();
+        let now_ms = Utc::now().timestamp_millis();
+        debug!(
+            invocation_id = %invocation_id,
+            worker_id = %payload.worker_id,
+            "writing invocation archive row"
+        );
+
+        self.store
+            .insert_archive(&InvocationArchiveRow {
+                invocation_id: invocation_id.clone(),
+                agent_id: event.envelope.agent_id.as_str().to_string(),
+                final_phase: payload.final_phase.clone(),
+                final_state_blob: payload.final_state_blob.clone(),
+                started_at: payload.started_at_ms,
+                terminal_at: payload.terminal_at_ms,
+                archived_at: now_ms,
+            })
+            .await?;
+
+        // The owning worker no longer carries this invocation
+        // as in-flight. Upsert because the dispatcher does not
+        // yet populate ownership rows for happy-path triggers
+        // (handled in a later plan step) — when it does, this
+        // becomes a pure status flip.
+        self.store
+            .upsert_invocation_ownership(
+                &invocation_id,
+                payload.worker_id.as_str(),
+                now_ms,
+                OwnerStatus::Completed,
+            )
+            .await?;
+
+        let ack = Event::new(
+            event.envelope.agent_id.clone(),
+            event.envelope.invocation_id,
+            EventPayload::InvocationArchiveAcked(InvocationArchiveAckedPayload {
+                worker_id: payload.worker_id.clone(),
+            }),
+        );
+        self.bus.publish(&ack).await?;
         Ok(())
     }
 
@@ -422,6 +491,118 @@ mod tests {
         bus.publish(&event).await.expect("publish 2");
         let row = store.get_invocation_owner(&inv_str).await.unwrap().unwrap();
         assert_eq!(row.status, OwnerStatus::Ambiguous);
+    }
+
+    #[tokio::test]
+    async fn handler_archives_invocation_and_publishes_ack() {
+        // Direct-handler test: drive `handle_invocation_archived`
+        // with a real bus (so the ack publish can be observed)
+        // and assert the archive row, ownership status flip, and
+        // ack subject all land. Skips the JetStream consume side
+        // since that's exercised by the ambiguous end-to-end test
+        // above — the dispatch loop is the same code path.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        use crate::events::EventPayload;
+        use crate::worker::WorkerId;
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ControlPlaneStore::open(&dir.path().join("events.db"))
+                .await
+                .unwrap(),
+        );
+
+        let agent_id = AgentId::new(format!("arch-test-{}", Uuid::now_v7().simple())).unwrap();
+        let worker_id = WorkerId::new(Uuid::now_v7().to_string()).expect("worker id");
+        let invocation_id = Uuid::now_v7();
+
+        // Subscribe before publishing so the ack isn't missed.
+        let mut ack_sub = bus
+            .subscribe(format!(
+                "fq.worker.{}.invocation.archive_acked",
+                worker_id.as_str()
+            ))
+            .await
+            .expect("subscribe to ack subject");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone());
+        let archived_event = Event::new(
+            agent_id.clone(),
+            invocation_id,
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: worker_id.clone(),
+                final_phase: "completed".to_string(),
+                final_state_blob: b"final-state".to_vec(),
+                started_at_ms: 1_000,
+                terminal_at_ms: 2_000,
+            }),
+        );
+        let archived_payload = match &archived_event.payload {
+            EventPayload::InvocationArchived(p) => p.clone(),
+            _ => unreachable!(),
+        };
+        consumer
+            .handle_invocation_archived(&archived_event, &archived_payload)
+            .await
+            .expect("archived handler succeeds");
+
+        // Archive row written.
+        let inv_str = invocation_id.to_string();
+        let archive = store
+            .get_archive(&inv_str)
+            .await
+            .unwrap()
+            .expect("archive row should exist after handler");
+        assert_eq!(archive.agent_id, agent_id.as_str());
+        assert_eq!(archive.final_phase, "completed");
+        assert_eq!(archive.final_state_blob, b"final-state");
+        assert_eq!(archive.started_at, 1_000);
+        assert_eq!(archive.terminal_at, 2_000);
+
+        // Ownership flipped to Completed.
+        let owner = store
+            .get_invocation_owner(&inv_str)
+            .await
+            .unwrap()
+            .expect("ownership row");
+        assert_eq!(owner.status, OwnerStatus::Completed);
+        assert_eq!(owner.worker_id, worker_id.as_str());
+
+        // Ack arrived on the worker-scoped subject.
+        let ack_event = tokio::time::timeout(Duration::from_secs(2), ack_sub.next())
+            .await
+            .expect("ack timeout")
+            .expect("ack stream closed")
+            .expect("ack deserialise");
+        assert_eq!(ack_event.envelope.invocation_id, invocation_id);
+        match &ack_event.payload {
+            EventPayload::InvocationArchiveAcked(p) => {
+                assert_eq!(p.worker_id, worker_id);
+            }
+            other => panic!("expected InvocationArchiveAcked, got {other:?}"),
+        }
+
+        // Idempotency: handling the same event twice is safe;
+        // the archive row is unchanged and a second ack is
+        // published (the worker's local dedupe on
+        // invocation_id handles that).
+        consumer
+            .handle_invocation_archived(&archived_event, &archived_payload)
+            .await
+            .expect("redelivery is a no-op for the store");
+        let archive_again = store.get_archive(&inv_str).await.unwrap().unwrap();
+        assert_eq!(
+            archive_again.archived_at, archive.archived_at,
+            "ON CONFLICT DO NOTHING preserves the first archived_at"
+        );
     }
 
     /// Test consumer with a custom durable name so parallel
