@@ -34,8 +34,8 @@ use crate::agent::{Agent, AgentId};
 use crate::bus::EventBus;
 use crate::events::{
     self, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
-    InvocationTotals, LlmRequestPayload, LlmResponsePayload, ToolCallPayload, ToolErrorKind,
-    ToolResultPayload, TriggerSource, TriggeredPayload,
+    InvocationArchivedPayload, InvocationTotals, LlmRequestPayload, LlmResponsePayload,
+    ToolCallPayload, ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::pricing::PricingTable;
@@ -65,10 +65,6 @@ pub struct ReducerRunner {
     /// knows which `fq.worker.{worker_id}.invocation.archive_acked`
     /// subject to ack on. In the v1 single-process daemon this
     /// is the runtime UUID (see fq-cli wire-up).
-    // Read-site wired in the follow-up commit that emits
-    // `InvocationArchived` on terminal. The field landing first
-    // lets each commit be small and independently reviewable.
-    #[allow(dead_code)]
     worker_id: WorkerId,
 }
 
@@ -445,6 +441,14 @@ impl ReducerRunner {
                                 total_duration_ms: duration_ms,
                             }),
                         ),
+                    )
+                    .await?;
+
+                    self.publish_archived_and_mark_pending(
+                        cursor,
+                        agent_id,
+                        invocation_id,
+                        "completed",
                     )
                     .await?;
 
@@ -948,7 +952,134 @@ impl ReducerRunner {
                 }),
             ),
         )
-        .await
+        .await?;
+
+        // Failure paths reach this method from several call
+        // sites — some after the run-loop's terminal upsert has
+        // already fired (NextAction::Failed / harness errors),
+        // some mid-step before any terminal write (LLM error,
+        // budget exceeded). To keep recovery and archive
+        // semantics consistent, the failure path is the
+        // authoritative point at which `invocation_state` is
+        // marked terminal. Idempotent: a no-op if the row is
+        // already terminal.
+        let terminal_at_ms = unix_now_ms();
+        self.ensure_terminal("failed", invocation_id, terminal_at_ms)
+            .await?;
+        self.publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
+            .await?;
+        Ok(())
+    }
+
+    /// Set `terminal_at` (and update `phase`) on the worker's
+    /// `invocation_state` row if it is not already terminal.
+    /// A no-op when the row is already terminal — keeps the
+    /// original `terminal_at` so the archive timestamp matches
+    /// the first observation of terminal.
+    ///
+    /// Reads the row first to preserve every other column
+    /// (state_blob, iteration, started_at, etc.); the
+    /// `upsert_invocation_state` UPDATE arm overwrites them
+    /// otherwise. The pattern is "read-modify-write" rather
+    /// than a partial UPDATE so the existing row-shaped
+    /// abstraction stays the single SQL surface.
+    async fn ensure_terminal(
+        &self,
+        phase_label: &str,
+        invocation_id: Uuid,
+        terminal_at_ms: i64,
+    ) -> Result<(), ExecutorError> {
+        let invocation_id_str = invocation_id.to_string();
+        let existing = self
+            .store
+            .get_invocation_state(&invocation_id_str)
+            .await
+            .map_err(map_store_err)?;
+        let Some(mut row) = existing else {
+            // No state row at all — the run-loop hasn't done
+            // its first upsert yet. Nothing to archive. Skip
+            // silently; recovery has nothing to recover.
+            return Ok(());
+        };
+        if row.terminal_at.is_some() {
+            return Ok(());
+        }
+        row.phase = phase_label.to_string();
+        row.terminal_at = Some(terminal_at_ms);
+        row.updated_at = terminal_at_ms;
+        self.store
+            .upsert_invocation_state(&row)
+            .await
+            .map_err(map_store_err)?;
+        Ok(())
+    }
+
+    /// Publish `InvocationArchived` for an already-terminal
+    /// invocation and flip the local row to `archive_status =
+    /// "pending"`. Called from both the Complete and Failed
+    /// terminal paths; the retry sweeper subsequently
+    /// republishes if the control-plane ack does not arrive.
+    ///
+    /// The state blob and timestamps come from the persisted
+    /// `invocation_state` row so callers don't need to thread
+    /// them through. If the row is missing (a logic bug — the
+    /// run-loop's terminal upsert should have written it) this
+    /// is a no-op so we don't crash mid-shutdown.
+    async fn publish_archived_and_mark_pending(
+        &self,
+        cursor: &mut Option<Uuid>,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        final_phase: &str,
+    ) -> Result<(), ExecutorError> {
+        let invocation_id_str = invocation_id.to_string();
+        let row = match self
+            .store
+            .get_invocation_state(&invocation_id_str)
+            .await
+            .map_err(map_store_err)?
+        {
+            Some(r) => r,
+            None => {
+                warn!(
+                    invocation_id = %invocation_id,
+                    "archive publish skipped: invocation_state row missing"
+                );
+                return Ok(());
+            }
+        };
+        let Some(terminal_at_ms) = row.terminal_at else {
+            warn!(
+                invocation_id = %invocation_id,
+                "archive publish skipped: invocation_state row is not terminal"
+            );
+            return Ok(());
+        };
+
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.clone(),
+                invocation_id,
+                EventPayload::InvocationArchived(InvocationArchivedPayload {
+                    worker_id: self.worker_id.clone(),
+                    final_phase: final_phase.to_string(),
+                    final_state_blob: row.state_blob,
+                    started_at_ms: row.started_at,
+                    terminal_at_ms,
+                }),
+            ),
+        )
+        .await?;
+
+        // `archive_published_at` is the publish time, not
+        // `terminal_at` — the retry sweeper measures from when
+        // the most recent publish went out, not from terminal.
+        self.store
+            .set_archive_pending(&invocation_id_str, unix_now_ms())
+            .await
+            .map_err(map_store_err)?;
+        Ok(())
     }
 
     fn write_logs(&self, agent_id: &AgentId, invocation_id: Uuid, logs: &[LogEntry]) {
@@ -2369,6 +2500,75 @@ mod tests {
     // recovery / resume semantics live in step 6 — these tests
     // only assert the persistence side.
     // -----------------------------------------------------------
+
+    #[tokio::test]
+    async fn complete_emits_invocation_archived_and_marks_row_pending() {
+        // The hand-off path (step 8): a successful Complete
+        // emits `invocation.archived` after `completed`, and the
+        // worker store row is flipped to `archive_status =
+        // "pending"`. The ack consumer (commit 6) deletes the
+        // row on receipt; the retry sweeper (commit 7) re-emits
+        // if the ack never arrives.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        let agent_id = unique_agent_id("step8-archive-on-complete");
+        let agent = simple_responder_agent(&agent_id);
+
+        // Sequence after my change:
+        //   triggered, llm.request, llm.dispatched, llm.response,
+        //   completed, invocation.archived  → 6 events.
+        let (store, events) =
+            run_with_wal(&url, agent, vec![end_turn_response("done.")], 6, None).await;
+
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(crate::test_support::events::event_kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "triggered",
+                "llm_request",
+                "llm_dispatched",
+                "llm_response",
+                "completed",
+                "invocation_archived",
+            ]
+        );
+
+        let inv_str = events[0].envelope.invocation_id.to_string();
+        let row = store
+            .get_invocation_state(&inv_str)
+            .await
+            .unwrap()
+            .expect("state row should exist after run");
+        assert_eq!(
+            row.archive_status.as_deref(),
+            Some("pending"),
+            "archive_status must be flipped to pending after publish"
+        );
+        assert!(
+            row.archive_published_at.is_some(),
+            "archive_published_at must be set after publish"
+        );
+
+        let terminal_at_ms = row.terminal_at.expect("terminal_at set");
+        match &events[5].payload {
+            EventPayload::InvocationArchived(p) => {
+                assert_eq!(p.final_phase, "completed");
+                assert_eq!(
+                    p.final_state_blob, row.state_blob,
+                    "archived blob must match the persisted final state"
+                );
+                assert_eq!(p.started_at_ms, row.started_at);
+                assert_eq!(p.terminal_at_ms, terminal_at_ms);
+            }
+            other => panic!("expected InvocationArchived, got {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn state_row_written_on_completion_with_terminal_at_set() {
