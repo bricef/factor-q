@@ -482,7 +482,15 @@ async fn trigger_agent(
                 .await
                 .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
         );
-        let runner = fq_runtime::ReducerRunner::new(bus, pricing, tools, worker_store);
+        // Each ad-hoc `fq invoke` is a one-shot worker instance.
+        // The runtime-id-shaped worker_id matches the daemon's
+        // naming so any archive hand-off the runner performs
+        // routes the ack subject (`fq.worker.{id}.invocation.archive_acked`)
+        // consistently.
+        let cli_worker_id = fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string())
+            .expect("uuid is a valid worker id");
+        let runner =
+            fq_runtime::ReducerRunner::new(bus, pricing, tools, worker_store, cli_worker_id);
         runner
             .run(
                 &fq_runtime::Harness::new(),
@@ -637,6 +645,13 @@ fn print_event(event: &Event) {
             "invocation.ambiguous entity={} call_id={}",
             p.stuck_entity, p.stuck_call_id
         ),
+        EventPayload::InvocationArchived(p) => format!(
+            "invocation.archived worker_id={} phase={}",
+            p.worker_id, p.final_phase
+        ),
+        EventPayload::InvocationArchiveAcked(p) => {
+            format!("invocation.archive_acked worker_id={}", p.worker_id)
+        }
         EventPayload::SystemStartup(p) => format!(
             "system.startup version={} agents={} nats={}",
             p.version, p.agents_loaded, p.nats_url
@@ -1102,6 +1117,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         pricing,
         tools,
         worker_store.clone(),
+        worker_id.clone(),
     ));
 
     // Spawn auto-resume tasks for each safe-resume / safe-replay

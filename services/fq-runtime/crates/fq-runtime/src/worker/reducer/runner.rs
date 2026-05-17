@@ -43,7 +43,7 @@ use crate::tools::ToolRegistry;
 use crate::worker::store::{
     DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow, WorkerStore,
 };
-use crate::worker::{ExecutorError, InvocationOutcome};
+use crate::worker::{ExecutorError, InvocationOutcome, WorkerId};
 
 /// Soft cap on the number of `step()` calls per invocation.
 /// Independent of the reducer's own `max_iterations` so a buggy
@@ -60,6 +60,16 @@ pub struct ReducerRunner {
     pricing: Arc<PricingTable>,
     tools: Arc<ToolRegistry>,
     store: Arc<WorkerStore>,
+    /// Identity of the worker hosting this runner. Stamped into
+    /// the [`InvocationArchivedPayload`] so the control-plane
+    /// knows which `fq.worker.{worker_id}.invocation.archive_acked`
+    /// subject to ack on. In the v1 single-process daemon this
+    /// is the runtime UUID (see fq-cli wire-up).
+    // Read-site wired in the follow-up commit that emits
+    // `InvocationArchived` on terminal. The field landing first
+    // lets each commit be small and independently reviewable.
+    #[allow(dead_code)]
+    worker_id: WorkerId,
 }
 
 impl ReducerRunner {
@@ -68,12 +78,14 @@ impl ReducerRunner {
         pricing: Arc<PricingTable>,
         tools: Arc<ToolRegistry>,
         store: Arc<WorkerStore>,
+        worker_id: WorkerId,
     ) -> Self {
         Self {
             bus,
             pricing,
             tools,
             store,
+            worker_id,
         }
     }
 
@@ -1349,6 +1361,13 @@ mod tests {
         format!("{prefix}-{}", Uuid::now_v7().simple())
     }
 
+    /// A worker id good for tests. Each call returns a fresh
+    /// UUID-shaped id so concurrent tests don't share a
+    /// `fq.worker.{id}.invocation.archive_acked` subject.
+    fn test_worker_id() -> WorkerId {
+        WorkerId::new(Uuid::now_v7().to_string()).expect("uuid is a valid worker id")
+    }
+
     fn test_pricing() -> Arc<PricingTable> {
         let mut entries = HashMap::new();
         entries.insert(
@@ -1501,6 +1520,7 @@ mod tests {
                 test_pricing(),
                 Arc::new(ToolRegistry::with_builtins()),
                 store,
+                test_worker_id(),
             );
             let _ = runner
                 .run(
@@ -1698,6 +1718,7 @@ mod tests {
             test_pricing(),
             Arc::new(ToolRegistry::with_builtins()),
             store,
+            test_worker_id(),
         );
         let _ = runner
             .run(
@@ -1850,6 +1871,7 @@ mod tests {
             test_pricing(),
             Arc::new(ToolRegistry::with_builtins()),
             store,
+            test_worker_id(),
         );
 
         let mut sub = bus
@@ -2081,6 +2103,7 @@ mod tests {
             test_pricing(),
             Arc::new(ToolRegistry::with_builtins()),
             store.clone(),
+            test_worker_id(),
         );
         let _ = runner
             .run(
@@ -2492,6 +2515,7 @@ mod tests {
             test_pricing(),
             Arc::new(ToolRegistry::with_builtins()),
             store.clone(),
+            test_worker_id(),
         );
         let llm = FixtureClient::new(); // no live responses needed
 
@@ -2572,6 +2596,7 @@ mod tests {
             test_pricing(),
             Arc::new(ToolRegistry::with_builtins()),
             store,
+            test_worker_id(),
         );
         let llm = FixtureClient::new();
         let err = runner
