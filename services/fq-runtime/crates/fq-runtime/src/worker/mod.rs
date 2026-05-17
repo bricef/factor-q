@@ -25,6 +25,7 @@
 //! `fq trigger` from the CLI) can hand an invocation to either
 //! without caring which one it picked.
 
+pub mod archive_ack;
 pub mod executor;
 pub mod heartbeat;
 pub mod id;
@@ -33,6 +34,7 @@ pub mod recovery;
 pub mod reducer;
 pub mod store;
 
+pub use archive_ack::{ArchiveAckConsumer, ArchiveAckError};
 pub use executor::{AgentExecutor, ExecutorError, InvocationOutcome};
 pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, HeartbeatProducer};
 pub use id::WorkerId;

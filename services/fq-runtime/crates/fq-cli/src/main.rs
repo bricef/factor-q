@@ -1240,6 +1240,21 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let mut hb_producer_handle =
         tokio::spawn(async move { hb_producer.run(hb_producer_shutdown_rx).await });
 
+    // Spawn the archive-ack consumer (worker side). Listens on
+    // `fq.worker.{worker_id}.invocation.archive_acked`; on
+    // receipt deletes the matching local invocation_state row.
+    // The companion retry sweeper (next plan step) republishes
+    // invocation.archived if an ack never arrives, so missed
+    // acks are recovered without a durable consumer.
+    let (archive_ack_shutdown_tx, archive_ack_shutdown_rx) = tokio::sync::oneshot::channel();
+    let archive_ack_consumer = fq_runtime::ArchiveAckConsumer::new(
+        bus.clone(),
+        worker_id.clone(),
+        worker_store.clone(),
+    );
+    let mut archive_ack_handle =
+        tokio::spawn(async move { archive_ack_consumer.run(archive_ack_shutdown_rx).await });
+
     // Spawn the trigger dispatcher.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
     let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker, llm);
@@ -1291,6 +1306,14 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             let err_msg = describe_task_result("heartbeat producer", result);
             ("task_failed", false, Some(("heartbeat_producer", err_msg)))
         }
+        result = &mut archive_ack_handle => {
+            let err_msg = describe_task_result("archive-ack consumer", result);
+            (
+                "task_failed",
+                false,
+                Some(("archive_ack_consumer", err_msg)),
+            )
+        }
         result = &mut dispatcher_handle => {
             let err_msg = describe_task_result("trigger dispatcher", result);
             ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
@@ -1325,6 +1348,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = coord_shutdown_tx.send(());
     let _ = hb_consumer_shutdown_tx.send(());
     let _ = hb_producer_shutdown_tx.send(());
+    let _ = archive_ack_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
@@ -1356,6 +1380,14 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
         Ok(Err(err)) => tracing::error!(error = %err, "heartbeat producer task panicked"),
         Err(_) => tracing::warn!("heartbeat producer did not shut down within 5s"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), archive_ack_handle).await {
+        Ok(Ok(Ok(()))) => println!("  archive-ack consumer stopped cleanly."),
+        Ok(Ok(Err(err))) => {
+            tracing::error!(error = %err, "archive-ack consumer exited with error")
+        }
+        Ok(Err(err)) => tracing::error!(error = %err, "archive-ack consumer task panicked"),
+        Err(_) => tracing::warn!("archive-ack consumer did not shut down within 5s"),
     }
     match tokio::time::timeout(std::time::Duration::from_secs(5), dispatcher_handle).await {
         Ok(Ok(Ok(()))) => println!("  trigger dispatcher stopped cleanly."),
