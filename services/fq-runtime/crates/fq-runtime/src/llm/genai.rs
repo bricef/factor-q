@@ -39,6 +39,45 @@ impl GenAiClient {
             client: provider::Client::default(),
         }
     }
+
+    /// Construct from the parsed `[providers.anthropic]` config. When
+    /// `base_url` is set, the client is built with an endpoint
+    /// override; otherwise the provider default applies.
+    pub fn from_anthropic_config(config: &crate::config::AnthropicConfig) -> Self {
+        match &config.base_url {
+            Some(url) => Self::with_base_url(url.clone()),
+            None => Self::new(),
+        }
+    }
+
+    /// Construct a client that redirects every request to `base_url`
+    /// instead of the provider-default endpoint. Used by tests (the
+    /// `MockAnthropicServer`) and for operator overrides via the
+    /// `[providers.anthropic]` `base_url` setting in `fq.toml`.
+    ///
+    /// Auth and model resolution are unchanged — the closure replaces
+    /// only the endpoint on whichever `ServiceTarget` genai resolves
+    /// for the requested model.
+    pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        use ::std::sync::Arc;
+        use provider::ServiceTarget;
+        use provider::resolver::{Endpoint, ServiceTargetResolver};
+
+        let url: Arc<str> = Arc::from(base_url.into());
+        let resolver = ServiceTargetResolver::from_resolver_fn(
+            move |target: ServiceTarget| -> Result<ServiceTarget, provider::resolver::Error> {
+                Ok(ServiceTarget {
+                    endpoint: Endpoint::from_owned(url.clone()),
+                    auth: target.auth,
+                    model: target.model,
+                })
+            },
+        );
+        let client = provider::Client::builder()
+            .with_service_target_resolver(resolver)
+            .build();
+        Self { client }
+    }
 }
 
 impl Default for GenAiClient {
@@ -401,5 +440,48 @@ mod tests {
             "expected positive input tokens, got {}",
             response.usage.input_tokens
         );
+    }
+
+    #[tokio::test]
+    async fn with_base_url_overrides_resolved_endpoint() {
+        let client = GenAiClient::with_base_url("http://127.0.0.1:9999");
+        let target = client
+            .client
+            .resolve_service_target("claude-haiku-4-5")
+            .await
+            .expect("resolve service target");
+        assert_eq!(target.endpoint.base_url(), "http://127.0.0.1:9999");
+    }
+
+    #[tokio::test]
+    async fn from_anthropic_config_without_base_url_uses_default_endpoint() {
+        let cfg = crate::config::AnthropicConfig::default();
+        let client = GenAiClient::from_anthropic_config(&cfg);
+        let target = client
+            .client
+            .resolve_service_target("claude-haiku-4-5")
+            .await
+            .expect("resolve service target");
+        // genai's default Anthropic endpoint is the public API URL.
+        assert!(
+            target.endpoint.base_url().contains("anthropic.com"),
+            "expected default endpoint to point at Anthropic, got {}",
+            target.endpoint.base_url()
+        );
+    }
+
+    #[tokio::test]
+    async fn from_anthropic_config_with_base_url_uses_override() {
+        let cfg = crate::config::AnthropicConfig {
+            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            base_url: Some("http://127.0.0.1:54321".to_string()),
+        };
+        let client = GenAiClient::from_anthropic_config(&cfg);
+        let target = client
+            .client
+            .resolve_service_target("claude-haiku-4-5")
+            .await
+            .expect("resolve service target");
+        assert_eq!(target.endpoint.base_url(), "http://127.0.0.1:54321");
     }
 }

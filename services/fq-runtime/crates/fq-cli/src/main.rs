@@ -427,7 +427,11 @@ async fn trigger_agent(
 
     // Real LLM client — genai resolves API keys from provider-specific
     // environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc).
-    let llm = GenAiClient::new();
+    // Honours [providers.anthropic] base_url when set.
+    let llm = match &config.providers.anthropic {
+        Some(anthropic) => GenAiClient::from_anthropic_config(anthropic),
+        None => GenAiClient::new(),
+    };
 
     // Parse trigger payload: try JSON first, fall back to string literal.
     let trigger_payload: Value = match payload {
@@ -1102,7 +1106,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     }
 
     let tools = Arc::new(tools);
-    let llm: Arc<dyn LlmClient> = Arc::new(GenAiClient::new());
+    let llm: Arc<dyn LlmClient> = Arc::new(match &config.providers.anthropic {
+        Some(anthropic) => GenAiClient::from_anthropic_config(anthropic),
+        None => GenAiClient::new(),
+    });
     let worker: Arc<dyn fq_runtime::Worker> = Arc::new(AgentExecutor::new(
         bus.clone(),
         pricing.clone(),

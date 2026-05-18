@@ -90,6 +90,12 @@ pub struct ProvidersConfig {
 pub struct AnthropicConfig {
     #[serde(default = "default_anthropic_api_key_env")]
     pub api_key_env: String,
+    /// Optional override for the Anthropic API base URL. When `None`
+    /// the genai crate uses Anthropic's public endpoint. Set this to
+    /// point at a test mock, an internal proxy, or a future
+    /// Bedrock-compatible endpoint.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -137,6 +143,7 @@ impl Default for AnthropicConfig {
     fn default() -> Self {
         Self {
             api_key_env: default_anthropic_api_key_env(),
+            base_url: None,
         }
     }
 }
@@ -301,6 +308,32 @@ api_key_env = "MY_ANTHROPIC_KEY"
         let config = Config::from_toml_str("").unwrap();
         assert_eq!(config.nats.url, "nats://localhost:4222");
         assert_eq!(config.agents.directory, PathBuf::from("agents"));
+    }
+
+    #[test]
+    fn anthropic_config_parses_base_url_from_toml() {
+        let toml = r#"
+[providers.anthropic]
+base_url = "http://127.0.0.1:12345"
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        let anthropic = config.providers.anthropic.unwrap();
+        assert_eq!(
+            anthropic.base_url.as_deref(),
+            Some("http://127.0.0.1:12345")
+        );
+        // api_key_env still defaults when only base_url is set.
+        assert_eq!(anthropic.api_key_env, "ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn anthropic_config_base_url_defaults_to_none() {
+        let toml = r#"
+[providers.anthropic]
+api_key_env = "SOMETHING"
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert!(config.providers.anthropic.unwrap().base_url.is_none());
     }
 
     #[test]

@@ -26,6 +26,12 @@ directory = "agents"
 # Environment variable holding the Anthropic API key. The runtime reads
 # the variable at call time; nothing is written back to this file.
 api_key_env = "ANTHROPIC_API_KEY"
+#
+# Optional override for the Anthropic API base URL. When unset, the
+# runtime uses Anthropic's public endpoint. Use cases: pointing at a
+# local mock during integration tests, an internal LLM proxy, or a
+# Bedrock-compatible endpoint.
+# base_url = "http://127.0.0.1:8080"
 
 [worker]
 # Worker-side knobs for the archive hand-off retry sweeper. The
