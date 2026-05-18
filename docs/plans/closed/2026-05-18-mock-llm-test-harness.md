@@ -1,7 +1,13 @@
 # Plan: Mock LLM Test Harness
 
 **Date**: 2026-05-18
-**Status**: Active
+**Status**: Closed 2026-05-18. All four steps shipped:
+`a8fdfb6` (base_url plumbing), `22e1bc3`
+(MockAnthropicServer), `2cbab1d` (full-pipeline acceptance
+test against the mock), `3759b1a` (manual drift detector +
+`just acceptance-drift` recipe). The parent plan's step-8
+status block notes the previously-deferred live acceptance
+test now runs in every CI build via the mock.
 **Design references**:
 - [`docs/design/event-schema.md`](../../design/event-schema.md) — event types under test.
 - [`docs/design/data-architecture.md`](../../design/data-architecture.md) §9.3 — the canonical end-to-end flow.
@@ -104,13 +110,13 @@ the Anthropic adapter.
 
 #### Done when
 
-- [ ] `AnthropicConfig.base_url: Option<String>` exists.
-- [ ] `GenAiClient::new(...)` accepts the base URL (signature
+- [x] `AnthropicConfig.base_url: Option<String>` exists.
+- [x] `GenAiClient::new(...)` accepts the base URL (signature
       TBD — likely a separate constructor `with_base_url` to
       keep `new()` unchanged for callers).
-- [ ] `fq.toml` template documents the new field with a
+- [x] `fq.toml` template documents the new field with a
       commented example.
-- [ ] All listed tests green.
+- [x] All listed tests green.
 
 ---
 
@@ -163,11 +169,11 @@ run in parallel; each spawns its own ephemeral-port mock.
 
 #### Done when
 
-- [ ] `test_support::mock_anthropic::MockAnthropicServer`
+- [x] `test_support::mock_anthropic::MockAnthropicServer`
       exists with `start`, `push_response`,
       `received_requests`, `base_url`, `shutdown`.
-- [ ] All listed tests green.
-- [ ] No new production dependencies — axum / hyper /
+- [x] All listed tests green.
+- [x] No new production dependencies — axum / hyper /
       reqwest stay test-only (`dev-dependencies` or
       `[dependencies] features = ["test"]`).
 
@@ -203,10 +209,10 @@ Gated on `FQ_NATS_URL` only — no `ANTHROPIC_API_KEY` needed.
 
 #### Done when
 
-- [ ] Test lives next to the other step-8 acceptance tests
+- [x] Test lives next to the other step-8 acceptance tests
       and runs by default in `cargo test`.
-- [ ] Parent plan
-      ([`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md))'s
+- [x] Parent plan
+      ([`2026-04-28-data-architecture-v1.md`](../active/2026-04-28-data-architecture-v1.md))'s
       step-8 status block is updated to mark this previously
       "deferred" acceptance test as shipped.
 
@@ -239,10 +245,10 @@ async fn anthropic_real_api_basic_response_parses() {
 
 #### Done when
 
-- [ ] `anthropic_real_api_basic_response_parses` test
+- [x] `anthropic_real_api_basic_response_parses` test
       exists and passes against live Anthropic.
-- [ ] `just acceptance-drift` recipe runs it.
-- [ ] `services/fq-runtime/README.md` (or equivalent
+- [x] `just acceptance-drift` recipe runs it.
+- [x] `services/fq-runtime/README.md` (or equivalent
       operator doc) documents the recipe: when to run it,
       cost expectation, what to do when it fails.
 
@@ -275,7 +281,7 @@ async fn anthropic_real_api_basic_response_parses() {
 This plan closes when:
 
 - All 4 steps' "Done when" boxes are ticked.
-- Parent plan ([`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md))'s
+- Parent plan ([`2026-04-28-data-architecture-v1.md`](../active/2026-04-28-data-architecture-v1.md))'s
   step-8 status block notes the live acceptance test is now
   in CI (via the mock).
 - This plan moves to `docs/plans/closed/`.

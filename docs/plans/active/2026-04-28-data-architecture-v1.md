@@ -470,10 +470,15 @@ Gated on `FQ_NATS_URL`.
 
 Remaining work, intentionally deferred:
 
-1. **Live acceptance test against NATS + Anthropic.**
-   Cannot run from the development sandbox (no NATS, no
-   API key). Scaffolding is in place — the NATS-gated
-   integration tests below all share the same harness.
+1. ~~**Live acceptance test against NATS + Anthropic.**~~
+   **Shipped as a mock-based acceptance test on 2026-05-18**
+   (mock-llm-test-harness plan). `coordination_consumer::tests::completed_invocation_archives_and_worker_cleans_up_against_mock`
+   exercises the full ReducerRunner → CoordinationConsumer →
+   ArchiveAckConsumer pipeline against `MockAnthropicServer`,
+   gated only on `FQ_NATS_URL`. The real-Anthropic drift
+   detector lives at
+   `llm::genai::tests::anthropic_real_api_basic_response_parses`,
+   marked `#[ignore]` and runnable via `just acceptance-drift`.
 2. **Some planned tests not written under the original
    names.** The plan listed
    `worker_emits_archived_on_terminal`,
@@ -528,12 +533,14 @@ LLM equivalent).
 #### Done when
 
 - [x] All listed integration tests green (under the renamed
-      test names above; NATS-gated, all 245 lib tests pass
-      without NATS available, by skipping)
+      test names above; NATS-gated, 258 lib tests pass against
+      live NATS as of 2026-05-18)
 - [x] All listed unit tests green
-- [ ] Acceptance test green against live NATS + Anthropic
-      (deferred — needs an environment with NATS + Anthropic
-      credentials)
+- [x] Acceptance test green via mock — `coordination_consumer::tests::completed_invocation_archives_and_worker_cleans_up_against_mock`
+      runs every CI build. Real-API drift detector at
+      `anthropic_real_api_basic_response_parses` (`#[ignore]`'d)
+      runs via `just acceptance-drift` when an `ANTHROPIC_API_KEY`
+      is available.
 - [x] Hand-off timeout configurable via `fq.toml` — new
       `[worker]` section with `archive_retry_interval_ms` and
       `archive_warn_after_ms`
