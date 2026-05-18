@@ -1818,6 +1818,7 @@ mod tests {
             .id(&agent_id)
             .model("claude-haiku")
             .system_prompt("be brief")
+            .tools(["file_read"])
             .budget(1.0)
             .build()
             .unwrap();
@@ -1865,10 +1866,9 @@ mod tests {
         // Drain. tool-call loop emits: triggered + 2 turns ×
         // (llm_request, llm_dispatched, llm_response with envelope.cost)
         // + 1 × (tool_call, tool_dispatched, tool_result) + completed
-        // = 11 events after envelope-refactor step 3 (no separate
-        // cost event).
+        // + invocation_archived = 12 events after data-arch step 8.
         let mut events = Vec::new();
-        for _ in 0..11 {
+        for _ in 0..12 {
             let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
                 .await
                 .expect("chain timeout")
