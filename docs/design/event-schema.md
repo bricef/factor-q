@@ -117,6 +117,7 @@ Events are published to NATS subjects following this pattern:
 
 ```
 fq.agent.{agent_id}.{event_type}[.{sub_type}]
+fq.worker.{worker_id}.{event_type}[.{sub_type}]
 fq.system.{event_type}
 ```
 
@@ -132,8 +133,11 @@ Concrete subjects:
 | `fq.agent.{agent_id}.tool.dispatched` | Tool has returned to the runtime (WAL middle-state) |
 | `fq.agent.{agent_id}.tool.result` | Tool invocation has completed (success or failure) |
 | `fq.agent.{agent_id}.invocation.ambiguous` | A worker found an `dispatched`-without-`completed` WAL row on restart and is surfacing it to the operator |
+| `fq.agent.{agent_id}.invocation.archived` | Worker → control-plane: invocation reached terminal; hand off the final state |
 | `fq.agent.{agent_id}.completed` | Invocation has finished successfully |
 | `fq.agent.{agent_id}.failed` | Invocation has terminated with an error |
+| `fq.worker.{worker_id}.heartbeat` | Worker liveness signal (periodic) |
+| `fq.worker.{worker_id}.invocation.archive_acked` | Control-plane → worker: archive row written; safe to delete local `invocation_state` |
 | `fq.system.startup` | Runtime lifecycle — startup |
 | `fq.system.shutdown` | Runtime lifecycle — shutdown |
 | `fq.system.task_failed` | A hosted task inside `fq run` exited with an error |
@@ -144,6 +148,7 @@ Concrete subjects:
 - **Agent ID in the subject, not just the payload.** A consumer can subscribe to `fq.agent.researcher.>` to only see events from the researcher agent without filtering in application code.
 - **Hierarchical types** (`llm.request` vs `llm.response`). Allows wildcards: `fq.agent.*.llm.>` matches all LLM events across all agents.
 - **System events are a separate namespace.** Runtime lifecycle is not tied to any agent.
+- **Worker-scoped subjects (`fq.worker.>`)** for events whose audience is one specific worker rather than every consumer of the agent's lifecycle: heartbeats, and the control-plane → worker `invocation.archive_acked` reply. Worker-scoped subscriptions stay narrow with a single filter (`fq.worker.{worker_id}.>`) and avoid cross-worker delivery noise. The fan-out subjects (`fq.agent.>`) remain the canonical place for invocation lifecycle events the rest of the system should see.
 - **WAL middle-state events** (`llm.dispatched`, `tool.dispatched`) sit between the request and result. They're an operational signal — recovery uses the SQLite WAL rows, not these events, but they let observers see "the call has returned, we're about to write the result."
 
 ## Event Types
@@ -348,6 +353,42 @@ Published when an invocation terminates with an error.
 }
 ```
 
+### `invocation.archived`
+
+Published by the worker after an invocation reaches terminal state, carrying the final state blob the control-plane writes into `invocation_archive`. Emitted *after* the terminal lifecycle event (`completed` or `failed`), in the same invocation chain.
+
+```json
+{
+  "worker_id": "worker-001",
+  "final_phase": "completed | failed",
+  "final_state_blob": [/* opaque bytes; the reducer's terminal state */],
+  "started_at_ms": 1716640123456,
+  "terminal_at_ms": 1716640135789
+}
+```
+
+**Design notes:**
+- **Canonical position:** `... → completed|failed → invocation.archived → invocation.archive_acked`. See data-architecture.md §9.3.
+- **`worker_id` rides on the payload, not the subject.** The subject is agent-scoped so the coordination consumer's existing `fq.agent.*.invocation.*` filter picks it up; the control-plane needs the `worker_id` to address the ack back at `fq.worker.{worker_id}.invocation.archive_acked`.
+- **`final_state_blob` is opaque.** The control-plane stores it as-is into `invocation_archive.state_blob`. Default serde encoding (JSON array of integers) is used today; if blob sizes start to strain the wire format, swap in `serde_bytes` here and in `InvocationStateRow`.
+- **Idempotent on the receiver.** The control-plane's `insert_archive` is `ON CONFLICT(invocation_id) DO NOTHING`; a redelivered `invocation.archived` is safe.
+
+### `invocation.archive_acked`
+
+Published by the control-plane on the worker-scoped subject after a successful (or idempotent no-op) `insert_archive`. Receipt tells the worker the archive row is durably written and the local `invocation_state` row can be deleted.
+
+```json
+{
+  "worker_id": "worker-001"
+}
+```
+
+**Design notes:**
+- **Worker-scoped subject.** `fq.worker.{worker_id}.invocation.archive_acked` so each worker subscribes with a single filter on its own id. The coordination consumer does not double-consume the ack.
+- **`invocation_id` rides on the envelope** — see ADR-0016 on payload vs envelope. The payload carries `worker_id` only as a defense-in-depth check on the receiving worker (the subject token already routes by `worker_id`).
+- **Emitted on every successful insert, including the idempotent no-op.** Otherwise a redelivered `invocation.archived` would never re-trigger the ack and a worker that missed the first one would never clean up.
+- **Subscription is core NATS, not durable JetStream.** Acks missed while the consumer is offline are recovered by the worker's retry sweeper republishing `invocation.archived` until a fresh ack arrives.
+
 ### `system.startup`
 
 ```json
@@ -410,6 +451,7 @@ The following invariants hold across the event stream and are assumed by consume
 5. **`envelope.cost` is present on `llm.response`** events that bill. There is no separate cost event.
 6. **`config_snapshot` in `triggered` is immutable for the invocation.** Config changes during an invocation are ignored; they apply to the next invocation.
 7. **`invocation.ambiguous` is emitted by the worker on startup** for any invocation whose WAL classification returns "ambiguous." The chain root for that emission is the new event itself (`parent_event_id` absent — recovery starts a fresh chain; see the recovery rationale in `data-architecture.md` §3.4).
+8. **`invocation.archived` immediately follows the terminal lifecycle event** (`completed` or `failed`) in the same invocation chain. The worker's retry sweeper may republish `invocation.archived` if the control-plane ack does not arrive; republishes keep the same `invocation_id` and the control-plane's insert is idempotent on it. `invocation.archive_acked` is the control-plane's reply on the worker-scoped subject and closes the hand-off.
 
 ## Storage and Retention
 

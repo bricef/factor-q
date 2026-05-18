@@ -1,13 +1,18 @@
 # Plan: Archive Hand-off (data-architecture-v1 step 8)
 
 **Date**: 2026-05-16
-**Status**: Substantively complete — shipped 2026-05-17. See
-"Status (2026-05-17)" below and the matching status block on
-the parent plan's [Step 8](./2026-04-28-data-architecture-v1.md#step-8--worker--control-plane-archive-hand-off).
+**Status**: Closed 2026-05-18. Implementation landed 2026-05-17
+on `worktree-inherited-dancing-reef` (`22087a9..5c4f90d`) and
+fast-forwarded onto `main` as `421ab11..e241860`. The doc-only
+follow-ups landed 2026-05-18 (event-schema and
+data-architecture updates, `[worker]` keys in the fq.toml
+template). See the parent plan's
+[Step 8](../active/2026-04-28-data-architecture-v1.md#step-8--worker--control-plane-archive-hand-off)
+status block for the canonical record.
 **Parent plan**:
-[`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md) — step 8.
+[`2026-04-28-data-architecture-v1.md`](../active/2026-04-28-data-architecture-v1.md) — step 8.
 **Design references**:
-- [`docs/design/data-architecture.md`](../../design/data-architecture.md) §5.3 (state retention) and §9.3 (new event types).
+- [`docs/design/data-architecture.md`](../../design/data-architecture.md) §5.3 (state retention), §5.5 (archive hand-off write order), and §9.3 (new event types).
 - Schema: §10 `invocation_archive` table is already implemented in
   `services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs`.
 
@@ -621,32 +626,32 @@ constants `DEFAULT_RETRY_INTERVAL_MS` /
 **Goal.** Make the new behaviour discoverable and close the
 plan.
 
-**What shipped (`5c4f90d`).** Parent plan got a Step 8 status
-block (same shape as Step 7's), listing the eight commits,
-the renamed integration tests, and the deferred live
+**What shipped.** Parent plan got a Step 8 status block (same
+shape as Step 7's) in `5c4f90d`, listing the eight commits,
+the renamed integration tests, and the (then-)deferred live
 acceptance test. `control_plane/mod.rs`'s topology comment
 was extended to list the coordination consumer (now covering
 both `invocation.ambiguous` and `invocation.archived`) and
-the heartbeat consumer. No separate closing report was
-written under `docs/plans/closed/` — the parent plan's
+the heartbeat consumer. The design-doc updates listed below
+landed on 2026-05-18 once the work was verified end-to-end
+against live NATS (which also surfaced and fixed the
+`fq.worker.>` stream-binding bug in `cffe16b`). No separate
+closing report under `docs/plans/closed/` — the parent plan's
 status block is the canonical record.
 
 #### Done when
 
-- [ ] Update `docs/design/event-schema.md` to document the
+- [x] Update `docs/design/event-schema.md` to document the
       two new event types and their canonical position
       (`completed → invocation.archived → invocation.archive_acked`).
-      **Deferred.**
-- [ ] Update `docs/design/data-architecture.md` §5.5 with
-      any write-order detail the worker emission deserves.
-      **Deferred.**
-- [ ] Update `fq.toml` template / operator docs with the
-      `[worker]` keys. **Deferred.**
+- [x] Update `docs/design/data-architecture.md` §5.5 with
+      the worker's archive emission write order.
+- [x] Update `fq.toml` template / operator docs with the
+      `[worker]` keys.
 - [x] Parent plan's step-8 status block reflects what
       shipped.
 - [x] `control_plane/mod.rs` topology comment updated.
-- [ ] Move this plan to `docs/plans/closed/` once the
-      deferred design-doc updates land.
+- [x] Move this plan to `docs/plans/closed/`.
 
 ## Cross-cutting concerns
 
@@ -657,9 +662,10 @@ status block is the canonical record.
 - **Reducer-equivalence tests survive.** Adding
   `invocation.archived` is non-breaking; the equivalence
   fixtures tolerate the new tail event on the reducer path.
-- **Documentation lands with the code — partially.** The
-  parent plan got the status block in the closing commit;
-  the design-doc updates listed in Step 7 are deferred.
+- **Documentation lands with the code.** The parent plan got
+  the status block in the closing commit; the design-doc
+  updates listed in Step 7 landed in a follow-up commit on
+  2026-05-18 once the work was verified end-to-end.
 
 ## Risks and what we'll learn
 
@@ -674,11 +680,14 @@ status block is the canonical record.
 
 This plan is closed when:
 
-- Acceptance tests for steps 3, 4, 5, and 6 are green against
-  live NATS (steps 4–6 covered by their NATS-gated integration
-  tests; the parent plan's end-to-end acceptance test remains
-  deferred).
-- `event-schema.md` and `data-architecture.md` updates land.
-- This plan moves to `docs/plans/closed/`.
-- Parent plan's step-8 checklist is updated to match. **Done
-  (2026-05-17, commit `5c4f90d`).**
+- [x] Acceptance tests for steps 3, 4, 5, and 6 are green
+      against live NATS (covered by their NATS-gated
+      integration tests, verified 2026-05-18 after the
+      `fq.worker.>` stream-binding fix in `cffe16b`). The
+      parent plan's end-to-end live-NATS+Anthropic acceptance
+      test remains deferred and is tracked separately.
+- [x] `event-schema.md` and `data-architecture.md` updates
+      land (2026-05-18).
+- [x] This plan moves to `docs/plans/closed/`.
+- [x] Parent plan's step-8 checklist updated to match (2026-05-17,
+      commit `5c4f90d`).

@@ -26,3 +26,21 @@ directory = "agents"
 # Environment variable holding the Anthropic API key. The runtime reads
 # the variable at call time; nothing is written back to this file.
 api_key_env = "ANTHROPIC_API_KEY"
+
+[worker]
+# Worker-side knobs for the archive hand-off retry sweeper. The
+# sweeper republishes `invocation.archived` for any terminal row
+# whose control-plane ack hasn't arrived yet.
+#
+# How often the sweeper republishes pending rows, in ms. Lower
+# values shorten time-to-recovery after a control-plane restart
+# at the cost of more NATS traffic during sustained outages.
+# archive_retry_interval_ms = 10000
+#
+# How long after `terminal_at` (in ms) the sweeper logs one
+# warning per held row. The sweeper *keeps republishing* past
+# this point — the warn is the operator-visible signal that the
+# control-plane isn't acknowledging in a reasonable time. The
+# local row is never deleted automatically (correctness over
+# cleanup); operator action is required for held rows.
+# archive_warn_after_ms = 60000

@@ -404,6 +404,42 @@ Each worker's WAL is consulted independently on its own restart;
 the control-plane's view of "what's stuck globally" comes from
 each worker reporting its ambiguous cases via NATS on recovery.
 
+**Archive hand-off** (terminal invocation → control-plane,
+covered in §9.3) uses the same SQLite-first write order. On
+reaching terminal:
+
+1. **Persist `terminal_at` to worker SQLite** (sync). Already
+   stamped by the reducer runner's per-step terminal upsert; the
+   `emit_failed` path calls a small `ensure_terminal` helper to
+   cover mid-step failure sites that bypass the loop's upsert.
+2. **Publish `completed` or `failed` to NATS** (sync ack). The
+   lifecycle event the rest of the system reads.
+3. **Publish `invocation.archived` to NATS** (sync ack). Carries
+   the final state blob for the control-plane to archive.
+4. **Mark the worker SQLite row `archive_status = 'pending'`**
+   (sync). Stamps `archive_published_at` so the retry sweeper
+   can measure age.
+
+Crash semantics:
+
+- After (1), before (2)/(3): recovery on restart sees a terminal
+  row with `archive_status IS NULL` and the retry sweeper picks
+  it up via `list_archive_pending`'s NULL-first ordering, then
+  publishes `invocation.archived`.
+- Between (3) and (4): the event went out but the row is still
+  NULL. The next sweeper tick treats it the same way and
+  republishes; the control-plane's `insert_archive` is
+  idempotent on `invocation_id` so the second publish is a no-op
+  on the archive table, and the ack still flows.
+- After (4): the row is `'pending'`; the sweeper republishes on
+  its cadence until `invocation.archive_acked` arrives on the
+  worker-scoped subject and the local row is deleted.
+
+The retry sweeper's "correctness over cleanup" rule (never
+delete a held row automatically — see `archive_retry.rs`) means
+a control-plane outage holds the row indefinitely on the worker
+rather than risking silent data loss.
+
 ### 5.6 Schema evolution — DECIDED, MINIMAL
 
 **Refuse-and-flag across incompatible schema changes.** Each
