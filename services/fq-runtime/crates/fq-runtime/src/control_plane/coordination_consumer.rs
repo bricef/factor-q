@@ -607,9 +607,197 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn completed_invocation_archives_and_worker_cleans_up_against_mock() {
+        // The plan's deferred acceptance test, realised against
+        // MockAnthropicServer instead of the live Anthropic API.
+        // Full pipeline: ReducerRunner → bus → CoordinationConsumer
+        // → archive row + ack → ArchiveAckConsumer → invocation_state
+        // row deleted.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        use crate::Agent;
+        use crate::events::TriggerSource;
+        use crate::llm::GenAiClient;
+        use crate::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
+        use crate::worker::reducer::Harness;
+        use crate::worker::{ArchiveAckConsumer, InvocationOutcome, WorkerId, WorkerStore};
+        use crate::{PricingTable, ReducerRunner, ToolRegistry};
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        // genai's auth resolver demands the env var even though
+        // the mock ignores the bearer. Safety: tests share a
+        // process, but the value is harmless.
+        // Safety: tests share a process but this var is benign.
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+
+        let mock = MockAnthropicServer::start().await;
+        mock.push_response(MockResponse::text("done.", 12, 4));
+
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let cp_dir = tempdir().unwrap();
+        let cp_store = Arc::new(
+            ControlPlaneStore::open(&cp_dir.path().join("events.db"))
+                .await
+                .unwrap(),
+        );
+        let worker_dir = tempdir().unwrap();
+        let worker_store = Arc::new(
+            WorkerStore::open(&worker_dir.path().join("worker.db"))
+                .await
+                .unwrap(),
+        );
+
+        let agent_id = AgentId::new(format!("e2e-archive-{}", Uuid::now_v7().simple())).unwrap();
+        let worker_id =
+            WorkerId::new(format!("e2e-worker-{}", Uuid::now_v7().simple())).expect("worker id");
+
+        // Capture the agent's invocation chain on NATS.
+        let mut chain_sub = bus
+            .subscribe(format!("fq.agent.{}.>", agent_id.as_str()))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Spawn the test coordination consumer with a unique
+        // name so we don't fight the production consumer.
+        let consumer_name = format!("fq-coordination-e2e-{}", Uuid::now_v7().simple());
+        let bus_for_cp = bus.clone();
+        let store_for_cp = cp_store.clone();
+        let agent_for_cp = agent_id.clone();
+        let (cp_shutdown_tx, cp_shutdown_rx) = oneshot::channel();
+        let cp_handle = tokio::spawn(async move {
+            run_test_consumer(
+                bus_for_cp,
+                store_for_cp,
+                consumer_name,
+                FILTER_SUBJECT,
+                agent_for_cp,
+                cp_shutdown_rx,
+            )
+            .await
+        });
+
+        // Spawn the real ArchiveAckConsumer for this worker.
+        let (ack_shutdown_tx, ack_shutdown_rx) = oneshot::channel();
+        let ack_consumer =
+            ArchiveAckConsumer::new(bus.clone(), worker_id.clone(), worker_store.clone());
+        let ack_handle = tokio::spawn(async move { ack_consumer.run(ack_shutdown_rx).await });
+
+        // Let both consumers register before publishing.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Build a runner pointing at the mock. file_read isn't
+        // used here — the scripted reducer just completes after
+        // one text response.
+        let agent = Agent::builder()
+            .id(agent_id.as_str())
+            .model("claude-haiku-4-5")
+            .system_prompt("be brief")
+            .budget(1.0)
+            .build()
+            .unwrap();
+
+        let llm = GenAiClient::with_base_url(mock.base_url());
+        let pricing = Arc::new(PricingTable::empty());
+        let tools = Arc::new(ToolRegistry::with_builtins());
+        let runner = ReducerRunner::new(
+            bus.clone(),
+            pricing,
+            tools,
+            worker_store.clone(),
+            worker_id.clone(),
+        );
+
+        let outcome = runner
+            .run(
+                &Harness::new(),
+                &agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                serde_json::json!({"input": "go"}),
+            )
+            .await
+            .expect("run completes");
+        let invocation_id = match outcome {
+            InvocationOutcome::Completed { invocation_id, .. } => invocation_id,
+            other => panic!("expected Completed outcome, got {other:?}"),
+        };
+        let inv_str = invocation_id.to_string();
+
+        // Poll for the full hand-off: archive row appears on CP,
+        // invocation_state row deleted on worker.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let archive = cp_store.get_archive(&inv_str).await.unwrap();
+            let state = worker_store.get_invocation_state(&inv_str).await.unwrap();
+            if archive.is_some() && state.is_none() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "hand-off didn't complete: archive={:?}, state={:?}",
+                    archive.is_some(),
+                    state.is_some()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Archive row contents.
+        let archive = cp_store.get_archive(&inv_str).await.unwrap().unwrap();
+        assert_eq!(archive.agent_id, agent_id.as_str());
+        assert_eq!(archive.final_phase, "completed");
+
+        // Drain captured events; verify the canonical sequence
+        // includes invocation.archived after completed.
+        let mut chain_kinds = Vec::new();
+        let collect_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < collect_deadline {
+            match tokio::time::timeout(Duration::from_millis(200), chain_sub.next()).await {
+                Ok(Some(Ok(ev))) => {
+                    chain_kinds.push(crate::test_support::events::event_kind(&ev));
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            chain_kinds
+                .windows(2)
+                .any(|w| w == ["completed", "invocation_archived"]),
+            "expected completed followed by invocation_archived in {chain_kinds:?}",
+        );
+
+        // Mock saw exactly one request, model carried through.
+        let received = mock.received_requests();
+        assert_eq!(
+            received.len(),
+            1,
+            "expected one chat call, got {received:?}"
+        );
+        assert_eq!(received[0]["model"], "claude-haiku-4-5");
+
+        let _ = cp_shutdown_tx.send(());
+        let _ = ack_shutdown_tx.send(());
+        let _ = cp_handle.await;
+        let _ = ack_handle.await;
+        mock.shutdown().await;
+    }
+
     /// Test consumer with a custom durable name so parallel
     /// test runs don't compete with each other or with the
     /// production `fq-coordination` consumer.
+    ///
+    /// Dispatches both `invocation.ambiguous` (direct store
+    /// upsert) and `invocation.archived` (delegates to the
+    /// real handler, which writes the archive row and emits
+    /// the worker-scoped ack). Other event types are ack'd
+    /// and ignored.
     async fn run_test_consumer(
         bus: EventBus,
         store: Arc<ControlPlaneStore>,
@@ -626,6 +814,10 @@ mod tests {
             .await
             .map_err(|err| CoordinationConsumerError::Stream(err.to_string()))?;
 
+        // A real CoordinationConsumer wrapper so we can reuse
+        // its production handlers for the archived path.
+        let inner = CoordinationConsumer::new(bus.clone(), store.clone());
+
         loop {
             tokio::select! {
                 biased;
@@ -637,13 +829,21 @@ mod tests {
                                 Ok(e) => e,
                                 Err(_) => { let _ = msg.ack().await; continue; }
                             };
-                            if let EventPayload::InvocationAmbiguous(_) = &event.payload {
-                                let _ = store.upsert_invocation_ownership(
-                                    &event.envelope.invocation_id.to_string(),
-                                    event.envelope.agent_id.as_str(),
-                                    Utc::now().timestamp_millis(),
-                                    OwnerStatus::Ambiguous,
-                                ).await;
+                            match &event.payload {
+                                EventPayload::InvocationAmbiguous(_) => {
+                                    let _ = store.upsert_invocation_ownership(
+                                        &event.envelope.invocation_id.to_string(),
+                                        event.envelope.agent_id.as_str(),
+                                        Utc::now().timestamp_millis(),
+                                        OwnerStatus::Ambiguous,
+                                    ).await;
+                                }
+                                EventPayload::InvocationArchived(payload) => {
+                                    let _ = inner
+                                        .handle_invocation_archived(&event, payload)
+                                        .await;
+                                }
+                                _ => {}
                             }
                             let _ = msg.ack().await;
                         }
