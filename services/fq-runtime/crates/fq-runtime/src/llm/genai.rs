@@ -396,14 +396,20 @@ mod tests {
         assert!(matches!(msg.role, provider::chat::ChatRole::Assistant));
     }
 
-    /// Live network test. Requires FQ_NETWORK_TESTS=1 and a real API
-    /// key for Anthropic. Skipped in normal test runs.
+    /// Drift detector against the real Anthropic API. Confirms
+    /// that our genai-adapter pipeline still successfully sends
+    /// a request and parses the response — i.e. that Anthropic
+    /// hasn't shifted the wire contract under us in a way the
+    /// mock-server tests can't see.
+    ///
+    /// Marked `#[ignore]` so `cargo test` skips it. Run via
+    /// `just acceptance-drift` or
+    /// `cargo test -- --ignored anthropic_real_api`. Requires
+    /// `ANTHROPIC_API_KEY`; one short Haiku call, ~fractions of
+    /// a cent per run.
     #[tokio::test]
-    async fn live_anthropic_round_trip() {
-        if std::env::var("FQ_NETWORK_TESTS").is_err() {
-            eprintln!("skipping: set FQ_NETWORK_TESTS=1");
-            return;
-        }
+    #[ignore = "live Anthropic API; run via `just acceptance-drift`"]
+    async fn anthropic_real_api_basic_response_parses() {
         if std::env::var("ANTHROPIC_API_KEY").is_err() {
             eprintln!("skipping: ANTHROPIC_API_KEY not set");
             return;
@@ -434,7 +440,11 @@ mod tests {
         };
 
         let response = client.chat(request).await.expect("chat");
-        assert!(response.content.is_some(), "expected some content");
+        assert!(
+            response.content.as_deref().is_some_and(|c| !c.is_empty()),
+            "expected non-empty content, got {:?}",
+            response.content
+        );
         assert!(
             response.usage.input_tokens > 0,
             "expected positive input tokens, got {}",

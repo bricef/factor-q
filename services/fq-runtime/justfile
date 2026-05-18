@@ -57,6 +57,15 @@ fq *args:
 # Run all quality checks
 ci: fmt-check lint test
 
+# Drift detector against the live Anthropic API. Sends one short
+# Haiku call (~fractions of a cent) and asserts the response
+# parses through our genai adapter. Use this when the mock-server
+# tests pass but you want to confirm the real wire contract is
+# unchanged — typically after Anthropic ships a model or API
+# update. Requires ANTHROPIC_API_KEY in the environment.
+acceptance-drift:
+    cargo test -- --ignored anthropic_real_api
+
 # Build the fq-runtime container image
 docker-build:
     docker build -t factor-q/fq-runtime:latest .

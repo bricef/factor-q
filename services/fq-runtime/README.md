@@ -99,7 +99,18 @@ Three test tiers, each with different prerequisites:
 |---|---|---|---|
 | Unit + integration | `just test` | NATS (`just infra-up`, set `FQ_NATS_URL`) | ~155 |
 | Smoke (real LLM) | `just smoke` (repo root) | NATS + `ANTHROPIC_API_KEY` | 6 |
+| Drift detector (real LLM) | `just acceptance-drift` | `ANTHROPIC_API_KEY` | 1 |
 | Shell sandbox (container) | `just test-shell-sandbox` | Docker | 16 |
+
+`just acceptance-drift` makes one short Haiku call (~fractions of a
+cent) against the live Anthropic API and asserts the response parses
+through our genai adapter. The full end-to-end pipeline (worker →
+control-plane archive hand-off) is verified deterministically in
+every `just test` run via `MockAnthropicServer`; run
+`acceptance-drift` separately when you want a real-API sanity check —
+for example after Anthropic ships a model or API update, or before
+cutting a release. Failure usually means a wire-format change; update
+the mock's response builders to match and re-run.
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full testing
 guide.
