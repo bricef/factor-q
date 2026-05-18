@@ -796,9 +796,7 @@ impl WorkerStore {
     /// sort first (terminal but the publish step has not yet
     /// run — typically a transient sliver, but the sweeper
     /// republishes them too so the flow is self-healing).
-    pub async fn list_archive_pending(
-        &self,
-    ) -> Result<Vec<InvocationStateRow>, WorkerStoreError> {
+    pub async fn list_archive_pending(&self) -> Result<Vec<InvocationStateRow>, WorkerStoreError> {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,

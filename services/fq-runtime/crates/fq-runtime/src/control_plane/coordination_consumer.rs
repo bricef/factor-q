@@ -40,7 +40,9 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use crate::bus::{BusError, EventBus};
-use crate::events::{Event, EventPayload, InvocationArchiveAckedPayload, InvocationArchivedPayload};
+use crate::events::{
+    Event, EventPayload, InvocationArchiveAckedPayload, InvocationArchivedPayload,
+};
 
 use super::store::{
     ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerStatus, WorkerStatus,

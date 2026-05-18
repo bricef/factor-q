@@ -1254,11 +1254,8 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // invocation.archived if an ack never arrives, so missed
     // acks are recovered without a durable consumer.
     let (archive_ack_shutdown_tx, archive_ack_shutdown_rx) = tokio::sync::oneshot::channel();
-    let archive_ack_consumer = fq_runtime::ArchiveAckConsumer::new(
-        bus.clone(),
-        worker_id.clone(),
-        worker_store.clone(),
-    );
+    let archive_ack_consumer =
+        fq_runtime::ArchiveAckConsumer::new(bus.clone(), worker_id.clone(), worker_store.clone());
     let mut archive_ack_handle =
         tokio::spawn(async move { archive_ack_consumer.run(archive_ack_shutdown_rx).await });
 
@@ -1267,13 +1264,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // until the control-plane acks. Cadence + warn threshold
     // come from `[worker]` in fq.toml.
     let (archive_retry_shutdown_tx, archive_retry_shutdown_rx) = tokio::sync::oneshot::channel();
-    let archive_retry_sweeper = fq_runtime::ArchiveRetrySweeper::new(
-        bus.clone(),
-        worker_id.clone(),
-        worker_store.clone(),
-    )
-    .with_retry_interval_ms(config.worker.archive_retry_interval_ms)
-    .with_warn_after_ms(config.worker.archive_warn_after_ms);
+    let archive_retry_sweeper =
+        fq_runtime::ArchiveRetrySweeper::new(bus.clone(), worker_id.clone(), worker_store.clone())
+            .with_retry_interval_ms(config.worker.archive_retry_interval_ms)
+            .with_warn_after_ms(config.worker.archive_warn_after_ms);
     let mut archive_retry_handle =
         tokio::spawn(async move { archive_retry_sweeper.run(archive_retry_shutdown_rx).await });
 

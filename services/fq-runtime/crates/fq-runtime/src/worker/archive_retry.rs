@@ -133,10 +133,7 @@ impl ArchiveRetrySweeper {
     }
 
     /// One sweep pass. Public for tests.
-    pub async fn sweep_once(
-        &self,
-        warned: &mut HashSet<String>,
-    ) -> Result<(), ArchiveRetryError> {
+    pub async fn sweep_once(&self, warned: &mut HashSet<String>) -> Result<(), ArchiveRetryError> {
         let rows = self
             .store
             .list_archive_pending()
@@ -150,12 +147,7 @@ impl ArchiveRetrySweeper {
         Ok(())
     }
 
-    fn maybe_warn_once(
-        &self,
-        row: &InvocationStateRow,
-        now_ms: i64,
-        warned: &mut HashSet<String>,
-    ) {
+    fn maybe_warn_once(&self, row: &InvocationStateRow, now_ms: i64, warned: &mut HashSet<String>) {
         let Some(terminal_at_ms) = row.terminal_at else {
             return;
         };
@@ -292,10 +284,7 @@ mod tests {
             .upsert_invocation_state(&terminal_row(&inv_str, &agent_id, 1_000))
             .await
             .unwrap();
-        store
-            .set_archive_pending(&inv_str, 1_000)
-            .await
-            .unwrap();
+        store.set_archive_pending(&inv_str, 1_000).await.unwrap();
 
         let mut sub = bus
             .subscribe(format!("fq.agent.{agent_id}.invocation.archived"))
@@ -350,8 +339,7 @@ mod tests {
                 .expect("worker store"),
         );
         let worker_id = WorkerId::new("warn-test").expect("worker id");
-        let sweeper = ArchiveRetrySweeper::new(bus, worker_id, store)
-            .with_warn_after_ms(1_000);
+        let sweeper = ArchiveRetrySweeper::new(bus, worker_id, store).with_warn_after_ms(1_000);
 
         let row = terminal_row("inv-1", "agent-1", 100);
         let mut warned = HashSet::new();

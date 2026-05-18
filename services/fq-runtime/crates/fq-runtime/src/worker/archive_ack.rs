@@ -215,10 +215,7 @@ mod tests {
             .upsert_invocation_state(&pending_terminal_row(&inv_str))
             .await
             .unwrap();
-        store
-            .set_archive_pending(&inv_str, 100)
-            .await
-            .unwrap();
+        store.set_archive_pending(&inv_str, 100).await.unwrap();
         assert!(
             store
                 .get_invocation_state(&inv_str)
@@ -248,7 +245,12 @@ mod tests {
         // Wait for the row to disappear.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
-            if store.get_invocation_state(&inv_str).await.unwrap().is_none() {
+            if store
+                .get_invocation_state(&inv_str)
+                .await
+                .unwrap()
+                .is_none()
+            {
                 break;
             }
             if tokio::time::Instant::now() > deadline {
