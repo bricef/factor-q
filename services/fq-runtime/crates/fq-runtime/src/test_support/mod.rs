@@ -16,4 +16,5 @@
 //!   or verify state shape after every step.
 
 pub mod events;
+pub mod mock_anthropic;
 pub mod stepper;
