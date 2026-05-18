@@ -24,8 +24,11 @@ pub const STREAM_NAME: &str = "fq-events";
 /// We narrow this from the original `fq.>` so the separate trigger
 /// stream (`fq.trigger.>`) can claim its subject without overlap.
 /// NATS does not allow two JetStream streams to claim overlapping
-/// subjects.
-pub const EVENT_STREAM_SUBJECTS: &[&str] = &["fq.agent.>", "fq.system.>"];
+/// subjects. `fq.worker.>` is captured here so worker-scoped events
+/// (heartbeats, archive acks) reach JetStream consumers and
+/// `bus.publish` receives a Pub-Ack — see `worker_heartbeat` and
+/// `worker_invocation_archive_acked` in `events::subjects`.
+pub const EVENT_STREAM_SUBJECTS: &[&str] = &["fq.agent.>", "fq.system.>", "fq.worker.>"];
 
 /// Default retention for the event stream.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60); // 30 days
@@ -136,20 +139,26 @@ impl EventBus {
             stream = STREAM_NAME,
             "ensuring JetStream event stream exists"
         );
-        self.jetstream
-            .get_or_create_stream(stream::Config {
-                name: STREAM_NAME.to_string(),
-                subjects: EVENT_STREAM_SUBJECTS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-                retention: stream::RetentionPolicy::Limits,
-                storage: stream::StorageType::File,
-                max_age: DEFAULT_MAX_AGE,
-                compression: Some(stream::Compression::S2),
-                ..Default::default()
-            })
-            .await?;
+        let config = stream::Config {
+            name: STREAM_NAME.to_string(),
+            subjects: EVENT_STREAM_SUBJECTS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            retention: stream::RetentionPolicy::Limits,
+            storage: stream::StorageType::File,
+            max_age: DEFAULT_MAX_AGE,
+            compression: Some(stream::Compression::S2),
+            ..Default::default()
+        };
+        // Create-or-update: get_or_create creates a fresh stream
+        // but won't change the config of an existing one, so a
+        // pre-existing cluster with stale `subjects` (e.g. a
+        // pre-`fq.worker.>` deployment) would silently drop
+        // worker-scoped publishes. update_stream applies the
+        // current config to whatever the server has.
+        self.jetstream.get_or_create_stream(config.clone()).await?;
+        self.jetstream.update_stream(&config).await?;
         Ok(())
     }
 
