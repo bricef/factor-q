@@ -124,6 +124,11 @@ enum Commands {
     /// Show a health overview of the runtime (NATS, streams,
     /// consumers, projection)
     Status,
+    /// Invocation triage commands
+    Invocation {
+        #[command(subcommand)]
+        command: InvocationCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -134,6 +139,55 @@ enum AgentCommands {
     Validate {
         /// Path to agent definition
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum InvocationCommands {
+    /// List invocations from the coordination store. By default
+    /// shows in-flight, ambiguous, completed, and failed rows;
+    /// use `--include-archived` to also show fully-archived
+    /// invocations.
+    List {
+        /// Filter by ownership status. Accepts
+        /// `in_flight | ambiguous | completed | failed`.
+        #[arg(long)]
+        status: Option<String>,
+        /// Also list rows from `invocation_archive` (terminal
+        /// invocations whose worker-side row is gone).
+        #[arg(long)]
+        include_archived: bool,
+        /// Maximum number of rows to return.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the detail of one invocation: owner row, archive
+    /// row (if present), and the last few events from the
+    /// projection.
+    Show {
+        /// Invocation id to inspect.
+        id: String,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Operator-issued terminal transition for an invocation.
+    /// Publishes `invocation.operator_recovered` so audit can
+    /// distinguish operator-initiated terminations from
+    /// worker-initiated ones. Works on any current state
+    /// (kill-switch behaviour).
+    Drop {
+        /// Invocation id to drop.
+        id: String,
+        /// Free-form reason recorded on the event payload.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -224,6 +278,29 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             show_costs(&cli.global, agent.as_deref(), since.as_deref()).await?
         }
         Commands::Status => show_status(&cli.global).await?,
+        Commands::Invocation { command } => match command {
+            InvocationCommands::List {
+                status,
+                include_archived,
+                limit,
+                json,
+            } => {
+                invocation_list(
+                    &cli.global,
+                    status.as_deref(),
+                    include_archived,
+                    limit,
+                    json,
+                )
+                .await?
+            }
+            InvocationCommands::Show { id, json } => {
+                invocation_show(&cli.global, &id, json).await?
+            }
+            InvocationCommands::Drop { id, reason, json } => {
+                invocation_drop(&cli.global, &id, reason.as_deref(), json).await?
+            }
+        },
     }
     Ok(())
 }
@@ -1628,4 +1705,517 @@ fn normalise(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+// ============================================================
+// fq invocation subcommand
+// ============================================================
+
+/// Parse a `--status` filter into an `OwnerStatus`. Returns
+/// `Err` on unknown values so the CLI exits with a clear
+/// message rather than silently matching no rows.
+fn parse_invocation_status_filter(
+    s: &str,
+) -> anyhow::Result<fq_runtime::control_plane::store::OwnerStatus> {
+    use fq_runtime::control_plane::store::OwnerStatus;
+    match s {
+        "in_flight" => Ok(OwnerStatus::InFlight),
+        "ambiguous" => Ok(OwnerStatus::Ambiguous),
+        "completed" => Ok(OwnerStatus::Completed),
+        "failed" => Ok(OwnerStatus::Failed),
+        other => Err(anyhow::anyhow!(
+            "unknown status filter `{other}` — try in_flight | ambiguous | completed | failed"
+        )),
+    }
+}
+
+#[derive(serde::Serialize, Clone)]
+struct InvocationListItem {
+    invocation_id: String,
+    agent_id: Option<String>,
+    worker_id: String,
+    status: String,
+    assigned_at_ms: i64,
+    archived: bool,
+}
+
+/// One human-readable line for an invocation list row. Pure;
+/// covered by unit tests.
+fn format_invocation_list_row_human(item: &InvocationListItem) -> String {
+    let inv_short: String = item.invocation_id.chars().take(8).collect();
+    let agent = item.agent_id.as_deref().unwrap_or("?");
+    let agent_trim: String = agent.chars().take(22).collect();
+    let worker_trim: String = item.worker_id.chars().take(22).collect();
+    let archived_flag = if item.archived { "yes" } else { "no" };
+    format!(
+        "{:<11} {:<10} {:<24} {:<24} {}",
+        inv_short, item.status, agent_trim, worker_trim, archived_flag
+    )
+}
+
+async fn invocation_list(
+    global: &GlobalArgs,
+    status: Option<&str>,
+    include_archived: bool,
+    limit: i64,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open control-plane store at {}",
+                db_path.display()
+            )
+        })?;
+    let proj_store = ProjectionStore::open_read_only(&db_path)
+        .await
+        .with_context(|| format!("failed to open projection at {}", db_path.display()))?;
+
+    let status_filter = status.map(parse_invocation_status_filter).transpose()?;
+    let owners = cp_store.list_invocations(status_filter, limit).await?;
+
+    let mut items: Vec<InvocationListItem> = Vec::with_capacity(owners.len());
+    for owner in &owners {
+        let agent_id = proj_store
+            .agent_id_for_invocation(&owner.invocation_id)
+            .await?;
+        items.push(InvocationListItem {
+            invocation_id: owner.invocation_id.clone(),
+            agent_id,
+            worker_id: owner.worker_id.clone(),
+            status: owner.status.as_str().to_string(),
+            assigned_at_ms: owner.assigned_at,
+            archived: false,
+        });
+    }
+
+    if include_archived {
+        let archives = cp_store.list_archives_recent(limit).await?;
+        for arc in archives {
+            if items.iter().any(|i| i.invocation_id == arc.invocation_id) {
+                continue;
+            }
+            items.push(InvocationListItem {
+                invocation_id: arc.invocation_id,
+                agent_id: Some(arc.agent_id),
+                worker_id: String::new(),
+                status: arc.final_phase,
+                assigned_at_ms: arc.archived_at,
+                archived: true,
+            });
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else if items.is_empty() {
+        let what = status
+            .map(|s| format!("with status={s} "))
+            .unwrap_or_default();
+        println!("0 invocations {what}— nothing to list.");
+    } else {
+        println!(
+            "{:<11} {:<10} {:<24} {:<24} arch",
+            "invocation", "status", "agent", "worker"
+        );
+        for item in &items {
+            println!("{}", format_invocation_list_row_human(item));
+        }
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct InvocationArchiveSummary {
+    final_phase: String,
+    started_at_ms: i64,
+    terminal_at_ms: i64,
+    archived_at_ms: i64,
+}
+
+#[derive(serde::Serialize)]
+struct EventSummary {
+    timestamp: String,
+    event_type: String,
+}
+
+#[derive(serde::Serialize)]
+struct InvocationDetail {
+    invocation_id: String,
+    agent_id: Option<String>,
+    owner: Option<InvocationListItem>,
+    archive: Option<InvocationArchiveSummary>,
+    recent_events: Vec<EventSummary>,
+}
+
+async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path).await?;
+    let proj_store = ProjectionStore::open_read_only(&db_path).await?;
+
+    let owner = cp_store.get_invocation_owner(id).await?;
+    let archive = cp_store.get_archive(id).await?;
+    let agent_id = proj_store.agent_id_for_invocation(id).await?;
+
+    if owner.is_none() && archive.is_none() && agent_id.is_none() {
+        eprintln!("no invocation found with id={id}");
+        std::process::exit(1);
+    }
+
+    // Limit recent events to those for this invocation. The
+    // projection has no per-invocation query method today; the
+    // generic query is fast enough for triage volumes.
+    let recent_events: Vec<EventSummary> = proj_store
+        .query_events(
+            &EventFilter {
+                agent: agent_id.as_deref(),
+                event_type: None,
+                since: None,
+            },
+            200,
+        )
+        .await?
+        .into_iter()
+        .filter(|e| e.invocation_id == id)
+        .take(20)
+        .map(|e| EventSummary {
+            timestamp: e.timestamp,
+            event_type: e.event_type,
+        })
+        .collect();
+
+    let owner_item = owner.as_ref().map(|o| InvocationListItem {
+        invocation_id: o.invocation_id.clone(),
+        agent_id: agent_id.clone(),
+        worker_id: o.worker_id.clone(),
+        status: o.status.as_str().to_string(),
+        assigned_at_ms: o.assigned_at,
+        archived: false,
+    });
+    let archive_summary = archive.as_ref().map(|a| InvocationArchiveSummary {
+        final_phase: a.final_phase.clone(),
+        started_at_ms: a.started_at,
+        terminal_at_ms: a.terminal_at,
+        archived_at_ms: a.archived_at,
+    });
+
+    let detail = InvocationDetail {
+        invocation_id: id.to_string(),
+        agent_id: agent_id.clone(),
+        owner: owner_item,
+        archive: archive_summary,
+        recent_events,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&detail)?);
+    } else {
+        println!("Invocation: {}", detail.invocation_id);
+        if let Some(a) = &detail.agent_id {
+            println!("  agent:    {a}");
+        }
+        if let Some(o) = &detail.owner {
+            println!("  status:   {}", o.status);
+            println!("  worker:   {}", o.worker_id);
+        } else {
+            println!("  status:   (no coordination row)");
+        }
+        if let Some(a) = &detail.archive {
+            println!(
+                "  archived: phase={} terminal_at_ms={} archived_at_ms={}",
+                a.final_phase, a.terminal_at_ms, a.archived_at_ms
+            );
+        }
+        if !detail.recent_events.is_empty() {
+            println!("\nRecent events:");
+            for e in &detail.recent_events {
+                let ts = e.timestamp.get(..19).unwrap_or(&e.timestamp);
+                println!("  {ts}  {}", e.event_type);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize, Debug)]
+struct InvocationDropResult {
+    invocation_id: String,
+    agent_id: String,
+    event_id: String,
+    reason: Option<String>,
+}
+
+/// Look up the agent for an invocation, build the
+/// `invocation.operator_recovered` event with `action="drop"`,
+/// publish it, and return the result struct. Extracted from the
+/// CLI handler so tests can drive the publish path without
+/// constructing `GlobalArgs` / config files.
+async fn publish_invocation_drop(
+    bus: &EventBus,
+    proj_store: &ProjectionStore,
+    invocation_id: &str,
+    reason: Option<&str>,
+) -> anyhow::Result<InvocationDropResult> {
+    let agent_id_str = proj_store
+        .agent_id_for_invocation(invocation_id)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no events found for invocation {invocation_id}; cannot determine agent. \
+                 Has any event been published for this invocation?"
+            )
+        })?;
+    let agent_id = AgentId::new(agent_id_str.clone())
+        .map_err(|e| anyhow::anyhow!("invalid agent_id from projection: {e}"))?;
+    let inv_uuid = Uuid::parse_str(invocation_id)
+        .map_err(|e| anyhow::anyhow!("invalid invocation id `{invocation_id}`: {e}"))?;
+
+    let event = Event::new(
+        agent_id,
+        inv_uuid,
+        EventPayload::InvocationOperatorRecovered(
+            fq_runtime::events::InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: reason.map(|s| s.to_string()),
+            },
+        ),
+    );
+    let event_id = event.envelope.event_id.to_string();
+    bus.publish(&event).await?;
+
+    Ok(InvocationDropResult {
+        invocation_id: invocation_id.to_string(),
+        agent_id: agent_id_str,
+        event_id,
+        reason: reason.map(|s| s.to_string()),
+    })
+}
+
+async fn invocation_drop(
+    global: &GlobalArgs,
+    id: &str,
+    reason: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+    let proj_store = ProjectionStore::open_read_only(&db_path).await?;
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+
+    let result = publish_invocation_drop(&bus, &proj_store, id, reason).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "Dropped invocation {id} (agent={}, event_id={}).",
+            result.agent_id, result.event_id
+        );
+        if let Some(r) = &result.reason {
+            println!("Reason: {r}");
+        }
+        println!("Follow with `fq invocation show {id}` to confirm the archive row.");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod invocation_tests {
+    use super::*;
+
+    #[test]
+    fn parse_invocation_status_filter_accepts_known_values() {
+        use fq_runtime::control_plane::store::OwnerStatus;
+        assert!(matches!(
+            parse_invocation_status_filter("in_flight").unwrap(),
+            OwnerStatus::InFlight
+        ));
+        assert!(matches!(
+            parse_invocation_status_filter("ambiguous").unwrap(),
+            OwnerStatus::Ambiguous
+        ));
+        assert!(matches!(
+            parse_invocation_status_filter("completed").unwrap(),
+            OwnerStatus::Completed
+        ));
+        assert!(matches!(
+            parse_invocation_status_filter("failed").unwrap(),
+            OwnerStatus::Failed
+        ));
+    }
+
+    #[test]
+    fn parse_invocation_status_filter_rejects_unknown() {
+        let err = parse_invocation_status_filter("garbage").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("garbage"));
+        assert!(msg.contains("in_flight"));
+    }
+
+    #[test]
+    fn format_invocation_list_row_human_renders_short_id_and_truncated_fields() {
+        let item = InvocationListItem {
+            invocation_id: "019e3b328fd47de1aae0bb91bb24528d".to_string(),
+            agent_id: Some("a".repeat(40)),
+            worker_id: "worker-42".to_string(),
+            status: "ambiguous".to_string(),
+            assigned_at_ms: 1_700_000_000_000,
+            archived: false,
+        };
+        let line = format_invocation_list_row_human(&item);
+        assert!(line.starts_with("019e3b32"), "expected 8-char id prefix");
+        assert!(line.contains("ambiguous"));
+        assert!(line.contains("worker-42"));
+        assert!(line.contains("no"));
+        // Agent string was truncated to 22 chars.
+        assert!(line.contains(&"a".repeat(22)));
+        assert!(!line.contains(&"a".repeat(23)));
+    }
+
+    #[test]
+    fn format_invocation_list_row_human_marks_archived() {
+        let item = InvocationListItem {
+            invocation_id: "inv".to_string(),
+            agent_id: Some("a".to_string()),
+            worker_id: String::new(),
+            status: "completed".to_string(),
+            assigned_at_ms: 0,
+            archived: true,
+        };
+        let line = format_invocation_list_row_human(&item);
+        assert!(
+            line.trim_end().ends_with("yes"),
+            "archived flag should be 'yes', got: {line:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_invocation_drop_emits_operator_recovered_for_agent() {
+        // NATS-gated end-to-end of the publish path: seed a
+        // ProjectionStore with one event so the agent lookup
+        // works, then call publish_invocation_drop and capture
+        // the event on the agent-scoped operator_recovered
+        // subject.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        use fq_runtime::events::{EventPayload as EP, TriggerSource, TriggeredPayload};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("events.db");
+        let proj_store = ProjectionStore::open(&db_path).await.unwrap();
+
+        let agent_id = AgentId::new(format!("op-drop-cli-{}", Uuid::now_v7().simple())).unwrap();
+        let invocation_id = Uuid::now_v7();
+
+        // Seed one event so agent_id_for_invocation has something
+        // to find. Pick triggered — the most representative
+        // first event for an invocation.
+        let seed = Event::new(
+            agent_id.clone(),
+            invocation_id,
+            EP::Triggered(TriggeredPayload {
+                trigger_source: TriggerSource::Manual,
+                trigger_subject: None,
+                trigger_payload: serde_json::Value::Null,
+                config_snapshot: fq_runtime::Agent::builder()
+                    .id(agent_id.as_str())
+                    .model("claude-haiku")
+                    .system_prompt("test")
+                    .build()
+                    .unwrap()
+                    .to_snapshot(),
+            }),
+        );
+        proj_store.insert_event(&seed).await.unwrap();
+
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let mut sub = bus
+            .subscribe(format!(
+                "fq.agent.{}.invocation.operator_recovered",
+                agent_id.as_str()
+            ))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let result = publish_invocation_drop(
+            &bus,
+            &proj_store,
+            &invocation_id.to_string(),
+            Some("test reason"),
+        )
+        .await
+        .expect("publish_invocation_drop");
+        assert_eq!(result.agent_id, agent_id.as_str());
+        assert_eq!(result.reason.as_deref(), Some("test reason"));
+
+        let captured = tokio::time::timeout(std::time::Duration::from_secs(2), sub.next())
+            .await
+            .expect("event timeout")
+            .expect("stream closed")
+            .expect("deserialise");
+        assert_eq!(captured.envelope.invocation_id, invocation_id);
+        match &captured.payload {
+            EventPayload::InvocationOperatorRecovered(p) => {
+                assert_eq!(p.action, "drop");
+                assert_eq!(p.final_phase, "failed");
+                assert_eq!(p.reason.as_deref(), Some("test reason"));
+            }
+            other => panic!("expected InvocationOperatorRecovered, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_invocation_drop_errors_when_agent_unknown() {
+        // No seeded events → no agent_id → error.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let proj_store = ProjectionStore::open(&dir.path().join("events.db"))
+            .await
+            .unwrap();
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+
+        let fake_inv = Uuid::now_v7().to_string();
+        let err = publish_invocation_drop(&bus, &proj_store, &fake_inv, None)
+            .await
+            .expect_err("expected error for unknown invocation");
+        let msg = format!("{err}");
+        assert!(msg.contains("no events found"), "got: {msg}");
+    }
+
+    #[test]
+    fn invocation_list_item_serialises_to_stable_json_shape() {
+        let item = InvocationListItem {
+            invocation_id: "inv-1".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            worker_id: "worker-1".to_string(),
+            status: "in_flight".to_string(),
+            assigned_at_ms: 42,
+            archived: false,
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["invocation_id"], "inv-1");
+        assert_eq!(v["agent_id"], "agent-1");
+        assert_eq!(v["worker_id"], "worker-1");
+        assert_eq!(v["status"], "in_flight");
+        assert_eq!(v["assigned_at_ms"], 42);
+        assert_eq!(v["archived"], false);
+    }
 }

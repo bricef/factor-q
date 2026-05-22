@@ -200,6 +200,21 @@ impl ProjectionStore {
         Ok(events)
     }
 
+    /// Look up the `agent_id` for an invocation. Returns `None` if
+    /// no projected event references the invocation. Used by the
+    /// operator CLI to address `fq.agent.<id>.*` subjects when only
+    /// the invocation id is known.
+    pub async fn agent_id_for_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let row = sqlx::query("SELECT agent_id FROM events WHERE invocation_id = ? LIMIT 1")
+            .bind(invocation_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<String, _>(0)))
+    }
+
     /// Aggregate cost-bearing events into per-agent totals. Cost
     /// now rides on `llm.response` envelopes (envelope-refactor
     /// plan step 3), so the filter is `total_cost IS NOT NULL`

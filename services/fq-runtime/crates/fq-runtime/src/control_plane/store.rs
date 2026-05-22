@@ -815,6 +815,69 @@ impl ControlPlaneStore {
         .await?;
         Ok(rows.into_iter().map(row_to_archive).collect())
     }
+
+    /// Most-recent `n` rows from `invocation_archive`, ordered by
+    /// `archived_at` DESC. Used by `fq invocation list
+    /// --include-archived`.
+    pub async fn list_archives_recent(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<InvocationArchiveRow>, ControlPlaneStoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT invocation_id, agent_id, final_phase, final_state_blob,
+                   started_at, terminal_at, archived_at
+            FROM invocation_archive
+            ORDER BY archived_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_archive).collect())
+    }
+
+    /// List coordination ownership rows, optionally filtered by
+    /// status, capped to `limit`, ordered by `assigned_at` DESC.
+    /// Used by `fq invocation list`.
+    pub async fn list_invocations(
+        &self,
+        status: Option<OwnerStatus>,
+        limit: i64,
+    ) -> Result<Vec<OwnerRow>, ControlPlaneStoreError> {
+        let rows = match status {
+            Some(s) => {
+                sqlx::query(
+                    r#"
+                    SELECT invocation_id, worker_id, assigned_at, status
+                    FROM coordination_invocation_owner
+                    WHERE status = ?
+                    ORDER BY assigned_at DESC
+                    LIMIT ?
+                    "#,
+                )
+                .bind(s.as_str())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    r#"
+                    SELECT invocation_id, worker_id, assigned_at, status
+                    FROM coordination_invocation_owner
+                    ORDER BY assigned_at DESC
+                    LIMIT ?
+                    "#,
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        rows.into_iter().map(row_to_owner).collect()
+    }
 }
 
 // ---------------------------------------------------------------
