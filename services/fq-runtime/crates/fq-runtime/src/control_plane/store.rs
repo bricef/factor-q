@@ -135,6 +135,11 @@ impl WorkerStatus {
 pub enum OwnerStatus {
     InFlight,
     Completed,
+    /// Terminal failure. Reached either via worker-emitted
+    /// `invocation.archived` with `final_phase = "failed"`,
+    /// or operator-issued
+    /// [`crate::events::EventPayload::InvocationOperatorRecovered`].
+    Failed,
     Ambiguous,
 }
 
@@ -143,6 +148,7 @@ impl OwnerStatus {
         match self {
             OwnerStatus::InFlight => "in_flight",
             OwnerStatus::Completed => "completed",
+            OwnerStatus::Failed => "failed",
             OwnerStatus::Ambiguous => "ambiguous",
         }
     }
@@ -151,6 +157,7 @@ impl OwnerStatus {
         match s {
             "in_flight" => Some(OwnerStatus::InFlight),
             "completed" => Some(OwnerStatus::Completed),
+            "failed" => Some(OwnerStatus::Failed),
             "ambiguous" => Some(OwnerStatus::Ambiguous),
             _ => None,
         }
@@ -1005,6 +1012,7 @@ mod tests {
         for s in [
             OwnerStatus::InFlight,
             OwnerStatus::Completed,
+            OwnerStatus::Failed,
             OwnerStatus::Ambiguous,
         ] {
             assert_eq!(OwnerStatus::parse(s.as_str()), Some(s));

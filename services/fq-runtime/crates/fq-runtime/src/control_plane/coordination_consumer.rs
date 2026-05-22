@@ -182,6 +182,10 @@ impl CoordinationConsumer {
             EventPayload::InvocationArchived(payload) => {
                 self.handle_invocation_archived(&event, payload).await
             }
+            EventPayload::InvocationOperatorRecovered(payload) => {
+                self.handle_invocation_operator_recovered(&event, payload)
+                    .await
+            }
             _ => {
                 // Unknown invocation event variant — ack and
                 // move on. We only filter to invocation.*
@@ -289,14 +293,32 @@ impl CoordinationConsumer {
         // yet populate ownership rows for happy-path triggers
         // (handled in a later plan step) — when it does, this
         // becomes a pure status flip.
-        self.store
-            .upsert_invocation_ownership(
-                &invocation_id,
-                payload.worker_id.as_str(),
-                now_ms,
-                OwnerStatus::Completed,
-            )
-            .await?;
+        //
+        // Don't downgrade an already-terminal status: if the
+        // operator dropped this invocation before the worker
+        // managed to publish `invocation.archived`, the owner
+        // row is `Failed` and the operator's decision sticks.
+        // Step-9 risk: race between `fq invocation drop` and
+        // a late-finishing worker.
+        let current_owner = self.store.get_invocation_owner(&invocation_id).await?;
+        let already_terminal = matches!(
+            current_owner.as_ref().map(|o| o.status),
+            Some(OwnerStatus::Failed | OwnerStatus::Completed)
+        );
+        if !already_terminal {
+            let new_status = match payload.final_phase.as_str() {
+                "failed" => OwnerStatus::Failed,
+                _ => OwnerStatus::Completed,
+            };
+            self.store
+                .upsert_invocation_ownership(
+                    &invocation_id,
+                    payload.worker_id.as_str(),
+                    now_ms,
+                    new_status,
+                )
+                .await?;
+        }
 
         let ack = Event::new(
             event.envelope.agent_id.clone(),
@@ -306,6 +328,70 @@ impl CoordinationConsumer {
             }),
         );
         self.bus.publish(&ack).await?;
+        Ok(())
+    }
+
+    /// Step 9: operator-issued terminal transition.
+    ///
+    /// 1. Write the archive row (idempotent on `invocation_id`).
+    ///    State blob is empty in v1 — the CP doesn't have the
+    ///    worker's state for an ambiguous invocation.
+    /// 2. Update the ownership row's status to match
+    ///    `final_phase`. Always overrides the previous status
+    ///    (including any prior terminal status), so an operator
+    ///    can correct a wrong worker outcome if they need to.
+    /// 3. **No ack** — unlike `invocation.archived`, no worker
+    ///    is waiting to clean up. If the worker is still alive
+    ///    and emits `invocation.archived` afterwards, the
+    ///    archive's status update is guarded against
+    ///    downgrading a terminal owner status (see
+    ///    `handle_invocation_archived`).
+    pub(crate) async fn handle_invocation_operator_recovered(
+        &self,
+        event: &Event,
+        payload: &crate::events::InvocationOperatorRecoveredPayload,
+    ) -> Result<(), CoordinationConsumerError> {
+        let invocation_id = event.envelope.invocation_id.to_string();
+        let now_ms = Utc::now().timestamp_millis();
+        debug!(
+            invocation_id = %invocation_id,
+            action = %payload.action,
+            final_phase = %payload.final_phase,
+            "applying operator-recovered terminal transition"
+        );
+
+        let final_status = match payload.final_phase.as_str() {
+            "completed" => OwnerStatus::Completed,
+            // v1 always emits "failed"; treat unknown phases as
+            // failed too so an audit trail is preserved.
+            _ => OwnerStatus::Failed,
+        };
+
+        // Preserve the existing worker_id if the owner row
+        // exists; otherwise use the agent_id as a placeholder
+        // (mirrors the ambiguous handler's behaviour).
+        let existing = self.store.get_invocation_owner(&invocation_id).await?;
+        let worker_id = existing
+            .as_ref()
+            .map(|o| o.worker_id.clone())
+            .unwrap_or_else(|| event.envelope.agent_id.as_str().to_string());
+
+        self.store
+            .insert_archive(&InvocationArchiveRow {
+                invocation_id: invocation_id.clone(),
+                agent_id: event.envelope.agent_id.as_str().to_string(),
+                final_phase: payload.final_phase.clone(),
+                final_state_blob: Vec::new(),
+                started_at: existing.as_ref().map(|o| o.assigned_at).unwrap_or(now_ms),
+                terminal_at: now_ms,
+                archived_at: now_ms,
+            })
+            .await?;
+
+        self.store
+            .upsert_invocation_ownership(&invocation_id, &worker_id, now_ms, final_status)
+            .await?;
+
         Ok(())
     }
 
@@ -608,6 +694,239 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handler_operator_recovered_writes_archive_and_updates_owner() {
+        // Operator-issued drop: no live worker involvement.
+        // Handler writes the archive row, flips the owner row
+        // to Failed, and does not publish an ack.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        use crate::events::{Event, EventPayload, InvocationOperatorRecoveredPayload};
+        use crate::worker::WorkerId;
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ControlPlaneStore::open(&dir.path().join("events.db"))
+                .await
+                .unwrap(),
+        );
+
+        let agent_id =
+            AgentId::new(format!("op-recover-test-{}", Uuid::now_v7().simple())).unwrap();
+        let worker_id = WorkerId::new(Uuid::now_v7().to_string()).expect("worker id");
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        // Seed an Ambiguous owner row as if the worker reported
+        // it on restart.
+        store
+            .upsert_invocation_ownership(
+                &inv_str,
+                worker_id.as_str(),
+                1_000,
+                OwnerStatus::Ambiguous,
+            )
+            .await
+            .unwrap();
+
+        // Subscribe to the worker's ack subject so we can
+        // assert nothing is published there.
+        let mut ack_sub = bus
+            .subscribe(format!(
+                "fq.worker.{}.invocation.archive_acked",
+                worker_id.as_str()
+            ))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone());
+        let event = Event::new(
+            agent_id.clone(),
+            invocation_id,
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: Some("flaky network".to_string()),
+            }),
+        );
+        let payload = match &event.payload {
+            EventPayload::InvocationOperatorRecovered(p) => p.clone(),
+            _ => unreachable!(),
+        };
+        consumer
+            .handle_invocation_operator_recovered(&event, &payload)
+            .await
+            .expect("handler succeeds");
+
+        // Archive row exists.
+        let archive = store
+            .get_archive(&inv_str)
+            .await
+            .unwrap()
+            .expect("archive row");
+        assert_eq!(archive.agent_id, agent_id.as_str());
+        assert_eq!(archive.final_phase, "failed");
+        assert!(archive.final_state_blob.is_empty());
+
+        // Owner row flipped to Failed, worker_id preserved.
+        let owner = store
+            .get_invocation_owner(&inv_str)
+            .await
+            .unwrap()
+            .expect("owner row");
+        assert_eq!(owner.status, OwnerStatus::Failed);
+        assert_eq!(owner.worker_id, worker_id.as_str());
+
+        // No ack published.
+        let ack = tokio::time::timeout(Duration::from_millis(200), ack_sub.next()).await;
+        assert!(
+            ack.is_err(),
+            "operator-recovered must not publish an ack; got {ack:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_operator_recovered_idempotent_on_redelivery() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        use crate::events::{Event, EventPayload, InvocationOperatorRecoveredPayload};
+        use crate::worker::WorkerId;
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ControlPlaneStore::open(&dir.path().join("events.db"))
+                .await
+                .unwrap(),
+        );
+        let agent_id =
+            AgentId::new(format!("op-recover-idem-{}", Uuid::now_v7().simple())).unwrap();
+        let worker_id = WorkerId::new(Uuid::now_v7().to_string()).expect("worker id");
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        store
+            .upsert_invocation_ownership(
+                &inv_str,
+                worker_id.as_str(),
+                1_000,
+                OwnerStatus::Ambiguous,
+            )
+            .await
+            .unwrap();
+
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone());
+        let event = Event::new(
+            agent_id.clone(),
+            invocation_id,
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: None,
+            }),
+        );
+        let payload = match &event.payload {
+            EventPayload::InvocationOperatorRecovered(p) => p.clone(),
+            _ => unreachable!(),
+        };
+
+        consumer
+            .handle_invocation_operator_recovered(&event, &payload)
+            .await
+            .expect("first apply");
+        let first = store.get_archive(&inv_str).await.unwrap().unwrap();
+
+        consumer
+            .handle_invocation_operator_recovered(&event, &payload)
+            .await
+            .expect("redelivery is a no-op for the archive insert");
+        let second = store.get_archive(&inv_str).await.unwrap().unwrap();
+        assert_eq!(
+            first.archived_at, second.archived_at,
+            "redelivery preserves the first archived_at"
+        );
+
+        let owner = store.get_invocation_owner(&inv_str).await.unwrap().unwrap();
+        assert_eq!(owner.status, OwnerStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn handler_archived_does_not_downgrade_failed_owner() {
+        // Race scenario: operator drops first, sets owner =
+        // Failed; then the worker emits invocation.archived
+        // with final_phase = "completed". The owner row must
+        // remain Failed.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        use crate::events::{Event, EventPayload, InvocationArchivedPayload};
+        use crate::worker::WorkerId;
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ControlPlaneStore::open(&dir.path().join("events.db"))
+                .await
+                .unwrap(),
+        );
+        let agent_id = AgentId::new(format!("race-test-{}", Uuid::now_v7().simple())).unwrap();
+        let worker_id = WorkerId::new(Uuid::now_v7().to_string()).expect("worker id");
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        // Operator already set this to Failed.
+        store
+            .upsert_invocation_ownership(&inv_str, worker_id.as_str(), 1_000, OwnerStatus::Failed)
+            .await
+            .unwrap();
+
+        // Worker now reports archived with completed (a stale
+        // success that the operator decided to ignore).
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone());
+        let event = Event::new(
+            agent_id.clone(),
+            invocation_id,
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: worker_id.clone(),
+                final_phase: "completed".to_string(),
+                final_state_blob: b"would-have-been-result".to_vec(),
+                started_at_ms: 1_000,
+                terminal_at_ms: 2_000,
+            }),
+        );
+        let payload = match &event.payload {
+            EventPayload::InvocationArchived(p) => p.clone(),
+            _ => unreachable!(),
+        };
+        consumer
+            .handle_invocation_archived(&event, &payload)
+            .await
+            .expect("handler succeeds");
+
+        let owner = store.get_invocation_owner(&inv_str).await.unwrap().unwrap();
+        assert_eq!(
+            owner.status,
+            OwnerStatus::Failed,
+            "operator's Failed must stick; worker's later completed must not downgrade it"
+        );
+    }
+
+    #[tokio::test]
     async fn completed_invocation_archives_and_worker_cleans_up_against_mock() {
         // The plan's deferred acceptance test, realised against
         // MockAnthropicServer instead of the live Anthropic API.
@@ -841,6 +1160,11 @@ mod tests {
                                 EventPayload::InvocationArchived(payload) => {
                                     let _ = inner
                                         .handle_invocation_archived(&event, payload)
+                                        .await;
+                                }
+                                EventPayload::InvocationOperatorRecovered(payload) => {
+                                    let _ = inner
+                                        .handle_invocation_operator_recovered(&event, payload)
                                         .await;
                                 }
                                 _ => {}
