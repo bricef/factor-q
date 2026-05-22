@@ -2061,39 +2061,18 @@ async fn publish_invocation_drop(
     invocation_id: &str,
     reason: Option<&str>,
 ) -> anyhow::Result<InvocationDropResult> {
-    let agent_id_str = proj_store
-        .agent_id_for_invocation(invocation_id)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no events found for invocation {invocation_id}; cannot determine agent. \
-                 Has any event been published for this invocation?"
-            )
-        })?;
-    let agent_id = AgentId::new(agent_id_str.clone())
-        .map_err(|e| anyhow::anyhow!("invalid agent_id from projection: {e}"))?;
-    let inv_uuid = Uuid::parse_str(invocation_id)
-        .map_err(|e| anyhow::anyhow!("invalid invocation id `{invocation_id}`: {e}"))?;
-
-    let event = Event::new(
-        agent_id,
-        inv_uuid,
-        EventPayload::InvocationOperatorRecovered(
-            fq_runtime::events::InvocationOperatorRecoveredPayload {
-                action: "drop".to_string(),
-                final_phase: "failed".to_string(),
-                reason: reason.map(|s| s.to_string()),
-            },
-        ),
-    );
-    let event_id = event.envelope.event_id.to_string();
-    bus.publish(&event).await?;
-
+    let res = fq_runtime::control_plane::operator::drop_invocation(
+        bus,
+        proj_store,
+        invocation_id,
+        reason,
+    )
+    .await?;
     Ok(InvocationDropResult {
-        invocation_id: invocation_id.to_string(),
-        agent_id: agent_id_str,
-        event_id,
-        reason: reason.map(|s| s.to_string()),
+        invocation_id: res.invocation_id,
+        agent_id: res.agent_id,
+        event_id: res.event_id,
+        reason: res.reason,
     })
 }
 

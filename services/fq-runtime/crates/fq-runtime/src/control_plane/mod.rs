@@ -36,6 +36,7 @@
 pub mod coordination_consumer;
 pub mod dispatcher;
 pub mod heartbeat_consumer;
+pub mod operator;
 pub mod projection;
 pub mod store;
 

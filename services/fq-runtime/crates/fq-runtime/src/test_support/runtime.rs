@@ -34,7 +34,9 @@ use uuid::Uuid;
 use crate::agent::AgentId;
 use crate::bus::EventBus;
 use crate::control_plane::CoordinationConsumer;
+use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::store::{ControlPlaneStore, OwnerStatus};
+use crate::events::Event;
 use crate::llm::GenAiClient;
 use crate::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
 use crate::worker::{ArchiveAckConsumer, WorkerId, WorkerStore};
@@ -115,11 +117,21 @@ impl TestRuntimeBuilder {
         let worker_id = WorkerId::new(format!("e2e-worker-{}", Uuid::now_v7().simple()))
             .map_err(|e| format!("worker id: {e}"))?;
 
+        // Control-plane store and projection store share a
+        // SQLite file in production (`show_status` opens both
+        // on the same path); mirror that here so the harness
+        // reflects the real layout.
         let cp_dir = tempfile::tempdir().map_err(|e| format!("cp tempdir: {e}"))?;
+        let cp_path = cp_dir.path().join("cp.db");
         let cp_store = Arc::new(
-            ControlPlaneStore::open(&cp_dir.path().join("cp.db"))
+            ControlPlaneStore::open(&cp_path)
                 .await
                 .map_err(|e| format!("ControlPlaneStore::open: {e}"))?,
+        );
+        let proj_store = Arc::new(
+            ProjectionStore::open(&cp_path)
+                .await
+                .map_err(|e| format!("ProjectionStore::open: {e}"))?,
         );
 
         let worker_dir = tempfile::tempdir().map_err(|e| format!("worker tempdir: {e}"))?;
@@ -160,6 +172,7 @@ impl TestRuntimeBuilder {
         Ok(TestRuntime {
             bus,
             cp_store,
+            proj_store,
             worker_store,
             mock,
             agent_id,
@@ -178,6 +191,7 @@ impl TestRuntimeBuilder {
 pub struct TestRuntime {
     bus: EventBus,
     cp_store: Arc<ControlPlaneStore>,
+    proj_store: Arc<ProjectionStore>,
     worker_store: Arc<WorkerStore>,
     mock: MockAnthropicServer,
     agent_id: AgentId,
@@ -212,10 +226,28 @@ impl TestRuntime {
         &self.cp_store
     }
 
+    /// The projection store (read/write). Tests seed events
+    /// here (via [`Self::seed_projection_event`]) so the
+    /// `agent_id_for_invocation` lookup in
+    /// `control_plane::operator::drop_invocation` resolves.
+    pub fn proj_store(&self) -> &Arc<ProjectionStore> {
+        &self.proj_store
+    }
+
     /// The worker store (read/write). Tests assert on
     /// `invocation_state` rows here.
     pub fn worker_store(&self) -> &Arc<WorkerStore> {
         &self.worker_store
+    }
+
+    /// Seed an event into the projection store so subsequent
+    /// agent-id lookups (e.g. by
+    /// `control_plane::operator::drop_invocation`) succeed.
+    pub async fn seed_projection_event(&self, event: &Event) -> Result<(), String> {
+        self.proj_store
+            .insert_event(event)
+            .await
+            .map_err(|e| format!("insert_event: {e}"))
     }
 
     /// The mock Anthropic server. Push canned responses with
@@ -370,6 +402,115 @@ mod tests {
             .start()
             .await
             .expect("harness");
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drop_ambiguous_terminates_invocation_end_to_end() {
+        // Step 9's deferred acceptance test, end-to-end via
+        // the harness: seed an ambiguous owner row + a
+        // projection event for the agent lookup; call
+        // operator::drop_invocation; assert the coordination
+        // consumer flips the owner to Failed, writes the
+        // archive row, and the audit chain shows the
+        // operator_recovered event with our reason.
+        let Some(_) = require_nats() else {
+            return;
+        };
+
+        use crate::control_plane::operator;
+        use crate::events::{EventPayload, InvocationAmbiguousPayload};
+        use futures::StreamExt;
+
+        let rt = TestRuntime::start().await.expect("harness");
+
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        // Subscribe to the operator_recovered subject BEFORE
+        // we publish so we don't miss the event.
+        let mut audit_sub = rt
+            .bus()
+            .subscribe(format!(
+                "fq.agent.{}.invocation.operator_recovered",
+                rt.agent_id().as_str()
+            ))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Seed an Ambiguous owner row (as if the worker had
+        // emitted invocation.ambiguous on restart).
+        rt.cp_store()
+            .upsert_invocation_ownership(
+                &inv_str,
+                rt.worker_id().as_str(),
+                1_000,
+                OwnerStatus::Ambiguous,
+            )
+            .await
+            .expect("seed owner");
+
+        // Seed a projection event so operator::drop_invocation's
+        // agent_id lookup resolves. The InvocationAmbiguous
+        // event is the natural seed — it's what the worker
+        // would have published.
+        let ambiguous_event = Event::new(
+            rt.agent_id().clone(),
+            invocation_id,
+            EventPayload::InvocationAmbiguous(InvocationAmbiguousPayload {
+                stuck_entity: "tool_dispatch".to_string(),
+                stuck_call_id: "tc-1".to_string(),
+                note: "seeded for test".to_string(),
+            }),
+        );
+        rt.seed_projection_event(&ambiguous_event)
+            .await
+            .expect("seed projection");
+
+        // Execute the operator action.
+        let result = operator::drop_invocation(
+            rt.bus(),
+            rt.proj_store(),
+            &inv_str,
+            Some("e2e drop scenario"),
+        )
+        .await
+        .expect("drop_invocation");
+        assert_eq!(result.agent_id, rt.agent_id().as_str());
+        assert_eq!(result.reason.as_deref(), Some("e2e drop scenario"));
+
+        // Owner row reaches Failed (CP handler must process
+        // the event off the JetStream consumer).
+        rt.wait_for_owner_status(invocation_id, OwnerStatus::Failed, Duration::from_secs(5))
+            .await
+            .expect("owner flipped to Failed");
+
+        // Archive row exists with our final_phase.
+        rt.wait_for_archive(invocation_id, Duration::from_secs(2))
+            .await
+            .expect("archive row");
+        let archive = rt.cp_store().get_archive(&inv_str).await.unwrap().unwrap();
+        assert_eq!(archive.final_phase, "failed");
+        assert_eq!(archive.agent_id, rt.agent_id().as_str());
+
+        // Audit chain has exactly one operator_recovered with
+        // the reason carried through.
+        let audit_event = tokio::time::timeout(Duration::from_secs(2), audit_sub.next())
+            .await
+            .expect("audit timeout")
+            .expect("audit stream closed")
+            .expect("audit deserialise");
+        assert_eq!(audit_event.envelope.invocation_id, invocation_id);
+        match &audit_event.payload {
+            EventPayload::InvocationOperatorRecovered(p) => {
+                assert_eq!(p.action, "drop");
+                assert_eq!(p.final_phase, "failed");
+                assert_eq!(p.reason.as_deref(), Some("e2e drop scenario"));
+            }
+            other => panic!("expected InvocationOperatorRecovered, got {other:?}"),
+        }
+
         rt.shutdown().await;
     }
 }
