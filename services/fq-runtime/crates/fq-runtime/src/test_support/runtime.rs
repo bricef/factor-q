@@ -513,4 +513,62 @@ mod tests {
 
         rt.shutdown().await;
     }
+
+    #[tokio::test]
+    async fn stale_worker_marked_stale_within_threshold() {
+        // Step 7's deferred acceptance test, end-to-end:
+        // a registered worker that stops heartbeating gets
+        // flipped to Stale by the coordination consumer's
+        // sweep within the configured window.
+        let Some(_) = require_nats() else {
+            return;
+        };
+
+        use crate::control_plane::store::WorkerStatus;
+        use chrono::Utc;
+
+        // Short threshold + short sweep cadence so the test
+        // wraps quickly.
+        let rt = TestRuntime::builder()
+            .stale_threshold_ms(500)
+            .sweep_interval_ms(100)
+            .start()
+            .await
+            .expect("harness");
+
+        // Register a separate worker (not the harness's own
+        // worker_id; we don't want the self-worker-skip rule
+        // to interfere).
+        let stale_candidate = format!("stale-test-{}", Uuid::now_v7().simple());
+        rt.cp_store()
+            .register_worker(&stale_candidate, "test-host", Utc::now().timestamp_millis())
+            .await
+            .expect("register worker");
+
+        // Wait for: threshold (500ms) + sweep cadence (100ms)
+        // + slack. 1.5s is plenty.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let worker = rt
+                .cp_store()
+                .get_worker(&stale_candidate)
+                .await
+                .expect("get_worker")
+                .expect("worker row exists");
+            if worker.status == WorkerStatus::Stale {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "worker {stale_candidate} not stale after {:?}; status={:?}, last_heartbeat={}",
+                    Duration::from_secs(2),
+                    worker.status,
+                    worker.last_heartbeat
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        rt.shutdown().await;
+    }
 }
