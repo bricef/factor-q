@@ -97,7 +97,7 @@ Test tiers, each with different prerequisites:
 
 | Tier | Command | Prerequisites | Count |
 |---|---|---|---|
-| Unit + integration | `just test` | NATS (`just infra-up`, set `FQ_NATS_URL`) | 268 |
+| Unit + integration | `just test` | NATS (`just infra-up`, set `FQ_NATS_URL`) | 278 |
 | Binary smoke | `just test` (covered) | — | 4 |
 | Smoke (real LLM) | `just smoke` (repo root) | NATS + `ANTHROPIC_API_KEY` | 6 |
 | Drift detector (real LLM) | `just acceptance-drift` | `ANTHROPIC_API_KEY` | 1 |

@@ -3,7 +3,7 @@
 //! the runtime's public API.
 //!
 //! The two submodules cover the two reusable patterns called out
-//! in `docs/plans/active/2026-04-28-data-architecture-v1.md`:
+//! in `docs/plans/closed/2026-04-28-data-architecture-v1.md`:
 //!
 //! - [`events`] — subscribe to a NATS subject, run an action,
 //!   collect emitted events, and assert structural properties of

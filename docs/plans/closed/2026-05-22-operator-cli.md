@@ -10,7 +10,7 @@ subcommand), `eac521e` (`fq workers` subcommand), `8ee44b2`
 deferred items (`fq recover` node-scope, `resume` action,
 live end-to-end acceptance test).
 **Parent plan**:
-[`2026-04-28-data-architecture-v1.md`](../active/2026-04-28-data-architecture-v1.md) — step 9.
+[`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md) — step 9.
 **Design references**:
 - [`docs/design/data-architecture.md`](../../design/data-architecture.md) §3.4 (ambiguous cases), §4.4 (operator surface), §7 (recovery).
 - [`docs/design/event-schema.md`](../../design/event-schema.md) — adds `invocation.operator_recovered`.

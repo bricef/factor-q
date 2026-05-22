@@ -50,3 +50,20 @@ api_key_env = "ANTHROPIC_API_KEY"
 # local row is never deleted automatically (correctness over
 # cleanup); operator action is required for held rows.
 # archive_warn_after_ms = 60000
+
+[state]
+# Control-plane state-retention knobs (step 10 of
+# data-architecture-v1). Drives a periodic sweep that deletes
+# rows from `invocation_archive` older than `retention_days`.
+#
+# How long to keep `invocation_archive` rows, in days. Default
+# 30. Set to `-1` to disable the sweep entirely (the archive
+# then grows without bound; useful for an operator who wants
+# to manage retention with an external job).
+# retention_days = 30
+#
+# How often the retention sweep runs, in seconds. Default 1
+# hour. Production doesn't need faster; the deletes are
+# proportional to the number of rows past the cutoff each tick,
+# so a shorter interval just means smaller per-tick batches.
+# sweep_interval_seconds = 3600

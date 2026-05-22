@@ -212,7 +212,7 @@ Gated on `FQ_NATS_URL` only — no `ANTHROPIC_API_KEY` needed.
 - [x] Test lives next to the other step-8 acceptance tests
       and runs by default in `cargo test`.
 - [x] Parent plan
-      ([`2026-04-28-data-architecture-v1.md`](../active/2026-04-28-data-architecture-v1.md))'s
+      ([`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md))'s
       step-8 status block is updated to mark this previously
       "deferred" acceptance test as shipped.
 
@@ -281,7 +281,7 @@ async fn anthropic_real_api_basic_response_parses() {
 This plan closes when:
 
 - All 4 steps' "Done when" boxes are ticked.
-- Parent plan ([`2026-04-28-data-architecture-v1.md`](../active/2026-04-28-data-architecture-v1.md))'s
+- Parent plan ([`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md))'s
   step-8 status block notes the live acceptance test is now
   in CI (via the mock).
 - This plan moves to `docs/plans/closed/`.

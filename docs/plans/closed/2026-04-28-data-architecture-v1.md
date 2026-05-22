@@ -1,7 +1,54 @@
 # Plan: Data Architecture v1 (single-node, role-aware)
 
 **Date**: 2026-04-28
-**Status**: Active
+**Status**: Closed 2026-05-22. All 10 steps landed; the
+parent-plan closing condition is satisfied.
+
+**Closing summary.** The plan ran from 2026-04-28 through
+2026-05-22 across 10 implementation steps plus three
+follow-up sub-plans (envelope refactor, archive hand-off,
+mock-llm test harness, operator CLI, acceptance harness).
+Each step's individual status block has its commit list and
+test-name mapping; the table below maps "what the parent plan
+asked for" to "what shipped":
+
+| Step | Status | Acceptance test |
+|---|---|---|
+| 1 — Internal role split | Closed | `e3124ee` and follow-ups |
+| 2 — Worker schema migration | Closed | worker store v1+v2 tests |
+| 3 — Control-plane schema | Closed | control-plane store tests |
+| 4 — Three-state WAL writes | Closed | `wal_*` tests on the worker store |
+| 5 — Persist reducer state per step | Closed | `state_row_written_on_completion_with_terminal_at_set` |
+| 6 — Worker recovery path | Closed (`fdd36a1`) | `system.recovery` + recovery tests |
+| 7 — Control-plane recovery path | Closed | `stale_worker_marked_stale_within_threshold` |
+| 8 — Worker → CP archive hand-off | Closed | `retry_sweeper_recovers_from_cp_outage` |
+| 9 — Operator CLI for triage | Closed | `drop_ambiguous_terminates_invocation_end_to_end` |
+| 10 — Retention sweep | Closed (`eb4eed7`) | `retention_sweep_deletes_old_archives_end_to_end` |
+
+**End-to-end coverage of the closing condition's lifecycle**
+(induced crash, recovery, archive, retention sweep) is spread
+across four scenarios in
+`test_support::runtime::tests` rather than a single mega-test.
+Each scenario isolates one transition; together they document
+the full lifecycle. See the closed acceptance-harness plan
+([`2026-05-22-acceptance-harness.md`](./2026-05-22-acceptance-harness.md))
+for the rationale.
+
+**Deferred items** (each tracked separately):
+
+- `fq recover` top-level (node-scope worker/manager recovery)
+  — sketch only; needs its own plan when the use case
+  crystallises.
+- `resume` action on `fq invocation` — requires a state-blob
+  retrieval mechanism (enrich `invocation.ambiguous` with the
+  blob, or add an operator-RPC to the worker).
+- Real-Anthropic live acceptance test — runs as the manual
+  `just acceptance-drift` recipe; not part of every CI build.
+
+**Successor plans** (per §"Successor plans" below): v2
+multi-node deployment, approval-gate UI/flow, per-agent
+durability mode opt-in.
+
 **Design references**:
 - [`docs/design/data-architecture.md`](../../design/data-architecture.md) — the architectural commitments this plan implements.
 - [`docs/design/data-architecture-requirements.md`](../../design/data-architecture-requirements.md) — the requirements baseline.
@@ -653,6 +700,32 @@ Gated on `FQ_NATS_URL`.
 
 ### Step 10 — Retention sweep
 
+**Status (2026-05-22): complete.** Shipped in commit
+`eb4eed7`. New `[state]` config section
+(`retention_days` default 30; `-1` disables;
+`sweep_interval_seconds` default 1h). New
+`control_plane::retention::RetentionSweeper` task wired into
+`fq run`. End-to-end acceptance via
+`test_support::runtime::tests::retention_sweep_deletes_old_archives_end_to_end`.
+Renamed coverage of the spec's test list (the renamed names
+match their behaviour 1:1; intent is preserved):
+
+- **`sweep_query_predicate`** → `cutoff_subtracts_retention_in_ms`
+  (+ `cutoff_saturates_for_huge_retention` for the
+  defence-in-depth case).
+- **`sweep_deletes_only_aged_rows`** → same name.
+- **`sweep_idempotent_across_runs`** → same name.
+- **`sweep_handles_empty_archive`** → same name.
+- **`sweep_disabled_when_retention_days_negative`** →
+  `disabled_sweep_returns_on_shutdown_without_work` (covers
+  the disabled-mode path).
+- **`config_sweep_interval_parser`** → `state_config_parses_overrides`
+  + `state_config_accepts_negative_retention_to_disable`
+  + `state_config_defaults_when_absent`.
+- **`sweep_runs_on_schedule`** is exercised by the
+  end-to-end acceptance test (which runs the real ticker
+  against a live store).
+
 **Goal.** Background task on the control-plane that deletes
 archive rows past `state.retention_days`.
 
@@ -691,11 +764,17 @@ Gated on `FQ_NATS_URL`.
 
 #### Done when
 
-- [ ] All listed integration tests green
-- [ ] All listed unit tests green
-- [ ] Acceptance test green against live NATS
-- [ ] Sweep configuration documented in the `fq.toml` template
-- [ ] Sweep emits a log line per cycle (including no-op)
+- [x] All listed integration tests green (covered by the
+      retention.rs `tests` module).
+- [x] All listed unit tests green (`cutoff_subtracts_retention_in_ms`,
+      `cutoff_saturates_for_huge_retention`,
+      `state_config_*`).
+- [x] Acceptance test green against live NATS —
+      `retention_sweep_deletes_old_archives_end_to_end`.
+- [x] Sweep configuration documented in the `fq.toml`
+      template (`[state]` section with both knobs).
+- [x] Sweep emits a log line per cycle (including no-op)
+      — every tick calls `info!` with `deleted_rows`.
 
 ## Cross-cutting concerns
 

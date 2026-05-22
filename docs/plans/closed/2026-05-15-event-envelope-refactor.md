@@ -350,7 +350,7 @@ up cold and not be confused by the v1 schema doc.
 - `docs/plans/active/2026-05-05-native-reducer-prototype.md` —
   moved to `closed/` with a one-paragraph note that this plan
   supersedes it.
-- `docs/plans/active/2026-04-28-data-architecture-v1.md` —
+- `docs/pla./2026-04-28-data-architecture-v1.md` —
   amended where it references event shapes (search for
   `Cost`, `event.agent_id`, etc.) so the active plan stays
   consistent with the now-current code.

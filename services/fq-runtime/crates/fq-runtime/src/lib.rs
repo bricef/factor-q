@@ -13,7 +13,7 @@
 //! deployment without changing the contract.
 //!
 //! See `docs/design/data-architecture.md` for the architectural
-//! framing and `docs/plans/active/2026-04-28-data-architecture-v1.md`
+//! framing and `docs/plans/closed/2026-04-28-data-architecture-v1.md`
 //! for the implementation plan.
 
 pub mod agent;

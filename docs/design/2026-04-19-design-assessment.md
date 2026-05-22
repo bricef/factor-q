@@ -360,4 +360,4 @@ parallel tool dispatch composes cleanly, and the code is
 subjectively maintainable. Live-NATS and real-Anthropic
 runs corroborated the in-process evidence. The follow-up
 work that built on the validated claim is tracked in
-[`docs/plans/active/2026-04-28-data-architecture-v1.md`](../plans/active/2026-04-28-data-architecture-v1.md).
+[`do../plans/closed/2026-04-28-data-architecture-v1.md`](../plans/closed/2026-04-28-data-architecture-v1.md).

@@ -509,7 +509,7 @@ is marginal until one of the triggers above fires.
 ### Stuck-invocation detection
 
 **Source:** discussion 2026-05-16 (worker heartbeat design).
-Related: `docs/plans/active/2026-04-28-data-architecture-v1.md`
+Related: `docs/plans/closed/2026-04-28-data-architecture-v1.md`
 steps 5 (state persisted at every step boundary) and 7
 (control-plane recovery).
 

@@ -7,10 +7,10 @@ fast-forwarded onto `main` as `421ab11..e241860`. The doc-only
 follow-ups landed 2026-05-18 (event-schema and
 data-architecture updates, `[worker]` keys in the fq.toml
 template). See the parent plan's
-[Step 8](../active/2026-04-28-data-architecture-v1.md#step-8--worker--control-plane-archive-hand-off)
+[Step 8](./2026-04-28-data-architecture-v1.md#step-8--worker--control-plane-archive-hand-off)
 status block for the canonical record.
 **Parent plan**:
-[`2026-04-28-data-architecture-v1.md`](../active/2026-04-28-data-architecture-v1.md) — step 8.
+[`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md) — step 8.
 **Design references**:
 - [`docs/design/data-architecture.md`](../../design/data-architecture.md) §5.3 (state retention), §5.5 (archive hand-off write order), and §9.3 (new event types).
 - Schema: §10 `invocation_archive` table is already implemented in
