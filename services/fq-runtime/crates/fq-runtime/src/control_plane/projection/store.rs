@@ -371,7 +371,8 @@ fn extract_fields(event: &Event) -> Fields {
         | EventPayload::SystemShutdown(_)
         | EventPayload::SystemTaskFailed(_)
         | EventPayload::SystemRecovery(_)
-        | EventPayload::WorkerHeartbeat(_) => Fields::default(),
+        | EventPayload::WorkerHeartbeat(_)
+        | EventPayload::InvocationOperatorRecovered(_) => Fields::default(),
     }
 }
 
@@ -389,6 +390,7 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
         EventPayload::InvocationAmbiguous(_) => "invocation_ambiguous",
         EventPayload::InvocationArchived(_) => "invocation_archived",
         EventPayload::InvocationArchiveAcked(_) => "invocation_archive_acked",
+        EventPayload::InvocationOperatorRecovered(_) => "invocation_operator_recovered",
         EventPayload::SystemStartup(_) => "system_startup",
         EventPayload::SystemShutdown(_) => "system_shutdown",
         EventPayload::SystemTaskFailed(_) => "system_task_failed",

@@ -137,6 +137,16 @@ pub mod subjects {
         format!("fq.agent.{agent_id}.invocation.archived")
     }
 
+    /// Operator → control-plane (step 9). Emitted by an
+    /// operator-issued `fq invocation drop` (or future
+    /// recovery actions) so audit can distinguish operator-
+    /// triggered terminal transitions from worker-triggered
+    /// ones. The coordination consumer's existing
+    /// `fq.agent.*.invocation.*` filter picks it up.
+    pub fn agent_invocation_operator_recovered(agent_id: &str) -> String {
+        format!("fq.agent.{agent_id}.invocation.operator_recovered")
+    }
+
     pub fn agent_completed(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.completed")
     }
@@ -301,6 +311,9 @@ impl Event {
             EventPayload::LlmDispatched(_) => subjects::agent_llm_dispatched(agent),
             EventPayload::InvocationAmbiguous(_) => subjects::agent_invocation_ambiguous(agent),
             EventPayload::InvocationArchived(_) => subjects::agent_invocation_archived(agent),
+            EventPayload::InvocationOperatorRecovered(_) => {
+                subjects::agent_invocation_operator_recovered(agent)
+            }
             EventPayload::Completed(_) => subjects::agent_completed(agent),
             EventPayload::Failed(_) => subjects::agent_failed(agent),
             EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
@@ -428,6 +441,7 @@ pub fn schema_id_for(payload: &EventPayload) -> &'static str {
         EventPayload::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
         EventPayload::InvocationArchived(_) => "factor-q/invocation_archived@1",
         EventPayload::InvocationArchiveAcked(_) => "factor-q/invocation_archive_acked@1",
+        EventPayload::InvocationOperatorRecovered(_) => "factor-q/invocation_operator_recovered@1",
         EventPayload::SystemStartup(_) => "factor-q/system_startup@1",
         EventPayload::SystemShutdown(_) => "factor-q/system_shutdown@1",
         EventPayload::SystemTaskFailed(_) => "factor-q/system_task_failed@1",
@@ -553,6 +567,17 @@ pub enum EventPayload {
     /// only because the subject is built from it (mirroring
     /// [`WorkerHeartbeat`]).
     InvocationArchiveAcked(InvocationArchiveAckedPayload),
+
+    /// Operator → control-plane (step 9). Emitted by
+    /// `fq invocation drop` and other future operator-issued
+    /// recovery actions. Distinct from [`InvocationArchived`]
+    /// so audit can filter operator-triggered terminal
+    /// transitions from worker-triggered ones. The
+    /// coordination consumer writes an `invocation_archive`
+    /// row and updates `coordination_invocation_owner.status`
+    /// to match `final_phase`; no ack is emitted (no worker
+    /// is waiting to clean up).
+    InvocationOperatorRecovered(InvocationOperatorRecoveredPayload),
 
     // Runtime lifecycle
     SystemStartup(SystemStartupPayload),
@@ -796,6 +821,25 @@ pub struct InvocationArchivedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationArchiveAckedPayload {
     pub worker_id: crate::worker::WorkerId,
+}
+
+/// Payload for [`EventPayload::InvocationOperatorRecovered`].
+/// Operator-issued terminal transition for an invocation.
+/// The `invocation_id` and `agent_id` live on the envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationOperatorRecoveredPayload {
+    /// Action the operator took. v1 is always `"drop"`; the
+    /// field exists so future actions (`resume`, `requeue`)
+    /// can be distinguished without minting a new variant.
+    pub action: String,
+    /// Phase the invocation should be marked at. v1 is
+    /// always `"failed"`; a future `resume` would set
+    /// `"completed"`.
+    pub final_phase: String,
+    /// Free-form reason supplied by the operator (e.g. via
+    /// `--reason`). Audit-only; consumers must not parse it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Published when a tool invocation completes (success or failure).
@@ -1101,6 +1145,61 @@ mod tests {
         // Envelope keeps the real invocation_id so the worker
         // can identify which row to delete.
         assert_eq!(event.envelope.invocation_id, invocation_id);
+    }
+
+    #[test]
+    fn invocation_operator_recovered_subject_is_agent_scoped() {
+        // Operator-issued; rides on the same agent-scoped
+        // namespace as `InvocationArchived` so the coordination
+        // consumer's `fq.agent.*.invocation.*` filter catches it.
+        let agent_id = AgentId::new("researcher").unwrap();
+        let invocation_id = Uuid::now_v7();
+        let event = Event::new(
+            agent_id,
+            invocation_id,
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: Some("stuck on flaky network call".to_string()),
+            }),
+        );
+        assert_eq!(
+            event.subject(),
+            "fq.agent.researcher.invocation.operator_recovered"
+        );
+        assert_eq!(
+            event.envelope.schema_id,
+            "factor-q/invocation_operator_recovered@1"
+        );
+        assert_eq!(event.envelope.invocation_id, invocation_id);
+        match &event.payload {
+            EventPayload::InvocationOperatorRecovered(p) => {
+                assert_eq!(p.action, "drop");
+                assert_eq!(p.final_phase, "failed");
+                assert_eq!(p.reason.as_deref(), Some("stuck on flaky network call"));
+            }
+            other => panic!("wrong payload variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invocation_operator_recovered_payload_omits_reason_when_none() {
+        // `reason` is operator-supplied; absence should
+        // serialise as missing rather than `null`.
+        let event = Event::new(
+            AgentId::new("r").unwrap(),
+            Uuid::now_v7(),
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: None,
+            }),
+        );
+        let body = serde_json::to_value(&event.payload).unwrap();
+        assert!(
+            body.get("reason").is_none(),
+            "reason should be omitted when None, got {body}"
+        );
     }
 
     #[test]

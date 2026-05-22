@@ -672,6 +672,15 @@ fn print_event(event: &Event) {
             p.task_name, p.error_message
         ),
         EventPayload::WorkerHeartbeat(p) => format!("worker.heartbeat worker_id={}", p.worker_id),
+        EventPayload::InvocationOperatorRecovered(p) => format!(
+            "invocation.operator_recovered action={} phase={}{}",
+            p.action,
+            p.final_phase,
+            p.reason
+                .as_deref()
+                .map(|r| format!(" reason={r:?}"))
+                .unwrap_or_default()
+        ),
     };
 
     println!(
