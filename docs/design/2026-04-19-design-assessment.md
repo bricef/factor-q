@@ -39,7 +39,7 @@ Written in sequence through April 2026:
 
 One prototype plan:
 
-- [`2026-04-19-wasm-harness-prototype.md`](../plans/active/2026-04-19-wasm-harness-prototype.md)
+- [`2026-04-19-wasm-harness-prototype.md`](../plans/closed/2026-04-19-wasm-harness-prototype.md)
   — prototype plan for validating the reducer boundary.
 
 Backlog entries added for: agent tool catalogue design,
@@ -360,4 +360,4 @@ parallel tool dispatch composes cleanly, and the code is
 subjectively maintainable. Live-NATS and real-Anthropic
 runs corroborated the in-process evidence. The follow-up
 work that built on the validated claim is tracked in
-[`do../plans/closed/2026-04-28-data-architecture-v1.md`](../plans/closed/2026-04-28-data-architecture-v1.md).
+[`docs/plans/closed/2026-04-28-data-architecture-v1.md`](../plans/closed/2026-04-28-data-architecture-v1.md).

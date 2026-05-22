@@ -216,7 +216,7 @@ The architectural claim survived contact with code. Given that:
      useful and cheap given the boundary already supports it.
    - **Fork C — WASM packaging.** Now that the boundary works
      natively, follow the existing
-     [`2026-04-19-wasm-harness-prototype.md`](../active/2026-04-19-wasm-harness-prototype.md).
+     [`2026-04-19-wasm-harness-prototype.md`](./2026-04-19-wasm-harness-prototype.md).
      The native crate effectively becomes the WASM guest crate
      with `#[no_std]` and component-model bindings on top.
 
@@ -231,8 +231,13 @@ those design gaps next is also defensible.
 
 This plan closes with the prototype landed and tested. The
 WASM-specific
-[`2026-04-19-wasm-harness-prototype.md`](../active/2026-04-19-wasm-harness-prototype.md)
-remains active and is the natural successor for Fork C above.
+[`2026-04-19-wasm-harness-prototype.md`](./2026-04-19-wasm-harness-prototype.md)
+was the natural successor for Fork C above but is now
+**deferred (2026-05-22)** — the security rationale that
+motivated it was reframed by
+[`docs/design/tool-isolation-model.md`](../../design/tool-isolation-model.md),
+which puts WASM around individual tools rather than the whole
+harness. See that plan's status block for the details.
 
 ---
 

@@ -311,5 +311,5 @@ cargo test -p fq-runtime --lib reducer::
 - Boundary design: [`docs/design/wasm-boundary-design.md`](../design/wasm-boundary-design.md)
 - Pre-prototype design assessment: [`docs/design/2026-04-19-design-assessment.md`](../design/2026-04-19-design-assessment.md)
 - Native reducer prototype closing report: [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md)
-- WASM-packaging plan (open): [`docs/plans/active/2026-04-19-wasm-harness-prototype.md`](../plans/active/2026-04-19-wasm-harness-prototype.md)
+- WASM-packaging plan (deferred — superseded by tool-isolation-model): [`docs/plans/closed/2026-04-19-wasm-harness-prototype.md`](../plans/closed/2026-04-19-wasm-harness-prototype.md)
 - Design principles: [`docs/design/design-principles.md`](../design/design-principles.md)

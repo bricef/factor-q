@@ -1,8 +1,35 @@
 # Plan: WASM Harness Prototype
 
 **Date**: 2026-04-19
-**Status**: Active
-**Design reference**: [`docs/design/wasm-boundary-design.md`](../../design/wasm-boundary-design.md)
+**Status**: Deferred 2026-05-22. The premise of this plan —
+that the security win comes from packaging the *harness* as
+a WASM component — was overtaken by
+[`docs/design/tool-isolation-model.md`](../../design/tool-isolation-model.md),
+which reframes isolation as a per-tool concern: the harness
+is a pure trusted function, and WASM is one of five
+isolation tiers (in-process / subprocess / container / WASM
+/ microVM) chosen per-tool. Wholesale-WASMing the harness
+isn't load-bearing for safety anymore.
+
+WASM is still strategic — but the strategic place to deploy
+it is around hermetic *tools* (`jq`-in-WASM,
+`busybox`-in-WASM, pure-computation tools that need fuel/
+memory bounds). See
+[`docs/design/wasm-posix-sandbox.md`](../../design/wasm-posix-sandbox.md)
+for that direction. When a tool that actually wants the WASM
+tier appears, the work belongs in a fresh plan scoped to
+"WASM tool isolation tier" rather than this harness-level
+prototype.
+
+The original "feasibility test for the harness boundary" is
+already partially answered by
+[`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](./2026-04-25-native-reducer-prototype.md):
+the reducer model works as a pure synchronous function in
+native Rust. The WIT-and-component-model packaging exercise
+remains valuable as a research project but isn't on the
+critical path.
+
+**Design reference**: [`docs/design/wasm-boundary-design.md`](../../design/wasm-boundary-design.md), [`docs/design/tool-isolation-model.md`](../../design/tool-isolation-model.md)
 
 ## Goal
 

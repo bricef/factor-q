@@ -626,9 +626,12 @@ Reconsider only if the prototype reveals a specific blocker.
 
 ### Debugging tractability
 
-Empirical — covered by the prototype plan
-([`docs/plans/active/2026-04-19-wasm-harness-prototype.md`](../plans/active/2026-04-19-wasm-harness-prototype.md))
+Empirical — covered by the (now-deferred) prototype plan
+([`docs/plans/closed/2026-04-19-wasm-harness-prototype.md`](../plans/closed/2026-04-19-wasm-harness-prototype.md))
 with concrete evaluation criteria. Can't be settled on paper.
+The plan was deferred 2026-05-22; see its status block for
+the reframe rationale and the strategic positioning of WASM
+in [`tool-isolation-model.md`](./tool-isolation-model.md).
 
 Worth noting: the reducer model makes debugging significantly
 easier than async-in-guest would have. Because `step` is pure,
