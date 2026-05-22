@@ -129,6 +129,37 @@ enum Commands {
         #[command(subcommand)]
         command: InvocationCommands,
     },
+    /// Worker inspection commands
+    Workers {
+        #[command(subcommand)]
+        command: WorkerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkerCommands {
+    /// List workers from the coordination store.
+    List {
+        /// Show only stale workers (last heartbeat past the
+        /// configured threshold).
+        #[arg(long, conflicts_with = "alive_only")]
+        stale_only: bool,
+        /// Show only alive workers.
+        #[arg(long, conflicts_with = "stale_only")]
+        alive_only: bool,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one worker's detail: host, status, heartbeat age,
+    /// and current in-flight invocation count.
+    Show {
+        /// Worker id to inspect.
+        id: String,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -300,6 +331,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             InvocationCommands::Drop { id, reason, json } => {
                 invocation_drop(&cli.global, &id, reason.as_deref(), json).await?
             }
+        },
+        Commands::Workers { command } => match command {
+            WorkerCommands::List {
+                stale_only,
+                alive_only,
+                json,
+            } => workers_list(&cli.global, stale_only, alive_only, json).await?,
+            WorkerCommands::Show { id, json } => workers_show(&cli.global, &id, json).await?,
         },
     }
     Ok(())
@@ -2217,5 +2256,223 @@ mod invocation_tests {
         assert_eq!(v["status"], "in_flight");
         assert_eq!(v["assigned_at_ms"], 42);
         assert_eq!(v["archived"], false);
+    }
+}
+
+// ============================================================
+// fq workers subcommand
+// ============================================================
+
+#[derive(serde::Serialize, Clone)]
+struct WorkerListItem {
+    worker_id: String,
+    host: String,
+    status: String,
+    last_heartbeat_ms: i64,
+    heartbeat_age_ms: i64,
+    in_flight_count: i64,
+}
+
+/// Human-readable heartbeat age. Stays in step with the
+/// stale-worker sweep threshold so the operator can eyeball
+/// what's about to go stale: anything past the threshold
+/// (default 30s) is rendered as `"stale"` regardless of the
+/// exact age — agrees with `coordination_worker.status`.
+fn format_heartbeat_age_human(age_ms: i64, stale_threshold_ms: i64) -> String {
+    if age_ms < 0 {
+        return "future".to_string();
+    }
+    if age_ms >= stale_threshold_ms {
+        return "stale".to_string();
+    }
+    let secs = age_ms / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
+}
+
+fn format_worker_list_row_human(item: &WorkerListItem, stale_threshold_ms: i64) -> String {
+    let age = format_heartbeat_age_human(item.heartbeat_age_ms, stale_threshold_ms);
+    format!(
+        "{:<28} {:<8} {:<10} {:<8} {}",
+        item.worker_id, item.status, age, item.in_flight_count, item.host
+    )
+}
+
+async fn workers_list(
+    global: &GlobalArgs,
+    stale_only: bool,
+    alive_only: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    use fq_runtime::control_plane::store::WorkerStatus;
+
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path).await?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // The threshold the CP uses to flip a worker from alive
+    // to stale; this is the same DEFAULT_STALE_THRESHOLD_MS
+    // used by the coordination consumer.
+    let stale_threshold_ms = 30_000_i64;
+
+    let workers = cp_store.list_workers().await?;
+    let mut items: Vec<WorkerListItem> = Vec::with_capacity(workers.len());
+    for w in workers {
+        if stale_only && w.status != WorkerStatus::Stale {
+            continue;
+        }
+        if alive_only && w.status != WorkerStatus::Alive {
+            continue;
+        }
+        let in_flight = cp_store
+            .list_invocations_for_worker(&w.worker_id)
+            .await?
+            .into_iter()
+            .filter(|o| {
+                matches!(
+                    o.status,
+                    fq_runtime::control_plane::store::OwnerStatus::InFlight
+                        | fq_runtime::control_plane::store::OwnerStatus::Ambiguous
+                )
+            })
+            .count() as i64;
+        items.push(WorkerListItem {
+            worker_id: w.worker_id,
+            host: w.host,
+            status: w.status.as_str().to_string(),
+            last_heartbeat_ms: w.last_heartbeat,
+            heartbeat_age_ms: now_ms - w.last_heartbeat,
+            in_flight_count: in_flight,
+        });
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else if items.is_empty() {
+        println!("0 workers — nothing to list.");
+    } else {
+        println!(
+            "{:<28} {:<8} {:<10} {:<8} host",
+            "worker", "status", "hb-age", "in-flight"
+        );
+        for item in &items {
+            println!("{}", format_worker_list_row_human(item, stale_threshold_ms));
+        }
+    }
+    Ok(())
+}
+
+async fn workers_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path).await?;
+    let stale_threshold_ms = 30_000_i64;
+
+    let worker = cp_store.get_worker(id).await?;
+    let Some(w) = worker else {
+        eprintln!("no worker found with id={id}");
+        std::process::exit(1);
+    };
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let owners = cp_store.list_invocations_for_worker(id).await?;
+    let in_flight = owners
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.status,
+                fq_runtime::control_plane::store::OwnerStatus::InFlight
+                    | fq_runtime::control_plane::store::OwnerStatus::Ambiguous
+            )
+        })
+        .count() as i64;
+
+    let item = WorkerListItem {
+        worker_id: w.worker_id.clone(),
+        host: w.host.clone(),
+        status: w.status.as_str().to_string(),
+        last_heartbeat_ms: w.last_heartbeat,
+        heartbeat_age_ms: now_ms - w.last_heartbeat,
+        in_flight_count: in_flight,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&item)?);
+    } else {
+        println!("Worker: {}", item.worker_id);
+        println!("  host:      {}", item.host);
+        println!("  status:    {}", item.status);
+        println!(
+            "  hb-age:    {}",
+            format_heartbeat_age_human(item.heartbeat_age_ms, stale_threshold_ms)
+        );
+        println!("  in-flight: {}", item.in_flight_count);
+        if !owners.is_empty() {
+            println!("\nInvocations owned:");
+            for o in owners.iter().take(20) {
+                let inv: String = o.invocation_id.chars().take(11).collect();
+                println!("  {inv}  {}", o.status.as_str());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod workers_tests {
+    use super::*;
+
+    #[test]
+    fn format_heartbeat_age_human_under_threshold_shows_seconds() {
+        assert_eq!(format_heartbeat_age_human(500, 30_000), "0s");
+        assert_eq!(format_heartbeat_age_human(12_345, 30_000), "12s");
+        assert_eq!(format_heartbeat_age_human(59_999, 30_000), "stale");
+    }
+
+    #[test]
+    fn format_heartbeat_age_human_minutes_and_hours() {
+        // Stale threshold widened so the larger ages don't get
+        // clobbered to "stale".
+        assert_eq!(format_heartbeat_age_human(150_000, 1_000_000), "2m");
+        assert_eq!(format_heartbeat_age_human(3_700_000, 10_000_000), "1h");
+    }
+
+    #[test]
+    fn format_heartbeat_age_human_past_threshold_is_stale() {
+        // 60s with threshold 30s.
+        assert_eq!(format_heartbeat_age_human(60_000, 30_000), "stale");
+    }
+
+    #[test]
+    fn format_heartbeat_age_human_handles_clock_skew() {
+        // Negative age = worker's clock is ahead. Render
+        // explicitly rather than displaying a nonsense
+        // negative second count.
+        assert_eq!(format_heartbeat_age_human(-1000, 30_000), "future");
+    }
+
+    #[test]
+    fn worker_list_item_serialises_to_stable_json_shape() {
+        let item = WorkerListItem {
+            worker_id: "w-1".to_string(),
+            host: "host-1".to_string(),
+            status: "alive".to_string(),
+            last_heartbeat_ms: 1_700_000_000_000,
+            heartbeat_age_ms: 1_500,
+            in_flight_count: 3,
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["worker_id"], "w-1");
+        assert_eq!(v["host"], "host-1");
+        assert_eq!(v["status"], "alive");
+        assert_eq!(v["last_heartbeat_ms"], 1_700_000_000_000_i64);
+        assert_eq!(v["heartbeat_age_ms"], 1_500);
+        assert_eq!(v["in_flight_count"], 3);
     }
 }
