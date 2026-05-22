@@ -39,7 +39,7 @@ use crate::control_plane::store::{ControlPlaneStore, OwnerStatus};
 use crate::events::Event;
 use crate::llm::GenAiClient;
 use crate::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
-use crate::worker::{ArchiveAckConsumer, WorkerId, WorkerStore};
+use crate::worker::{ArchiveAckConsumer, ArchiveRetrySweeper, WorkerId, WorkerStore};
 
 /// Skip the test if `FQ_NATS_URL` isn't set. Returns the URL
 /// on success; prints a `skipping:` line and returns `None`
@@ -61,6 +61,7 @@ pub struct TestRuntimeBuilder {
     with_coordination: bool,
     stale_threshold_ms: i64,
     sweep_interval_ms: u64,
+    archive_retry_interval_ms: u64,
 }
 
 impl Default for TestRuntimeBuilder {
@@ -69,6 +70,10 @@ impl Default for TestRuntimeBuilder {
             with_coordination: true,
             stale_threshold_ms: 30_000,
             sweep_interval_ms: 10_000,
+            // Production default is 10s; tests want faster
+            // republishes so retry-recovery scenarios don't
+            // make the test wall-clock blow up.
+            archive_retry_interval_ms: 500,
         }
     }
 }
@@ -92,6 +97,15 @@ impl TestRuntimeBuilder {
     /// Override the stale-sweep cadence (default 10s).
     pub fn sweep_interval_ms(mut self, ms: u64) -> Self {
         self.sweep_interval_ms = ms;
+        self
+    }
+
+    /// Override the archive retry sweeper's republish
+    /// cadence. Default 500ms (down from production 10s)
+    /// so scenarios that need to observe a republish don't
+    /// wait too long.
+    pub fn archive_retry_interval_ms(mut self, ms: u64) -> Self {
+        self.archive_retry_interval_ms = ms;
         self
     }
 
@@ -147,8 +161,15 @@ impl TestRuntimeBuilder {
         if self.with_coordination {
             let (tx, rx) = oneshot::channel();
             let consumer_name = format!("fq-coordination-e2e-{}", Uuid::now_v7().simple());
+            // Narrow the filter to ONLY this test's agent so
+            // parallel tests don't cross-contaminate via the
+            // worker-scoped ack subject (one CP would
+            // otherwise ack another test's archive, racing
+            // its sweeper).
+            let filter = format!("fq.agent.{}.invocation.*", agent_id.as_str());
             let consumer = CoordinationConsumer::new(bus.clone(), cp_store.clone())
                 .with_test_consumer_name(consumer_name)
+                .with_test_filter_subject(filter)
                 .with_stale_threshold_ms(self.stale_threshold_ms)
                 .with_sweep_interval_ms(self.sweep_interval_ms);
             cp_shutdown_tx = Some(tx);
@@ -165,6 +186,20 @@ impl TestRuntimeBuilder {
             let _ = ack_consumer.run(ack_rx).await;
         });
 
+        // ArchiveRetrySweeper — production has this on every
+        // worker; the harness needs it for scenarios that
+        // exercise the recovery-from-CP-outage path. The
+        // sweeper's `list_archive_pending` is a no-op when
+        // nothing's terminal, so it's harmless for the
+        // happy-path scenarios.
+        let (retry_tx, retry_rx) = oneshot::channel();
+        let retry_sweeper =
+            ArchiveRetrySweeper::new(bus.clone(), worker_id.clone(), worker_store.clone())
+                .with_retry_interval_ms(self.archive_retry_interval_ms);
+        let retry_handle = tokio::spawn(async move {
+            let _ = retry_sweeper.run(retry_rx).await;
+        });
+
         // Let any spawned consumers register before the test
         // starts publishing.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -177,10 +212,14 @@ impl TestRuntimeBuilder {
             mock,
             agent_id,
             worker_id,
+            stale_threshold_ms: self.stale_threshold_ms,
+            sweep_interval_ms: self.sweep_interval_ms,
             cp_shutdown_tx,
             cp_handle,
             ack_shutdown_tx: Some(ack_tx),
             ack_handle: Some(ack_handle),
+            retry_shutdown_tx: Some(retry_tx),
+            retry_handle: Some(retry_handle),
             _cp_dir: cp_dir,
             _worker_dir: worker_dir,
         })
@@ -196,10 +235,14 @@ pub struct TestRuntime {
     mock: MockAnthropicServer,
     agent_id: AgentId,
     worker_id: WorkerId,
+    stale_threshold_ms: i64,
+    sweep_interval_ms: u64,
     cp_shutdown_tx: Option<oneshot::Sender<()>>,
     cp_handle: Option<JoinHandle<()>>,
     ack_shutdown_tx: Option<oneshot::Sender<()>>,
     ack_handle: Option<JoinHandle<()>>,
+    retry_shutdown_tx: Option<oneshot::Sender<()>>,
+    retry_handle: Option<JoinHandle<()>>,
     _cp_dir: TempDir,
     _worker_dir: TempDir,
 }
@@ -356,6 +399,32 @@ impl TestRuntime {
         }
     }
 
+    /// Start the coordination consumer post-hoc. Errors if
+    /// it's already running. Used by scenarios that need to
+    /// observe pre-consumer behaviour before bringing the
+    /// CP back up (e.g. the retry-sweeper recovery test).
+    pub async fn start_coordination(&mut self) -> Result<(), String> {
+        if self.cp_handle.is_some() {
+            return Err("coordination consumer already running".to_string());
+        }
+        let (tx, rx) = oneshot::channel();
+        let consumer_name = format!("fq-coordination-e2e-{}", Uuid::now_v7().simple());
+        let filter = format!("fq.agent.{}.invocation.*", self.agent_id.as_str());
+        let consumer = CoordinationConsumer::new(self.bus.clone(), self.cp_store.clone())
+            .with_test_consumer_name(consumer_name)
+            .with_test_filter_subject(filter)
+            .with_stale_threshold_ms(self.stale_threshold_ms)
+            .with_sweep_interval_ms(self.sweep_interval_ms);
+        let handle = tokio::spawn(async move {
+            let _ = consumer.run(rx).await;
+        });
+        self.cp_shutdown_tx = Some(tx);
+        self.cp_handle = Some(handle);
+        // Give the durable consumer a moment to register.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Ok(())
+    }
+
     /// Stop every spawned component and wait for their tasks
     /// to drain. Safe to call multiple times (subsequent calls
     /// are no-ops).
@@ -366,10 +435,16 @@ impl TestRuntime {
         if let Some(tx) = self.ack_shutdown_tx.take() {
             let _ = tx.send(());
         }
+        if let Some(tx) = self.retry_shutdown_tx.take() {
+            let _ = tx.send(());
+        }
         if let Some(h) = self.cp_handle.take() {
             let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
         }
         if let Some(h) = self.ack_handle.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+        }
+        if let Some(h) = self.retry_handle.take() {
             let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
         }
         self.mock.shutdown().await;
@@ -510,6 +585,145 @@ mod tests {
             }
             other => panic!("expected InvocationOperatorRecovered, got {other:?}"),
         }
+
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retry_sweeper_recovers_from_cp_outage() {
+        // Step 8's deferred acceptance scenario, end-to-end.
+        // With no CoordinationConsumer running, the worker
+        // completes an invocation and publishes
+        // invocation.archived but nothing processes it.
+        // The ArchiveRetrySweeper republishes; we observe
+        // ≥2 archived events. Then we start the CP consumer
+        // and verify the archive lands + local row cleaned up.
+        let Some(_) = require_nats() else {
+            return;
+        };
+
+        use crate::Agent;
+        use crate::events::TriggerSource;
+        use crate::test_support::mock_anthropic::MockResponse;
+        use crate::worker::InvocationOutcome;
+        use crate::worker::reducer::Harness;
+        use crate::{PricingTable, ReducerRunner, ToolRegistry};
+        use futures::StreamExt;
+
+        // Start without coordination, short retry interval.
+        let mut rt = TestRuntime::builder()
+            .with_coordination(false)
+            .archive_retry_interval_ms(300)
+            .start()
+            .await
+            .expect("harness");
+        rt.push_llm_response(MockResponse::text("done.", 10, 4));
+
+        // Subscribe to the archived subject to count
+        // republishes.
+        let mut archived_sub = rt
+            .bus()
+            .subscribe(format!(
+                "fq.agent.{}.invocation.archived",
+                rt.agent_id().as_str()
+            ))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Drive an invocation to terminal.
+        let agent = Agent::builder()
+            .id(rt.agent_id().as_str())
+            .model("claude-haiku-4-5")
+            .system_prompt("be brief")
+            .budget(1.0)
+            .build()
+            .unwrap();
+        let llm = rt.llm_client();
+        let runner = ReducerRunner::new(
+            rt.bus().clone(),
+            Arc::new(PricingTable::empty()),
+            Arc::new(ToolRegistry::with_builtins()),
+            rt.worker_store().clone(),
+            rt.worker_id().clone(),
+        );
+        let outcome = runner
+            .run(
+                &Harness::new(),
+                &agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                serde_json::json!({"input": "go"}),
+            )
+            .await
+            .expect("run completes");
+        let invocation_id = match outcome {
+            InvocationOutcome::Completed { invocation_id, .. } => invocation_id,
+            other => panic!("expected Completed outcome, got {other:?}"),
+        };
+
+        // Wait for the initial archived emission (the worker
+        // publishes once per invocation). Don't try to count
+        // sweeper republishes — under suite contention the
+        // exact count is timing-dependent; what we really
+        // care about is that the loop closes once CP comes up
+        // (which can only happen via a sweeper republish,
+        // since the CP consumer starts with DeliverPolicy::New).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut saw_initial = false;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(200), archived_sub.next()).await {
+                Ok(Some(Ok(ev)))
+                    if ev.envelope.invocation_id == invocation_id
+                        && matches!(
+                            ev.payload,
+                            crate::events::EventPayload::InvocationArchived(_)
+                        ) =>
+                {
+                    saw_initial = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_initial, "expected initial invocation.archived event");
+
+        // invocation_state row still present with
+        // archive_status='pending' (CP never ack'd).
+        let row = rt
+            .worker_store()
+            .get_invocation_state(&invocation_id.to_string())
+            .await
+            .unwrap()
+            .expect("state row still present");
+        assert_eq!(row.archive_status.as_deref(), Some("pending"));
+        assert!(
+            rt.cp_store()
+                .get_archive(&invocation_id.to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "archive must not exist while CP is down",
+        );
+
+        // Start the CP consumer with DeliverPolicy::New, so it
+        // can ONLY catch a sweeper republish (not the initial
+        // emit which is now in the past).
+        rt.start_coordination().await.expect("start coordination");
+
+        // Cleanup landing is proof the sweeper republished
+        // after CP came up: CP wrote the archive row + sent
+        // the ack, ArchiveAckConsumer deleted invocation_state.
+        // Deadlines are generous to absorb tokio scheduling
+        // starvation under full-suite contention (we run
+        // alongside many other NATS-gated tests).
+        rt.wait_for_archive(invocation_id, Duration::from_secs(15))
+            .await
+            .expect("archive row after CP comes up — sweeper republished");
+        rt.wait_for_local_cleanup(invocation_id, Duration::from_secs(15))
+            .await
+            .expect("local cleanup after CP comes up");
 
         rt.shutdown().await;
     }

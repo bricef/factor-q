@@ -233,6 +233,10 @@ mod tests {
             bus: bus.clone(),
             store: store.clone(),
             consumer_name: unique_consumer_name(),
+            // Narrow filter so the durable consumer doesn't
+            // have to chew through every event the shared
+            // stream has accumulated across days of runs.
+            filter_subject: format!("fq.agent.{agent_id}.>"),
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -278,16 +282,25 @@ mod tests {
     }
 
     /// A variant of ProjectionConsumer that accepts a custom
-    /// durable name so test runs don't step on each other.
+    /// durable name and filter so test runs don't step on
+    /// each other. The filter narrows the JetStream consumer
+    /// to a single agent's events; without it, a fresh test
+    /// consumer has to replay the whole stream's accumulated
+    /// history (thousands of events across days of test
+    /// runs) before reaching its own.
     struct ProjectionConsumerWithName {
         bus: EventBus,
         store: Arc<ProjectionStore>,
         consumer_name: String,
+        filter_subject: String,
     }
 
     impl ProjectionConsumerWithName {
         async fn run(self, mut shutdown: oneshot::Receiver<()>) -> Result<(), ConsumerError> {
-            let consumer = self.bus.durable_consumer(&self.consumer_name).await?;
+            let consumer = self
+                .bus
+                .durable_consumer_with_filter(&self.consumer_name, &self.filter_subject)
+                .await?;
             let mut messages = consumer
                 .messages()
                 .await

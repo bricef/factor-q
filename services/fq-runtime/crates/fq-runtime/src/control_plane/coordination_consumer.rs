@@ -86,6 +86,13 @@ pub struct CoordinationConsumer {
     /// the stream's accumulated history. See
     /// [`Self::with_test_consumer_name`].
     test_consumer_name: Option<String>,
+    /// Test-only override for the JetStream filter subject.
+    /// When `Some`, used in place of [`FILTER_SUBJECT`] so the
+    /// test consumer only receives events for one agent's
+    /// invocations. Without this, parallel acceptance tests
+    /// cross-contaminate via the ack subject (one test's CP
+    /// ack-then-delete races another test's sweeper).
+    test_filter_subject: Option<String>,
 }
 
 impl CoordinationConsumer {
@@ -97,6 +104,7 @@ impl CoordinationConsumer {
             sweep_interval_ms: DEFAULT_SWEEP_INTERVAL_MS,
             self_worker_id: None,
             test_consumer_name: None,
+            test_filter_subject: None,
         }
     }
 
@@ -130,21 +138,35 @@ impl CoordinationConsumer {
         self
     }
 
+    /// Narrow the JetStream filter subject for this consumer.
+    /// Test-only — the acceptance harness sets this to
+    /// `fq.agent.<test_agent_id>.invocation.*` so parallel
+    /// tests' CP consumers don't pick up each other's events
+    /// (and don't race on the worker-scoped ack subject).
+    pub fn with_test_filter_subject(mut self, filter: String) -> Self {
+        self.test_filter_subject = Some(filter);
+        self
+    }
+
     /// Run the consumer loop until `shutdown` fires.
     pub async fn run(
         self,
         mut shutdown: oneshot::Receiver<()>,
     ) -> Result<(), CoordinationConsumerError> {
-        info!(filter = FILTER_SUBJECT, "coordination consumer starting");
+        let effective_filter = self
+            .test_filter_subject
+            .as_deref()
+            .unwrap_or(FILTER_SUBJECT);
+        info!(filter = effective_filter, "coordination consumer starting");
         let consumer = match &self.test_consumer_name {
             Some(name) => {
                 self.bus
-                    .durable_consumer_with_filter_from_new(name, FILTER_SUBJECT)
+                    .durable_consumer_with_filter_from_new(name, effective_filter)
                     .await?
             }
             None => {
                 self.bus
-                    .durable_consumer_with_filter(CONSUMER_NAME, FILTER_SUBJECT)
+                    .durable_consumer_with_filter(CONSUMER_NAME, effective_filter)
                     .await?
             }
         };
