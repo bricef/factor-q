@@ -247,26 +247,48 @@ or attempt manual reconstruction.
 ### 4.4 Operator surface for ambiguous cases
 
 Ambiguous cases are surfaced by the **control-plane**, which
-aggregates them across workers:
+aggregates them across workers. The v1 surface is a set of
+non-interactive subcommands rooted at `fq invocation` (per-
+invocation triage) and `fq workers` (worker liveness), with
+`fq status` summarising what needs attention:
 
 ```
-$ fq recover
+$ fq status
+...
+Recovery state
+  Ambiguous invocations: 2
+    -> `fq invocation list --status=ambiguous` to inspect
+    -> `fq invocation drop <id>` to triage individually
+  Stale workers: 1
+    -> `fq workers list --stale-only` to inspect
 
-3 in-flight invocations from previous run:
-  inv_abc123 (agent: code-reviewer, worker: w-001)
-    last action: tool dispatch [shell] — ambiguous
-    started: 2026-04-28 09:14:22 (4m 12s ago)
-    last known message: "Running cargo test..."
-    --
-    [r]esume  treat as completed (operator confirms tool ran)
-    [d]rop    abandon invocation; mark as failed
-    [s]kip    leave for later inspection
-  ...
+$ fq invocation list --status=ambiguous
+invocation  status     agent                    worker     arch
+inv_abc12   ambiguous  code-reviewer            w-001      no
+inv_def34   ambiguous  doc-bot                  w-001      no
+
+$ fq invocation drop inv_abc12 --reason "stuck on flaky network"
 ```
 
-The exact UX is a v1 implementation detail; the *contract* is
-that ambiguity is operator-visible across the cluster, not
-silently resolved by individual workers.
+`fq invocation drop` publishes
+`invocation.operator_recovered` (see event-schema.md). The
+coordination consumer's handler writes an `invocation_archive`
+row and updates the owner status to `Failed`. A late
+`invocation.archived` from a still-alive worker is detected by
+a no-downgrade guard and does not override the operator's
+decision.
+
+`resume` semantics are deferred from v1: the control-plane
+doesn't currently carry the worker's `state_blob` for
+ambiguous invocations, so an honest resume would either
+require enriching `invocation.ambiguous` to carry the blob or
+adding an operator-RPC to the worker. The contract — *that
+ambiguity is operator-visible across the cluster and not
+silently resolved* — is preserved by drop. Node-level
+recovery (`fq recover`) for stuck workers / control-plane is
+a follow-up; see the step-9 plan
+(`docs/plans/closed/2026-05-22-operator-cli.md`) for the
+scope decision.
 
 ### 4.5 What the contract does NOT promise
 

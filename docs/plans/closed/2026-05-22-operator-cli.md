@@ -1,9 +1,16 @@
 # Plan: Operator CLI for triage and recovery
 
 **Date**: 2026-05-22
-**Status**: Active
+**Status**: Closed 2026-05-22. Six commits on `main`:
+`5cf41ea` (event variant), `ac9d263` (CP handler + Failed
+status + no-downgrade guard), `fbaeb9b` (`fq invocation`
+subcommand), `eac521e` (`fq workers` subcommand), `8ee44b2`
+(`fq status` recovery section), and the doc-only close
+(this commit). Parent plan's step-9 status block notes the
+deferred items (`fq recover` node-scope, `resume` action,
+live end-to-end acceptance test).
 **Parent plan**:
-[`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md) — step 9.
+[`2026-04-28-data-architecture-v1.md`](../active/2026-04-28-data-architecture-v1.md) — step 9.
 **Design references**:
 - [`docs/design/data-architecture.md`](../../design/data-architecture.md) §3.4 (ambiguous cases), §4.4 (operator surface), §7 (recovery).
 - [`docs/design/event-schema.md`](../../design/event-schema.md) — adds `invocation.operator_recovered`.
@@ -140,10 +147,10 @@ Schema id: `factor-q/invocation_operator_recovered@1`.
 
 #### Done when
 
-- [ ] `EventPayload::InvocationOperatorRecovered` variant exists.
-- [ ] Subject helper in `events::subjects` covers it.
-- [ ] Schema-id mapping covers it.
-- [ ] All listed tests green.
+- [x] `EventPayload::InvocationOperatorRecovered` variant exists.
+- [x] Subject helper in `events::subjects` covers it.
+- [x] Schema-id mapping covers it.
+- [x] All listed tests green.
 
 ---
 
@@ -177,10 +184,10 @@ Schema id: `factor-q/invocation_operator_recovered@1`.
 
 #### Done when
 
-- [ ] `coordination_consumer.rs` arm for
+- [x] `coordination_consumer.rs` arm for
       `InvocationOperatorRecovered` is implemented.
-- [ ] All listed tests green.
-- [ ] Existing step-8 handler tests still pass.
+- [x] All listed tests green.
+- [x] Existing step-8 handler tests still pass.
 
 ---
 
@@ -250,10 +257,10 @@ Gated on `FQ_NATS_URL`.
 
 #### Done when
 
-- [ ] `fq invocation list/show/drop` exist and pass tests.
-- [ ] `--json` output validates against a fixed
+- [x] `fq invocation list/show/drop` exist and pass tests.
+- [x] `--json` output validates against a fixed
       `InvocationListItem` / `InvocationDetail` schema.
-- [ ] `fq invocation --help` is clear about which fields
+- [x] `fq invocation --help` is clear about which fields
       each subcommand prints.
 
 ---
@@ -288,9 +295,9 @@ ambiguous-event surfacings (if any) from the projection.
 
 #### Done when
 
-- [ ] `fq workers list/show` exist and pass tests.
-- [ ] `--stale-only` / `--alive-only` filters work.
-- [ ] Heartbeat-age display is consistent across human and
+- [x] `fq workers list/show` exist and pass tests.
+- [x] `--stale-only` / `--alive-only` filters work.
+- [x] Heartbeat-age display is consistent across human and
       JSON output (JSON keeps the raw timestamp; human
       computes the age string).
 
@@ -331,11 +338,11 @@ When everything is green, the section prints "All clear."
 
 #### Done when
 
-- [ ] `fq status` shows the new section.
-- [ ] Recovery guidance text is unit-tested for the three
+- [x] `fq status` shows the new section.
+- [x] Recovery guidance text is unit-tested for the three
       shapes (clear / ambiguous-only / stale-only /
       both).
-- [ ] `--json` output gains the corresponding fields.
+- [x] `--json` output gains the corresponding fields.
 
 ---
 
@@ -343,15 +350,15 @@ When everything is green, the section prints "All clear."
 
 **Goal.** Make the new surface discoverable.
 
-- [ ] Update `docs/design/event-schema.md` to add
+- [x] Update `docs/design/event-schema.md` to add
       `invocation.operator_recovered` (event type +
       subject row + invariant).
-- [ ] Update `docs/design/data-architecture.md` §4.4
+- [x] Update `docs/design/data-architecture.md` §4.4
       (operator surface) to point at the new commands.
-- [ ] Update `services/fq-runtime/README.md`'s testing
+- [x] Update `services/fq-runtime/README.md`'s testing
       table if any new commands need a recipe.
-- [ ] Update parent plan's step-9 status block.
-- [ ] Move this plan to `docs/plans/closed/`.
+- [x] Update parent plan's step-9 status block.
+- [x] Move this plan to `docs/plans/closed/`.
 
 ## Cross-cutting concerns
 

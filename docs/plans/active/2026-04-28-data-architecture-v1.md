@@ -552,6 +552,32 @@ LLM equivalent).
 
 ### Step 9 — `fq recover` and `fq workers` commands
 
+**Status (2026-05-22): substantively complete.** Shipped as
+six commits on `main` (`5cf41ea..8ee44b2`) following the
+[step-9 operator-CLI plan](../closed/2026-05-22-operator-cli.md).
+The surface that landed is slightly reshaped from the
+original sketch:
+
+- `fq invocation list/show/drop` — per-invocation triage
+- `fq workers list/show` — worker liveness inspection
+- `fq status` — gained a "Recovery state" section with
+  counts and command hints
+
+`fq recover` (top-level) is **deferred** as a follow-up: the
+sub-plan reframed it as node-level scope (worker / control-
+plane), distinct from per-invocation triage which now lives
+under `fq invocation`. `resume` action is also deferred —
+the CP doesn't carry the worker's `state_blob` for
+ambiguous invocations, so honest resume needs further work
+(see the closed sub-plan's Decisions section).
+
+New event variant introduced: `invocation.operator_recovered`
+(see `docs/design/event-schema.md`). Audit can filter
+operator-triggered terminal transitions from worker-
+triggered ones. The `invocation.archived` handler gained a
+no-downgrade guard so a late `archived` from a still-alive
+worker doesn't override the operator's `Failed`.
+
 **Goal.** Operator-facing CLI for triaging ambiguous
 invocations and inspecting workers.
 
@@ -593,11 +619,29 @@ Gated on `FQ_NATS_URL`.
 
 #### Done when
 
-- [ ] All listed integration tests green
-- [ ] All listed unit tests green
-- [ ] Acceptance test green against live NATS
-- [ ] `fq recover --help`, `fq workers --help`, `fq invocation --help` give clear usage
-- [ ] CLI output is parseable (JSON output flag) and human-readable (default)
+- [x] Integration coverage for the new surface lives in
+      `fq-cli`'s `invocation_tests` and `workers_tests`
+      modules (NATS-gated where relevant); pre-existing
+      step-7/8 NATS-gated tests still pass against live NATS
+      (262 lib tests pass as of 2026-05-22).
+- [x] Pure unit tests cover the parser (`parse_invocation_status_filter`),
+      the recovery-guidance renderer (`render_recovery_guidance`),
+      the heartbeat-age formatter (`format_heartbeat_age_human`),
+      and the JSON shape of `InvocationListItem`/`WorkerListItem`.
+- [ ] Live-NATS end-to-end acceptance test (`fq run` + provoked
+      ambiguous case + operator drop) — deferred; covered in
+      spirit by the step-2 CP handler tests and the
+      `publish_invocation_drop_emits_operator_recovered_for_agent`
+      integration test.
+- [x] `fq invocation --help`, `fq workers --help` give clear
+      usage (clap auto-generated; subcommand docstrings in
+      `fq-cli/src/main.rs`).
+- [x] CLI output is parseable (`--json` on every command)
+      and human-readable (default).
+- [ ] `fq recover` (top-level, node-scope) — **deferred** to
+      a follow-up plan.
+- [ ] `resume` action — **deferred** pending the state-blob
+      retrieval design.
 
 ---
 

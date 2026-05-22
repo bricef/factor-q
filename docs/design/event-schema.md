@@ -134,6 +134,7 @@ Concrete subjects:
 | `fq.agent.{agent_id}.tool.result` | Tool invocation has completed (success or failure) |
 | `fq.agent.{agent_id}.invocation.ambiguous` | A worker found an `dispatched`-without-`completed` WAL row on restart and is surfacing it to the operator |
 | `fq.agent.{agent_id}.invocation.archived` | Worker → control-plane: invocation reached terminal; hand off the final state |
+| `fq.agent.{agent_id}.invocation.operator_recovered` | Operator → control-plane: operator-issued terminal transition (`fq invocation drop`) |
 | `fq.agent.{agent_id}.completed` | Invocation has finished successfully |
 | `fq.agent.{agent_id}.failed` | Invocation has terminated with an error |
 | `fq.worker.{worker_id}.heartbeat` | Worker liveness signal (periodic) |
@@ -389,6 +390,25 @@ Published by the control-plane on the worker-scoped subject after a successful (
 - **Emitted on every successful insert, including the idempotent no-op.** Otherwise a redelivered `invocation.archived` would never re-trigger the ack and a worker that missed the first one would never clean up.
 - **Subscription is core NATS, not durable JetStream.** Acks missed while the consumer is offline are recovered by the worker's retry sweeper republishing `invocation.archived` until a fresh ack arrives.
 
+### `invocation.operator_recovered`
+
+Published by `fq invocation drop` (and any future operator-issued recovery action) so audit can distinguish operator-triggered terminal transitions from worker-triggered ones. The coordination consumer's handler writes an `invocation_archive` row (with an empty `state_blob` in v1 — the control-plane doesn't have the worker's state for an ambiguous invocation) and updates `coordination_invocation_owner.status` to match `final_phase`. No ack is emitted.
+
+```json
+{
+  "action": "drop",
+  "final_phase": "failed",
+  "reason": "stuck on flaky network call"
+}
+```
+
+**Design notes:**
+- **`action` is `"drop"` in v1.** The field exists so future actions (`resume`, `requeue`) can be distinguished without minting a new variant.
+- **`final_phase` is `"failed"` in v1.** A future `resume` would set `"completed"`.
+- **`reason` is operator-supplied free-form.** Audit-only; consumers must not parse it. Omitted on the wire when absent.
+- **Resume semantics are deferred.** The control-plane doesn't currently hold the worker's `state_blob` for ambiguous invocations; honest resume would require either enriching `invocation.ambiguous` with the blob or adding an operator-RPC to the worker. See the step-9 plan (`docs/plans/closed/2026-05-22-operator-cli.md`).
+- **No ack.** Unlike `invocation.archived`, no worker is waiting to clean up. The `invocation.archived` handler has a no-downgrade guard so a late `archived` event from a still-alive worker doesn't override the operator's `Failed`.
+
 ### `system.startup`
 
 ```json
@@ -452,6 +472,7 @@ The following invariants hold across the event stream and are assumed by consume
 6. **`config_snapshot` in `triggered` is immutable for the invocation.** Config changes during an invocation are ignored; they apply to the next invocation.
 7. **`invocation.ambiguous` is emitted by the worker on startup** for any invocation whose WAL classification returns "ambiguous." The chain root for that emission is the new event itself (`parent_event_id` absent — recovery starts a fresh chain; see the recovery rationale in `data-architecture.md` §3.4).
 8. **`invocation.archived` immediately follows the terminal lifecycle event** (`completed` or `failed`) in the same invocation chain. The worker's retry sweeper may republish `invocation.archived` if the control-plane ack does not arrive; republishes keep the same `invocation_id` and the control-plane's insert is idempotent on it. `invocation.archive_acked` is the control-plane's reply on the worker-scoped subject and closes the hand-off.
+9. **`invocation.operator_recovered` is operator-initiated** and rooted on its own envelope (the operator's `fq` process is not the original worker, so the chain is fresh). Terminal status set by this event is sticky — the coordination consumer's `invocation.archived` handler will not downgrade an already-terminal owner status if a still-alive worker emits `archived` after the operator's drop.
 
 ## Storage and Retention
 
