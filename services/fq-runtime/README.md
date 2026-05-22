@@ -93,14 +93,27 @@ every subcommand. See `fq --help` for details.
 
 ## Testing
 
-Three test tiers, each with different prerequisites:
+Test tiers, each with different prerequisites:
 
 | Tier | Command | Prerequisites | Count |
 |---|---|---|---|
-| Unit + integration | `just test` | NATS (`just infra-up`, set `FQ_NATS_URL`) | ~155 |
+| Unit + integration | `just test` | NATS (`just infra-up`, set `FQ_NATS_URL`) | 268 |
+| Binary smoke | `just test` (covered) | — | 4 |
 | Smoke (real LLM) | `just smoke` (repo root) | NATS + `ANTHROPIC_API_KEY` | 6 |
 | Drift detector (real LLM) | `just acceptance-drift` | `ANTHROPIC_API_KEY` | 1 |
 | Shell sandbox (container) | `just test-shell-sandbox` | Docker | 16 |
+
+The unit-and-integration tier includes the in-process acceptance
+harness (`test_support::runtime::TestRuntime`) that boots the full
+`fq run` runtime against live NATS and the mock Anthropic server,
+plus four end-to-end scenarios (drop-ambiguous, stale-worker,
+retry-sweeper-recovers-from-CP-outage, drop-vs-late-archived race).
+New acceptance tests for future plans should reach for the harness
+rather than building inline component wiring.
+
+The binary smoke tier (`fq-cli/tests/smoke.rs`) invokes the `fq`
+binary as a subprocess for CLI-level regressions that in-process
+tests can't catch.
 
 `just acceptance-drift` makes one short Haiku call (~fractions of a
 cent) against the live Anthropic API and asserts the response parses

@@ -377,10 +377,10 @@ Two items remain, both legitimately deferred:
    handling.** Deferred to step 8 (where the events are
    first published). The coordination consumer's
    `_ => Ok(())` arm catches unknown variants today.
-3. **Acceptance test surface.** The test as written needs
-   `fq invocation list --status=ambiguous` and `fq workers
-   stale` CLI commands which belong to step 9. The step's
-   acceptance can land alongside the CLI work in step 9.
+3. ~~**Acceptance test surface.**~~ **Shipped 2026-05-22**
+   via the acceptance harness plan. End-to-end stale-worker
+   detection covered by
+   `test_support::runtime::tests::stale_worker_marked_stale_within_threshold`.
 
 The natural next move is **step 8 (archive hand-off)**. It
 will pull item 2 along with it as a natural consequence,
@@ -493,6 +493,12 @@ Remaining work, intentionally deferred:
    - `archive_ack::tests::ack_deletes_matching_invocation_state_row`
    - `archive_retry::tests::sweep_republishes_pending_terminal_rows`
    - `archive_retry::tests::sweep_warns_once_after_threshold`
+3. **Retry-from-CP-outage end-to-end acceptance test.**
+   **Shipped 2026-05-22** via the acceptance harness.
+   `test_support::runtime::tests::retry_sweeper_recovers_from_cp_outage`
+   drives a real invocation with no CP, then starts CP and
+   verifies cleanup lands — proving the sweeper republished
+   under live conditions.
 
 **Goal.** Worker emits `invocation.archived` on terminal;
 control-plane writes archive row and emits
@@ -628,11 +634,11 @@ Gated on `FQ_NATS_URL`.
       the recovery-guidance renderer (`render_recovery_guidance`),
       the heartbeat-age formatter (`format_heartbeat_age_human`),
       and the JSON shape of `InvocationListItem`/`WorkerListItem`.
-- [ ] Live-NATS end-to-end acceptance test (`fq run` + provoked
-      ambiguous case + operator drop) — deferred; covered in
-      spirit by the step-2 CP handler tests and the
-      `publish_invocation_drop_emits_operator_recovered_for_agent`
-      integration test.
+- [x] Live-NATS end-to-end acceptance test — **shipped 2026-05-22**
+      via the acceptance harness plan:
+      `test_support::runtime::tests::drop_ambiguous_terminates_invocation_end_to_end`
+      drives a real ambiguous case and a real operator drop
+      through the live CP dispatch loop.
 - [x] `fq invocation --help`, `fq workers --help` give clear
       usage (clap auto-generated; subcommand docstrings in
       `fq-cli/src/main.rs`).

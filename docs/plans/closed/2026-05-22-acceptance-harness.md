@@ -1,7 +1,29 @@
 # Plan: Live-NATS + real-runtime acceptance harness
 
 **Date**: 2026-05-22
-**Status**: Active
+**Status**: Closed 2026-05-22. Seven commits on `main`:
+`c5b7a43` (TestRuntime harness), `ad53960` (drop-ambiguous
+scenario + extracted operator::drop_invocation), `3577e41`
+(stale-worker scenario), `42a9682` (retry-sweeper scenario
++ cross-test contamination fix + projection-consumer flake
+fix), `9926882` (drop-vs-late-archived race), `7f6b13b`
+(binary smoke test), and the doc-only close (this commit).
+Parent plan's step-7/8/9 status blocks updated to mark the
+deferred acceptance tests as shipped.
+
+Two real bugs found and fixed inline (per the plan's
+"no #[ignore] escape hatch" discipline):
+
+1. **Cross-test contamination via the ack subject.** Parallel
+   tests' CoordinationConsumers were processing each other's
+   archived events and publishing acks on each other's worker
+   subjects, racing the sweepers. Fix: `with_test_filter_subject`
+   builder method on CoordinationConsumer; TestRuntime narrows
+   the filter to `fq.agent.<test_agent_id>.invocation.*`.
+2. **Projection-consumer test flake under accumulated stream
+   history.** `consumer_projects_events_into_store` timed out
+   replaying days of stream history. Fix: narrow the test
+   consumer's filter to its own agent.
 **Design references**:
 - [`docs/design/data-architecture.md`](../../design/data-architecture.md) §3.4 (ambiguous), §5.5 (archive write order), §7 (recovery).
 - [`docs/design/event-schema.md`](../../design/event-schema.md) — every event the harness asserts on.
@@ -162,12 +184,12 @@ awaits the handles.
 
 #### Done when
 
-- [ ] `TestRuntime::start()` and `::shutdown()` work; one
+- [x] `TestRuntime::start()` and `::shutdown()` work; one
       smoke test that just starts, runs no invocation,
       shuts down cleanly passes.
-- [ ] All store and mock accessors compile and return the
+- [x] All store and mock accessors compile and return the
       expected types.
-- [ ] The existing
+- [x] The existing
       `completed_invocation_archives_and_worker_cleans_up_against_mock`
       test is rewritten to use `TestRuntime` and stays
       green — proves the harness is a faithful replacement
@@ -203,8 +225,8 @@ Assert:   - Within 5s: coordination_invocation_owner.status
 
 #### Done when
 
-- [ ] Test green against live NATS.
-- [ ] Step 9 parent plan's status block updated to mark
+- [x] Test green against live NATS.
+- [x] Step 9 parent plan's status block updated to mark
       this acceptance test as shipped.
 
 ---
@@ -233,8 +255,8 @@ Assert:   - coordination_worker row for the worker_id has
 
 #### Done when
 
-- [ ] Test green against live NATS.
-- [ ] TestRuntime exposes a way to start with overridden
+- [x] Test green against live NATS.
+- [x] TestRuntime exposes a way to start with overridden
       stale/sweep thresholds (test-only constructor or a
       builder method).
 
@@ -272,10 +294,10 @@ Assert 2: - Within 3 seconds: invocation_archive row exists.
 
 #### Done when
 
-- [ ] Test green against live NATS.
-- [ ] TestRuntime gains a `start_without_coordination()`
+- [x] Test green against live NATS.
+- [x] TestRuntime gains a `start_without_coordination()`
       builder variant.
-- [ ] TestRuntime gains a way to start the coordination
+- [x] TestRuntime gains a way to start the coordination
       consumer post-hoc (or a separate
       `start_coordination_consumer()` method).
 
@@ -311,8 +333,8 @@ Assert:   - coordination_invocation_owner.status remains
 
 #### Done when
 
-- [ ] Test green against live NATS.
-- [ ] Confirms the no-downgrade guard works through the
+- [x] Test green against live NATS.
+- [x] Confirms the no-downgrade guard works through the
       live event bus, not just through direct handler calls.
 
 ---
@@ -339,20 +361,20 @@ A single integration test in `fq-cli/tests/` that:
 
 #### Done when
 
-- [ ] `cargo test -p fq-cli --test smoke` green.
-- [ ] Test doesn't require NATS to be running (uses a
+- [x] `cargo test -p fq-cli --test smoke` green.
+- [x] Test doesn't require NATS to be running (uses a
       bogus URL so connection fails predictably).
 
 ---
 
 ### Step 7 — Documentation and closing
 
-- [ ] Update `services/fq-runtime/README.md` testing table:
+- [x] Update `services/fq-runtime/README.md` testing table:
       mention the harness module and the acceptance-test
       scenarios it covers. Bump the "Count" column to
       reflect the new tests.
-- [ ] Move this plan to `docs/plans/closed/`.
-- [ ] Update parent plan's step-7 / step-8 / step-9 status
+- [x] Move this plan to `docs/plans/closed/`.
+- [x] Update parent plan's step-7 / step-8 / step-9 status
       blocks where the corresponding deferred acceptance
       tests are now covered.
 
