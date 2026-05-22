@@ -27,6 +27,42 @@ pub struct Config {
     pub cache: CacheConfig,
     #[serde(default)]
     pub worker: WorkerConfig,
+    #[serde(default)]
+    pub state: StateConfig,
+}
+
+/// Control-plane state-retention knobs. Drives the
+/// `invocation_archive` retention sweep (step 10 of
+/// data-architecture-v1).
+#[derive(Debug, Clone, Deserialize)]
+pub struct StateConfig {
+    /// How long to keep `invocation_archive` rows before the
+    /// retention sweep deletes them. Default 30 days. Set to
+    /// `-1` to disable the sweep entirely.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: i64,
+    /// How often the retention sweep runs, in seconds.
+    /// Default 1 hour. Production doesn't need faster; tests
+    /// override via `[state]` in their config.
+    #[serde(default = "default_sweep_interval_seconds")]
+    pub sweep_interval_seconds: u64,
+}
+
+fn default_retention_days() -> i64 {
+    30
+}
+
+fn default_sweep_interval_seconds() -> u64 {
+    3_600
+}
+
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_retention_days(),
+            sweep_interval_seconds: default_sweep_interval_seconds(),
+        }
+    }
 }
 
 /// Worker-side knobs. Today only the archive hand-off retry
@@ -166,6 +202,7 @@ impl Default for Config {
             },
             cache: CacheConfig::default(),
             worker: WorkerConfig::default(),
+            state: StateConfig::default(),
         }
     }
 }
@@ -340,6 +377,37 @@ api_key_env = "SOMETHING"
     fn rejects_invalid_toml() {
         let err = Config::from_toml_str("not = valid = toml = at all").unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToml(_)));
+    }
+
+    #[test]
+    fn state_config_defaults_when_absent() {
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(config.state.retention_days, 30);
+        assert_eq!(config.state.sweep_interval_seconds, 3_600);
+    }
+
+    #[test]
+    fn state_config_parses_overrides() {
+        let toml = r#"
+[state]
+retention_days = 7
+sweep_interval_seconds = 300
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.state.retention_days, 7);
+        assert_eq!(config.state.sweep_interval_seconds, 300);
+    }
+
+    #[test]
+    fn state_config_accepts_negative_retention_to_disable() {
+        let toml = r#"
+[state]
+retention_days = -1
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.state.retention_days, -1);
+        // sweep_interval_seconds still defaults.
+        assert_eq!(config.state.sweep_interval_seconds, 3_600);
     }
 
     #[test]

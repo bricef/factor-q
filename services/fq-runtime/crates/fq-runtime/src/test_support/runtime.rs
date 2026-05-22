@@ -35,6 +35,7 @@ use crate::agent::AgentId;
 use crate::bus::EventBus;
 use crate::control_plane::CoordinationConsumer;
 use crate::control_plane::projection::ProjectionStore;
+use crate::control_plane::retention::RetentionSweeper;
 use crate::control_plane::store::{ControlPlaneStore, OwnerStatus};
 use crate::events::Event;
 use crate::llm::GenAiClient;
@@ -62,6 +63,8 @@ pub struct TestRuntimeBuilder {
     stale_threshold_ms: i64,
     sweep_interval_ms: u64,
     archive_retry_interval_ms: u64,
+    retention_days: i64,
+    retention_sweep_interval_seconds: u64,
 }
 
 impl Default for TestRuntimeBuilder {
@@ -74,6 +77,11 @@ impl Default for TestRuntimeBuilder {
             // republishes so retry-recovery scenarios don't
             // make the test wall-clock blow up.
             archive_retry_interval_ms: 500,
+            // Disabled by default — most scenarios don't
+            // care about retention. Tests that do override
+            // both knobs.
+            retention_days: -1,
+            retention_sweep_interval_seconds: 1,
         }
     }
 }
@@ -106,6 +114,21 @@ impl TestRuntimeBuilder {
     /// wait too long.
     pub fn archive_retry_interval_ms(mut self, ms: u64) -> Self {
         self.archive_retry_interval_ms = ms;
+        self
+    }
+
+    /// Enable the retention sweep with the given retention
+    /// in days. Default is `-1` (disabled). Passing `0`
+    /// deletes any non-zero-age archive row on the next
+    /// sweep tick.
+    pub fn retention_days(mut self, days: i64) -> Self {
+        self.retention_days = days;
+        self
+    }
+
+    /// Override the retention sweep cadence (default 1s).
+    pub fn retention_sweep_interval_seconds(mut self, seconds: u64) -> Self {
+        self.retention_sweep_interval_seconds = seconds;
         self
     }
 
@@ -200,6 +223,17 @@ impl TestRuntimeBuilder {
             let _ = retry_sweeper.run(retry_rx).await;
         });
 
+        // RetentionSweeper (CP-side). Disabled by default
+        // via `retention_days = -1`; scenarios that care
+        // override via `retention_days(N)`.
+        let (retention_tx, retention_rx) = oneshot::channel();
+        let retention_sweeper = RetentionSweeper::new(
+            cp_store.clone(),
+            self.retention_days,
+            self.retention_sweep_interval_seconds,
+        );
+        let retention_handle = tokio::spawn(retention_sweeper.run(retention_rx));
+
         // Let any spawned consumers register before the test
         // starts publishing.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -220,6 +254,8 @@ impl TestRuntimeBuilder {
             ack_handle: Some(ack_handle),
             retry_shutdown_tx: Some(retry_tx),
             retry_handle: Some(retry_handle),
+            retention_shutdown_tx: Some(retention_tx),
+            retention_handle: Some(retention_handle),
             _cp_dir: cp_dir,
             _worker_dir: worker_dir,
         })
@@ -243,6 +279,8 @@ pub struct TestRuntime {
     ack_handle: Option<JoinHandle<()>>,
     retry_shutdown_tx: Option<oneshot::Sender<()>>,
     retry_handle: Option<JoinHandle<()>>,
+    retention_shutdown_tx: Option<oneshot::Sender<()>>,
+    retention_handle: Option<JoinHandle<()>>,
     _cp_dir: TempDir,
     _worker_dir: TempDir,
 }
@@ -438,6 +476,9 @@ impl TestRuntime {
         if let Some(tx) = self.retry_shutdown_tx.take() {
             let _ = tx.send(());
         }
+        if let Some(tx) = self.retention_shutdown_tx.take() {
+            let _ = tx.send(());
+        }
         if let Some(h) = self.cp_handle.take() {
             let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
         }
@@ -445,6 +486,9 @@ impl TestRuntime {
             let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
         }
         if let Some(h) = self.retry_handle.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+        }
+        if let Some(h) = self.retention_handle.take() {
             let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
         }
         self.mock.shutdown().await;
@@ -724,6 +768,79 @@ mod tests {
         rt.wait_for_local_cleanup(invocation_id, Duration::from_secs(15))
             .await
             .expect("local cleanup after CP comes up");
+
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retention_sweep_deletes_old_archives_end_to_end() {
+        // Step 10's acceptance scenario: with retention=1 day
+        // and a 1s sweep interval, an archive row older than
+        // 1 day gets deleted within a few sweep ticks; a
+        // 12-hour-old row remains untouched.
+        let Some(_) = require_nats() else {
+            return;
+        };
+
+        use crate::control_plane::store::InvocationArchiveRow;
+        use chrono::Utc;
+        const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
+
+        let rt = TestRuntime::builder()
+            .retention_days(1)
+            .retention_sweep_interval_seconds(1)
+            .start()
+            .await
+            .expect("harness");
+
+        let now_ms = Utc::now().timestamp_millis();
+        let old_id = format!("retention-old-{}", Uuid::now_v7().simple());
+        let recent_id = format!("retention-recent-{}", Uuid::now_v7().simple());
+
+        rt.cp_store()
+            .insert_archive(&InvocationArchiveRow {
+                invocation_id: old_id.clone(),
+                agent_id: rt.agent_id().as_str().to_string(),
+                final_phase: "completed".to_string(),
+                final_state_blob: vec![],
+                started_at: now_ms - 2 * MS_PER_DAY,
+                terminal_at: now_ms - 2 * MS_PER_DAY,
+                archived_at: now_ms - 2 * MS_PER_DAY,
+            })
+            .await
+            .expect("insert old");
+        rt.cp_store()
+            .insert_archive(&InvocationArchiveRow {
+                invocation_id: recent_id.clone(),
+                agent_id: rt.agent_id().as_str().to_string(),
+                final_phase: "completed".to_string(),
+                final_state_blob: vec![],
+                started_at: now_ms - MS_PER_DAY / 2,
+                terminal_at: now_ms - MS_PER_DAY / 2,
+                archived_at: now_ms - MS_PER_DAY / 2,
+            })
+            .await
+            .expect("insert recent");
+
+        // Wait for the sweep to fire at least once. The
+        // sweeper consumes its first tick, then runs every
+        // interval (1s). 3s deadline is generous.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let old = rt.cp_store().get_archive(&old_id).await.unwrap();
+            let recent = rt.cp_store().get_archive(&recent_id).await.unwrap();
+            if old.is_none() && recent.is_some() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "retention sweep did not converge in 5s; old={}, recent={}",
+                    old.is_some(),
+                    recent.is_some()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
 
         rt.shutdown().await;
     }

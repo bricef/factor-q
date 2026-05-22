@@ -1458,6 +1458,20 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let mut archive_retry_handle =
         tokio::spawn(async move { archive_retry_sweeper.run(archive_retry_shutdown_rx).await });
 
+    // Spawn the control-plane retention sweep (step 10).
+    // Deletes invocation_archive rows older than
+    // state.retention_days. Setting retention_days < 0
+    // disables the task (it exits immediately on startup);
+    // see `[state]` in fq.toml.
+    let (retention_shutdown_tx, retention_shutdown_rx) = tokio::sync::oneshot::channel();
+    let retention_sweeper = fq_runtime::control_plane::retention::RetentionSweeper::new(
+        cp_store.clone(),
+        config.state.retention_days,
+        config.state.sweep_interval_seconds,
+    );
+    let mut retention_handle =
+        tokio::spawn(async move { retention_sweeper.run(retention_shutdown_rx).await });
+
     // Spawn the trigger dispatcher.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
     let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker, llm);
@@ -1525,6 +1539,22 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 Some(("archive_retry_sweeper", err_msg)),
             )
         }
+        result = &mut retention_handle => {
+            // RetentionSweeper::run returns () — a panic
+            // shows up as Err(JoinError).
+            match result {
+                Ok(()) => (
+                    "task_failed",
+                    false,
+                    Some(("retention_sweeper", "exited cleanly".to_string())),
+                ),
+                Err(err) => (
+                    "task_failed",
+                    false,
+                    Some(("retention_sweeper", format!("task panicked: {err}"))),
+                ),
+            }
+        }
         result = &mut dispatcher_handle => {
             let err_msg = describe_task_result("trigger dispatcher", result);
             ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
@@ -1561,6 +1591,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = hb_producer_shutdown_tx.send(());
     let _ = archive_ack_shutdown_tx.send(());
     let _ = archive_retry_shutdown_tx.send(());
+    let _ = retention_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
@@ -1608,6 +1639,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
         Ok(Err(err)) => tracing::error!(error = %err, "archive retry sweeper task panicked"),
         Err(_) => tracing::warn!("archive retry sweeper did not shut down within 5s"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), retention_handle).await {
+        Ok(Ok(())) => println!("  retention sweep stopped cleanly."),
+        Ok(Err(err)) => tracing::error!(error = %err, "retention sweep task panicked"),
+        Err(_) => tracing::warn!("retention sweep did not shut down within 5s"),
     }
     match tokio::time::timeout(std::time::Duration::from_secs(5), dispatcher_handle).await {
         Ok(Ok(Ok(()))) => println!("  trigger dispatcher stopped cleanly."),

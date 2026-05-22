@@ -38,6 +38,7 @@ pub mod dispatcher;
 pub mod heartbeat_consumer;
 pub mod operator;
 pub mod projection;
+pub mod retention;
 pub mod store;
 
 pub use coordination_consumer::{CoordinationConsumer, CoordinationConsumerError};
