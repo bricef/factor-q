@@ -889,7 +889,69 @@ async fn show_status(global: &GlobalArgs) -> anyhow::Result<()> {
             }
         }
     }
+
+    // Recovery state (step 9). Points the operator at the
+    // commands they'd need if anything is off; renders
+    // "All clear." otherwise.
+    println!();
+    println!("Recovery state");
+    if !db_path.exists() {
+        println!("  (no coordination data — `fq run` has not initialised the store)");
+    } else {
+        match fq_runtime::ControlPlaneStore::open_read_only(&db_path).await {
+            Ok(cp_store) => {
+                let ambiguous = match cp_store
+                    .list_invocations_with_status(
+                        fq_runtime::control_plane::store::OwnerStatus::Ambiguous,
+                    )
+                    .await
+                {
+                    Ok(rows) => rows.len() as i64,
+                    Err(err) => {
+                        println!("  ✗ failed to count ambiguous invocations: {err}");
+                        return Ok(());
+                    }
+                };
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let stale = match cp_store.list_stale_workers(now_ms, 30_000).await {
+                    Ok(rows) => rows.len() as i64,
+                    Err(err) => {
+                        println!("  ✗ failed to count stale workers: {err}");
+                        return Ok(());
+                    }
+                };
+                print!("{}", render_recovery_guidance(ambiguous, stale));
+            }
+            Err(err) => {
+                println!("  ✗ failed to open control-plane store: {err}");
+            }
+        }
+    }
     Ok(())
+}
+
+/// Pure: render the recovery-guidance block of `fq status`
+/// from two counts. The text includes the next-step commands
+/// so the operator can copy-paste rather than remember syntax.
+fn render_recovery_guidance(ambiguous_count: i64, stale_worker_count: i64) -> String {
+    if ambiguous_count == 0 && stale_worker_count == 0 {
+        return "  All clear.\n".to_string();
+    }
+    let mut out = String::new();
+    if ambiguous_count > 0 {
+        out.push_str(&format!(
+            "  Ambiguous invocations: {ambiguous_count}\n\
+             \x20\x20  -> `fq invocation list --status=ambiguous` to inspect\n\
+             \x20\x20  -> `fq invocation drop <id>` to triage individually\n"
+        ));
+    }
+    if stale_worker_count > 0 {
+        out.push_str(&format!(
+            "  Stale workers: {stale_worker_count}\n\
+             \x20\x20  -> `fq workers list --stale-only` to inspect\n"
+        ));
+    }
+    out
 }
 
 /// Report the state of a single JetStream stream and one of its
@@ -2455,6 +2517,49 @@ mod workers_tests {
         // explicitly rather than displaying a nonsense
         // negative second count.
         assert_eq!(format_heartbeat_age_human(-1000, 30_000), "future");
+    }
+
+    #[test]
+    fn render_recovery_guidance_all_clear() {
+        let out = render_recovery_guidance(0, 0);
+        assert!(out.contains("All clear"), "got: {out:?}");
+        // No command hints when nothing's pending.
+        assert!(
+            !out.contains("fq invocation"),
+            "should not hint commands: {out:?}"
+        );
+        assert!(
+            !out.contains("fq workers"),
+            "should not hint commands: {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_recovery_guidance_for_ambiguous_only() {
+        let out = render_recovery_guidance(3, 0);
+        assert!(out.contains("Ambiguous invocations: 3"));
+        assert!(out.contains("fq invocation list --status=ambiguous"));
+        assert!(out.contains("fq invocation drop"));
+        assert!(!out.contains("Stale workers"), "got: {out:?}");
+        assert!(!out.contains("All clear"));
+    }
+
+    #[test]
+    fn render_recovery_guidance_for_stale_only() {
+        let out = render_recovery_guidance(0, 2);
+        assert!(out.contains("Stale workers: 2"));
+        assert!(out.contains("fq workers list --stale-only"));
+        assert!(!out.contains("Ambiguous"), "got: {out:?}");
+        assert!(!out.contains("All clear"));
+    }
+
+    #[test]
+    fn render_recovery_guidance_for_both() {
+        let out = render_recovery_guidance(1, 1);
+        assert!(out.contains("Ambiguous invocations: 1"));
+        assert!(out.contains("Stale workers: 1"));
+        assert!(out.contains("fq invocation drop"));
+        assert!(out.contains("fq workers list --stale-only"));
     }
 
     #[test]
