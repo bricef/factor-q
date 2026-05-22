@@ -357,6 +357,53 @@ impl EventBus {
         Ok(consumer)
     }
 
+    /// Like [`Self::durable_consumer_with_filter`] but the
+    /// consumer starts from new messages only (skips the
+    /// stream's historical messages on first creation).
+    ///
+    /// Test-oriented: the acceptance harness needs fresh
+    /// consumers per test, but the stream is shared across
+    /// runs and contains thousands of historical messages.
+    /// Starting from `New` avoids the catch-up wait while
+    /// keeping production's recovery-from-history semantics
+    /// untouched.
+    ///
+    /// Note: `get_or_create_consumer` returns the existing
+    /// consumer's config if `name` already exists, so this
+    /// only affects the first creation. Pair with a unique
+    /// per-test consumer name to actually get the new
+    /// behaviour.
+    pub async fn durable_consumer_with_filter_from_new(
+        &self,
+        name: &str,
+        filter_subject: &str,
+    ) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            filter = filter_subject,
+            "getting/creating filtered durable JetStream consumer (deliver_policy=new)"
+        );
+        let stream = self
+            .jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let consumer = stream
+            .get_or_create_consumer(
+                name,
+                consumer::pull::Config {
+                    durable_name: Some(name.to_string()),
+                    filter_subject: filter_subject.to_string(),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    deliver_policy: consumer::DeliverPolicy::New,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        Ok(consumer)
+    }
+
     /// Subscribe to events matching a subject filter.
     ///
     /// Uses core NATS subscribe (not a durable JetStream consumer), so the

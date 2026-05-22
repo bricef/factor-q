@@ -80,6 +80,12 @@ pub struct CoordinationConsumer {
     /// ourselves stale during sweeps. Optional because v2
     /// control-plane processes won't have a co-located worker.
     self_worker_id: Option<String>,
+    /// Test-only override for the durable consumer name. When
+    /// `Some`, `run` also uses the deliver-from-new variant of
+    /// the bus's consumer factory so the test doesn't replay
+    /// the stream's accumulated history. See
+    /// [`Self::with_test_consumer_name`].
+    test_consumer_name: Option<String>,
 }
 
 impl CoordinationConsumer {
@@ -90,6 +96,7 @@ impl CoordinationConsumer {
             stale_threshold_ms: DEFAULT_STALE_THRESHOLD_MS,
             sweep_interval_ms: DEFAULT_SWEEP_INTERVAL_MS,
             self_worker_id: None,
+            test_consumer_name: None,
         }
     }
 
@@ -113,16 +120,34 @@ impl CoordinationConsumer {
         self
     }
 
+    /// Override the JetStream durable consumer name and start
+    /// from new messages only (skip the stream's history).
+    /// Test-only — the acceptance harness uses this so each
+    /// test gets an isolated consumer without replaying the
+    /// shared stream's accumulated events.
+    pub fn with_test_consumer_name(mut self, name: String) -> Self {
+        self.test_consumer_name = Some(name);
+        self
+    }
+
     /// Run the consumer loop until `shutdown` fires.
     pub async fn run(
         self,
         mut shutdown: oneshot::Receiver<()>,
     ) -> Result<(), CoordinationConsumerError> {
         info!(filter = FILTER_SUBJECT, "coordination consumer starting");
-        let consumer = self
-            .bus
-            .durable_consumer_with_filter(CONSUMER_NAME, FILTER_SUBJECT)
-            .await?;
+        let consumer = match &self.test_consumer_name {
+            Some(name) => {
+                self.bus
+                    .durable_consumer_with_filter_from_new(name, FILTER_SUBJECT)
+                    .await?
+            }
+            None => {
+                self.bus
+                    .durable_consumer_with_filter(CONSUMER_NAME, FILTER_SUBJECT)
+                    .await?
+            }
+        };
         let mut messages = consumer
             .messages()
             .await
@@ -932,104 +957,47 @@ mod tests {
         // MockAnthropicServer instead of the live Anthropic API.
         // Full pipeline: ReducerRunner → bus → CoordinationConsumer
         // → archive row + ack → ArchiveAckConsumer → invocation_state
-        // row deleted.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
+        // row deleted. Uses the TestRuntime harness so the setup
+        // boilerplate isn't repeated across scenarios.
+        let Some(_) = crate::test_support::runtime::require_nats() else {
             return;
         };
 
         use crate::Agent;
         use crate::events::TriggerSource;
-        use crate::llm::GenAiClient;
-        use crate::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
+        use crate::test_support::mock_anthropic::MockResponse;
+        use crate::test_support::runtime::TestRuntime;
+        use crate::worker::InvocationOutcome;
         use crate::worker::reducer::Harness;
-        use crate::worker::{ArchiveAckConsumer, InvocationOutcome, WorkerId, WorkerStore};
         use crate::{PricingTable, ReducerRunner, ToolRegistry};
-        use tempfile::tempdir;
-        use uuid::Uuid;
 
-        // genai's auth resolver demands the env var even though
-        // the mock ignores the bearer. Safety: tests share a
-        // process, but the value is harmless.
-        // Safety: tests share a process but this var is benign.
-        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+        let rt = TestRuntime::start().await.expect("harness");
+        rt.push_llm_response(MockResponse::text("done.", 12, 4));
 
-        let mock = MockAnthropicServer::start().await;
-        mock.push_response(MockResponse::text("done.", 12, 4));
-
-        let bus = EventBus::connect(&url).await.expect("connect NATS");
-        let cp_dir = tempdir().unwrap();
-        let cp_store = Arc::new(
-            ControlPlaneStore::open(&cp_dir.path().join("events.db"))
-                .await
-                .unwrap(),
-        );
-        let worker_dir = tempdir().unwrap();
-        let worker_store = Arc::new(
-            WorkerStore::open(&worker_dir.path().join("worker.db"))
-                .await
-                .unwrap(),
-        );
-
-        let agent_id = AgentId::new(format!("e2e-archive-{}", Uuid::now_v7().simple())).unwrap();
-        let worker_id =
-            WorkerId::new(format!("e2e-worker-{}", Uuid::now_v7().simple())).expect("worker id");
-
-        // Capture the agent's invocation chain on NATS.
-        let mut chain_sub = bus
-            .subscribe(format!("fq.agent.{}.>", agent_id.as_str()))
+        // Capture the agent's invocation chain on NATS for the
+        // event-order assertion.
+        let mut chain_sub = rt
+            .bus()
+            .subscribe(format!("fq.agent.{}.>", rt.agent_id().as_str()))
             .await
             .expect("subscribe");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Spawn the test coordination consumer with a unique
-        // name so we don't fight the production consumer.
-        let consumer_name = format!("fq-coordination-e2e-{}", Uuid::now_v7().simple());
-        let bus_for_cp = bus.clone();
-        let store_for_cp = cp_store.clone();
-        let agent_for_cp = agent_id.clone();
-        let (cp_shutdown_tx, cp_shutdown_rx) = oneshot::channel();
-        let cp_handle = tokio::spawn(async move {
-            run_test_consumer(
-                bus_for_cp,
-                store_for_cp,
-                consumer_name,
-                FILTER_SUBJECT,
-                agent_for_cp,
-                cp_shutdown_rx,
-            )
-            .await
-        });
-
-        // Spawn the real ArchiveAckConsumer for this worker.
-        let (ack_shutdown_tx, ack_shutdown_rx) = oneshot::channel();
-        let ack_consumer =
-            ArchiveAckConsumer::new(bus.clone(), worker_id.clone(), worker_store.clone());
-        let ack_handle = tokio::spawn(async move { ack_consumer.run(ack_shutdown_rx).await });
-
-        // Let both consumers register before publishing.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        // Build a runner pointing at the mock. file_read isn't
-        // used here — the scripted reducer just completes after
-        // one text response.
+        // Drive a single invocation through a fresh runner.
         let agent = Agent::builder()
-            .id(agent_id.as_str())
+            .id(rt.agent_id().as_str())
             .model("claude-haiku-4-5")
             .system_prompt("be brief")
             .budget(1.0)
             .build()
             .unwrap();
-
-        let llm = GenAiClient::with_base_url(mock.base_url());
-        let pricing = Arc::new(PricingTable::empty());
-        let tools = Arc::new(ToolRegistry::with_builtins());
+        let llm = rt.llm_client();
         let runner = ReducerRunner::new(
-            bus.clone(),
-            pricing,
-            tools,
-            worker_store.clone(),
-            worker_id.clone(),
+            rt.bus().clone(),
+            Arc::new(PricingTable::empty()),
+            Arc::new(ToolRegistry::with_builtins()),
+            rt.worker_store().clone(),
+            rt.worker_id().clone(),
         );
 
         let outcome = runner
@@ -1047,34 +1015,28 @@ mod tests {
             InvocationOutcome::Completed { invocation_id, .. } => invocation_id,
             other => panic!("expected Completed outcome, got {other:?}"),
         };
-        let inv_str = invocation_id.to_string();
 
-        // Poll for the full hand-off: archive row appears on CP,
-        // invocation_state row deleted on worker.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let archive = cp_store.get_archive(&inv_str).await.unwrap();
-            let state = worker_store.get_invocation_state(&inv_str).await.unwrap();
-            if archive.is_some() && state.is_none() {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                panic!(
-                    "hand-off didn't complete: archive={:?}, state={:?}",
-                    archive.is_some(),
-                    state.is_some()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        // Full hand-off: archive row on CP, invocation_state
+        // deleted on worker.
+        rt.wait_for_archive(invocation_id, Duration::from_secs(10))
+            .await
+            .expect("archive row");
+        rt.wait_for_local_cleanup(invocation_id, Duration::from_secs(10))
+            .await
+            .expect("invocation_state cleanup");
 
         // Archive row contents.
-        let archive = cp_store.get_archive(&inv_str).await.unwrap().unwrap();
-        assert_eq!(archive.agent_id, agent_id.as_str());
+        let archive = rt
+            .cp_store()
+            .get_archive(&invocation_id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(archive.agent_id, rt.agent_id().as_str());
         assert_eq!(archive.final_phase, "completed");
 
-        // Drain captured events; verify the canonical sequence
-        // includes invocation.archived after completed.
+        // Drain captured events; verify completed precedes
+        // invocation_archived.
         let mut chain_kinds = Vec::new();
         let collect_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tokio::time::Instant::now() < collect_deadline {
@@ -1092,8 +1054,8 @@ mod tests {
             "expected completed followed by invocation_archived in {chain_kinds:?}",
         );
 
-        // Mock saw exactly one request, model carried through.
-        let received = mock.received_requests();
+        // Mock saw exactly one request with the right model.
+        let received = rt.mock().received_requests();
         assert_eq!(
             received.len(),
             1,
@@ -1101,11 +1063,7 @@ mod tests {
         );
         assert_eq!(received[0]["model"], "claude-haiku-4-5");
 
-        let _ = cp_shutdown_tx.send(());
-        let _ = ack_shutdown_tx.send(());
-        let _ = cp_handle.await;
-        let _ = ack_handle.await;
-        mock.shutdown().await;
+        rt.shutdown().await;
     }
 
     /// Test consumer with a custom durable name so parallel
