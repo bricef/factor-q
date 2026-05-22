@@ -729,6 +729,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drop_then_late_archived_keeps_owner_failed_end_to_end() {
+        // Race scenario, end-to-end via the harness:
+        // operator drops first (owner → Failed); a still-
+        // alive worker emits invocation.archived with
+        // final_phase=completed later; the no-downgrade
+        // guard keeps owner = Failed and the first archive
+        // insert wins (ON CONFLICT DO NOTHING).
+        let Some(_) = require_nats() else {
+            return;
+        };
+
+        use crate::control_plane::operator;
+        use crate::events::{EventPayload, InvocationAmbiguousPayload, InvocationArchivedPayload};
+
+        let rt = TestRuntime::start().await.expect("harness");
+
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        // Seed an InFlight owner row + a projection event
+        // (so the operator drop can resolve the agent_id).
+        rt.cp_store()
+            .upsert_invocation_ownership(
+                &inv_str,
+                rt.worker_id().as_str(),
+                1_000,
+                OwnerStatus::InFlight,
+            )
+            .await
+            .expect("seed owner");
+        let seed_event = Event::new(
+            rt.agent_id().clone(),
+            invocation_id,
+            EventPayload::InvocationAmbiguous(InvocationAmbiguousPayload {
+                stuck_entity: "tool_dispatch".to_string(),
+                stuck_call_id: "tc-race".to_string(),
+                note: "race-scenario seed".to_string(),
+            }),
+        );
+        rt.seed_projection_event(&seed_event)
+            .await
+            .expect("seed projection");
+
+        // Operator drop: publishes operator_recovered.
+        operator::drop_invocation(
+            rt.bus(),
+            rt.proj_store(),
+            &inv_str,
+            Some("race scenario: operator wins"),
+        )
+        .await
+        .expect("drop_invocation");
+
+        // Wait for the CP to mark Failed.
+        rt.wait_for_owner_status(invocation_id, OwnerStatus::Failed, Duration::from_secs(5))
+            .await
+            .expect("owner Failed after operator drop");
+        let archive_before = rt
+            .cp_store()
+            .get_archive(&inv_str)
+            .await
+            .unwrap()
+            .expect("archive row from operator drop");
+        assert_eq!(archive_before.final_phase, "failed");
+
+        // Now a "late" worker publishes an archived event
+        // with completed — racing the operator's drop. Use a
+        // dummy worker_id so the ack (which CP will emit)
+        // doesn't trigger our ArchiveAckConsumer (which is
+        // listening on rt.worker_id()'s subject).
+        use crate::worker::WorkerId;
+        let other_worker =
+            WorkerId::new(format!("late-worker-{}", Uuid::now_v7().simple())).unwrap();
+        let late_event = Event::new(
+            rt.agent_id().clone(),
+            invocation_id,
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: other_worker,
+                final_phase: "completed".to_string(),
+                final_state_blob: b"would-have-been-real-state".to_vec(),
+                started_at_ms: 1_000,
+                terminal_at_ms: 2_000,
+            }),
+        );
+        rt.bus().publish(&late_event).await.expect("publish late");
+
+        // Give the CP consumer time to process the late
+        // archived event.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // No-downgrade: owner stays Failed.
+        let owner = rt
+            .cp_store()
+            .get_invocation_owner(&inv_str)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            owner.status,
+            OwnerStatus::Failed,
+            "operator's Failed must stick despite the late `completed` archived event"
+        );
+
+        // Archive row preserved as failed (first-writer-wins
+        // via ON CONFLICT DO NOTHING).
+        let archive_after = rt.cp_store().get_archive(&inv_str).await.unwrap().unwrap();
+        assert_eq!(archive_after.final_phase, "failed");
+        assert_eq!(archive_after.archived_at, archive_before.archived_at);
+        assert!(
+            archive_after.final_state_blob.is_empty(),
+            "operator drop wrote an empty blob; the late completed must not have overwritten it"
+        );
+
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn stale_worker_marked_stale_within_threshold() {
         // Step 7's deferred acceptance test, end-to-end:
         // a registered worker that stops heartbeating gets
