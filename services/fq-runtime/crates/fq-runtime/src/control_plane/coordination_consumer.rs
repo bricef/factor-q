@@ -1105,8 +1105,15 @@ mod tests {
         _agent_filter: AgentId,
         mut shutdown: oneshot::Receiver<()>,
     ) -> Result<(), CoordinationConsumerError> {
+        // Start from new messages only: when the full lib
+        // suite runs against a shared NATS, the stream is
+        // crowded with `fq.agent.*.invocation.*` events from
+        // other tests. Default `DeliverPolicy::All` drains
+        // them all before reaching this test's published
+        // event and the 5s deadline below trips. Pairs with
+        // a unique consumer_name per test.
         let consumer = bus
-            .durable_consumer_with_filter(&consumer_name, filter_subject)
+            .durable_consumer_with_filter_from_new(&consumer_name, filter_subject)
             .await?;
         let mut messages = consumer
             .messages()

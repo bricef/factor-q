@@ -2212,6 +2212,31 @@ mod tests {
         expected_event_count: usize,
         sandbox_dir: Option<&std::path::Path>,
     ) -> (Arc<WorkerStore>, Vec<Event>) {
+        let (store, events, _) = run_with_wal_capturing_outcome(
+            url,
+            agent,
+            responses,
+            expected_event_count,
+            sandbox_dir,
+        )
+        .await;
+        (store, events)
+    }
+
+    /// Same as [`run_with_wal`] but also returns the `run`
+    /// result. Useful when a test asserts on the outcome
+    /// variant (e.g. budget-exceeded).
+    async fn run_with_wal_capturing_outcome(
+        url: &str,
+        agent: Agent,
+        responses: Vec<ChatResponse>,
+        expected_event_count: usize,
+        sandbox_dir: Option<&std::path::Path>,
+    ) -> (
+        Arc<WorkerStore>,
+        Vec<Event>,
+        Result<InvocationOutcome, crate::worker::ExecutorError>,
+    ) {
         let bus = EventBus::connect(url).await.expect("connect to NATS");
         let store_dir = tempdir().expect("tempdir");
         let store = Arc::new(
@@ -2238,7 +2263,7 @@ mod tests {
             test_worker_id(),
             Harness::new(),
         );
-        let _ = runner
+        let outcome = runner
             .run(
                 &agent,
                 &llm,
@@ -2265,7 +2290,7 @@ mod tests {
         // released when `store` is dropped.)
         let _ = sandbox_dir; // suppress "unused" if not provided
         std::mem::forget(store_dir);
-        (store, events)
+        (store, events, outcome)
     }
 
     fn end_turn_response(text: &str) -> ChatResponse {
@@ -2584,6 +2609,132 @@ mod tests {
         assert!(
             dispatch.is_none(),
             "denied call must not write a tool_dispatch row; got {dispatch:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_sandbox_violation_surfaces_on_reducer_path() {
+        // Sister to the executor-side
+        // `tool_sandbox_violations_surface_to_the_llm`. Distinct
+        // from the allowlist test above: here the tool *is*
+        // allowed (`file_read` is in the agent's declared tools),
+        // but the runtime sandbox denies the specific path. The
+        // tool actually dispatches; the failure surfaces from
+        // inside the tool, not from the synthetic-error gating
+        // shortcut. So the event sequence includes both
+        // `tool.call` and `tool.dispatched` before the failing
+        // `tool.result`.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        let allowed = tempdir().unwrap();
+        let forbidden = tempdir().unwrap();
+        let target = forbidden.path().join("secret.txt");
+        std::fs::write(&target, "no").unwrap();
+
+        let agent_id = unique_agent_id("sandbox-violator");
+        let agent = Agent::builder()
+            .id(&agent_id)
+            .model("claude-haiku")
+            .system_prompt("Try to read a file.")
+            .tools(["file_read"])
+            .sandbox(Sandbox::new().fs_read(allowed.path().to_string_lossy().to_string()))
+            .budget(1.0)
+            .build()
+            .unwrap();
+
+        let responses = vec![
+            tool_call_response(
+                "file_read",
+                "call_violate",
+                json!({"path": target.to_string_lossy()}),
+            ),
+            end_turn_response("Could not read."),
+        ];
+
+        // triggered, llm_request, llm_dispatched, llm_response,
+        // tool_call, tool_dispatched, tool_result(err),
+        // llm_request, llm_dispatched, llm_response, completed,
+        // invocation_archived = 12 events.
+        let (_store, events) = run_with_wal(&url, agent, responses, 12, None).await;
+
+        let tool_result = events
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::ToolResult(p) => Some(p),
+                _ => None,
+            })
+            .expect("tool_result event present");
+        assert!(tool_result.is_error, "sandbox-blocked tool must error");
+        assert!(
+            matches!(
+                tool_result.error_kind,
+                Some(ToolErrorKind::SandboxViolation)
+            ),
+            "sandbox-blocked tool error_kind must be SandboxViolation, got {:?}",
+            tool_result.error_kind
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_exceeded_emits_failed_event_on_reducer_path() {
+        // Sister to the executor-side
+        // `emits_failed_event_when_budget_exceeded`. The runner
+        // computes total cost after the LLM turn lands and
+        // short-circuits to `Failed { BudgetExceeded }` when the
+        // budget is blown. Asserts both the outcome variant and
+        // the on-bus event.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        let agent_id = unique_agent_id("overspender");
+        let agent = Agent::builder()
+            .id(&agent_id)
+            .model("claude-haiku")
+            .system_prompt("You spend a lot.")
+            .budget(0.0001)
+            .build()
+            .unwrap();
+
+        // 1M input tokens at $1/M = $1.00 — well over $0.0001.
+        let expensive = ChatResponse {
+            content: Some("expensive".to_string()),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 1_000_000,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        };
+
+        // triggered, llm_request, llm_dispatched, llm_response,
+        // failed, invocation_archived = 6 events.
+        let (_store, events, outcome) =
+            run_with_wal_capturing_outcome(&url, agent, vec![expensive], 6, None).await;
+
+        let outcome = outcome.expect("run resolves cleanly even on budget exceeded");
+        assert!(
+            matches!(outcome, InvocationOutcome::BudgetExceeded { .. }),
+            "outcome must be BudgetExceeded, got {outcome:?}"
+        );
+
+        let failed = events
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::Failed(p) => Some(p),
+                _ => None,
+            })
+            .expect("failed event present");
+        assert!(
+            matches!(failed.error_kind, FailureKind::BudgetExceeded),
+            "failed.error_kind must be BudgetExceeded, got {:?}",
+            failed.error_kind
         );
     }
 
