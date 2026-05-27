@@ -609,11 +609,16 @@ async fn trigger_agent(
         // consistently.
         let cli_worker_id = fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string())
             .expect("uuid is a valid worker id");
-        let runner =
-            fq_runtime::ReducerRunner::new(bus, pricing, tools, worker_store, cli_worker_id);
+        let runner = fq_runtime::ReducerRunner::new(
+            bus,
+            pricing,
+            tools,
+            worker_store,
+            cli_worker_id,
+            fq_runtime::Harness::new(),
+        );
         runner
             .run(
-                &fq_runtime::Harness::new(),
                 &loaded.agent,
                 &llm,
                 TriggerSource::Manual,
@@ -1312,6 +1317,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         tools,
         worker_store.clone(),
         worker_id.clone(),
+        fq_runtime::Harness::new(),
     ));
 
     // Spawn auto-resume tasks for each safe-resume / safe-replay
@@ -1358,11 +1364,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         let runner = resume_runner.clone();
         let llm_arc = llm.clone();
         tokio::spawn(async move {
-            let harness = fq_runtime::Harness::new();
-            match runner
-                .resume(&harness, &agent, llm_arc.as_ref(), inv_id)
-                .await
-            {
+            match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
                 Ok(outcome) => tracing::info!(
                     invocation_id = %inv_id,
                     ?outcome,

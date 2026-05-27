@@ -25,6 +25,7 @@ use serde_json::Value;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use super::harness::Harness;
 use super::types::{
     AgentConfig, CapabilityResult, EmittedEvent, HarnessError, LogEntry, LogLevel, ModelRequest,
     ModelResponse, NextAction, Reducer, StepInput, ToolCallRequest, ToolCallResult, TriggerPayload,
@@ -55,7 +56,13 @@ const HOST_STEP_BUDGET: u32 = 1_000;
 /// the same runtime pieces as the legacy [`crate::AgentExecutor`],
 /// plus a [`WorkerStore`] for the three-state WAL persisted
 /// around every tool and LLM dispatch (data-architecture.md §5.5).
-pub struct ReducerRunner {
+///
+/// Generic over the [`Reducer`] impl. Production wires
+/// `ReducerRunner<Harness>` everywhere; tests may instantiate
+/// with stub reducers when they need finer control. The
+/// reducer is held as a field so the [`crate::Worker`] trait
+/// impl doesn't have to expose the generic.
+pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     bus: EventBus,
     pricing: Arc<PricingTable>,
     tools: Arc<ToolRegistry>,
@@ -66,15 +73,19 @@ pub struct ReducerRunner {
     /// subject to ack on. In the v1 single-process daemon this
     /// is the runtime UUID (see fq-cli wire-up).
     worker_id: WorkerId,
+    /// The reducer driven by every `run`/`resume`. Held as a
+    /// field so callers don't have to pass it on every call.
+    reducer: R,
 }
 
-impl ReducerRunner {
+impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     pub fn new(
         bus: EventBus,
         pricing: Arc<PricingTable>,
         tools: Arc<ToolRegistry>,
         store: Arc<WorkerStore>,
         worker_id: WorkerId,
+        reducer: R,
     ) -> Self {
         Self {
             bus,
@@ -82,14 +93,14 @@ impl ReducerRunner {
             tools,
             store,
             worker_id,
+            reducer,
         }
     }
 
-    /// Run a single invocation of `agent` through the supplied
+    /// Run a single invocation of `agent` through this runner's
     /// reducer. Behavioural twin of [`crate::AgentExecutor::run`].
-    pub async fn run<R: Reducer + Send + Sync>(
+    pub async fn run(
         &self,
-        reducer: &R,
         agent: &Agent,
         llm: &dyn LlmClient,
         trigger_source: TriggerSource,
@@ -157,7 +168,6 @@ impl ReducerRunner {
         let step_index_start: u32 = 0;
 
         self.run_loop_inner(
-            reducer,
             agent,
             llm,
             invocation_id,
@@ -192,9 +202,8 @@ impl ReducerRunner {
     /// safe: the loop's normal flow re-emits the intent (idempotent
     /// `INSERT OR REPLACE`), runs the action, and continues.
     /// No special handling needed.
-    pub async fn resume<R: Reducer + Send + Sync>(
+    pub async fn resume(
         &self,
-        reducer: &R,
         agent: &Agent,
         llm: &dyn LlmClient,
         invocation_id: Uuid,
@@ -304,7 +313,7 @@ impl ReducerRunner {
                 random_seed: rand_u64(),
                 step_index,
             };
-            let output = reducer.step(input).map_err(|e| {
+            let output = self.reducer.step(input).map_err(|e| {
                 ExecutorError::WorkerStore(format!("replay step {step_index} failed: {e}"))
             })?;
             state = output.state;
@@ -323,7 +332,6 @@ impl ReducerRunner {
         let start = Instant::now();
         let mut cursor: Option<Uuid> = None;
         self.run_loop_inner(
-            reducer,
             agent,
             llm,
             invocation_id,
@@ -347,9 +355,8 @@ impl ReducerRunner {
     /// `(state, last_result, step_index, totals)` plus all the
     /// invocation-scoped context.
     #[allow(clippy::too_many_arguments)]
-    async fn run_loop_inner<R: Reducer + Send + Sync>(
+    async fn run_loop_inner(
         &self,
-        reducer: &R,
         agent: &Agent,
         llm: &dyn LlmClient,
         invocation_id: Uuid,
@@ -376,7 +383,7 @@ impl ReducerRunner {
                 step_index,
             };
 
-            let output = match reducer.step(input) {
+            let output = match self.reducer.step(input) {
                 Ok(o) => o,
                 Err(err) => {
                     totals.total_duration_ms = start.elapsed().as_millis() as u64;
@@ -1123,7 +1130,7 @@ impl ReducerRunner {
 
 /// Internal: factor out the LLM dispatch path so the loop body
 /// stays readable.
-impl ReducerRunner {
+impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     async fn run_model_with_llm(
@@ -1652,10 +1659,10 @@ mod tests {
                 Arc::new(ToolRegistry::with_builtins()),
                 store,
                 test_worker_id(),
+                Harness::new(),
             );
             let _ = runner
                 .run(
-                    &Harness::new(),
                     &agent,
                     &llm,
                     TriggerSource::Manual,
@@ -1851,10 +1858,10 @@ mod tests {
             Arc::new(ToolRegistry::with_builtins()),
             store,
             test_worker_id(),
+            Harness::new(),
         );
         let _ = runner
             .run(
-                &Harness::new(),
                 &agent,
                 &llm,
                 TriggerSource::Manual,
@@ -2003,6 +2010,7 @@ mod tests {
             Arc::new(ToolRegistry::with_builtins()),
             store,
             test_worker_id(),
+            Harness::new(),
         );
 
         let mut sub = bus
@@ -2012,14 +2020,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         runner
-            .run(
-                &Harness::new(),
-                &agent,
-                &llm,
-                TriggerSource::Manual,
-                None,
-                json!({}),
-            )
+            .run(&agent, &llm, TriggerSource::Manual, None, json!({}))
             .await
             .expect("invocation");
 
@@ -2235,10 +2236,10 @@ mod tests {
             Arc::new(ToolRegistry::with_builtins()),
             store.clone(),
             test_worker_id(),
+            Harness::new(),
         );
         let _ = runner
             .run(
-                &Harness::new(),
                 &agent,
                 &llm,
                 TriggerSource::Manual,
@@ -2811,11 +2812,12 @@ mod tests {
             Arc::new(ToolRegistry::with_builtins()),
             store.clone(),
             test_worker_id(),
+            Harness::new(),
         );
         let llm = FixtureClient::new(); // no live responses needed
 
         let outcome = runner
-            .resume(&Harness::new(), &agent, &llm, invocation_id)
+            .resume(&agent, &llm, invocation_id)
             .await
             .expect("resume completes");
 
@@ -2892,10 +2894,11 @@ mod tests {
             Arc::new(ToolRegistry::with_builtins()),
             store,
             test_worker_id(),
+            Harness::new(),
         );
         let llm = FixtureClient::new();
         let err = runner
-            .resume(&Harness::new(), &agent, &llm, invocation_id)
+            .resume(&agent, &llm, invocation_id)
             .await
             .expect_err("resume should refuse ambiguous");
         assert!(

@@ -103,11 +103,12 @@ impl Worker for AgentExecutor {
 }
 
 #[async_trait]
-impl Worker for ReducerRunner {
-    /// The reducer-runner [`Worker`] uses [`Harness`] as its
-    /// reducer. Tests that need to exercise alternative
-    /// `Reducer` implementations can call
-    /// [`ReducerRunner::run`] directly with their own reducer.
+impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for ReducerRunner<R> {
+    /// Defers to [`ReducerRunner::run`] with the reducer
+    /// the runner was constructed with. The trait doesn't
+    /// have to expose the `R: Reducer` generic — production
+    /// wires `ReducerRunner<Harness>`; tests pick whichever
+    /// reducer they want at construction time.
     async fn run_invocation(
         &self,
         agent: &Agent,
@@ -116,14 +117,7 @@ impl Worker for ReducerRunner {
         trigger_subject: Option<String>,
         trigger_payload: Value,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        self.run(
-            &Harness::new(),
-            agent,
-            llm,
-            trigger_source,
-            trigger_subject,
-            trigger_payload,
-        )
-        .await
+        self.run(agent, llm, trigger_source, trigger_subject, trigger_payload)
+            .await
     }
 }

@@ -1020,11 +1020,11 @@ mod tests {
             Arc::new(ToolRegistry::with_builtins()),
             rt.worker_store().clone(),
             rt.worker_id().clone(),
+            Harness::new(),
         );
 
         let outcome = runner
             .run(
-                &Harness::new(),
                 &agent,
                 &llm,
                 TriggerSource::Manual,
