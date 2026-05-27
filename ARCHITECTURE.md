@@ -172,8 +172,11 @@ properties rather than features that need separate wiring.
   composes the existing `LlmClient`, `ToolRegistry`, `EventBus`,
   and `PricingTable`.
 
-Selected at runtime via `fq trigger --reducer`. The legacy
-executor remains the default. See the
+Every `fq trigger` and dispatcher path runs through this
+runner; the legacy `AgentExecutor` is being deprecated and
+removed (see
+[`docs/plans/active/2026-05-27-deprecate-legacy-executor.md`](docs/plans/active/2026-05-27-deprecate-legacy-executor.md)).
+See the
 [reducer harness guide](docs/guide/reducer-harness.md) for the
 full surface and the
 [boundary design](docs/design/wasm-boundary-design.md) for the

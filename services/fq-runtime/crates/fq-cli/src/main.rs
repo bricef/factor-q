@@ -13,8 +13,8 @@ use fq_runtime::events::{
 use fq_runtime::llm::{GenAiClient, LlmClient};
 use fq_runtime::worker::InvocationOutcome;
 use fq_runtime::{
-    AgentExecutor, Config, EventBus, McpClientManager, McpServerConfig, PricingTable,
-    ProjectionConsumer, ProjectionStore, ToolRegistry, TriggerDispatcher,
+    Config, EventBus, McpClientManager, McpServerConfig, PricingTable, ProjectionConsumer,
+    ProjectionStore, ToolRegistry, TriggerDispatcher,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -93,14 +93,9 @@ enum Commands {
         payload: Option<String>,
         /// Publish the trigger to NATS (fq.trigger.<agent>) and let a
         /// running `fq run` daemon dispatch it, instead of running
-        /// the executor in-process.
+        /// the runner in-process.
         #[arg(long)]
         via_nats: bool,
-        /// Run through the experimental reducer-model harness
-        /// instead of the legacy in-process executor.
-        /// See `docs/design/wasm-boundary-design.md`.
-        #[arg(long)]
-        reducer: bool,
     },
     /// Agent management commands
     Agent {
@@ -275,12 +270,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             agent,
             payload,
             via_nats,
-            reducer,
         } => {
             if via_nats {
                 publish_trigger(&cli.global, &agent, payload.as_deref()).await?
             } else {
-                trigger_agent(&cli.global, &agent, payload.as_deref(), reducer).await?
+                trigger_agent(&cli.global, &agent, payload.as_deref()).await?
             }
         }
         Commands::Agent { command } => match command {
@@ -493,14 +487,12 @@ fn validate_agent(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Trigger an agent by name. Loads the registry, resolves the agent,
-/// connects to NATS, loads the pricing table, then runs the executor
-/// with a stub LLM client that returns a canned response (until the
-/// genai adapter is wired in).
+/// connects to NATS, loads the pricing table, then drives the
+/// reducer runner against a real LLM client.
 async fn trigger_agent(
     global: &GlobalArgs,
     agent_name: &str,
     payload: Option<&str>,
-    reducer: bool,
 ) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
 
@@ -589,55 +581,41 @@ async fn trigger_agent(
     }
 
     let tools = Arc::new(tools);
-    let path_label = if reducer { "reducer" } else { "legacy" };
-    println!("Running agent... (path: {path_label})");
-    let outcome_result = if reducer {
-        // Reducer path persists tool/LLM dispatches through the
-        // worker WAL. The store opens against the same events.db
-        // the daemon would use; if `fq run` is also active the
-        // same file is shared (locks at the SQLite layer).
-        let db_path = projection_path(&config);
-        let worker_store = Arc::new(
-            fq_runtime::WorkerStore::open(&db_path)
-                .await
-                .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
-        );
-        // Each ad-hoc `fq invoke` is a one-shot worker instance.
-        // The runtime-id-shaped worker_id matches the daemon's
-        // naming so any archive hand-off the runner performs
-        // routes the ack subject (`fq.worker.{id}.invocation.archive_acked`)
-        // consistently.
-        let cli_worker_id = fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string())
-            .expect("uuid is a valid worker id");
-        let runner = fq_runtime::ReducerRunner::new(
-            bus,
-            pricing,
-            tools,
-            worker_store,
-            cli_worker_id,
-            fq_runtime::Harness::new(),
-        );
-        runner
-            .run(
-                &loaded.agent,
-                &llm,
-                TriggerSource::Manual,
-                None,
-                trigger_payload,
-            )
+    println!("Running agent...");
+    // Tool/LLM dispatches are persisted through the worker
+    // WAL. The store opens against the same events.db the
+    // daemon would use; if `fq run` is also active the same
+    // file is shared (locks at the SQLite layer).
+    let db_path = projection_path(&config);
+    let worker_store = Arc::new(
+        fq_runtime::WorkerStore::open(&db_path)
             .await
-    } else {
-        let executor = AgentExecutor::new(bus, pricing, tools);
-        executor
-            .run(
-                &loaded.agent,
-                &llm,
-                TriggerSource::Manual,
-                None,
-                trigger_payload,
-            )
-            .await
-    };
+            .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
+    );
+    // Each ad-hoc `fq trigger` is a one-shot worker instance.
+    // The runtime-id-shaped worker_id matches the daemon's
+    // naming so any archive hand-off the runner performs
+    // routes the ack subject
+    // (`fq.worker.{id}.invocation.archive_acked`) consistently.
+    let cli_worker_id = fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string())
+        .expect("uuid is a valid worker id");
+    let runner = fq_runtime::ReducerRunner::new(
+        bus,
+        pricing,
+        tools,
+        worker_store,
+        cli_worker_id,
+        fq_runtime::Harness::new(),
+    );
+    let outcome_result = runner
+        .run(
+            &loaded.agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            trigger_payload,
+        )
+        .await;
     let outcome = match outcome_result {
         Ok(outcome) => outcome,
         Err(fq_runtime::ExecutorError::Llm(fq_runtime::LlmError::Auth(msg))) => {

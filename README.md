@@ -20,7 +20,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - [Design principles](docs/design/design-principles.md) — cross-cutting rules that guide design decisions
 - [Contributing](CONTRIBUTING.md) — development setup, test tiers, code conventions
 - [Agent authoring guide](docs/guide/agent-definitions.md) — write your first agent
-- [Reducer harness guide](docs/guide/reducer-harness.md) — the suspend/resume-capable execution path (`fq trigger --reducer`)
+- [Reducer harness guide](docs/guide/reducer-harness.md) — the suspend/resume-capable execution path that drives every invocation
 - [Event schema](docs/design/event-schema.md) — the event model everything is built around
 - [Agent orchestration tools](docs/design/agent-orchestration-tools.md) — wishlist for primitives to coordinate multi-agent work (graph substrate, handles, sinks, fragment library)
 - [Worker-side ergonomics](docs/design/worker-side-ergonomics.md) — primitives for what an agent has, knows, and controls while executing (introspection, checkpoints, structured errors)

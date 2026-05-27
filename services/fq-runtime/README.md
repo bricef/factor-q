@@ -69,8 +69,7 @@ just fq -- agent list
 ```
 fq init [-f|--force]                        # create a new project (config, agents/, sample)
 fq run                                      # start the daemon (projection + dispatcher)
-fq trigger <agent> [payload]                # run an agent in-process (legacy executor)
-fq trigger <agent> [payload] --reducer      # run via the reducer harness (suspend/resume capable)
+fq trigger <agent> [payload]                # run an agent in-process via the reducer runner
 fq trigger --via-nats <agent> [payload]     # publish a trigger to NATS for fq run to dispatch
 fq agent list                               # list agents in the configured directory
 fq agent validate <path>                    # validate an agent definition
@@ -81,11 +80,11 @@ fq costs [--agent] [--since]                # show per-agent cost totals
 fq status                                   # runtime health: NATS, streams, consumers, projection
 ```
 
-The `--reducer` flag selects the experimental reducer-model
-execution path documented in
-[`docs/guide/reducer-harness.md`](../../docs/guide/reducer-harness.md).
-Both paths emit the same canonical events; the reducer path
-adds suspend/resume as a structural property of the boundary.
+Every trigger runs through the reducer runner documented in
+[`docs/guide/reducer-harness.md`](../../docs/guide/reducer-harness.md):
+a pure synchronous `step(StepInput) -> StepOutput` driven by a
+host loop, with suspend/resume as a structural property of the
+boundary.
 
 Global flags (`--config`, `--agents-dir`, `--nats-url`, `--cache-dir`)
 and their corresponding `FQ_*` environment variables are available on

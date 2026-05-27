@@ -107,17 +107,7 @@ just fq costs --since 2026-04-25
 
 The projection is rebuildable from NATS at any time — NATS is the source of truth.
 
-## 7. Try the reducer execution path (optional)
-
-factor-q has a second execution path with the same canonical events but with suspend/resume as a structural property:
-
-```sh
-just fq trigger sample-agent "List the files." --reducer
-```
-
-The output is identical. The implementation differs: the harness is a pure synchronous reducer (`step(StepInput) -> StepOutput`) and a host loop. See [`docs/guide/reducer-harness.md`](docs/guide/reducer-harness.md) for what the path is for and when to use it.
-
-## 7b. Try `self_inspect` (optional)
+## 7. Try `self_inspect` (optional)
 
 The `self_inspect` built-in lets an agent ask the runtime about its own invocation state — budget remaining, iterations used, the configured model — instead of guessing. Try it via the bundled `self-aware` example:
 
