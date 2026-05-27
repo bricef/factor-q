@@ -1302,23 +1302,24 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Some(anthropic) => GenAiClient::from_anthropic_config(anthropic),
         None => GenAiClient::new(),
     });
-    let worker: Arc<dyn fq_runtime::Worker> = Arc::new(AgentExecutor::new(
-        bus.clone(),
-        pricing.clone(),
-        tools.clone(),
-    ));
-    // A separate ReducerRunner handles auto-resume of in-flight
-    // invocations. The dispatcher (above) uses the legacy
-    // AgentExecutor for new triggers; resumes need the
-    // reducer-path runner because the WAL is wired through it.
-    let resume_runner = Arc::new(fq_runtime::ReducerRunner::new(
-        bus.clone(),
-        pricing,
-        tools,
-        worker_store.clone(),
-        worker_id.clone(),
-        fq_runtime::Harness::new(),
-    ));
+    // One ReducerRunner serves two roles: the dispatcher uses
+    // it as the Worker for new triggers, and the recovery
+    // path uses it directly for auto-resume of in-flight
+    // invocations. New triggers now exercise the same WAL /
+    // archive / coordination wiring that resumes do (this
+    // closes a latent gap: pre-deprecation, new triggers via
+    // `fq run` went through AgentExecutor and bypassed all of
+    // it).
+    let resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> =
+        Arc::new(fq_runtime::ReducerRunner::new(
+            bus.clone(),
+            pricing,
+            tools,
+            worker_store.clone(),
+            worker_id.clone(),
+            fq_runtime::Harness::new(),
+        ));
+    let worker: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
 
     // Spawn auto-resume tasks for each safe-resume / safe-replay
     // invocation found by the recovery scan. Ambiguous cases

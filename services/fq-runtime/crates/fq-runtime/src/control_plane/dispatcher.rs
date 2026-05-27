@@ -251,7 +251,7 @@ mod tests {
     use crate::llm::fixture::FixtureClient;
     use crate::pricing::{ModelPricing, PricingTable};
     use crate::tools::ToolRegistry;
-    use crate::worker::AgentExecutor;
+    use crate::worker::{Harness, ReducerRunner, WorkerId, WorkerStore};
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -425,10 +425,20 @@ You are a test agent."#
             c
         });
 
-        let worker: Arc<dyn Worker> = Arc::new(AgentExecutor::new(
+        let worker_store = Arc::new(
+            WorkerStore::open(&dir.path().join("worker.db"))
+                .await
+                .unwrap(),
+        );
+        let worker_id = WorkerId::new(format!("dispatcher-test-{}", Uuid::now_v7().simple()))
+            .expect("worker id");
+        let worker: Arc<dyn Worker> = Arc::new(ReducerRunner::new(
             bus.clone(),
             test_pricing(),
             test_tools(),
+            worker_store,
+            worker_id,
+            Harness::new(),
         ));
 
         // Projection store, so we can verify events landed.
