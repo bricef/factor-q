@@ -1485,7 +1485,6 @@ mod tests {
     use crate::llm::fixture::FixtureClient;
     use crate::pricing::ModelPricing;
     use crate::tools::ToolRegistry;
-    use crate::worker::executor::AgentExecutor;
     use crate::worker::reducer::Harness;
     use crate::worker::store::DispatchStatus;
     use crate::{events::EventPayload, llm::ChatResponse};
@@ -1554,193 +1553,53 @@ mod tests {
 
     use crate::test_support::events::event_kind;
 
-    /// Run the same scripted scenario through both executors
-    /// and collect each emitted event sequence. The bus is
-    /// distinct per agent, so no cross-talk.
-    /// Assert kinds appear in the listed order somewhere in the
-    /// sequence (other kinds may interleave). Variant of the
-    /// public helper that works on plain kind names.
-    fn assert_relative_order(kinds: &[&'static str], expected: &[&'static str]) {
-        let mut from = 0;
-        for k in expected {
-            let pos = kinds[from..]
-                .iter()
-                .position(|s| s == k)
-                .unwrap_or_else(|| {
-                    panic!("kind {k:?} not found at or after {from}; got {kinds:?}")
-                });
-            from += pos + 1;
-        }
-    }
-
-    /// Strip the WAL middle-state events (`tool_dispatched`,
-    /// `llm_dispatched`) from a kind sequence. Used by the
-    /// equivalence tests: the legacy executor doesn't emit them
-    /// in v1, so we compare the post-strip reducer sequence
-    /// against the legacy sequence.
-    fn strip_wal_dispatched(kinds: &[&'static str]) -> Vec<&'static str> {
-        kinds
-            .iter()
-            .copied()
-            .filter(|k| *k != "tool_dispatched" && *k != "llm_dispatched")
-            .collect()
-    }
-
-    /// Run a scripted scenario through both the legacy executor
-    /// and the reducer runner and return the (kind) sequences
-    /// each emitted. The reducer-side count must include the
-    /// extra WAL middle-state events; pass `legacy_count` and
-    /// `reducer_count` separately.
-    #[allow(clippy::too_many_arguments)]
-    async fn run_through_legacy_and_reducer(
-        url: &str,
-        agent_factory: impl Fn(String) -> Agent,
-        responses: impl Fn() -> Vec<ChatResponse>,
-        legacy_count: usize,
-        reducer_count: usize,
-    ) -> (Vec<&'static str>, Vec<&'static str>) {
-        let bus = EventBus::connect(url).await.expect("connect to NATS");
-
-        let collect_events = async |agent: Agent, ev_count: usize| -> Vec<Event> {
-            let mut sub = bus
-                .subscribe(format!("fq.agent.{}.>", agent.id().as_str()))
-                .await
-                .expect("subscribe");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let llm = FixtureClient::new();
-            for r in responses() {
-                llm.push_response(r);
-            }
-            let outcome = AgentExecutor::new(
-                bus.clone(),
-                test_pricing(),
-                Arc::new(ToolRegistry::with_builtins()),
-            )
-            .run(
-                &agent,
-                &llm,
-                TriggerSource::Manual,
-                None,
-                json!({"input": "go"}),
-            )
-            .await;
-            let _ = outcome;
-            let mut out = Vec::new();
-            for _ in 0..ev_count {
-                let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
-                    .await
-                    .expect("legacy timeout")
-                    .expect("legacy stream closed")
-                    .expect("legacy deserialise");
-                out.push(event);
-            }
-            out
-        };
-
-        let collect_reducer = async |agent: Agent, ev_count: usize| -> Vec<Event> {
-            let mut sub = bus
-                .subscribe(format!("fq.agent.{}.>", agent.id().as_str()))
-                .await
-                .expect("subscribe");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let llm = FixtureClient::new();
-            for r in responses() {
-                llm.push_response(r);
-            }
-            let store_dir = tempdir().expect("tempdir");
-            let store = Arc::new(
-                WorkerStore::open(&store_dir.path().join("events.db"))
-                    .await
-                    .expect("worker store"),
-            );
-            let runner = ReducerRunner::new(
-                bus.clone(),
-                test_pricing(),
-                Arc::new(ToolRegistry::with_builtins()),
-                store,
-                test_worker_id(),
-                Harness::new(),
-            );
-            let _ = runner
-                .run(
-                    &agent,
-                    &llm,
-                    TriggerSource::Manual,
-                    None,
-                    json!({"input": "go"}),
-                )
-                .await;
-            let mut out = Vec::new();
-            for _ in 0..ev_count {
-                let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
-                    .await
-                    .expect("reducer timeout")
-                    .expect("reducer stream closed")
-                    .expect("reducer deserialise");
-                out.push(event);
-            }
-            out
-        };
-
-        let legacy_events =
-            collect_events(agent_factory(unique_agent_id("legacy")), legacy_count).await;
-        let reducer_events =
-            collect_reducer(agent_factory(unique_agent_id("reducer")), reducer_count).await;
-
-        let legacy_kinds: Vec<&'static str> = legacy_events.iter().map(event_kind).collect();
-        let reducer_kinds: Vec<&'static str> = reducer_events.iter().map(event_kind).collect();
-        (legacy_kinds, reducer_kinds)
-    }
-
     #[tokio::test]
-    async fn equivalent_event_sequence_for_simple_completion() {
+    async fn reducer_emits_canonical_event_sequence_for_simple_completion() {
+        // Was `equivalent_event_sequence_for_simple_completion`,
+        // which ran a single canned response through *both* the
+        // legacy executor and the reducer and asserted that the
+        // reducer sequence equals the legacy sequence modulo WAL
+        // middle-state events. After AgentExecutor is deleted
+        // the legacy half is gone, so this asserts the
+        // reducer-side canonical sequence directly.
         let Ok(url) = std::env::var("FQ_NATS_URL") else {
             eprintln!("skipping: FQ_NATS_URL not set");
             return;
         };
 
-        // Legacy: 5 events (triggered, llm.request, llm.response,
-        // cost, completed). Reducer: same plus llm.dispatched
-        // between request and response.
-        let (legacy, reducer) = run_through_legacy_and_reducer(
-            &url,
-            |id| {
-                Agent::builder()
-                    .id(id)
-                    .model("claude-haiku")
-                    .system_prompt("You are a test agent.")
-                    .budget(1.0)
-                    .build()
-                    .unwrap()
-            },
-            || vec![canned("Hello.", 100, 50)],
-            // After envelope-refactor step 3, cost rides on the
-            // llm.response envelope; no separate cost event.
-            // Legacy: 4 (was 5); reducer: 5 (was 6).
-            4,
-            5,
-        )
-        .await;
+        let agent_id = unique_agent_id("canonical-simple");
+        let agent = Agent::builder()
+            .id(&agent_id)
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .budget(1.0)
+            .build()
+            .unwrap();
 
+        // triggered, llm.request, llm.dispatched, llm.response,
+        // completed = 5 events. (invocation_archived also fires
+        // immediately after; not collected here.)
+        let (_store, events) =
+            run_with_wal(&url, agent, vec![canned("Hello.", 100, 50)], 5, None).await;
+
+        let kinds: Vec<&str> = events.iter().map(event_kind).collect();
         assert_eq!(
-            legacy,
-            vec!["triggered", "llm_request", "llm_response", "completed"]
+            kinds,
+            vec![
+                "triggered",
+                "llm_request",
+                "llm_dispatched",
+                "llm_response",
+                "completed",
+            ],
         );
-        // The reducer sequence equals the legacy sequence after
-        // stripping the new WAL middle-state events that the
-        // legacy executor doesn't emit.
-        assert_eq!(
-            strip_wal_dispatched(&reducer),
-            legacy,
-            "reducer path must match legacy event order modulo WAL middle-state events"
-        );
-        // And the reducer sequence must include llm_dispatched
-        // between llm_request and llm_response.
-        assert_relative_order(&reducer, &["llm_request", "llm_dispatched", "llm_response"]);
     }
 
     #[tokio::test]
-    async fn equivalent_event_sequence_for_tool_call_loop() {
+    async fn reducer_emits_canonical_event_sequence_for_tool_call_loop() {
+        // Was `equivalent_event_sequence_for_tool_call_loop`.
+        // Same conversion as the simple-completion test:
+        // reducer-only canonical-sequence assertion.
         let Ok(url) = std::env::var("FQ_NATS_URL") else {
             eprintln!("skipping: FQ_NATS_URL not set");
             return;
@@ -1752,60 +1611,50 @@ mod tests {
         let target_path = target.to_string_lossy().to_string();
         let allowed_dir = dir.path().to_string_lossy().to_string();
 
-        let (legacy, reducer) = run_through_legacy_and_reducer(
-            &url,
-            |id| {
-                Agent::builder()
-                    .id(id)
-                    .model("claude-haiku")
-                    .system_prompt("Use tools when asked.")
-                    .tools(["file_read"])
-                    .sandbox(Sandbox::new().fs_read(allowed_dir.clone()))
-                    .budget(1.0)
-                    .build()
-                    .unwrap()
-            },
-            || {
-                vec![
-                    tool_use(
-                        "file_read",
-                        "call_abc",
-                        json!({"path": target_path.clone()}),
-                        (100, 50),
-                    ),
-                    canned("Got it.", 150, 20),
-                ]
-            },
-            // After envelope-refactor step 3, no separate cost event.
-            // Legacy: 8 (was 10); reducer: 11 (was 13).
-            8,  // legacy: 8 events (no dispatched, no cost)
-            11, // reducer: legacy + 2 llm_dispatched + 1 tool_dispatched
-        )
-        .await;
+        let agent_id = unique_agent_id("canonical-tool-loop");
+        let agent = Agent::builder()
+            .id(&agent_id)
+            .model("claude-haiku")
+            .system_prompt("Use tools when asked.")
+            .tools(["file_read"])
+            .sandbox(Sandbox::new().fs_read(allowed_dir))
+            .budget(1.0)
+            .build()
+            .unwrap();
 
-        let expected_legacy = vec![
-            "triggered",
-            "llm_request",
-            "llm_response",
-            "tool_call",
-            "tool_result",
-            "llm_request",
-            "llm_response",
-            "completed",
+        let responses = vec![
+            tool_use(
+                "file_read",
+                "call_abc",
+                json!({"path": target_path}),
+                (100, 50),
+            ),
+            canned("Got it.", 150, 20),
         ];
-        assert_eq!(legacy, expected_legacy);
-        // The reducer sequence equals the legacy sequence after
-        // stripping the new WAL middle-state events.
+
+        // 11 events: triggered, then for each LLM turn the
+        // (llm.request, llm.dispatched, llm.response) triple,
+        // with a tool-dispatch triple (tool.call, tool.dispatched,
+        // tool.result) between turns 1 and 2, ending in completed.
+        let (_store, events) = run_with_wal(&url, agent, responses, 11, Some(dir.path())).await;
+
+        let kinds: Vec<&str> = events.iter().map(event_kind).collect();
         assert_eq!(
-            strip_wal_dispatched(&reducer),
-            expected_legacy,
-            "reducer path must match legacy event order modulo WAL middle-state events"
+            kinds,
+            vec![
+                "triggered",
+                "llm_request",
+                "llm_dispatched",
+                "llm_response",
+                "tool_call",
+                "tool_dispatched",
+                "tool_result",
+                "llm_request",
+                "llm_dispatched",
+                "llm_response",
+                "completed",
+            ],
         );
-        // And the reducer sequence must include both
-        // llm_dispatched (between request/response, in both
-        // turns) and tool_dispatched (between tool_call/tool_result).
-        assert_relative_order(&reducer, &["tool_call", "tool_dispatched", "tool_result"]);
-        assert_relative_order(&reducer, &["llm_request", "llm_dispatched", "llm_response"]);
     }
 
     #[tokio::test]
