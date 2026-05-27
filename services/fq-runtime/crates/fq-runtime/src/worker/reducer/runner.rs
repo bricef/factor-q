@@ -2491,6 +2491,101 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tool_not_in_agent_allowlist_is_denied_on_reducer_path() {
+        // Defence-in-depth gating: the LLM only sees declared
+        // tool schemas, but if it hallucinates a name, the
+        // runner short-circuits to a synthetic ToolResult with
+        // PermissionDenied and never executes anything. Mirrors
+        // the legacy executor's `tool_not_in_agent_allowlist_is_denied`
+        // — this is the reducer-path counterpart that was
+        // missing as of commit `c9fd92e`.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        let agent_id = unique_agent_id("gating-deny");
+        // Agent declares only file_read; LLM will try file_write.
+        let agent = Agent::builder()
+            .id(&agent_id)
+            .model("claude-haiku")
+            .system_prompt("You like to write.")
+            .tools(["file_read"])
+            .budget(1.0)
+            .build()
+            .unwrap();
+
+        let responses = vec![
+            tool_call_response(
+                "file_write",
+                "call_deny",
+                json!({"path": "/tmp/x", "content": "x"}),
+            ),
+            end_turn_response("done anyway."),
+        ];
+
+        // Event sequence on the synthetic-error path:
+        //   triggered, llm.request, llm.dispatched, llm.response,
+        //   tool.result (synthetic — no tool.call/tool.dispatched),
+        //   llm.request, llm.dispatched, llm.response,
+        //   completed, invocation.archived
+        // = 10 events.
+        let (store, events) = run_with_wal(&url, agent, responses, 10, None).await;
+
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(crate::test_support::events::event_kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "triggered",
+                "llm_request",
+                "llm_dispatched",
+                "llm_response",
+                "tool_result",
+                "llm_request",
+                "llm_dispatched",
+                "llm_response",
+                "completed",
+                "invocation_archived",
+            ],
+            "synthetic-error gating path must emit tool.result without tool.call / tool.dispatched"
+        );
+
+        // The single tool.result must be is_error=true with
+        // PermissionDenied.
+        let tool_result = events
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::ToolResult(p) => Some(p),
+                _ => None,
+            })
+            .expect("tool_result event present");
+        assert!(tool_result.is_error, "denied tool must surface as error");
+        assert!(
+            matches!(
+                tool_result.error_kind,
+                Some(ToolErrorKind::PermissionDenied)
+            ),
+            "denied tool error_kind must be PermissionDenied, got {:?}",
+            tool_result.error_kind
+        );
+
+        // No WAL row was written for the denied call — the
+        // synthetic-error path bypasses tool_dispatch entirely.
+        let inv_str = events[0].envelope.invocation_id.to_string();
+        let dispatch = store
+            .get_tool_dispatch(&inv_str, "call_deny")
+            .await
+            .unwrap();
+        assert!(
+            dispatch.is_none(),
+            "denied call must not write a tool_dispatch row; got {dispatch:?}"
+        );
+    }
+
     // -----------------------------------------------------------
     // Step 5: per-step state persistence.
     //
