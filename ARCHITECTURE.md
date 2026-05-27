@@ -138,49 +138,37 @@ Publishing awaits the JetStream ack. Subscription uses core NATS
 subscribe (for live tailing) or durable pull consumers (for the
 projection and dispatcher).
 
-### Agent executor (`fq-runtime/src/executor.rs`)
+### Reducer harness (`fq-runtime/src/worker/reducer/`)
 
-`AgentExecutor::run()` drives the agent loop:
-1. Emit `Triggered` event (with a full `ConfigSnapshot`)
-2. Build the LLM prompt (system prompt + user message from trigger payload)
-3. Call the LLM via the `LlmClient` trait
-4. If the response contains tool calls, dispatch each one:
-   - Validate the tool is in the agent's allowed list
-   - Check the tool's sandbox dimension (fs_read, fs_write, exec_cwd)
-   - Execute, emit `tool.call` and `tool.result` events
-   - Feed results back as tool-role messages
-5. Repeat until the LLM stops calling tools, the budget is hit, or
-   max iterations (20) are reached
-6. Emit `Completed` or `Failed`
-
-Budget enforcement runs after every LLM call and compares the
-cumulative cost against the agent's declared budget ceiling.
-
-### Reducer harness (`fq-runtime/src/reducer/`)
-
-A second execution path with the same canonical-event semantics
-as `AgentExecutor`. The harness is structured as a pure
-synchronous reducer (`step(StepInput) -> StepOutput`) and the
-host loop (`ReducerRunner`) drives the side effects. This shape
-gives suspension, replay, and migration as structural
-properties rather than features that need separate wiring.
+Every invocation runs through a single execution path: a pure
+synchronous reducer (`step(StepInput) -> StepOutput`) driven by
+a host loop (`ReducerRunner`). The reducer decides what to do
+next; the runner executes the side effects (LLM call, tool
+dispatch, event publish) and feeds the result back. This shape
+gives suspension, replay, and migration as structural properties
+rather than features that need separate wiring.
 
 - `reducer/types.rs` — `Reducer` trait and the boundary types.
 - `reducer/harness.rs` — `Harness`, the explicit state-enum
-  reducer that mirrors `AgentExecutor` behaviourally.
-- `reducer/runner.rs` — `ReducerRunner`, the host loop that
-  composes the existing `LlmClient`, `ToolRegistry`, `EventBus`,
-  and `PricingTable`.
+  reducer that ships with the runtime.
+- `reducer/runner.rs` — `ReducerRunner`, the host loop. Composes
+  `LlmClient`, `ToolRegistry`, `EventBus`, `PricingTable`, and a
+  per-worker `WorkerStore` (the WAL / archive persistence layer
+  described in `docs/design/data-architecture.md`).
 
-Every `fq trigger` and dispatcher path runs through this
-runner; the legacy `AgentExecutor` is being deprecated and
-removed (see
-[`docs/plans/active/2026-05-27-deprecate-legacy-executor.md`](docs/plans/active/2026-05-27-deprecate-legacy-executor.md)).
-See the
-[reducer harness guide](docs/guide/reducer-harness.md) for the
-full surface and the
+The runner emits the canonical event sequence
+(`triggered → llm.request → llm.dispatched → llm.response →
+tool.call → tool.dispatched → tool.result → … → completed →
+invocation.archived`) that every downstream consumer relies on.
+Budget enforcement runs after every LLM call and compares the
+cumulative cost against the agent's declared budget ceiling.
+
+See the [reducer harness guide](docs/guide/reducer-harness.md)
+for the full surface, the
 [boundary design](docs/design/wasm-boundary-design.md) for the
-rationale.
+rationale, and the
+[legacy-executor deprecation plan](docs/plans/closed/2026-05-27-deprecate-legacy-executor.md)
+for the consolidation that landed in 2026-05.
 
 ### LLM abstraction (`fq-runtime/src/llm/`)
 

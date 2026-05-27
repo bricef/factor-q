@@ -1,37 +1,18 @@
 # The Reducer Harness
 
-factor-q runs agents through one of two execution paths:
+Every factor-q invocation runs through a single execution path: a **reducer** (a pure synchronous `step(StepInput) -> StepOutput` function) driven by a **host loop** (`ReducerRunner`). The reducer decides what to do next; the runner makes it happen and emits the canonical event sequence (`triggered → llm.request → llm.dispatched → llm.response → tool.call → tool.dispatched → tool.result → … → completed → invocation.archived`).
 
-| Path | Selected by | Status | What it is |
-|---|---|---|---|
-| **Legacy executor** | default | shipped, used in production | Async Rust function that drives the LLM/tool loop directly. |
-| **Reducer harness** | `fq trigger --reducer` | prototype, behaviourally equivalent | Pure synchronous reducer (`step` function) plus a host loop. Same canonical events, suspend/resume capable. |
+This shape gives factor-q **suspension, migration, replay, audit logging, and determinism** as structural properties of the boundary rather than features bolted on top.
 
-Both paths produce **the same canonical event sequence** (`triggered → llm.request → llm.response → cost → tool.call → tool.result → … → completed`) so downstream consumers (the SQLite projection, `fq events tail`, dashboards) cannot tell which path produced an invocation.
+This guide covers:
+1. [The reducer model](#the-reducer-model) (one diagram)
+2. [The Rust API](#the-rust-api) (`Reducer` trait, types, examples)
+3. [Suspend and resume](#suspend-and-resume)
+4. [Host-fulfilled tools](#host-fulfilled-tools)
+5. [What's not yet supported](#whats-not-yet-supported)
+6. [Where the code and tests live](#where-the-code-and-tests-live)
 
-This guide explains:
-1. [When to use the reducer path](#when-to-use-the-reducer-path)
-2. [The reducer model](#the-reducer-model) (one diagram)
-3. [Using `--reducer` from the CLI](#using-reducer-from-the-cli)
-4. [The Rust API](#the-rust-api) (`Reducer` trait, types, examples)
-5. [Suspend and resume](#suspend-and-resume)
-6. [What's not yet supported](#whats-not-yet-supported)
-7. [Where the code and tests live](#where-the-code-and-tests-live)
-
-For background on **why** factor-q has this shape, see [`docs/design/wasm-boundary-design.md`](../design/wasm-boundary-design.md). For an honest critique of the design as it stood before the prototype, see [`docs/design/2026-04-19-design-assessment.md`](../design/2026-04-19-design-assessment.md). For the prototype's verification report, see [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md).
-
-## When to use the reducer path
-
-| Use the reducer path when… | Reasoning |
-|---|---|
-| You want to **suspend an invocation** and resume it later (in the same process or another). | The reducer's state is a single opaque blob you can serialise, persist, and feed back in. |
-| You want to **debug a deterministic step trace** of an agent's decisions. | `step(StepInput) -> StepOutput` is pure: same inputs always yield the same output, no hidden state, no async interleaving. |
-| You're working on the **harness boundary itself** (new state-machine features, alternative reducers, WASM packaging). | The boundary is the contract; this is where it's exercised. |
-
-| Use the legacy executor when… | Reasoning |
-|---|---|
-| You just want to run an agent. | The legacy path is the default for a reason: it's the simpler shape and the one that the rest of the runtime is currently built around. |
-| You're testing a feature that hasn't landed in the reducer yet. | See [What's not yet supported](#whats-not-yet-supported). |
+For background on **why** factor-q has this shape, see [`docs/design/wasm-boundary-design.md`](../design/wasm-boundary-design.md). For the prototype's verification report, see [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md). For the deprecation of the alternate ("legacy") direct-async path that preceded reducer-only, see [`docs/plans/closed/2026-05-27-deprecate-legacy-executor.md`](../plans/closed/2026-05-27-deprecate-legacy-executor.md).
 
 ## The reducer model
 
@@ -80,23 +61,9 @@ This shape gives factor-q five properties for the price of one mechanism:
 
 The cost is one ergonomic constraint: the reducer is **synchronous** and writes its loop as an explicit state enum rather than a stack of `await`s. See [the closing report](../plans/closed/2026-04-25-native-reducer-prototype.md) for the assessment of how that worked out in practice.
 
-## Using `--reducer` from the CLI
-
-```sh
-# Run an agent through the reducer path
-fq trigger sample-agent "Say hello." --reducer
-
-# Same agent, default path, for comparison
-fq trigger sample-agent "Say hello."
-```
-
-Both forms emit the same canonical events to NATS, materialise into the same SQLite projection, and produce the same kind of console output. The only visible difference today is one log line — `Running agent... (path: reducer)` vs `(path: legacy)` — included so the operator can tell at a glance which path ran.
-
-The `--reducer` flag is incompatible with `--via-nats`. The trigger dispatcher inside `fq run` always uses the legacy executor for now; if you publish a trigger over NATS, that's the path it will take regardless of CLI flags.
-
 ## The Rust API
 
-The reducer module is `fq_runtime::reducer`. Three things to know about:
+The reducer module is `fq_runtime::worker::reducer`. Three things to know about:
 
 ### The `Reducer` trait
 
@@ -110,7 +77,7 @@ That's the entire trait. One method. Pure. Synchronous. No `Send + Sync` bounds 
 
 ### The boundary types
 
-Defined in [`fq-runtime/src/reducer/types.rs`](../../services/fq-runtime/crates/fq-runtime/src/reducer/types.rs).
+Defined in [`fq-runtime/src/worker/reducer/types.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/types.rs).
 
 | Type | Role |
 |---|---|
@@ -123,11 +90,11 @@ Defined in [`fq-runtime/src/reducer/types.rs`](../../services/fq-runtime/crates/
 | `LogEntry`, `EmittedEvent` | Fire-and-forget tracing/event emission. |
 | `HarnessError` | Terminal failure surfaced from the reducer (`MaxIterations`, `InternalError`). |
 
-All boundary types derive `Serialize`/`Deserialize`. The state blob is JSON in the native prototype; future WASM packaging will put the same shapes through the component-model ABI.
+All boundary types derive `Serialize`/`Deserialize`. The state blob is JSON in the native implementation; future WASM packaging will put the same shapes through the component-model ABI.
 
 ### The shipped `Harness` reducer
 
-[`fq_runtime::Harness`](../../services/fq-runtime/crates/fq-runtime/src/reducer/harness.rs) is the production `Reducer` implementation that mirrors the legacy executor's behaviour. Its persistent state is small:
+[`fq_runtime::Harness`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/harness.rs) is the production `Reducer` implementation. Its persistent state is small:
 
 ```rust
 struct HarnessState {
@@ -141,21 +108,25 @@ Four phases, three fields. If you write your own reducer (for retries, ReAct, pl
 
 ### Driving a reducer from your own code
 
-Most callers should use [`ReducerRunner`](../../services/fq-runtime/crates/fq-runtime/src/reducer/runner.rs), which is what `fq trigger --reducer` uses. It composes the existing `LlmClient`, `ToolRegistry`, `EventBus`, and `PricingTable`:
+Most callers should use [`ReducerRunner`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs), which is what `fq trigger` and the in-process daemon worker both use. It composes the existing `LlmClient`, `ToolRegistry`, `EventBus`, `PricingTable`, and a per-worker `WorkerStore` (the WAL / archive persistence layer):
 
 ```rust
-use fq_runtime::{Harness, ReducerRunner, EventBus, PricingTable, ToolRegistry};
+use fq_runtime::{
+    Harness, ReducerRunner, EventBus, PricingTable, ToolRegistry,
+    WorkerStore, worker::WorkerId,
+};
 use fq_runtime::events::TriggerSource;
 use std::sync::Arc;
 
 let bus     = EventBus::connect("nats://localhost:4222").await?;
 let pricing = Arc::new(PricingTable::load(&cache_path).await);
 let tools   = Arc::new(ToolRegistry::with_builtins());
-let runner  = ReducerRunner::new(bus, pricing, tools);
+let store   = Arc::new(WorkerStore::open(&db_path).await?);
+let worker_id = WorkerId::new(uuid::Uuid::now_v7().to_string())?;
+let runner  = ReducerRunner::new(bus, pricing, tools, store, worker_id, Harness::new());
 
 let outcome = runner
     .run(
-        &Harness::new(),       // your Reducer impl
         &agent,                // a validated fq_runtime::Agent
         &llm,                  // any LlmClient
         TriggerSource::Manual,
@@ -165,7 +136,7 @@ let outcome = runner
     .await?;
 ```
 
-The return type is `InvocationOutcome` — same enum the legacy executor returns. Anything that already handles a legacy outcome handles a reducer outcome.
+The return type is `InvocationOutcome`. The runner is generic over the `Reducer` impl; the type parameter defaults to `Harness`, so `Arc<ReducerRunner>` works without further annotation.
 
 ### Driving the reducer manually (no host loop)
 
@@ -173,7 +144,7 @@ For tests, debuggers, or a custom host, call `step` directly:
 
 ```rust
 use fq_runtime::Harness;
-use fq_runtime::reducer::types::{StepInput, AgentConfig, TriggerPayload, TriggerSourceKind};
+use fq_runtime::worker::reducer::types::{StepInput, AgentConfig, TriggerPayload, TriggerSourceKind};
 use fq_runtime::Reducer;
 
 let harness = Harness::new();
@@ -195,7 +166,7 @@ for step_index in 0.. {
     let output = harness.step(input)?;
     state = output.state;
 
-    use fq_runtime::reducer::NextAction::*;
+    use fq_runtime::worker::reducer::NextAction::*;
     match output.next_action {
         Complete(text)             => { return Ok(text); }
         Failed(err)                => { return Err(err.into()); }
@@ -236,9 +207,9 @@ let s2 = new_harness.step(StepInput {
 // `s2` continues exactly where the previous run left off.
 ```
 
-The runtime does not yet automate this for you — there's no on-disk durable state store wired up. The boundary supports it; that's a follow-up plan item, not a missing primitive.
+In production, `fq run` automates the host side of this: the `WorkerStore` writes an `invocation_state` row at every step boundary, and the daemon's recovery scan auto-resumes safe-to-replay invocations on the next startup. See [`ReducerRunner::resume`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs) for the wire-up.
 
-For a working test of this exact pattern, see `state_round_trips_across_drop_and_resume` in [`harness.rs`](../../services/fq-runtime/crates/fq-runtime/src/reducer/harness.rs).
+For a working unit test of the reducer-only round-trip pattern, see `state_round_trips_across_drop_and_resume` in [`harness.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/harness.rs).
 
 ## Host-fulfilled tools
 
@@ -259,16 +230,12 @@ pattern:
 1. The schema lives in [`fq-tools/src/builtin/self_inspect.rs`](../../services/fq-runtime/crates/fq-tools/src/builtin/self_inspect.rs)
    so the LLM-facing schema list and the registry entry are
    consistent.
-2. Both `AgentExecutor::execute_tool_call` and
-   `ReducerRunner::run_tool` intercept the tool name *before*
-   the registry lookup. A registry-level `execute()` call would
-   hit a tripwire error — that's the host telling itself
-   it forgot to intercept.
+2. [`ReducerRunner::run_tool`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs) intercepts the
+   tool name *before* the registry lookup. A registry-level
+   `execute()` call would hit a tripwire error — that's the host
+   telling itself it forgot to intercept.
 3. The actual data is synthesised by
-   [`crate::introspection::synthesize_self_inspect`](../../services/fq-runtime/crates/fq-runtime/src/introspection.rs),
-   which both paths call. Sharing the synthesis keeps the event
-   equivalence guarantee intact: same input state → same JSON
-   output → same `tool.result` event.
+   [`crate::worker::introspection::synthesize_self_inspect`](../../services/fq-runtime/crates/fq-runtime/src/worker/introspection.rs).
 4. The agent sees `self_inspect` exactly like any other tool —
    one entry in its `tools:` list, ordinary `tool.call` /
    `tool.result` events, JSON output.
@@ -278,27 +245,23 @@ For an agent that uses `self_inspect`, see
 
 ## What's not yet supported
 
-Honest enumeration. The boundary supports each of these; the prototype hasn't wired them up yet.
+Honest enumeration. The boundary supports each of these; the implementation hasn't wired them up yet.
 
 | Gap | Status |
 |---|---|
 | Concurrent parallel tool dispatch | Reducer emits `CallToolsParallel(Vec<...>)`; the runner dispatches them sequentially. One-line refactor with `futures::join_all`. |
-| Durable state persistence | State blobs round-trip in tests; `fq run` doesn't checkpoint them to disk. Active design: [`docs/design/data-architecture-requirements.md`](../design/data-architecture-requirements.md). |
-| `fq trigger --via-nats` reducer dispatch | The trigger dispatcher inside `fq run` always uses the legacy executor. |
-| Live-LLM end-to-end smoke test | Done as of 2026-04-25 — both paths exercised against a real Anthropic call (simple completion and tool-use loop). Not yet a permanent CI test. |
-| Cost-equivalence assertion | Equivalence tests assert event order. Cost numbers were observed identical on the live runs but aren't asserted in tests. |
+| Live-LLM end-to-end smoke test in CI | Done as of 2026-04-25 — exercised against a real Anthropic call (simple completion and tool-use loop). Not yet a permanent CI test. |
 
 ## Where the code and tests live
 
 | What | Path |
 |---|---|
-| Module entry | [`fq-runtime/src/reducer/mod.rs`](../../services/fq-runtime/crates/fq-runtime/src/reducer/mod.rs) |
-| Boundary types + `Reducer` trait | [`fq-runtime/src/reducer/types.rs`](../../services/fq-runtime/crates/fq-runtime/src/reducer/types.rs) |
-| `Harness` (state-enum reducer) | [`fq-runtime/src/reducer/harness.rs`](../../services/fq-runtime/crates/fq-runtime/src/reducer/harness.rs) |
-| `ReducerRunner` (host loop) | [`fq-runtime/src/reducer/runner.rs`](../../services/fq-runtime/crates/fq-runtime/src/reducer/runner.rs) |
-| CLI flag wiring | [`fq-cli/src/main.rs`](../../services/fq-runtime/crates/fq-cli/src/main.rs) (search `reducer:`) |
+| Module entry | [`fq-runtime/src/worker/reducer/mod.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/mod.rs) |
+| Boundary types + `Reducer` trait | [`fq-runtime/src/worker/reducer/types.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/types.rs) |
+| `Harness` (state-enum reducer) | [`fq-runtime/src/worker/reducer/harness.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/harness.rs) |
+| `ReducerRunner` (host loop) | [`fq-runtime/src/worker/reducer/runner.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs) |
 | Pure unit tests | `harness.rs` `#[cfg(test)] mod tests` — runs without NATS. |
-| Equivalence tests | `runner.rs` `#[cfg(test)] mod tests` — skips silently when `FQ_NATS_URL` is unset. |
+| Behavioural tests | `runner.rs` `#[cfg(test)] mod tests` — skips silently when `FQ_NATS_URL` is unset. |
 
 To run only the reducer tests:
 
@@ -309,7 +272,7 @@ cargo test -p fq-runtime --lib reducer::
 ## Cross-references
 
 - Boundary design: [`docs/design/wasm-boundary-design.md`](../design/wasm-boundary-design.md)
-- Pre-prototype design assessment: [`docs/design/2026-04-19-design-assessment.md`](../design/2026-04-19-design-assessment.md)
 - Native reducer prototype closing report: [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md)
+- Legacy-executor deprecation (consolidation onto the reducer path): [`docs/plans/closed/2026-05-27-deprecate-legacy-executor.md`](../plans/closed/2026-05-27-deprecate-legacy-executor.md)
 - WASM-packaging plan (deferred — superseded by tool-isolation-model): [`docs/plans/closed/2026-04-19-wasm-harness-prototype.md`](../plans/closed/2026-04-19-wasm-harness-prototype.md)
 - Design principles: [`docs/design/design-principles.md`](../design/design-principles.md)

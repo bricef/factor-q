@@ -1,7 +1,62 @@
 # Plan: Deprecate the legacy `AgentExecutor`
 
 **Date**: 2026-05-27
-**Status**: Active
+**Status**: Closed (2026-05-27)
+
+## Closing summary
+
+All 8 steps completed in a single sitting. Commits
+`41aacef` (step 1) through `59caf13` (step 7) plus this
+closure commit cover the entire arc.
+
+What landed:
+
+- `AgentExecutor` is gone from the workspace. Net code change:
+  -1170 / +79 lines in step 7 alone (executor.rs deleted,
+  `InvocationOutcome` / `ExecutorError` moved into
+  `worker/mod.rs`).
+- `ReducerRunner` is the only `Worker` impl. `Worker::run`
+  was reshaped so the reducer is a field of the runner, not
+  a parameter, so the trait doesn't have to leak the
+  `R: Reducer` generic.
+- `fq trigger` has one path, not two. The `--reducer` flag
+  is gone; clap rejects it as an unknown argument.
+- The daemon's new-trigger path (`fq run`'s
+  `TriggerDispatcher`) now goes through the same
+  `ReducerRunner` instance as the recovery path. Both
+  exercise the WAL / archive / coordination wiring shipped
+  by data-architecture-v1; pre-deprecation, only the
+  recovery path did. This closes a latent gap in what
+  data-arch-v1 closure called "complete."
+- Reducer-side test coverage now matches and exceeds the
+  legacy suite. Step 1 added the missing reducer-path gating
+  test; step 5's audit identified two more gaps and closed
+  them with sister tests for sandbox-violation surfacing and
+  budget-exceeded `Failed` emission.
+- Equivalence tests converted in step 6 became
+  reducer-only canonical-sequence tests; the dual-driver
+  helper, `strip_wal_dispatched`, and `assert_relative_order`
+  helpers are gone (their work folded into strict
+  `assert_eq!` on the full kind sequence).
+- One pre-existing parallel-suite flake fixed in passing:
+  `coordination_consumer_handles_invocation_ambiguous_end_to_end`
+  was timing out under the full lib suite because its
+  durable consumer used `DeliverPolicy::All`. Switched to
+  the `_from_new` variant, matching the acceptance harness's
+  pattern.
+- User-facing docs (`README.md`, `QUICKSTART.md`,
+  `ARCHITECTURE.md`, `services/fq-runtime/README.md`,
+  `docs/guide/reducer-harness.md`) rewritten to reflect the
+  single-path reality.
+
+Final test counts: 276 lib tests passing (down from 281 — the
+5 executor.rs tests were retired; every behavioural claim
+remains proven by the reducer-side suite per step 5's audit).
+Workspace tests + clippy clean.
+
+The "no #[ignore] escape hatch" discipline held throughout:
+the one bug surfaced (the coordination-consumer flake) got
+fixed in the same commit as the step that surfaced it.
 **Design references**:
 - [`docs/design/wasm-boundary-design.md`](../../design/wasm-boundary-design.md) — reducer model the runner implements.
 - [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../closed/2026-04-25-native-reducer-prototype.md) — native reducer that made `AgentExecutor` redundant.

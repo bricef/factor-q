@@ -45,6 +45,20 @@ for the rationale.
 - Real-Anthropic live acceptance test — runs as the manual
   `just acceptance-drift` recipe; not part of every CI build.
 
+**Follow-up addendum (2026-05-27).** The legacy-executor
+deprecation plan
+([`2026-05-27-deprecate-legacy-executor.md`](./2026-05-27-deprecate-legacy-executor.md))
+closed a latent gap in this plan's "complete" claim: the
+daemon's new-trigger path (`fq run`'s `TriggerDispatcher`)
+was constructing an `AgentExecutor` and bypassing all the
+WAL / archive / coordination wiring described above. Only the
+recovery path had been routed through `ReducerRunner`. After
+that plan landed, every invocation — new triggers and resumes
+alike — exercises the v1 data-architecture pipeline end to
+end. No data was lost or corrupted by the prior wiring; the
+gap was about which-code-path-is-exercised, not about
+correctness of the persistence layer.
+
 **Successor plans** (per §"Successor plans" below): v2
 multi-node deployment, approval-gate UI/flow, per-agent
 durability mode opt-in.
