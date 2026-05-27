@@ -15,19 +15,15 @@
 //! the control-plane asks of a worker goes through the trait;
 //! the control-plane has no other handle on worker internals.
 //!
-//! Two implementations ship in v1:
-//!
-//! - [`AgentExecutor`] — the legacy direct-async path.
-//! - [`ReducerRunner`] — the reducer-harness path that drives a
-//!   pure synchronous [`Reducer`] from the host side.
-//!
-//! Both implement [`Worker`] uniformly so the control-plane (and
-//! `fq trigger` from the CLI) can hand an invocation to either
-//! without caring which one it picked.
+//! The shipped implementation is [`ReducerRunner`], the
+//! reducer-harness path that drives a pure synchronous
+//! [`Reducer`] from the host side. The control-plane (and
+//! `fq trigger` from the CLI) hand invocations to a
+//! `dyn Worker`; in v2 a remote-worker adapter implements the
+//! same trait against NATS without the control-plane noticing.
 
 pub mod archive_ack;
 pub mod archive_retry;
-pub mod executor;
 pub mod heartbeat;
 pub mod id;
 pub mod introspection;
@@ -37,7 +33,6 @@ pub mod store;
 
 pub use archive_ack::{ArchiveAckConsumer, ArchiveAckError};
 pub use archive_retry::{ArchiveRetryError, ArchiveRetrySweeper};
-pub use executor::{AgentExecutor, ExecutorError, InvocationOutcome};
 pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, HeartbeatProducer};
 pub use id::WorkerId;
 pub use recovery::{
@@ -51,17 +46,49 @@ pub use store::{
 
 use async_trait::async_trait;
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::agent::Agent;
+use crate::bus::BusError;
 use crate::events::TriggerSource;
-use crate::llm::LlmClient;
+use crate::llm::{ChatResponse, LlmClient, LlmError};
+
+/// Outcome of a successful call to [`Worker::run_invocation`].
+#[derive(Debug)]
+pub enum InvocationOutcome {
+    Completed {
+        invocation_id: Uuid,
+        response: ChatResponse,
+        cost: f64,
+        duration_ms: u64,
+    },
+    BudgetExceeded {
+        invocation_id: Uuid,
+        cost: f64,
+    },
+}
+
+/// Infrastructure errors returned by a [`Worker`].
+#[derive(Debug, thiserror::Error)]
+pub enum ExecutorError {
+    #[error("event bus error: {0}")]
+    Bus(#[from] BusError),
+
+    #[error("LLM error: {0}")]
+    Llm(#[from] LlmError),
+
+    #[error("worker store error: {0}")]
+    WorkerStore(String),
+
+    #[error("max iterations exceeded")]
+    MaxIterationsExceeded,
+}
 
 /// What the control-plane asks of a worker.
 ///
-/// In v1 this is implemented by [`AgentExecutor`] (legacy path)
-/// and [`ReducerRunner`] (reducer path). In v2 a remote-worker
-/// adapter implements the same trait against NATS without the
-/// control-plane noticing.
+/// In v1 this is implemented by [`ReducerRunner`]; v2 will add a
+/// remote-worker adapter implementing the same trait against
+/// NATS without the control-plane noticing.
 ///
 /// The trait is deliberately narrow: one method, fully
 /// async. Everything else the worker needs (LLM client, event
@@ -85,21 +112,6 @@ pub trait Worker: Send + Sync {
         trigger_subject: Option<String>,
         trigger_payload: Value,
     ) -> Result<InvocationOutcome, ExecutorError>;
-}
-
-#[async_trait]
-impl Worker for AgentExecutor {
-    async fn run_invocation(
-        &self,
-        agent: &Agent,
-        llm: &dyn LlmClient,
-        trigger_source: TriggerSource,
-        trigger_subject: Option<String>,
-        trigger_payload: Value,
-    ) -> Result<InvocationOutcome, ExecutorError> {
-        self.run(agent, llm, trigger_source, trigger_subject, trigger_payload)
-            .await
-    }
 }
 
 #[async_trait]

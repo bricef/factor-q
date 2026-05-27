@@ -53,7 +53,7 @@ pub use mcp::{McpClientManager, McpError, McpServerConfig};
 pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;
 pub use worker::{
-    AgentExecutor, ArchiveAckConsumer, ArchiveAckError, ArchiveRetryError, ArchiveRetrySweeper,
-    ExecutorError, Harness, InvocationOutcome, Reducer, ReducerRunner, WORKER_SCHEMA_VERSION,
-    Worker, WorkerStore, WorkerStoreError,
+    ArchiveAckConsumer, ArchiveAckError, ArchiveRetryError, ArchiveRetrySweeper, ExecutorError,
+    Harness, InvocationOutcome, Reducer, ReducerRunner, WORKER_SCHEMA_VERSION, Worker, WorkerStore,
+    WorkerStoreError,
 };

@@ -1281,13 +1281,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         None => GenAiClient::new(),
     });
     // One ReducerRunner serves two roles: the dispatcher uses
-    // it as the Worker for new triggers, and the recovery
-    // path uses it directly for auto-resume of in-flight
-    // invocations. New triggers now exercise the same WAL /
-    // archive / coordination wiring that resumes do (this
-    // closes a latent gap: pre-deprecation, new triggers via
-    // `fq run` went through AgentExecutor and bypassed all of
-    // it).
+    // it as the Worker for new triggers, and the recovery path
+    // uses it directly (via the concrete type) for auto-resume
+    // of in-flight invocations. Both paths share the same WAL
+    // / archive / coordination wiring.
     let resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> =
         Arc::new(fq_runtime::ReducerRunner::new(
             bus.clone(),

@@ -6,12 +6,12 @@
 //! registry, event bus, pricing table) and feeding the results
 //! back to the reducer.
 //!
-//! The runner emits the same canonical event sequence as
-//! [`crate::AgentExecutor`] (`triggered` → `llm.request` →
-//! `llm.response` → `cost` → optional `tool.call` /
-//! `tool.result` → ... → `completed` / `failed`) so projection
-//! consumers and downstream observers cannot tell which path
-//! produced an invocation.
+//! The runner emits the canonical event sequence
+//! (`triggered` → `llm.request` → `llm.dispatched` →
+//! `llm.response` → optional `tool.call` / `tool.dispatched` /
+//! `tool.result` → ... → `completed` / `failed` →
+//! `invocation.archived`) that every downstream consumer relies
+//! on.
 //!
 //! This is the host side of the reducer/host boundary. The
 //! reducer decides what to do next; the runner makes it happen.
@@ -53,7 +53,7 @@ use crate::worker::{ExecutorError, InvocationOutcome, WorkerId};
 const HOST_STEP_BUDGET: u32 = 1_000;
 
 /// Drive an agent invocation through a [`Reducer`]. Composes
-/// the same runtime pieces as the legacy [`crate::AgentExecutor`],
+/// the LLM client, tool registry, event bus, and pricing table,
 /// plus a [`WorkerStore`] for the three-state WAL persisted
 /// around every tool and LLM dispatch (data-architecture.md §5.5).
 ///
@@ -98,7 +98,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     }
 
     /// Run a single invocation of `agent` through this runner's
-    /// reducer. Behavioural twin of [`crate::AgentExecutor::run`].
+    /// reducer to terminal.
     pub async fn run(
         &self,
         agent: &Agent,

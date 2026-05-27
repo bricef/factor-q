@@ -4,16 +4,11 @@
 //! the runtime knows the data (current cost, iteration count,
 //! configured model, available tools) but a normal
 //! [`fq_tools::ToolContext`] cannot reach any of it — the
-//! context only carries the sandbox. So both the legacy
-//! [`crate::AgentExecutor`] and the reducer
-//! [`crate::worker::reducer::ReducerRunner`] intercept tool calls
-//! whose name is [`fq_tools::builtin::SELF_INSPECT_TOOL_NAME`]
-//! and call [`synthesize_self_inspect`] to produce the result.
-//!
-//! Centralising the synthesis here means both paths return the
-//! same JSON for the same invocation state, which keeps the
-//! event-equivalence guarantee that the reducer prototype was
-//! validated against.
+//! context only carries the sandbox. So
+//! [`crate::worker::reducer::ReducerRunner`] intercepts tool
+//! calls whose name is
+//! [`fq_tools::builtin::SELF_INSPECT_TOOL_NAME`] and calls
+//! [`synthesize_self_inspect`] to produce the result.
 //!
 //! The output is JSON, not free-form text. LLMs parse JSON
 //! reliably, and structured output makes the data easier to

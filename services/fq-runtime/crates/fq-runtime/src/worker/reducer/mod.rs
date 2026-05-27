@@ -1,4 +1,4 @@
-//! Reducer-model agent harness (native prototype).
+//! Reducer-model agent harness.
 //!
 //! The agent harness is structured as a pure synchronous reducer:
 //! a single `step(StepInput) -> StepOutput` function with no I/O,
@@ -6,19 +6,19 @@
 //! drives the loop, executes the actions the reducer requests,
 //! and feeds the results back on the next step.
 //!
-//! This is the native validation of the boundary described in
+//! This is the native realisation of the boundary described in
 //! `docs/design/wasm-boundary-design.md`. WASM packaging is
-//! deliberately out of scope here: the architectural claim under
-//! test is that a state-enum reducer is a tractable shape for the
-//! agent harness. WASM is a packaging question that becomes
-//! relevant only after the reducer claim is validated.
+//! deliberately out of scope here: the architectural claim the
+//! shape makes is that a state-enum reducer is a tractable shape
+//! for the agent harness. WASM is a packaging question that
+//! becomes relevant only after the reducer claim is in place.
 //!
-//! The two key tests are:
+//! Two key behavioural guarantees are tested in [`runner`]:
 //!
-//! - **Equivalence**: the same scripted scenario (same fixture
-//!   LLM responses, same agent definition) produces the same
-//!   sequence of canonical events through the reducer path as
-//!   through the legacy [`crate::AgentExecutor`].
+//! - **Canonical event sequence**: a scripted scenario produces
+//!   the documented sequence of canonical events
+//!   (`triggered → llm.request → llm.dispatched → llm.response
+//!   → tool.* → completed`) in order, every time.
 //! - **Suspend/resume**: an invocation can be paused at any step
 //!   boundary, the opaque state blob persisted, the reducer
 //!   instance dropped, and a fresh instance resumed from the blob

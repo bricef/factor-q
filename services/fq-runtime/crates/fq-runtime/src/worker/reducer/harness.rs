@@ -1,9 +1,8 @@
 //! Native [`Reducer`] implementation as an explicit state
-//! machine. Mirrors the semantics of [`crate::AgentExecutor`]:
-//! seed the conversation with system + user messages, ask the
-//! model, dispatch any tool calls, feed results back, repeat
-//! until the model declares an end turn or the iteration cap is
-//! hit.
+//! machine. Seed the conversation with system + user messages,
+//! ask the model, dispatch any tool calls, feed results back,
+//! repeat until the model declares an end turn or the iteration
+//! cap is hit.
 //!
 //! The state enum is small on purpose. If it stays small as we
 //! layer in retries, partial dispatch, multi-step reasoning, and

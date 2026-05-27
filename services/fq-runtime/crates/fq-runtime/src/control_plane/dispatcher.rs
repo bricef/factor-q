@@ -52,7 +52,7 @@ pub const CONSUMER_NAME: &str = "fq-dispatcher";
 /// The dispatcher lives on the control-plane side of the role
 /// boundary; it talks to workers exclusively through the
 /// [`Worker`] trait. v1 hands it an in-process worker
-/// (`Arc::new(AgentExecutor::new(...))`); v2 will hand it a
+/// (`Arc::new(ReducerRunner::new(...))`); v2 will hand it a
 /// remote-worker adapter that proxies over NATS.
 pub struct TriggerDispatcher {
     bus: EventBus,
