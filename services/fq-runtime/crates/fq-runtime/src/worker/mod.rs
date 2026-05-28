@@ -38,7 +38,7 @@ pub use id::WorkerId;
 pub use recovery::{
     CategoryCounts, ClassifiedInvocation, RecoveryCategory, categorise, scan_in_flight,
 };
-pub use reducer::{Harness, Reducer, ReducerRunner};
+pub use reducer::{Harness, Reducer, ReducerContext, ReducerRunner, RunnerConfig};
 pub use store::{
     Compatibility, DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow,
     WORKER_SCHEMA_VERSION, WorkerStore, WorkerStoreError,

@@ -52,10 +52,59 @@ use crate::worker::{ExecutorError, InvocationOutcome, WorkerId};
 /// progress) cannot wedge the host indefinitely.
 const HOST_STEP_BUDGET: u32 = 1_000;
 
-/// Drive an agent invocation through a [`Reducer`]. Composes
-/// the LLM client, tool registry, event bus, and pricing table,
-/// plus a [`WorkerStore`] for the three-state WAL persisted
-/// around every tool and LLM dispatch (data-architecture.md §5.5).
+/// Agent-relevant context for an invocation: the services and
+/// (future) policy/metadata the agent can use or should know,
+/// held read-only. Open to addition — new agent-facing
+/// dependencies become fields here (with builder-style setters
+/// for optional ones) without changing [`ReducerRunner::new`].
+pub struct ReducerContext {
+    /// Tools the agent may call.
+    tools: Arc<ToolRegistry>,
+}
+
+impl ReducerContext {
+    pub fn new(tools: Arc<ToolRegistry>) -> Self {
+        Self { tools }
+    }
+}
+
+/// Platform machinery the host loop runs on — not agent-facing.
+/// Open to addition — new platform dependencies become fields
+/// here without changing [`ReducerRunner::new`].
+pub struct RunnerConfig {
+    /// Event bus for publishing the canonical event sequence.
+    bus: EventBus,
+    /// Model→price lookup for cost accounting.
+    pricing: Arc<PricingTable>,
+    /// Three-state WAL / invocation-state persistence
+    /// (data-architecture.md §5.5).
+    store: Arc<WorkerStore>,
+    /// Identity of the worker hosting this runner (coordination /
+    /// archive-ack routing on `fq.worker.{worker_id}.*`).
+    worker_id: WorkerId,
+}
+
+impl RunnerConfig {
+    pub fn new(
+        bus: EventBus,
+        pricing: Arc<PricingTable>,
+        store: Arc<WorkerStore>,
+        worker_id: WorkerId,
+    ) -> Self {
+        Self {
+            bus,
+            pricing,
+            store,
+            worker_id,
+        }
+    }
+}
+
+/// Drive an agent invocation through a [`Reducer`]. Holds the
+/// agent-relevant [`ReducerContext`] and the platform
+/// [`RunnerConfig`] as separate read-only bundles so new
+/// dependencies of either kind extend a bundle rather than
+/// re-signing the constructor.
 ///
 /// Generic over the [`Reducer`] impl. Production wires
 /// `ReducerRunner<Harness>` everywhere; tests may instantiate
@@ -63,36 +112,20 @@ const HOST_STEP_BUDGET: u32 = 1_000;
 /// reducer is held as a field so the [`crate::Worker`] trait
 /// impl doesn't have to expose the generic.
 pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
-    bus: EventBus,
-    pricing: Arc<PricingTable>,
-    tools: Arc<ToolRegistry>,
-    store: Arc<WorkerStore>,
-    /// Identity of the worker hosting this runner. Stamped into
-    /// the [`InvocationArchivedPayload`] so the control-plane
-    /// knows which `fq.worker.{worker_id}.invocation.archive_acked`
-    /// subject to ack on. In the v1 single-process daemon this
-    /// is the runtime UUID (see fq-cli wire-up).
-    worker_id: WorkerId,
+    /// Agent-relevant services and policy (tools today).
+    context: Arc<ReducerContext>,
+    /// Platform machinery (bus, pricing, WAL store, worker id).
+    config: Arc<RunnerConfig>,
     /// The reducer driven by every `run`/`resume`. Held as a
     /// field so callers don't have to pass it on every call.
     reducer: R,
 }
 
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
-    pub fn new(
-        bus: EventBus,
-        pricing: Arc<PricingTable>,
-        tools: Arc<ToolRegistry>,
-        store: Arc<WorkerStore>,
-        worker_id: WorkerId,
-        reducer: R,
-    ) -> Self {
+    pub fn new(context: Arc<ReducerContext>, config: Arc<RunnerConfig>, reducer: R) -> Self {
         Self {
-            bus,
-            pricing,
-            tools,
-            store,
-            worker_id,
+            context,
+            config,
             reducer,
         }
     }
@@ -119,7 +152,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         );
 
         let sandbox = agent.sandbox().to_tool_sandbox();
-        let tool_schemas = self.tools.build_schemas(agent.tools());
+        let tool_schemas = self.context.tools.build_schemas(agent.tools());
 
         let agent_config = AgentConfig {
             agent_id: agent_id.clone(),
@@ -210,6 +243,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     ) -> Result<InvocationOutcome, ExecutorError> {
         let inv_str = invocation_id.to_string();
         let state_row = self
+            .config
             .store
             .get_invocation_state(&inv_str)
             .await
@@ -243,11 +277,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         // Refuse ambiguous WAL state.
         let tools = self
+            .config
             .store
             .list_tool_dispatches_for_invocation(&inv_str)
             .await
             .map_err(map_store_err)?;
         let llms = self
+            .config
             .store
             .list_llm_dispatches_for_invocation(&inv_str)
             .await
@@ -277,7 +313,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         // Set up agent context (mirrors run()).
         let sandbox = agent.sandbox().to_tool_sandbox();
-        let tool_schemas = self.tools.build_schemas(agent.tools());
+        let tool_schemas = self.context.tools.build_schemas(agent.tools());
         let agent_config = AgentConfig {
             agent_id: agent_id.clone(),
             model: agent.model().to_string(),
@@ -411,7 +447,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // row terminal, everything else leaves it open.
             let (phase_label, terminal_at) =
                 phase_and_terminal_from(&output.next_action, unix_now_ms());
-            self.store
+            self.config
+                .store
                 .upsert_invocation_state(&InvocationStateRow {
                     invocation_id: invocation_id.to_string(),
                     agent_id: agent_id.as_str().to_string(),
@@ -613,7 +650,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let intent_at = unix_now_ms();
         let parameters_json =
             serde_json::to_string(&req.parameters).unwrap_or_else(|_| "{}".to_string());
-        self.store
+        self.config
+            .store
             .write_tool_intent(
                 &inv_str,
                 req.tool_call_id.as_str(),
@@ -657,18 +695,20 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 .await;
         }
 
-        let tool = match self.tools.get(&req.tool_name) {
+        let tool = match self.context.tools.get(&req.tool_name) {
             Some(t) => t,
             None => {
                 // Tool isn't registered — close the WAL row as
                 // a non-ambiguous error so recovery doesn't see
                 // it as `dispatched` forever.
-                self.store
+                self.config
+                    .store
                     .write_tool_dispatched(&inv_str, req.tool_call_id.as_str(), unix_now_ms())
                     .await
                     .map_err(map_store_err)?;
                 let msg = format!("no implementation registered for tool '{}'", req.tool_name);
-                self.store
+                self.config
+                    .store
                     .write_tool_completed(
                         &inv_str,
                         req.tool_call_id.as_str(),
@@ -698,7 +738,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         // Tool returned control. Mark dispatched (the
         // ambiguous-window state) before processing the result.
-        self.store
+        self.config
+            .store
             .write_tool_dispatched(&inv_str, req.tool_call_id.as_str(), unix_now_ms())
             .await
             .map_err(map_store_err)?;
@@ -717,7 +758,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         match outcome {
             Ok(result) => {
-                self.store
+                self.config
+                    .store
                     .write_tool_completed(
                         &inv_str,
                         req.tool_call_id.as_str(),
@@ -752,7 +794,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
             Err(err) => {
                 let (kind, message) = classify_tool_error(&err);
-                self.store
+                self.config
+                    .store
                     .write_tool_completed(
                         &inv_str,
                         req.tool_call_id.as_str(),
@@ -823,7 +866,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let duration_ms = tool_start.elapsed().as_millis() as u64;
 
         // Close the WAL: dispatched, then completed.
-        self.store
+        self.config
+            .store
             .write_tool_dispatched(inv_str, req.tool_call_id.as_str(), unix_now_ms())
             .await
             .map_err(map_store_err)?;
@@ -839,7 +883,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             ),
         )
         .await?;
-        self.store
+        self.config
+            .store
             .write_tool_completed(
                 inv_str,
                 req.tool_call_id.as_str(),
@@ -924,7 +969,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
         let id = event.envelope.event_id;
         debug!(event_type = ?event.payload, "publishing event");
-        self.bus.publish(&event).await.map_err(ExecutorError::Bus)?;
+        self.config
+            .bus
+            .publish(&event)
+            .await
+            .map_err(ExecutorError::Bus)?;
         *cursor = Some(id);
         Ok(())
     }
@@ -998,6 +1047,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     ) -> Result<(), ExecutorError> {
         let invocation_id_str = invocation_id.to_string();
         let existing = self
+            .config
             .store
             .get_invocation_state(&invocation_id_str)
             .await
@@ -1014,7 +1064,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         row.phase = phase_label.to_string();
         row.terminal_at = Some(terminal_at_ms);
         row.updated_at = terminal_at_ms;
-        self.store
+        self.config
+            .store
             .upsert_invocation_state(&row)
             .await
             .map_err(map_store_err)?;
@@ -1041,6 +1092,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     ) -> Result<(), ExecutorError> {
         let invocation_id_str = invocation_id.to_string();
         let row = match self
+            .config
             .store
             .get_invocation_state(&invocation_id_str)
             .await
@@ -1069,7 +1121,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 agent_id.clone(),
                 invocation_id,
                 EventPayload::InvocationArchived(InvocationArchivedPayload {
-                    worker_id: self.worker_id.clone(),
+                    worker_id: self.config.worker_id.clone(),
                     final_phase: final_phase.to_string(),
                     final_state_blob: row.state_blob,
                     started_at_ms: row.started_at,
@@ -1082,7 +1134,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // `archive_published_at` is the publish time, not
         // `terminal_at` — the retry sweeper measures from when
         // the most recent publish went out, not from terminal.
-        self.store
+        self.config
+            .store
             .set_archive_pending(&invocation_id_str, unix_now_ms())
             .await
             .map_err(map_store_err)?;
@@ -1159,7 +1212,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // completed, then response/cost events.
         let request_payload_json =
             serde_json::to_string(&chat_request).unwrap_or_else(|_| "{}".to_string());
-        self.store
+        self.config
+            .store
             .write_llm_intent(
                 &inv_str,
                 &req_str,
@@ -1192,11 +1246,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // LLM call returned an error. Close the WAL with
                 // is_error=true so recovery sees a final state,
                 // not the ambiguous `dispatched` state.
-                self.store
+                self.config
+                    .store
                     .write_llm_dispatched(&inv_str, &req_str, unix_now_ms())
                     .await
                     .map_err(map_store_err)?;
-                self.store
+                self.config
+                    .store
                     .write_llm_completed(
                         &inv_str,
                         &req_str,
@@ -1227,7 +1283,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // LLM returned control. Mark dispatched (ambiguous
         // window), publish the dispatched event, then transition
         // to completed before the response/cost events go out.
-        self.store
+        self.config
+            .store
             .write_llm_dispatched(&inv_str, &req_str, unix_now_ms())
             .await
             .map_err(map_store_err)?;
@@ -1244,7 +1301,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         )
         .await?;
         let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
-        self.store
+        self.config
+            .store
             .write_llm_completed(
                 &inv_str,
                 &req_str,
@@ -1259,7 +1317,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // Cost folds into the llm.response envelope (envelope-refactor
         // plan step 3). Compute before publishing so the response
         // event carries its cost in one publish, not two.
-        let pricing = self.pricing.lookup(&request.model);
+        let pricing = self.config.pricing.lookup(&request.model);
         if pricing.is_none() {
             warn!(
                 model = %request.model,
@@ -1702,11 +1760,13 @@ mod tests {
                 .expect("worker store"),
         );
         let runner = ReducerRunner::new(
-            bus.clone(),
-            test_pricing(),
-            Arc::new(ToolRegistry::with_builtins()),
-            store,
-            test_worker_id(),
+            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
+            Arc::new(RunnerConfig::new(
+                bus.clone(),
+                test_pricing(),
+                store,
+                test_worker_id(),
+            )),
             Harness::new(),
         );
         let _ = runner
@@ -1854,11 +1914,13 @@ mod tests {
                 .expect("worker store"),
         );
         let runner = ReducerRunner::new(
-            bus.clone(),
-            test_pricing(),
-            Arc::new(ToolRegistry::with_builtins()),
-            store,
-            test_worker_id(),
+            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
+            Arc::new(RunnerConfig::new(
+                bus.clone(),
+                test_pricing(),
+                store,
+                test_worker_id(),
+            )),
             Harness::new(),
         );
 
@@ -2105,11 +2167,13 @@ mod tests {
             llm.push_response(r);
         }
         let runner = ReducerRunner::new(
-            bus.clone(),
-            test_pricing(),
-            Arc::new(ToolRegistry::with_builtins()),
-            store.clone(),
-            test_worker_id(),
+            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
+            Arc::new(RunnerConfig::new(
+                bus.clone(),
+                test_pricing(),
+                store.clone(),
+                test_worker_id(),
+            )),
             Harness::new(),
         );
         let outcome = runner
@@ -2807,11 +2871,13 @@ mod tests {
         // Resume.
         let bus = EventBus::connect(&url).await.unwrap();
         let runner = ReducerRunner::new(
-            bus,
-            test_pricing(),
-            Arc::new(ToolRegistry::with_builtins()),
-            store.clone(),
-            test_worker_id(),
+            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
+            Arc::new(RunnerConfig::new(
+                bus,
+                test_pricing(),
+                store.clone(),
+                test_worker_id(),
+            )),
             Harness::new(),
         );
         let llm = FixtureClient::new(); // no live responses needed
@@ -2889,11 +2955,13 @@ mod tests {
 
         let bus = EventBus::connect(&url).await.unwrap();
         let runner = ReducerRunner::new(
-            bus,
-            test_pricing(),
-            Arc::new(ToolRegistry::with_builtins()),
-            store,
-            test_worker_id(),
+            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
+            Arc::new(RunnerConfig::new(
+                bus,
+                test_pricing(),
+                store,
+                test_worker_id(),
+            )),
             Harness::new(),
         );
         let llm = FixtureClient::new();

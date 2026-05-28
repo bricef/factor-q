@@ -54,6 +54,6 @@ pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;
 pub use worker::{
     ArchiveAckConsumer, ArchiveAckError, ArchiveRetryError, ArchiveRetrySweeper, ExecutorError,
-    Harness, InvocationOutcome, Reducer, ReducerRunner, WORKER_SCHEMA_VERSION, Worker, WorkerStore,
-    WorkerStoreError,
+    Harness, InvocationOutcome, Reducer, ReducerContext, ReducerRunner, RunnerConfig,
+    WORKER_SCHEMA_VERSION, Worker, WorkerStore, WorkerStoreError,
 };

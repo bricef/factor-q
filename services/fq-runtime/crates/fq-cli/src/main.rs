@@ -600,11 +600,13 @@ async fn trigger_agent(
     let cli_worker_id = fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string())
         .expect("uuid is a valid worker id");
     let runner = fq_runtime::ReducerRunner::new(
-        bus,
-        pricing,
-        tools,
-        worker_store,
-        cli_worker_id,
+        Arc::new(fq_runtime::ReducerContext::new(tools)),
+        Arc::new(fq_runtime::RunnerConfig::new(
+            bus,
+            pricing,
+            worker_store,
+            cli_worker_id,
+        )),
         fq_runtime::Harness::new(),
     );
     let outcome_result = runner
@@ -1287,11 +1289,13 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // / archive / coordination wiring.
     let resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> =
         Arc::new(fq_runtime::ReducerRunner::new(
-            bus.clone(),
-            pricing,
-            tools,
-            worker_store.clone(),
-            worker_id.clone(),
+            Arc::new(fq_runtime::ReducerContext::new(tools)),
+            Arc::new(fq_runtime::RunnerConfig::new(
+                bus.clone(),
+                pricing,
+                worker_store.clone(),
+                worker_id.clone(),
+            )),
             fq_runtime::Harness::new(),
         ));
     let worker: Arc<dyn fq_runtime::Worker> = resume_runner.clone();

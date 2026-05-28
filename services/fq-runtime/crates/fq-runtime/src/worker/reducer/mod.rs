@@ -29,7 +29,7 @@ pub mod runner;
 pub mod types;
 
 pub use harness::Harness;
-pub use runner::ReducerRunner;
+pub use runner::{ReducerContext, ReducerRunner, RunnerConfig};
 pub use types::{
     CapabilityResult, EmittedEvent, HarnessError, HarnessErrorKind, LogEntry, LogLevel,
     ModelRequest, ModelResponse, NextAction, Reducer, StepInput, StepOutput, ToolCallRequest,

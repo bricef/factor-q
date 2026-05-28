@@ -251,7 +251,9 @@ mod tests {
     use crate::llm::fixture::FixtureClient;
     use crate::pricing::{ModelPricing, PricingTable};
     use crate::tools::ToolRegistry;
-    use crate::worker::{Harness, ReducerRunner, WorkerId, WorkerStore};
+    use crate::worker::{
+        Harness, ReducerContext, ReducerRunner, RunnerConfig, WorkerId, WorkerStore,
+    };
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -433,11 +435,13 @@ You are a test agent."#
         let worker_id = WorkerId::new(format!("dispatcher-test-{}", Uuid::now_v7().simple()))
             .expect("worker id");
         let worker: Arc<dyn Worker> = Arc::new(ReducerRunner::new(
-            bus.clone(),
-            test_pricing(),
-            test_tools(),
-            worker_store,
-            worker_id,
+            Arc::new(ReducerContext::new(test_tools())),
+            Arc::new(RunnerConfig::new(
+                bus.clone(),
+                test_pricing(),
+                worker_store,
+                worker_id,
+            )),
             Harness::new(),
         ));
 

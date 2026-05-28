@@ -991,7 +991,7 @@ mod tests {
         use crate::test_support::runtime::TestRuntime;
         use crate::worker::InvocationOutcome;
         use crate::worker::reducer::Harness;
-        use crate::{PricingTable, ReducerRunner, ToolRegistry};
+        use crate::{PricingTable, ReducerContext, ReducerRunner, RunnerConfig, ToolRegistry};
 
         let rt = TestRuntime::start().await.expect("harness");
         rt.push_llm_response(MockResponse::text("done.", 12, 4));
@@ -1015,11 +1015,13 @@ mod tests {
             .unwrap();
         let llm = rt.llm_client();
         let runner = ReducerRunner::new(
-            rt.bus().clone(),
-            Arc::new(PricingTable::empty()),
-            Arc::new(ToolRegistry::with_builtins()),
-            rt.worker_store().clone(),
-            rt.worker_id().clone(),
+            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
+            Arc::new(RunnerConfig::new(
+                rt.bus().clone(),
+                Arc::new(PricingTable::empty()),
+                rt.worker_store().clone(),
+                rt.worker_id().clone(),
+            )),
             Harness::new(),
         );
 
