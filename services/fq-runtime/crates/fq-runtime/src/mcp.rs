@@ -16,7 +16,7 @@ use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, ClientCapabilities, ClientInfo, ElicitationCapability,
     FormElicitationCapability, ReadResourceRequestParams, ReadResourceResult, Resource,
-    ResourceTemplate, RootsCapabilities, SamplingCapability, ServerCapabilities,
+    ResourceContents, ResourceTemplate, RootsCapabilities, SamplingCapability, ServerCapabilities,
 };
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
@@ -161,6 +161,152 @@ impl Tool for McpTool {
     }
 }
 
+/// Whether a synthesized resource tool lists or reads.
+#[derive(Clone, Copy)]
+enum ResourceOp {
+    List,
+    Read,
+}
+
+/// A host-synthesized tool exposing a server's MCP resources to the
+/// agent's LLM (model-controlled access). One pair per server that
+/// advertises the resources capability — `<server>__list_resources`
+/// and `<server>__read_resource`. Mirrors [`McpTool`]: it holds the
+/// shared client handle and registers in the [`ToolRegistry`] like any
+/// other tool, so no reducer-runner changes are needed. (Host-curated
+/// injection of declared resources is a separate path — see the plan's
+/// step 3d.)
+pub struct McpResourceTool {
+    name: String,
+    description: String,
+    schema: Value,
+    op: ResourceOp,
+    client: Arc<McpClient>,
+}
+
+impl McpResourceTool {
+    fn list(server: &str, client: Arc<McpClient>) -> Self {
+        Self {
+            name: format!("{server}__list_resources"),
+            description: format!(
+                "List the resources available from the '{server}' MCP server, \
+                 returning each resource's URI, name, and description."
+            ),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            op: ResourceOp::List,
+            client,
+        }
+    }
+
+    fn read(server: &str, client: Arc<McpClient>) -> Self {
+        Self {
+            name: format!("{server}__read_resource"),
+            description: format!(
+                "Read a resource from the '{server}' MCP server by its URI \
+                 (discover URIs with {server}__list_resources)."
+            ),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "uri": { "type": "string", "description": "The resource URI to read." }
+                },
+                "required": ["uri"],
+                "additionalProperties": false
+            }),
+            op: ResourceOp::Read,
+            client,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for McpResourceTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn parameters_schema(&self) -> Value {
+        self.schema.clone()
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &ToolContext<'_>,
+        params: Value,
+    ) -> Result<ToolResult, ToolError> {
+        match self.op {
+            ResourceOp::List => {
+                let resources = self
+                    .client
+                    .list_all_resources()
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+                let mut output = String::new();
+                for resource in &resources {
+                    let raw = &resource.raw;
+                    output.push_str(&raw.uri);
+                    output.push_str(" — ");
+                    output.push_str(&raw.name);
+                    if let Some(description) = raw.description.as_deref() {
+                        output.push_str(": ");
+                        output.push_str(description);
+                    }
+                    output.push('\n');
+                }
+                if output.is_empty() {
+                    output.push_str("(no resources)");
+                }
+                Ok(ToolResult {
+                    output,
+                    is_error: false,
+                })
+            }
+            ResourceOp::Read => {
+                let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "read_resource requires a 'uri' string".to_string(),
+                    )
+                })?;
+                let result = self
+                    .client
+                    .read_resource(ReadResourceRequestParams::new(uri))
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+                let mut output = String::new();
+                for contents in &result.contents {
+                    match contents {
+                        ResourceContents::TextResourceContents { text, .. } => {
+                            output.push_str(text);
+                            output.push('\n');
+                        }
+                        ResourceContents::BlobResourceContents {
+                            blob, mime_type, ..
+                        } => {
+                            output.push_str(&format!(
+                                "[binary resource: {} base64 chars, mime {}]\n",
+                                blob.len(),
+                                mime_type.as_deref().unwrap_or("unknown")
+                            ));
+                        }
+                    }
+                }
+                Ok(ToolResult {
+                    output,
+                    is_error: false,
+                })
+            }
+        }
+    }
+}
+
 /// Tracks a running MCP server and its client handle.
 struct RunningServer {
     name: String,
@@ -287,6 +433,28 @@ impl McpClientManager {
                 tool_input_schema: input_schema,
                 client: Arc::clone(&client),
             }));
+        }
+
+        // Synthesize host-fulfilled resource tools (step 3b) when the
+        // server advertises the resources capability, so the agent's LLM
+        // can list/read its resources on demand.
+        let advertises_resources = client
+            .peer_info()
+            .and_then(|info| info.capabilities.resources.as_ref())
+            .is_some();
+        if advertises_resources {
+            for resource_tool in [
+                McpResourceTool::list(&config.name, Arc::clone(&client)),
+                McpResourceTool::read(&config.name, Arc::clone(&client)),
+            ] {
+                debug!(
+                    server = %config.name,
+                    tool = %resource_tool.name(),
+                    "registered MCP resource tool"
+                );
+                tool_names.push(resource_tool.name().to_string());
+                tools.push(Arc::new(resource_tool));
+            }
         }
 
         self.started.insert(key);

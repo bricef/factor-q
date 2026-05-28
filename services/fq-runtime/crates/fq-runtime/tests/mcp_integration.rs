@@ -242,3 +242,62 @@ async fn lists_and_reads_resources_from_everything_server() {
 
     manager.shutdown().await;
 }
+
+/// Step 3b: resources surface to the agent as host-fulfilled tools the
+/// LLM can call (`<server>__list_resources` / `<server>__read_resource`).
+#[tokio::test]
+async fn resource_tools_let_the_agent_list_and_read() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    let tools = manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    let list_tool = tools
+        .iter()
+        .find(|t| t.name() == "everything__list_resources")
+        .expect("list_resources tool synthesized");
+    let read_tool = tools
+        .iter()
+        .find(|t| t.name() == "everything__read_resource")
+        .expect("read_resource tool synthesized");
+
+    let sandbox = ToolSandbox::new();
+    let ctx = ToolContext::new(&sandbox);
+
+    let listed = list_tool
+        .execute(&ctx, serde_json::json!({}))
+        .await
+        .expect("list tool runs");
+    assert!(!listed.is_error);
+    assert!(
+        listed.output.contains("://"),
+        "listing should contain resource URIs, got: {}",
+        listed.output
+    );
+
+    // Read a real resource by URI (taken from the protocol-level list).
+    let uri = manager
+        .list_resources("everything")
+        .await
+        .expect("list resources")[0]
+        .raw
+        .uri
+        .clone();
+    let read = read_tool
+        .execute(&ctx, serde_json::json!({ "uri": uri }))
+        .await
+        .expect("read tool runs");
+    assert!(!read.is_error);
+    assert!(
+        !read.output.trim().is_empty(),
+        "read tool should return resource content"
+    );
+
+    manager.shutdown().await;
+}

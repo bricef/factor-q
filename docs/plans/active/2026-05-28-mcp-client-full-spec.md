@@ -188,12 +188,16 @@ host-curated injection — so the step splits into sub-chunks:
 - **3c — Subscribe + notification sink**: `subscribe` plus a
   handler sink for `notifications/resources/{updated,list_changed}`
   (the handler gains state to record/forward them).
-- **3d — Host-curated injection**: agent definition declares
-  pinned resources; the harness reads and injects their content
-  into the prompt (app-controlled, per ADR-0013). *Carries its
-  own sub-decisions — injection point (invocation-start vs
-  per-step) and the agent-definition syntax — to settle before
-  building.*
+- **3d — Host-curated injection** (decided 2026-05-28): the
+  agent definition declares pinned resources via a `resources:`
+  frontmatter list of `mcp://<server>/<native-uri>` pseudo-URLs
+  (scheme `mcp`, authority = a server named in the `mcp:` block,
+  remainder = that server's native resource URI). At
+  **invocation start** — not per reducer step, consistent with
+  factor-q's invocation-scoped config (no per-step config exists
+  elsewhere) — the harness reads each pinned resource and injects
+  its content into the initial prompt context (app-controlled,
+  per ADR-0013).
 
 **Failing tests first** (against the everything server's resource
 set, confirmed at write-time): list resources; read by URI; read
