@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use fq_runtime::mcp::{FactorQClientHandler, McpClientManager, McpServerConfig};
+use fq_runtime::mcp::{
+    FactorQClientHandler, McpClientManager, McpServerConfig, ResourceNotification,
+};
 use fq_tools::{Tool, ToolContext, ToolSandbox};
 
 /// Skip the test if `npx` is not available.
@@ -297,6 +299,63 @@ async fn resource_tools_let_the_agent_list_and_read() {
     assert!(
         !read.output.trim().is_empty(),
         "read tool should return resource content"
+    );
+
+    manager.shutdown().await;
+}
+
+/// Step 3c: subscribing to a resource and enabling the everything
+/// server's simulated updates delivers `resources/updated`
+/// notifications through the client handler's sink.
+#[tokio::test]
+async fn subscribe_delivers_resource_update_notifications() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    let tools = manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    // Subscribe to the first resource.
+    let uri = manager
+        .list_resources("everything")
+        .await
+        .expect("list resources")[0]
+        .raw
+        .uri
+        .clone();
+    manager
+        .subscribe("everything", &uri)
+        .await
+        .expect("subscribe");
+
+    // Updates are opt-in: the everything server only emits them after the
+    // subscriber-updates toggle tool is invoked (no args; ~5s pace).
+    let toggle = tools
+        .iter()
+        .find(|t| t.name().contains("subscriber"))
+        .expect("subscriber-updates toggle tool");
+    let sandbox = ToolSandbox::new();
+    let ctx = ToolContext::new(&sandbox);
+    toggle
+        .execute(&ctx, serde_json::json!({}))
+        .await
+        .expect("toggle updates on");
+
+    let notification = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        manager.recv_resource_notification("everything"),
+    )
+    .await
+    .expect("a resource notification within 15s")
+    .expect("notification channel open");
+    assert!(
+        matches!(notification, ResourceNotification::Updated { .. }),
+        "expected a resources/updated notification, got {notification:?}"
     );
 
     manager.shutdown().await;

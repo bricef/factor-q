@@ -16,12 +16,14 @@ use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, ClientCapabilities, ClientInfo, ElicitationCapability,
     FormElicitationCapability, ReadResourceRequestParams, ReadResourceResult, Resource,
-    ResourceContents, ResourceTemplate, RootsCapabilities, SamplingCapability, ServerCapabilities,
+    ResourceContents, ResourceTemplate, ResourceUpdatedNotificationParam, RootsCapabilities,
+    SamplingCapability, ServerCapabilities, SubscribeRequestParams,
 };
-use rmcp::service::{RoleClient, RunningService};
+use rmcp::service::{MaybeSendFuture, NotificationContext, RoleClient, RunningService};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use serde_json::Value;
 use tokio::process::Command;
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
 /// Configuration for an MCP server to be started as a child process.
@@ -59,17 +61,40 @@ pub enum McpError {
 // Type alias for the concrete client handle we store.
 type McpClient = RunningService<RoleClient, FactorQClientHandler>;
 
+/// A resource notification forwarded from a connected MCP server.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResourceNotification {
+    /// A subscribed resource changed (`notifications/resources/updated`).
+    Updated { uri: String },
+    /// The server's resource list changed
+    /// (`notifications/resources/list_changed`).
+    ListChanged,
+}
+
 /// factor-q's MCP client handler.
 ///
 /// Advertises the client-side capabilities factor-q intends to honour
-/// (roots, sampling, elicitation) during the initialize handshake.
-/// Server-initiated requests (sampling, elicitation, roots) still use
+/// (roots, sampling, elicitation) during the initialize handshake, and
+/// forwards resource notifications to a sink when one is wired.
+/// Server-initiated *requests* (sampling, elicitation, roots) still use
 /// rmcp's default handlers — declining or returning empty — until
 /// Steps 5–6 of the full-spec plan implement them under ADR-0017's
 /// autonomous-resolution policy.
-pub struct FactorQClientHandler;
+#[derive(Default)]
+pub struct FactorQClientHandler {
+    /// Sink for resource notifications forwarded from the connected
+    /// server (`resources/updated`, `resources/list_changed`).
+    resource_notifications: Option<mpsc::UnboundedSender<ResourceNotification>>,
+}
 
 impl FactorQClientHandler {
+    /// Build a handler that forwards resource notifications to `tx`.
+    fn with_notifications(tx: mpsc::UnboundedSender<ResourceNotification>) -> Self {
+        Self {
+            resource_notifications: Some(tx),
+        }
+    }
+
     /// The client capabilities factor-q advertises during initialize:
     /// roots + `list_changed`, sampling, and form-mode elicitation with
     /// schema validation — the inbound surface ADR-0017 governs.
@@ -94,6 +119,27 @@ impl ClientHandler for FactorQClientHandler {
         let mut info = ClientInfo::default();
         info.capabilities = Self::advertised_capabilities();
         info
+    }
+
+    fn on_resource_updated(
+        &self,
+        params: ResourceUpdatedNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
+        if let Some(tx) = &self.resource_notifications {
+            let _ = tx.send(ResourceNotification::Updated { uri: params.uri });
+        }
+        std::future::ready(())
+    }
+
+    fn on_resource_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
+        if let Some(tx) = &self.resource_notifications {
+            let _ = tx.send(ResourceNotification::ListChanged);
+        }
+        std::future::ready(())
     }
 }
 
@@ -312,6 +358,8 @@ struct RunningServer {
     name: String,
     client: Arc<McpClient>,
     tool_names: Vec<String>,
+    /// Receiver for resource notifications the handler forwards.
+    resource_notifications: Mutex<mpsc::UnboundedReceiver<ResourceNotification>>,
 }
 
 /// Manages the lifecycle of MCP server child processes.
@@ -382,15 +430,15 @@ impl McpClientManager {
 
         // Perform the MCP initialize handshake. The handler advertises
         // factor-q's client capabilities (roots/sampling/elicitation) and
-        // will answer server-initiated requests in later steps.
-        let client =
-            FactorQClientHandler
-                .serve(transport)
-                .await
-                .map_err(|err| McpError::ServerStart {
-                    command: config.command.clone(),
-                    reason: err.to_string(),
-                })?;
+        // forwards resource notifications to `notif_rx`.
+        let (notif_tx, notif_rx) = mpsc::unbounded_channel();
+        let client = FactorQClientHandler::with_notifications(notif_tx)
+            .serve(transport)
+            .await
+            .map_err(|err| McpError::ServerStart {
+                command: config.command.clone(),
+                reason: err.to_string(),
+            })?;
 
         let client = Arc::new(client);
 
@@ -462,6 +510,7 @@ impl McpClientManager {
             name: config.name,
             client,
             tool_names,
+            resource_notifications: Mutex::new(notif_rx),
         });
 
         Ok(tools)
@@ -529,6 +578,26 @@ impl McpClientManager {
             })
     }
 
+    /// Subscribe to update notifications for a resource on a server.
+    /// Updates arrive via [`Self::recv_resource_notification`].
+    pub async fn subscribe(&self, server: &str, uri: &str) -> Result<(), McpError> {
+        self.client_for(server)?
+            .subscribe(SubscribeRequestParams::new(uri))
+            .await
+            .map(|_| ())
+            .map_err(|err| McpError::ResourceOp {
+                server: server.to_string(),
+                reason: err.to_string(),
+            })
+    }
+
+    /// Await the next resource notification a server's handler forwarded.
+    /// `None` if the server is unknown or its notification channel closed.
+    pub async fn recv_resource_notification(&self, server: &str) -> Option<ResourceNotification> {
+        let server = self.servers.iter().find(|s| s.name == server)?;
+        server.resource_notifications.lock().await.recv().await
+    }
+
     /// Gracefully shut down all managed MCP server processes.
     pub async fn shutdown(&mut self) {
         for server in &mut self.servers {
@@ -575,7 +644,7 @@ mod tests {
 
     #[test]
     fn get_info_carries_advertised_capabilities() {
-        let info = FactorQClientHandler.get_info();
+        let info = FactorQClientHandler::default().get_info();
         assert!(info.capabilities.roots.is_some());
         assert!(info.capabilities.sampling.is_some());
         assert!(info.capabilities.elicitation.is_some());
