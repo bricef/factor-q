@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use fq_runtime::mcp::{McpClientManager, McpServerConfig};
+use fq_runtime::mcp::{FactorQClientHandler, McpClientManager, McpServerConfig};
 use fq_tools::{Tool, ToolContext, ToolSandbox};
 
 /// Skip the test if `npx` is not available.
@@ -23,11 +23,15 @@ fn require_npx() -> bool {
     }
 }
 
+/// Pinned so the TDD oracle is stable and runs from the local npx
+/// cache without hitting the npm registry. Bump deliberately.
+const EVERYTHING_SERVER: &str = "@modelcontextprotocol/server-everything@2026.1.26";
+
 fn everything_config() -> McpServerConfig {
     McpServerConfig {
         name: "everything".to_string(),
         command: "npx".to_string(),
-        args: vec!["@modelcontextprotocol/server-everything".to_string()],
+        args: vec!["-y".to_string(), EVERYTHING_SERVER.to_string()],
         env: vec![],
     }
 }
@@ -149,4 +153,51 @@ async fn bad_command_returns_error() {
         "error should mention the command: {}",
         err
     );
+}
+
+/// Step 2: the client advertises its full capability set (roots,
+/// sampling, elicitation) and negotiates the server's advertised
+/// capabilities during the initialize handshake.
+#[tokio::test]
+async fn negotiates_full_capability_set() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    // The everything server advertises the full server-side surface.
+    let server = manager
+        .server_capabilities("everything")
+        .expect("negotiated server capabilities");
+    assert!(
+        server.resources.is_some(),
+        "server should advertise resources"
+    );
+    assert!(server.prompts.is_some(), "server should advertise prompts");
+    assert!(server.tools.is_some(), "server should advertise tools");
+    assert!(server.logging.is_some(), "server should advertise logging");
+    assert!(
+        server.completions.is_some(),
+        "server should advertise completions"
+    );
+
+    // factor-q advertises the client-side capabilities it intends to honour.
+    let client = FactorQClientHandler::advertised_capabilities();
+    assert!(client.roots.is_some(), "client should advertise roots");
+    assert!(
+        client.sampling.is_some(),
+        "client should advertise sampling"
+    );
+    assert!(
+        client.elicitation.is_some(),
+        "client should advertise elicitation"
+    );
+
+    manager.shutdown().await;
 }

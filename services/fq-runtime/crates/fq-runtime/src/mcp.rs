@@ -11,8 +11,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
+use rmcp::ClientHandler;
 use rmcp::ServiceExt;
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{
+    CallToolRequestParams, ClientCapabilities, ClientInfo, ElicitationCapability,
+    FormElicitationCapability, RootsCapabilities, SamplingCapability, ServerCapabilities,
+};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use serde_json::Value;
@@ -46,7 +50,45 @@ pub enum McpError {
 }
 
 // Type alias for the concrete client handle we store.
-type McpClient = RunningService<RoleClient, ()>;
+type McpClient = RunningService<RoleClient, FactorQClientHandler>;
+
+/// factor-q's MCP client handler.
+///
+/// Advertises the client-side capabilities factor-q intends to honour
+/// (roots, sampling, elicitation) during the initialize handshake.
+/// Server-initiated requests (sampling, elicitation, roots) still use
+/// rmcp's default handlers — declining or returning empty — until
+/// Steps 5–6 of the full-spec plan implement them under ADR-0017's
+/// autonomous-resolution policy.
+pub struct FactorQClientHandler;
+
+impl FactorQClientHandler {
+    /// The client capabilities factor-q advertises during initialize:
+    /// roots + `list_changed`, sampling, and form-mode elicitation with
+    /// schema validation — the inbound surface ADR-0017 governs.
+    pub fn advertised_capabilities() -> ClientCapabilities {
+        let mut capabilities = ClientCapabilities::default();
+        capabilities.roots = Some(RootsCapabilities {
+            list_changed: Some(true),
+        });
+        capabilities.sampling = Some(SamplingCapability::default());
+        capabilities.elicitation = Some(ElicitationCapability {
+            form: Some(FormElicitationCapability {
+                schema_validation: Some(true),
+            }),
+            url: None,
+        });
+        capabilities
+    }
+}
+
+impl ClientHandler for FactorQClientHandler {
+    fn get_info(&self) -> ClientInfo {
+        let mut info = ClientInfo::default();
+        info.capabilities = Self::advertised_capabilities();
+        info
+    }
+}
 
 /// A single tool from an MCP server, adapted to the fq-tools [`Tool`] trait.
 ///
@@ -185,9 +227,12 @@ impl McpClientManager {
             reason: err.to_string(),
         })?;
 
-        // Perform the MCP initialize handshake.
+        // Perform the MCP initialize handshake. The handler advertises
+        // factor-q's client capabilities (roots/sampling/elicitation) and
+        // will answer server-initiated requests in later steps.
         let client =
-            ().serve(transport)
+            FactorQClientHandler
+                .serve(transport)
                 .await
                 .map_err(|err| McpError::ServerStart {
                     command: config.command.clone(),
@@ -247,6 +292,17 @@ impl McpClientManager {
         Ok(tools)
     }
 
+    /// The capabilities a started server advertised during the initialize
+    /// handshake, looked up by server name. `None` if no server with that
+    /// name is running or the handshake produced no peer info.
+    pub fn server_capabilities(&self, name: &str) -> Option<ServerCapabilities> {
+        self.servers
+            .iter()
+            .find(|server| server.name == name)
+            .and_then(|server| server.client.peer_info())
+            .map(|info| info.capabilities.clone())
+    }
+
     /// Gracefully shut down all managed MCP server processes.
     pub async fn shutdown(&mut self) {
         for server in &mut self.servers {
@@ -276,5 +332,26 @@ impl McpClientManager {
         }
         self.servers.clear();
         self.started.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertises_roots_sampling_elicitation() {
+        let capabilities = FactorQClientHandler::advertised_capabilities();
+        assert!(capabilities.roots.is_some(), "roots advertised");
+        assert!(capabilities.sampling.is_some(), "sampling advertised");
+        assert!(capabilities.elicitation.is_some(), "elicitation advertised");
+    }
+
+    #[test]
+    fn get_info_carries_advertised_capabilities() {
+        let info = FactorQClientHandler.get_info();
+        assert!(info.capabilities.roots.is_some());
+        assert!(info.capabilities.sampling.is_some());
+        assert!(info.capabilities.elicitation.is_some());
     }
 }
