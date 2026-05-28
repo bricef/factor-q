@@ -173,19 +173,42 @@ a resource by URI; read via a resource *template*; subscribe
 and receive a `resources/updated` notification; observe a
 `resources/list_changed` notification.
 
-**Implementation.** `list_resources` / `read_resource` /
-`list_resource_templates` / `subscribe` on the manager; a sink
-for `notifications/resources/{updated,list_changed}`; and the
-context-assembly path that turns read resource content into
-text/structured context the harness can place into the prompt
-(host-controlled injection, per ADR-0013's working-memory
-boundary).
+**Decided 2026-05-28: both consumption surfaces.** Read content
+reaches the agent two ways — a model-controlled read tool *and*
+host-curated injection — so the step splits into sub-chunks:
+
+- **3a — Protocol wrappers** (mechanical, shared foundation):
+  `list_resources` / `read_resource` / `list_resource_templates`
+  on the manager, by server name (mirrors `server_capabilities`).
+  Reusable by both surfaces below.
+- **3b — Model-controlled read tool**: host-fulfilled tool(s)
+  the agent's LLM calls on demand to list/read a server's
+  resources (parallels `McpTool`, per-server). Fits the
+  tools-only LLM surface.
+- **3c — Subscribe + notification sink**: `subscribe` plus a
+  handler sink for `notifications/resources/{updated,list_changed}`
+  (the handler gains state to record/forward them).
+- **3d — Host-curated injection**: agent definition declares
+  pinned resources; the harness reads and injects their content
+  into the prompt (app-controlled, per ADR-0013). *Carries its
+  own sub-decisions — injection point (invocation-start vs
+  per-step) and the agent-definition syntax — to settle before
+  building.*
+
+**Failing tests first** (against the everything server's resource
+set, confirmed at write-time): list resources; read by URI; read
+via template; the read tool returns content to the agent;
+subscribe + receive `resources/updated`; observe
+`resources/list_changed`; a pinned resource's content appears in
+the assembled prompt context.
 
 **Done when**
 
-- [ ] All five resource tests green against the pinned server.
-- [ ] Read resource content reaches the agent context (no
-      longer silently dropped).
+- [ ] Protocol wrappers + read tool + subscribe/notifications
+      green against the pinned server.
+- [ ] Read resource content reaches the agent both via the tool
+      and via host-curated injection (no longer silently
+      dropped at `mcp.rs:99-101`).
 
 ---
 

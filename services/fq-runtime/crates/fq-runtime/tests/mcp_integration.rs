@@ -201,3 +201,44 @@ async fn negotiates_full_capability_set() {
 
     manager.shutdown().await;
 }
+
+/// Step 3a: the manager lists and reads resources (and templates) from a
+/// server over the MCP resource protocol.
+#[tokio::test]
+async fn lists_and_reads_resources_from_everything_server() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    let resources = manager
+        .list_resources("everything")
+        .await
+        .expect("list resources");
+    assert!(!resources.is_empty(), "everything server exposes resources");
+
+    // Read the first resource by URI; it should carry contents.
+    let uri = resources[0].raw.uri.clone();
+    let result = manager
+        .read_resource("everything", &uri)
+        .await
+        .expect("read resource");
+    assert!(!result.contents.is_empty(), "resource should have contents");
+
+    let templates = manager
+        .list_resource_templates("everything")
+        .await
+        .expect("list resource templates");
+    assert!(
+        !templates.is_empty(),
+        "everything server exposes resource templates"
+    );
+
+    manager.shutdown().await;
+}

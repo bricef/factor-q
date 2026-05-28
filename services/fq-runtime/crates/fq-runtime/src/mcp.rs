@@ -15,7 +15,8 @@ use rmcp::ClientHandler;
 use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, ClientCapabilities, ClientInfo, ElicitationCapability,
-    FormElicitationCapability, RootsCapabilities, SamplingCapability, ServerCapabilities,
+    FormElicitationCapability, ReadResourceRequestParams, ReadResourceResult, Resource,
+    ResourceTemplate, RootsCapabilities, SamplingCapability, ServerCapabilities,
 };
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
@@ -47,6 +48,12 @@ pub enum McpError {
 
     #[error("tool call to '{tool_name}' failed: {reason}")]
     ToolCall { tool_name: String, reason: String },
+
+    #[error("no MCP server named '{name}' is running")]
+    UnknownServer { name: String },
+
+    #[error("resource operation on '{server}' failed: {reason}")]
+    ResourceOp { server: String, reason: String },
 }
 
 // Type alias for the concrete client handle we store.
@@ -301,6 +308,57 @@ impl McpClientManager {
             .find(|server| server.name == name)
             .and_then(|server| server.client.peer_info())
             .map(|info| info.capabilities.clone())
+    }
+
+    /// Find the client handle for a running server by name.
+    fn client_for(&self, name: &str) -> Result<&Arc<McpClient>, McpError> {
+        self.servers
+            .iter()
+            .find(|server| server.name == name)
+            .map(|server| &server.client)
+            .ok_or_else(|| McpError::UnknownServer {
+                name: name.to_string(),
+            })
+    }
+
+    /// List all resources a running server exposes (auto-paginated).
+    pub async fn list_resources(&self, server: &str) -> Result<Vec<Resource>, McpError> {
+        self.client_for(server)?
+            .list_all_resources()
+            .await
+            .map_err(|err| McpError::ResourceOp {
+                server: server.to_string(),
+                reason: err.to_string(),
+            })
+    }
+
+    /// Read a single resource from a running server by URI.
+    pub async fn read_resource(
+        &self,
+        server: &str,
+        uri: &str,
+    ) -> Result<ReadResourceResult, McpError> {
+        self.client_for(server)?
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await
+            .map_err(|err| McpError::ResourceOp {
+                server: server.to_string(),
+                reason: err.to_string(),
+            })
+    }
+
+    /// List the resource templates a running server exposes (auto-paginated).
+    pub async fn list_resource_templates(
+        &self,
+        server: &str,
+    ) -> Result<Vec<ResourceTemplate>, McpError> {
+        self.client_for(server)?
+            .list_all_resource_templates()
+            .await
+            .map_err(|err| McpError::ResourceOp {
+                server: server.to_string(),
+                reason: err.to_string(),
+            })
     }
 
     /// Gracefully shut down all managed MCP server processes.
