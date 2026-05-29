@@ -207,11 +207,12 @@ impl Tool for McpTool {
     }
 }
 
-/// Whether a synthesized resource tool lists or reads.
+/// Which resource operation a synthesized tool performs.
 #[derive(Clone, Copy)]
 enum ResourceOp {
     List,
     Read,
+    ListTemplates,
 }
 
 /// A host-synthesized tool exposing a server's MCP resources to the
@@ -264,6 +265,24 @@ impl McpResourceTool {
                 "additionalProperties": false
             }),
             op: ResourceOp::Read,
+            client,
+        }
+    }
+
+    fn list_templates(server: &str, client: Arc<McpClient>) -> Self {
+        Self {
+            name: format!("{server}__list_resource_templates"),
+            description: format!(
+                "List the resource templates the '{server}' MCP server exposes \
+                 (URI templates like scheme://path/{{param}}); fill in the params \
+                 and read the concrete URI with {server}__read_resource."
+            ),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            op: ResourceOp::ListTemplates,
             client,
         }
     }
@@ -343,6 +362,32 @@ impl Tool for McpResourceTool {
                             ));
                         }
                     }
+                }
+                Ok(ToolResult {
+                    output,
+                    is_error: false,
+                })
+            }
+            ResourceOp::ListTemplates => {
+                let templates = self
+                    .client
+                    .list_all_resource_templates()
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+                let mut output = String::new();
+                for template in &templates {
+                    let raw = &template.raw;
+                    output.push_str(&raw.uri_template);
+                    output.push_str(" — ");
+                    output.push_str(&raw.name);
+                    if let Some(description) = raw.description.as_deref() {
+                        output.push_str(": ");
+                        output.push_str(description);
+                    }
+                    output.push('\n');
+                }
+                if output.is_empty() {
+                    output.push_str("(no resource templates)");
                 }
                 Ok(ToolResult {
                     output,
@@ -494,6 +539,7 @@ impl McpClientManager {
             for resource_tool in [
                 McpResourceTool::list(&config.name, Arc::clone(&client)),
                 McpResourceTool::read(&config.name, Arc::clone(&client)),
+                McpResourceTool::list_templates(&config.name, Arc::clone(&client)),
             ] {
                 debug!(
                     server = %config.name,

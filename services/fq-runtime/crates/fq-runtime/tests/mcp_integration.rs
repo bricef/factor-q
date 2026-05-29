@@ -360,3 +360,40 @@ async fn subscribe_delivers_resource_update_notifications() {
 
     manager.shutdown().await;
 }
+
+/// Step 3b (addendum): the model can discover resource templates via a
+/// `<server>__list_resource_templates` tool, so templated resources like
+/// `scheme://path/{param}` can be filled in and read.
+#[tokio::test]
+async fn resource_template_tool_lists_templates() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    let tools = manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    let templates_tool = tools
+        .iter()
+        .find(|t| t.name() == "everything__list_resource_templates")
+        .expect("list_resource_templates tool synthesized");
+
+    let sandbox = ToolSandbox::new();
+    let ctx = ToolContext::new(&sandbox);
+    let listed = templates_tool
+        .execute(&ctx, serde_json::json!({}))
+        .await
+        .expect("list templates");
+    assert!(!listed.is_error);
+    assert!(
+        listed.output.contains("://"),
+        "template listing should contain template URIs, got: {}",
+        listed.output
+    );
+
+    manager.shutdown().await;
+}

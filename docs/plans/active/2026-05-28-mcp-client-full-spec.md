@@ -181,38 +181,41 @@ host-curated injection — so the step splits into sub-chunks:
   `list_resources` / `read_resource` / `list_resource_templates`
   on the manager, by server name (mirrors `server_capabilities`).
   Reusable by both surfaces below.
-- **3b — Model-controlled read tool**: host-fulfilled tool(s)
-  the agent's LLM calls on demand to list/read a server's
-  resources (parallels `McpTool`, per-server). Fits the
-  tools-only LLM surface.
+- **3b — Model-controlled read tools** (the *primary* inclusion
+  mechanism): host-fulfilled tools the agent's LLM calls on demand
+  to **list / read / list-templates** a server's resources
+  (`<server>__list_resources`, `__read_resource`,
+  `__list_resource_templates`; parallel `McpTool`, per-server).
+  The model decides what to read, and resolves templated resources
+  (e.g. `calendar://events/{y}/{m}/{d}`) by filling params into a
+  concrete URI it reads.
 - **3c — Subscribe + notification sink**: `subscribe` plus a
   handler sink for `notifications/resources/{updated,list_changed}`
   (the handler gains state to record/forward them).
-- **3d — Host-curated injection** (decided 2026-05-28): the
-  agent definition declares pinned resources via a `resources:`
-  frontmatter list of `mcp://<server>/<native-uri>` pseudo-URLs
-  (scheme `mcp`, authority = a server named in the `mcp:` block,
-  remainder = that server's native resource URI). At
-  **invocation start** — not per reducer step, consistent with
-  factor-q's invocation-scoped config (no per-step config exists
-  elsewhere) — the harness reads each pinned resource and injects
-  its content into the initial prompt context (app-controlled,
-  per ADR-0013).
+- **3d — Static host-curated inclusion** (reshaped 2026-05-29):
+  a `static_resources:` frontmatter field naming **concrete**
+  `mcp://<server>/<native-uri>` resources the harness always reads
+  and injects into the initial prompt at **invocation start**
+  (app-controlled guaranteed inclusion, per ADR-0013) — distinct
+  from 3b's model-driven discovery, which is the primary path.
+  Concrete URIs only: templates can't be statically pinned (their
+  params are runtime values), so templated resources go through 3b;
+  a declarative template-binding (params from the trigger) is
+  deferred. MCP prescribes no inclusion policy — this is one
+  honest, documented host policy.
 
 **Failing tests first** (against the everything server's resource
-set, confirmed at write-time): list resources; read by URI; read
-via template; the read tool returns content to the agent;
-subscribe + receive `resources/updated`; observe
-`resources/list_changed`; a pinned resource's content appears in
-the assembled prompt context.
+set, confirmed at write-time): list resources; read by URI; list
+templates; the read tool returns content; subscribe + receive
+`resources/updated`; and a `static_resources` concrete pin's
+content appears in the assembled prompt context.
 
 **Done when**
 
-- [ ] Protocol wrappers + read tool + subscribe/notifications
-      green against the pinned server.
-- [ ] Read resource content reaches the agent both via the tool
-      and via host-curated injection (no longer silently
-      dropped at `mcp.rs:99-101`).
+- [x] Protocol wrappers + read/templates tools +
+      subscribe/notifications green against the pinned server.
+- [ ] Read resource content reaches the agent via the tools (done)
+      and via `static_resources` host-curated injection (3d).
 
 ---
 
