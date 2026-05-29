@@ -7,7 +7,7 @@
 //! [`McpClientManager`] owns the lifecycle of MCP server child processes:
 //! starting them, discovering their tools, and shutting them down.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
@@ -624,6 +624,19 @@ impl McpClientManager {
             })
     }
 
+    /// A cloneable read-only handle for reading resources from the
+    /// currently-running servers — used to inject `static_resources`
+    /// at invocation start without sharing the manager's lifecycle.
+    pub fn resource_reader(&self) -> McpResourceReader {
+        McpResourceReader {
+            clients: self
+                .servers
+                .iter()
+                .map(|server| (server.name.clone(), Arc::clone(&server.client)))
+                .collect(),
+        }
+    }
+
     /// Subscribe to update notifications for a resource on a server.
     /// Updates arrive via [`Self::recv_resource_notification`].
     pub async fn subscribe(&self, server: &str, uri: &str) -> Result<(), McpError> {
@@ -673,6 +686,39 @@ impl McpClientManager {
         }
         self.servers.clear();
         self.started.clear();
+    }
+}
+
+/// A cheap, cloneable read-only handle over a manager's connected
+/// servers for reading resources, without the manager's `&mut`
+/// lifecycle. [`ReducerContext`](crate::ReducerContext) holds one so
+/// the runner can read `static_resources` pins at invocation start
+/// while `main` keeps the manager for graceful shutdown.
+#[derive(Clone, Default)]
+pub struct McpResourceReader {
+    clients: HashMap<String, Arc<McpClient>>,
+}
+
+impl McpResourceReader {
+    /// Read a resource by `(server, uri)`.
+    pub async fn read_resource(
+        &self,
+        server: &str,
+        uri: &str,
+    ) -> Result<ReadResourceResult, McpError> {
+        let client = self
+            .clients
+            .get(server)
+            .ok_or_else(|| McpError::UnknownServer {
+                name: server.to_string(),
+            })?;
+        client
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await
+            .map_err(|err| McpError::ResourceOp {
+                server: server.to_string(),
+                reason: err.to_string(),
+            })
     }
 }
 

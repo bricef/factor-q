@@ -397,3 +397,37 @@ async fn resource_template_tool_lists_templates() {
 
     manager.shutdown().await;
 }
+
+/// Step 3d (foundation): the manager hands out a cloneable read-only
+/// resource handle that reads by (server, uri) — the handle
+/// ReducerContext holds for static_resources injection.
+#[tokio::test]
+async fn resource_reader_reads_by_server_and_uri() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    let uri = manager
+        .list_resources("everything")
+        .await
+        .expect("list resources")[0]
+        .raw
+        .uri
+        .clone();
+
+    let reader = manager.resource_reader();
+    let result = reader
+        .read_resource("everything", &uri)
+        .await
+        .expect("read via handle");
+    assert!(!result.contents.is_empty(), "handle should read contents");
+
+    manager.shutdown().await;
+}
