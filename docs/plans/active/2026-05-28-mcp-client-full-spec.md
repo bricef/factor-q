@@ -217,6 +217,36 @@ content appears in the assembled prompt context.
 - [ ] Read resource content reaches the agent via the tools (done)
       and via `static_resources` host-curated injection (3d).
 
+**Step 3d sub-steps** (foundations committed; 3d-iii remains):
+
+- **3d-i** ✅ (`fb97944`) — `McpResourceReader`: a cloneable,
+  read-only handle (per-server client `Arc`s) the manager hands
+  out. **Decision (2026-05-29):** the runner gets read access via
+  this handle, *not* by sharing the whole `McpClientManager` — the
+  manager keeps its `&mut shutdown()` in `main.rs`; `ReducerContext`
+  holds the handle.
+- **3d-ii** ✅ (`beb5f19`) — `static_resources:` agent-def field +
+  `StaticResourcePin::parse` (`mcp://<server>/<native-uri>`,
+  concrete only).
+- **3d-iii** ⬜ — the wiring:
+  1. `ReducerContext` gains `resources: Option<McpResourceReader>`
+     via a `with_resources()` builder (optional field — no
+     `ReducerRunner::new` signature change).
+  2. `StepInput` gains a static-resource-content field; the harness
+     `initial_step` injects it as a context message after the
+     system prompt. The pure reducer does no I/O — the runner reads
+     first and passes content in.
+  3. The runner's `run()` reads the agent's `static_resources` pins
+     via the handle *before* the step loop and passes the content
+     into the first `StepInput` (step 0 only; `resume()` does not
+     re-inject — pins are already in persisted state).
+  4. `main.rs` wires `mcp_manager.resource_reader()` into both
+     `ReducerContext` construction sites; the manager stays alive
+     for `shutdown()`.
+  5. e2e test: an agent with a `static_resources` pin sees that
+     resource's content in its first model request (mock-LLM
+     harness + the pinned everything server).
+
 ---
 
 ### Step 4 — Prompts + Completion (P2)
