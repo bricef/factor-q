@@ -41,6 +41,41 @@ pub struct McpServerDeclaration {
     pub env: Vec<(String, String)>,
 }
 
+/// A concrete MCP resource statically pinned for guaranteed inclusion
+/// (the `static_resources:` frontmatter field). Parsed from a
+/// `mcp://<server>/<native-uri>` URL: `server` names a server in the
+/// `mcp:` block; `uri` is that server's native resource URI. Concrete
+/// only — templated resources are model-driven via the read tools,
+/// not statically pinned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticResourcePin {
+    pub server: String,
+    pub uri: String,
+}
+
+impl StaticResourcePin {
+    /// Parse a `mcp://<server>/<native-uri>` pin.
+    pub fn parse(s: &str) -> Result<Self, BuildError> {
+        let rest = s.strip_prefix("mcp://").ok_or_else(|| {
+            BuildError::InvalidStaticResource(format!("{s:?}: must start with mcp://"))
+        })?;
+        let (server, uri) = rest.split_once('/').ok_or_else(|| {
+            BuildError::InvalidStaticResource(format!(
+                "{s:?}: missing /<resource-uri> after the server name"
+            ))
+        })?;
+        if server.is_empty() || uri.is_empty() {
+            return Err(BuildError::InvalidStaticResource(format!(
+                "{s:?}: server and resource uri must both be non-empty"
+            )));
+        }
+        Ok(Self {
+            server: server.to_string(),
+            uri: uri.to_string(),
+        })
+    }
+}
+
 /// A validated agent ready to be executed.
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -52,6 +87,7 @@ pub struct Agent {
     budget: Option<f64>,
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
+    static_resources: Vec<StaticResourcePin>,
 }
 
 impl Agent {
@@ -90,6 +126,12 @@ impl Agent {
 
     pub fn mcp_servers(&self) -> &[McpServerDeclaration] {
         &self.mcp_servers
+    }
+
+    /// Concrete MCP resources to always read and inject at invocation
+    /// start (the `static_resources:` frontmatter field).
+    pub fn static_resources(&self) -> &[StaticResourcePin] {
+        &self.static_resources
     }
 
     /// Produce a [`ConfigSnapshot`] for inclusion in a `Triggered` event.
@@ -321,6 +363,7 @@ pub struct AgentBuilder {
     budget: Option<f64>,
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
+    static_resources: Vec<StaticResourcePin>,
 }
 
 impl AgentBuilder {
@@ -377,6 +420,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn static_resources(mut self, pins: Vec<StaticResourcePin>) -> Self {
+        self.static_resources = pins;
+        self
+    }
+
     /// Finalise construction, validating required fields.
     pub fn build(self) -> Result<Agent, BuildError> {
         let id_str = self.id.ok_or(BuildError::MissingField("id"))?;
@@ -406,6 +454,7 @@ impl AgentBuilder {
             budget: self.budget,
             trigger: self.trigger,
             mcp_servers: self.mcp_servers,
+            static_resources: self.static_resources,
         })
     }
 }
@@ -424,6 +473,9 @@ pub enum BuildError {
 
     #[error("invalid budget: must be finite and non-negative, got {0}")]
     InvalidBudget(f64),
+
+    #[error("invalid static_resources entry: {0}")]
+    InvalidStaticResource(String),
 }
 
 #[cfg(test)]

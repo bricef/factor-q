@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use super::{Agent, BuildError, McpServerDeclaration, Sandbox};
+use super::{Agent, BuildError, McpServerDeclaration, Sandbox, StaticResourcePin};
 
 /// Parse an agent definition from the raw Markdown content.
 ///
@@ -46,13 +46,20 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
         })
         .collect();
 
+    let static_resources = frontmatter
+        .static_resources
+        .iter()
+        .map(|s| StaticResourcePin::parse(s))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut builder = Agent::builder()
         .id(frontmatter.name)
         .model(frontmatter.model)
         .system_prompt(body)
         .tools(frontmatter.tools)
         .sandbox(sandbox)
-        .mcp_servers(mcp_servers);
+        .mcp_servers(mcp_servers)
+        .static_resources(static_resources);
 
     if let Some(budget) = frontmatter.budget {
         builder = builder.budget(budget);
@@ -78,6 +85,8 @@ struct Frontmatter {
     trigger: Option<String>,
     #[serde(default)]
     mcp: Vec<McpFrontmatter>,
+    #[serde(default)]
+    static_resources: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,6 +373,47 @@ Prompt.
 "#;
         let agent = parse_agent(content).unwrap();
         assert!(agent.mcp_servers().is_empty());
+    }
+
+    #[test]
+    fn parses_static_resources() {
+        let content = r#"---
+name: pinned
+model: claude-haiku
+mcp:
+  - server: everything
+    command: npx
+    args:
+      - "@modelcontextprotocol/server-everything"
+static_resources:
+  - "mcp://everything/test://static/resource/1"
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        assert_eq!(agent.static_resources().len(), 1);
+        let pin = &agent.static_resources()[0];
+        assert_eq!(pin.server, "everything");
+        assert_eq!(pin.uri, "test://static/resource/1");
+    }
+
+    #[test]
+    fn rejects_malformed_static_resource() {
+        let content = r#"---
+name: broken
+model: claude-haiku
+static_resources:
+  - "not-a-pin"
+---
+
+Prompt.
+"#;
+        let err = parse_agent(content).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidAgent(BuildError::InvalidStaticResource(_))
+        ));
     }
 
     #[test]
