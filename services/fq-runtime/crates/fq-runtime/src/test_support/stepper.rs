@@ -79,6 +79,7 @@ impl<R: Reducer> ManualStepper<R> {
             now_ms,
             random_seed,
             step_index: self.step_index,
+            static_resource_context: None,
         };
         let output = self
             .reducer

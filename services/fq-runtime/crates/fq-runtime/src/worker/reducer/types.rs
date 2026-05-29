@@ -84,6 +84,16 @@ pub struct StepInput {
     pub random_seed: u64,
     /// Monotonic counter starting at 0.
     pub step_index: u32,
+    /// Host-curated context assembled from the agent's
+    /// `static_resources` pins (MCP resource content the host
+    /// read at invocation start). `Some` only on step 0; the
+    /// reducer injects it once after the system prompt. `None`
+    /// when no pins are declared, on every non-initial step, and
+    /// on resume (the content is already in the persisted state).
+    /// The reducer does no I/O — the runner reads the pins and
+    /// passes the rendered content in here.
+    #[serde(default)]
+    pub static_resource_context: Option<String>,
 }
 
 /// Output of one invocation of `step`.

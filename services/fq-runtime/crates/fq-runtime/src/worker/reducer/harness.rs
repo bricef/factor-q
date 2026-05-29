@@ -110,6 +110,19 @@ fn initial_step(input: StepInput, state: &mut HarnessState) -> Result<StepOutput
         tool_calls: vec![],
         tool_call_id: None,
     });
+    // Host-curated `static_resources` content, injected once right
+    // after the system prompt and before the trigger. The runner
+    // read the pins at invocation start (the reducer does no I/O);
+    // `None` here means no pins, or this is a resumed invocation
+    // where the content already lives in the persisted history.
+    if let Some(context) = &input.static_resource_context {
+        state.messages.push(Message {
+            role: MessageRole::User,
+            content: Some(context.clone()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+    }
     state.messages.push(Message {
         role: MessageRole::User,
         content: Some(payload_to_user_message(&input.trigger)),
@@ -413,6 +426,7 @@ mod tests {
             now_ms: 1_000_000 + step_index as u64,
             random_seed: step_index as u64,
             step_index,
+            static_resource_context: None,
         }
     }
 
@@ -589,6 +603,7 @@ mod tests {
             now_ms: idx as u64,
             random_seed: idx as u64,
             step_index: idx,
+            static_resource_context: None,
         };
 
         let s0 = h.step(mk(vec![], None, 0)).unwrap();
@@ -626,6 +641,7 @@ mod tests {
             now_ms: idx as u64,
             random_seed: idx as u64,
             step_index: idx,
+            static_resource_context: None,
         };
 
         let s0 = h.step(mk(vec![], None, 0)).unwrap();

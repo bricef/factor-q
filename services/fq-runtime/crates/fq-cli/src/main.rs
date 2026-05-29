@@ -600,7 +600,9 @@ async fn trigger_agent(
     let cli_worker_id = fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string())
         .expect("uuid is a valid worker id");
     let runner = fq_runtime::ReducerRunner::new(
-        Arc::new(fq_runtime::ReducerContext::new(tools)),
+        Arc::new(
+            fq_runtime::ReducerContext::new(tools).with_resources(mcp_manager.resource_reader()),
+        ),
         Arc::new(fq_runtime::RunnerConfig::new(
             bus,
             pricing,
@@ -1289,7 +1291,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // / archive / coordination wiring.
     let resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> =
         Arc::new(fq_runtime::ReducerRunner::new(
-            Arc::new(fq_runtime::ReducerContext::new(tools)),
+            Arc::new(
+                fq_runtime::ReducerContext::new(tools)
+                    .with_resources(mcp_manager.resource_reader()),
+            ),
             Arc::new(fq_runtime::RunnerConfig::new(
                 bus.clone(),
                 pricing,

@@ -431,3 +431,152 @@ async fn resource_reader_reads_by_server_and_uri() {
 
     manager.shutdown().await;
 }
+
+/// Step 3d (iii) — end-to-end: an agent that declares a concrete
+/// `static_resources` pin sees that resource's content in its very
+/// first model request. Exercises the full wiring — the manager's
+/// resource handle on `ReducerContext`, the runner reading pins
+/// before the step loop, and the harness injecting the rendered
+/// content after the system prompt. Drives a real everything server
+/// with a scripted (fixture) LLM so the assertion is on what the
+/// model was actually sent.
+///
+/// Needs both `npx` (the server) and NATS (the runner publishes the
+/// canonical event sequence); skips if either is absent.
+#[tokio::test]
+async fn static_resource_pin_appears_in_first_model_request() {
+    use std::collections::HashMap;
+
+    use fq_runtime::events::{StopReason, TokenUsage, TriggerSource};
+    use fq_runtime::llm::fixture::FixtureClient;
+    use fq_runtime::{
+        Agent, ChatResponse, EventBus, Harness, ModelPricing, PricingTable, ReducerContext,
+        ReducerRunner, RunnerConfig, ToolRegistry, WorkerStore,
+    };
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
+        eprintln!("skipping: FQ_NATS_URL not set");
+        return;
+    };
+
+    // Start the everything server and pick a concrete resource to pin.
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+    let uri = manager
+        .list_resources("everything")
+        .await
+        .expect("list resources")[0]
+        .raw
+        .uri
+        .clone();
+    // The exact text the runner will inject for this pin — rendered
+    // through the same shared helper the runner uses.
+    let read = manager
+        .read_resource("everything", &uri)
+        .await
+        .expect("read pinned resource");
+    let expected_body = fq_runtime::mcp::render_resource_contents(&read);
+    assert!(
+        !expected_body.is_empty(),
+        "pinned resource should render to non-empty content"
+    );
+
+    // An agent that statically pins that resource.
+    let pin = fq_runtime::agent::StaticResourcePin {
+        server: "everything".to_string(),
+        uri: uri.clone(),
+    };
+    let agent = Agent::builder()
+        .id("static-resource-e2e")
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(1.0)
+        .static_resources(vec![pin])
+        .build()
+        .expect("build agent");
+
+    // Scripted model: a single end-turn response ends the invocation
+    // after exactly one model request — the one we inspect.
+    let llm = FixtureClient::new();
+    llm.push_response(ChatResponse {
+        content: Some("done.".to_string()),
+        tool_calls: vec![],
+        stop_reason: StopReason::EndTurn,
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
+
+    // Host machinery: NATS bus + a throwaway worker store.
+    let bus = EventBus::connect(&nats_url).await.expect("connect to NATS");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&store_dir.path().join("events.db"))
+            .await
+            .expect("open worker store"),
+    );
+    let mut pricing = HashMap::new();
+    pricing.insert(
+        "claude-haiku".to_string(),
+        ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    );
+    let worker_id =
+        fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string()).expect("worker id");
+
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))
+                .with_resources(manager.resource_reader()),
+        ),
+        Arc::new(RunnerConfig::new(
+            bus,
+            Arc::new(PricingTable::from_map(pricing)),
+            store,
+            worker_id,
+        )),
+        Harness::new(),
+    );
+
+    runner
+        .run(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            serde_json::json!("hello"),
+        )
+        .await
+        .expect("invocation runs to completion");
+
+    // The fixture client recorded every request it saw; the first
+    // is step 0's model request — it must carry the pinned resource.
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 1, "exactly one model request was made");
+    let first = &requests[0];
+    assert!(
+        first.messages.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|c| c.contains(&expected_body))),
+        "the pinned resource's content must appear in the first model request; \
+         messages were: {:?}",
+        first.messages
+    );
+
+    manager.shutdown().await;
+}

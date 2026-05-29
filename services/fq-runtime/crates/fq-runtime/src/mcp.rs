@@ -345,26 +345,8 @@ impl Tool for McpResourceTool {
                     .read_resource(ReadResourceRequestParams::new(uri))
                     .await
                     .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
-                let mut output = String::new();
-                for contents in &result.contents {
-                    match contents {
-                        ResourceContents::TextResourceContents { text, .. } => {
-                            output.push_str(text);
-                            output.push('\n');
-                        }
-                        ResourceContents::BlobResourceContents {
-                            blob, mime_type, ..
-                        } => {
-                            output.push_str(&format!(
-                                "[binary resource: {} base64 chars, mime {}]\n",
-                                blob.len(),
-                                mime_type.as_deref().unwrap_or("unknown")
-                            ));
-                        }
-                    }
-                }
                 Ok(ToolResult {
-                    output,
+                    output: render_resource_contents(&result),
                     is_error: false,
                 })
             }
@@ -720,6 +702,34 @@ impl McpResourceReader {
                 reason: err.to_string(),
             })
     }
+}
+
+/// Render a [`ReadResourceResult`]'s contents into a plain-text
+/// block. Text contents are concatenated verbatim; binary (blob)
+/// contents are summarised with their size and mime type, since
+/// they are not meaningful as model-visible text. Shared by the
+/// model-controlled read tool ([`McpResourceTool`]) and the
+/// runner's `static_resources` injection so both render identically.
+pub fn render_resource_contents(result: &ReadResourceResult) -> String {
+    let mut output = String::new();
+    for contents in &result.contents {
+        match contents {
+            ResourceContents::TextResourceContents { text, .. } => {
+                output.push_str(text);
+                output.push('\n');
+            }
+            ResourceContents::BlobResourceContents {
+                blob, mime_type, ..
+            } => {
+                output.push_str(&format!(
+                    "[binary resource: {} base64 chars, mime {}]\n",
+                    blob.len(),
+                    mime_type.as_deref().unwrap_or("unknown")
+                ));
+            }
+        }
+    }
+    output
 }
 
 #[cfg(test)]

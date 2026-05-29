@@ -49,7 +49,7 @@ pub use control_plane::{
     CoordinationConsumerError, HeartbeatConsumer, HeartbeatConsumerError, OwnerStatus,
 };
 pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
-pub use mcp::{McpClientManager, McpError, McpServerConfig};
+pub use mcp::{McpClientManager, McpError, McpResourceReader, McpServerConfig};
 pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;
 pub use worker::{

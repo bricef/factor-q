@@ -214,10 +214,10 @@ content appears in the assembled prompt context.
 
 - [x] Protocol wrappers + read/templates tools +
       subscribe/notifications green against the pinned server.
-- [ ] Read resource content reaches the agent via the tools (done)
+- [x] Read resource content reaches the agent via the tools (done)
       and via `static_resources` host-curated injection (3d).
 
-**Step 3d sub-steps** (foundations committed; 3d-iii remains):
+**Step 3d sub-steps** (all committed):
 
 - **3d-i** ✅ (`fb97944`) — `McpResourceReader`: a cloneable,
   read-only handle (per-server client `Arc`s) the manager hands
@@ -228,24 +228,28 @@ content appears in the assembled prompt context.
 - **3d-ii** ✅ (`beb5f19`) — `static_resources:` agent-def field +
   `StaticResourcePin::parse` (`mcp://<server>/<native-uri>`,
   concrete only).
-- **3d-iii** ⬜ — the wiring:
-  1. `ReducerContext` gains `resources: Option<McpResourceReader>`
+- **3d-iii** ✅ — the wiring:
+  1. `ReducerContext` gained `resources: Option<McpResourceReader>`
      via a `with_resources()` builder (optional field — no
      `ReducerRunner::new` signature change).
-  2. `StepInput` gains a static-resource-content field; the harness
-     `initial_step` injects it as a context message after the
-     system prompt. The pure reducer does no I/O — the runner reads
-     first and passes content in.
+  2. `StepInput` gained `static_resource_context: Option<String>`;
+     the harness `initial_step` injects it as a context message
+     after the system prompt. The pure reducer does no I/O — the
+     runner reads first and passes content in.
   3. The runner's `run()` reads the agent's `static_resources` pins
-     via the handle *before* the step loop and passes the content
-     into the first `StepInput` (step 0 only; `resume()` does not
-     re-inject — pins are already in persisted state).
+     via the handle *before* the step loop (best-effort: a pin that
+     fails to read is logged and skipped) and passes the rendered
+     content into step 0 only; `run_loop_inner` nulls it on every
+     later step and `resume()` never re-injects (pins are already
+     in persisted state). Rendering is shared with the read tool
+     via `mcp::render_resource_contents`.
   4. `main.rs` wires `mcp_manager.resource_reader()` into both
      `ReducerContext` construction sites; the manager stays alive
      for `shutdown()`.
-  5. e2e test: an agent with a `static_resources` pin sees that
-     resource's content in its first model request (mock-LLM
-     harness + the pinned everything server).
+  5. e2e test `static_resource_pin_appears_in_first_model_request`:
+     an agent with a `static_resources` pin sees that resource's
+     content in its first model request (FixtureClient mock-LLM +
+     the pinned everything server).
 
 ---
 

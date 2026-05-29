@@ -39,6 +39,7 @@ use crate::events::{
     ToolCallPayload, ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
+use crate::mcp::McpResourceReader;
 use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
 use crate::worker::store::{
@@ -60,11 +61,28 @@ const HOST_STEP_BUDGET: u32 = 1_000;
 pub struct ReducerContext {
     /// Tools the agent may call.
     tools: Arc<ToolRegistry>,
+    /// Read-only handle over the running MCP servers, used to read
+    /// the agent's `static_resources` pins at invocation start.
+    /// `None` when no MCP servers are wired (e.g. most tests);
+    /// set via [`ReducerContext::with_resources`].
+    resources: Option<McpResourceReader>,
 }
 
 impl ReducerContext {
     pub fn new(tools: Arc<ToolRegistry>) -> Self {
-        Self { tools }
+        Self {
+            tools,
+            resources: None,
+        }
+    }
+
+    /// Attach a read-only MCP resource handle so the runner can
+    /// inject `static_resources` content at invocation start.
+    /// Optional builder-style setter — adding it does not change
+    /// [`ReducerRunner::new`]'s signature.
+    pub fn with_resources(mut self, resources: McpResourceReader) -> Self {
+        self.resources = Some(resources);
+        self
     }
 }
 
@@ -200,6 +218,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let started_at_ms = unix_now_ms();
         let step_index_start: u32 = 0;
 
+        // Read the agent's `static_resources` pins once, before the
+        // step loop, and hand the rendered content to step 0 only.
+        // Resume does *not* re-inject — the content is already in
+        // the persisted conversation history (see `resume`).
+        let static_context = self.read_static_resources(agent).await;
+
         self.run_loop_inner(
             agent,
             llm,
@@ -214,6 +238,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             totals,
             start,
             started_at_ms,
+            static_context,
             &mut cursor,
         )
         .await
@@ -348,6 +373,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 now_ms: now_ms(),
                 random_seed: rand_u64(),
                 step_index,
+                // Replay reconstructs persisted state; pins were
+                // already injected on the original step 0.
+                static_resource_context: None,
             };
             let output = self.reducer.step(input).map_err(|e| {
                 ExecutorError::WorkerStore(format!("replay step {step_index} failed: {e}"))
@@ -381,6 +409,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             totals,
             start,
             state_row.started_at,
+            // Resume never re-injects static_resources: the pins'
+            // content is already in the replayed conversation
+            // history persisted on the original step 0.
+            None,
             &mut cursor,
         )
         .await
@@ -406,6 +438,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         mut totals: InvocationTotals,
         start: Instant,
         started_at_ms: i64,
+        static_context: Option<String>,
         cursor: &mut Option<Uuid>,
     ) -> Result<InvocationOutcome, ExecutorError> {
         for step_index in step_index_start..HOST_STEP_BUDGET {
@@ -417,6 +450,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 now_ms: now_ms(),
                 random_seed: rand_u64(),
                 step_index,
+                // Static-resource content is injected exactly once,
+                // on step 0. Later steps and resumed runs carry it
+                // in the reducer's persisted conversation history.
+                static_resource_context: if step_index == 0 {
+                    static_context.clone()
+                } else {
+                    None
+                },
             };
 
             let output = match self.reducer.step(input) {
@@ -614,6 +655,63 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         )
         .await?;
         Err(ExecutorError::MaxIterationsExceeded)
+    }
+
+    /// Read the agent's `static_resources` pins through the MCP
+    /// resource handle and render them into a single context
+    /// block for injection at step 0. Returns `None` when the
+    /// agent declares no pins, when no resource handle is wired,
+    /// or when none of the pins could be read.
+    ///
+    /// Best-effort by design: a pin that fails to read is logged
+    /// and skipped rather than failing the invocation. The host
+    /// curates these for guaranteed *inclusion*, but a transient
+    /// read failure against a third-party server should degrade
+    /// to "context omitted", not "invocation dead".
+    async fn read_static_resources(&self, agent: &Agent) -> Option<String> {
+        let pins = agent.static_resources();
+        if pins.is_empty() {
+            return None;
+        }
+        let Some(reader) = self.context.resources.as_ref() else {
+            warn!(
+                agent_id = %agent.id(),
+                "agent declares static_resources but no MCP resource handle is wired; \
+                 skipping injection"
+            );
+            return None;
+        };
+
+        let mut sections = Vec::new();
+        for pin in pins {
+            match reader.read_resource(&pin.server, &pin.uri).await {
+                Ok(result) => {
+                    let body = crate::mcp::render_resource_contents(&result);
+                    sections.push(format!(
+                        "Resource mcp://{}/{}:\n{}",
+                        pin.server, pin.uri, body
+                    ));
+                }
+                Err(err) => {
+                    warn!(
+                        agent_id = %agent.id(),
+                        server = %pin.server,
+                        uri = %pin.uri,
+                        error = %err,
+                        "failed to read static_resources pin; omitting it from injected context"
+                    );
+                }
+            }
+        }
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "The following resources were provided as context for this invocation:\n\n{}",
+                sections.join("\n\n")
+            ))
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1843,6 +1941,7 @@ mod tests {
                 now_ms: 0,
                 random_seed: 0,
                 step_index: 0,
+                static_resource_context: None,
             })
             .unwrap();
         // Suspended snapshot.
@@ -1868,6 +1967,7 @@ mod tests {
                 now_ms: 1,
                 random_seed: 1,
                 step_index: 1,
+                static_resource_context: None,
             })
             .unwrap();
 
@@ -1996,6 +2096,7 @@ mod tests {
             now_ms: idx as u64,
             random_seed: idx as u64,
             step_index: idx,
+            static_resource_context: None,
         };
 
         // Step 0: seed → CallModel.
@@ -2820,6 +2921,7 @@ mod tests {
             now_ms: 0,
             random_seed: 0,
             step_index: 0,
+            static_resource_context: None,
         };
         let s0_output = harness.step(s0_input).expect("step 0");
 
