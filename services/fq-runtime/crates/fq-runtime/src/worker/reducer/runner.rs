@@ -56,39 +56,72 @@ const HOST_STEP_BUDGET: u32 = 1_000;
 /// Agent-relevant context for an invocation: the services and
 /// (future) policy/metadata the agent can use or should know,
 /// held read-only. Open to addition — new agent-facing
-/// dependencies become fields here (with builder-style setters
-/// for optional ones) without changing [`ReducerRunner::new`].
+/// dependencies become fields here, wired through
+/// [`ReducerContextBuilder`], without changing
+/// [`ReducerRunner::new`].
+///
+/// Constructed via [`ReducerContext::builder`]; the fields are
+/// private so the builder is the single construction surface.
 pub struct ReducerContext {
     /// Tools the agent may call.
     tools: Arc<ToolRegistry>,
     /// Read-only handle over the running MCP servers, used to read
     /// the agent's `static_resources` pins at invocation start.
-    /// `None` when no MCP servers are wired (e.g. most tests);
-    /// set via [`ReducerContext::with_resources`].
+    /// `None` when no MCP servers are wired (e.g. most tests).
     resources: Option<McpResourceReader>,
 }
 
 impl ReducerContext {
-    pub fn new(tools: Arc<ToolRegistry>) -> Self {
-        Self {
-            tools,
-            resources: None,
-        }
+    /// Start building a context. `tools` is required; `resources`
+    /// is optional. See [`ReducerContextBuilder`].
+    pub fn builder() -> ReducerContextBuilder {
+        ReducerContextBuilder::default()
+    }
+}
+
+/// Fluent builder for [`ReducerContext`]. `tools` is required;
+/// optional fields default to absent. [`build`](Self::build)
+/// panics if a required field was not set — every construction
+/// site is internal and known at compile time, so a missing field
+/// is a programmer error rather than a runtime condition.
+#[derive(Default)]
+pub struct ReducerContextBuilder {
+    tools: Option<Arc<ToolRegistry>>,
+    resources: Option<McpResourceReader>,
+}
+
+impl ReducerContextBuilder {
+    /// Tools the agent may call (required).
+    pub fn tools(mut self, tools: Arc<ToolRegistry>) -> Self {
+        self.tools = Some(tools);
+        self
     }
 
-    /// Attach a read-only MCP resource handle so the runner can
-    /// inject `static_resources` content at invocation start.
-    /// Optional builder-style setter — adding it does not change
-    /// [`ReducerRunner::new`]'s signature.
-    pub fn with_resources(mut self, resources: McpResourceReader) -> Self {
+    /// Read-only MCP resource handle so the runner can inject
+    /// `static_resources` content at invocation start (optional).
+    pub fn resources(mut self, resources: McpResourceReader) -> Self {
         self.resources = Some(resources);
         self
+    }
+
+    /// Finalise the context. Panics if `tools` was not set.
+    pub fn build(self) -> ReducerContext {
+        ReducerContext {
+            tools: self
+                .tools
+                .expect("ReducerContext::builder() requires .tools(..)"),
+            resources: self.resources,
+        }
     }
 }
 
 /// Platform machinery the host loop runs on — not agent-facing.
 /// Open to addition — new platform dependencies become fields
-/// here without changing [`ReducerRunner::new`].
+/// here, wired through [`RunnerConfigBuilder`], without changing
+/// [`ReducerRunner::new`].
+///
+/// Constructed via [`RunnerConfig::builder`]; the fields are
+/// private so the builder is the single construction surface.
 pub struct RunnerConfig {
     /// Event bus for publishing the canonical event sequence.
     bus: EventBus,
@@ -103,17 +136,62 @@ pub struct RunnerConfig {
 }
 
 impl RunnerConfig {
-    pub fn new(
-        bus: EventBus,
-        pricing: Arc<PricingTable>,
-        store: Arc<WorkerStore>,
-        worker_id: WorkerId,
-    ) -> Self {
-        Self {
-            bus,
-            pricing,
-            store,
-            worker_id,
+    /// Start building the platform config. All four fields are
+    /// required; see [`RunnerConfigBuilder`].
+    pub fn builder() -> RunnerConfigBuilder {
+        RunnerConfigBuilder::default()
+    }
+}
+
+/// Fluent builder for [`RunnerConfig`]. Every field is required;
+/// [`build`](Self::build) panics if any was not set — the
+/// construction sites are internal and known at compile time.
+#[derive(Default)]
+pub struct RunnerConfigBuilder {
+    bus: Option<EventBus>,
+    pricing: Option<Arc<PricingTable>>,
+    store: Option<Arc<WorkerStore>>,
+    worker_id: Option<WorkerId>,
+}
+
+impl RunnerConfigBuilder {
+    /// Event bus for publishing the canonical event sequence.
+    pub fn bus(mut self, bus: EventBus) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Model→price lookup for cost accounting.
+    pub fn pricing(mut self, pricing: Arc<PricingTable>) -> Self {
+        self.pricing = Some(pricing);
+        self
+    }
+
+    /// Three-state WAL / invocation-state persistence.
+    pub fn store(mut self, store: Arc<WorkerStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Identity of the worker hosting this runner.
+    pub fn worker_id(mut self, worker_id: WorkerId) -> Self {
+        self.worker_id = Some(worker_id);
+        self
+    }
+
+    /// Finalise the config. Panics if any field was not set.
+    pub fn build(self) -> RunnerConfig {
+        RunnerConfig {
+            bus: self.bus.expect("RunnerConfig::builder() requires .bus(..)"),
+            pricing: self
+                .pricing
+                .expect("RunnerConfig::builder() requires .pricing(..)"),
+            store: self
+                .store
+                .expect("RunnerConfig::builder() requires .store(..)"),
+            worker_id: self
+                .worker_id
+                .expect("RunnerConfig::builder() requires .worker_id(..)"),
         }
     }
 }
@@ -1858,13 +1936,19 @@ mod tests {
                 .expect("worker store"),
         );
         let runner = ReducerRunner::new(
-            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
-            Arc::new(RunnerConfig::new(
-                bus.clone(),
-                test_pricing(),
-                store,
-                test_worker_id(),
-            )),
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus.clone())
+                    .pricing(test_pricing())
+                    .store(store)
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
             Harness::new(),
         );
         let _ = runner
@@ -2014,13 +2098,19 @@ mod tests {
                 .expect("worker store"),
         );
         let runner = ReducerRunner::new(
-            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
-            Arc::new(RunnerConfig::new(
-                bus.clone(),
-                test_pricing(),
-                store,
-                test_worker_id(),
-            )),
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus.clone())
+                    .pricing(test_pricing())
+                    .store(store)
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
             Harness::new(),
         );
 
@@ -2268,13 +2358,19 @@ mod tests {
             llm.push_response(r);
         }
         let runner = ReducerRunner::new(
-            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
-            Arc::new(RunnerConfig::new(
-                bus.clone(),
-                test_pricing(),
-                store.clone(),
-                test_worker_id(),
-            )),
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus.clone())
+                    .pricing(test_pricing())
+                    .store(store.clone())
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
             Harness::new(),
         );
         let outcome = runner
@@ -2973,13 +3069,19 @@ mod tests {
         // Resume.
         let bus = EventBus::connect(&url).await.unwrap();
         let runner = ReducerRunner::new(
-            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
-            Arc::new(RunnerConfig::new(
-                bus,
-                test_pricing(),
-                store.clone(),
-                test_worker_id(),
-            )),
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus)
+                    .pricing(test_pricing())
+                    .store(store.clone())
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
             Harness::new(),
         );
         let llm = FixtureClient::new(); // no live responses needed
@@ -3057,13 +3159,19 @@ mod tests {
 
         let bus = EventBus::connect(&url).await.unwrap();
         let runner = ReducerRunner::new(
-            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
-            Arc::new(RunnerConfig::new(
-                bus,
-                test_pricing(),
-                store,
-                test_worker_id(),
-            )),
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus)
+                    .pricing(test_pricing())
+                    .store(store)
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
             Harness::new(),
         );
         let llm = FixtureClient::new();

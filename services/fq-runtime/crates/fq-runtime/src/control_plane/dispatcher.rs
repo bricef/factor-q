@@ -435,13 +435,15 @@ You are a test agent."#
         let worker_id = WorkerId::new(format!("dispatcher-test-{}", Uuid::now_v7().simple()))
             .expect("worker id");
         let worker: Arc<dyn Worker> = Arc::new(ReducerRunner::new(
-            Arc::new(ReducerContext::new(test_tools())),
-            Arc::new(RunnerConfig::new(
-                bus.clone(),
-                test_pricing(),
-                worker_store,
-                worker_id,
-            )),
+            Arc::new(ReducerContext::builder().tools(test_tools()).build()),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus.clone())
+                    .pricing(test_pricing())
+                    .store(worker_store)
+                    .worker_id(worker_id)
+                    .build(),
+            ),
             Harness::new(),
         ));
 

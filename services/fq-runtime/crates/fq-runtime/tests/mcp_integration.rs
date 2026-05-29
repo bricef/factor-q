@@ -540,15 +540,19 @@ async fn static_resource_pin_appears_in_first_model_request() {
 
     let runner = ReducerRunner::new(
         Arc::new(
-            ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))
-                .with_resources(manager.resource_reader()),
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .resources(manager.resource_reader())
+                .build(),
         ),
-        Arc::new(RunnerConfig::new(
-            bus,
-            Arc::new(PricingTable::from_map(pricing)),
-            store,
-            worker_id,
-        )),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(bus)
+                .pricing(Arc::new(PricingTable::from_map(pricing)))
+                .store(store)
+                .worker_id(worker_id)
+                .build(),
+        ),
         Harness::new(),
     );
 

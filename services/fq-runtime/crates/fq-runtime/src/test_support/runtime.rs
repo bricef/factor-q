@@ -685,13 +685,19 @@ mod tests {
             .unwrap();
         let llm = rt.llm_client();
         let runner = ReducerRunner::new(
-            Arc::new(ReducerContext::new(Arc::new(ToolRegistry::with_builtins()))),
-            Arc::new(RunnerConfig::new(
-                rt.bus().clone(),
-                Arc::new(PricingTable::empty()),
-                rt.worker_store().clone(),
-                rt.worker_id().clone(),
-            )),
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(rt.bus().clone())
+                    .pricing(Arc::new(PricingTable::empty()))
+                    .store(rt.worker_store().clone())
+                    .worker_id(rt.worker_id().clone())
+                    .build(),
+            ),
             Harness::new(),
         );
         let outcome = runner

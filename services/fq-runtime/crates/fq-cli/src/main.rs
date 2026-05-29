@@ -601,14 +601,19 @@ async fn trigger_agent(
         .expect("uuid is a valid worker id");
     let runner = fq_runtime::ReducerRunner::new(
         Arc::new(
-            fq_runtime::ReducerContext::new(tools).with_resources(mcp_manager.resource_reader()),
+            fq_runtime::ReducerContext::builder()
+                .tools(tools)
+                .resources(mcp_manager.resource_reader())
+                .build(),
         ),
-        Arc::new(fq_runtime::RunnerConfig::new(
-            bus,
-            pricing,
-            worker_store,
-            cli_worker_id,
-        )),
+        Arc::new(
+            fq_runtime::RunnerConfig::builder()
+                .bus(bus)
+                .pricing(pricing)
+                .store(worker_store)
+                .worker_id(cli_worker_id)
+                .build(),
+        ),
         fq_runtime::Harness::new(),
     );
     let outcome_result = runner
@@ -1292,15 +1297,19 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> =
         Arc::new(fq_runtime::ReducerRunner::new(
             Arc::new(
-                fq_runtime::ReducerContext::new(tools)
-                    .with_resources(mcp_manager.resource_reader()),
+                fq_runtime::ReducerContext::builder()
+                    .tools(tools)
+                    .resources(mcp_manager.resource_reader())
+                    .build(),
             ),
-            Arc::new(fq_runtime::RunnerConfig::new(
-                bus.clone(),
-                pricing,
-                worker_store.clone(),
-                worker_id.clone(),
-            )),
+            Arc::new(
+                fq_runtime::RunnerConfig::builder()
+                    .bus(bus.clone())
+                    .pricing(pricing)
+                    .store(worker_store.clone())
+                    .worker_id(worker_id.clone())
+                    .build(),
+            ),
             fq_runtime::Harness::new(),
         ));
     let worker: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
