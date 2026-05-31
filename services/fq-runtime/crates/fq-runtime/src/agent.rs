@@ -76,6 +76,35 @@ impl StaticResourcePin {
     }
 }
 
+/// Declarative grant for MCP **sampling** (`sampling/createMessage`),
+/// the one server-initiated primitive that spends the agent's model
+/// budget on a server's behalf (ADR-0017 / ADR-0018). Nothing by
+/// default: an agent with no grant declines every sampling request,
+/// no model call.
+///
+/// In v1 this is set programmatically (tests, and any caller that
+/// constructs an [`Agent`] directly); Step 8 parses it from agent
+/// frontmatter into this same shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SamplingGrant {
+    /// Names of MCP servers (from the `mcp:` block) permitted to
+    /// request sampling. A server not listed is declined.
+    pub servers: Vec<String>,
+    /// Optional aggregate sampling sub-budget (USD) within the
+    /// invocation. The runtime declines once cumulative sampling
+    /// spend reaches it, *before* the model call. `None` = bounded
+    /// only by the invocation budget. `Some(0.0)` = granted in
+    /// principle but no spend allowed (useful for tests / dry policy).
+    pub max_cost: Option<f64>,
+}
+
+impl SamplingGrant {
+    /// Whether `server` is permitted to request sampling.
+    pub fn permits(&self, server: &str) -> bool {
+        self.servers.iter().any(|s| s == server)
+    }
+}
+
 /// A validated agent ready to be executed.
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -88,6 +117,7 @@ pub struct Agent {
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
     static_resources: Vec<StaticResourcePin>,
+    sampling: Option<SamplingGrant>,
 }
 
 impl Agent {
@@ -132,6 +162,12 @@ impl Agent {
     /// start (the `static_resources:` frontmatter field).
     pub fn static_resources(&self) -> &[StaticResourcePin] {
         &self.static_resources
+    }
+
+    /// The agent's MCP sampling grant, if any. `None` means no server
+    /// may request sampling (the default — nothing by default).
+    pub fn sampling_grant(&self) -> Option<&SamplingGrant> {
+        self.sampling.as_ref()
     }
 
     /// Produce a [`ConfigSnapshot`] for inclusion in a `Triggered` event.
@@ -364,6 +400,7 @@ pub struct AgentBuilder {
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
     static_resources: Vec<StaticResourcePin>,
+    sampling: Option<SamplingGrant>,
 }
 
 impl AgentBuilder {
@@ -425,6 +462,13 @@ impl AgentBuilder {
         self
     }
 
+    /// Grant MCP sampling to the named servers (see [`SamplingGrant`]).
+    /// Absent by default — nothing by default.
+    pub fn sampling_grant(mut self, grant: SamplingGrant) -> Self {
+        self.sampling = Some(grant);
+        self
+    }
+
     /// Finalise construction, validating required fields.
     pub fn build(self) -> Result<Agent, BuildError> {
         let id_str = self.id.ok_or(BuildError::MissingField("id"))?;
@@ -455,6 +499,7 @@ impl AgentBuilder {
             trigger: self.trigger,
             mcp_servers: self.mcp_servers,
             static_resources: self.static_resources,
+            sampling: self.sampling,
         })
     }
 }

@@ -882,3 +882,254 @@ async fn sampling_request_bridges_to_the_host() {
 
     manager.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Step 5c — Sampling policy, end to end through the runner.
+//
+// A scripted agent calls the everything server's
+// `trigger-sampling-request` tool, which makes the server send
+// `sampling/createMessage` back to the runner mid-tool-call. The
+// runner gates the request against the agent's grant/budget, and (when
+// permitted) answers it on the agent's model through the one
+// budgeted/WAL'd/evented LLM path. These tests assert the policy:
+// permitted → a sampling model call happens; ungranted / over-budget →
+// it is declined with *no* model call.
+// ---------------------------------------------------------------------------
+
+/// The everything server's sampling tool sends this exact system
+/// prompt; spotting it in a recorded model request proves the sampling
+/// completion ran through the runner's LLM path.
+const SAMPLING_SYSTEM_PROMPT: &str = "You are a helpful test server.";
+
+fn saw_sampling_call(requests: &[fq_runtime::ChatRequest]) -> bool {
+    requests.iter().any(|r| {
+        r.messages.iter().any(|m| {
+            m.content
+                .as_deref()
+                .is_some_and(|c| c.contains(SAMPLING_SYSTEM_PROMPT))
+        })
+    })
+}
+
+/// Drive a scripted agent that calls `trigger-sampling-request` under
+/// the given sampling `grant`, against a per-invocation everything
+/// server whose request channel is wired into the runner. Returns the
+/// invocation outcome and every `ChatRequest` the agent model saw (the
+/// sampling completion, when permitted, is one of them). `None` if the
+/// test environment (npx / NATS) is unavailable.
+async fn run_sampling_scenario(
+    grant: Option<fq_runtime::SamplingGrant>,
+) -> Option<(fq_runtime::InvocationOutcome, Vec<fq_runtime::ChatRequest>)> {
+    use std::collections::HashMap;
+
+    use fq_runtime::events::{StopReason, TokenUsage, TriggerSource};
+    use fq_runtime::llm::fixture::FixtureClient;
+    use fq_runtime::{
+        Agent, ChatResponse, EventBus, Harness, ModelPricing, PricingTable, ReducerContext,
+        ReducerRunner, RunnerConfig, SamplingChannel, ToolRegistry, WorkerStore,
+    };
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return None;
+    }
+    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
+        eprintln!("skipping: FQ_NATS_URL not set");
+        return None;
+    };
+
+    // Per-invocation everything server with its inbound request channel.
+    let mut manager = McpClientManager::new();
+    let (tools, rx) = manager
+        .start_server_with_requests(everything_config())
+        .await
+        .expect("start server-everything (per-invocation)");
+
+    let mut registry = ToolRegistry::with_builtins();
+    for tool in tools {
+        registry.register(tool);
+    }
+
+    // Agent permitted to call the sampling tool, with the grant under test.
+    let mut builder = Agent::builder()
+        .id("sampling-policy-e2e")
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(1.0)
+        .tools(["trigger-sampling-request".to_string()]);
+    if let Some(grant) = grant {
+        builder = builder.sampling_grant(grant);
+    }
+    let agent = builder.build().expect("build agent");
+
+    // Scripted model: (1) call the sampling tool, (2) the sampling
+    // completion itself, (3) end the turn. When sampling is declined,
+    // no model call consumes (2), so the agent's step 1 does — the
+    // invocation still completes, just with one fewer model call.
+    let canned = |text: &str| ChatResponse {
+        content: Some(text.to_string()),
+        tool_calls: vec![],
+        stop_reason: StopReason::EndTurn,
+        usage: TokenUsage {
+            input_tokens: 8,
+            output_tokens: 4,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    };
+    let llm = FixtureClient::new();
+    llm.push_response(ChatResponse {
+        content: None,
+        tool_calls: vec![fq_runtime::events::MessageToolCall {
+            tool_call_id: fq_runtime::events::ToolCallId::new("call-sampling").unwrap(),
+            tool_name: "trigger-sampling-request".to_string(),
+            parameters: serde_json::json!({"prompt": "hello from agent", "maxTokens": 16}),
+        }],
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
+    llm.push_response(canned("SAMPLED-ANSWER"));
+    llm.push_response(canned("done."));
+
+    // Host machinery (mirrors the static-resource e2e test).
+    let bus = EventBus::connect(&nats_url).await.expect("connect to NATS");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&store_dir.path().join("events.db"))
+            .await
+            .expect("open worker store"),
+    );
+    let mut pricing = HashMap::new();
+    pricing.insert(
+        "claude-haiku".to_string(),
+        ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    );
+    let worker_id =
+        fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string()).expect("worker id");
+
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(registry))
+                .resources(manager.resource_reader())
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(bus)
+                .pricing(Arc::new(PricingTable::from_map(pricing)))
+                .store(store)
+                .worker_id(worker_id)
+                .build(),
+        ),
+        Harness::new(),
+    );
+
+    let outcome = runner
+        .run_with_server_requests(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            serde_json::json!("go"),
+            Some(SamplingChannel::new("everything", rx)),
+        )
+        .await
+        .expect("invocation runs to completion");
+
+    let requests = llm.requests();
+    manager.shutdown().await;
+    Some((outcome, requests))
+}
+
+/// Permitted: the grant covers the requesting server, so the runner
+/// answers the sampling request on the agent's model — a third model
+/// call (the sampling completion) appears, carrying the server's
+/// system prompt.
+#[tokio::test]
+async fn sampling_permitted_runs_on_the_agent_model() {
+    let grant = fq_runtime::SamplingGrant {
+        servers: vec!["everything".to_string()],
+        max_cost: None,
+    };
+    let Some((outcome, requests)) = run_sampling_scenario(Some(grant)).await else {
+        return;
+    };
+
+    assert!(
+        matches!(outcome, fq_runtime::InvocationOutcome::Completed { .. }),
+        "invocation should complete, got {outcome:?}"
+    );
+    assert!(
+        saw_sampling_call(&requests),
+        "a sampling completion should have run on the agent model"
+    );
+    assert_eq!(
+        requests.len(),
+        3,
+        "agent turn 0 + sampling + agent turn 1 = 3 model calls, got {}",
+        requests.len()
+    );
+}
+
+/// Over-budget: granted, but the sampling sub-budget is exhausted
+/// (`max_cost: 0`), so the request is declined *before* any model call.
+#[tokio::test]
+async fn sampling_over_subbudget_is_declined_without_a_model_call() {
+    let grant = fq_runtime::SamplingGrant {
+        servers: vec!["everything".to_string()],
+        max_cost: Some(0.0),
+    };
+    let Some((outcome, requests)) = run_sampling_scenario(Some(grant)).await else {
+        return;
+    };
+
+    assert!(
+        matches!(outcome, fq_runtime::InvocationOutcome::Completed { .. }),
+        "invocation should still complete, got {outcome:?}"
+    );
+    assert!(
+        !saw_sampling_call(&requests),
+        "an over-budget sampling request must not call the model"
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "only the two agent turns should call the model, got {}",
+        requests.len()
+    );
+}
+
+/// Ungranted: the agent has no sampling grant at all, so every request
+/// is declined with no model call.
+#[tokio::test]
+async fn sampling_ungranted_is_declined_without_a_model_call() {
+    let Some((outcome, requests)) = run_sampling_scenario(None).await else {
+        return;
+    };
+
+    assert!(
+        matches!(outcome, fq_runtime::InvocationOutcome::Completed { .. }),
+        "invocation should still complete, got {outcome:?}"
+    );
+    assert!(
+        !saw_sampling_call(&requests),
+        "an ungranted sampling request must not call the model"
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "only the two agent turns should call the model, got {}",
+        requests.len()
+    );
+}

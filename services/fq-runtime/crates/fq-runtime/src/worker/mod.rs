@@ -40,7 +40,7 @@ pub use recovery::{
 };
 pub use reducer::{
     Harness, Reducer, ReducerContext, ReducerContextBuilder, ReducerRunner, RunnerConfig,
-    RunnerConfigBuilder,
+    RunnerConfigBuilder, SamplingChannel,
 };
 pub use store::{
     Compatibility, DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow,

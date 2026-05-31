@@ -503,6 +503,11 @@ pub struct CostMetadata {
     pub total_cost: f64,
     pub cumulative_invocation_cost: f64,
     pub cumulative_agent_cost: f64,
+    /// What prompted the priced call (agent turn vs sampling), so
+    /// sampling spend is attributable to its server while still
+    /// counting toward the invocation total. Defaults to `AgentTurn`.
+    #[serde(default)]
+    pub origin: LlmCallOrigin,
 }
 
 /// Open key/value commentary. Producing agents may attach anything
@@ -645,6 +650,23 @@ pub struct SandboxSnapshot {
     pub env: Vec<String>,
     #[serde(default)]
     pub exec_cwd: Vec<String>,
+}
+
+/// What prompted an LLM call, for cost attribution (ADR-0004 /
+/// ADR-0018). Agent turns are the reducer's own reasoning steps;
+/// sampling calls are server-initiated (`sampling/createMessage`) and
+/// tagged with the originating MCP server so their spend is distinct
+/// from the agent's own turns while still bounded by the same
+/// invocation budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LlmCallOrigin {
+    /// A reducer-driven agent reasoning turn (the default).
+    #[default]
+    AgentTurn,
+    /// A server-initiated sampling completion, attributed to the
+    /// requesting MCP server.
+    Sampling { server: String },
 }
 
 /// Published immediately before an LLM call is made.
@@ -909,6 +931,12 @@ pub struct InvocationTotals {
     pub total_tool_calls: u32,
     pub total_cost: f64,
     pub total_duration_ms: u64,
+    /// Cumulative spend on server-initiated sampling within this
+    /// invocation (a subset of `total_cost`), tracked separately so
+    /// the sampling sub-budget can be enforced (ADR-0018). Defaults
+    /// to 0 for totals written before sampling existed.
+    #[serde(default)]
+    pub sampling_cost: f64,
 }
 
 /// Published when the `fq run` daemon starts up.
@@ -1470,6 +1498,7 @@ mod tests {
             total_cost: 0.0006,
             cumulative_invocation_cost: 0.0006,
             cumulative_agent_cost: 0.0006,
+            origin: LlmCallOrigin::AgentTurn,
         };
         let event = event.with_cost(cost.clone());
         assert_eq!(event.envelope.cost.as_ref(), Some(&cost));
@@ -1490,6 +1519,7 @@ mod tests {
             total_cost: 0.3,
             cumulative_invocation_cost: 0.3,
             cumulative_agent_cost: 0.3,
+            origin: LlmCallOrigin::AgentTurn,
         };
         let event = Event::new(
             AgentId::new("agent").unwrap(),

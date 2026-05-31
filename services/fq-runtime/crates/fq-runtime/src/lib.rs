@@ -41,7 +41,7 @@ pub mod worker;
 #[cfg(test)]
 pub mod test_support;
 
-pub use agent::{Agent, AgentId, AgentRegistry, McpServerDeclaration, Sandbox};
+pub use agent::{Agent, AgentId, AgentRegistry, McpServerDeclaration, SamplingGrant, Sandbox};
 pub use bus::EventBus;
 pub use config::Config;
 pub use control_plane::dispatcher::{DispatcherError, TriggerDispatcher};
@@ -57,6 +57,6 @@ pub use tools::ToolRegistry;
 pub use worker::{
     ArchiveAckConsumer, ArchiveAckError, ArchiveRetryError, ArchiveRetrySweeper, ExecutorError,
     Harness, InvocationOutcome, Reducer, ReducerContext, ReducerContextBuilder, ReducerRunner,
-    RunnerConfig, RunnerConfigBuilder, WORKER_SCHEMA_VERSION, Worker, WorkerStore,
+    RunnerConfig, RunnerConfigBuilder, SamplingChannel, WORKER_SCHEMA_VERSION, Worker, WorkerStore,
     WorkerStoreError,
 };

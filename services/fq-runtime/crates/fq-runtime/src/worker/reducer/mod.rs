@@ -31,6 +31,7 @@ pub mod types;
 pub use harness::Harness;
 pub use runner::{
     ReducerContext, ReducerContextBuilder, ReducerRunner, RunnerConfig, RunnerConfigBuilder,
+    SamplingChannel,
 };
 pub use types::{
     CapabilityResult, EmittedEvent, HarnessError, HarnessErrorKind, LogEntry, LogLevel,

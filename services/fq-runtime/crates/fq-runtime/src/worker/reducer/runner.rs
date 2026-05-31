@@ -31,17 +31,25 @@ use super::types::{
     ModelResponse, NextAction, Reducer, StepInput, ToolCallRequest, ToolCallResult, TriggerPayload,
     TriggerSourceKind,
 };
+use rmcp::model::{
+    CreateMessageRequestParams, CreateMessageResult, Role, SamplingContent, SamplingMessage,
+    SamplingMessageContent,
+};
+use tokio::sync::mpsc::UnboundedReceiver;
+
 use crate::agent::{Agent, AgentId};
 use crate::bus::EventBus;
 use crate::events::{
     self, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
-    InvocationArchivedPayload, InvocationTotals, LlmRequestPayload, LlmResponsePayload,
-    ToolCallPayload, ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
+    InvocationArchivedPayload, InvocationTotals, LlmCallOrigin, LlmRequestPayload,
+    LlmResponsePayload, Message, MessageRole, RequestParams, StopReason, ToolCallPayload,
+    ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
-use crate::mcp::McpResourceReader;
+use crate::mcp::{McpResourceReader, ServerRequest};
 use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
+use crate::validation::ValidatorChain;
 use crate::worker::store::{
     DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow, WorkerStore,
 };
@@ -52,6 +60,34 @@ use crate::worker::{ExecutorError, InvocationOutcome, WorkerId};
 /// reducer (e.g. one that perpetually returns CallModel without
 /// progress) cannot wedge the host indefinitely.
 const HOST_STEP_BUDGET: u32 = 1_000;
+
+/// A per-invocation inbound channel from one grant-bearing MCP
+/// server: the server's name (for grant checks and cost
+/// attribution) paired with the receiver the runner services in its
+/// `select!` during tool-call awaits (ADR-0018). Built by pairing a
+/// server name with the receiver from
+/// [`McpClientManager::start_server_with_requests`](crate::mcp::McpClientManager::start_server_with_requests).
+///
+/// One channel = one granted server. Servicing several granted
+/// servers concurrently (a merged, server-tagged stream) is a
+/// follow-up; v1 wires a single channel, which is what the everything
+/// server's sampling tool exercises.
+pub struct SamplingChannel {
+    /// Name of the MCP server this channel belongs to.
+    pub server: String,
+    /// Inbound server-initiated requests from that server.
+    pub rx: UnboundedReceiver<ServerRequest>,
+}
+
+impl SamplingChannel {
+    /// Pair a server name with its request receiver.
+    pub fn new(server: impl Into<String>, rx: UnboundedReceiver<ServerRequest>) -> Self {
+        Self {
+            server: server.into(),
+            rx,
+        }
+    }
+}
 
 /// Agent-relevant context for an invocation: the services and
 /// (future) policy/metadata the agent can use or should know,
@@ -69,6 +105,12 @@ pub struct ReducerContext {
     /// the agent's `static_resources` pins at invocation start.
     /// `None` when no MCP servers are wired (e.g. most tests).
     resources: Option<McpResourceReader>,
+    /// Outbound validation seam for sampling results before they
+    /// return to the requesting server (ADR-0018 §4): censor secrets,
+    /// reject leakage, etc. Default is an empty chain (allow
+    /// everything); concrete validators (e.g. a `HighEntropyRedactor`)
+    /// are added without touching the runner.
+    sampling_validators: ValidatorChain<CreateMessageResult>,
 }
 
 impl ReducerContext {
@@ -88,6 +130,7 @@ impl ReducerContext {
 pub struct ReducerContextBuilder {
     tools: Option<Arc<ToolRegistry>>,
     resources: Option<McpResourceReader>,
+    sampling_validators: Option<ValidatorChain<CreateMessageResult>>,
 }
 
 impl ReducerContextBuilder {
@@ -104,6 +147,13 @@ impl ReducerContextBuilder {
         self
     }
 
+    /// Outbound validators for sampling results (optional; defaults
+    /// to an empty allow-everything chain).
+    pub fn sampling_validators(mut self, chain: ValidatorChain<CreateMessageResult>) -> Self {
+        self.sampling_validators = Some(chain);
+        self
+    }
+
     /// Finalise the context. Panics if `tools` was not set.
     pub fn build(self) -> ReducerContext {
         ReducerContext {
@@ -111,6 +161,7 @@ impl ReducerContextBuilder {
                 .tools
                 .expect("ReducerContext::builder() requires .tools(..)"),
             resources: self.resources,
+            sampling_validators: self.sampling_validators.unwrap_or_default(),
         }
     }
 }
@@ -228,6 +279,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
     /// Run a single invocation of `agent` through this runner's
     /// reducer to terminal.
+    ///
+    /// Equivalent to [`run_with_server_requests`](Self::run_with_server_requests)
+    /// with no inbound server channel — the path used when no
+    /// grant-bearing MCP server is attached to the invocation.
     pub async fn run(
         &self,
         agent: &Agent,
@@ -235,6 +290,31 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger_source: TriggerSource,
         trigger_subject: Option<String>,
         trigger_payload: Value,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        self.run_with_server_requests(
+            agent,
+            llm,
+            trigger_source,
+            trigger_subject,
+            trigger_payload,
+            None,
+        )
+        .await
+    }
+
+    /// Run a single invocation, servicing inbound server-initiated
+    /// requests (sampling) from `sampling` during tool-call awaits
+    /// (ADR-0018). `sampling` is `Some` when a grant-bearing MCP
+    /// server is wired for this invocation; the runner is the sole
+    /// LLM arbiter and gates/runs/validates each request itself.
+    pub async fn run_with_server_requests(
+        &self,
+        agent: &Agent,
+        llm: &dyn LlmClient,
+        trigger_source: TriggerSource,
+        trigger_subject: Option<String>,
+        trigger_payload: Value,
+        sampling: Option<SamplingChannel>,
     ) -> Result<InvocationOutcome, ExecutorError> {
         let invocation_id = Uuid::now_v7();
         let start = Instant::now();
@@ -317,6 +397,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             start,
             started_at_ms,
             static_context,
+            sampling,
             &mut cursor,
         )
         .await
@@ -491,6 +572,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // content is already in the replayed conversation
             // history persisted on the original step 0.
             None,
+            // No inbound server channel on resume: the per-invocation
+            // server connection died with the crash, so a resumed run
+            // cannot service (or replay) sampling (ADR-0018 §5). Any
+            // in-flight sampling is surfaced via `fq recover`.
+            None,
             &mut cursor,
         )
         .await
@@ -517,6 +603,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         start: Instant,
         started_at_ms: i64,
         static_context: Option<String>,
+        mut sampling: Option<SamplingChannel>,
         cursor: &mut Option<Uuid>,
     ) -> Result<InvocationOutcome, ExecutorError> {
         for step_index in step_index_start..HOST_STEP_BUDGET {
@@ -658,6 +745,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             agent_id,
                             invocation_id,
                             request,
+                            LlmCallOrigin::AgentTurn,
                             &mut totals,
                             start,
                             cursor,
@@ -680,11 +768,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         .run_tool(
                             agent,
                             sandbox,
+                            llm,
                             agent_id,
                             invocation_id,
                             req,
-                            &totals,
+                            &mut totals,
                             start,
+                            sampling.as_mut(),
                             cursor,
                         )
                         .await?;
@@ -704,11 +794,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             .run_tool(
                                 agent,
                                 sandbox,
+                                llm,
                                 agent_id,
                                 invocation_id,
                                 req,
-                                &totals,
+                                &mut totals,
                                 start,
+                                sampling.as_mut(),
                                 cursor,
                             )
                             .await?;
@@ -797,11 +889,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         &self,
         agent: &Agent,
         sandbox: &ToolSandbox,
+        llm: &dyn LlmClient,
         agent_id: &AgentId,
         invocation_id: Uuid,
         req: ToolCallRequest,
-        totals: &InvocationTotals,
+        totals: &mut InvocationTotals,
         start: Instant,
+        sampling: Option<&mut SamplingChannel>,
         cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
         if !agent.tools().iter().any(|name| name == &req.tool_name) {
@@ -909,7 +1003,48 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         let ctx = ToolContext::new(sandbox);
         let tool_start = Instant::now();
-        let outcome = tool.execute(&ctx, req.parameters.clone()).await;
+        // While the tool runs, the server it belongs to may initiate
+        // requests back at us (sampling) — those arrive *because* the
+        // agent called this tool, landing while we're parked at the
+        // await. Service them in a `select!` so the runner, the sole
+        // LLM arbiter, handles them without a second caller and
+        // without blocking the tool (ADR-0018 §2). With no channel
+        // wired, this is a plain await.
+        let outcome = match sampling {
+            None => tool.execute(&ctx, req.parameters.clone()).await,
+            Some(channel) => {
+                let tool_fut = tool.execute(&ctx, req.parameters.clone());
+                tokio::pin!(tool_fut);
+                loop {
+                    tokio::select! {
+                        // Bias toward completing the tool: if both are
+                        // ready, return the tool result rather than
+                        // starving it behind a backlog of requests.
+                        biased;
+                        result = &mut tool_fut => break result,
+                        maybe_req = channel.rx.recv() => match maybe_req {
+                            Some(request) => {
+                                self.handle_server_request(
+                                    agent,
+                                    &channel.server,
+                                    llm,
+                                    agent_id,
+                                    invocation_id,
+                                    request,
+                                    totals,
+                                    start,
+                                    cursor,
+                                )
+                                .await?;
+                            }
+                            // Channel closed (server gone): just await
+                            // the tool to completion.
+                            None => break (&mut tool_fut).await,
+                        }
+                    }
+                }
+            }
+        };
         let duration_ms = tool_start.elapsed().as_millis() as u64;
 
         // Tool returned control. Mark dispatched (the
@@ -1360,7 +1495,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 /// Internal: factor out the LLM dispatch path so the loop body
 /// stays readable.
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
-    #[allow(clippy::too_many_arguments)]
+    /// Agent-turn LLM path: dispatch through the shared core, then
+    /// apply agent-turn failure semantics — an LLM error fails the
+    /// invocation, and exceeding the budget terminates it.
     #[allow(clippy::too_many_arguments)]
     async fn run_model_with_llm(
         &self,
@@ -1369,10 +1506,85 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         agent_id: &AgentId,
         invocation_id: Uuid,
         request: ModelRequest,
+        origin: LlmCallOrigin,
         totals: &mut InvocationTotals,
         start: Instant,
         cursor: &mut Option<Uuid>,
     ) -> Result<ModelOutcome, ExecutorError> {
+        let response = match self
+            .dispatch_llm(
+                llm,
+                agent_id,
+                invocation_id,
+                request,
+                origin,
+                totals,
+                cursor,
+            )
+            .await?
+        {
+            Ok((response, _cost)) => response,
+            Err(err) => {
+                totals.total_duration_ms = start.elapsed().as_millis() as u64;
+                self.emit_failed(
+                    agent_id,
+                    invocation_id,
+                    FailureKind::LlmError,
+                    err.to_string(),
+                    FailurePhase::LlmRequest,
+                    *totals,
+                    cursor,
+                )
+                .await?;
+                return Err(ExecutorError::Llm(err));
+            }
+        };
+
+        if let Some(budget) = budget
+            && totals.total_cost > budget
+        {
+            totals.total_duration_ms = start.elapsed().as_millis() as u64;
+            self.emit_failed(
+                agent_id,
+                invocation_id,
+                FailureKind::BudgetExceeded,
+                format!(
+                    "cost ${:.6} exceeded budget ${budget:.2}",
+                    totals.total_cost
+                ),
+                FailurePhase::LlmResponse,
+                *totals,
+                cursor,
+            )
+            .await?;
+            return Ok(ModelOutcome::BudgetExceeded(totals.total_cost));
+        }
+
+        Ok(ModelOutcome::Response(response))
+    }
+
+    /// Shared LLM dispatch core (ADR-0018 §2): the single WAL'd /
+    /// evented / budgeted path every model call flows through — agent
+    /// turns and sampling alike. Writes the §5.5 WAL
+    /// (intent → dispatched → completed), publishes
+    /// `llm.request` / `llm.dispatched` / `llm.response` + cost (the
+    /// cost tagged with `origin` for attribution), and folds cost into
+    /// `totals`. Returns the inner `Err` on an LLM-call failure (the
+    /// WAL is already closed `is_error`) so each caller applies its
+    /// own semantics — an agent turn fails the invocation, a sampling
+    /// request merely declines. The outer `Err` is infrastructure
+    /// (store / bus).
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_llm(
+        &self,
+        llm: &dyn LlmClient,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        request: ModelRequest,
+        origin: LlmCallOrigin,
+        totals: &mut InvocationTotals,
+        cursor: &mut Option<Uuid>,
+    ) -> Result<Result<(ModelResponse, f64), crate::llm::LlmError>, ExecutorError> {
         let call_id = Uuid::now_v7();
         let inv_str = invocation_id.to_string();
         let req_str = call_id.to_string();
@@ -1439,18 +1651,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     )
                     .await
                     .map_err(map_store_err)?;
-                totals.total_duration_ms = start.elapsed().as_millis() as u64;
-                self.emit_failed(
-                    agent_id,
-                    invocation_id,
-                    FailureKind::LlmError,
-                    err.to_string(),
-                    FailurePhase::LlmRequest,
-                    *totals,
-                    cursor,
-                )
-                .await?;
-                return Err(ExecutorError::Llm(err));
+                // Hand the LLM error back to the caller; the WAL is
+                // already closed `is_error`, so this is a final state.
+                return Ok(Err(err));
             }
         };
 
@@ -1530,42 +1733,243 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 total_cost,
                 cumulative_invocation_cost: totals.total_cost,
                 cumulative_agent_cost: totals.total_cost,
+                origin,
             }),
         )
         .await?;
 
-        if let Some(budget) = budget
-            && totals.total_cost > budget
+        Ok(Ok((
+            ModelResponse {
+                content: response.content,
+                tool_calls: response.tool_calls,
+                stop_reason: response.stop_reason,
+                usage: response.usage,
+            },
+            total_cost,
+        )))
+    }
+
+    /// Service one inbound server-initiated request (ADR-0018). The
+    /// runner is the sole arbiter; the handler is a thin bridge, so
+    /// the gate/run/validate logic lives here and replies on the
+    /// request's oneshot. A dropped reply (the tool finished and the
+    /// bridge went away) is ignored.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_server_request(
+        &self,
+        agent: &Agent,
+        server: &str,
+        llm: &dyn LlmClient,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        request: ServerRequest,
+        totals: &mut InvocationTotals,
+        start: Instant,
+        cursor: &mut Option<Uuid>,
+    ) -> Result<(), ExecutorError> {
+        match request {
+            ServerRequest::Sampling { params, reply } => {
+                let result = self
+                    .handle_sampling(
+                        agent,
+                        server,
+                        llm,
+                        agent_id,
+                        invocation_id,
+                        params,
+                        totals,
+                        start,
+                        cursor,
+                    )
+                    .await?;
+                let _ = reply.send(result);
+                Ok(())
+            }
+        }
+    }
+
+    /// Answer a `sampling/createMessage` request (ADR-0018 §2):
+    /// **gate** (granted? within the sampling sub-budget and the
+    /// invocation total?) → **run** through the shared LLM path tagged
+    /// `origin = sampling{server}` → **validate** the result through
+    /// the outbound seam → reply. A policy refusal or a model failure
+    /// returns a structured decline to the *server* and leaves the
+    /// agent invocation untouched — sampling spends the agent's
+    /// budget but never fails its turn. The outer `Err` is
+    /// infrastructure (store / bus) and does propagate.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_sampling(
+        &self,
+        agent: &Agent,
+        server: &str,
+        llm: &dyn LlmClient,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        params: CreateMessageRequestParams,
+        totals: &mut InvocationTotals,
+        _start: Instant,
+        cursor: &mut Option<Uuid>,
+    ) -> Result<Result<CreateMessageResult, rmcp::ErrorData>, ExecutorError> {
+        // --- gate (no model call on refusal) ---
+        let Some(grant) = agent.sampling_grant() else {
+            return Ok(Err(sampling_decline(
+                "sampling is not granted for this agent",
+            )));
+        };
+        if !grant.permits(server) {
+            return Ok(Err(sampling_decline(&format!(
+                "sampling is not granted for server '{server}'"
+            ))));
+        }
+        if let Some(max) = grant.max_cost
+            && totals.sampling_cost >= max
         {
-            totals.total_duration_ms = start.elapsed().as_millis() as u64;
-            self.emit_failed(
-                agent_id,
-                invocation_id,
-                FailureKind::BudgetExceeded,
-                format!(
-                    "cost ${:.6} exceeded budget ${budget:.2}",
-                    totals.total_cost
-                ),
-                FailurePhase::LlmResponse,
-                *totals,
-                cursor,
-            )
-            .await?;
-            return Ok(ModelOutcome::BudgetExceeded(totals.total_cost));
+            return Ok(Err(sampling_decline(
+                "sampling sub-budget exhausted for this invocation",
+            )));
+        }
+        if let Some(budget) = agent.budget()
+            && totals.total_cost >= budget
+        {
+            return Ok(Err(sampling_decline(
+                "invocation budget exhausted; sampling refused",
+            )));
         }
 
-        Ok(ModelOutcome::Response(ModelResponse {
-            content: response.content,
-            tool_calls: response.tool_calls,
-            stop_reason: response.stop_reason,
-            usage: response.usage,
-        }))
+        // --- run through the shared LLM path, tagged as sampling ---
+        // (Inbound `includeContext` is forced to `none`: we do not
+        // inject agent/MCP context into a server's prompt yet, so a
+        // server cannot pull context it was not granted. The inbound
+        // redact seam lands with context injection.)
+        let model_request = sampling_to_model_request(agent.model(), &params);
+        let origin = LlmCallOrigin::Sampling {
+            server: server.to_string(),
+        };
+        let (response, call_cost) = match self
+            .dispatch_llm(
+                llm,
+                agent_id,
+                invocation_id,
+                model_request,
+                origin,
+                totals,
+                cursor,
+            )
+            .await?
+        {
+            Ok(pair) => pair,
+            // A sampling model failure declines the request; the agent
+            // invocation continues (ADR-0018: the failure is the
+            // server's, not the agent's).
+            Err(err) => {
+                return Ok(Err(sampling_decline(&format!(
+                    "sampling model call failed: {err}"
+                ))));
+            }
+        };
+        totals.sampling_cost += call_cost;
+
+        // --- outbound validation seam ---
+        let result = model_response_to_create_message(agent.model(), response);
+        match self.context.sampling_validators.run(result) {
+            Ok(validated) => Ok(Ok(validated)),
+            Err(reason) => Ok(Err(sampling_decline(&format!(
+                "sampling result rejected by policy: {reason}"
+            )))),
+        }
     }
 }
 
 enum ModelOutcome {
     Response(ModelResponse),
     BudgetExceeded(f64),
+}
+
+/// A structured decline returned to a server whose sampling request
+/// the runtime refuses (policy) or could not fulfil (model failure).
+/// Maps to a JSON-RPC error response; the server decides how to
+/// proceed without the sample.
+fn sampling_decline(reason: &str) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_request(reason.to_string(), None)
+}
+
+/// Build a [`ModelRequest`] for a sampling completion from the
+/// server's `sampling/createMessage` params, run on the agent's own
+/// model. The server's `systemPrompt` becomes a system message; each
+/// sampling message maps to a user/assistant message. Only text
+/// content is injected in v1 (non-text is a placeholder); tools are
+/// never exposed to a sampling call.
+fn sampling_to_model_request(model: &str, params: &CreateMessageRequestParams) -> ModelRequest {
+    let mut messages = Vec::with_capacity(params.messages.len() + 1);
+    if let Some(system) = &params.system_prompt {
+        messages.push(Message {
+            role: MessageRole::System,
+            content: Some(system.clone()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        });
+    }
+    for sampling_message in &params.messages {
+        messages.push(Message {
+            role: match sampling_message.role {
+                Role::User => MessageRole::User,
+                Role::Assistant => MessageRole::Assistant,
+            },
+            content: Some(sampling_message_text(&sampling_message.content)),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        });
+    }
+    ModelRequest {
+        model: model.to_string(),
+        messages,
+        tools: Vec::new(),
+        params: RequestParams {
+            temperature: params.temperature.map(|t| t as f64),
+            max_tokens: Some(params.max_tokens),
+        },
+    }
+}
+
+/// Flatten a sampling message's content (single or multiple) into a
+/// plain string for the agent model. Non-text content is represented
+/// by a placeholder so conversation structure is preserved without
+/// claiming to faithfully inject images/audio (a later capability).
+fn sampling_message_text(content: &SamplingContent<SamplingMessageContent>) -> String {
+    match content {
+        SamplingContent::Single(item) => sampling_item_text(item),
+        SamplingContent::Multiple(items) => items
+            .iter()
+            .map(sampling_item_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn sampling_item_text(item: &SamplingMessageContent) -> String {
+    match item {
+        SamplingMessageContent::Text(text) => text.text.clone(),
+        _ => "[non-text sampling content omitted]".to_string(),
+    }
+}
+
+/// Wrap an agent-model [`ModelResponse`] back into the
+/// `CreateMessageResult` shape the protocol returns to the server.
+fn model_response_to_create_message(model: &str, response: ModelResponse) -> CreateMessageResult {
+    CreateMessageResult::new(
+        SamplingMessage::assistant_text(response.content.unwrap_or_default()),
+        model.to_string(),
+    )
+    .with_stop_reason(stop_reason_to_mcp(response.stop_reason))
+}
+
+fn stop_reason_to_mcp(stop_reason: StopReason) -> &'static str {
+    match stop_reason {
+        StopReason::EndTurn => CreateMessageResult::STOP_REASON_END_TURN,
+        StopReason::MaxTokens => CreateMessageResult::STOP_REASON_END_MAX_TOKEN,
+        StopReason::StopSequence => CreateMessageResult::STOP_REASON_END_SEQUENCE,
+        StopReason::ToolUse => CreateMessageResult::STOP_REASON_TOOL_USE,
+    }
 }
 
 /// Reconstruct a [`CapabilityResult::ToolResult`] from a
@@ -2241,6 +2645,7 @@ mod tests {
                     total_tool_calls: 0,
                     total_cost: 0.0001,
                     total_duration_ms: 0,
+                    sampling_cost: 0.0,
                 },
                 elapsed_ms: 0,
             },

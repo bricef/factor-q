@@ -487,6 +487,7 @@ mod tests {
             total_cost: cost,
             cumulative_invocation_cost: cost,
             cumulative_agent_cost: cost,
+            origin: crate::events::LlmCallOrigin::AgentTurn,
         })
     }
 
@@ -517,6 +518,7 @@ mod tests {
                     total_tool_calls: 0,
                     total_cost: 0.5,
                     total_duration_ms: 99,
+                    sampling_cost: 0.0,
                 },
             }),
         )

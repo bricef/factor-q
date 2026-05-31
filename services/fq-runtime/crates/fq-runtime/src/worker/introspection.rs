@@ -127,6 +127,7 @@ mod tests {
                 total_tool_calls: 0,
                 total_cost: 0.000091,
                 total_duration_ms: 0,
+                sampling_cost: 0.0,
             },
             elapsed_ms: 1234,
         }
