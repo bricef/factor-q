@@ -377,6 +377,45 @@ no LLM authorization step.
       `includeContext` gated to explicit grant (default `none`)
       through an inbound redact chain.
 
+**Build status / resume anchor (2026-05-31).** Decomposed into
+5a/5b/5c; design fully locked (ADR-0018). `main` clean + pushed.
+
+- **5a ✅** (`e5c5fa1`) — validation seam in
+  `crates/fq-runtime/src/validation.rs`:
+  `ValidatorResult<T> = Allow | Modify(T) | Deny(reason)`,
+  `Validator<T>` trait, left-to-right `ValidatorChain<T>`,
+  `DefaultAllow`. 5 unit tests green.
+- **5b ⬜** — the handler→runner bridge, *no runner changes*:
+  add `ServerRequest::Sampling { params, reply: oneshot }`;
+  `FactorQClientHandler::create_message` (`mcp.rs`, currently the
+  rmcp default `method_not_found`) becomes a bridge — forward on a
+  per-invocation channel, await the oneshot, return it; add a
+  per-invocation `start_server` path that wires the sampling
+  channel (today `start_server` builds the handler via
+  `with_notifications`; `RunningServer` holds the client). Bridge
+  integration test: call the everything server's
+  `trigger-sampling-request` tool, drain the channel + reply with a
+  canned `CreateMessageResult`, assert the tool call completes.
+- **5c ⬜** — the runner surgery (recovery-critical; start fresh):
+  sampling grant on `Agent` (`agent.rs`, mirror `static_resources`,
+  set programmatically; parsed in Step 8); refactor the
+  tool-dispatch await in `worker/reducer/runner.rs`
+  (`run_loop_inner` → `run_tool`) into a `select!` over
+  {tool result, `ServerRequest`}; `handle_sampling` = gate (grant +
+  sub-budget + invocation total) → run via the existing
+  `run_model_with_llm` path tagged `origin = sampling{server}` →
+  `ValidatorChain` → reply; add `origin` attribution to the
+  cost/`llm.*` events (`events.rs`, ADR-0004); 3 e2e policy tests in
+  `tests/mcp_integration.rs` with `FixtureClient` (permitted /
+  over-budget / ungranted).
+
+rmcp facts (1.7): `create_message(&self, params:
+CreateMessageRequestParams, ctx) -> Result<CreateMessageResult,
+McpError>`; `CreateMessageResult { model, stop_reason,
+message: SamplingMessage }`; `McpError::method_not_found::<…>()` is
+the decline. Per ADR-0018 only grant-bearing servers go
+per-invocation; tool-only servers may stay shared.
+
 ---
 
 ### Step 6 — Roots + Elicitation (P4)
