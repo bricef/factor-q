@@ -385,17 +385,21 @@ no LLM authorization step.
   `ValidatorResult<T> = Allow | Modify(T) | Deny(reason)`,
   `Validator<T>` trait, left-to-right `ValidatorChain<T>`,
   `DefaultAllow`. 5 unit tests green.
-- **5b ⬜** — the handler→runner bridge, *no runner changes*:
-  add `ServerRequest::Sampling { params, reply: oneshot }`;
-  `FactorQClientHandler::create_message` (`mcp.rs`, currently the
-  rmcp default `method_not_found`) becomes a bridge — forward on a
-  per-invocation channel, await the oneshot, return it; add a
-  per-invocation `start_server` path that wires the sampling
-  channel (today `start_server` builds the handler via
-  `with_notifications`; `RunningServer` holds the client). Bridge
-  integration test: call the everything server's
-  `trigger-sampling-request` tool, drain the channel + reply with a
-  canned `CreateMessageResult`, assert the tool call completes.
+- **5b ✅** (`7e344e3`) — the handler→runner bridge, *no runner
+  changes*: `ServerRequest::Sampling { params, reply:
+  oneshot<Result<CreateMessageResult, rmcp::ErrorData>> }`;
+  `FactorQClientHandler::create_message` is now a thin bridge —
+  forwards on a per-invocation channel, awaits the oneshot, returns
+  it; declines with `method_not_found` when no channel is wired
+  (shared tool-only server) or no listener. New
+  `McpClientManager::start_server_with_requests` is the
+  per-invocation start path (no dedup) that wires the channel and
+  returns the receiver the runner will `select!` on; both paths
+  share `start_inner`. Bridge integration test
+  (`sampling_request_bridges_to_the_host`) drives the everything
+  server's `trigger-sampling-request`, drains the channel + replies
+  canned, asserts the tool completes. rmcp added as dev-dependency
+  for the wire reply type.
 - **5c ⬜** — the runner surgery (recovery-critical; start fresh):
   sampling grant on `Agent` (`agent.rs`, mirror `static_resources`,
   set programmatically; parsed in Step 8); refactor the
