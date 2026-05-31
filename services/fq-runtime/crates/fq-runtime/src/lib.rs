@@ -25,6 +25,7 @@ pub mod mcp;
 pub mod pricing;
 pub mod prompt;
 pub mod tools;
+pub mod validation;
 
 // Role modules. Both stay `pub` so that downstream code (fq-cli,
 // integration tests) can reach typed APIs that haven't been
