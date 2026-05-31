@@ -386,29 +386,73 @@ answer elicitation autonomously via the agent LLM (or decline
 per policy).
 
 **Failing tests first.**
-- *Roots*: advertise roots derived from the agent's workspace
-  config; assert the everything server receives the
-  `roots/list` response and a `roots/list_changed` after an
-  update.
+- *Roots*: advertise roots derived from the sandbox fs grant;
+  assert the everything server receives them on `roots/list`, and
+  that an automated trigger fires `roots/list_changed`.
 - *Elicitation (granted)*: server requests structured input;
-  handler produces a schema-valid value via `mock_anthropic`
-  and returns `accept` with content.
-- *Elicitation (not granted)*: handler returns `decline`
-  without calling the model.
+  produces a schema-valid value via `mock_anthropic`, returns
+  `accept` with content, attributed to the server.
+- *Elicitation (not granted / over-budget / retries-exhausted)*:
+  returns `decline`; for ungranted, no model call.
 
-**Implementation.** `ClientHandler` arms for `roots/list` (from
-workspace/sandbox config, never the LLM) and
-`elicitation/create` (schema → structured-output sub-call on
-the agent model → validate → `accept`, or `decline`).
+**Implementation.** Per
+[ADR-0018](../../adrs/accepted/0018-mcp-server-initiated-execution.md):
+both inherit per-invocation instances, the grant model, and the
+bidirectional validation seam. They differ in *arbitration*:
+
+*Roots — handler-only, no LLM, no budget.* `list_roots` returns
+invocation-scoped config; it never touches the runner.
+- **Source: derived from the agent's sandbox filesystem grant**,
+  with the invariant **advertised roots ⊆ sandbox fs boundary**
+  (narrowable, never wideable — can't advertise a path you don't
+  enforce). `file://` only for v1; other URI schemes later.
+- **Boolean per-server grant**, nothing by default.
+- **Advisory, not enforcement** — roots tell a cooperative server
+  its intended scope; the sandbox / ADR-0010 proxy is the wall.
+- Advertised through the **outbound `Validator` chain** (default
+  `DefaultAllow`).
+- **`roots/list_changed`**: expose the mechanism (update roots +
+  `notify_roots_list_changed`); the real dynamic-workspace trigger
+  defers to the "Workspace state" backlog item. Covered by an
+  automated test that invokes the trigger programmatically.
+
+*Elicitation — sampling-shaped (runner-arbitrated).* Same
+`select!` path / budget / events / validation seam as Step 5; only
+the answer stage differs:
+- **Schema-constrained structured output** via a **reusable runner
+  "structured completion against a schema" primitive**: validate
+  against `requested_schema` → **bounded retry** (default N=2, each
+  retry a budget-counted LLM call) → exhausted ⇒ `Decline`. The
+  same primitive later serves the sampling evaluator-validator and
+  the backlog's spawn-deliverable typing.
+- **Action mapping**: `Accept` (valid value) / `Decline`
+  (ungranted, over-budget, or retries exhausted — refuse but the
+  server continues) / `Cancel` (reserved for genuine invocation
+  abort, not policy refusal).
+- **Restricted schema subset**: enforce MCP's flat-object /
+  primitive-enum elicitation schema; decline anything outside it.
+- **The schema is a named extraction channel** (sharper than
+  sampling's free-form output): the **inbound seam inspects the
+  schema's field names + message** (a server can request
+  `{ api_key: string }` and coax the model to fill it), and the
+  **outbound seam censors the structured value**.
+
+Sampling + elicitation unify under one server-initiated request
+path (`ServerRequest { Sampling | Elicitation }`, one channel, one
+`select!` arm); only the answer stage differs.
 
 **Done when**
 
-- [ ] Roots + both elicitation tests green.
-- [ ] Roots come from config; elicitation answers from the LLM
-      and validate against the requested schema.
-- [ ] The elicitation-answer LLM call is attributed as
-      elicitation for the originating server in the trace,
-      distinct from agent-turn spend.
+- [ ] Roots advertised (⊆ sandbox fs grant); `roots/list` +
+      automated `roots/list_changed` tests green.
+- [ ] Elicitation: granted→`accept` (schema-valid),
+      ungranted→`decline` (no model call),
+      over-budget/retries-exhausted→`decline`; all green.
+- [ ] The elicitation-answer LLM call is attributed as elicitation
+      for the originating server, distinct from agent-turn spend.
+- [ ] Bidirectional validation seam wired for both (roots
+      outbound; elicitation inbound schema/message + outbound
+      value), reusing the ADR-0018 `Validator` chain.
 
 ---
 

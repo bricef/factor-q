@@ -153,6 +153,13 @@ touching the seam. Which validators ship beyond `DefaultAllow` is
 a later scoping call (Step 8's policy surface); the seam and the
 default land with sampling.
 
+Elicitation sharpens why the inbound seam is non-optional: its
+`requestedSchema` is a **named extraction channel** — a server can
+ask for `{ api_key: string }` and coax the model to fill it from
+context, where sampling's output is merely free-form. So the
+inbound chain inspects the schema's field names and the message,
+not just the injected context.
+
 ### 5. Recovery
 
 A server-initiated LLM call in flight is WAL'd like any other. A
@@ -179,8 +186,12 @@ result. No separate recovery story for sampling.
   `McpClientManager` grows a per-invocation mode. Tool-only
   servers are unaffected.
 - **New types.** `ValidatorResult<T>`, a `Validator` trait, and a
-  `ValidatorChain`, plus the per-invocation request channel and
-  `SamplingRequest`.
+  `ValidatorChain`; the per-invocation request channel and a
+  unified `ServerRequest { Sampling | Elicitation }`; and a
+  **reusable runner "structured completion against a schema"
+  primitive** (validate → bounded retry → decline). Elicitation
+  consumes it first; the sampling evaluator-validator and the
+  backlog's spawn-deliverable typing reuse it.
 - **Scope.** This model is the foundation for Step 5 (sampling)
   and Step 6 (elicitation). Roots is read-only config (no LLM
   call) but inherits the per-invocation + grant model.
