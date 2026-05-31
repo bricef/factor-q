@@ -364,18 +364,27 @@ no LLM authorization step.
 
 **Done when**
 
-- [ ] All three sampling tests green.
-- [ ] Sampling cost flows through cost controls + event bus;
-      over-budget and ungranted requests deny without calling
-      the model.
-- [ ] Each sampling completion is attributed to its originating
-      server in the emitted cost events / trace, distinct from
-      the agent's own LLM spend (ADR-0004 cost attribution).
-- [ ] Bidirectional validation seam in place (ADR-0018): a
-      pluggable `Validator` chain (`ValidatorResult = Allow |
-      Modify | Deny`, default `DefaultAllow`) on the result, and
-      `includeContext` gated to explicit grant (default `none`)
-      through an inbound redact chain.
+- [x] All three sampling tests green (`sampling_permitted_runs_on_the_agent_model`,
+      `sampling_over_subbudget_is_declined_without_a_model_call`,
+      `sampling_ungranted_is_declined_without_a_model_call`).
+- [x] Sampling cost flows through cost controls + event bus (the
+      shared `dispatch_llm` path); over-budget and ungranted
+      requests deny without calling the model.
+- [x] Each sampling completion is attributed to its originating
+      server via `origin = sampling{server}` on the emitted
+      **cost** event (`CostMetadata`) + `InvocationTotals.sampling_cost`,
+      distinct from the agent's own LLM spend (ADR-0004).
+      *Narrowed:* origin rides the cost envelope (the attribution
+      record); `LlmCallOrigin` is public so spreading it to the
+      `llm.request`/`llm.response` trace is a trivial follow-up —
+      today they correlate by `call_id`.
+- [x] Outbound validation seam in place (ADR-0018): the pluggable
+      `ValidatorChain<CreateMessageResult>` on `ReducerContext`
+      (default empty / allow-everything) runs on the result before
+      reply; `includeContext` is forced to `none` (no context
+      injection yet, so nothing to redact). *Deferred to Step 6:*
+      the inbound redact chain lands with context injection /
+      elicitation schemas.
 
 **Build status / resume anchor (2026-05-31).** Decomposed into
 5a/5b/5c; design fully locked (ADR-0018). `main` clean + pushed.
@@ -400,18 +409,26 @@ no LLM authorization step.
   server's `trigger-sampling-request`, drains the channel + replies
   canned, asserts the tool completes. rmcp added as dev-dependency
   for the wire reply type.
-- **5c ⬜** — the runner surgery (recovery-critical; start fresh):
-  sampling grant on `Agent` (`agent.rs`, mirror `static_resources`,
-  set programmatically; parsed in Step 8); refactor the
-  tool-dispatch await in `worker/reducer/runner.rs`
-  (`run_loop_inner` → `run_tool`) into a `select!` over
-  {tool result, `ServerRequest`}; `handle_sampling` = gate (grant +
-  sub-budget + invocation total) → run via the existing
-  `run_model_with_llm` path tagged `origin = sampling{server}` →
-  `ValidatorChain` → reply; add `origin` attribution to the
-  cost/`llm.*` events (`events.rs`, ADR-0004); 3 e2e policy tests in
-  `tests/mcp_integration.rs` with `FixtureClient` (permitted /
-  over-budget / ungranted).
+- **5c ✅** (`f85a965`) — the runner surgery: `SamplingGrant`
+  on `Agent` (`agent.rs`, mirrors `static_resources`); the
+  tool-dispatch await in `run_tool` is now a biased `select!` over
+  {tool result, `ServerRequest`}, fed a per-invocation
+  `SamplingChannel` threaded through `run_with_server_requests`
+  (`run` delegates with `None`; `resume` never services sampling —
+  ADR-0018 §5). `dispatch_llm` extracted as the shared LLM core;
+  `run_model_with_llm` is the agent-turn wrapper. `handle_sampling`
+  = gate (grant → server permitted → sampling sub-budget →
+  invocation budget) → `dispatch_llm` tagged
+  `origin = sampling{server}` → outbound `ValidatorChain` → reply;
+  policy refusal / model failure declines to the server, agent turn
+  untouched. `origin` attribution on `CostMetadata` +
+  `InvocationTotals.sampling_cost` (`events.rs`). 3 e2e policy tests
+  green. **Remaining wiring (follow-up / Step 8):** production daemon
+  doesn't yet start grant-bearing servers per-invocation and pass the
+  `SamplingChannel` (the mechanism + grant + tests land; the daemon
+  lifecycle switch to `start_server_with_requests` for granted
+  servers is the open piece). Single granted channel for now;
+  multi-server merged stream is a follow-up.
 
 rmcp facts (1.7): `create_message(&self, params:
 CreateMessageRequestParams, ctx) -> Result<CreateMessageResult,
