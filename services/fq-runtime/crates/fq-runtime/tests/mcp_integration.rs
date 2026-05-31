@@ -584,3 +584,222 @@ async fn static_resource_pin_appears_in_first_model_request() {
 
     manager.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Step 4 — Prompts + Completion (P2)
+//
+// The pinned everything server registers four prompts:
+//   simple-prompt      — no args, one user/text message
+//   args-prompt        — city (required) + state (optional), substituted
+//   completable-prompt — department + name, both with completion handlers
+//   resource-prompt    — resourceType ("Text"/"Blob") + resourceId, returns a
+//                        user/text message followed by an embedded resource
+// ---------------------------------------------------------------------------
+
+/// Step 4: list a server's prompts over the MCP prompt protocol.
+#[tokio::test]
+async fn lists_prompts_from_everything_server() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    let prompts = manager
+        .list_prompts("everything")
+        .await
+        .expect("list prompts");
+    let names: Vec<&str> = prompts.iter().map(|p| p.name.as_str()).collect();
+    for expected in [
+        "simple-prompt",
+        "args-prompt",
+        "completable-prompt",
+        "resource-prompt",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "expected prompt {expected:?} in {names:?}"
+        );
+    }
+
+    manager.shutdown().await;
+}
+
+/// Step 4: fetch a parameterised prompt as a reusable, owned seed value —
+/// the server substitutes the bound arguments into the message sequence,
+/// and the seed records its provenance (server, name, arguments).
+#[tokio::test]
+async fn gets_parameterised_prompt_as_seed() {
+    use std::collections::BTreeMap;
+
+    use fq_runtime::prompt::{PromptRole, PromptSeed};
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    let args = BTreeMap::from([
+        ("city".to_string(), "London".to_string()),
+        ("state".to_string(), "Ontario".to_string()),
+    ]);
+    let seed: PromptSeed = manager
+        .get_prompt("everything", "args-prompt", args.clone())
+        .await
+        .expect("get args-prompt");
+
+    // Provenance.
+    assert_eq!(seed.server, "everything");
+    assert_eq!(seed.name, "args-prompt");
+    assert_eq!(seed.arguments, args);
+
+    // Bound message sequence: one user message with both args substituted.
+    assert_eq!(seed.messages.len(), 1, "args-prompt returns one message");
+    assert_eq!(seed.messages[0].role, PromptRole::User);
+    let text = seed.messages[0]
+        .content
+        .to_text()
+        .expect("text content renders");
+    assert!(
+        text.contains("What's weather in London, Ontario?"),
+        "expected substituted arguments, got {text:?}"
+    );
+}
+
+/// Step 4: an embedded *text* resource in a prompt is captured losslessly
+/// and renders into the seed transcript (a supported handling path).
+#[tokio::test]
+async fn embedded_text_resource_prompt_renders() {
+    use std::collections::BTreeMap;
+
+    use fq_runtime::prompt::{EmbeddedResource, PromptContent, PromptSeed};
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    let args = BTreeMap::from([
+        ("resourceType".to_string(), "Text".to_string()),
+        ("resourceId".to_string(), "1".to_string()),
+    ]);
+    let seed: PromptSeed = manager
+        .get_prompt("everything", "resource-prompt", args)
+        .await
+        .expect("get resource-prompt (Text)");
+
+    // user/text followed by user/resource (embedded).
+    assert_eq!(seed.messages.len(), 2, "text + embedded resource");
+    assert!(
+        matches!(
+            seed.messages[1].content,
+            PromptContent::EmbeddedResource(EmbeddedResource::Text { .. })
+        ),
+        "second message should be an embedded text resource, got {:?}",
+        seed.messages[1].content
+    );
+
+    // The whole sequence is supported, so it renders to a transcript.
+    let transcript = seed.to_transcript().expect("text resource renders");
+    assert_eq!(transcript.len(), 2);
+    assert!(
+        transcript[1]
+            .content
+            .as_deref()
+            .is_some_and(|c| c.contains("This is a plaintext resource")),
+        "embedded resource text should reach the transcript"
+    );
+}
+
+/// Step 4: an embedded *blob* resource is captured losslessly but is not yet
+/// handled — rendering fails loudly with NotImplemented rather than silently
+/// dropping it. Server-driven coverage of the handler-stub path.
+#[tokio::test]
+async fn embedded_blob_resource_prompt_is_not_implemented() {
+    use std::collections::BTreeMap;
+
+    use fq_runtime::prompt::{EmbeddedResource, PromptContent, PromptError, PromptSeed};
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    let args = BTreeMap::from([
+        ("resourceType".to_string(), "Blob".to_string()),
+        ("resourceId".to_string(), "1".to_string()),
+    ]);
+    let seed: PromptSeed = manager
+        .get_prompt("everything", "resource-prompt", args)
+        .await
+        .expect("get resource-prompt (Blob)");
+
+    // Captured losslessly as a blob resource...
+    assert!(
+        matches!(
+            seed.messages[1].content,
+            PromptContent::EmbeddedResource(EmbeddedResource::Blob { .. })
+        ),
+        "second message should be an embedded blob resource, got {:?}",
+        seed.messages[1].content
+    );
+    // ...but handling it is not implemented, and says so loudly.
+    assert!(
+        matches!(seed.to_transcript(), Err(PromptError::NotImplemented(_))),
+        "blob resource handling should be NotImplemented"
+    );
+}
+
+/// Step 4: request argument completion for a prompt argument and assert the
+/// server's suggestions (per ADR-0017, prompts/completion are
+/// model-controlled — there is no human menu).
+#[tokio::test]
+async fn completes_prompt_argument() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    // department completions starting with "S" → Sales, Support.
+    let completion = manager
+        .complete_prompt("everything", "completable-prompt", "department", "S", None)
+        .await
+        .expect("complete department argument");
+    assert!(
+        completion.values.contains(&"Sales".to_string())
+            && completion.values.contains(&"Support".to_string()),
+        "expected Sales + Support, got {:?}",
+        completion.values
+    );
+
+    manager.shutdown().await;
+}

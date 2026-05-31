@@ -287,10 +287,47 @@ transcript.
 
 **Done when**
 
-- [ ] Prompt list/get/completion tests green.
-- [ ] A fetched prompt is exposed as a reusable seed value
+- [x] Prompt list/get/completion tests green.
+- [x] A fetched prompt is exposed as a reusable seed value
       (messages + bound args + provenance), ready for a future
       spawn to consume.
+
+**Implemented 2026-05-31.**
+
+- Owned, provider-neutral [`crate::prompt`] module: `PromptSeed`
+  (server + name + bound `arguments` + `messages`) with a **capture
+  layer** ([`PromptContent`], a 1:1 mirror of the 2025-11-25
+  `ContentBlock` union — text, image, audio, resource_link, embedded
+  resource — lossless serde round-trip) and a fallible **handling
+  layer** (`to_text` / `to_message` / `to_transcript`; unsupported
+  content returns `PromptError::NotImplemented` rather than being
+  dropped). rmcp-free; the rmcp→owned conversion lives in
+  `crate::mcp` (`prompt_content_from_rmcp`).
+- Manager wrappers mirror the resource ones: `list_prompts`
+  (rmcp `Prompt`), `get_prompt` → owned `PromptSeed`, `complete_prompt`
+  → `CompletionInfo`.
+- Tests against the pinned everything server: list (4 prompts),
+  parameterised `get` (arg substitution + provenance), embedded **text**
+  resource renders, embedded **blob** resource → `NotImplemented`,
+  and `department` argument completion. Plus owned-type unit tests
+  (lossless round-trip + every NotImplemented arm).
+
+**Two rmcp gaps surfaced; both off the critical path:**
+
+- **Embedded resource in prompts** — rmcp 1.4 failed to deserialize
+  it (the `Resource` variant's `#[serde(flatten)]` was missing
+  upstream). Already fixed upstream (`rust-sdk#842` / `#843`);
+  resolved here by **bumping rmcp 1.4 → 1.7**, which flipped the two
+  `resource-prompt` tests green.
+- **Audio in prompts** — rmcp still omits the `Audio` variant from
+  `PromptMessageContent` (through 1.7) and rejects it on the wire, so
+  audio prompt content can't reach our capture layer yet. Our owned
+  `PromptContent::Audio` is spec-canonical and ready. Reported +
+  fixed upstream (`rust-sdk#864` / PR `#865`); tracked in
+  `docs/plans/backlog.md`.
+
+*`prompts/list_changed` handling* is folded into Step 7 (utilities /
+`list_changed` cache refresh) rather than duplicated here.
 
 ---
 

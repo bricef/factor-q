@@ -23,6 +23,7 @@ pub mod events;
 pub mod llm;
 pub mod mcp;
 pub mod pricing;
+pub mod prompt;
 pub mod tools;
 
 // Role modules. Both stay `pub` so that downstream code (fq-cli,

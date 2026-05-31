@@ -647,6 +647,39 @@ work and likely after step 8 (archive hand-off), so the
 - Step 9's `fq recover` CLI is being built and the stuck
   case fits naturally alongside ambiguous in its UI.
 
+## MCP client gaps (flagged 2026-05-31)
+
+### Audio content in MCP prompt messages (blocked on rmcp)
+**Source:** MCP full-spec plan Step 4
+(`docs/plans/active/2026-05-28-mcp-client-full-spec.md`);
+`crate::prompt::PromptContent::Audio`,
+`crate::mcp::prompt_content_from_rmcp`.
+
+factor-q's `PromptContent` is a 1:1 capture of the MCP 2025-11-25
+`ContentBlock` union, including `Audio`. But `rmcp`'s
+`PromptMessageContent` omits the `Audio` variant (through 1.7), and
+because it is an internally-tagged enum with no catch-all, a
+spec-conformant `{"type":"audio",...}` prompt content block fails to
+deserialize inside `get_prompt` — so audio prompt content never
+reaches our capture layer (the fetch errors first).
+
+**Status: reported and fixed upstream** —
+- issue: `modelcontextprotocol/rust-sdk#864`
+- PR: `modelcontextprotocol/rust-sdk#865` (adds the `Audio` variant +
+  `new_audio` + schema snapshot)
+
+When that PR merges and we pick up the release, the `Audio` arm in
+`crate::prompt` becomes reachable with **no factor-q change required**;
+the handler stub (`PromptContent::to_text` →
+`NotImplemented("audio")`) is what we'd implement if/when audio
+prompts need rendering. The unit test
+`prompt::tests::capture_round_trips_losslessly_for_all_variants`
+already exercises the owned `Audio` type end-to-end.
+
+The sibling embedded-resource gap (`rust-sdk#842` / `#843`) was
+already fixed upstream and is resolved here by the rmcp 1.4 → 1.7
+bump (it unblocked the `resource-prompt` integration tests).
+
 ## Process and documentation gaps
 
 ### ADRs still in draft

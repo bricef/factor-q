@@ -7,17 +7,19 @@
 //! [`McpClientManager`] owns the lifecycle of MCP server child processes:
 //! starting them, discovering their tools, and shutting them down.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
 use rmcp::ClientHandler;
 use rmcp::ServiceExt;
 use rmcp::model::{
-    CallToolRequestParams, ClientCapabilities, ClientInfo, ElicitationCapability,
-    FormElicitationCapability, ReadResourceRequestParams, ReadResourceResult, Resource,
-    ResourceContents, ResourceTemplate, ResourceUpdatedNotificationParam, RootsCapabilities,
-    SamplingCapability, ServerCapabilities, SubscribeRequestParams,
+    CallToolRequestParams, ClientCapabilities, ClientInfo, CompletionContext, CompletionInfo,
+    ElicitationCapability, FormElicitationCapability, GetPromptRequestParams, GetPromptResult,
+    JsonObject, Prompt, PromptMessageContent, PromptMessageRole, ReadResourceRequestParams,
+    ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
+    ResourceUpdatedNotificationParam, RootsCapabilities, SamplingCapability, ServerCapabilities,
+    SubscribeRequestParams,
 };
 use rmcp::service::{MaybeSendFuture, NotificationContext, RoleClient, RunningService};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
@@ -56,6 +58,9 @@ pub enum McpError {
 
     #[error("resource operation on '{server}' failed: {reason}")]
     ResourceOp { server: String, reason: String },
+
+    #[error("prompt operation on '{server}' failed: {reason}")]
+    PromptOp { server: String, reason: String },
 }
 
 // Type alias for the concrete client handle we store.
@@ -606,6 +611,72 @@ impl McpClientManager {
             })
     }
 
+    /// List the prompts a running server exposes (auto-paginated).
+    /// Returns rmcp's discovery type, mirroring [`Self::list_resources`];
+    /// the owned, lossless representation is reserved for the fetched
+    /// prompt itself (see [`Self::get_prompt`]).
+    pub async fn list_prompts(&self, server: &str) -> Result<Vec<Prompt>, McpError> {
+        self.client_for(server)?
+            .list_all_prompts()
+            .await
+            .map_err(|err| McpError::PromptOp {
+                server: server.to_string(),
+                reason: err.to_string(),
+            })
+    }
+
+    /// Fetch a prompt by name with bound arguments and materialise it
+    /// into an owned, reusable [`PromptSeed`](crate::prompt::PromptSeed)
+    /// (Step 4's seed value: message sequence + bound args + provenance).
+    /// This is the rmcp boundary — the seed itself is provider-neutral.
+    pub async fn get_prompt(
+        &self,
+        server: &str,
+        name: &str,
+        arguments: BTreeMap<String, String>,
+    ) -> Result<crate::prompt::PromptSeed, McpError> {
+        let mut params = GetPromptRequestParams::new(name);
+        if !arguments.is_empty() {
+            let obj: JsonObject = arguments
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            params = params.with_arguments(obj);
+        }
+        let result = self
+            .client_for(server)?
+            .get_prompt(params)
+            .await
+            .map_err(|err| McpError::PromptOp {
+                server: server.to_string(),
+                reason: err.to_string(),
+            })?;
+        Ok(prompt_seed_from_rmcp(server, name, arguments, result))
+    }
+
+    /// Request argument completion for a prompt argument
+    /// (`completion/complete`). Per ADR-0017 prompts are
+    /// model-controlled, so this is the agent's tool, not a human menu.
+    /// `context` carries previously-resolved arguments for
+    /// dependent completions (e.g. the everything server's `name`
+    /// argument depends on `department`).
+    pub async fn complete_prompt(
+        &self,
+        server: &str,
+        prompt: &str,
+        argument: &str,
+        value: &str,
+        context: Option<CompletionContext>,
+    ) -> Result<CompletionInfo, McpError> {
+        self.client_for(server)?
+            .complete_prompt_argument(prompt, argument, value, context)
+            .await
+            .map_err(|err| McpError::PromptOp {
+                server: server.to_string(),
+                reason: err.to_string(),
+            })
+    }
+
     /// A cloneable read-only handle for reading resources from the
     /// currently-running servers — used to inject `static_resources`
     /// at invocation start without sharing the manager's lifecycle.
@@ -730,6 +801,108 @@ pub fn render_resource_contents(result: &ReadResourceResult) -> String {
         }
     }
     output
+}
+
+/// Convert a fetched rmcp `GetPromptResult` into the owned, lossless
+/// [`PromptSeed`](crate::prompt::PromptSeed) — the rmcp → factor-q
+/// boundary for prompts. Everything downstream is provider-neutral.
+///
+/// rmcp 1.4–1.7 omit `Audio` from `PromptMessageContent` and reject
+/// it on the wire, so audio prompt content never reaches here (the
+/// fetch fails first). Our [`PromptContent`](crate::prompt::PromptContent)
+/// keeps the spec-canonical `Audio` variant regardless — see the
+/// `docs/plans/backlog.md` gap note.
+fn prompt_seed_from_rmcp(
+    server: &str,
+    name: &str,
+    arguments: BTreeMap<String, String>,
+    result: GetPromptResult,
+) -> crate::prompt::PromptSeed {
+    use crate::prompt::{PromptRole, PromptSeed, PromptSeedMessage};
+    let messages = result
+        .messages
+        .iter()
+        .map(|m| PromptSeedMessage {
+            role: match m.role {
+                PromptMessageRole::User => PromptRole::User,
+                PromptMessageRole::Assistant => PromptRole::Assistant,
+            },
+            content: prompt_content_from_rmcp(&m.content),
+        })
+        .collect();
+    PromptSeed {
+        server: server.to_string(),
+        name: name.to_string(),
+        arguments,
+        description: result.description.clone(),
+        messages,
+    }
+}
+
+/// Map one rmcp prompt content block to the owned [`PromptContent`].
+/// Captures the primary fields plus annotations / `_meta` (verbatim,
+/// as opaque JSON) so the conversion is lossless for everything rmcp
+/// can deliver.
+fn prompt_content_from_rmcp(content: &PromptMessageContent) -> crate::prompt::PromptContent {
+    use crate::prompt::{EmbeddedResource, PromptContent};
+    match content {
+        PromptMessageContent::Text { text } => PromptContent::Text {
+            text: text.clone(),
+            meta: crate::prompt::ContentMeta::default(),
+        },
+        PromptMessageContent::Image { image } => PromptContent::Image {
+            data: image.raw.data.clone(),
+            mime_type: image.raw.mime_type.clone(),
+            meta: content_meta(image.annotations.as_ref(), image.raw.meta.as_ref()),
+        },
+        PromptMessageContent::ResourceLink { link } => PromptContent::ResourceLink {
+            uri: link.raw.uri.clone(),
+            name: link.raw.name.clone(),
+            meta: content_meta(link.annotations.as_ref(), link.raw.meta.as_ref()),
+        },
+        PromptMessageContent::Resource { resource } => {
+            let annotations = resource.annotations.as_ref();
+            let embedded = match &resource.raw.resource {
+                ResourceContents::TextResourceContents {
+                    uri,
+                    mime_type,
+                    text,
+                    meta,
+                } => EmbeddedResource::Text {
+                    uri: uri.clone(),
+                    mime_type: mime_type.clone(),
+                    text: text.clone(),
+                    meta: content_meta(annotations, meta.as_ref()),
+                },
+                ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    meta,
+                } => EmbeddedResource::Blob {
+                    uri: uri.clone(),
+                    mime_type: mime_type.clone(),
+                    blob: blob.clone(),
+                    meta: content_meta(annotations, meta.as_ref()),
+                },
+            };
+            PromptContent::EmbeddedResource(embedded)
+        }
+    }
+}
+
+/// Capture optional rmcp annotations + `_meta` as opaque JSON,
+/// keeping the owned prompt types lossless without re-modelling the
+/// (large, evolving) annotation schema. Generic so the rmcp
+/// `Annotations` / `Meta` types stay out of the owned `prompt` module.
+fn content_meta<A: serde::Serialize, M: serde::Serialize>(
+    annotations: Option<&A>,
+    meta: Option<&M>,
+) -> crate::prompt::ContentMeta {
+    crate::prompt::ContentMeta {
+        annotations: annotations.and_then(|a| serde_json::to_value(a).ok()),
+        meta: meta.and_then(|m| serde_json::to_value(m).ok()),
+    }
 }
 
 #[cfg(test)]
