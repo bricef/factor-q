@@ -349,10 +349,18 @@ sampling tool, with `mock_anthropic` as the agent model):
 3. *Not permitted*: an agent without the sampling grant gets a
    declined response; no model call.
 
-**Implementation.** `ClientHandler::create_message` →
-policy/budget check (declarative grant from Step 8) → run on
-the agent's `LlmClient` → emit events → return. No human
-review step; no LLM authorization step.
+**Implementation.** Per
+[ADR-0018](../../adrs/accepted/0018-mcp-server-initiated-execution.md)
+(the execution model for server-initiated calls): the server runs
+as a **per-invocation** instance; `create_message` on the handler
+is a thin bridge that forwards over a channel to the **runner**,
+which is the sole LLM arbiter. The runner services it via a
+`select!` during the tool-call await → gate (grant + sub-budget,
+declarative grant from Step 8) → run through the one WAL'd /
+evented / budgeted LLM path tagged `origin = sampling{server}` →
+**validation seam** → reply. The result returns to the *server*,
+not the harness; the reducer is untouched. No human review step;
+no LLM authorization step.
 
 **Done when**
 
@@ -363,6 +371,11 @@ review step; no LLM authorization step.
 - [ ] Each sampling completion is attributed to its originating
       server in the emitted cost events / trace, distinct from
       the agent's own LLM spend (ADR-0004 cost attribution).
+- [ ] Bidirectional validation seam in place (ADR-0018): a
+      pluggable `Validator` chain (`ValidatorResult = Allow |
+      Modify | Deny`, default `DefaultAllow`) on the result, and
+      `includeContext` gated to explicit grant (default `none`)
+      through an inbound redact chain.
 
 ---
 
