@@ -8,9 +8,10 @@
 use std::sync::Arc;
 
 use fq_runtime::mcp::{
-    FactorQClientHandler, McpClientManager, McpServerConfig, ResourceNotification,
+    FactorQClientHandler, McpClientManager, McpServerConfig, ResourceNotification, ServerRequest,
 };
 use fq_tools::{Tool, ToolContext, ToolSandbox};
+use rmcp::model::{CreateMessageResult, SamplingMessage};
 
 /// Skip the test if `npx` is not available.
 fn require_npx() -> bool {
@@ -799,6 +800,84 @@ async fn completes_prompt_argument() {
             && completion.values.contains(&"Support".to_string()),
         "expected Sales + Support, got {:?}",
         completion.values
+    );
+
+    manager.shutdown().await;
+}
+
+/// Step 5b — the handler→runner sampling bridge.
+///
+/// The everything server registers `trigger-sampling-request` only
+/// when the client advertises the sampling capability (we do); calling
+/// it makes the server send `sampling/createMessage` *back* to us and
+/// block on the answer. With a per-invocation server (the channel
+/// wired), `create_message` forwards the request on the
+/// `ServerRequest` channel and awaits the host's reply. Here the test
+/// plays the runner: it drains one request and replies with a canned
+/// result, and the tool call completes carrying that result.
+#[tokio::test]
+async fn sampling_request_bridges_to_the_host() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    let (tools, mut requests) = manager
+        .start_server_with_requests(everything_config())
+        .await
+        .expect("start server-everything (per-invocation)");
+
+    let trigger: Arc<dyn Tool> = tools
+        .into_iter()
+        .find(|t| t.name() == "trigger-sampling-request")
+        .expect("everything server exposes trigger-sampling-request when sampling is advertised");
+
+    let sandbox = ToolSandbox::new();
+
+    // The tool call blocks until the host answers the bridged sampling
+    // request, so drive both sides concurrently on this task. (rmcp
+    // services the inbound request on its own background task, so the
+    // bridge makes progress independently of this `join!`.)
+    let tool_call = async {
+        let ctx = ToolContext::new(&sandbox);
+        trigger
+            .execute(&ctx, serde_json::json!({"prompt": "ping", "maxTokens": 16}))
+            .await
+    };
+
+    let host = async {
+        let request = requests
+            .recv()
+            .await
+            .expect("host should receive the bridged sampling request");
+        let ServerRequest::Sampling { params, reply } = request;
+        // The server forwarded its prompt through to us.
+        assert!(
+            !params.messages.is_empty(),
+            "sampling request should carry the server's messages"
+        );
+        assert_eq!(params.max_tokens, 16, "max_tokens should round-trip");
+        // Reply with a canned result, as the runner would after
+        // running the LLM call.
+        let result = CreateMessageResult::new(
+            SamplingMessage::assistant_text("pong from host"),
+            "test-sampling-model".to_string(),
+        )
+        .with_stop_reason(CreateMessageResult::STOP_REASON_END_TURN);
+        reply
+            .send(Ok(result))
+            .expect("bridge should still be awaiting the reply");
+    };
+
+    let (tool_result, ()) = tokio::join!(tool_call, host);
+
+    let result = tool_result.expect("trigger-sampling-request should complete");
+    assert!(!result.is_error, "sampling tool should not report an error");
+    assert!(
+        result.output.contains("test-sampling-model") && result.output.contains("pong from host"),
+        "tool output should echo the host's sampling result, got: {}",
+        result.output
     );
 
     manager.shutdown().await;

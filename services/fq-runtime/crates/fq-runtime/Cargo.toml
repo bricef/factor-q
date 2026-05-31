@@ -28,6 +28,9 @@ strum = { version = "0.27", features = ["derive"] }
 [dev-dependencies]
 tempfile = "3"
 axum = "0.7"
+# Integration tests construct rmcp wire types (e.g. a canned
+# `CreateMessageResult` to reply to a bridged sampling request).
+rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process"] }
 
 [lints]
 workspace = true

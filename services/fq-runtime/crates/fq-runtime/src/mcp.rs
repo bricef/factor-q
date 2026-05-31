@@ -15,17 +15,20 @@ use rmcp::ClientHandler;
 use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, ClientCapabilities, ClientInfo, CompletionContext, CompletionInfo,
+    CreateMessageRequestMethod, CreateMessageRequestParams, CreateMessageResult,
     ElicitationCapability, FormElicitationCapability, GetPromptRequestParams, GetPromptResult,
     JsonObject, Prompt, PromptMessageContent, PromptMessageRole, ReadResourceRequestParams,
     ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
     ResourceUpdatedNotificationParam, RootsCapabilities, SamplingCapability, ServerCapabilities,
     SubscribeRequestParams,
 };
-use rmcp::service::{MaybeSendFuture, NotificationContext, RoleClient, RunningService};
+use rmcp::service::{
+    MaybeSendFuture, NotificationContext, RequestContext, RoleClient, RunningService,
+};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use serde_json::Value;
 use tokio::process::Command;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 /// Configuration for an MCP server to be started as a child process.
@@ -76,6 +79,29 @@ pub enum ResourceNotification {
     ListChanged,
 }
 
+/// A request a connected MCP server initiates back toward the host
+/// *mid-invocation* (ADR-0018).
+///
+/// The handler ([`FactorQClientHandler`]) is a thin bridge: it
+/// translates an inbound rmcp request into one of these variants,
+/// forwards it on a per-invocation channel, and awaits the host's
+/// reply on the embedded oneshot. The runner is the sole arbiter —
+/// it gates, runs the LLM call through its single budgeted/WAL'd
+/// path, validates the result, and replies. Step 5 wires the
+/// sampling arm; Step 6 adds an `Elicitation` variant to the same
+/// channel and `select!` arm.
+pub enum ServerRequest {
+    /// `sampling/createMessage` — the server asks the host to run an
+    /// LLM completion and return the result to the *server* (not the
+    /// agent's transcript). `reply` carries either the result or a
+    /// structured decline (e.g. ungranted / over-budget); dropping
+    /// the sender declines with `method_not_found`.
+    Sampling {
+        params: CreateMessageRequestParams,
+        reply: oneshot::Sender<Result<CreateMessageResult, rmcp::ErrorData>>,
+    },
+}
+
 /// factor-q's MCP client handler.
 ///
 /// Advertises the client-side capabilities factor-q intends to honour
@@ -90,6 +116,12 @@ pub struct FactorQClientHandler {
     /// Sink for resource notifications forwarded from the connected
     /// server (`resources/updated`, `resources/list_changed`).
     resource_notifications: Option<mpsc::UnboundedSender<ResourceNotification>>,
+    /// Sink for server-initiated requests (sampling, and later
+    /// elicitation) bridged to the runner. `None` for shared,
+    /// tool-only servers, which decline inbound requests per the rmcp
+    /// default (ADR-0018: only grant-bearing servers run
+    /// per-invocation with a wired channel).
+    server_requests: Option<mpsc::UnboundedSender<ServerRequest>>,
 }
 
 impl FactorQClientHandler {
@@ -97,7 +129,16 @@ impl FactorQClientHandler {
     fn with_notifications(tx: mpsc::UnboundedSender<ResourceNotification>) -> Self {
         Self {
             resource_notifications: Some(tx),
+            ..Default::default()
         }
+    }
+
+    /// Wire a sink for server-initiated requests (sampling /
+    /// elicitation). Used on the per-invocation start path; absent
+    /// for shared tool-only servers.
+    fn with_server_requests(mut self, tx: mpsc::UnboundedSender<ServerRequest>) -> Self {
+        self.server_requests = Some(tx);
+        self
     }
 
     /// The client capabilities factor-q advertises during initialize:
@@ -124,6 +165,49 @@ impl ClientHandler for FactorQClientHandler {
         let mut info = ClientInfo::default();
         info.capabilities = Self::advertised_capabilities();
         info
+    }
+
+    /// Bridge a `sampling/createMessage` request to the runner.
+    ///
+    /// The handler does no policy and no LLM call (ADR-0018 §2): it
+    /// forwards the params on the per-invocation channel and awaits
+    /// the runner's reply. With no channel wired (a shared tool-only
+    /// server) or no runner listening, it declines with
+    /// `method_not_found` — the rmcp default.
+    fn create_message(
+        &self,
+        params: CreateMessageRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> impl std::future::Future<Output = Result<CreateMessageResult, rmcp::ErrorData>>
+    + MaybeSendFuture
+    + '_ {
+        let sink = self.server_requests.clone();
+        async move {
+            let decline = || {
+                Err(rmcp::ErrorData::method_not_found::<
+                    CreateMessageRequestMethod,
+                >())
+            };
+            let Some(tx) = sink else {
+                return decline();
+            };
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if tx
+                .send(ServerRequest::Sampling {
+                    params,
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                // Runner gone — no one will service this request.
+                return decline();
+            }
+            match reply_rx.await {
+                Ok(result) => result,
+                // Reply sender dropped without answering → decline.
+                Err(_) => decline(),
+            }
+        }
     }
 
     fn on_resource_updated(
@@ -439,6 +523,39 @@ impl McpClientManager {
             return Ok(Vec::new());
         }
 
+        let tools = self.start_inner(config, None).await?;
+        self.started.insert(key);
+        Ok(tools)
+    }
+
+    /// Start a *per-invocation* MCP server instance with a wired
+    /// server-initiated request channel (ADR-0018).
+    ///
+    /// Unlike [`start_server`], this never deduplicates: a server
+    /// granted an inbound capability (sampling, elicitation, roots)
+    /// runs as its own child process per invocation, so its
+    /// server-initiated requests attribute to the right invocation's
+    /// budget, grant, and event chain. Returns the discovered tools
+    /// plus the receiver the runner services in its `select!` loop.
+    pub async fn start_server_with_requests(
+        &mut self,
+        config: McpServerConfig,
+    ) -> Result<(Vec<Arc<dyn Tool>>, mpsc::UnboundedReceiver<ServerRequest>), McpError> {
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let tools = self.start_inner(config, Some(req_tx)).await?;
+        Ok((tools, req_rx))
+    }
+
+    /// Shared start path: spawn the child process, run the initialize
+    /// handshake, discover tools, and register the [`RunningServer`].
+    /// `server_request_tx` wires the per-invocation sampling /
+    /// elicitation bridge; `None` leaves the server tool-only (inbound
+    /// requests decline). Deduplication is the caller's concern.
+    async fn start_inner(
+        &mut self,
+        config: McpServerConfig,
+        server_request_tx: Option<mpsc::UnboundedSender<ServerRequest>>,
+    ) -> Result<Vec<Arc<dyn Tool>>, McpError> {
         info!(
             server = %config.name,
             command = %config.command,
@@ -461,10 +578,15 @@ impl McpClientManager {
         })?;
 
         // Perform the MCP initialize handshake. The handler advertises
-        // factor-q's client capabilities (roots/sampling/elicitation) and
-        // forwards resource notifications to `notif_rx`.
+        // factor-q's client capabilities (roots/sampling/elicitation),
+        // forwards resource notifications to `notif_rx`, and — on the
+        // per-invocation path — bridges server-initiated requests.
         let (notif_tx, notif_rx) = mpsc::unbounded_channel();
-        let client = FactorQClientHandler::with_notifications(notif_tx)
+        let mut handler = FactorQClientHandler::with_notifications(notif_tx);
+        if let Some(req_tx) = server_request_tx {
+            handler = handler.with_server_requests(req_tx);
+        }
+        let client = handler
             .serve(transport)
             .await
             .map_err(|err| McpError::ServerStart {
@@ -538,7 +660,6 @@ impl McpClientManager {
             }
         }
 
-        self.started.insert(key);
         self.servers.push(RunningServer {
             name: config.name,
             client,
