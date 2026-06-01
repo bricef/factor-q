@@ -519,6 +519,7 @@ mod tests {
                     total_cost: 0.5,
                     total_duration_ms: 99,
                     sampling_cost: 0.0,
+                    elicitation_cost: 0.0,
                 },
             }),
         )

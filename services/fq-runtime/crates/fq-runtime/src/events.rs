@@ -667,6 +667,9 @@ pub enum LlmCallOrigin {
     /// A server-initiated sampling completion, attributed to the
     /// requesting MCP server.
     Sampling { server: String },
+    /// A server-initiated elicitation completion (structured input),
+    /// attributed to the requesting MCP server.
+    Elicitation { server: String },
 }
 
 /// Published immediately before an LLM call is made.
@@ -937,6 +940,11 @@ pub struct InvocationTotals {
     /// to 0 for totals written before sampling existed.
     #[serde(default)]
     pub sampling_cost: f64,
+    /// Cumulative spend on server-initiated elicitation within this
+    /// invocation (a subset of `total_cost`), tracked separately so
+    /// the elicitation sub-budget can be enforced (ADR-0018).
+    #[serde(default)]
+    pub elicitation_cost: f64,
 }
 
 /// Published when the `fq run` daemon starts up.

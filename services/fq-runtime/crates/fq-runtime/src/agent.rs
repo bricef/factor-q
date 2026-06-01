@@ -126,6 +126,30 @@ impl RootsGrant {
     }
 }
 
+/// Declarative grant for MCP **elicitation** (`elicitation/create`),
+/// the server-initiated request for structured user input
+/// (ADR-0017 / ADR-0018). factor-q answers it autonomously on the
+/// agent's model rather than prompting a human; the schema is a named
+/// extraction channel, so this is gated like sampling. Nothing by
+/// default. Set programmatically in v1; Step 8 parses it from
+/// frontmatter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElicitationGrant {
+    /// Names of MCP servers permitted to request elicitation.
+    pub servers: Vec<String>,
+    /// Optional aggregate elicitation sub-budget (USD) within the
+    /// invocation, enforced *before* each model call. `None` = bounded
+    /// only by the invocation budget; `Some(0.0)` = no spend allowed.
+    pub max_cost: Option<f64>,
+}
+
+impl ElicitationGrant {
+    /// Whether `server` is permitted to request elicitation.
+    pub fn permits(&self, server: &str) -> bool {
+        self.servers.iter().any(|s| s == server)
+    }
+}
+
 /// A validated agent ready to be executed.
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -140,6 +164,7 @@ pub struct Agent {
     static_resources: Vec<StaticResourcePin>,
     sampling: Option<SamplingGrant>,
     roots: Option<RootsGrant>,
+    elicitation: Option<ElicitationGrant>,
 }
 
 impl Agent {
@@ -196,6 +221,12 @@ impl Agent {
     /// advertised to no server (the default — nothing by default).
     pub fn roots_grant(&self) -> Option<&RootsGrant> {
         self.roots.as_ref()
+    }
+
+    /// The agent's MCP elicitation grant, if any. `None` means no
+    /// server may request elicitation (the default).
+    pub fn elicitation_grant(&self) -> Option<&ElicitationGrant> {
+        self.elicitation.as_ref()
     }
 
     /// Produce a [`ConfigSnapshot`] for inclusion in a `Triggered` event.
@@ -430,6 +461,7 @@ pub struct AgentBuilder {
     static_resources: Vec<StaticResourcePin>,
     sampling: Option<SamplingGrant>,
     roots: Option<RootsGrant>,
+    elicitation: Option<ElicitationGrant>,
 }
 
 impl AgentBuilder {
@@ -505,6 +537,13 @@ impl AgentBuilder {
         self
     }
 
+    /// Grant MCP elicitation to the named servers (see
+    /// [`ElicitationGrant`]). Absent by default — nothing by default.
+    pub fn elicitation_grant(mut self, grant: ElicitationGrant) -> Self {
+        self.elicitation = Some(grant);
+        self
+    }
+
     /// Finalise construction, validating required fields.
     pub fn build(self) -> Result<Agent, BuildError> {
         let id_str = self.id.ok_or(BuildError::MissingField("id"))?;
@@ -537,6 +576,7 @@ impl AgentBuilder {
             static_resources: self.static_resources,
             sampling: self.sampling,
             roots: self.roots,
+            elicitation: self.elicitation,
         })
     }
 }

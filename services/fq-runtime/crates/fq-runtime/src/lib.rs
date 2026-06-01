@@ -42,7 +42,8 @@ pub mod worker;
 pub mod test_support;
 
 pub use agent::{
-    Agent, AgentId, AgentRegistry, McpServerDeclaration, RootsGrant, SamplingGrant, Sandbox,
+    Agent, AgentId, AgentRegistry, ElicitationGrant, McpServerDeclaration, RootsGrant,
+    SamplingGrant, Sandbox,
 };
 pub use bus::EventBus;
 pub use config::Config;

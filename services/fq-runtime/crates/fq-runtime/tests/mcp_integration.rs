@@ -851,7 +851,9 @@ async fn sampling_request_bridges_to_the_host() {
             .recv()
             .await
             .expect("host should receive the bridged sampling request");
-        let ServerRequest::Sampling { params, reply } = request;
+        let ServerRequest::Sampling { params, reply } = request else {
+            panic!("expected a sampling request, got an elicitation one");
+        };
         // The server forwarded its prompt through to us.
         assert!(
             !params.messages.is_empty(),
@@ -1259,5 +1261,305 @@ async fn roots_not_advertised_without_a_grant() {
     assert!(
         other.is_empty(),
         "a grant that omits this server advertises no roots"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Step 6b — Elicitation policy, end to end through the runner.
+//
+// A scripted agent calls the everything server's
+// `trigger-elicitation-request` tool, which sends `elicitation/create`
+// with a schema (`required: ["name"]`). The runner gates the request,
+// then answers it as a schema-constrained completion on the agent's
+// model: parse JSON → validate against the schema → retry up to N → on
+// success `accept` with the value (which the server echoes back into
+// the tool result), else `decline`.
+// ---------------------------------------------------------------------------
+
+/// The runner prefixes every elicitation completion with this phrase;
+/// its presence in a recorded model request proves the schema-constrained
+/// completion ran.
+const ELICITATION_MARKER: &str = "completing a structured form";
+
+fn saw_elicitation_call(requests: &[fq_runtime::ChatRequest]) -> bool {
+    requests.iter().any(|r| {
+        r.messages.iter().any(|m| {
+            m.content
+                .as_deref()
+                .is_some_and(|c| c.contains(ELICITATION_MARKER))
+        })
+    })
+}
+
+/// Drive a scripted agent that calls `trigger-elicitation-request`
+/// under the given `grant`. `elicitation_answers` are the JSON strings
+/// the model returns for successive elicitation attempts (each a
+/// budget-counted model call); they are consumed only when the request
+/// is permitted. Returns the outcome and every recorded ChatRequest.
+async fn run_elicitation_scenario(
+    grant: Option<fq_runtime::ElicitationGrant>,
+    elicitation_answers: Vec<String>,
+) -> Option<(fq_runtime::InvocationOutcome, Vec<fq_runtime::ChatRequest>)> {
+    use std::collections::HashMap;
+
+    use fq_runtime::events::{StopReason, TokenUsage, TriggerSource};
+    use fq_runtime::llm::fixture::FixtureClient;
+    use fq_runtime::{
+        Agent, ChatResponse, EventBus, Harness, ModelPricing, PricingTable, ReducerContext,
+        ReducerRunner, RunnerConfig, SamplingChannel, ToolRegistry, WorkerStore,
+    };
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return None;
+    }
+    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
+        eprintln!("skipping: FQ_NATS_URL not set");
+        return None;
+    };
+
+    let mut manager = McpClientManager::new();
+    let (tools, rx, _roots) = manager
+        .start_server_with_requests(everything_config(), vec![])
+        .await
+        .expect("start server-everything (per-invocation)");
+
+    let mut registry = ToolRegistry::with_builtins();
+    for tool in tools {
+        registry.register(tool);
+    }
+
+    let mut builder = Agent::builder()
+        .id("elicitation-policy-e2e")
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(1.0)
+        .tools(["trigger-elicitation-request".to_string()]);
+    if let Some(grant) = grant {
+        builder = builder.elicitation_grant(grant);
+    }
+    let agent = builder.build().expect("build agent");
+
+    let canned = |text: &str, stop: StopReason| ChatResponse {
+        content: Some(text.to_string()),
+        tool_calls: vec![],
+        stop_reason: stop,
+        usage: TokenUsage {
+            input_tokens: 8,
+            output_tokens: 4,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    };
+
+    let llm = FixtureClient::new();
+    // (1) call the elicitation tool.
+    llm.push_response(ChatResponse {
+        content: None,
+        tool_calls: vec![fq_runtime::events::MessageToolCall {
+            tool_call_id: fq_runtime::events::ToolCallId::new("call-elicit").unwrap(),
+            tool_name: "trigger-elicitation-request".to_string(),
+            parameters: serde_json::json!({}),
+        }],
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
+    // (2) the elicitation completion attempts.
+    for answer in &elicitation_answers {
+        llm.push_response(canned(answer, StopReason::EndTurn));
+    }
+    // (3) end the agent turn.
+    llm.push_response(canned("done.", StopReason::EndTurn));
+
+    let bus = EventBus::connect(&nats_url).await.expect("connect to NATS");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&store_dir.path().join("events.db"))
+            .await
+            .expect("open worker store"),
+    );
+    let mut pricing = HashMap::new();
+    pricing.insert(
+        "claude-haiku".to_string(),
+        ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    );
+    let worker_id =
+        fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string()).expect("worker id");
+
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(registry))
+                .resources(manager.resource_reader())
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(bus)
+                .pricing(Arc::new(PricingTable::from_map(pricing)))
+                .store(store)
+                .worker_id(worker_id)
+                .build(),
+        ),
+        Harness::new(),
+    );
+
+    let outcome = runner
+        .run_with_server_requests(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            serde_json::json!("go"),
+            Some(SamplingChannel::new("everything", rx)),
+        )
+        .await
+        .expect("invocation runs to completion");
+
+    let requests = llm.requests();
+    manager.shutdown().await;
+    Some((outcome, requests))
+}
+
+/// Permitted: the runner answers the elicitation on the agent model
+/// with a schema-valid value; the server `accept`s it and echoes the
+/// value back into the tool result (which reaches the agent transcript).
+#[tokio::test]
+async fn elicitation_permitted_accepts_schema_valid_value() {
+    let grant = fq_runtime::ElicitationGrant {
+        servers: vec!["everything".to_string()],
+        max_cost: None,
+    };
+    let Some((outcome, requests)) =
+        run_elicitation_scenario(Some(grant), vec![r#"{"name": "Ada Lovelace"}"#.to_string()])
+            .await
+    else {
+        return;
+    };
+
+    assert!(
+        matches!(outcome, fq_runtime::InvocationOutcome::Completed { .. }),
+        "invocation should complete, got {outcome:?}"
+    );
+    assert!(
+        saw_elicitation_call(&requests),
+        "the schema-constrained completion should have run on the agent model"
+    );
+    assert_eq!(
+        requests.len(),
+        3,
+        "agent turn 0 + elicitation + agent turn 1 = 3 model calls, got {}",
+        requests.len()
+    );
+    // The accepted value round-trips: the server echoes it into the
+    // tool result, which lands in the agent's next model request.
+    assert!(
+        requests.iter().any(|r| r.messages.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|c| c.contains("Ada Lovelace")))),
+        "the accepted value should round-trip into the agent transcript"
+    );
+}
+
+/// Ungranted: no grant, so the request is declined with no model call.
+#[tokio::test]
+async fn elicitation_ungranted_is_declined_without_a_model_call() {
+    let Some((outcome, requests)) =
+        run_elicitation_scenario(None, vec![r#"{"name": "Ada Lovelace"}"#.to_string()]).await
+    else {
+        return;
+    };
+
+    assert!(
+        matches!(outcome, fq_runtime::InvocationOutcome::Completed { .. }),
+        "invocation should still complete, got {outcome:?}"
+    );
+    assert!(
+        !saw_elicitation_call(&requests),
+        "an ungranted elicitation request must not call the model"
+    );
+    assert_eq!(requests.len(), 2, "got {}", requests.len());
+}
+
+/// Over-budget: granted but the elicitation sub-budget is exhausted
+/// (`max_cost: 0`), so it is declined before any model call.
+#[tokio::test]
+async fn elicitation_over_subbudget_is_declined_without_a_model_call() {
+    let grant = fq_runtime::ElicitationGrant {
+        servers: vec!["everything".to_string()],
+        max_cost: Some(0.0),
+    };
+    let Some((outcome, requests)) =
+        run_elicitation_scenario(Some(grant), vec![r#"{"name": "Ada Lovelace"}"#.to_string()])
+            .await
+    else {
+        return;
+    };
+
+    assert!(
+        matches!(outcome, fq_runtime::InvocationOutcome::Completed { .. }),
+        "invocation should still complete, got {outcome:?}"
+    );
+    assert!(
+        !saw_elicitation_call(&requests),
+        "an over-budget elicitation request must not call the model"
+    );
+    assert_eq!(requests.len(), 2, "got {}", requests.len());
+}
+
+/// Retries exhausted: granted, but the model never produces a
+/// schema-valid value (missing the required `name`, then unparseable),
+/// so after the bounded retries the request is declined.
+#[tokio::test]
+async fn elicitation_retries_exhausted_declines() {
+    let grant = fq_runtime::ElicitationGrant {
+        servers: vec!["everything".to_string()],
+        max_cost: None,
+    };
+    // Two invalid attempts: missing required field, then not JSON.
+    let Some((outcome, requests)) = run_elicitation_scenario(
+        Some(grant),
+        vec![
+            r#"{"unrelated": 1}"#.to_string(),
+            "not json at all".to_string(),
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+
+    assert!(
+        matches!(outcome, fq_runtime::InvocationOutcome::Completed { .. }),
+        "invocation should complete, got {outcome:?}"
+    );
+    assert!(
+        saw_elicitation_call(&requests),
+        "the model should have been asked (and retried)"
+    );
+    assert_eq!(
+        requests.len(),
+        4,
+        "agent turn 0 + two elicitation attempts + agent turn 1 = 4 model calls, got {}",
+        requests.len()
+    );
+    // The server reports the decline in the tool result.
+    assert!(
+        requests.iter().any(|r| r
+            .messages
+            .iter()
+            .any(|m| m.content.as_deref().is_some_and(|c| c.contains("declined")))),
+        "the decline should round-trip into the agent transcript"
     );
 }

@@ -15,10 +15,11 @@ use rmcp::ClientHandler;
 use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, ClientCapabilities, ClientInfo, CompletionContext, CompletionInfo,
-    CreateMessageRequestMethod, CreateMessageRequestParams, CreateMessageResult,
-    ElicitationCapability, FormElicitationCapability, GetPromptRequestParams, GetPromptResult,
-    JsonObject, ListRootsResult, Prompt, PromptMessageContent, PromptMessageRole,
-    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
+    CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequestMethod,
+    CreateMessageRequestParams, CreateMessageResult, ElicitationAction, ElicitationCapability,
+    FormElicitationCapability, GetPromptRequestParams, GetPromptResult, JsonObject,
+    ListRootsResult, Prompt, PromptMessageContent, PromptMessageRole, ReadResourceRequestParams,
+    ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
     ResourceUpdatedNotificationParam, Root, RootsCapabilities, SamplingCapability,
     ServerCapabilities, SubscribeRequestParams,
 };
@@ -106,6 +107,28 @@ pub enum ServerRequest {
         params: CreateMessageRequestParams,
         reply: oneshot::Sender<Result<CreateMessageResult, rmcp::ErrorData>>,
     },
+    /// `elicitation/create` — the server asks for structured user
+    /// input matching a schema. factor-q answers it autonomously on
+    /// the agent's model (ADR-0017); `reply` carries the result, whose
+    /// `action` is `accept` (with content) or `decline`. A dropped
+    /// sender declines.
+    Elicitation {
+        params: CreateElicitationRequestParams,
+        reply: oneshot::Sender<Result<CreateElicitationResult, rmcp::ErrorData>>,
+    },
+}
+
+/// The structured decline an elicitation request resolves to when
+/// refused (ungranted, over-budget, retries exhausted) or when the
+/// host cannot service it. Per the protocol this is an ordinary
+/// result with `action: decline`, not an error — the server continues
+/// without the input.
+pub(crate) fn elicitation_decline() -> CreateElicitationResult {
+    CreateElicitationResult {
+        action: ElicitationAction::Decline,
+        content: None,
+        meta: None,
+    }
 }
 
 /// A host-side handle to a per-invocation server's advertised roots
@@ -294,6 +317,42 @@ impl ClientHandler for FactorQClientHandler {
                 Ok(result) => result,
                 // Reply sender dropped without answering → decline.
                 Err(_) => decline(),
+            }
+        }
+    }
+
+    /// Bridge an `elicitation/create` request to the runner (ADR-0018).
+    /// Like [`create_message`](Self::create_message), the handler does
+    /// no policy and no LLM call: it forwards the params and awaits the
+    /// runner's reply. With no channel wired or no runner listening it
+    /// declines (an ordinary `action: decline` result — the rmcp
+    /// default).
+    fn create_elicitation(
+        &self,
+        params: CreateElicitationRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> impl std::future::Future<Output = Result<CreateElicitationResult, rmcp::ErrorData>>
+    + MaybeSendFuture
+    + '_ {
+        let sink = self.server_requests.clone();
+        async move {
+            let Some(tx) = sink else {
+                return Ok(elicitation_decline());
+            };
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if tx
+                .send(ServerRequest::Elicitation {
+                    params,
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                return Ok(elicitation_decline());
+            }
+            match reply_rx.await {
+                Ok(result) => result,
+                // Reply sender dropped without answering → decline.
+                Err(_) => Ok(elicitation_decline()),
             }
         }
     }

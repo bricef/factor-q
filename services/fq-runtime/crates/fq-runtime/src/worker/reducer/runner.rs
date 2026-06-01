@@ -32,8 +32,9 @@ use super::types::{
     TriggerSourceKind,
 };
 use rmcp::model::{
-    CreateMessageRequestParams, CreateMessageResult, Role, SamplingContent, SamplingMessage,
-    SamplingMessageContent,
+    CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequestParams,
+    CreateMessageResult, ElicitationAction, ElicitationSchema, Role, SamplingContent,
+    SamplingMessage, SamplingMessageContent,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -46,7 +47,7 @@ use crate::events::{
     ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
-use crate::mcp::{McpResourceReader, ServerRequest};
+use crate::mcp::{McpResourceReader, ServerRequest, elicitation_decline};
 use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
 use crate::validation::ValidatorChain;
@@ -111,6 +112,15 @@ pub struct ReducerContext {
     /// everything); concrete validators (e.g. a `HighEntropyRedactor`)
     /// are added without touching the runner.
     sampling_validators: ValidatorChain<CreateMessageResult>,
+    /// Inbound validation seam for elicitation requests (ADR-0018 §4):
+    /// inspects the request's message and schema field names — a
+    /// server can request `{ api_key: string }` and coax the model to
+    /// fill it from context. Default empty (allow).
+    elicitation_inbound_validators: ValidatorChain<CreateElicitationRequestParams>,
+    /// Outbound validation seam for the structured value an
+    /// elicitation produced before it returns to the server: censor
+    /// secrets in the extracted fields. Default empty (allow).
+    elicitation_outbound_validators: ValidatorChain<Value>,
 }
 
 impl ReducerContext {
@@ -131,6 +141,8 @@ pub struct ReducerContextBuilder {
     tools: Option<Arc<ToolRegistry>>,
     resources: Option<McpResourceReader>,
     sampling_validators: Option<ValidatorChain<CreateMessageResult>>,
+    elicitation_inbound_validators: Option<ValidatorChain<CreateElicitationRequestParams>>,
+    elicitation_outbound_validators: Option<ValidatorChain<Value>>,
 }
 
 impl ReducerContextBuilder {
@@ -154,6 +166,23 @@ impl ReducerContextBuilder {
         self
     }
 
+    /// Inbound validators for elicitation requests (optional; defaults
+    /// to an empty allow-everything chain).
+    pub fn elicitation_inbound_validators(
+        mut self,
+        chain: ValidatorChain<CreateElicitationRequestParams>,
+    ) -> Self {
+        self.elicitation_inbound_validators = Some(chain);
+        self
+    }
+
+    /// Outbound validators for elicitation values (optional; defaults
+    /// to an empty allow-everything chain).
+    pub fn elicitation_outbound_validators(mut self, chain: ValidatorChain<Value>) -> Self {
+        self.elicitation_outbound_validators = Some(chain);
+        self
+    }
+
     /// Finalise the context. Panics if `tools` was not set.
     pub fn build(self) -> ReducerContext {
         ReducerContext {
@@ -162,6 +191,10 @@ impl ReducerContextBuilder {
                 .expect("ReducerContext::builder() requires .tools(..)"),
             resources: self.resources,
             sampling_validators: self.sampling_validators.unwrap_or_default(),
+            elicitation_inbound_validators: self.elicitation_inbound_validators.unwrap_or_default(),
+            elicitation_outbound_validators: self
+                .elicitation_outbound_validators
+                .unwrap_or_default(),
         }
     }
 }
@@ -1785,6 +1818,22 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 let _ = reply.send(result);
                 Ok(())
             }
+            ServerRequest::Elicitation { params, reply } => {
+                let result = self
+                    .handle_elicitation(
+                        agent,
+                        server,
+                        llm,
+                        agent_id,
+                        invocation_id,
+                        params,
+                        totals,
+                        cursor,
+                    )
+                    .await?;
+                let _ = reply.send(result);
+                Ok(())
+            }
         }
     }
 
@@ -1878,6 +1927,113 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             )))),
         }
     }
+
+    /// Answer an `elicitation/create` request (ADR-0018 §4). Same
+    /// gate / shared-LLM-path / cost attribution as sampling, but the
+    /// answer is a **schema-constrained structured completion**: the
+    /// model is asked for JSON matching the requested schema, validated
+    /// against it, and retried up to [`ELICITATION_MAX_RETRIES`] times;
+    /// a still-invalid result, a refusal (ungranted / over-budget), or
+    /// a model failure all resolve to a `decline` *result* (not an
+    /// error) so the server continues without the input. The outer
+    /// `Err` is infrastructure (store / bus).
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_elicitation(
+        &self,
+        agent: &Agent,
+        server: &str,
+        llm: &dyn LlmClient,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        params: CreateElicitationRequestParams,
+        totals: &mut InvocationTotals,
+        cursor: &mut Option<Uuid>,
+    ) -> Result<Result<CreateElicitationResult, rmcp::ErrorData>, ExecutorError> {
+        let decline = || Ok(Ok(elicitation_decline()));
+
+        // --- gate (no model call on refusal) ---
+        let Some(grant) = agent.elicitation_grant() else {
+            return decline();
+        };
+        if !grant.permits(server) {
+            return decline();
+        }
+        if let Some(max) = grant.max_cost
+            && totals.elicitation_cost >= max
+        {
+            return decline();
+        }
+        if let Some(budget) = agent.budget()
+            && totals.total_cost >= budget
+        {
+            return decline();
+        }
+
+        // --- inbound validation seam (message + schema field names) ---
+        let params = match self.context.elicitation_inbound_validators.run(params) {
+            Ok(params) => params,
+            Err(_) => return decline(),
+        };
+
+        // Only form-mode elicitation is supported; URL mode declines.
+        let CreateElicitationRequestParams::FormElicitationParams {
+            message,
+            requested_schema,
+            ..
+        } = params
+        else {
+            return decline();
+        };
+
+        // --- schema-constrained structured completion (bounded retry) ---
+        let origin = LlmCallOrigin::Elicitation {
+            server: server.to_string(),
+        };
+        for _ in 0..ELICITATION_MAX_RETRIES {
+            let model_request =
+                elicitation_to_model_request(agent.model(), &message, &requested_schema);
+            let response = match self
+                .dispatch_llm(
+                    llm,
+                    agent_id,
+                    invocation_id,
+                    model_request,
+                    origin.clone(),
+                    totals,
+                    cursor,
+                )
+                .await?
+            {
+                Ok((response, cost)) => {
+                    totals.elicitation_cost += cost;
+                    response
+                }
+                // A model failure declines; the agent turn is untouched.
+                Err(_) => return decline(),
+            };
+
+            let Some(value) = parse_elicitation_value(response.content.as_deref()) else {
+                continue; // unparseable → retry
+            };
+            if validate_against_elicitation_schema(&value, &requested_schema).is_err() {
+                continue; // schema-invalid → retry
+            }
+
+            // --- outbound validation seam (censor the structured value) ---
+            let value = match self.context.elicitation_outbound_validators.run(value) {
+                Ok(value) => value,
+                Err(_) => return decline(),
+            };
+            return Ok(Ok(CreateElicitationResult {
+                action: ElicitationAction::Accept,
+                content: Some(value),
+                meta: None,
+            }));
+        }
+
+        // Retries exhausted without a schema-valid result.
+        decline()
+    }
 }
 
 enum ModelOutcome {
@@ -1970,6 +2126,89 @@ fn stop_reason_to_mcp(stop_reason: StopReason) -> &'static str {
         StopReason::StopSequence => CreateMessageResult::STOP_REASON_END_SEQUENCE,
         StopReason::ToolUse => CreateMessageResult::STOP_REASON_TOOL_USE,
     }
+}
+
+/// Max model attempts to produce a schema-valid elicitation value
+/// before declining (ADR-0018 §4 — "bounded retry"). Each attempt is
+/// a budget-counted LLM call.
+const ELICITATION_MAX_RETRIES: u32 = 2;
+
+/// The system instruction prefixed to every elicitation completion.
+/// Kept as a constant so its presence in a recorded model request is
+/// a stable signal that the schema-constrained completion ran.
+const ELICITATION_SYSTEM_PREAMBLE: &str = "You are completing a structured form on the user's behalf. Respond with ONLY a single \
+     JSON object that conforms to the JSON schema below — no prose, no code fences.";
+
+/// Build the schema-constrained completion request for an elicitation:
+/// a system message carrying the instruction + serialized schema, and
+/// the server's human-readable `message` as the user turn. Run on the
+/// agent's own model; no tools.
+fn elicitation_to_model_request(
+    model: &str,
+    message: &str,
+    schema: &ElicitationSchema,
+) -> ModelRequest {
+    let schema_json = serde_json::to_string_pretty(schema).unwrap_or_default();
+    ModelRequest {
+        model: model.to_string(),
+        messages: vec![
+            Message {
+                role: MessageRole::System,
+                content: Some(format!(
+                    "{ELICITATION_SYSTEM_PREAMBLE}\n\nJSON schema:\n{schema_json}"
+                )),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some(message.to_string()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ],
+        tools: Vec::new(),
+        params: RequestParams {
+            temperature: None,
+            max_tokens: None,
+        },
+    }
+}
+
+/// Parse a model's elicitation answer into a JSON object, tolerating
+/// surrounding whitespace and ```json code fences. Returns `None` if
+/// the content is absent, unparseable, or not a JSON object.
+fn parse_elicitation_value(content: Option<&str>) -> Option<Value> {
+    let text = content?.trim();
+    let text = text
+        .strip_prefix("```json")
+        .or_else(|| text.strip_prefix("```"))
+        .unwrap_or(text);
+    let text = text.strip_suffix("```").unwrap_or(text).trim();
+    let value: Value = serde_json::from_str(text).ok()?;
+    value.is_object().then_some(value)
+}
+
+/// Validate an elicitation value against the requested schema. v1
+/// enforces object shape and required-field presence; the schema type
+/// itself is already restricted to the MCP flat-object / primitive
+/// subset by rmcp's deserialization. Deeper per-field type checking is
+/// a later refinement.
+fn validate_against_elicitation_schema(
+    value: &Value,
+    schema: &ElicitationSchema,
+) -> Result<(), String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "elicitation response is not a JSON object".to_string())?;
+    if let Some(required) = &schema.required {
+        for key in required {
+            if !obj.contains_key(key) {
+                return Err(format!("missing required field '{key}'"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reconstruct a [`CapabilityResult::ToolResult`] from a
@@ -2646,6 +2885,7 @@ mod tests {
                     total_cost: 0.0001,
                     total_duration_ms: 0,
                     sampling_cost: 0.0,
+                    elicitation_cost: 0.0,
                 },
                 elapsed_ms: 0,
             },
