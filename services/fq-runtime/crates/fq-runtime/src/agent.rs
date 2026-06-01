@@ -30,6 +30,8 @@ pub mod registry;
 
 pub use registry::{AgentRegistry, LoadError, LoadedAgent, RegistryError};
 
+use serde::{Deserialize, Serialize};
+
 use crate::events::{ConfigSnapshot, SandboxSnapshot};
 
 /// An MCP server declared in an agent definition.
@@ -85,7 +87,7 @@ impl StaticResourcePin {
 /// In v1 this is set programmatically (tests, and any caller that
 /// constructs an [`Agent`] directly); Step 8 parses it from agent
 /// frontmatter into this same shape.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SamplingGrant {
     /// Names of MCP servers (from the `mcp:` block) permitted to
     /// request sampling. A server not listed is declined.
@@ -112,7 +114,7 @@ impl SamplingGrant {
 /// nothing by default. The advertised set is *derived* from the
 /// agent's sandbox fs grant (advertised roots ⊆ sandbox boundary —
 /// narrowable, never wideable), not configured here.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RootsGrant {
     /// Names of MCP servers (from the `mcp:` block) to which the
     /// agent's workspace roots are advertised.
@@ -133,7 +135,7 @@ impl RootsGrant {
 /// extraction channel, so this is gated like sampling. Nothing by
 /// default. Set programmatically in v1; Step 8 parses it from
 /// frontmatter.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ElicitationGrant {
     /// Names of MCP servers permitted to request elicitation.
     pub servers: Vec<String>,
@@ -242,6 +244,9 @@ impl Agent {
             tools: self.tools.clone(),
             sandbox: self.sandbox.to_snapshot(),
             budget: self.budget,
+            sampling: self.sampling.clone(),
+            roots: self.roots.clone(),
+            elicitation: self.elicitation.clone(),
         }
     }
 }

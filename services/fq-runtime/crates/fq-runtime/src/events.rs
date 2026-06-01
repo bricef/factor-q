@@ -526,6 +526,14 @@ impl Annotations {
 }
 
 /// Per-type event payloads, tagged by `event_type`.
+///
+/// `Triggered` is intentionally the largest variant — it carries the
+/// full [`ConfigSnapshot`] (system prompt, sandbox, capability grants)
+/// for audit/replay. It's emitted once per invocation, not on the hot
+/// per-step path, so we accept the size rather than box it (which would
+/// add a heap allocation to a value that is always serialized to NATS
+/// anyway).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "payload", rename_all = "snake_case")]
 pub enum EventPayload {
@@ -628,7 +636,7 @@ pub enum TriggerSource {
 ///
 /// Captured on `triggered` so that replay is meaningful even if the agent
 /// definition is later modified.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfigSnapshot {
     pub name: String,
     pub model: String,
@@ -636,6 +644,14 @@ pub struct ConfigSnapshot {
     pub tools: Vec<String>,
     pub sandbox: SandboxSnapshot,
     pub budget: Option<f64>,
+    /// MCP capability grants (ADR-0017) captured for audit. Absent for
+    /// snapshots written before Step 8 / for agents that grant nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<crate::agent::SamplingGrant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roots: Option<crate::agent::RootsGrant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elicitation: Option<crate::agent::ElicitationGrant>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1065,6 +1081,7 @@ mod tests {
                         exec_cwd: vec![],
                     },
                     budget: Some(0.50),
+                    ..Default::default()
                 },
             }),
         );
@@ -1385,6 +1402,7 @@ mod tests {
                     tools: vec![],
                     sandbox: SandboxSnapshot::default(),
                     budget: None,
+                    ..Default::default()
                 },
             }),
         );
@@ -1582,6 +1600,7 @@ mod tests {
                     tools: vec![],
                     sandbox: SandboxSnapshot::default(),
                     budget: None,
+                    ..Default::default()
                 },
             }),
         )
@@ -1747,6 +1766,7 @@ mod tests {
                     tools: vec![],
                     sandbox: SandboxSnapshot::default(),
                     budget: None,
+                    ..Default::default()
                 },
             }),
             EventPayload::LlmRequest(LlmRequestPayload {

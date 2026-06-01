@@ -8,7 +8,10 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use super::{Agent, BuildError, McpServerDeclaration, Sandbox, StaticResourcePin};
+use super::{
+    Agent, BuildError, ElicitationGrant, McpServerDeclaration, RootsGrant, SamplingGrant, Sandbox,
+    StaticResourcePin,
+};
 
 /// Parse an agent definition from the raw Markdown content.
 ///
@@ -34,6 +37,21 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
     for path in frontmatter.sandbox.exec_cwd {
         sandbox = sandbox.exec_cwd(path);
     }
+
+    // Aggregate the per-server capability flags into agent-level
+    // grants (the sub-budget is aggregate, declared at the top level).
+    // Computed before `mcp` is consumed into declarations below.
+    let servers_granting = |pick: fn(&McpFrontmatter) -> bool| -> Vec<String> {
+        frontmatter
+            .mcp
+            .iter()
+            .filter(|m| pick(m))
+            .map(|m| m.server.clone())
+            .collect()
+    };
+    let sampling_servers = servers_granting(|m| m.sampling);
+    let elicitation_servers = servers_granting(|m| m.elicitation);
+    let roots_servers = servers_granting(|m| m.roots);
 
     let mcp_servers: Vec<McpServerDeclaration> = frontmatter
         .mcp
@@ -67,6 +85,23 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
     if let Some(trigger) = frontmatter.trigger {
         builder = builder.trigger(trigger);
     }
+    if !sampling_servers.is_empty() {
+        builder = builder.sampling_grant(SamplingGrant {
+            servers: sampling_servers,
+            max_cost: frontmatter.sampling_budget,
+        });
+    }
+    if !elicitation_servers.is_empty() {
+        builder = builder.elicitation_grant(ElicitationGrant {
+            servers: elicitation_servers,
+            max_cost: frontmatter.elicitation_budget,
+        });
+    }
+    if !roots_servers.is_empty() {
+        builder = builder.roots_grant(RootsGrant {
+            servers: roots_servers,
+        });
+    }
 
     Ok(builder.build()?)
 }
@@ -87,6 +122,12 @@ struct Frontmatter {
     mcp: Vec<McpFrontmatter>,
     #[serde(default)]
     static_resources: Vec<String>,
+    /// Aggregate sampling sub-budget (USD) across all servers granted
+    /// `sampling`, enforced per invocation. `None` = bounded only by
+    /// the invocation `budget` (ADR-0017 / ADR-0018).
+    sampling_budget: Option<f64>,
+    /// Aggregate elicitation sub-budget (USD), same semantics.
+    elicitation_budget: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +138,15 @@ struct McpFrontmatter {
     args: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    /// Per-server capability grants (ADR-0017, nothing by default):
+    /// may this server request sampling / elicitation, and are the
+    /// agent's workspace roots advertised to it?
+    #[serde(default)]
+    sampling: bool,
+    #[serde(default)]
+    elicitation: bool,
+    #[serde(default)]
+    roots: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -431,5 +481,94 @@ Prompt.
             err,
             ParseError::InvalidAgent(BuildError::InvalidBudget(_))
         ));
+    }
+
+    #[test]
+    fn parses_capability_grants_from_frontmatter() {
+        let content = r#"---
+name: granting-agent
+model: claude-haiku
+sampling_budget: 0.50
+elicitation_budget: 0.25
+mcp:
+  - server: everything
+    command: npx
+    sampling: true
+    elicitation: true
+    roots: true
+  - server: tools-only
+    command: other
+---
+
+You are a test agent.
+"#;
+        let agent = parse_agent(content).unwrap();
+
+        let sampling = agent.sampling_grant().expect("sampling granted");
+        assert_eq!(sampling.servers, vec!["everything".to_string()]);
+        assert_eq!(sampling.max_cost, Some(0.50));
+
+        let elicitation = agent.elicitation_grant().expect("elicitation granted");
+        assert_eq!(elicitation.servers, vec!["everything".to_string()]);
+        assert_eq!(elicitation.max_cost, Some(0.25));
+
+        let roots = agent.roots_grant().expect("roots granted");
+        assert_eq!(roots.servers, vec!["everything".to_string()]);
+
+        // The tools-only server is in none of the grants.
+        assert!(!sampling.permits("tools-only"));
+        assert!(!roots.permits("tools-only"));
+    }
+
+    #[test]
+    fn no_capability_grants_by_default() {
+        let content = r#"---
+name: plain-agent
+model: claude-haiku
+mcp:
+  - server: everything
+    command: npx
+---
+
+You are a test agent.
+"#;
+        let agent = parse_agent(content).unwrap();
+        assert!(agent.sampling_grant().is_none());
+        assert!(agent.elicitation_grant().is_none());
+        assert!(agent.roots_grant().is_none());
+    }
+
+    #[test]
+    fn grants_round_trip_through_config_snapshot() {
+        let content = r#"---
+name: granting-agent
+model: claude-haiku
+sampling_budget: 0.50
+mcp:
+  - server: everything
+    command: npx
+    sampling: true
+    roots: true
+---
+
+You are a test agent.
+"#;
+        let agent = parse_agent(content).unwrap();
+        let snapshot = agent.to_snapshot();
+
+        let sampling = snapshot.sampling.expect("snapshot captures sampling grant");
+        assert_eq!(sampling.servers, vec!["everything".to_string()]);
+        assert_eq!(sampling.max_cost, Some(0.50));
+        assert_eq!(
+            snapshot
+                .roots
+                .expect("snapshot captures roots grant")
+                .servers,
+            vec!["everything".to_string()]
+        );
+        assert!(
+            snapshot.elicitation.is_none(),
+            "no elicitation grant was declared"
+        );
     }
 }

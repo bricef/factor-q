@@ -450,6 +450,7 @@ mod tests {
                     tools: vec![],
                     sandbox: SandboxSnapshot::default(),
                     budget: None,
+                    ..Default::default()
                 },
             }),
         )

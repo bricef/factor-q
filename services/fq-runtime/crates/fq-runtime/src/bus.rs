@@ -465,6 +465,7 @@ mod tests {
                         exec_cwd: vec![],
                     },
                     budget: None,
+                    ..Default::default()
                 },
             }),
         )
