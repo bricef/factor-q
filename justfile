@@ -38,9 +38,10 @@ infra-status:
 build:
     cd {{runtime_dir}} && just build
 
-# Run all tests across services
-test:
-    cd {{runtime_dir}} && just test
+# Run all tests across services, or forward cargo args to filter
+# (e.g. `just test -p fq-runtime --lib agent::definition`).
+test *args:
+    cd {{runtime_dir}} && just test "$@"
 
 # Run quality checks across services
 ci:

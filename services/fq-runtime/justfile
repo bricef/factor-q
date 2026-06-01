@@ -3,6 +3,11 @@
 # Enable "$@" in recipe bodies so variadic *args preserve shell quoting.
 set positional-arguments
 
+# The bus/integration tests need a NATS endpoint. Default to the local
+# dev instance (`just infra-up`); override by exporting FQ_NATS_URL in
+# the environment before invoking just.
+export FQ_NATS_URL := env_var_or_default("FQ_NATS_URL", "nats://127.0.0.1:4222")
+
 # Show available recipes
 default:
     @just --list
@@ -15,9 +20,10 @@ build:
 build-release:
     cargo build --release
 
-# Run all tests
-test:
-    cargo test
+# Run all tests, or a filtered subset by forwarding cargo args
+# (e.g. `just test -p fq-runtime --lib agent::definition`).
+test *args:
+    cargo test "$@"
 
 # Type-check without building. --all-targets covers tests and
 # examples, matching the workspace lint policy.
