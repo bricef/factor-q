@@ -555,9 +555,32 @@ capability lists rather than serving stale data.
 
 **Done when**
 
-- [ ] Progress, cancellation, pagination, logging tests green.
-- [ ] `list_changed` refreshes cached tool/resource/prompt
-      lists.
+- [x] Progress, cancellation, pagination, logging tests green.
+      Commits: `f18d1e1` (7a logging — notification backbone +
+      `on_logging_message` + `set_logging_level`), `4a646d7` (7b
+      progress — per-call progress token + `on_progress`), `b5bcd02`
+      (7c/7d/7e — `refresh_tools` + list_changed forwarding,
+      `call_tool_cancellable` via rmcp `send_cancellable_request`,
+      pagination already via `list_all_*`).
+- [x] `list_changed` refreshes cached lists: `refresh_tools`
+      re-discovers the cached tool list (the only cached one — the
+      manager's `tool_names`); resources/prompts are fetched
+      on-demand via `list_all_*` (never cached → never stale).
+      `on_tool_list_changed`/`on_prompt_list_changed` forward
+      notifications so a consumer reacts.
+
+**Notes / deferred (same theme as 5c/6):** the production daemon
+doesn't yet drive the notification→action loops — react to a
+forwarded `ToolListChanged` by calling `refresh_tools` and
+re-registering into the live `ToolRegistry`; surface progress/logging
+to an operator; cancel in-flight calls on invocation abort. The
+mechanisms, the unified `ServerNotification` sink, and the
+`call_tool_cancellable` / `refresh_tools` / `set_logging_level`
+methods all land here with tests; wiring them into the daemon's event
+loop is the remaining piece. A dedicated multi-page pagination test
+and a server-driven `list_changed`→refresh test want a mock
+paginating/mutating MCP server (test-infra follow-up); pagination
+itself is correct (cursor-following `list_all_*`).
 
 ---
 
