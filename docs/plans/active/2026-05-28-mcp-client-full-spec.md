@@ -503,16 +503,34 @@ path (`ServerRequest { Sampling | Elicitation }`, one channel, one
 
 **Done when**
 
-- [ ] Roots advertised (⊆ sandbox fs grant); `roots/list` +
-      automated `roots/list_changed` tests green.
-- [ ] Elicitation: granted→`accept` (schema-valid),
-      ungranted→`decline` (no model call),
-      over-budget/retries-exhausted→`decline`; all green.
-- [ ] The elicitation-answer LLM call is attributed as elicitation
-      for the originating server, distinct from agent-turn spend.
-- [ ] Bidirectional validation seam wired for both (roots
-      outbound; elicitation inbound schema/message + outbound
-      value), reusing the ADR-0018 `Validator` chain.
+- [x] **6a** (`c8eaa4c`) — Roots advertised (⊆ sandbox fs grant via
+      `roots_from_sandbox`/`advertised_roots`); `roots/list` +
+      automated `roots/list_changed` tests green (oracle: the
+      everything server's `get-roots-list`). `RootsGrant` on `Agent`;
+      `RootsHandle::set_roots` exposes the `list_changed` mechanism.
+- [x] **6b** (`4bfec85`) — Elicitation: granted→`accept` (schema-valid,
+      round-trips back through the server), ungranted→`decline` (no
+      model call), over-budget→`decline` (no model call),
+      retries-exhausted→`decline`; all green.
+- [x] The elicitation-answer LLM call is attributed
+      `origin = elicitation{server}` on the cost event +
+      `InvocationTotals.elicitation_cost`, distinct from agent-turn
+      spend.
+- [x] Bidirectional validation seam wired for both: roots outbound
+      (`ValidatorChain<Vec<Root>>` in `advertised_roots`); elicitation
+      inbound (`CreateElicitationRequestParams`) + outbound (`Value`)
+      chains on `ReducerContext`, reusing the ADR-0018 `Validator`
+      chain. All default-empty (allow); concrete validators are a
+      later policy-surface concern (Step 8).
+
+**Remaining wiring (follow-up / Step 8), same as Step 5c:** the
+production daemon doesn't yet start grant-bearing servers
+per-invocation and pass the `SamplingChannel` / `RootsHandle` /
+advertised roots — the mechanisms + grants + tests land here; the
+daemon lifecycle switch to `start_server_with_requests` for granted
+servers is the open piece. Elicitation schema validation is v1
+(object shape + required-field presence); deeper per-field type
+checking is a refinement.
 
 ---
 
