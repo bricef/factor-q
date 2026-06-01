@@ -17,10 +17,10 @@ use rmcp::model::{
     CallToolRequestParams, ClientCapabilities, ClientInfo, CompletionContext, CompletionInfo,
     CreateMessageRequestMethod, CreateMessageRequestParams, CreateMessageResult,
     ElicitationCapability, FormElicitationCapability, GetPromptRequestParams, GetPromptResult,
-    JsonObject, Prompt, PromptMessageContent, PromptMessageRole, ReadResourceRequestParams,
-    ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
-    ResourceUpdatedNotificationParam, RootsCapabilities, SamplingCapability, ServerCapabilities,
-    SubscribeRequestParams,
+    JsonObject, ListRootsResult, Prompt, PromptMessageContent, PromptMessageRole,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
+    ResourceUpdatedNotificationParam, Root, RootsCapabilities, SamplingCapability,
+    ServerCapabilities, SubscribeRequestParams,
 };
 use rmcp::service::{
     MaybeSendFuture, NotificationContext, RequestContext, RoleClient, RunningService,
@@ -30,6 +30,9 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
+
+use crate::agent::{RootsGrant, Sandbox};
+use crate::validation::ValidatorChain;
 
 /// Configuration for an MCP server to be started as a child process.
 #[derive(Debug, Clone)]
@@ -64,6 +67,9 @@ pub enum McpError {
 
     #[error("prompt operation on '{server}' failed: {reason}")]
     PromptOp { server: String, reason: String },
+
+    #[error("roots operation on '{server}' failed: {reason}")]
+    RootsOp { server: String, reason: String },
 }
 
 // Type alias for the concrete client handle we store.
@@ -102,6 +108,74 @@ pub enum ServerRequest {
     },
 }
 
+/// A host-side handle to a per-invocation server's advertised roots
+/// (ADR-0018). Holds the shared roots cell the handler reads on
+/// `roots/list`, plus the client to fire `roots/list_changed`. Lets
+/// the host update the advertised workspace (e.g. when the agent's
+/// sandbox changes) and notify the server, which re-fetches.
+pub struct RootsHandle {
+    server: String,
+    roots: Arc<Mutex<Vec<Root>>>,
+    client: Arc<McpClient>,
+}
+
+impl RootsHandle {
+    /// Replace the advertised roots and notify the server via
+    /// `roots/list_changed` so it re-fetches. The full dynamic-workspace
+    /// trigger (recomputing from a changed sandbox) is a later
+    /// "Workspace state" concern; this exposes the mechanism.
+    pub async fn set_roots(&self, roots: Vec<Root>) -> Result<(), McpError> {
+        *self.roots.lock().await = roots;
+        self.client
+            .notify_roots_list_changed()
+            .await
+            .map_err(|err| McpError::RootsOp {
+                server: self.server.clone(),
+                reason: err.to_string(),
+            })
+    }
+}
+
+/// Derive the `file://` roots a server should be advertised from an
+/// agent's sandbox filesystem grant (ADR-0018): the union of the
+/// sandbox's read and write paths, deduplicated, each as a `file://`
+/// root named by its path. This enforces *advertised roots ⊆ sandbox
+/// boundary* by construction — only granted paths are ever advertised.
+/// `file://` only for v1.
+pub fn roots_from_sandbox(sandbox: &Sandbox) -> Vec<Root> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut roots = Vec::new();
+    for path in sandbox
+        .fs_read_paths()
+        .iter()
+        .chain(sandbox.fs_write_paths())
+    {
+        let uri = format!("file://{path}");
+        if seen.insert(uri.clone()) {
+            roots.push(Root::new(uri).with_name(path.clone()));
+        }
+    }
+    roots
+}
+
+/// Compute the roots to advertise to `server`: nothing unless the
+/// agent's [`RootsGrant`] permits it, otherwise the sandbox-derived
+/// roots run through the outbound validator chain (ADR-0018 §4). A
+/// `Deny` from the chain advertises nothing rather than a partial set.
+pub fn advertised_roots(
+    sandbox: &Sandbox,
+    grant: Option<&RootsGrant>,
+    server: &str,
+    validators: &ValidatorChain<Vec<Root>>,
+) -> Vec<Root> {
+    if !grant.is_some_and(|g| g.permits(server)) {
+        return Vec::new();
+    }
+    validators
+        .run(roots_from_sandbox(sandbox))
+        .unwrap_or_default()
+}
+
 /// factor-q's MCP client handler.
 ///
 /// Advertises the client-side capabilities factor-q intends to honour
@@ -122,6 +196,12 @@ pub struct FactorQClientHandler {
     /// default (ADR-0018: only grant-bearing servers run
     /// per-invocation with a wired channel).
     server_requests: Option<mpsc::UnboundedSender<ServerRequest>>,
+    /// Workspace roots advertised to the server on `roots/list`
+    /// (ADR-0018). Shared (interior-mutable) with the [`RootsHandle`]
+    /// so the host can update them and fire `roots/list_changed`.
+    /// Empty by default — roots are nothing-by-default and derived
+    /// from the agent's sandbox grant.
+    roots: Arc<Mutex<Vec<Root>>>,
 }
 
 impl FactorQClientHandler {
@@ -138,6 +218,14 @@ impl FactorQClientHandler {
     /// for shared tool-only servers.
     fn with_server_requests(mut self, tx: mpsc::UnboundedSender<ServerRequest>) -> Self {
         self.server_requests = Some(tx);
+        self
+    }
+
+    /// Share the advertised-roots cell with this handler so
+    /// `roots/list` reflects host updates. Used on the per-invocation
+    /// start path; the same `Arc` is held by the [`RootsHandle`].
+    fn with_roots(mut self, roots: Arc<Mutex<Vec<Root>>>) -> Self {
+        self.roots = roots;
         self
     }
 
@@ -208,6 +296,19 @@ impl ClientHandler for FactorQClientHandler {
                 Err(_) => decline(),
             }
         }
+    }
+
+    /// Answer `roots/list` with the workspace roots advertised to this
+    /// server (ADR-0018). Handler-only: no LLM, no budget — roots are
+    /// invocation-scoped config. Empty when the agent granted no roots
+    /// to this server.
+    fn list_roots(
+        &self,
+        _context: RequestContext<RoleClient>,
+    ) -> impl std::future::Future<Output = Result<ListRootsResult, rmcp::ErrorData>> + MaybeSendFuture + '_
+    {
+        let roots = Arc::clone(&self.roots);
+        async move { Ok(ListRootsResult::new(roots.lock().await.clone())) }
     }
 
     fn on_resource_updated(
@@ -523,39 +624,53 @@ impl McpClientManager {
             return Ok(Vec::new());
         }
 
-        let tools = self.start_inner(config, None).await?;
+        let (tools, _roots) = self.start_inner(config, None, Vec::new()).await?;
         self.started.insert(key);
         Ok(tools)
     }
 
     /// Start a *per-invocation* MCP server instance with a wired
-    /// server-initiated request channel (ADR-0018).
+    /// server-initiated request channel and advertised `roots`
+    /// (ADR-0018).
     ///
     /// Unlike [`start_server`], this never deduplicates: a server
     /// granted an inbound capability (sampling, elicitation, roots)
     /// runs as its own child process per invocation, so its
     /// server-initiated requests attribute to the right invocation's
-    /// budget, grant, and event chain. Returns the discovered tools
-    /// plus the receiver the runner services in its `select!` loop.
+    /// budget, grant, and event chain. Returns the discovered tools,
+    /// the receiver the runner services in its `select!` loop, and a
+    /// [`RootsHandle`] for updating the advertised roots. Pass empty
+    /// `roots` when the agent grants none.
     pub async fn start_server_with_requests(
         &mut self,
         config: McpServerConfig,
-    ) -> Result<(Vec<Arc<dyn Tool>>, mpsc::UnboundedReceiver<ServerRequest>), McpError> {
+        roots: Vec<Root>,
+    ) -> Result<
+        (
+            Vec<Arc<dyn Tool>>,
+            mpsc::UnboundedReceiver<ServerRequest>,
+            RootsHandle,
+        ),
+        McpError,
+    > {
         let (req_tx, req_rx) = mpsc::unbounded_channel();
-        let tools = self.start_inner(config, Some(req_tx)).await?;
-        Ok((tools, req_rx))
+        let (tools, roots_handle) = self.start_inner(config, Some(req_tx), roots).await?;
+        Ok((tools, req_rx, roots_handle))
     }
 
     /// Shared start path: spawn the child process, run the initialize
     /// handshake, discover tools, and register the [`RunningServer`].
     /// `server_request_tx` wires the per-invocation sampling /
     /// elicitation bridge; `None` leaves the server tool-only (inbound
-    /// requests decline). Deduplication is the caller's concern.
+    /// requests decline). `roots` seeds the advertised workspace.
+    /// Deduplication is the caller's concern. Returns the tools and a
+    /// [`RootsHandle`] over the (possibly empty) advertised roots.
     async fn start_inner(
         &mut self,
         config: McpServerConfig,
         server_request_tx: Option<mpsc::UnboundedSender<ServerRequest>>,
-    ) -> Result<Vec<Arc<dyn Tool>>, McpError> {
+        roots: Vec<Root>,
+    ) -> Result<(Vec<Arc<dyn Tool>>, RootsHandle), McpError> {
         info!(
             server = %config.name,
             command = %config.command,
@@ -582,7 +697,9 @@ impl McpClientManager {
         // forwards resource notifications to `notif_rx`, and — on the
         // per-invocation path — bridges server-initiated requests.
         let (notif_tx, notif_rx) = mpsc::unbounded_channel();
-        let mut handler = FactorQClientHandler::with_notifications(notif_tx);
+        let roots_cell = Arc::new(Mutex::new(roots));
+        let mut handler =
+            FactorQClientHandler::with_notifications(notif_tx).with_roots(Arc::clone(&roots_cell));
         if let Some(req_tx) = server_request_tx {
             handler = handler.with_server_requests(req_tx);
         }
@@ -595,6 +712,11 @@ impl McpClientManager {
             })?;
 
         let client = Arc::new(client);
+        let roots_handle = RootsHandle {
+            server: config.name.clone(),
+            roots: roots_cell,
+            client: Arc::clone(&client),
+        };
 
         // Discover tools.
         let mcp_tools = client
@@ -667,7 +789,7 @@ impl McpClientManager {
             resource_notifications: Mutex::new(notif_rx),
         });
 
-        Ok(tools)
+        Ok((tools, roots_handle))
     }
 
     /// The capabilities a started server advertised during the initialize

@@ -41,7 +41,9 @@ pub mod worker;
 #[cfg(test)]
 pub mod test_support;
 
-pub use agent::{Agent, AgentId, AgentRegistry, McpServerDeclaration, SamplingGrant, Sandbox};
+pub use agent::{
+    Agent, AgentId, AgentRegistry, McpServerDeclaration, RootsGrant, SamplingGrant, Sandbox,
+};
 pub use bus::EventBus;
 pub use config::Config;
 pub use control_plane::dispatcher::{DispatcherError, TriggerDispatcher};
@@ -51,7 +53,10 @@ pub use control_plane::{
     CoordinationConsumerError, HeartbeatConsumer, HeartbeatConsumerError, OwnerStatus,
 };
 pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
-pub use mcp::{McpClientManager, McpError, McpResourceReader, McpServerConfig, ServerRequest};
+pub use mcp::{
+    McpClientManager, McpError, McpResourceReader, McpServerConfig, RootsHandle, ServerRequest,
+    advertised_roots, roots_from_sandbox,
+};
 pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;
 pub use worker::{

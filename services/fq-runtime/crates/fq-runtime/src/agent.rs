@@ -105,6 +105,27 @@ impl SamplingGrant {
     }
 }
 
+/// Declarative grant for advertising workspace **roots** to an MCP
+/// server (ADR-0017 / ADR-0018). Roots are advisory — they tell a
+/// cooperative server its intended filesystem scope; the sandbox /
+/// ADR-0010 proxy is the actual wall. A boolean per-server grant,
+/// nothing by default. The advertised set is *derived* from the
+/// agent's sandbox fs grant (advertised roots ⊆ sandbox boundary —
+/// narrowable, never wideable), not configured here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootsGrant {
+    /// Names of MCP servers (from the `mcp:` block) to which the
+    /// agent's workspace roots are advertised.
+    pub servers: Vec<String>,
+}
+
+impl RootsGrant {
+    /// Whether `server` is advertised the agent's roots.
+    pub fn permits(&self, server: &str) -> bool {
+        self.servers.iter().any(|s| s == server)
+    }
+}
+
 /// A validated agent ready to be executed.
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -118,6 +139,7 @@ pub struct Agent {
     mcp_servers: Vec<McpServerDeclaration>,
     static_resources: Vec<StaticResourcePin>,
     sampling: Option<SamplingGrant>,
+    roots: Option<RootsGrant>,
 }
 
 impl Agent {
@@ -168,6 +190,12 @@ impl Agent {
     /// may request sampling (the default — nothing by default).
     pub fn sampling_grant(&self) -> Option<&SamplingGrant> {
         self.sampling.as_ref()
+    }
+
+    /// The agent's MCP roots grant, if any. `None` means roots are
+    /// advertised to no server (the default — nothing by default).
+    pub fn roots_grant(&self) -> Option<&RootsGrant> {
+        self.roots.as_ref()
     }
 
     /// Produce a [`ConfigSnapshot`] for inclusion in a `Triggered` event.
@@ -401,6 +429,7 @@ pub struct AgentBuilder {
     mcp_servers: Vec<McpServerDeclaration>,
     static_resources: Vec<StaticResourcePin>,
     sampling: Option<SamplingGrant>,
+    roots: Option<RootsGrant>,
 }
 
 impl AgentBuilder {
@@ -469,6 +498,13 @@ impl AgentBuilder {
         self
     }
 
+    /// Advertise the agent's workspace roots to the named servers
+    /// (see [`RootsGrant`]). Absent by default — nothing by default.
+    pub fn roots_grant(mut self, grant: RootsGrant) -> Self {
+        self.roots = Some(grant);
+        self
+    }
+
     /// Finalise construction, validating required fields.
     pub fn build(self) -> Result<Agent, BuildError> {
         let id_str = self.id.ok_or(BuildError::MissingField("id"))?;
@@ -500,6 +536,7 @@ impl AgentBuilder {
             mcp_servers: self.mcp_servers,
             static_resources: self.static_resources,
             sampling: self.sampling,
+            roots: self.roots,
         })
     }
 }

@@ -11,7 +11,7 @@ use fq_runtime::mcp::{
     FactorQClientHandler, McpClientManager, McpServerConfig, ResourceNotification, ServerRequest,
 };
 use fq_tools::{Tool, ToolContext, ToolSandbox};
-use rmcp::model::{CreateMessageResult, SamplingMessage};
+use rmcp::model::{CreateMessageResult, Root, SamplingMessage};
 
 /// Skip the test if `npx` is not available.
 fn require_npx() -> bool {
@@ -823,8 +823,8 @@ async fn sampling_request_bridges_to_the_host() {
     }
 
     let mut manager = McpClientManager::new();
-    let (tools, mut requests) = manager
-        .start_server_with_requests(everything_config())
+    let (tools, mut requests, _roots) = manager
+        .start_server_with_requests(everything_config(), vec![])
         .await
         .expect("start server-everything (per-invocation)");
 
@@ -940,8 +940,8 @@ async fn run_sampling_scenario(
 
     // Per-invocation everything server with its inbound request channel.
     let mut manager = McpClientManager::new();
-    let (tools, rx) = manager
-        .start_server_with_requests(everything_config())
+    let (tools, rx, _roots) = manager
+        .start_server_with_requests(everything_config(), vec![])
         .await
         .expect("start server-everything (per-invocation)");
 
@@ -1131,5 +1131,133 @@ async fn sampling_ungranted_is_declined_without_a_model_call() {
         2,
         "only the two agent turns should call the model, got {}",
         requests.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Step 6a — Roots (handler-only; no LLM, no budget).
+//
+// Roots are derived from the agent's sandbox fs grant (advertised ⊆
+// sandbox boundary), advertised to granted servers on `roots/list`,
+// and updated via `roots/list_changed`. The everything server's
+// `get-roots-list` tool calls `roots/list` (and re-fetches on
+// `list_changed`), so it doubles as the oracle for both.
+// ---------------------------------------------------------------------------
+
+/// Read the everything server's `get-roots-list` tool output, which
+/// reflects the roots it currently knows for this client.
+async fn read_roots_list(tool: &Arc<dyn Tool>) -> String {
+    let sandbox = ToolSandbox::new();
+    let ctx = ToolContext::new(&sandbox);
+    tool.execute(&ctx, serde_json::json!({}))
+        .await
+        .expect("get-roots-list should succeed")
+        .output
+}
+
+#[tokio::test]
+async fn roots_derived_from_sandbox_are_advertised_and_updatable() {
+    use std::time::Duration;
+
+    use fq_runtime::Sandbox;
+    use fq_runtime::validation::ValidatorChain;
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    // An agent whose sandbox grants two filesystem paths, with roots
+    // advertised to the everything server.
+    let sandbox = Sandbox::new()
+        .fs_read("/tmp/factorq-roots-read")
+        .fs_write("/tmp/factorq-roots-write");
+    let grant = fq_runtime::RootsGrant {
+        servers: vec!["everything".to_string()],
+    };
+    let roots = fq_runtime::advertised_roots(
+        &sandbox,
+        Some(&grant),
+        "everything",
+        &ValidatorChain::<Vec<Root>>::new(),
+    );
+    assert_eq!(roots.len(), 2, "both sandbox paths become roots");
+
+    let mut manager = McpClientManager::new();
+    let (tools, _rx, roots_handle) = manager
+        .start_server_with_requests(everything_config(), roots)
+        .await
+        .expect("start server-everything (per-invocation)");
+
+    let get_roots: Arc<dyn Tool> = tools
+        .into_iter()
+        .find(|t| t.name() == "get-roots-list")
+        .expect("everything server exposes get-roots-list when roots is advertised");
+
+    // The advertised roots reach the server on roots/list.
+    let listed = read_roots_list(&get_roots).await;
+    assert!(
+        listed.contains("file:///tmp/factorq-roots-read")
+            && listed.contains("file:///tmp/factorq-roots-write"),
+        "server should see both advertised roots, got: {listed}"
+    );
+
+    // roots/list_changed: update the advertised set and notify; the
+    // server re-fetches and reflects the new root.
+    roots_handle
+        .set_roots(vec![
+            Root::new("file:///tmp/factorq-roots-extra").with_name("/tmp/factorq-roots-extra"),
+        ])
+        .await
+        .expect("set_roots + notify list_changed");
+
+    // The re-fetch is async; poll briefly until the change lands.
+    let mut updated = String::new();
+    for _ in 0..20 {
+        updated = read_roots_list(&get_roots).await;
+        if updated.contains("file:///tmp/factorq-roots-extra") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        updated.contains("file:///tmp/factorq-roots-extra"),
+        "after list_changed the server should see the updated root, got: {updated}"
+    );
+
+    manager.shutdown().await;
+}
+
+/// Ungranted: roots are nothing-by-default, so a server not in the
+/// grant is advertised an empty set.
+#[tokio::test]
+async fn roots_not_advertised_without_a_grant() {
+    use fq_runtime::Sandbox;
+    use fq_runtime::validation::ValidatorChain;
+
+    let sandbox = Sandbox::new().fs_read("/tmp/factorq-roots-read");
+
+    // No grant at all → empty.
+    let none = fq_runtime::advertised_roots(
+        &sandbox,
+        None,
+        "everything",
+        &ValidatorChain::<Vec<Root>>::new(),
+    );
+    assert!(none.is_empty(), "no grant advertises no roots");
+
+    // Granted to a different server → empty for this one.
+    let grant = fq_runtime::RootsGrant {
+        servers: vec!["some-other-server".to_string()],
+    };
+    let other = fq_runtime::advertised_roots(
+        &sandbox,
+        Some(&grant),
+        "everything",
+        &ValidatorChain::<Vec<Root>>::new(),
+    );
+    assert!(
+        other.is_empty(),
+        "a grant that omits this server advertises no roots"
     );
 }
