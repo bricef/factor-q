@@ -8,10 +8,10 @@
 use std::sync::Arc;
 
 use fq_runtime::mcp::{
-    FactorQClientHandler, McpClientManager, McpServerConfig, ResourceNotification, ServerRequest,
+    FactorQClientHandler, McpClientManager, McpServerConfig, ServerNotification, ServerRequest,
 };
 use fq_tools::{Tool, ToolContext, ToolSandbox};
-use rmcp::model::{CreateMessageResult, Root, SamplingMessage};
+use rmcp::model::{CreateMessageResult, LoggingLevel, Root, SamplingMessage};
 
 /// Skip the test if `npx` is not available.
 fn require_npx() -> bool {
@@ -347,15 +347,22 @@ async fn subscribe_delivers_resource_update_notifications() {
         .await
         .expect("toggle updates on");
 
-    let notification = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        manager.recv_resource_notification("everything"),
-    )
+    // The unified notification channel also carries log records (the
+    // server logs the subscribe request), so skip past anything that
+    // isn't the resources/updated we're waiting for.
+    let notification = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            match manager.recv_notification("everything").await {
+                Some(n @ ServerNotification::ResourceUpdated { .. }) => break n,
+                Some(_) => continue,
+                None => panic!("notification channel closed"),
+            }
+        }
+    })
     .await
-    .expect("a resource notification within 15s")
-    .expect("notification channel open");
+    .expect("a resources/updated notification within 15s");
     assert!(
-        matches!(notification, ResourceNotification::Updated { .. }),
+        matches!(notification, ServerNotification::ResourceUpdated { .. }),
         "expected a resources/updated notification, got {notification:?}"
     );
 
@@ -1562,4 +1569,60 @@ async fn elicitation_retries_exhausted_declines() {
             .any(|m| m.content.as_deref().is_some_and(|c| c.contains("declined")))),
         "the decline should round-trip into the agent transcript"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Step 7 — Logging (notifications/message).
+//
+// `logging/setLevel` chooses the minimum level; the everything
+// server's `toggle-simulated-logging` tool emits one log immediately
+// on enable. The handler folds logs into tracing and forwards them on
+// the notification sink.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn server_log_messages_are_forwarded_after_set_level() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    let tools = manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    // Ask for everything (debug+) so the immediate message — whatever
+    // random level it is — is not filtered server-side.
+    manager
+        .set_logging_level("everything", LoggingLevel::Debug)
+        .await
+        .expect("logging/setLevel should be accepted");
+
+    // Enabling simulated logging sends one message immediately.
+    let toggle: &Arc<dyn Tool> = tools
+        .iter()
+        .find(|t| t.name() == "toggle-simulated-logging")
+        .expect("everything server exposes toggle-simulated-logging");
+    let sandbox = ToolSandbox::new();
+    let ctx = ToolContext::new(&sandbox);
+    toggle
+        .execute(&ctx, serde_json::json!({}))
+        .await
+        .expect("toggle simulated logging on");
+
+    let notification = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        manager.recv_notification("everything"),
+    )
+    .await
+    .expect("a log notification within 10s")
+    .expect("notification channel open");
+    assert!(
+        matches!(notification, ServerNotification::Log { .. }),
+        "expected a notifications/message log, got {notification:?}"
+    );
+
+    manager.shutdown().await;
 }

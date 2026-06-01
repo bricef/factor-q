@@ -18,10 +18,10 @@ use rmcp::model::{
     CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequestMethod,
     CreateMessageRequestParams, CreateMessageResult, ElicitationAction, ElicitationCapability,
     FormElicitationCapability, GetPromptRequestParams, GetPromptResult, JsonObject,
-    ListRootsResult, Prompt, PromptMessageContent, PromptMessageRole, ReadResourceRequestParams,
-    ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
-    ResourceUpdatedNotificationParam, Root, RootsCapabilities, SamplingCapability,
-    ServerCapabilities, SubscribeRequestParams,
+    ListRootsResult, LoggingLevel, LoggingMessageNotificationParam, Prompt, PromptMessageContent,
+    PromptMessageRole, ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
+    ResourceTemplate, ResourceUpdatedNotificationParam, Root, RootsCapabilities,
+    SamplingCapability, ServerCapabilities, SetLevelRequestParams, SubscribeRequestParams,
 };
 use rmcp::service::{
     MaybeSendFuture, NotificationContext, RequestContext, RoleClient, RunningService,
@@ -76,14 +76,40 @@ pub enum McpError {
 // Type alias for the concrete client handle we store.
 type McpClient = RunningService<RoleClient, FactorQClientHandler>;
 
-/// A resource notification forwarded from a connected MCP server.
+/// An out-of-band notification forwarded from a connected MCP server
+/// to the host's notification sink: resource changes, capability-list
+/// changes, log records, and progress (Step 7). The host drains these
+/// from the per-server channel (see
+/// [`McpClientManager::recv_notification`]) to react — refresh stale
+/// caches, fold logs into tracing, surface progress, etc.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ResourceNotification {
+pub enum ServerNotification {
     /// A subscribed resource changed (`notifications/resources/updated`).
-    Updated { uri: String },
+    ResourceUpdated { uri: String },
     /// The server's resource list changed
     /// (`notifications/resources/list_changed`).
-    ListChanged,
+    ResourceListChanged,
+    /// The server's tool list changed
+    /// (`notifications/tools/list_changed`).
+    ToolListChanged,
+    /// The server's prompt list changed
+    /// (`notifications/prompts/list_changed`).
+    PromptListChanged,
+    /// A log record from the server (`notifications/message`). `level`
+    /// is the MCP level name (`"debug"`..`"emergency"`).
+    Log {
+        level: String,
+        logger: Option<String>,
+        data: Value,
+    },
+    /// Progress on an in-flight request (`notifications/progress`),
+    /// keyed by the `token` the host attached when issuing it.
+    Progress {
+        token: String,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<String>,
+    },
 }
 
 /// A request a connected MCP server initiates back toward the host
@@ -212,7 +238,7 @@ pub fn advertised_roots(
 pub struct FactorQClientHandler {
     /// Sink for resource notifications forwarded from the connected
     /// server (`resources/updated`, `resources/list_changed`).
-    resource_notifications: Option<mpsc::UnboundedSender<ResourceNotification>>,
+    notifications: Option<mpsc::UnboundedSender<ServerNotification>>,
     /// Sink for server-initiated requests (sampling, and later
     /// elicitation) bridged to the runner. `None` for shared,
     /// tool-only servers, which decline inbound requests per the rmcp
@@ -229,9 +255,9 @@ pub struct FactorQClientHandler {
 
 impl FactorQClientHandler {
     /// Build a handler that forwards resource notifications to `tx`.
-    fn with_notifications(tx: mpsc::UnboundedSender<ResourceNotification>) -> Self {
+    fn with_notifications(tx: mpsc::UnboundedSender<ServerNotification>) -> Self {
         Self {
-            resource_notifications: Some(tx),
+            notifications: Some(tx),
             ..Default::default()
         }
     }
@@ -375,8 +401,8 @@ impl ClientHandler for FactorQClientHandler {
         params: ResourceUpdatedNotificationParam,
         _context: NotificationContext<RoleClient>,
     ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
-        if let Some(tx) = &self.resource_notifications {
-            let _ = tx.send(ResourceNotification::Updated { uri: params.uri });
+        if let Some(tx) = &self.notifications {
+            let _ = tx.send(ServerNotification::ResourceUpdated { uri: params.uri });
         }
         std::future::ready(())
     }
@@ -385,10 +411,65 @@ impl ClientHandler for FactorQClientHandler {
         &self,
         _context: NotificationContext<RoleClient>,
     ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
-        if let Some(tx) = &self.resource_notifications {
-            let _ = tx.send(ResourceNotification::ListChanged);
+        if let Some(tx) = &self.notifications {
+            let _ = tx.send(ServerNotification::ResourceListChanged);
         }
         std::future::ready(())
+    }
+
+    /// Fold a server log record (`notifications/message`) into the
+    /// host's `tracing` output at the mapped level, and forward it on
+    /// the notification sink so consumers (tests, a future event-bus
+    /// bridge) can observe it. The server respects the client's
+    /// `logging/setLevel` choice, so filtering happens server-side.
+    fn on_logging_message(
+        &self,
+        params: LoggingMessageNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
+        let level = logging_level_name(params.level);
+        let logger = params.logger.as_deref().unwrap_or("mcp-server");
+        // Dynamic level → a static-level dispatch (tracing levels are
+        // const). MCP's eight levels collapse onto tracing's five.
+        match params.level {
+            LoggingLevel::Debug => {
+                debug!(target: "mcp.server.log", %level, logger, data = %params.data)
+            }
+            LoggingLevel::Info | LoggingLevel::Notice => {
+                info!(target: "mcp.server.log", %level, logger, data = %params.data)
+            }
+            LoggingLevel::Warning => {
+                warn!(target: "mcp.server.log", %level, logger, data = %params.data)
+            }
+            LoggingLevel::Error
+            | LoggingLevel::Critical
+            | LoggingLevel::Alert
+            | LoggingLevel::Emergency => {
+                tracing::error!(target: "mcp.server.log", %level, logger, data = %params.data)
+            }
+        }
+        if let Some(tx) = &self.notifications {
+            let _ = tx.send(ServerNotification::Log {
+                level: level.to_string(),
+                logger: params.logger,
+                data: params.data,
+            });
+        }
+        std::future::ready(())
+    }
+}
+
+/// Map an MCP logging level to its canonical lowercase name.
+fn logging_level_name(level: LoggingLevel) -> &'static str {
+    match level {
+        LoggingLevel::Debug => "debug",
+        LoggingLevel::Info => "info",
+        LoggingLevel::Notice => "notice",
+        LoggingLevel::Warning => "warning",
+        LoggingLevel::Error => "error",
+        LoggingLevel::Critical => "critical",
+        LoggingLevel::Alert => "alert",
+        LoggingLevel::Emergency => "emergency",
     }
 }
 
@@ -635,7 +716,7 @@ struct RunningServer {
     client: Arc<McpClient>,
     tool_names: Vec<String>,
     /// Receiver for resource notifications the handler forwards.
-    resource_notifications: Mutex<mpsc::UnboundedReceiver<ResourceNotification>>,
+    notifications: Mutex<mpsc::UnboundedReceiver<ServerNotification>>,
 }
 
 /// Manages the lifecycle of MCP server child processes.
@@ -845,7 +926,7 @@ impl McpClientManager {
             name: config.name,
             client,
             tool_names,
-            resource_notifications: Mutex::new(notif_rx),
+            notifications: Mutex::new(notif_rx),
         });
 
         Ok((tools, roots_handle))
@@ -993,7 +1074,7 @@ impl McpClientManager {
     }
 
     /// Subscribe to update notifications for a resource on a server.
-    /// Updates arrive via [`Self::recv_resource_notification`].
+    /// Updates arrive via [`Self::recv_notification`].
     pub async fn subscribe(&self, server: &str, uri: &str) -> Result<(), McpError> {
         self.client_for(server)?
             .subscribe(SubscribeRequestParams::new(uri))
@@ -1005,11 +1086,31 @@ impl McpClientManager {
             })
     }
 
-    /// Await the next resource notification a server's handler forwarded.
-    /// `None` if the server is unknown or its notification channel closed.
-    pub async fn recv_resource_notification(&self, server: &str) -> Option<ResourceNotification> {
+    /// Await the next out-of-band notification a server's handler
+    /// forwarded (resource change, list-changed, log, progress).
+    /// `None` if the server is unknown or its channel closed.
+    pub async fn recv_notification(&self, server: &str) -> Option<ServerNotification> {
         let server = self.servers.iter().find(|s| s.name == server)?;
-        server.resource_notifications.lock().await.recv().await
+        server.notifications.lock().await.recv().await
+    }
+
+    /// Set the minimum logging level the server should send
+    /// (`logging/setLevel`). The server filters below this level, so
+    /// only messages at or above `level` arrive on the notification
+    /// sink thereafter.
+    pub async fn set_logging_level(
+        &self,
+        server: &str,
+        level: LoggingLevel,
+    ) -> Result<(), McpError> {
+        self.client_for(server)?
+            .set_level(SetLevelRequestParams::new(level))
+            .await
+            .map(|_| ())
+            .map_err(|err| McpError::ResourceOp {
+                server: server.to_string(),
+                reason: err.to_string(),
+            })
     }
 
     /// Gracefully shut down all managed MCP server processes.
