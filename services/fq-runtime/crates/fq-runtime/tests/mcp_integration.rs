@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use fq_runtime::mcp::{
-    FactorQClientHandler, McpClientManager, McpServerConfig, ServerNotification, ServerRequest,
+    AdvertisedCapabilities, FactorQClientHandler, McpClientManager, McpServerConfig,
+    ServerNotification, ServerRequest,
 };
 use fq_tools::{Tool, ToolContext, ToolSandbox};
 use rmcp::model::{CreateMessageResult, LoggingLevel, Root, SamplingMessage};
@@ -190,8 +191,9 @@ async fn negotiates_full_capability_set() {
         "server should advertise completions"
     );
 
-    // factor-q advertises the client-side capabilities it intends to honour.
-    let client = FactorQClientHandler::advertised_capabilities();
+    // factor-q can advertise the full client-side surface when an agent
+    // grants it (here: all three).
+    let client = FactorQClientHandler::advertised_capabilities(AdvertisedCapabilities::all());
     assert!(client.roots.is_some(), "client should advertise roots");
     assert!(
         client.sampling.is_some(),
@@ -831,7 +833,7 @@ async fn sampling_request_bridges_to_the_host() {
 
     let mut manager = McpClientManager::new();
     let (tools, mut requests, _roots) = manager
-        .start_server_with_requests(everything_config(), vec![])
+        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::all())
         .await
         .expect("start server-everything (per-invocation)");
 
@@ -950,7 +952,7 @@ async fn run_sampling_scenario(
     // Per-invocation everything server with its inbound request channel.
     let mut manager = McpClientManager::new();
     let (tools, rx, _roots) = manager
-        .start_server_with_requests(everything_config(), vec![])
+        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::all())
         .await
         .expect("start server-everything (per-invocation)");
 
@@ -1194,7 +1196,7 @@ async fn roots_derived_from_sandbox_are_advertised_and_updatable() {
 
     let mut manager = McpClientManager::new();
     let (tools, _rx, roots_handle) = manager
-        .start_server_with_requests(everything_config(), roots)
+        .start_server_with_requests(everything_config(), roots, AdvertisedCapabilities::all())
         .await
         .expect("start server-everything (per-invocation)");
 
@@ -1327,7 +1329,7 @@ async fn run_elicitation_scenario(
 
     let mut manager = McpClientManager::new();
     let (tools, rx, _roots) = manager
-        .start_server_with_requests(everything_config(), vec![])
+        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::all())
         .await
         .expect("start server-everything (per-invocation)");
 
@@ -1783,4 +1785,57 @@ async fn in_flight_tool_call_can_be_cancelled() {
     );
 
     manager.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Step 8b — Grant-aware capability advertisement.
+//
+// The everything server gates its server-initiated trigger tools on the
+// client's advertised capabilities, so what we advertise (per the
+// agent's grant) determines what the server even registers.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn advertised_capabilities_gate_what_the_server_registers() {
+    use std::collections::BTreeSet;
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let tool_names = |tools: &[Arc<dyn Tool>]| -> BTreeSet<String> {
+        tools.iter().map(|t| t.name().to_string()).collect()
+    };
+
+    // Advertise nothing inbound: the capability-gated tools are absent.
+    let mut none = McpClientManager::new();
+    let (tools, _rx, _roots) = none
+        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::none())
+        .await
+        .expect("start server-everything (no caps)");
+    let names = tool_names(&tools);
+    assert!(names.contains("echo"), "ungated tools are still present");
+    assert!(
+        !names.contains("trigger-sampling-request")
+            && !names.contains("trigger-elicitation-request")
+            && !names.contains("get-roots-list"),
+        "ungranted capabilities must not be advertised → server registers none of their tools, got {names:?}"
+    );
+    none.shutdown().await;
+
+    // Advertise all three: the server now registers each gated tool.
+    let mut all = McpClientManager::new();
+    let (gtools, _grx, _groots) = all
+        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::all())
+        .await
+        .expect("start server-everything (all caps)");
+    let gnames = tool_names(&gtools);
+    assert!(
+        gnames.contains("trigger-sampling-request")
+            && gnames.contains("trigger-elicitation-request")
+            && gnames.contains("get-roots-list"),
+        "granted capabilities are advertised → server registers their tools, got {gnames:?}"
+    );
+    all.shutdown().await;
 }

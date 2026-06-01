@@ -250,17 +250,50 @@ pub fn advertised_roots(
         .unwrap_or_default()
 }
 
+/// Which inbound (server-initiated) capabilities factor-q advertises to
+/// a given server during the initialize handshake (ADR-0017,
+/// nothing-by-default). Derived per-server from the agent's grants:
+/// a server not granted a capability is not told the client supports
+/// it, so a well-behaved server won't even register the corresponding
+/// tool (e.g. the everything server gates `trigger-sampling-request` on
+/// the client advertising `sampling`). Resources/prompts are *server*
+/// capabilities and unaffected by this.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdvertisedCapabilities {
+    pub sampling: bool,
+    pub elicitation: bool,
+    pub roots: bool,
+}
+
+impl AdvertisedCapabilities {
+    /// Advertise nothing inbound (a shared, tool-only server).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Advertise all three (used by tests that exercise the full
+    /// server-initiated surface).
+    pub fn all() -> Self {
+        Self {
+            sampling: true,
+            elicitation: true,
+            roots: true,
+        }
+    }
+}
+
 /// factor-q's MCP client handler.
 ///
-/// Advertises the client-side capabilities factor-q intends to honour
-/// (roots, sampling, elicitation) during the initialize handshake, and
-/// forwards resource notifications to a sink when one is wired.
-/// Server-initiated *requests* (sampling, elicitation, roots) still use
-/// rmcp's default handlers — declining or returning empty — until
-/// Steps 5–6 of the full-spec plan implement them under ADR-0017's
-/// autonomous-resolution policy.
+/// Advertises the client-side capabilities the agent granted this
+/// server (roots, sampling, elicitation) during the initialize
+/// handshake, forwards out-of-band notifications to a sink, and — on
+/// the per-invocation path — bridges server-initiated requests
+/// (sampling, elicitation) to the runner and answers `roots/list`.
 #[derive(Default)]
 pub struct FactorQClientHandler {
+    /// Inbound capabilities advertised to this server (per-server
+    /// grant). Default: nothing (tool-only).
+    capabilities: AdvertisedCapabilities,
     /// Sink for resource notifications forwarded from the connected
     /// server (`resources/updated`, `resources/list_changed`).
     notifications: Option<mpsc::UnboundedSender<ServerNotification>>,
@@ -287,6 +320,13 @@ impl FactorQClientHandler {
         }
     }
 
+    /// Set the inbound capabilities advertised to this server (derived
+    /// from the agent's per-server grants). Default is none.
+    fn with_capabilities(mut self, capabilities: AdvertisedCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
     /// Wire a sink for server-initiated requests (sampling /
     /// elicitation). Used on the per-invocation start path; absent
     /// for shared tool-only servers.
@@ -303,21 +343,29 @@ impl FactorQClientHandler {
         self
     }
 
-    /// The client capabilities factor-q advertises during initialize:
-    /// roots + `list_changed`, sampling, and form-mode elicitation with
-    /// schema validation — the inbound surface ADR-0017 governs.
-    pub fn advertised_capabilities() -> ClientCapabilities {
+    /// Build the `ClientCapabilities` advertised during initialize from
+    /// the per-server grant: each of roots (+`list_changed`), sampling,
+    /// and form-mode elicitation is advertised only if granted
+    /// (ADR-0017, nothing-by-default). An ungranted capability is left
+    /// `None`, so the server is never told the client supports it.
+    pub fn advertised_capabilities(granted: AdvertisedCapabilities) -> ClientCapabilities {
         let mut capabilities = ClientCapabilities::default();
-        capabilities.roots = Some(RootsCapabilities {
-            list_changed: Some(true),
-        });
-        capabilities.sampling = Some(SamplingCapability::default());
-        capabilities.elicitation = Some(ElicitationCapability {
-            form: Some(FormElicitationCapability {
-                schema_validation: Some(true),
-            }),
-            url: None,
-        });
+        if granted.roots {
+            capabilities.roots = Some(RootsCapabilities {
+                list_changed: Some(true),
+            });
+        }
+        if granted.sampling {
+            capabilities.sampling = Some(SamplingCapability::default());
+        }
+        if granted.elicitation {
+            capabilities.elicitation = Some(ElicitationCapability {
+                form: Some(FormElicitationCapability {
+                    schema_validation: Some(true),
+                }),
+                url: None,
+            });
+        }
         capabilities
     }
 }
@@ -325,7 +373,7 @@ impl FactorQClientHandler {
 impl ClientHandler for FactorQClientHandler {
     fn get_info(&self) -> ClientInfo {
         let mut info = ClientInfo::default();
-        info.capabilities = Self::advertised_capabilities();
+        info.capabilities = Self::advertised_capabilities(self.capabilities);
         info
     }
 
@@ -847,7 +895,11 @@ impl McpClientManager {
             return Ok(Vec::new());
         }
 
-        let (tools, _roots) = self.start_inner(config, None, Vec::new()).await?;
+        // Shared servers are tool-only: advertise no inbound capabilities
+        // (a grant-bearing server runs per-invocation instead — ADR-0018).
+        let (tools, _roots) = self
+            .start_inner(config, None, Vec::new(), AdvertisedCapabilities::none())
+            .await?;
         self.started.insert(key);
         Ok(tools)
     }
@@ -868,6 +920,7 @@ impl McpClientManager {
         &mut self,
         config: McpServerConfig,
         roots: Vec<Root>,
+        capabilities: AdvertisedCapabilities,
     ) -> Result<
         (
             Vec<Arc<dyn Tool>>,
@@ -877,7 +930,9 @@ impl McpClientManager {
         McpError,
     > {
         let (req_tx, req_rx) = mpsc::unbounded_channel();
-        let (tools, roots_handle) = self.start_inner(config, Some(req_tx), roots).await?;
+        let (tools, roots_handle) = self
+            .start_inner(config, Some(req_tx), roots, capabilities)
+            .await?;
         Ok((tools, req_rx, roots_handle))
     }
 
@@ -893,6 +948,7 @@ impl McpClientManager {
         config: McpServerConfig,
         server_request_tx: Option<mpsc::UnboundedSender<ServerRequest>>,
         roots: Vec<Root>,
+        capabilities: AdvertisedCapabilities,
     ) -> Result<(Vec<Arc<dyn Tool>>, RootsHandle), McpError> {
         info!(
             server = %config.name,
@@ -921,8 +977,9 @@ impl McpClientManager {
         // per-invocation path — bridges server-initiated requests.
         let (notif_tx, notif_rx) = mpsc::unbounded_channel();
         let roots_cell = Arc::new(Mutex::new(roots));
-        let mut handler =
-            FactorQClientHandler::with_notifications(notif_tx).with_roots(Arc::clone(&roots_cell));
+        let mut handler = FactorQClientHandler::with_notifications(notif_tx)
+            .with_roots(Arc::clone(&roots_cell))
+            .with_capabilities(capabilities);
         if let Some(req_tx) = server_request_tx {
             handler = handler.with_server_requests(req_tx);
         }
@@ -1490,18 +1547,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advertises_roots_sampling_elicitation() {
-        let capabilities = FactorQClientHandler::advertised_capabilities();
-        assert!(capabilities.roots.is_some(), "roots advertised");
-        assert!(capabilities.sampling.is_some(), "sampling advertised");
-        assert!(capabilities.elicitation.is_some(), "elicitation advertised");
+    fn advertised_capabilities_reflect_the_grant() {
+        let all = FactorQClientHandler::advertised_capabilities(AdvertisedCapabilities::all());
+        assert!(all.roots.is_some() && all.sampling.is_some() && all.elicitation.is_some());
+
+        let none = FactorQClientHandler::advertised_capabilities(AdvertisedCapabilities::none());
+        assert!(
+            none.roots.is_none() && none.sampling.is_none() && none.elicitation.is_none(),
+            "nothing is advertised without a grant"
+        );
+
+        // Partial grant: only the granted capability is advertised.
+        let sampling_only = FactorQClientHandler::advertised_capabilities(AdvertisedCapabilities {
+            sampling: true,
+            ..AdvertisedCapabilities::none()
+        });
+        assert!(sampling_only.sampling.is_some());
+        assert!(sampling_only.roots.is_none() && sampling_only.elicitation.is_none());
     }
 
     #[test]
-    fn get_info_carries_advertised_capabilities() {
-        let info = FactorQClientHandler::default().get_info();
-        assert!(info.capabilities.roots.is_some());
-        assert!(info.capabilities.sampling.is_some());
-        assert!(info.capabilities.elicitation.is_some());
+    fn get_info_carries_granted_capabilities() {
+        // Default handler (tool-only) advertises nothing inbound.
+        let tool_only = FactorQClientHandler::default().get_info();
+        assert!(tool_only.capabilities.sampling.is_none());
+        assert!(tool_only.capabilities.roots.is_none());
+        assert!(tool_only.capabilities.elicitation.is_none());
+
+        // A fully-granted handler advertises all three.
+        let granted = FactorQClientHandler::default()
+            .with_capabilities(AdvertisedCapabilities::all())
+            .get_info();
+        assert!(granted.capabilities.sampling.is_some());
+        assert!(granted.capabilities.roots.is_some());
+        assert!(granted.capabilities.elicitation.is_some());
     }
 }
