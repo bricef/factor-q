@@ -1626,3 +1626,59 @@ async fn server_log_messages_are_forwarded_after_set_level() {
 
     manager.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Step 7 — Progress (notifications/progress).
+//
+// Every tool call carries a progress token, so the everything server's
+// `trigger-long-running-operation` reports one progress notification
+// per step against it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn progress_notifications_track_a_long_running_operation() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    let tools = manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    let op: &Arc<dyn Tool> = tools
+        .iter()
+        .find(|t| t.name() == "trigger-long-running-operation")
+        .expect("everything server exposes trigger-long-running-operation");
+
+    // 3 steps over ~1s → 3 progress notifications (progress 1..3, total 3).
+    let sandbox = ToolSandbox::new();
+    let ctx = ToolContext::new(&sandbox);
+    let result = op
+        .execute(&ctx, serde_json::json!({"duration": 1, "steps": 3}))
+        .await
+        .expect("long-running operation completes");
+    assert!(!result.is_error, "operation should not error");
+
+    // Progress notifications are buffered on the channel during the
+    // call; drain three of them.
+    let mut count = 0;
+    while count < 3 {
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            manager.recv_notification("everything"),
+        )
+        .await
+        .expect("a progress notification within 5s")
+        .expect("notification channel open");
+        if let ServerNotification::Progress { total, .. } = n {
+            assert_eq!(total, Some(3.0), "total should be the step count");
+            count += 1;
+        }
+    }
+    assert_eq!(count, 3, "expected one progress notification per step");
+
+    manager.shutdown().await;
+}

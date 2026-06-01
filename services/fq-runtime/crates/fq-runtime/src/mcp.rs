@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
 use rmcp::ClientHandler;
@@ -18,10 +19,11 @@ use rmcp::model::{
     CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequestMethod,
     CreateMessageRequestParams, CreateMessageResult, ElicitationAction, ElicitationCapability,
     FormElicitationCapability, GetPromptRequestParams, GetPromptResult, JsonObject,
-    ListRootsResult, LoggingLevel, LoggingMessageNotificationParam, Prompt, PromptMessageContent,
-    PromptMessageRole, ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
-    ResourceTemplate, ResourceUpdatedNotificationParam, Root, RootsCapabilities,
-    SamplingCapability, ServerCapabilities, SetLevelRequestParams, SubscribeRequestParams,
+    ListRootsResult, LoggingLevel, LoggingMessageNotificationParam, Meta, NumberOrString,
+    ProgressNotificationParam, ProgressToken, Prompt, PromptMessageContent, PromptMessageRole,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
+    ResourceUpdatedNotificationParam, Root, RootsCapabilities, SamplingCapability,
+    ServerCapabilities, SetLevelRequestParams, SubscribeRequestParams,
 };
 use rmcp::service::{
     MaybeSendFuture, NotificationContext, RequestContext, RoleClient, RunningService,
@@ -75,6 +77,27 @@ pub enum McpError {
 
 // Type alias for the concrete client handle we store.
 type McpClient = RunningService<RoleClient, FactorQClientHandler>;
+
+/// Monotonic source of per-request progress tokens (Step 7). Each
+/// outbound tool call gets a fresh token so a server that supports
+/// progress can report against it via `notifications/progress`.
+static PROGRESS_TOKEN_SEQ: AtomicI64 = AtomicI64::new(1);
+
+fn next_progress_token() -> ProgressToken {
+    ProgressToken(NumberOrString::Number(
+        PROGRESS_TOKEN_SEQ.fetch_add(1, Ordering::Relaxed),
+    ))
+}
+
+/// Render a progress token to a string for the neutral
+/// [`ServerNotification::Progress`] (tokens are numeric here, but a
+/// server may echo a string token).
+fn progress_token_string(token: &ProgressToken) -> String {
+    match &token.0 {
+        NumberOrString::Number(n) => n.to_string(),
+        NumberOrString::String(s) => s.to_string(),
+    }
+}
 
 /// An out-of-band notification forwarded from a connected MCP server
 /// to the host's notification sink: resource changes, capability-list
@@ -457,6 +480,32 @@ impl ClientHandler for FactorQClientHandler {
         }
         std::future::ready(())
     }
+
+    /// Forward `notifications/progress` for an in-flight request: trace
+    /// it and forward a [`ServerNotification::Progress`] on the sink.
+    fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
+        let token = progress_token_string(&params.progress_token);
+        debug!(
+            target: "mcp.server.progress",
+            token = %token,
+            progress = params.progress,
+            total = ?params.total,
+            "progress"
+        );
+        if let Some(tx) = &self.notifications {
+            let _ = tx.send(ServerNotification::Progress {
+                token,
+                progress: params.progress,
+                total: params.total,
+                message: params.message,
+            });
+        }
+        std::future::ready(())
+    }
 }
 
 /// Map an MCP logging level to its canonical lowercase name.
@@ -513,7 +562,12 @@ impl Tool for McpTool {
             }
         };
 
-        let request = CallToolRequestParams::new(self.tool_name.clone()).with_arguments(arguments);
+        let mut request =
+            CallToolRequestParams::new(self.tool_name.clone()).with_arguments(arguments);
+        // Attach a progress token so progress-capable servers can
+        // report against this call (`notifications/progress`); servers
+        // that don't support progress ignore it.
+        request.meta = Some(Meta::with_progress_token(next_progress_token()));
 
         let result = self
             .client
