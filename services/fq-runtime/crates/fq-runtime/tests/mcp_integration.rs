@@ -1612,13 +1612,19 @@ async fn server_log_messages_are_forwarded_after_set_level() {
         .await
         .expect("toggle simulated logging on");
 
-    let notification = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        manager.recv_notification("everything"),
-    )
+    // The unified channel also carries other notifications (e.g. the
+    // server emits tools/list_changed); skip past them to the log.
+    let notification = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match manager.recv_notification("everything").await {
+                Some(n @ ServerNotification::Log { .. }) => break n,
+                Some(_) => continue,
+                None => panic!("notification channel closed"),
+            }
+        }
+    })
     .await
-    .expect("a log notification within 10s")
-    .expect("notification channel open");
+    .expect("a log notification within 10s");
     assert!(
         matches!(notification, ServerNotification::Log { .. }),
         "expected a notifications/message log, got {notification:?}"
@@ -1679,6 +1685,102 @@ async fn progress_notifications_track_a_long_running_operation() {
         }
     }
     assert_eq!(count, 3, "expected one progress notification per step");
+
+    manager.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Step 7 — list_changed refresh.
+//
+// `refresh_tools` re-discovers a server's tool list (reacting to
+// `notifications/tools/list_changed`) instead of serving the
+// startup-time set. The everything server's tools are static, so this
+// asserts re-discovery returns the same set and the mechanism works;
+// driving an actual tools/list_changed needs a mutating server.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn refresh_tools_rediscovers_the_tool_list() {
+    use std::collections::BTreeSet;
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    let initial = manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+    let initial_names: BTreeSet<String> = initial.iter().map(|t| t.name().to_string()).collect();
+    assert!(
+        initial_names.contains("echo"),
+        "baseline discovery should include echo"
+    );
+
+    // Re-discover via the list_changed refresh path.
+    let refreshed = manager
+        .refresh_tools("everything")
+        .await
+        .expect("refresh_tools re-discovers");
+    let refreshed_names: BTreeSet<String> =
+        refreshed.iter().map(|t| t.name().to_string()).collect();
+
+    assert_eq!(
+        initial_names, refreshed_names,
+        "re-discovery should return the current tool set"
+    );
+
+    // Unknown server is an error, not a panic.
+    assert!(manager.refresh_tools("does-not-exist").await.is_err());
+
+    manager.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Step 7 — Cancellation (notifications/cancelled).
+//
+// `call_tool_cancellable` races a tool call against a cancel future;
+// when cancel wins it sends `notifications/cancelled` and abandons the
+// in-flight request, returning None promptly instead of blocking.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn in_flight_tool_call_can_be_cancelled() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut manager = McpClientManager::new();
+    manager
+        .start_server(everything_config())
+        .await
+        .expect("start server-everything");
+
+    // A 10-second operation, cancelled after 200ms.
+    let args = serde_json::json!({"duration": 10, "steps": 10})
+        .as_object()
+        .unwrap()
+        .clone();
+    let start = std::time::Instant::now();
+    let outcome = manager
+        .call_tool_cancellable(
+            "everything",
+            "trigger-long-running-operation",
+            args,
+            tokio::time::sleep(std::time::Duration::from_millis(200)),
+        )
+        .await
+        .expect("the call resolves (cancelled or completed)");
+
+    assert!(outcome.is_none(), "a cancelled call returns None");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "cancellation should abort promptly, not wait the full 10s (took {:?})",
+        start.elapsed()
+    );
 
     manager.shutdown().await;
 }

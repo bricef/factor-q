@@ -15,7 +15,8 @@ use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
 use rmcp::ClientHandler;
 use rmcp::ServiceExt;
 use rmcp::model::{
-    CallToolRequestParams, ClientCapabilities, ClientInfo, CompletionContext, CompletionInfo,
+    CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam,
+    ClientCapabilities, ClientInfo, ClientRequest, CompletionContext, CompletionInfo,
     CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequestMethod,
     CreateMessageRequestParams, CreateMessageResult, ElicitationAction, ElicitationCapability,
     FormElicitationCapability, GetPromptRequestParams, GetPromptResult, JsonObject,
@@ -23,10 +24,11 @@ use rmcp::model::{
     ProgressNotificationParam, ProgressToken, Prompt, PromptMessageContent, PromptMessageRole,
     ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
     ResourceUpdatedNotificationParam, Root, RootsCapabilities, SamplingCapability,
-    ServerCapabilities, SetLevelRequestParams, SubscribeRequestParams,
+    ServerCapabilities, ServerResult, SetLevelRequestParams, SubscribeRequestParams,
 };
 use rmcp::service::{
-    MaybeSendFuture, NotificationContext, RequestContext, RoleClient, RunningService,
+    MaybeSendFuture, NotificationContext, PeerRequestOptions, RequestContext, RoleClient,
+    RunningService,
 };
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use serde_json::Value;
@@ -436,6 +438,33 @@ impl ClientHandler for FactorQClientHandler {
     ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
         if let Some(tx) = &self.notifications {
             let _ = tx.send(ServerNotification::ResourceListChanged);
+        }
+        std::future::ready(())
+    }
+
+    /// The server's tool list changed (`notifications/tools/list_changed`).
+    /// Forward it so the host can re-discover via
+    /// [`McpClientManager::refresh_tools`] rather than serving the
+    /// startup-time set.
+    fn on_tool_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
+        if let Some(tx) = &self.notifications {
+            let _ = tx.send(ServerNotification::ToolListChanged);
+        }
+        std::future::ready(())
+    }
+
+    /// The server's prompt list changed
+    /// (`notifications/prompts/list_changed`). Prompts are fetched
+    /// on-demand, so this is informational — forward it for observers.
+    fn on_prompt_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
+        if let Some(tx) = &self.notifications {
+            let _ = tx.send(ServerNotification::PromptListChanged);
         }
         std::future::ready(())
     }
@@ -912,17 +941,39 @@ impl McpClientManager {
             client: Arc::clone(&client),
         };
 
-        // Discover tools.
+        // Discover tools (shared with `refresh_tools`).
+        let (tools, tool_names) = Self::discover_tools(&client, &config.name).await?;
+
+        self.servers.push(RunningServer {
+            name: config.name,
+            client,
+            tool_names,
+            notifications: Mutex::new(notif_rx),
+        });
+
+        Ok((tools, roots_handle))
+    }
+
+    /// Discover a server's current tools: the regular MCP tools plus
+    /// the synthesized host-fulfilled resource tools (step 3b) when the
+    /// server advertises resources. Shared by initial startup and
+    /// [`refresh_tools`](Self::refresh_tools) (Step 7,
+    /// `notifications/tools/list_changed`). Returns the tool wrappers
+    /// and their names.
+    async fn discover_tools(
+        client: &Arc<McpClient>,
+        server_name: &str,
+    ) -> Result<(Vec<Arc<dyn Tool>>, Vec<String>), McpError> {
         let mcp_tools = client
             .list_all_tools()
             .await
             .map_err(|err| McpError::ToolDiscovery {
-                command: config.command.clone(),
+                command: server_name.to_string(),
                 reason: err.to_string(),
             })?;
 
         info!(
-            server = %config.name,
+            server = %server_name,
             tool_count = mcp_tools.len(),
             "discovered MCP tools"
         );
@@ -938,18 +989,14 @@ impl McpClientManager {
             let input_schema = serde_json::to_value(&*mcp_tool.input_schema)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
 
-            debug!(
-                server = %config.name,
-                tool = %name,
-                "registered MCP tool"
-            );
+            debug!(server = %server_name, tool = %name, "registered MCP tool");
 
             tool_names.push(name.clone());
             tools.push(Arc::new(McpTool {
                 tool_name: name,
                 tool_description: description,
                 tool_input_schema: input_schema,
-                client: Arc::clone(&client),
+                client: Arc::clone(client),
             }));
         }
 
@@ -962,12 +1009,12 @@ impl McpClientManager {
             .is_some();
         if advertises_resources {
             for resource_tool in [
-                McpResourceTool::list(&config.name, Arc::clone(&client)),
-                McpResourceTool::read(&config.name, Arc::clone(&client)),
-                McpResourceTool::list_templates(&config.name, Arc::clone(&client)),
+                McpResourceTool::list(server_name, Arc::clone(client)),
+                McpResourceTool::read(server_name, Arc::clone(client)),
+                McpResourceTool::list_templates(server_name, Arc::clone(client)),
             ] {
                 debug!(
-                    server = %config.name,
+                    server = %server_name,
                     tool = %resource_tool.name(),
                     "registered MCP resource tool"
                 );
@@ -976,14 +1023,28 @@ impl McpClientManager {
             }
         }
 
-        self.servers.push(RunningServer {
-            name: config.name,
-            client,
-            tool_names,
-            notifications: Mutex::new(notif_rx),
-        });
+        Ok((tools, tool_names))
+    }
 
-        Ok((tools, roots_handle))
+    /// Re-discover a server's tools and refresh the cached tool-name
+    /// list, reacting to `notifications/tools/list_changed` (Step 7).
+    /// Returns the current tool set so the caller can re-register it in
+    /// its [`ToolRegistry`](crate::tools::ToolRegistry) rather than
+    /// serving the stale set discovered at startup. Resources and
+    /// prompts are fetched on-demand (never cached), so they need no
+    /// refresh.
+    pub async fn refresh_tools(&mut self, server: &str) -> Result<Vec<Arc<dyn Tool>>, McpError> {
+        let idx = self
+            .servers
+            .iter()
+            .position(|s| s.name == server)
+            .ok_or_else(|| McpError::UnknownServer {
+                name: server.to_string(),
+            })?;
+        let client = Arc::clone(&self.servers[idx].client);
+        let (tools, tool_names) = Self::discover_tools(&client, server).await?;
+        self.servers[idx].tool_names = tool_names;
+        Ok(tools)
     }
 
     /// The capabilities a started server advertised during the initialize
@@ -1146,6 +1207,68 @@ impl McpClientManager {
     pub async fn recv_notification(&self, server: &str) -> Option<ServerNotification> {
         let server = self.servers.iter().find(|s| s.name == server)?;
         server.notifications.lock().await.recv().await
+    }
+
+    /// Call a tool, racing it against a `cancel` future (Step 7). If
+    /// the tool completes first, return its result as `Some`. If
+    /// `cancel` fires first, send `notifications/cancelled` to the
+    /// server (asking it to abort) and return `None`, abandoning the
+    /// in-flight request. This is how a host aborts a stuck or
+    /// no-longer-needed tool call (timeout, shutdown, budget) without
+    /// blocking on it.
+    pub async fn call_tool_cancellable<F>(
+        &self,
+        server: &str,
+        tool_name: &str,
+        arguments: JsonObject,
+        cancel: F,
+    ) -> Result<Option<CallToolResult>, McpError>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        let params = CallToolRequestParams::new(tool_name.to_string()).with_arguments(arguments);
+        let mut handle = self
+            .client_for(server)?
+            .peer()
+            .send_cancellable_request(
+                ClientRequest::CallToolRequest(CallToolRequest::new(params)),
+                PeerRequestOptions::no_options(),
+            )
+            .await
+            .map_err(|err| McpError::ToolCall {
+                tool_name: tool_name.to_string(),
+                reason: err.to_string(),
+            })?;
+
+        // Clone what's needed to cancel without consuming the handle
+        // (the `select!` borrows `handle.rx`).
+        let request_id = handle.id.clone();
+        let peer = handle.peer.clone();
+        let tool_call_error = |reason: String| McpError::ToolCall {
+            tool_name: tool_name.to_string(),
+            reason,
+        };
+
+        tokio::pin!(cancel);
+        tokio::select! {
+            result = &mut handle.rx => match result {
+                Ok(Ok(ServerResult::CallToolResult(result))) => Ok(Some(result)),
+                Ok(Ok(_)) => Err(tool_call_error("unexpected response type".to_string())),
+                Ok(Err(err)) => Err(tool_call_error(err.to_string())),
+                Err(_) => Err(tool_call_error("transport closed".to_string())),
+            },
+            _ = &mut cancel => {
+                // Best-effort: tell the server to abort. We stop
+                // awaiting the response regardless.
+                let _ = peer
+                    .notify_cancelled(CancelledNotificationParam {
+                        request_id,
+                        reason: Some("cancelled by host".to_string()),
+                    })
+                    .await;
+                Ok(None)
+            }
+        }
     }
 
     /// Set the minimum logging level the server should send
