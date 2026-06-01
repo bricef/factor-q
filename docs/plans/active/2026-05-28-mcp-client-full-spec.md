@@ -586,27 +586,48 @@ itself is correct (cursor-following `list_all_*`).
 
 ### Step 8 — Agent-definition + sandbox capability surface
 
-**Goal.** Make ADR-0017's grants declarable and enforced.
-Extend `McpServerDeclaration` / the sandbox with: sampling
-{allowed, sub-budget}, elicitation {allowed}, roots {scope}.
-Feed these into the handshake (advertised `ClientCapabilities`)
-and into the Step 5/6 policy gates.
+**Goal.** Make ADR-0017's grants declarable and enforced
+*end-to-end*. The grant **types** and runtime **gates** already
+exist (`SamplingGrant` / `RootsGrant` / `ElicitationGrant`, set
+programmatically; the Step 5/6 gates consume them, and Step 7's
+mechanisms — `start_server_with_requests`, `SamplingChannel`,
+`RootsHandle`, `call_tool_cancellable`, `refresh_tools` — are in
+place). Step 8 makes them (a) **declarable** in agent frontmatter
+and (b) actually **fire in the daemon's invocation path** (Steps
+5c/6/7 deferred the production wiring).
 
 **Failing tests first.** An agent def granting sampling +
 elicitation produces a handler that advertises and honours
 them; an agent def granting neither advertises neither and
-denies both; roots scope reflects the declared workspace.
+denies both; roots scope reflects the declared workspace; a
+**full daemon-path invocation** against a grant-bearing server
+performs a sampling / elicitation / roots exchange (not just the
+direct `run_with_server_requests` test path).
 
-**Implementation.** Parse the new fields in
-`agent/definition.rs`; thread them through the Agent builder
-and into `McpClientManager` / `FactorQClientHandler`
-construction.
+**Implementation.** Parse the new fields in `agent/definition.rs`
+(frontmatter → `SamplingGrant` / `RootsGrant` / `ElicitationGrant`
+incl. sampling/elicitation sub-budgets); thread them through the
+Agent builder + `ConfigSnapshot`. Then close the production-wiring
+gap left by Steps 5c/6/7: the daemon must start **grant-bearing
+servers per-invocation** (`start_server_with_requests`) and thread
+the resulting `SamplingChannel` + `RootsHandle` + `advertised_roots`
+into `run_with_server_requests`, so the gates run in a real
+invocation, not only under test.
 
 **Done when**
 
-- [ ] Capability grants parse, round-trip, and gate behaviour.
-- [ ] Ungranted capabilities are neither advertised nor
-      honoured.
+- [ ] Sampling / elicitation / roots grants parse from frontmatter,
+      round-trip through the Agent builder + `ConfigSnapshot`, and
+      drive advertised capabilities + the Step 5/6 policy gates.
+- [ ] Ungranted capabilities are neither advertised nor honoured.
+- [ ] The daemon starts grant-bearing MCP servers per-invocation and
+      threads the sampling/elicitation channel + roots handle +
+      advertised roots into the invocation — a full daemon-path
+      sampling / elicitation / roots exchange works end-to-end (not
+      just the direct `run_with_server_requests` test path).
+- [ ] The bidirectional validation seam is configurable per
+      agent/policy — the `ValidatorChain`s exist (default-allow); wire
+      them from config. (Concrete validators are a backlog item.)
 
 ---
 

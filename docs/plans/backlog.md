@@ -680,6 +680,75 @@ The sibling embedded-resource gap (`rust-sdk#842` / `#843`) was
 already fixed upstream and is resolved here by the rmcp 1.4 → 1.7
 bump (it unblocked the `resource-prompt` integration tests).
 
+## MCP full-spec follow-ups (flagged 2026-06-01)
+
+**Source:** Steps 5–7 of the MCP full-spec plan
+(`docs/plans/active/2026-05-28-mcp-client-full-spec.md`); commits
+`f85a965` (sampling), `c8eaa4c` / `4bfec85` (roots / elicitation),
+`f18d1e1` / `4a646d7` / `b5bcd02` (utilities). Each capability shipped
+as a *mechanism + grant + tests*; these are the pieces deliberately
+left for later. The grant-parsing + daemon-enforcement wiring lives in
+**Step 8** of that plan; the items below are polish / robustness /
+feature-gated work that does not block the plan closing.
+
+- [ ] **`origin` on the `llm.request` / `llm.response` trace.** Today
+      `LlmCallOrigin` (agent-turn vs `sampling` / `elicitation{server}`)
+      rides only the **cost** event (`CostMetadata`) +
+      `InvocationTotals.{sampling,elicitation}_cost`. ADR-0018
+      envisioned it on request/response too; they correlate by
+      `call_id` for now. `LlmCallOrigin` is public — spreading it is a
+      few struct fields + construction sites.
+- [ ] **Multi-server server-initiated channel.** `run_with_server_requests`
+      takes a single `SamplingChannel`; servicing several grant-bearing
+      servers in one invocation needs a merged, server-tagged stream
+      (the `select!` arm + gate already key on the server name).
+- [ ] **`includeContext` injection + inbound redact chain.** Sampling
+      forces `includeContext: none` (no agent/MCP context is injected
+      into a server's prompt yet). When context injection lands, honor
+      `thisServer` / `allServers` through the inbound validate-and-redact
+      chain (ADR-0018 §4).
+- [ ] **Elicitation schema-validation depth.** v1 enforces object shape
+      + required-field presence (`validate_against_elicitation_schema`).
+      Add per-field primitive / format (email, uri, date) / enum /
+      numeric-range checks, and reject schemas outside MCP's flat-object
+      subset rather than passing them through.
+- [ ] **Extract the reusable "structured completion against a schema"
+      primitive.** The validate → bounded-retry → decline loop is inline
+      in `handle_elicitation`; ADR-0018 wants it as a shared runner
+      primitive that the sampling evaluator-validator and the
+      spawn-deliverable typing (agent-concurrency backlog item) reuse.
+- [ ] **Concrete validators for the validation seam.** The sampling
+      outbound, elicitation inbound/outbound, and roots outbound
+      `ValidatorChain`s ship default-allow. Implement the policy-surface
+      validators: `HighEntropyRedactor`, `ValidateRequestPolicy`, and the
+      sampling evaluator-validator.
+- [ ] **Server logs → event bus.** `on_logging_message` folds records
+      into `tracing` + the `ServerNotification::Log` sink; the plan's
+      "/ the event bus" half — a `Logging` event payload bridged onto the
+      bus (needs an `EventPayload` variant + `schema_id_for` entry) — is
+      unbuilt.
+- [ ] **Daemon notification→action loops.** Nothing drains the
+      `ServerNotification` channel in the running daemon yet: react to
+      `ToolListChanged` by calling `refresh_tools` *and re-registering
+      into the live `ToolRegistry`* (the manager refreshes its own
+      `tool_names`; registry re-registration is the open piece); cancel
+      in-flight calls on invocation abort (`call_tool_cancellable`
+      exists; no abort trigger — timeout / budget / shutdown — is wired);
+      surface progress / logs to an operator.
+- [ ] **Mock paginating / mutating MCP server (test infra).** The
+      everything server doesn't paginate and only emits
+      `tools/list_changed` once at startup, so a real multi-page
+      pagination test and a server-driven `list_changed`→`refresh_tools`
+      test can't be written against it. A small in-process or
+      child-process mock would unblock both. Pagination *itself* is
+      correct (cursor-following `list_all_*`); this is a coverage gap,
+      not an implementation gap.
+- [ ] **Roots: non-`file://` URI schemes.** `roots_from_sandbox` emits
+      `file://` only. (The dynamic-workspace `roots/list_changed`
+      *trigger* — recompute roots from a changed sandbox — is owned by
+      the "Workspace state: snapshotting and base layers" item above;
+      only the `RootsHandle::set_roots` mechanism exists today.)
+
 ## Process and documentation gaps
 
 ### ADRs still in draft
