@@ -645,13 +645,22 @@ the "concrete validators" backlog item).
 **Goal.** Document the full-spec client and the autonomous
 HITL model; close the plan.
 
-- Update `ARCHITECTURE.md` (MCP is no longer tools-only) and
-  the MCP section of the agent-definition docs (new capability
-  grants).
-- Add a short MCP-client guide page (what's supported, the
-  no-human invariant, how to grant capabilities).
-- Move this plan to `docs/plans/closed/` with a closing
-  summary and commit list.
+- [x] `ARCHITECTURE.md` MCP section updated (no longer tools-only;
+      full capability set + autonomous-HITL + per-invocation model).
+- [x] Agent-definition guide (`docs/guide/agent-definitions.md`) gains
+      an MCP section: `mcp:` servers, resource tools, `static_resources`,
+      and the capability grants + sub-budgets + nothing-by-default.
+- [x] New MCP guide (`docs/guide/mcp.md`): what's supported, the
+      no-human invariant, how to grant capabilities, worked examples,
+      current limits.
+- [x] ADR-0005 notes the added frontmatter fields (points to the live
+      guide); new ADR index (`docs/adrs/README.md`) — also flags the
+      `0014` number clash + unfiled root ADRs for a cleanup pass.
+- [x] Example agent `agents/examples/mcp-grants.md` demonstrates the
+      grants end-to-end (validated by the registry example-load test).
+- [ ] Move this plan to `docs/plans/closed/` with a closing summary +
+      commit list. (Ready: Steps 1–8 done, docs landed; the remaining
+      items are backlog, non-blocking. Deferred to a deliberate close.)
 
 ## Cross-cutting concerns
 

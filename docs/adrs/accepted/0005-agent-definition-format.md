@@ -51,6 +51,27 @@ Produce a structured report with sections: Summary,
 Key Findings, Sources, and Confidence Assessment.
 ```
 
+### Additional fields (extensions since)
+
+The field set has grown as the runtime gained capabilities. The
+builder (`agent::AgentBuilder`) is the source of truth; the current,
+user-facing list lives in
+[Writing Agent Definitions](../../guide/agent-definitions.md). Notable
+additions beyond the original set above:
+
+- **`mcp:`** — a list of MCP servers to attach (`server` / `command` /
+  `args` / `env`), each with optional per-server capability grants
+  (`sampling`, `elicitation`, `roots`) that default to off
+  (ADR-0017 / ADR-0018).
+- **`sampling_budget` / `elicitation_budget`** — aggregate sub-budgets
+  (USD) for the server-initiated capabilities, enforced inside the
+  overall `budget`.
+- **`static_resources:`** — `mcp://<server>/<uri>` resource pins read
+  once and injected into the opening prompt.
+
+These are captured in the `Triggered` event's `ConfigSnapshot` for
+replay/audit alongside the original fields.
+
 ### Internal representation
 
 The runtime parses Markdown agent definitions into a Rust `Agent` struct via a builder pattern. The builder is the type-safe internal representation with compile-time validation. The Markdown file is the authoring and storage surface.

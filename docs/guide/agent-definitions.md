@@ -171,7 +171,7 @@ clear error message that the LLM sees and can adapt to.
   or relative (`./data`). Relative paths are resolved against the
   config file's directory.
 - The sandbox is enforced at the **process level**, not the OS
-  level. For stronger isolation see [ADR-0010](../adrs/draft/0010-agent-execution-isolation.md).
+  level. For stronger isolation see [ADR-0010](../adrs/accepted/0010-agent-execution-isolation.md).
 
 ## Budget
 
@@ -186,6 +186,107 @@ budget: 0.50   # half a dollar per invocation
 
 Omit `budget` to run without a ceiling. This is not recommended
 for unattended agents.
+
+## MCP servers
+
+[MCP](https://modelcontextprotocol.io) (Model Context Protocol)
+servers extend an agent with external tools, resources, and prompts.
+Declare them in the `mcp:` block — a list, one entry per server:
+
+```yaml
+mcp:
+  - server: filesystem          # the name you refer to it by
+    command: npx                # how to launch it (a stdio child process)
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+    env:                        # optional process environment
+      LOG_LEVEL: info
+```
+
+Each server runs as a child process factor-q speaks MCP to. The
+server's **tools** become available exactly like built-ins — list the
+ones you want in `tools:` by their own names (MCP tool names are not
+prefixed):
+
+```yaml
+tools:
+  - read_file                   # a tool the filesystem server provides
+mcp:
+  - server: filesystem
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+```
+
+A server that exposes **resources** also gets two host-fulfilled tools,
+`<server>__list_resources` and `<server>__read_resource` (e.g.
+`filesystem__read_resource`), so the agent can browse and read them on
+demand. Grant those by listing them in `tools:` too.
+
+### Pinning resources with `static_resources`
+
+To guarantee a specific resource is in context from the first turn —
+without the agent having to fetch it — pin it with `static_resources`,
+a list of `mcp://<server>/<resource-uri>` URLs:
+
+```yaml
+static_resources:
+  - "mcp://filesystem/file:///data/README.md"
+```
+
+Pinned resources are read once at invocation start and injected into
+the opening prompt. Use this for context the agent always needs (a
+schema, a style guide, project facts).
+
+### Capability grants
+
+Beyond providing tools, the MCP spec lets a **server ask things of the
+agent** mid-call — the *server-initiated* capabilities:
+
+| Capability | The server asks to… | How factor-q answers |
+|---|---|---|
+| `sampling` | run an LLM completion (using the agent's model + budget) | runs it, gated and cost-tracked |
+| `elicitation` | get structured input matching a schema | answers from the agent's model |
+| `roots` | learn the agent's workspace filesystem scope | the sandbox's fs paths |
+
+factor-q resolves all three **autonomously** — there is never a human
+in the loop (see
+[ADR-0017](../adrs/accepted/0017-mcp-human-in-the-loop.md)). Because
+they spend the agent's budget or expose its context, they are **off by
+default** and granted **per server**:
+
+```yaml
+budget: 1.00
+sampling_budget: 0.25           # aggregate ceiling for sampling spend
+mcp:
+  - server: research
+    command: my-research-server
+    sampling: true              # this server may request sampling
+    elicitation: true           # …and structured input
+    roots: true                 # …and may see the workspace roots
+  - server: untrusted
+    command: some-third-party-server
+    # no flags → tools only; any sampling/elicitation/roots request is declined
+```
+
+- **Nothing by default.** A server with no flags gets tools only; any
+  server-initiated request it makes is declined. Grants are per server,
+  so you can trust one server with sampling and not another.
+- **Sub-budgets.** `sampling_budget` and `elicitation_budget`
+  (top-level, USD) cap the *aggregate* spend on each across the
+  invocation, inside the overall `budget`. Omit them to bound only by
+  `budget`. Once a sub-budget is reached, further requests are declined
+  *without* a model call.
+- **Roots are advisory.** They are derived from the sandbox's
+  `fs_read`/`fs_write` paths (advertised ⊆ the sandbox boundary) and
+  tell a cooperative server its intended scope — the sandbox itself is
+  the actual wall.
+
+A server granted any capability runs as its **own process per
+invocation** (so its requests attribute to the right invocation's
+budget and grant); tool-only servers are shared. See the
+[MCP guide](mcp.md) for the full model and worked examples, and
+[ADR-0017](../adrs/accepted/0017-mcp-human-in-the-loop.md) /
+[ADR-0018](../adrs/accepted/0018-mcp-server-initiated-execution.md) for
+the rationale.
 
 ## Triggers
 

@@ -49,7 +49,7 @@ The system must support:
 - Per-agent tool scoping — each agent is configured with a specific set of tools appropriate to its role
 - User-authored tools and skills that extend the system without modifying the core
 - Tool discovery, so agents (or the graph definition) can reference tools by name
-- MCP (Model Context Protocol) as an integration path for external tool providers
+- MCP (Model Context Protocol) as an integration path for external capability providers. factor-q is a full MCP client (spec 2025-11-25): beyond tools, it consumes **resources** and **prompts**, and answers the server-initiated capabilities — **sampling** (a server runs a completion on the agent's model), **elicitation** (structured input), and **roots** (workspace scope). The server-initiated ones are resolved autonomously with no human in the loop, gated by declarative per-server capability grants that default to nothing (ADR-0017); the runner, the sole LLM arbiter, services them mid-tool-call and a grant-bearing server runs per-invocation (ADR-0018). See the [MCP guide](docs/guide/mcp.md).
 
 ### API layer
 The runtime exposes a well-defined API that all clients (CLI, TUI, web, external integrations) connect through. The runtime and its interfaces are strictly separated — no client has privileged access that bypasses the API. This is the surface through which humans and external systems interact with factor-q.
@@ -263,7 +263,7 @@ non-zero.
 These subsystems from the vision are not implemented:
 - Task engine (fan-out/fan-in, dependency graph)
 - Agent graph / multi-agent orchestration
-- Memory system (MCP services — scoped to phase 2)
+- Memory system (the memory *servers* per ADR-0013; the MCP *client* that would consume them is implemented — see the [MCP guide](docs/guide/mcp.md))
 - Skill registry (AgentSkills format — scoped to phase 2)
 - API layer (REST/gRPC/WebSocket — ADR-0006 is still draft)
 - Continuous learning
