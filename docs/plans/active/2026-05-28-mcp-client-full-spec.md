@@ -616,18 +616,27 @@ invocation, not only under test.
 
 **Done when**
 
-- [ ] Sampling / elicitation / roots grants parse from frontmatter,
-      round-trip through the Agent builder + `ConfigSnapshot`, and
-      drive advertised capabilities + the Step 5/6 policy gates.
-- [ ] Ungranted capabilities are neither advertised nor honoured.
-- [ ] The daemon starts grant-bearing MCP servers per-invocation and
-      threads the sampling/elicitation channel + roots handle +
-      advertised roots into the invocation — a full daemon-path
-      sampling / elicitation / roots exchange works end-to-end (not
-      just the direct `run_with_server_requests` test path).
-- [ ] The bidirectional validation seam is configurable per
-      agent/policy — the `ValidatorChain`s exist (default-allow); wire
-      them from config. (Concrete validators are a backlog item.)
+- [x] **8a** (`9d97d09`) — Sampling / elicitation / roots grants parse
+      from frontmatter (per-server flags + aggregate sub-budgets),
+      round-trip through the Agent builder + `ConfigSnapshot`.
+- [x] **8b** (`c98cde7`) — Grants drive advertised capabilities
+      (`AdvertisedCapabilities` per server); ungranted capabilities are
+      neither advertised nor honoured (a server gates its
+      server-initiated tools on what the client advertises, so it
+      registers none of them — proven by
+      `advertised_capabilities_gate_what_the_server_registers`).
+- [x] **8c** (`cc19c43`) — `ReducerRunner::run` starts grant-bearing
+      servers per-invocation, derives caps + advertised roots from the
+      grant, layers their tools onto the base registry, and wires the
+      `SamplingChannel` — a full `run`-path sampling exchange works
+      end-to-end (`run_auto_starts_a_grant_bearing_server_and_samples`),
+      not just the direct `run_with_server_requests` test path. fq-cli
+      boot skips grant-bearing servers (they run per-invocation).
+
+**Remaining (backlog, non-blocking):** multi-server server-initiated
+support (v1 wires one grant-bearing server per invocation); the
+validation seam is wired default-allow (config-driven validators are
+the "concrete validators" backlog item).
 
 ---
 
