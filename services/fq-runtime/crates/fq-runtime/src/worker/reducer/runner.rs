@@ -47,7 +47,10 @@ use crate::events::{
     ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
-use crate::mcp::{McpResourceReader, ServerRequest, elicitation_decline};
+use crate::mcp::{
+    AdvertisedCapabilities, McpClientManager, McpResourceReader, McpServerConfig, ServerRequest,
+    advertised_roots, elicitation_decline,
+};
 use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
 use crate::validation::ValidatorChain;
@@ -313,9 +316,17 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// Run a single invocation of `agent` through this runner's
     /// reducer to terminal.
     ///
-    /// Equivalent to [`run_with_server_requests`](Self::run_with_server_requests)
-    /// with no inbound server channel — the path used when no
-    /// grant-bearing MCP server is attached to the invocation.
+    /// Run a single invocation to terminal.
+    ///
+    /// If the agent grants an inbound MCP capability (sampling /
+    /// elicitation / roots) to a server, that server is started
+    /// **per-invocation** (ADR-0018) with the agent's advertised
+    /// capabilities + sandbox-derived roots; its tools are layered onto
+    /// the base registry for this invocation and its server-initiated
+    /// requests are serviced via the runner's `select!`. Otherwise the
+    /// base registry runs with no inbound channel. v1 wires a single
+    /// grant-bearing server; multiple is a follow-up (a merged,
+    /// server-tagged stream).
     pub async fn run(
         &self,
         agent: &Agent,
@@ -324,22 +335,124 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger_subject: Option<String>,
         trigger_payload: Value,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        self.run_with_server_requests(
-            agent,
-            llm,
-            trigger_source,
-            trigger_subject,
-            trigger_payload,
-            None,
-        )
-        .await
+        let Some(decl) = agent
+            .mcp_servers()
+            .iter()
+            .find(|d| agent.grants_inbound_capability(&d.server))
+        else {
+            // No grant-bearing server: base registry, no channel.
+            return self
+                .run_loop_for(
+                    agent,
+                    llm,
+                    trigger_source,
+                    trigger_subject,
+                    trigger_payload,
+                    &self.context.tools,
+                    None,
+                )
+                .await;
+        };
+
+        if agent
+            .mcp_servers()
+            .iter()
+            .filter(|d| agent.grants_inbound_capability(&d.server))
+            .count()
+            > 1
+        {
+            warn!(
+                agent_id = %agent.id(),
+                wired = %decl.server,
+                "agent grants MCP capabilities to multiple servers; v1 wires only the first \
+                 (multi-server server-initiated support is a follow-up)"
+            );
+        }
+
+        let capabilities = AdvertisedCapabilities {
+            sampling: agent
+                .sampling_grant()
+                .is_some_and(|g| g.permits(&decl.server)),
+            elicitation: agent
+                .elicitation_grant()
+                .is_some_and(|g| g.permits(&decl.server)),
+            roots: agent.roots_grant().is_some_and(|g| g.permits(&decl.server)),
+        };
+        // Advertised roots ⊆ sandbox grant; outbound validation seam is
+        // default-allow here (config-driven validators are a follow-up).
+        let roots = advertised_roots(
+            agent.sandbox(),
+            agent.roots_grant(),
+            &decl.server,
+            &ValidatorChain::new(),
+        );
+        let config = McpServerConfig {
+            name: decl.server.clone(),
+            command: decl.command.clone(),
+            args: decl.args.clone(),
+            env: decl.env.clone(),
+        };
+
+        let mut manager = McpClientManager::new();
+        let (server_tools, rx, _roots_handle) = match manager
+            .start_server_with_requests(config, roots, capabilities)
+            .await
+        {
+            Ok(parts) => parts,
+            Err(err) => {
+                // Couldn't start the grant-bearing server: degrade to a
+                // base-registry run rather than failing the invocation.
+                warn!(
+                    agent_id = %agent.id(),
+                    server = %decl.server,
+                    error = %err,
+                    "failed to start grant-bearing MCP server per-invocation; \
+                     running without server-initiated support"
+                );
+                return self
+                    .run_loop_for(
+                        agent,
+                        llm,
+                        trigger_source,
+                        trigger_subject,
+                        trigger_payload,
+                        &self.context.tools,
+                        None,
+                    )
+                    .await;
+            }
+        };
+
+        // Effective registry for this invocation: base + the
+        // per-invocation server's tools (they win on name collision).
+        let mut tools = (*self.context.tools).clone();
+        for tool in server_tools {
+            tools.register(tool);
+        }
+        let channel = SamplingChannel::new(decl.server.clone(), rx);
+
+        let outcome = self
+            .run_loop_for(
+                agent,
+                llm,
+                trigger_source,
+                trigger_subject,
+                trigger_payload,
+                &tools,
+                Some(channel),
+            )
+            .await;
+        manager.shutdown().await;
+        outcome
     }
 
     /// Run a single invocation, servicing inbound server-initiated
     /// requests (sampling) from `sampling` during tool-call awaits
-    /// (ADR-0018). `sampling` is `Some` when a grant-bearing MCP
-    /// server is wired for this invocation; the runner is the sole
-    /// LLM arbiter and gates/runs/validates each request itself.
+    /// (ADR-0018), against the runner's base tool registry. The
+    /// caller supplies the channel (and is responsible for the
+    /// server's lifecycle); [`run`](Self::run) is the auto-managed
+    /// path. The runner is the sole LLM arbiter and
+    /// gates/runs/validates each request itself.
     pub async fn run_with_server_requests(
         &self,
         agent: &Agent,
@@ -347,6 +460,33 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger_source: TriggerSource,
         trigger_subject: Option<String>,
         trigger_payload: Value,
+        sampling: Option<SamplingChannel>,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        self.run_loop_for(
+            agent,
+            llm,
+            trigger_source,
+            trigger_subject,
+            trigger_payload,
+            &self.context.tools,
+            sampling,
+        )
+        .await
+    }
+
+    /// The shared invocation body: emit `triggered`, build the agent
+    /// config from `tools`, and drive the step loop. `tools` is the
+    /// effective registry for this invocation (base, or base + a
+    /// per-invocation server's tools).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_loop_for(
+        &self,
+        agent: &Agent,
+        llm: &dyn LlmClient,
+        trigger_source: TriggerSource,
+        trigger_subject: Option<String>,
+        trigger_payload: Value,
+        tools: &ToolRegistry,
         sampling: Option<SamplingChannel>,
     ) -> Result<InvocationOutcome, ExecutorError> {
         let invocation_id = Uuid::now_v7();
@@ -361,7 +501,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         );
 
         let sandbox = agent.sandbox().to_tool_sandbox();
-        let tool_schemas = self.context.tools.build_schemas(agent.tools());
+        let tool_schemas = tools.build_schemas(agent.tools());
 
         let agent_config = AgentConfig {
             agent_id: agent_id.clone(),
@@ -423,6 +563,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             &agent_config,
             &trigger,
             &sandbox,
+            tools,
             state,
             last_result,
             step_index_start,
@@ -595,6 +736,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             &agent_config,
             &trigger,
             &sandbox,
+            // Resume uses the base registry: grant-bearing servers are
+            // not restarted on resume (ADR-0018 §5).
+            &self.context.tools,
             state,
             last_result,
             step_index,
@@ -629,6 +773,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         agent_config: &AgentConfig,
         trigger: &TriggerPayload,
         sandbox: &ToolSandbox,
+        tools: &ToolRegistry,
         mut state: Vec<u8>,
         mut last_result: Option<CapabilityResult>,
         step_index_start: u32,
@@ -801,6 +946,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         .run_tool(
                             agent,
                             sandbox,
+                            tools,
                             llm,
                             agent_id,
                             invocation_id,
@@ -827,6 +973,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             .run_tool(
                                 agent,
                                 sandbox,
+                                tools,
                                 llm,
                                 agent_id,
                                 invocation_id,
@@ -922,6 +1069,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         &self,
         agent: &Agent,
         sandbox: &ToolSandbox,
+        tools: &ToolRegistry,
         llm: &dyn LlmClient,
         agent_id: &AgentId,
         invocation_id: Uuid,
@@ -998,7 +1146,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 .await;
         }
 
-        let tool = match self.context.tools.get(&req.tool_name) {
+        let tool = match tools.get(&req.tool_name) {
             Some(t) => t,
             None => {
                 // Tool isn't registered — close the WAL row as

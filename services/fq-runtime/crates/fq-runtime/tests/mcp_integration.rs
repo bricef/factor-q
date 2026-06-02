@@ -1839,3 +1839,153 @@ async fn advertised_capabilities_gate_what_the_server_registers() {
     );
     all.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Step 8c — Daemon-path: the runner auto-starts a grant-bearing server.
+//
+// An agent that declares a server in `mcp:` *and* grants it sampling
+// gets that server started per-invocation by `run` itself (not the
+// test harness): the runner derives the advertised capabilities from
+// the grant, layers the server's tools onto the base registry, and
+// wires the sampling channel. So a plain `run` performs a real
+// sampling exchange — the end-to-end production path.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn run_auto_starts_a_grant_bearing_server_and_samples() {
+    use std::collections::HashMap;
+
+    use fq_runtime::events::{StopReason, TokenUsage, TriggerSource};
+    use fq_runtime::llm::fixture::FixtureClient;
+    use fq_runtime::{
+        Agent, ChatResponse, EventBus, Harness, McpServerDeclaration, ModelPricing, PricingTable,
+        ReducerContext, ReducerRunner, RunnerConfig, SamplingGrant, ToolRegistry, WorkerStore,
+    };
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
+        eprintln!("skipping: FQ_NATS_URL not set");
+        return;
+    };
+
+    // The agent *declares* the everything server in its `mcp:` block and
+    // *grants* it sampling. No manual server start, no
+    // run_with_server_requests — the runner does it all from `run`.
+    let agent = Agent::builder()
+        .id("daemon-sampling-e2e")
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(1.0)
+        .tools(["trigger-sampling-request".to_string()])
+        .mcp_servers(vec![McpServerDeclaration {
+            server: "everything".to_string(),
+            command: "npx".to_string(),
+            args: vec!["-y".to_string(), EVERYTHING_SERVER.to_string()],
+            env: vec![],
+        }])
+        .sampling_grant(SamplingGrant {
+            servers: vec!["everything".to_string()],
+            max_cost: None,
+        })
+        .build()
+        .expect("build agent");
+
+    let canned = |text: &str| ChatResponse {
+        content: Some(text.to_string()),
+        tool_calls: vec![],
+        stop_reason: StopReason::EndTurn,
+        usage: TokenUsage {
+            input_tokens: 8,
+            output_tokens: 4,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    };
+    let llm = FixtureClient::new();
+    llm.push_response(ChatResponse {
+        content: None,
+        tool_calls: vec![fq_runtime::events::MessageToolCall {
+            tool_call_id: fq_runtime::events::ToolCallId::new("call-sampling").unwrap(),
+            tool_name: "trigger-sampling-request".to_string(),
+            parameters: serde_json::json!({"prompt": "hello", "maxTokens": 16}),
+        }],
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
+    llm.push_response(canned("SAMPLED-ANSWER"));
+    llm.push_response(canned("done."));
+
+    let bus = EventBus::connect(&nats_url).await.expect("connect to NATS");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&store_dir.path().join("events.db"))
+            .await
+            .expect("open worker store"),
+    );
+    let mut pricing = HashMap::new();
+    pricing.insert(
+        "claude-haiku".to_string(),
+        ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    );
+    let worker_id =
+        fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string()).expect("worker id");
+
+    // Base registry has only builtins — the everything server's tools
+    // are NOT pre-registered; the runner discovers them per-invocation.
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(bus)
+                .pricing(Arc::new(PricingTable::from_map(pricing)))
+                .store(store)
+                .worker_id(worker_id)
+                .build(),
+        ),
+        Harness::new(),
+    );
+
+    let outcome = runner
+        .run(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            serde_json::json!("go"),
+        )
+        .await
+        .expect("invocation runs to completion");
+
+    assert!(
+        matches!(outcome, fq_runtime::InvocationOutcome::Completed { .. }),
+        "invocation should complete, got {outcome:?}"
+    );
+    let requests = llm.requests();
+    assert!(
+        saw_sampling_call(&requests),
+        "the runner should have auto-started the granted server and run a sampling completion"
+    );
+    assert_eq!(
+        requests.len(),
+        3,
+        "agent turn 0 + sampling + agent turn 1 = 3 model calls, got {}",
+        requests.len()
+    );
+}

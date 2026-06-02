@@ -551,6 +551,12 @@ async fn trigger_agent(
     let mut tools = ToolRegistry::with_builtins();
     let mut mcp_manager = McpClientManager::new();
     for decl in loaded.agent.mcp_servers() {
+        // A server the agent grants an inbound capability (sampling /
+        // elicitation / roots) runs per-invocation, wired by the runner
+        // (ADR-0018) — not shared here.
+        if loaded.agent.grants_inbound_capability(&decl.server) {
+            continue;
+        }
         let config = McpServerConfig {
             name: decl.server.clone(),
             command: decl.command.clone(),
@@ -1256,6 +1262,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let mut mcp_manager = McpClientManager::new();
     for loaded in registry.iter() {
         for decl in loaded.agent.mcp_servers() {
+            // Grant-bearing servers run per-invocation, wired by the
+            // runner (ADR-0018) — not shared at daemon boot.
+            if loaded.agent.grants_inbound_capability(&decl.server) {
+                continue;
+            }
             let config = McpServerConfig {
                 name: decl.server.clone(),
                 command: decl.command.clone(),

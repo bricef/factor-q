@@ -231,6 +231,16 @@ impl Agent {
         self.elicitation.as_ref()
     }
 
+    /// Whether this agent grants `server` any inbound MCP capability
+    /// (sampling / elicitation / roots). Such servers run as
+    /// per-invocation instances with a wired request channel
+    /// (ADR-0018), rather than shared at daemon boot.
+    pub fn grants_inbound_capability(&self, server: &str) -> bool {
+        self.sampling.as_ref().is_some_and(|g| g.permits(server))
+            || self.elicitation.as_ref().is_some_and(|g| g.permits(server))
+            || self.roots.as_ref().is_some_and(|g| g.permits(server))
+    }
+
     /// Produce a [`ConfigSnapshot`] for inclusion in a `Triggered` event.
     ///
     /// Snapshots are how replay is made meaningful: even if the underlying
