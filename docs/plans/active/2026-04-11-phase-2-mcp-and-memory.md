@@ -51,7 +51,7 @@ A standalone MCP server providing skill discovery and activation, backed by the 
 - `skill.deactivate(name)` — signal to unload a skill and reclaim context space
 - Skills embedded at registration time; re-embedded when SKILL.md changes
 - Namespace-based access control enforced per-agent — search results filtered by the agent's declared access patterns
-- Skills follow the AgentSkills specification (ADR-0014)
+- Skills follow the AgentSkills specification (ADR-0019)
 - CLI commands: `fq skill list`, `fq skill validate <path>`, `fq skill search <query>`
 
 ### 5. Context window management

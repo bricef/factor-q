@@ -6,7 +6,7 @@ factor-q's bedrock primitive is the **signature** — a typed
 input schema, a typed output schema, and an intent statement —
 with **bindings** (implementations) as a separate, tunable layer
 (see [`signatures-and-optimization-hierarchy.md`](./signatures-and-optimization-hierarchy.md)).
-[ADR-0015](../adrs/ADR-0015-rust-runtime-polyglot-tools.md)
+[ADR-0015](../adrs/accepted/0015-rust-runtime-polyglot-tools.md)
 already commits the Rust runtime to owning a **schema registry
 and validation**. This document proposes giving that registry a
 *discovery surface*, and sketches where that leads.
@@ -33,7 +33,7 @@ two: **fragments** discover by name/tag/version with a reverse
 index built from `FragmentRef` edges
 ([`agent-orchestration-tools.md`](./agent-orchestration-tools.md)),
 and **skills** discover by embedding-based *semantic* search
-([ADR-0014](../adrs/accepted/0014-skill-format.md)). Type
+([ADR-0019](../adrs/accepted/0019-skill-format.md)). Type
 discovery is the *structural* sibling of skill discovery.
 
 **Out of scope:** this is **not** part of the MCP-client
@@ -48,10 +48,10 @@ here as direction, with a clear near-term/north-star split.
 
 | Axis | Key | Finds | Status |
 |---|---|---|---|
-| **Semantic** (embeddings) | "*about* X" | skills, memory | planned (phase-2; ADR-0014) |
+| **Semantic** (embeddings) | "*about* X" | skills, memory | planned (phase-2; ADR-0019) |
 | **Structural** (type index) | "*shaped like* X → Y" | signatures, bindings | this document |
 
-Both are *runtime* capabilities, not prompt content — ADR-0014's
+Both are *runtime* capabilities, not prompt content — ADR-0019's
 scaling argument (you cannot list hundreds–thousands of entries
 in a prompt) applies identically to signatures. Both fit the same
 MCP split worked out for memory: **read one by URI → resource**;
@@ -80,7 +80,7 @@ them ("a signature *about* graph-building that returns `Graph`").
    type, output type, tags). Structural where skill-search is
    semantic.
 4. **Access-filtered.** Discovery respects the same per-agent
-   access model as skills (ADR-0014's namespace filters): a
+   access model as skills (ADR-0019's namespace filters): a
    search returns only signatures the caller is permitted to
    use/spawn. An agent cannot discover what it cannot invoke.
 
@@ -180,7 +180,7 @@ return.
   that primitive. "Agents that return X" is precisely "signatures
   with output X and their bindings."
 - **ADR-0015 schema registry** — the substrate this indexes.
-- **ADR-0014 skill discovery** — the semantic sibling; reuse its
+- **ADR-0019 skill discovery** — the semantic sibling; reuse its
   access-filtering and tool-not-prompt scaling discipline.
 - **Fragment registry** — the name/tag sibling and the
   reverse-index precedent.

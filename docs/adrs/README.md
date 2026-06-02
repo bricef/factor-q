@@ -5,6 +5,9 @@ behind them. Each is a point-in-time record: it reflects what was
 decided when, and isn't rewritten as the system evolves (later ADRs
 supersede earlier ones; guides track the current state).
 
+Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
+`NNNN-slug.md`.
+
 ## Accepted
 
 | ADR | Decision |
@@ -19,9 +22,12 @@ supersede earlier ones; guides track the current state).
 | [0011](accepted/0011-event-bus-and-persistence.md) | Event bus and persistence (NATS + JetStream) |
 | [0012](accepted/0012-graph-definition-format.md) | Execution graph definition format |
 | [0013](accepted/0013-memory-as-mcp-service.md) | Memory as an MCP service |
-| [0014](accepted/0014-skill-format.md) | Skill format and discovery |
+| [0014](accepted/0014-agent-harness-as-reducer.md) | Agent harness as a reducer with a runtime-owned loop |
+| [0015](accepted/0015-rust-runtime-polyglot-tools.md) | Rust runtime, polyglot tools, language boundary at the event bus |
+| [0016](accepted/0016-typed-operations-no-free-form-apis.md) | Typed operations exposed to agents, no free-form storage APIs |
 | [0017](accepted/0017-mcp-human-in-the-loop.md) | Autonomous resolution of MCP human-in-the-loop primitives (the capability-grant policy) |
 | [0018](accepted/0018-mcp-server-initiated-execution.md) | Execution model for server-initiated MCP calls (sampling/elicitation/roots) |
+| [0019](accepted/0019-skill-format.md) | Skill format and discovery |
 
 ## Draft
 
@@ -31,21 +37,8 @@ supersede earlier ones; guides track the current state).
 | [0007](draft/0007-inter-agent-communication.md) | Inter-agent communication patterns |
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 
-## Unfiled (housekeeping)
-
-Three records live at the repo root of this directory rather than under
-`accepted/`, and one collides on number with an accepted ADR. They are
-real, in-force decisions and should be moved into `accepted/` (and
-renumbered to resolve the clash) in a cleanup pass:
-
-| File | Decision | Note |
-|---|---|---|
-| [`ADR-0014-agent-harness-as-reducer.md`](ADR-0014-agent-harness-as-reducer.md) | Agent harness as a reducer with a runtime-owned loop | **Number clashes** with `accepted/0014-skill-format.md` |
-| [`ADR-0015-rust-runtime-polyglot-tools.md`](ADR-0015-rust-runtime-polyglot-tools.md) | Rust runtime, polyglot tools, language boundary at the event bus | Unfiled |
-| [`ADR-0016-typed-operations-no-free-form-apis.md`](ADR-0016-typed-operations-no-free-form-apis.md) | Typed operations exposed to agents, no free-form storage APIs | Unfiled |
-
 ## Related guides
 
 - [Writing Agent Definitions](../guide/agent-definitions.md) — the live frontmatter reference (implements ADR-0005).
 - [MCP](../guide/mcp.md) — the MCP capability model (implements ADR-0013/0017/0018).
-- [Reducer harness](../guide/reducer-harness.md) — the execution model (implements the harness-as-reducer ADR).
+- [Reducer harness](../guide/reducer-harness.md) — the execution model (implements [ADR-0014](accepted/0014-agent-harness-as-reducer.md)).

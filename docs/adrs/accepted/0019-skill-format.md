@@ -1,4 +1,4 @@
-# ADR-0014: Skill Format and Discovery
+# ADR-0019: Skill Format and Discovery
 
 ## Status
 Accepted
