@@ -417,6 +417,22 @@ invocation counts, error rates, and mean duration per agent per
 time window — similar data, different dimension. Easy to build as
 another SQLite query once the need arises.
 
+### MCP server logs and progress on the operator surface
+**Source:** MCP-completion plan
+([`active/2026-06-04-mcp-completion.md`](active/2026-06-04-mcp-completion.md)),
+steps B1/B2 (scope confirmed 2026-06-04).
+
+Connected MCP servers emit `notifications/message` (logs) and
+`notifications/progress`. The MCP-completion plan drains the
+`ServerNotification` channel in the daemon and bridges server logs onto
+the event bus (a new `EventPayload` variant). The **operator-facing**
+half — surfacing those logs and in-flight progress through the operator
+CLI / event consumer, alongside cost and invocation status — belongs to
+this broader observability effort and is captured here so it is not lost
+when the MCP plan closes. The MCP plan wires the minimal surface (emit +
+a basic operator readout); a richer operator UX (filtering, per-server
+log levels, progress display) lands with this work.
+
 ## Reducer boundary invariants (flagged 2026-05-15)
 
 A design pass on validation at the reducer host/guest boundary
@@ -691,43 +707,56 @@ left for later. The grant-parsing + daemon-enforcement wiring lives in
 **Step 8** of that plan; the items below are polish / robustness /
 feature-gated work that does not block the plan closing.
 
-- [ ] **`origin` on the `llm.request` / `llm.response` trace.** Today
+**Status (2026-06-04):** most of this list is now owned by a dedicated
+completion plan,
+[`2026-06-04-mcp-completion.md`](active/2026-06-04-mcp-completion.md),
+which takes the in-scope items to a finished state — validation
+(incl. **config-driven validators**), `origin` on the trace,
+multi-server channel, daemon notification→action wiring, logs→bus, and
+the paginating/mutating mock — and adds **Streamable HTTP transport**
+for full 2025-11-25 spec compliance. **Explicitly deferred there, kept
+here for the future:** `includeContext` injection + inbound redact
+chain, and roots non-`file://` schemes (plus audio-in-prompts under
+*MCP client gaps* above, blocked on rmcp). The bullets below are tagged
+**[in plan]** / **[deferred]** accordingly.
+
+- [ ] **[in plan] `origin` on the `llm.request` / `llm.response` trace.** Today
       `LlmCallOrigin` (agent-turn vs `sampling` / `elicitation{server}`)
       rides only the **cost** event (`CostMetadata`) +
       `InvocationTotals.{sampling,elicitation}_cost`. ADR-0018
       envisioned it on request/response too; they correlate by
       `call_id` for now. `LlmCallOrigin` is public — spreading it is a
       few struct fields + construction sites.
-- [ ] **Multi-server server-initiated channel.** `run_with_server_requests`
+- [ ] **[in plan] Multi-server server-initiated channel.** `run_with_server_requests`
       takes a single `SamplingChannel`; servicing several grant-bearing
       servers in one invocation needs a merged, server-tagged stream
       (the `select!` arm + gate already key on the server name).
-- [ ] **`includeContext` injection + inbound redact chain.** Sampling
+- [ ] **[deferred] `includeContext` injection + inbound redact chain.** Sampling
       forces `includeContext: none` (no agent/MCP context is injected
       into a server's prompt yet). When context injection lands, honor
       `thisServer` / `allServers` through the inbound validate-and-redact
       chain (ADR-0018 §4).
-- [ ] **Elicitation schema-validation depth.** v1 enforces object shape
+- [ ] **[in plan] Elicitation schema-validation depth.** v1 enforces object shape
       + required-field presence (`validate_against_elicitation_schema`).
       Add per-field primitive / format (email, uri, date) / enum /
       numeric-range checks, and reject schemas outside MCP's flat-object
       subset rather than passing them through.
-- [ ] **Extract the reusable "structured completion against a schema"
+- [ ] **[in plan] Extract the reusable "structured completion against a schema"
       primitive.** The validate → bounded-retry → decline loop is inline
       in `handle_elicitation`; ADR-0018 wants it as a shared runner
       primitive that the sampling evaluator-validator and the
       spawn-deliverable typing (agent-concurrency backlog item) reuse.
-- [ ] **Concrete validators for the validation seam.** The sampling
+- [ ] **[in plan] Concrete validators for the validation seam.** The sampling
       outbound, elicitation inbound/outbound, and roots outbound
       `ValidatorChain`s ship default-allow. Implement the policy-surface
       validators: `HighEntropyRedactor`, `ValidateRequestPolicy`, and the
       sampling evaluator-validator.
-- [ ] **Server logs → event bus.** `on_logging_message` folds records
+- [ ] **[in plan] Server logs → event bus.** `on_logging_message` folds records
       into `tracing` + the `ServerNotification::Log` sink; the plan's
       "/ the event bus" half — a `Logging` event payload bridged onto the
       bus (needs an `EventPayload` variant + `schema_id_for` entry) — is
       unbuilt.
-- [ ] **Daemon notification→action loops.** Nothing drains the
+- [ ] **[in plan] Daemon notification→action loops.** Nothing drains the
       `ServerNotification` channel in the running daemon yet: react to
       `ToolListChanged` by calling `refresh_tools` *and re-registering
       into the live `ToolRegistry`* (the manager refreshes its own
@@ -735,7 +764,7 @@ feature-gated work that does not block the plan closing.
       in-flight calls on invocation abort (`call_tool_cancellable`
       exists; no abort trigger — timeout / budget / shutdown — is wired);
       surface progress / logs to an operator.
-- [ ] **Mock paginating / mutating MCP server (test infra).** The
+- [ ] **[in plan] Mock paginating / mutating MCP server (test infra).** The
       everything server doesn't paginate and only emits
       `tools/list_changed` once at startup, so a real multi-page
       pagination test and a server-driven `list_changed`→`refresh_tools`
@@ -743,7 +772,7 @@ feature-gated work that does not block the plan closing.
       child-process mock would unblock both. Pagination *itself* is
       correct (cursor-following `list_all_*`); this is a coverage gap,
       not an implementation gap.
-- [ ] **Roots: non-`file://` URI schemes.** `roots_from_sandbox` emits
+- [ ] **[deferred] Roots: non-`file://` URI schemes.** `roots_from_sandbox` emits
       `file://` only. (The dynamic-workspace `roots/list_changed`
       *trigger* — recompute roots from a changed sandbox — is owned by
       the "Workspace state: snapshotting and base layers" item above;
