@@ -1930,6 +1930,73 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         )))
     }
 
+    /// Run a schema-constrained structured completion — the reusable
+    /// primitive behind elicitation (ADR-0018 §4), shaped so the future
+    /// sampling evaluator-validator and spawn-deliverable typing reuse
+    /// it. Build a request, dispatch it on the agent's model, parse the
+    /// response, and validate the parsed value — retrying up to
+    /// `max_retries` times. Returns the first value that parses, passes
+    /// `validate`, *and* survives the `outbound` seam
+    /// (`Ok(Some(value))`); a model failure, exhausted retries, or an
+    /// outbound denial all yield `Ok(None)` so the caller can decline.
+    /// `record_cost` attributes each dispatched call's cost to the
+    /// caller's sub-budget. The outer `Err` is infrastructure
+    /// (store / bus).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_structured_completion(
+        &self,
+        llm: &dyn LlmClient,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        origin: LlmCallOrigin,
+        max_retries: u32,
+        totals: &mut InvocationTotals,
+        cursor: &mut Option<Uuid>,
+        build_request: impl Fn() -> ModelRequest,
+        parse: impl Fn(Option<&str>) -> Option<Value>,
+        validate: impl Fn(&Value) -> Result<(), String>,
+        outbound: &ValidatorChain<Value>,
+        mut record_cost: impl FnMut(&mut InvocationTotals, f64),
+    ) -> Result<Option<Value>, ExecutorError> {
+        for _ in 0..max_retries {
+            let response = match self
+                .dispatch_llm(
+                    llm,
+                    agent_id,
+                    invocation_id,
+                    build_request(),
+                    origin.clone(),
+                    totals,
+                    cursor,
+                )
+                .await?
+            {
+                Ok((response, cost)) => {
+                    record_cost(totals, cost);
+                    response
+                }
+                // A model failure resolves to "no value"; the caller
+                // declines and the agent turn is untouched.
+                Err(_) => return Ok(None),
+            };
+
+            let Some(value) = parse(response.content.as_deref()) else {
+                continue; // unparseable → retry
+            };
+            if validate(&value).is_err() {
+                continue; // invalid → retry
+            }
+
+            // Outbound seam: a denial censors the whole result.
+            return match outbound.run(value) {
+                Ok(value) => Ok(Some(value)),
+                Err(_) => Ok(None),
+            };
+        }
+        // Retries exhausted without a valid result.
+        Ok(None)
+    }
+
     /// Service one inbound server-initiated request (ADR-0018). The
     /// runner is the sole arbiter; the handler is a thin bridge, so
     /// the gate/run/validate logic lives here and replies on the
@@ -2134,53 +2201,38 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         };
 
         // --- schema-constrained structured completion (bounded retry) ---
+        // Delegates to the reusable `run_structured_completion` primitive;
+        // only the request builder, schema validation, and sub-budget
+        // attribution are elicitation-specific.
         let origin = LlmCallOrigin::Elicitation {
             server: server.to_string(),
         };
-        for _ in 0..ELICITATION_MAX_RETRIES {
-            let model_request =
-                elicitation_to_model_request(agent.model(), &message, &requested_schema);
-            let response = match self
-                .dispatch_llm(
-                    llm,
-                    agent_id,
-                    invocation_id,
-                    model_request,
-                    origin.clone(),
-                    totals,
-                    cursor,
-                )
-                .await?
-            {
-                Ok((response, cost)) => {
-                    totals.elicitation_cost += cost;
-                    response
-                }
-                // A model failure declines; the agent turn is untouched.
-                Err(_) => return decline(),
-            };
+        let model = agent.model();
+        let value = self
+            .run_structured_completion(
+                llm,
+                agent_id,
+                invocation_id,
+                origin,
+                ELICITATION_MAX_RETRIES,
+                totals,
+                cursor,
+                || elicitation_to_model_request(model, &message, &requested_schema),
+                parse_elicitation_value,
+                |value| validate_against_elicitation_schema(value, &requested_schema),
+                &self.context.elicitation_outbound_validators,
+                |totals, cost| totals.elicitation_cost += cost,
+            )
+            .await?;
 
-            let Some(value) = parse_elicitation_value(response.content.as_deref()) else {
-                continue; // unparseable → retry
-            };
-            if validate_against_elicitation_schema(&value, &requested_schema).is_err() {
-                continue; // schema-invalid → retry
-            }
-
-            // --- outbound validation seam (censor the structured value) ---
-            let value = match self.context.elicitation_outbound_validators.run(value) {
-                Ok(value) => value,
-                Err(_) => return decline(),
-            };
-            return Ok(Ok(CreateElicitationResult {
+        match value {
+            Some(value) => Ok(Ok(CreateElicitationResult {
                 action: ElicitationAction::Accept,
                 content: Some(value),
                 meta: None,
-            }));
+            })),
+            None => decline(),
         }
-
-        // Retries exhausted without a schema-valid result.
-        decline()
     }
 }
 
