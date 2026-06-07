@@ -38,7 +38,7 @@ use rmcp::model::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::agent::{Agent, AgentId};
+use crate::agent::{Agent, AgentId, EvaluatorSpec};
 use crate::bus::EventBus;
 use crate::events::{
     self, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
@@ -2105,17 +2105,40 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // inject agent/MCP context into a server's prompt yet, so a
         // server cannot pull context it was not granted. The inbound
         // redact seam lands with context injection.)
-        let model_request = sampling_to_model_request(agent.model(), &params);
         let origin = LlmCallOrigin::Sampling {
             server: server.to_string(),
         };
+
+        // --- input evaluator gates (may decline before any model call) ---
+        if let EvaluatorOutcome::Denied(reason) = self
+            .run_evaluators(
+                &agent.sampling_validation().input_validation,
+                "forwarding a sampling request to the agent's model",
+                &serde_json::to_string(&params).unwrap_or_default(),
+                agent.model(),
+                llm,
+                agent_id,
+                invocation_id,
+                origin.clone(),
+                totals,
+                cursor,
+                |t, c| t.sampling_cost += c,
+            )
+            .await?
+        {
+            return Ok(Err(sampling_decline(&format!(
+                "sampling request denied by evaluator: {reason}"
+            ))));
+        }
+
+        let model_request = sampling_to_model_request(agent.model(), &params);
         let (response, call_cost) = match self
             .dispatch_llm(
                 llm,
                 agent_id,
                 invocation_id,
                 model_request,
-                origin,
+                origin.clone(),
                 totals,
                 cursor,
             )
@@ -2145,12 +2168,39 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 ))));
             }
         };
-        match crate::policy::sampling_output_chain(agent.sampling_validation()).run(result) {
-            Ok(validated) => Ok(Ok(validated)),
-            Err(reason) => Ok(Err(sampling_decline(&format!(
-                "sampling result rejected by policy: {reason}"
-            )))),
+        let result =
+            match crate::policy::sampling_output_chain(agent.sampling_validation()).run(result) {
+                Ok(validated) => validated,
+                Err(reason) => {
+                    return Ok(Err(sampling_decline(&format!(
+                        "sampling result rejected by policy: {reason}"
+                    ))));
+                }
+            };
+
+        // --- output evaluator gates (judge the result before reply) ---
+        if let EvaluatorOutcome::Denied(reason) = self
+            .run_evaluators(
+                &agent.sampling_validation().output_validation,
+                "returning a sampling result to the requesting MCP server",
+                &sampling_message_text(&result.message.content),
+                agent.model(),
+                llm,
+                agent_id,
+                invocation_id,
+                origin,
+                totals,
+                cursor,
+                |t, c| t.sampling_cost += c,
+            )
+            .await?
+        {
+            return Ok(Err(sampling_decline(&format!(
+                "sampling result denied by evaluator: {reason}"
+            ))));
         }
+
+        Ok(Ok(result))
     }
 
     /// Answer an `elicitation/create` request (ADR-0018 §4). Same
@@ -2208,6 +2258,29 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             Err(_) => return decline(),
         };
 
+        // --- input evaluator gates (judge the request before answering) ---
+        let origin = LlmCallOrigin::Elicitation {
+            server: server.to_string(),
+        };
+        if let EvaluatorOutcome::Denied(_) = self
+            .run_evaluators(
+                &agent.elicitation_validation().input_validation,
+                "answering an elicitation request from an MCP server",
+                &serde_json::to_string(&params).unwrap_or_default(),
+                agent.model(),
+                llm,
+                agent_id,
+                invocation_id,
+                origin.clone(),
+                totals,
+                cursor,
+                |t, c| t.elicitation_cost += c,
+            )
+            .await?
+        {
+            return decline();
+        }
+
         // Only form-mode elicitation is supported; URL mode declines.
         let CreateElicitationRequestParams::FormElicitationParams {
             message,
@@ -2222,16 +2295,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // Delegates to the reusable `run_structured_completion` primitive;
         // only the request builder, schema validation, and sub-budget
         // attribution are elicitation-specific.
-        let origin = LlmCallOrigin::Elicitation {
-            server: server.to_string(),
-        };
         let model = agent.model();
         let value = self
             .run_structured_completion(
                 llm,
                 agent_id,
                 invocation_id,
-                origin,
+                origin.clone(),
                 ELICITATION_MAX_RETRIES,
                 totals,
                 cursor,
@@ -2249,14 +2319,167 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // Declarative outbound redaction on the accepted value (the
         // pluggable context outbound seam already ran inside the
         // structured-completion primitive).
-        match crate::policy::elicitation_output_chain(agent.elicitation_validation()).run(value) {
-            Ok(value) => Ok(Ok(CreateElicitationResult {
-                action: ElicitationAction::Accept,
-                content: Some(value),
-                meta: None,
-            })),
-            Err(_) => decline(),
+        let value = match crate::policy::elicitation_output_chain(agent.elicitation_validation())
+            .run(value)
+        {
+            Ok(value) => value,
+            Err(_) => return decline(),
+        };
+
+        // --- output evaluator gates (judge the elicited value) ---
+        if let EvaluatorOutcome::Denied(_) = self
+            .run_evaluators(
+                &agent.elicitation_validation().output_validation,
+                "returning an elicited value to the requesting MCP server",
+                &serde_json::to_string(&value).unwrap_or_default(),
+                agent.model(),
+                llm,
+                agent_id,
+                invocation_id,
+                origin,
+                totals,
+                cursor,
+                |t, c| t.elicitation_cost += c,
+            )
+            .await?
+        {
+            return decline();
         }
+
+        Ok(Ok(CreateElicitationResult {
+            action: ElicitationAction::Accept,
+            content: Some(value),
+            meta: None,
+        }))
+    }
+
+    /// Run an ordered evaluator sequence (A1c) against `subject` with AND
+    /// semantics: the first deny short-circuits and the rest do not run;
+    /// an empty sequence — or all-approve — passes. `ApproveAll` /
+    /// `DenyAll` are deterministic; `Llm` runs a model judge via the
+    /// structured-completion primitive on the agent's model (or a
+    /// configured cheaper one), asking for a
+    /// `{ "approved": bool, "reason": string }` verdict. A judge that
+    /// returns no parseable verdict fails closed (denies). Each judge
+    /// call's cost is attributed through `record_cost`.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_evaluators(
+        &self,
+        evaluators: &[EvaluatorSpec],
+        context: &str,
+        subject: &str,
+        default_model: &str,
+        llm: &dyn LlmClient,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        origin: LlmCallOrigin,
+        totals: &mut InvocationTotals,
+        cursor: &mut Option<Uuid>,
+        mut record_cost: impl FnMut(&mut InvocationTotals, f64),
+    ) -> Result<EvaluatorOutcome, ExecutorError> {
+        let empty_outbound = ValidatorChain::new();
+        for evaluator in evaluators {
+            match evaluator {
+                EvaluatorSpec::ApproveAll => {}
+                EvaluatorSpec::DenyAll => {
+                    return Ok(EvaluatorOutcome::Denied("denied by deny_all".to_string()));
+                }
+                EvaluatorSpec::Llm { model } => {
+                    let model = model.as_deref().unwrap_or(default_model).to_string();
+                    let value = self
+                        .run_structured_completion(
+                            llm,
+                            agent_id,
+                            invocation_id,
+                            origin.clone(),
+                            EVALUATOR_MAX_RETRIES,
+                            totals,
+                            cursor,
+                            || evaluator_to_model_request(&model, context, subject),
+                            parse_elicitation_value,
+                            validate_evaluator_verdict,
+                            &empty_outbound,
+                            &mut record_cost,
+                        )
+                        .await?;
+                    if let EvaluatorOutcome::Denied(reason) = evaluator_verdict(value) {
+                        return Ok(EvaluatorOutcome::Denied(reason));
+                    }
+                }
+            }
+        }
+        Ok(EvaluatorOutcome::Approved)
+    }
+}
+
+/// The outcome of running an evaluator sequence (A1c).
+enum EvaluatorOutcome {
+    Approved,
+    Denied(String),
+}
+
+/// Attempts for an LLM evaluator's verdict before failing closed.
+const EVALUATOR_MAX_RETRIES: u32 = 1;
+
+/// System instruction prefixed to every LLM evaluator judge call.
+const EVALUATOR_SYSTEM_PREAMBLE: &str = "You are a safety evaluator gating an automated MCP exchange. Decide whether the content below is safe and \
+     appropriate for the stated action. Respond with ONLY a single JSON object \
+     {\"approved\": <true|false>, \"reason\": <string>} — no prose, no code fences.";
+
+/// Build the judge request for an LLM evaluator: the preamble + action
+/// context as the system message, the subject as the user turn. Run on
+/// the configured (or agent) model; no tools.
+fn evaluator_to_model_request(model: &str, context: &str, subject: &str) -> ModelRequest {
+    ModelRequest {
+        model: model.to_string(),
+        messages: vec![
+            Message {
+                role: MessageRole::System,
+                content: Some(format!("{EVALUATOR_SYSTEM_PREAMBLE}\n\nAction: {context}")),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: Some(subject.to_string()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ],
+        tools: Vec::new(),
+        params: RequestParams {
+            temperature: None,
+            max_tokens: None,
+        },
+    }
+}
+
+/// Validate that an evaluator response carries a boolean `approved`.
+fn validate_evaluator_verdict(value: &Value) -> Result<(), String> {
+    if value.get("approved").and_then(Value::as_bool).is_some() {
+        Ok(())
+    } else {
+        Err("evaluator response missing boolean `approved`".to_string())
+    }
+}
+
+/// Map a parsed evaluator verdict to an outcome. A missing verdict (a
+/// model failure or unparseable response after retries) fails closed:
+/// denied.
+fn evaluator_verdict(value: Option<Value>) -> EvaluatorOutcome {
+    match value {
+        Some(value) if value.get("approved").and_then(Value::as_bool) == Some(true) => {
+            EvaluatorOutcome::Approved
+        }
+        Some(value) => {
+            let reason = value
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("denied by evaluator")
+                .to_string();
+            EvaluatorOutcome::Denied(reason)
+        }
+        None => EvaluatorOutcome::Denied("evaluator returned no verdict".to_string()),
     }
 }
 
@@ -2594,6 +2817,23 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn evaluator_verdict_maps_outcomes() {
+        assert!(matches!(
+            evaluator_verdict(Some(json!({ "approved": true }))),
+            EvaluatorOutcome::Approved
+        ));
+        match evaluator_verdict(Some(json!({ "approved": false, "reason": "nope" }))) {
+            EvaluatorOutcome::Denied(reason) => assert_eq!(reason, "nope"),
+            EvaluatorOutcome::Approved => panic!("expected denied"),
+        }
+        // A missing / unparseable verdict fails closed (denies).
+        assert!(matches!(
+            evaluator_verdict(None),
+            EvaluatorOutcome::Denied(_)
+        ));
+    }
 
     fn unique_agent_id(prefix: &str) -> String {
         format!("{prefix}-{}", Uuid::now_v7().simple())
