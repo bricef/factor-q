@@ -152,6 +152,144 @@ impl ElicitationGrant {
     }
 }
 
+/// One stage in a capability's `input_validation` / `output_validation`
+/// list. `ApproveAll` / `DenyAll` are deterministic (useful for tests
+/// and a hard allow/deny); `Llm` runs a model judge in the runner
+/// (reusing the structured-completion primitive), optionally on a
+/// cheaper model than the agent's own. Parsed from a frontmatter list,
+/// e.g. `[approve_all, { llm: claude-haiku-4-5 }]`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EvaluatorSpec {
+    /// Always approves — a no-op gate.
+    ApproveAll,
+    /// Always denies — short-circuits the chain.
+    DenyAll,
+    /// An LLM judge; `model` overrides the agent's model when set.
+    Llm { model: Option<String> },
+}
+
+impl serde::Serialize for EvaluatorSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            EvaluatorSpec::ApproveAll => serializer.serialize_str("approve_all"),
+            EvaluatorSpec::DenyAll => serializer.serialize_str("deny_all"),
+            EvaluatorSpec::Llm { model: None } => serializer.serialize_str("llm"),
+            EvaluatorSpec::Llm { model: Some(model) } => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("llm", model)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EvaluatorSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        // A list entry is either a bare token (`approve_all` / `deny_all`
+        // / `llm`) or a single-key map (`{ llm: <model> }`).
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Token(String),
+            Llm { llm: Option<String> },
+        }
+        match Repr::deserialize(deserializer)? {
+            Repr::Token(token) => match token.as_str() {
+                "approve_all" => Ok(EvaluatorSpec::ApproveAll),
+                "deny_all" => Ok(EvaluatorSpec::DenyAll),
+                "llm" => Ok(EvaluatorSpec::Llm { model: None }),
+                other => Err(D::Error::custom(format!(
+                    "unknown evaluator '{other}' (expected approve_all, deny_all, llm, or {{ llm: <model> }})"
+                ))),
+            },
+            Repr::Llm { llm } => Ok(EvaluatorSpec::Llm { model: llm }),
+        }
+    }
+}
+
+/// The validation policy for one capability (sampling or elicitation)
+/// on one agent. Declared per server in frontmatter (`sampling:` /
+/// `elicitation:` as a table) and aggregated here; installed on the
+/// runner per invocation. All-default means "no validation" (the
+/// nothing-by-default seam stays allow-everything).
+///
+/// Two layers feed two mechanisms: the boolean flags drive the
+/// synchronous [`crate::policy`] validators (redactor / request gate),
+/// while the `*_validation` lists drive the async evaluator sequence in
+/// the runner.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct CapabilityValidation {
+    /// Install `HighEntropyRedactor` on the outbound value / result.
+    pub redact_secrets: bool,
+    /// Install `ValidateRequestPolicy` on the inbound request
+    /// (elicitation only; ignored for sampling, which has no schema).
+    pub reject_sensitive_fields: bool,
+    /// Evaluator gates run on the inbound request, in order.
+    pub input_validation: Vec<EvaluatorSpec>,
+    /// Evaluator gates run on the outbound value / result, in order.
+    pub output_validation: Vec<EvaluatorSpec>,
+}
+
+impl CapabilityValidation {
+    /// Whether nothing is configured (the default allow-everything seam).
+    pub fn is_empty(&self) -> bool {
+        !self.redact_secrets
+            && !self.reject_sensitive_fields
+            && self.input_validation.is_empty()
+            && self.output_validation.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod validation_config_tests {
+    use super::{CapabilityValidation, EvaluatorSpec};
+
+    #[test]
+    fn evaluator_spec_round_trips_every_form() {
+        let cases = [
+            ("\"approve_all\"", EvaluatorSpec::ApproveAll),
+            ("\"deny_all\"", EvaluatorSpec::DenyAll),
+            ("\"llm\"", EvaluatorSpec::Llm { model: None }),
+            (
+                "{\"llm\":\"claude-haiku-4-5\"}",
+                EvaluatorSpec::Llm {
+                    model: Some("claude-haiku-4-5".to_string()),
+                },
+            ),
+        ];
+        for (json, expected) in cases {
+            let parsed: EvaluatorSpec = serde_json::from_str(json).expect("parse");
+            assert_eq!(parsed, expected, "parsing {json}");
+            let reserialised = serde_json::to_string(&parsed).expect("serialise");
+            assert_eq!(reserialised, json, "round-trip {json}");
+        }
+    }
+
+    #[test]
+    fn unknown_evaluator_token_is_rejected() {
+        assert!(serde_json::from_str::<EvaluatorSpec>("\"sometimes\"").is_err());
+    }
+
+    #[test]
+    fn capability_validation_parses_a_mixed_list_and_defaults_empty() {
+        let cv: CapabilityValidation = serde_json::from_str(
+            r#"{ "redact_secrets": true, "output_validation": ["approve_all", { "llm": "claude-haiku-4-5" }, "deny_all"] }"#,
+        )
+        .expect("parse");
+        assert!(cv.redact_secrets);
+        assert!(!cv.reject_sensitive_fields);
+        assert!(cv.input_validation.is_empty());
+        assert_eq!(cv.output_validation.len(), 3);
+        assert_eq!(cv.output_validation[2], EvaluatorSpec::DenyAll);
+        assert!(!cv.is_empty());
+
+        assert!(CapabilityValidation::default().is_empty());
+    }
+}
+
 /// A validated agent ready to be executed.
 #[derive(Debug, Clone)]
 pub struct Agent {
