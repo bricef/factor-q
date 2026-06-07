@@ -19,7 +19,8 @@ use rmcp::model::{
 };
 use serde_json::Value;
 
-use crate::validation::{Validator, ValidatorResult};
+use crate::agent::CapabilityValidation;
+use crate::validation::{Validator, ValidatorChain, ValidatorResult};
 
 /// Replacement inserted where a high-entropy (secret-looking) token is
 /// redacted.
@@ -250,6 +251,40 @@ fn matched_sensitive_pattern(text: &str) -> Option<&'static str> {
         .find(|p| norm.contains(p))
 }
 
+/// Build the synchronous outbound chain for a sampling result from the
+/// agent's config (currently: redaction when `redact_secrets`). The
+/// async evaluator gates (`output_validation`) run separately in the
+/// runner.
+pub fn sampling_output_chain(cv: &CapabilityValidation) -> ValidatorChain<CreateMessageResult> {
+    let mut chain = ValidatorChain::new();
+    if cv.redact_secrets {
+        chain.push(Box::new(HighEntropyRedactor));
+    }
+    chain
+}
+
+/// Build the synchronous inbound chain for an elicitation request: the
+/// request-policy gate when `reject_sensitive_fields` is set.
+pub fn elicitation_input_chain(
+    cv: &CapabilityValidation,
+) -> ValidatorChain<CreateElicitationRequestParams> {
+    let mut chain = ValidatorChain::new();
+    if cv.reject_sensitive_fields {
+        chain.push(Box::new(ValidateRequestPolicy));
+    }
+    chain
+}
+
+/// Build the synchronous outbound chain for an elicited value:
+/// redaction when `redact_secrets` is set.
+pub fn elicitation_output_chain(cv: &CapabilityValidation) -> ValidatorChain<Value> {
+    let mut chain = ValidatorChain::new();
+    if cv.redact_secrets {
+        chain.push(Box::new(HighEntropyRedactor));
+    }
+    chain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +392,23 @@ mod tests {
             }),
         );
         assert_eq!(policy.validate(&req), ValidatorResult::Allow);
+    }
+
+    #[test]
+    fn config_builds_chains_only_when_flags_set() {
+        let redact = CapabilityValidation {
+            redact_secrets: true,
+            ..Default::default()
+        };
+        assert!(!sampling_output_chain(&redact).is_empty());
+        assert!(!elicitation_output_chain(&redact).is_empty());
+        assert!(sampling_output_chain(&CapabilityValidation::default()).is_empty());
+
+        let reject = CapabilityValidation {
+            reject_sensitive_fields: true,
+            ..Default::default()
+        };
+        assert!(!elicitation_input_chain(&reject).is_empty());
+        assert!(elicitation_input_chain(&CapabilityValidation::default()).is_empty());
     }
 }

@@ -2133,9 +2133,19 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         };
         totals.sampling_cost += call_cost;
 
-        // --- outbound validation seam ---
+        // --- outbound validation seam: the pluggable context chain
+        // (empty by default) then the agent's declarative config
+        // (redaction when `redact_secrets`). ---
         let result = model_response_to_create_message(agent.model(), response);
-        match self.context.sampling_validators.run(result) {
+        let result = match self.context.sampling_validators.run(result) {
+            Ok(result) => result,
+            Err(reason) => {
+                return Ok(Err(sampling_decline(&format!(
+                    "sampling result rejected by policy: {reason}"
+                ))));
+            }
+        };
+        match crate::policy::sampling_output_chain(agent.sampling_validation()).run(result) {
             Ok(validated) => Ok(Ok(validated)),
             Err(reason) => Ok(Err(sampling_decline(&format!(
                 "sampling result rejected by policy: {reason}"
@@ -2184,8 +2194,16 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             return decline();
         }
 
-        // --- inbound validation seam (message + schema field names) ---
+        // --- inbound validation seam: the pluggable context chain
+        // (empty by default) then the agent's declarative request policy
+        // (sensitive-field rejection when `reject_sensitive_fields`). ---
         let params = match self.context.elicitation_inbound_validators.run(params) {
+            Ok(params) => params,
+            Err(_) => return decline(),
+        };
+        let params = match crate::policy::elicitation_input_chain(agent.elicitation_validation())
+            .run(params)
+        {
             Ok(params) => params,
             Err(_) => return decline(),
         };
@@ -2225,13 +2243,19 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             )
             .await?;
 
-        match value {
-            Some(value) => Ok(Ok(CreateElicitationResult {
+        let Some(value) = value else {
+            return decline();
+        };
+        // Declarative outbound redaction on the accepted value (the
+        // pluggable context outbound seam already ran inside the
+        // structured-completion primitive).
+        match crate::policy::elicitation_output_chain(agent.elicitation_validation()).run(value) {
+            Ok(value) => Ok(Ok(CreateElicitationResult {
                 action: ElicitationAction::Accept,
                 content: Some(value),
                 meta: None,
             })),
-            None => decline(),
+            Err(_) => decline(),
         }
     }
 }
