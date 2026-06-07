@@ -33,8 +33,8 @@ use super::types::{
 };
 use rmcp::model::{
     CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequestParams,
-    CreateMessageResult, ElicitationAction, ElicitationSchema, Role, SamplingContent,
-    SamplingMessage, SamplingMessageContent,
+    CreateMessageResult, ElicitationAction, ElicitationSchema, EnumSchema, PrimitiveSchema, Role,
+    SamplingContent, SamplingMessage, SamplingMessageContent, StringFormat,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -2636,11 +2636,12 @@ fn parse_elicitation_value(content: Option<&str>) -> Option<Value> {
     value.is_object().then_some(value)
 }
 
-/// Validate an elicitation value against the requested schema. v1
-/// enforces object shape and required-field presence; the schema type
-/// itself is already restricted to the MCP flat-object / primitive
-/// subset by rmcp's deserialization. Deeper per-field type checking is
-/// a later refinement.
+/// Validate an elicitation value against the requested schema. The
+/// schema type is already restricted to the MCP flat-object / primitive
+/// subset by rmcp's deserialization; here we enforce, per field:
+/// required-field presence, no unexpected fields, the property's
+/// primitive type, string length / format (email / uri / date /
+/// date-time), numeric range, and enum membership.
 fn validate_against_elicitation_schema(
     value: &Value,
     schema: &ElicitationSchema,
@@ -2655,7 +2656,146 @@ fn validate_against_elicitation_schema(
             }
         }
     }
+    for (key, field_value) in obj {
+        let Some(property) = schema.properties.get(key) else {
+            return Err(format!(
+                "unexpected field '{key}' not declared in the schema"
+            ));
+        };
+        validate_primitive_value(key, field_value, property)?;
+    }
     Ok(())
+}
+
+/// Validate one field value against its primitive property schema.
+fn validate_primitive_value(
+    key: &str,
+    value: &Value,
+    schema: &PrimitiveSchema,
+) -> Result<(), String> {
+    match schema {
+        PrimitiveSchema::String(string_schema) => {
+            let text = value
+                .as_str()
+                .ok_or_else(|| format!("field '{key}' must be a string"))?;
+            let len = text.chars().count() as u32;
+            if let Some(min) = string_schema.min_length
+                && len < min
+            {
+                return Err(format!("field '{key}' is shorter than minLength {min}"));
+            }
+            if let Some(max) = string_schema.max_length
+                && len > max
+            {
+                return Err(format!("field '{key}' is longer than maxLength {max}"));
+            }
+            if let Some(format) = string_schema.format
+                && !string_matches_format(text, format)
+            {
+                return Err(format!("field '{key}' is not a valid {format:?}"));
+            }
+            Ok(())
+        }
+        PrimitiveSchema::Number(number_schema) => {
+            let number = value
+                .as_f64()
+                .ok_or_else(|| format!("field '{key}' must be a number"))?;
+            if let Some(min) = number_schema.minimum
+                && number < min
+            {
+                return Err(format!("field '{key}' is below minimum {min}"));
+            }
+            if let Some(max) = number_schema.maximum
+                && number > max
+            {
+                return Err(format!("field '{key}' is above maximum {max}"));
+            }
+            Ok(())
+        }
+        PrimitiveSchema::Integer(integer_schema) => {
+            let number = value
+                .as_i64()
+                .ok_or_else(|| format!("field '{key}' must be an integer"))?;
+            if let Some(min) = integer_schema.minimum
+                && number < min
+            {
+                return Err(format!("field '{key}' is below minimum {min}"));
+            }
+            if let Some(max) = integer_schema.maximum
+                && number > max
+            {
+                return Err(format!("field '{key}' is above maximum {max}"));
+            }
+            Ok(())
+        }
+        PrimitiveSchema::Boolean(_) => value
+            .as_bool()
+            .map(|_| ())
+            .ok_or_else(|| format!("field '{key}' must be a boolean")),
+        PrimitiveSchema::Enum(enum_schema) => {
+            let text = value
+                .as_str()
+                .ok_or_else(|| format!("field '{key}' must be a string (enum)"))?;
+            let allowed = enum_allowed_values(enum_schema);
+            // If the allowed set can't be extracted, fall back to the
+            // type check rather than reject a spec-valid value.
+            if allowed.is_empty() || allowed.iter().any(|a| a == text) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "field '{key}' value '{text}' is not one of the allowed enum values"
+                ))
+            }
+        }
+    }
+}
+
+/// Whether `text` satisfies a basic check for an MCP string `format`.
+/// Intentionally lightweight (no full RFC validation): enough to reject
+/// obviously-wrong values without pulling in a parser.
+fn string_matches_format(text: &str, format: StringFormat) -> bool {
+    match format {
+        StringFormat::Email => matches!(text.split_once('@'),
+            Some((local, domain)) if !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')),
+        StringFormat::Uri => matches!(text.split_once(':'),
+            Some((scheme, _)) if !scheme.is_empty()
+                && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))),
+        StringFormat::Date => is_iso_date(text),
+        StringFormat::DateTime => {
+            matches!(text.split_once('T'), Some((date, _)) if is_iso_date(date))
+        }
+    }
+}
+
+/// Whether `text` has the ISO `YYYY-MM-DD` calendar-date shape.
+fn is_iso_date(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('-').collect();
+    parts.len() == 3
+        && parts[0].len() == 4
+        && parts[1].len() == 2
+        && parts[2].len() == 2
+        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Extract an enum schema's allowed string values by serialising it and
+/// reading the `enum` array (rmcp models enums as several variants, so
+/// going through JSON is simpler than matching each).
+fn enum_allowed_values(schema: &EnumSchema) -> Vec<String> {
+    serde_json::to_value(schema)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("enum"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Reconstruct a [`CapabilityResult::ToolResult`] from a
@@ -2833,6 +2973,39 @@ mod tests {
             evaluator_verdict(None),
             EvaluatorOutcome::Denied(_)
         ));
+    }
+
+    #[test]
+    fn elicitation_schema_validation_enforces_per_field_rules() {
+        let schema: ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "minLength": 2 },
+                "age": { "type": "integer", "minimum": 0, "maximum": 150 },
+                "email": { "type": "string", "format": "email" },
+                "color": { "type": "string", "enum": ["red", "green"] }
+            },
+            "required": ["name"]
+        }))
+        .expect("valid elicitation schema");
+
+        let ok = |v: serde_json::Value| validate_against_elicitation_schema(&v, &schema).is_ok();
+        let err = |v: serde_json::Value| validate_against_elicitation_schema(&v, &schema).is_err();
+
+        assert!(ok(
+            json!({ "name": "Ada", "age": 30, "email": "ada@example.com", "color": "red" })
+        ));
+        assert!(err(json!({ "age": 30 })), "missing required name");
+        assert!(err(json!({ "name": 5 })), "wrong type");
+        assert!(err(json!({ "name": "A" })), "below minLength");
+        assert!(err(json!({ "name": "Ada", "age": 999 })), "above maximum");
+        assert!(err(json!({ "name": "Ada", "age": 1.5 })), "non-integer");
+        assert!(err(json!({ "name": "Ada", "email": "nope" })), "bad email");
+        assert!(err(json!({ "name": "Ada", "color": "blue" })), "bad enum");
+        assert!(
+            err(json!({ "name": "Ada", "extra": 1 })),
+            "unexpected field"
+        );
     }
 
     fn unique_agent_id(prefix: &str) -> String {
