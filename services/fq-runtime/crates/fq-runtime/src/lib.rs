@@ -22,6 +22,7 @@ pub mod config;
 pub mod events;
 pub mod llm;
 pub mod mcp;
+pub mod policy;
 pub mod pricing;
 pub mod prompt;
 pub mod tools;
