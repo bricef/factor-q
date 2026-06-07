@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::{
-    Agent, BuildError, ElicitationGrant, McpServerDeclaration, RootsGrant, SamplingGrant, Sandbox,
-    StaticResourcePin,
+    Agent, BuildError, CapabilityValidation, ElicitationGrant, McpServerDeclaration, RootsGrant,
+    SamplingGrant, Sandbox, StaticResourcePin,
 };
 
 /// Parse an agent definition from the raw Markdown content.
@@ -49,9 +49,24 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
             .map(|m| m.server.clone())
             .collect()
     };
-    let sampling_servers = servers_granting(|m| m.sampling);
-    let elicitation_servers = servers_granting(|m| m.elicitation);
+    let sampling_servers = servers_granting(|m| m.sampling.is_granted());
+    let elicitation_servers = servers_granting(|m| m.elicitation.is_granted());
     let roots_servers = servers_granting(|m| m.roots);
+
+    // Aggregate each capability's per-server validation policy (a server
+    // may declare `sampling:` / `elicitation:` as a table). v1 unions
+    // across granting servers; per-server policy is a follow-up with the
+    // multi-server work.
+    let mut sampling_validation = CapabilityValidation::default();
+    let mut elicitation_validation = CapabilityValidation::default();
+    for m in frontmatter.mcp.iter() {
+        if let Some(cv) = m.sampling.validation() {
+            merge_validation(&mut sampling_validation, cv);
+        }
+        if let Some(cv) = m.elicitation.validation() {
+            merge_validation(&mut elicitation_validation, cv);
+        }
+    }
 
     let mcp_servers: Vec<McpServerDeclaration> = frontmatter
         .mcp
@@ -102,8 +117,71 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
             servers: roots_servers,
         });
     }
+    if !sampling_validation.is_empty() {
+        builder = builder.sampling_validation(sampling_validation);
+    }
+    if !elicitation_validation.is_empty() {
+        builder = builder.elicitation_validation(elicitation_validation);
+    }
 
     Ok(builder.build()?)
+}
+
+/// Merge `from` into `into` (union): any redaction flag set wins, and
+/// evaluator lists concatenate in declaration order.
+fn merge_validation(into: &mut CapabilityValidation, from: &CapabilityValidation) {
+    into.redact_secrets |= from.redact_secrets;
+    into.reject_sensitive_fields |= from.reject_sensitive_fields;
+    into.input_validation
+        .extend(from.input_validation.iter().cloned());
+    into.output_validation
+        .extend(from.output_validation.iter().cloned());
+}
+
+/// A per-server capability flag in frontmatter: either a bare bool
+/// (`sampling: true`) or a validation table
+/// (`sampling: { redact_secrets: true, output_validation: [...] }`). A
+/// table — or `true` — grants the capability; absent or `false` does
+/// not. (Roots take only a bool — no validation policy.)
+#[derive(Debug, Clone, Default)]
+enum CapabilityGrant {
+    /// Not granted (absent or `false`).
+    #[default]
+    Off,
+    /// Granted with the default allow-everything validation seam (`true`).
+    On,
+    /// Granted with an explicit validation policy (a table).
+    Configured(CapabilityValidation),
+}
+
+impl CapabilityGrant {
+    fn is_granted(&self) -> bool {
+        !matches!(self, CapabilityGrant::Off)
+    }
+
+    fn validation(&self) -> Option<&CapabilityValidation> {
+        match self {
+            CapabilityGrant::Configured(cv) => Some(cv),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilityGrant {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // A bare bool, or a validation table.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Flag(bool),
+            Config(CapabilityValidation),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Flag(false) => CapabilityGrant::Off,
+            Repr::Flag(true) => CapabilityGrant::On,
+            Repr::Config(cv) => CapabilityGrant::Configured(cv),
+        })
+    }
 }
 
 /// YAML frontmatter structure. Private to this module — callers work with
@@ -142,9 +220,9 @@ struct McpFrontmatter {
     /// may this server request sampling / elicitation, and are the
     /// agent's workspace roots advertised to it?
     #[serde(default)]
-    sampling: bool,
+    sampling: CapabilityGrant,
     #[serde(default)]
-    elicitation: bool,
+    elicitation: CapabilityGrant,
     #[serde(default)]
     roots: bool,
 }
@@ -518,6 +596,39 @@ You are a test agent.
         // The tools-only server is in none of the grants.
         assert!(!sampling.permits("tools-only"));
         assert!(!roots.permits("tools-only"));
+    }
+
+    #[test]
+    fn parses_capability_validation_table() {
+        let content = r#"---
+name: validated-agent
+model: claude-haiku
+mcp:
+  - server: everything
+    command: npx
+    sampling:
+      redact_secrets: true
+      output_validation: [approve_all, { llm: claude-haiku-4-5 }]
+    elicitation:
+      reject_sensitive_fields: true
+      input_validation: [deny_all]
+---
+
+You are a validated agent.
+"#;
+        let agent = parse_agent(content).unwrap();
+
+        // A validation table grants the capability, same as `true`.
+        assert!(agent.sampling_grant().is_some());
+        assert!(agent.elicitation_grant().is_some());
+
+        let sv = agent.sampling_validation();
+        assert!(sv.redact_secrets);
+        assert_eq!(sv.output_validation.len(), 2);
+
+        let ev = agent.elicitation_validation();
+        assert!(ev.reject_sensitive_fields);
+        assert_eq!(ev.input_validation.len(), 1);
     }
 
     #[test]
