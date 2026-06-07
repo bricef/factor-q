@@ -305,6 +305,8 @@ pub struct Agent {
     sampling: Option<SamplingGrant>,
     roots: Option<RootsGrant>,
     elicitation: Option<ElicitationGrant>,
+    sampling_validation: CapabilityValidation,
+    elicitation_validation: CapabilityValidation,
 }
 
 impl Agent {
@@ -369,6 +371,18 @@ impl Agent {
         self.elicitation.as_ref()
     }
 
+    /// The agent's MCP **sampling** validation policy (redaction +
+    /// evaluator gates). Default-empty = the allow-everything seam.
+    pub fn sampling_validation(&self) -> &CapabilityValidation {
+        &self.sampling_validation
+    }
+
+    /// The agent's MCP **elicitation** validation policy. Default-empty
+    /// = the allow-everything seam.
+    pub fn elicitation_validation(&self) -> &CapabilityValidation {
+        &self.elicitation_validation
+    }
+
     /// Whether this agent grants `server` any inbound MCP capability
     /// (sampling / elicitation / roots). Such servers run as
     /// per-invocation instances with a wired request channel
@@ -395,6 +409,8 @@ impl Agent {
             sampling: self.sampling.clone(),
             roots: self.roots.clone(),
             elicitation: self.elicitation.clone(),
+            sampling_validation: self.sampling_validation.clone(),
+            elicitation_validation: self.elicitation_validation.clone(),
         }
     }
 }
@@ -615,6 +631,8 @@ pub struct AgentBuilder {
     sampling: Option<SamplingGrant>,
     roots: Option<RootsGrant>,
     elicitation: Option<ElicitationGrant>,
+    sampling_validation: CapabilityValidation,
+    elicitation_validation: CapabilityValidation,
 }
 
 impl AgentBuilder {
@@ -697,6 +715,19 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the MCP **sampling** validation policy (redaction + evaluator
+    /// gates). Empty by default — the allow-everything seam.
+    pub fn sampling_validation(mut self, validation: CapabilityValidation) -> Self {
+        self.sampling_validation = validation;
+        self
+    }
+
+    /// Set the MCP **elicitation** validation policy. Empty by default.
+    pub fn elicitation_validation(mut self, validation: CapabilityValidation) -> Self {
+        self.elicitation_validation = validation;
+        self
+    }
+
     /// Finalise construction, validating required fields.
     pub fn build(self) -> Result<Agent, BuildError> {
         let id_str = self.id.ok_or(BuildError::MissingField("id"))?;
@@ -730,6 +761,8 @@ impl AgentBuilder {
             sampling: self.sampling,
             roots: self.roots,
             elicitation: self.elicitation,
+            sampling_validation: self.sampling_validation,
+            elicitation_validation: self.elicitation_validation,
         })
     }
 }

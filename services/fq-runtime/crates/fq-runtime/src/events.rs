@@ -652,6 +652,18 @@ pub struct ConfigSnapshot {
     pub roots: Option<crate::agent::RootsGrant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elicitation: Option<crate::agent::ElicitationGrant>,
+    /// Per-capability validation policy (redaction + evaluator gates),
+    /// captured for audit. Default-empty for agents that configure none.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::CapabilityValidation::is_empty"
+    )]
+    pub sampling_validation: crate::agent::CapabilityValidation,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::CapabilityValidation::is_empty"
+    )]
+    pub elicitation_validation: crate::agent::CapabilityValidation,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
