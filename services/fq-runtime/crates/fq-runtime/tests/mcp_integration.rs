@@ -915,9 +915,15 @@ const SAMPLING_SYSTEM_PROMPT: &str = "You are a helpful test server.";
 fn saw_sampling_call(requests: &[fq_runtime::ChatRequest]) -> bool {
     requests.iter().any(|r| {
         r.messages.iter().any(|m| {
-            m.content
-                .as_deref()
-                .is_some_and(|c| c.contains(SAMPLING_SYSTEM_PROMPT))
+            // The sampling completion carries the server's system prompt
+            // as a *System* message. An evaluator judge embeds the
+            // serialized request (which also contains that prompt) in a
+            // *User* message, so match on role to avoid counting the
+            // judge call as a sampling completion.
+            matches!(m.role, fq_runtime::events::MessageRole::System)
+                && m.content
+                    .as_deref()
+                    .is_some_and(|c| c.contains(SAMPLING_SYSTEM_PROMPT))
         })
     })
 }
@@ -930,6 +936,8 @@ fn saw_sampling_call(requests: &[fq_runtime::ChatRequest]) -> bool {
 /// test environment (npx / NATS) is unavailable.
 async fn run_sampling_scenario(
     grant: Option<fq_runtime::SamplingGrant>,
+    sampling_validation: fq_runtime::CapabilityValidation,
+    judge_responses: &[&str],
 ) -> Option<(fq_runtime::InvocationOutcome, Vec<fq_runtime::ChatRequest>)> {
     use std::collections::HashMap;
 
@@ -971,6 +979,7 @@ async fn run_sampling_scenario(
     if let Some(grant) = grant {
         builder = builder.sampling_grant(grant);
     }
+    builder = builder.sampling_validation(sampling_validation);
     let agent = builder.build().expect("build agent");
 
     // Scripted model: (1) call the sampling tool, (2) the sampling
@@ -1004,6 +1013,11 @@ async fn run_sampling_scenario(
             cache_write_tokens: 0,
         },
     });
+    // Input-evaluator judge verdicts (if any) are answered before the
+    // sampling completion; an over-pushed response is simply unused.
+    for judge in judge_responses {
+        llm.push_response(canned(judge));
+    }
     llm.push_response(canned("SAMPLED-ANSWER"));
     llm.push_response(canned("done."));
 
@@ -1063,6 +1077,119 @@ async fn run_sampling_scenario(
     Some((outcome, requests))
 }
 
+/// Drive a sampling scenario whose `input_validation` is the given
+/// evaluator sequence, returning whether the sampling completion
+/// actually ran (observed via the sampling system prompt appearing in a
+/// model request). `judge_responses` answers any LLM-evaluator judge
+/// calls in order. `None` when the test environment is unavailable.
+async fn sampling_input_evaluators_ran(
+    evaluators: Vec<fq_runtime::EvaluatorSpec>,
+    judge_responses: &[&str],
+) -> Option<bool> {
+    let grant = fq_runtime::SamplingGrant {
+        servers: vec!["everything".to_string()],
+        max_cost: None,
+    };
+    let validation = fq_runtime::CapabilityValidation {
+        input_validation: evaluators,
+        ..Default::default()
+    };
+    let (outcome, requests) =
+        run_sampling_scenario(Some(grant), validation, judge_responses).await?;
+    assert!(
+        matches!(outcome, fq_runtime::InvocationOutcome::Completed { .. }),
+        "invocation should complete, got {outcome:?}"
+    );
+    Some(saw_sampling_call(&requests))
+}
+
+/// `approve_all` is a no-op gate: the sampling call proceeds.
+#[tokio::test]
+async fn sampling_input_evaluator_approve_all_proceeds() {
+    let Some(ran) =
+        sampling_input_evaluators_ran(vec![fq_runtime::EvaluatorSpec::ApproveAll], &[]).await
+    else {
+        return;
+    };
+    assert!(ran, "approve_all should let the sampling call proceed");
+}
+
+/// `deny_all` short-circuits before any model call.
+#[tokio::test]
+async fn sampling_input_evaluator_deny_all_declines() {
+    let Some(ran) =
+        sampling_input_evaluators_ran(vec![fq_runtime::EvaluatorSpec::DenyAll], &[]).await
+    else {
+        return;
+    };
+    assert!(!ran, "deny_all should decline before any model call");
+}
+
+/// AND semantics: a later `deny_all` still declines (first failure wins).
+#[tokio::test]
+async fn sampling_input_evaluators_short_circuit_on_first_deny() {
+    let Some(ran) = sampling_input_evaluators_ran(
+        vec![
+            fq_runtime::EvaluatorSpec::ApproveAll,
+            fq_runtime::EvaluatorSpec::DenyAll,
+        ],
+        &[],
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(!ran, "a later deny_all must still decline the call");
+}
+
+/// The chain passes only when every evaluator approves.
+#[tokio::test]
+async fn sampling_input_evaluators_pass_only_when_all_approve() {
+    let Some(ran) = sampling_input_evaluators_ran(
+        vec![
+            fq_runtime::EvaluatorSpec::ApproveAll,
+            fq_runtime::EvaluatorSpec::ApproveAll,
+        ],
+        &[],
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(ran, "all-approve should let the call proceed");
+}
+
+/// An LLM evaluator that denies declines the call (no sampling).
+#[tokio::test]
+async fn sampling_input_llm_evaluator_denies() {
+    let Some(ran) = sampling_input_evaluators_ran(
+        vec![fq_runtime::EvaluatorSpec::Llm { model: None }],
+        &[r#"{"approved": false, "reason": "policy violation"}"#],
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(!ran, "an LLM evaluator that denies should decline the call");
+}
+
+/// An LLM evaluator that approves lets the call proceed.
+#[tokio::test]
+async fn sampling_input_llm_evaluator_approves() {
+    let Some(ran) = sampling_input_evaluators_ran(
+        vec![fq_runtime::EvaluatorSpec::Llm { model: None }],
+        &[r#"{"approved": true}"#],
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        ran,
+        "an LLM evaluator that approves should let the call proceed"
+    );
+}
+
 /// Permitted: the grant covers the requesting server, so the runner
 /// answers the sampling request on the agent's model — a third model
 /// call (the sampling completion) appears, carrying the server's
@@ -1073,7 +1200,9 @@ async fn sampling_permitted_runs_on_the_agent_model() {
         servers: vec!["everything".to_string()],
         max_cost: None,
     };
-    let Some((outcome, requests)) = run_sampling_scenario(Some(grant)).await else {
+    let Some((outcome, requests)) =
+        run_sampling_scenario(Some(grant), Default::default(), &[]).await
+    else {
         return;
     };
 
@@ -1101,7 +1230,9 @@ async fn sampling_over_subbudget_is_declined_without_a_model_call() {
         servers: vec!["everything".to_string()],
         max_cost: Some(0.0),
     };
-    let Some((outcome, requests)) = run_sampling_scenario(Some(grant)).await else {
+    let Some((outcome, requests)) =
+        run_sampling_scenario(Some(grant), Default::default(), &[]).await
+    else {
         return;
     };
 
@@ -1125,7 +1256,8 @@ async fn sampling_over_subbudget_is_declined_without_a_model_call() {
 /// is declined with no model call.
 #[tokio::test]
 async fn sampling_ungranted_is_declined_without_a_model_call() {
-    let Some((outcome, requests)) = run_sampling_scenario(None).await else {
+    let Some((outcome, requests)) = run_sampling_scenario(None, Default::default(), &[]).await
+    else {
         return;
     };
 
