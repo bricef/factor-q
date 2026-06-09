@@ -77,19 +77,53 @@ const HOST_STEP_BUDGET: u32 = 1_000;
 /// follow-up; v1 wires a single channel, which is what the everything
 /// server's sampling tool exercises.
 pub struct SamplingChannel {
-    /// Name of the MCP server this channel belongs to.
-    pub server: String,
-    /// Inbound server-initiated requests from that server.
-    pub rx: UnboundedReceiver<ServerRequest>,
+    /// One inbound request receiver per grant-bearing server, paired
+    /// with that server's name. [`recv`](Self::recv) selects across all
+    /// of them so more than one grant-bearing server can be serviced in
+    /// a single invocation (ADR-0018); a closed receiver is dropped.
+    channels: Vec<(String, UnboundedReceiver<ServerRequest>)>,
 }
 
 impl SamplingChannel {
-    /// Pair a server name with its request receiver.
+    /// A channel for a single server (the direct / test path).
     pub fn new(server: impl Into<String>, rx: UnboundedReceiver<ServerRequest>) -> Self {
         Self {
-            server: server.into(),
-            rx,
+            channels: vec![(server.into(), rx)],
         }
+    }
+
+    /// A channel merging several servers' request receivers.
+    pub fn merged(channels: Vec<(String, UnboundedReceiver<ServerRequest>)>) -> Self {
+        Self { channels }
+    }
+
+    /// Receive the next request from any server, tagged with the server
+    /// name. Closed receivers are removed as they drain; returns `None`
+    /// once every server's channel is closed. Selection is biased toward
+    /// earlier servers, which is fine — requests are independent.
+    pub async fn recv(&mut self) -> Option<(String, ServerRequest)> {
+        std::future::poll_fn(|cx| {
+            let mut index = 0;
+            while index < self.channels.len() {
+                match self.channels[index].1.poll_recv(cx) {
+                    std::task::Poll::Ready(Some(request)) => {
+                        let server = self.channels[index].0.clone();
+                        return std::task::Poll::Ready(Some((server, request)));
+                    }
+                    // This server's channel closed; drop it and continue.
+                    std::task::Poll::Ready(None) => {
+                        self.channels.remove(index);
+                    }
+                    std::task::Poll::Pending => index += 1,
+                }
+            }
+            if self.channels.is_empty() {
+                std::task::Poll::Ready(None)
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await
     }
 }
 
@@ -335,11 +369,16 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger_subject: Option<String>,
         trigger_payload: Value,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        let Some(decl) = agent
+        // Every grant-bearing server runs per-invocation (ADR-0018): we
+        // start each, layer its tools onto the base registry, and merge
+        // their server-initiated request streams into one channel keyed
+        // by server name.
+        let grant_servers: Vec<_> = agent
             .mcp_servers()
             .iter()
-            .find(|d| agent.grants_inbound_capability(&d.server))
-        else {
+            .filter(|d| agent.grants_inbound_capability(&d.server))
+            .collect();
+        if grant_servers.is_empty() {
             // No grant-bearing server: base registry, no channel.
             return self
                 .run_loop_for(
@@ -352,85 +391,61 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     None,
                 )
                 .await;
-        };
-
-        if agent
-            .mcp_servers()
-            .iter()
-            .filter(|d| agent.grants_inbound_capability(&d.server))
-            .count()
-            > 1
-        {
-            warn!(
-                agent_id = %agent.id(),
-                wired = %decl.server,
-                "agent grants MCP capabilities to multiple servers; v1 wires only the first \
-                 (multi-server server-initiated support is a follow-up)"
-            );
         }
-
-        let capabilities = AdvertisedCapabilities {
-            sampling: agent
-                .sampling_grant()
-                .is_some_and(|g| g.permits(&decl.server)),
-            elicitation: agent
-                .elicitation_grant()
-                .is_some_and(|g| g.permits(&decl.server)),
-            roots: agent.roots_grant().is_some_and(|g| g.permits(&decl.server)),
-        };
-        // Advertised roots ⊆ sandbox grant; outbound validation seam is
-        // default-allow here (config-driven validators are a follow-up).
-        let roots = advertised_roots(
-            agent.sandbox(),
-            agent.roots_grant(),
-            &decl.server,
-            &ValidatorChain::new(),
-        );
-        let config = McpServerConfig {
-            name: decl.server.clone(),
-            command: decl.command.clone(),
-            args: decl.args.clone(),
-            env: decl.env.clone(),
-        };
 
         let mut manager = McpClientManager::new();
-        let (server_tools, rx, _roots_handle) = match manager
-            .start_server_with_requests(config, roots, capabilities)
-            .await
-        {
-            Ok(parts) => parts,
-            Err(err) => {
-                // Couldn't start the grant-bearing server: degrade to a
-                // base-registry run rather than failing the invocation.
-                warn!(
-                    agent_id = %agent.id(),
-                    server = %decl.server,
-                    error = %err,
-                    "failed to start grant-bearing MCP server per-invocation; \
-                     running without server-initiated support"
-                );
-                return self
-                    .run_loop_for(
-                        agent,
-                        llm,
-                        trigger_source,
-                        trigger_subject,
-                        trigger_payload,
-                        &self.context.tools,
-                        None,
-                    )
-                    .await;
-            }
-        };
-
-        // Effective registry for this invocation: base + the
-        // per-invocation server's tools (they win on name collision).
         let mut tools = (*self.context.tools).clone();
-        for tool in server_tools {
-            tools.register(tool);
+        let mut channels: Vec<(String, UnboundedReceiver<ServerRequest>)> = Vec::new();
+        for decl in grant_servers {
+            let capabilities = AdvertisedCapabilities {
+                sampling: agent
+                    .sampling_grant()
+                    .is_some_and(|g| g.permits(&decl.server)),
+                elicitation: agent
+                    .elicitation_grant()
+                    .is_some_and(|g| g.permits(&decl.server)),
+                roots: agent.roots_grant().is_some_and(|g| g.permits(&decl.server)),
+            };
+            // Advertised roots ⊆ sandbox grant; the roots outbound seam
+            // is default-allow (roots have no evaluator path).
+            let roots = advertised_roots(
+                agent.sandbox(),
+                agent.roots_grant(),
+                &decl.server,
+                &ValidatorChain::new(),
+            );
+            let config = McpServerConfig {
+                name: decl.server.clone(),
+                command: decl.command.clone(),
+                args: decl.args.clone(),
+                env: decl.env.clone(),
+            };
+            match manager
+                .start_server_with_requests(config, roots, capabilities)
+                .await
+            {
+                Ok((server_tools, rx, _roots_handle)) => {
+                    // Per-invocation server tools win on name collision.
+                    for tool in server_tools {
+                        tools.register(tool);
+                    }
+                    channels.push((decl.server.clone(), rx));
+                }
+                // A server that fails to start is skipped (its tools and
+                // server-initiated requests are simply absent) rather
+                // than failing the whole invocation.
+                Err(err) => {
+                    warn!(
+                        agent_id = %agent.id(),
+                        server = %decl.server,
+                        error = %err,
+                        "failed to start grant-bearing MCP server per-invocation; skipping it"
+                    );
+                }
+            }
         }
-        let channel = SamplingChannel::new(decl.server.clone(), rx);
 
+        let sampling = (!channels.is_empty()).then(|| SamplingChannel::merged(channels));
         let outcome = self
             .run_loop_for(
                 agent,
@@ -439,7 +454,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 trigger_subject,
                 trigger_payload,
                 &tools,
-                Some(channel),
+                sampling,
             )
             .await;
         manager.shutdown().await;
@@ -1203,11 +1218,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         // starving it behind a backlog of requests.
                         biased;
                         result = &mut tool_fut => break result,
-                        maybe_req = channel.rx.recv() => match maybe_req {
-                            Some(request) => {
+                        maybe_req = channel.recv() => match maybe_req {
+                            Some((server, request)) => {
                                 self.handle_server_request(
                                     agent,
-                                    &channel.server,
+                                    &server,
                                     llm,
                                     agent_id,
                                     invocation_id,
@@ -1218,7 +1233,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                                 )
                                 .await?;
                             }
-                            // Channel closed (server gone): just await
+                            // All servers' channels closed: just await
                             // the tool to completion.
                             None => break (&mut tool_fut).await,
                         }
@@ -3008,6 +3023,37 @@ mod tests {
             err(json!({ "name": "Ada", "extra": 1 })),
             "unexpected field"
         );
+    }
+
+    #[tokio::test]
+    async fn sampling_channel_merges_servers_and_drains() {
+        use crate::mcp::ServerRequest;
+        use tokio::sync::{mpsc, oneshot};
+
+        fn req() -> ServerRequest {
+            let params = serde_json::from_value(json!({ "messages": [], "maxTokens": 8 }))
+                .expect("sampling params");
+            let (reply, _rx) = oneshot::channel();
+            ServerRequest::Sampling { params, reply }
+        }
+
+        let (tx_a, rx_a) = mpsc::unbounded_channel();
+        let (tx_b, rx_b) = mpsc::unbounded_channel();
+        let mut channel = SamplingChannel::merged(vec![
+            ("alpha".to_string(), rx_a),
+            ("beta".to_string(), rx_b),
+        ]);
+
+        // A request on either server's channel is tagged with its name.
+        tx_b.send(req()).unwrap();
+        assert_eq!(channel.recv().await.expect("request").0, "beta");
+        tx_a.send(req()).unwrap();
+        assert_eq!(channel.recv().await.expect("request").0, "alpha");
+
+        // Once every server's channel is closed, recv drains to None.
+        drop(tx_a);
+        drop(tx_b);
+        assert!(channel.recv().await.is_none());
     }
 
     fn unique_agent_id(prefix: &str) -> String {
