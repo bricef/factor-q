@@ -312,6 +312,7 @@ mod tests {
             aid("test-agent"),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
+                origin: crate::events::LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
                 content: Some("hi".to_string()),
                 tool_calls: vec![],

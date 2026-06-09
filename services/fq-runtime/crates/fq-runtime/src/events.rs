@@ -708,6 +708,12 @@ pub struct LlmRequestPayload {
     pub messages: Vec<Message>,
     pub tools_available: Vec<ToolSchema>,
     pub request_params: RequestParams,
+    /// What prompted this call — agent turn vs server-initiated sampling
+    /// / elicitation (ADR-0018) — mirroring the cost event's attribution
+    /// so the request/response trace is self-describing. `default` =
+    /// `AgentTurn` for events persisted before this field existed.
+    #[serde(default)]
+    pub origin: LlmCallOrigin,
 }
 
 /// WAL middle-state event for LLM dispatch. Emitted between
@@ -775,6 +781,9 @@ pub struct LlmResponsePayload {
     pub tool_calls: Vec<MessageToolCall>,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
+    /// What prompted this call (see [`LlmRequestPayload::origin`]).
+    #[serde(default)]
+    pub origin: LlmCallOrigin,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1517,6 +1526,7 @@ mod tests {
             AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
+                origin: LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
                 content: None,
                 tool_calls: vec![],
@@ -1563,6 +1573,7 @@ mod tests {
             AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
+                origin: LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
                 content: Some("ok".to_string()),
                 tool_calls: vec![],
@@ -1583,6 +1594,7 @@ mod tests {
             AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
+                origin: LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
                 content: None,
                 tool_calls: vec![],
@@ -1683,6 +1695,7 @@ mod tests {
             AgentId::new("agent").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
+                origin: LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
                 content: Some("hello".to_string()),
                 tool_calls: vec![],
@@ -1717,6 +1730,7 @@ mod tests {
             AgentId::new("producer").unwrap(),
             invocation_id,
             EventPayload::LlmResponse(LlmResponsePayload {
+                origin: LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
                 content: Some("answer: 42".to_string()),
                 tool_calls: vec![],
@@ -1782,6 +1796,7 @@ mod tests {
                 },
             }),
             EventPayload::LlmRequest(LlmRequestPayload {
+                origin: LlmCallOrigin::AgentTurn,
                 call_id: inv,
                 model: "m".into(),
                 messages: vec![],
@@ -1796,6 +1811,7 @@ mod tests {
                 model: "m".into(),
             }),
             EventPayload::LlmResponse(LlmResponsePayload {
+                origin: LlmCallOrigin::AgentTurn,
                 call_id: inv,
                 content: None,
                 tool_calls: vec![],

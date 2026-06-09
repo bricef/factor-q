@@ -1804,6 +1804,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     messages: chat_request.messages.clone(),
                     tools_available: chat_request.tools.clone(),
                     request_params: chat_request.params.clone(),
+                    origin: origin.clone(),
                 }),
             ),
         )
@@ -1900,6 +1901,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     tool_calls: response.tool_calls.clone(),
                     stop_reason: response.stop_reason,
                     usage: response.usage,
+                    origin: origin.clone(),
                 }),
             )
             .with_cost(events::CostMetadata {

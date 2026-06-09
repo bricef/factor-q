@@ -464,6 +464,7 @@ mod tests {
             aid(agent),
             inv,
             EventPayload::LlmResponse(LlmResponsePayload {
+                origin: crate::events::LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
                 content: Some("ok".to_string()),
                 tool_calls: vec![],
@@ -531,6 +532,7 @@ mod tests {
             aid(agent),
             inv,
             EventPayload::LlmRequest(LlmRequestPayload {
+                origin: crate::events::LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
                 model: "claude-haiku-4-5".to_string(),
                 messages: vec![Message {
@@ -553,6 +555,7 @@ mod tests {
             aid(agent),
             inv,
             EventPayload::LlmResponse(LlmResponsePayload {
+                origin: crate::events::LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
                 content: Some("hi".to_string()),
                 tool_calls: vec![],
