@@ -1582,4 +1582,108 @@ mod tests {
         assert!(granted.capabilities.roots.is_some());
         assert!(granted.capabilities.elicitation.is_some());
     }
+
+    // --- D1: in-process mock MCP server (pagination + mutation) ---------
+    // The everything server neither paginates its tool list nor mutates
+    // it, so these tests serve a small in-process MCP server over a
+    // duplex to exercise cursor-following discovery and re-discovery
+    // after a tool-list change (the refresh path).
+    use rmcp::ServerHandler;
+    use rmcp::model::{ListToolsResult, PaginatedRequestParams, ServerInfo, Tool};
+
+    struct MockToolServer {
+        tools: Arc<Mutex<Vec<Tool>>>,
+        page_size: usize,
+    }
+
+    impl ServerHandler for MockToolServer {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(
+                ServerCapabilities::builder()
+                    .enable_tools()
+                    .enable_tool_list_changed()
+                    .build(),
+            )
+        }
+
+        async fn list_tools(
+            &self,
+            request: Option<PaginatedRequestParams>,
+            _context: RequestContext<rmcp::RoleServer>,
+        ) -> Result<ListToolsResult, rmcp::ErrorData> {
+            let tools = self.tools.lock().await.clone();
+            let start: usize = request
+                .and_then(|r| r.cursor)
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0);
+            let end = (start + self.page_size).min(tools.len());
+            let next_cursor = (end < tools.len()).then(|| end.to_string());
+            Ok(ListToolsResult {
+                tools: tools[start..end].to_vec(),
+                next_cursor,
+                ..Default::default()
+            })
+        }
+    }
+
+    fn mock_tool(name: &str) -> Tool {
+        Tool::new(
+            name.to_string(),
+            "mock tool".to_string(),
+            Arc::new(serde_json::Map::new()),
+        )
+    }
+
+    async fn serve_mock(tools: Arc<Mutex<Vec<Tool>>>, page_size: usize) -> Arc<McpClient> {
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+        let server = MockToolServer { tools, page_size };
+        tokio::spawn(async move {
+            if let Ok(running) = server.serve(server_transport).await {
+                let _ = running.waiting().await;
+            }
+        });
+        let client = FactorQClientHandler::default()
+            .with_capabilities(AdvertisedCapabilities::none())
+            .serve(client_transport)
+            .await
+            .expect("client serves over the duplex");
+        Arc::new(client)
+    }
+
+    #[tokio::test]
+    async fn discover_follows_the_pagination_cursor() {
+        // 5 tools, 2 per page → 3 pages; discovery must follow the cursor.
+        let tools = Arc::new(Mutex::new(
+            (0..5)
+                .map(|i| mock_tool(&format!("t{i}")))
+                .collect::<Vec<_>>(),
+        ));
+        let client = serve_mock(tools, 2).await;
+        let (_, names) = McpClientManager::discover_tools(&client, "mock")
+            .await
+            .expect("discover");
+        assert_eq!(names.len(), 5, "all pages should be walked");
+    }
+
+    #[tokio::test]
+    async fn rediscovery_reflects_a_mutated_tool_list() {
+        let tools = Arc::new(Mutex::new(vec![mock_tool("a"), mock_tool("b")]));
+        let client = serve_mock(tools.clone(), 10).await;
+        let (_, before) = McpClientManager::discover_tools(&client, "mock")
+            .await
+            .expect("discover");
+        assert_eq!(before.len(), 2);
+
+        // The server mutates its tool list (what tools/list_changed
+        // signals); a re-discovery (the refresh path) must reflect it.
+        tools.lock().await.push(mock_tool("c"));
+        let (_, after) = McpClientManager::discover_tools(&client, "mock")
+            .await
+            .expect("re-discover");
+        assert_eq!(
+            after.len(),
+            3,
+            "refresh re-discovery should see the new tool"
+        );
+    }
 }

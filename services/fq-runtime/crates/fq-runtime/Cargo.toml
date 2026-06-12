@@ -29,8 +29,10 @@ strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 axum = "0.7"
 # Integration tests construct rmcp wire types (e.g. a canned
-# `CreateMessageResult` to reply to a bridged sampling request).
-rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process"] }
+# `CreateMessageResult` to reply to a bridged sampling request); the
+# `server` + `transport-async-rw` features let unit tests serve an
+# in-process mock MCP server over a duplex (D1: pagination / mutation).
+rmcp = { version = "1.7", default-features = false, features = ["client", "server", "transport-child-process", "transport-async-rw"] }
 
 [lints]
 workspace = true
