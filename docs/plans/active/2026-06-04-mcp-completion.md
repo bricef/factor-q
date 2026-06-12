@@ -120,13 +120,17 @@ with a pointer.
 
 ### B — Daemon wiring (make shipped mechanisms fire)
 
-- **B1 · Notification → action loops — IN.** Drain the
-  `ServerNotification` channel in the running daemon: on
-  `ToolListChanged` call `refresh_tools` **and re-register into the live
-  `ToolRegistry`** (the manager refreshes its own `tool_names`; registry
-  re-registration is the missing half); cancel in-flight calls on
-  invocation abort (`call_tool_cancellable` exists; wire a trigger —
-  timeout / budget / shutdown); surface progress / logs to an operator.
+- **B1 · Notification → action loops — IN (scoped 2026-06-12,
+  [ADR-0020](../../adrs/accepted/0020-mcp-notification-handling.md)).**
+  Drain the `ServerNotification` channel in the running daemon; fold
+  logs/progress into `tracing`; on `ToolListChanged` re-discover and
+  install a rebuilt registry into the shared `ReducerContext` so the
+  **next** invocation sees it (in-flight invocations keep the registry
+  they started with — ConfigSnapshot semantics). **Deferred by
+  ADR-0020:** mid-invocation hot-swap; the cancellation *trigger*
+  (`call_tool_cancellable` exists; no abort source is wired — owned by
+  whichever feature first produces one, e.g. stuck-invocation
+  detection).
 - **B2 · Server logs → event bus — IN.** `on_logging_message` folds
   records into `tracing` + the `ServerNotification::Log` sink; the "→
   event bus" half is unbuilt — add an `EventPayload` variant + a

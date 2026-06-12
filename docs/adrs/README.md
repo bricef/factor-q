@@ -28,6 +28,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0017](accepted/0017-mcp-human-in-the-loop.md) | Autonomous resolution of MCP human-in-the-loop primitives (the capability-grant policy) |
 | [0018](accepted/0018-mcp-server-initiated-execution.md) | Execution model for server-initiated MCP calls (sampling/elicitation/roots) |
 | [0019](accepted/0019-skill-format.md) | Skill format and discovery |
+| [0020](accepted/0020-mcp-notification-handling.md) | MCP server notifications — drained in the daemon, tools refresh between invocations |
 
 ## Draft
 
