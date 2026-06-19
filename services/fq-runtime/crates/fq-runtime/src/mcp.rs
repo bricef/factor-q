@@ -30,7 +30,7 @@ use rmcp::service::{
     MaybeSendFuture, NotificationContext, PeerRequestOptions, RequestContext, RoleClient,
     RunningService,
 };
-use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
+use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::Value;
 use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -40,17 +40,24 @@ use crate::agent::{RootsGrant, Sandbox};
 use crate::tools::ToolRegistry;
 use crate::validation::ValidatorChain;
 
-/// Configuration for an MCP server to be started as a child process.
+/// Configuration for an MCP server: a stdio child process (`command`),
+/// or — when `url` is set — a remote server reached over the Streamable
+/// HTTP transport (the 2025-11-25 spec remote transport).
 #[derive(Debug, Clone)]
 pub struct McpServerConfig {
     /// Human-readable name for logging.
     pub name: String,
-    /// Executable to spawn.
+    /// Executable to spawn (stdio transport).
     pub command: String,
-    /// Command-line arguments.
+    /// Command-line arguments (stdio transport).
     pub args: Vec<String>,
-    /// Environment variables to set on the child process.
+    /// Environment variables to set on the child process (stdio
+    /// transport).
     pub env: Vec<(String, String)>,
+    /// When set, the server is reached over the Streamable HTTP remote
+    /// transport at this URL instead of a stdio child process;
+    /// `command` / `args` / `env` are then unused.
+    pub url: Option<String>,
 }
 
 /// Errors from MCP server lifecycle and tool calls.
@@ -958,24 +965,12 @@ impl McpClientManager {
             "starting MCP server"
         );
 
-        // Build the child process command.
-        let env_vars = config.env.clone();
-        let args = config.args.clone();
-        let transport = TokioChildProcess::new(Command::new(&config.command).configure(|cmd| {
-            cmd.args(&args);
-            for (k, v) in &env_vars {
-                cmd.env(k, v);
-            }
-        }))
-        .map_err(|err| McpError::ServerStart {
-            command: config.command.clone(),
-            reason: err.to_string(),
-        })?;
-
-        // Perform the MCP initialize handshake. The handler advertises
-        // factor-q's client capabilities (roots/sampling/elicitation),
-        // forwards resource notifications to `notif_rx`, and — on the
-        // per-invocation path — bridges server-initiated requests.
+        // The handler advertises factor-q's client capabilities
+        // (roots/sampling/elicitation), forwards resource notifications
+        // to `notif_rx`, and — on the per-invocation path — bridges
+        // server-initiated requests. It is then served over whichever
+        // transport the config selects; the MCP initialize handshake and
+        // every subsequent operation are transport-agnostic.
         let (notif_tx, notif_rx) = mpsc::unbounded_channel();
         let roots_cell = Arc::new(Mutex::new(roots));
         let mut handler = FactorQClientHandler::with_notifications(notif_tx)
@@ -984,13 +979,40 @@ impl McpClientManager {
         if let Some(req_tx) = server_request_tx {
             handler = handler.with_server_requests(req_tx);
         }
-        let client = handler
-            .serve(transport)
-            .await
-            .map_err(|err| McpError::ServerStart {
-                command: config.command.clone(),
-                reason: err.to_string(),
-            })?;
+        let client = match &config.url {
+            // Streamable HTTP (remote) transport — the 2025-11-25 spec
+            // transport.
+            Some(url) => handler
+                .serve(StreamableHttpClientTransport::from_uri(url.clone()))
+                .await
+                .map_err(|err| McpError::ServerStart {
+                    command: url.clone(),
+                    reason: err.to_string(),
+                })?,
+            // stdio child-process transport.
+            None => {
+                let env_vars = config.env.clone();
+                let args = config.args.clone();
+                let transport =
+                    TokioChildProcess::new(Command::new(&config.command).configure(|cmd| {
+                        cmd.args(&args);
+                        for (k, v) in &env_vars {
+                            cmd.env(k, v);
+                        }
+                    }))
+                    .map_err(|err| McpError::ServerStart {
+                        command: config.command.clone(),
+                        reason: err.to_string(),
+                    })?;
+                handler
+                    .serve(transport)
+                    .await
+                    .map_err(|err| McpError::ServerStart {
+                        command: config.command.clone(),
+                        reason: err.to_string(),
+                    })?
+            }
+        };
 
         let client = Arc::new(client);
         let roots_handle = RootsHandle {

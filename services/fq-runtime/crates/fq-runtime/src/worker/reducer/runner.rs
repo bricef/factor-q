@@ -439,6 +439,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 command: decl.command.clone(),
                 args: decl.args.clone(),
                 env: decl.env.clone(),
+                url: None,
             };
             match manager
                 .start_server_with_requests(config, roots, capabilities)

@@ -562,7 +562,7 @@ async fn trigger_agent(
             command: decl.command.clone(),
             args: decl.args.clone(),
             env: decl.env.clone(),
-        };
+            url: None,        };
         match mcp_manager.start_server(config).await {
             Ok(mcp_tools) => {
                 for tool in mcp_tools {
@@ -1275,7 +1275,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 command: decl.command.clone(),
                 args: decl.args.clone(),
                 env: decl.env.clone(),
-            };
+                url: None,            };
             match mcp_manager.start_server(config).await {
                 Ok(mcp_tools) => {
                     for tool in mcp_tools {

@@ -37,7 +37,79 @@ fn everything_config() -> McpServerConfig {
         command: "npx".to_string(),
         args: vec!["-y".to_string(), EVERYTHING_SERVER.to_string()],
         env: vec![],
+        url: None,
     }
+}
+
+/// E3: factor-q speaks the **Streamable HTTP** remote transport (the
+/// 2025-11-25 spec transport), not just stdio. Start the *same* pinned
+/// everything server in `streamableHttp` mode on a loopback port and
+/// drive a full discovery handshake over HTTP. Loopback TCP, so this
+/// runs under direct `cargo` (the `just` sandbox blocks it, same as
+/// NATS).
+#[tokio::test]
+async fn streamable_http_transport_discovers_tools_over_http() {
+    use std::time::Duration;
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    // Allocate a free loopback port (drop the listener so the child can
+    // bind it), then start the everything server in streamable-HTTP mode.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port();
+    let mut child = tokio::process::Command::new("npx")
+        .args(["-y", EVERYTHING_SERVER, "streamableHttp"])
+        .env("PORT", port.to_string())
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn streamable-http everything server");
+
+    // Wait until the server is listening (bounded), then give express a
+    // beat to mount the `/mcp` route after the socket binds.
+    let mut listening = false;
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            listening = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(listening, "everything server never listened on port {port}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Connect over Streamable HTTP and discover tools — the handshake
+    // and every operation are transport-agnostic, so success here proves
+    // the remote transport works end to end.
+    let mut manager = McpClientManager::new();
+    let result = manager
+        .start_server(McpServerConfig {
+            name: "everything-http".to_string(),
+            command: String::new(),
+            args: vec![],
+            env: vec![],
+            url: Some(format!("http://127.0.0.1:{port}/mcp")),
+        })
+        .await;
+    let tools = result.expect("start everything server over streamable HTTP");
+    assert!(
+        tools.len() >= 3,
+        "expected the everything server's tools over HTTP, got {}",
+        tools.len()
+    );
+
+    manager.shutdown().await;
+    let _ = child.kill().await;
 }
 
 #[tokio::test]
@@ -145,6 +217,7 @@ async fn bad_command_returns_error() {
             command: "this-binary-does-not-exist-12345".to_string(),
             args: vec![],
             env: vec![],
+            url: None,
         })
         .await;
 
