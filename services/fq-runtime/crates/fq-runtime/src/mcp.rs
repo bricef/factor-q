@@ -37,6 +37,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::agent::{RootsGrant, Sandbox};
+use crate::tools::ToolRegistry;
 use crate::validation::ValidatorChain;
 
 /// Configuration for an MCP server to be started as a child process.
@@ -1245,6 +1246,39 @@ impl McpClientManager {
         }
     }
 
+    /// A cloneable handle for re-discovering the running servers'
+    /// tools — used by the daemon's notification drain to rebuild the
+    /// shared registry on `tools/list_changed` (ADR-0020) without
+    /// sharing the manager's `&mut` lifecycle (same pattern as
+    /// [`resource_reader`](Self::resource_reader)).
+    pub fn tool_refresher(&self) -> McpToolRefresher {
+        McpToolRefresher {
+            clients: self
+                .servers
+                .iter()
+                .map(|server| (server.name.clone(), Arc::clone(&server.client)))
+                .collect(),
+        }
+    }
+
+    /// Extract every server's notification receiver so a drain task
+    /// can own them outright (ADR-0020). Each receiver is replaced
+    /// with a closed dummy, so a later
+    /// [`recv_notification`](Self::recv_notification) for that server
+    /// returns `None` immediately rather than racing the drain.
+    pub async fn take_notifications(
+        &mut self,
+    ) -> Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)> {
+        let mut out = Vec::with_capacity(self.servers.len());
+        for server in &self.servers {
+            let mut guard = server.notifications.lock().await;
+            let (_closed_tx, closed_rx) = mpsc::unbounded_channel();
+            let rx = std::mem::replace(&mut *guard, closed_rx);
+            out.push((server.name.clone(), rx));
+        }
+        out
+    }
+
     /// Subscribe to update notifications for a resource on a server.
     /// Updates arrive via [`Self::recv_notification`].
     pub async fn subscribe(&self, server: &str, uri: &str) -> Result<(), McpError> {
@@ -1409,6 +1443,113 @@ impl McpResourceReader {
                 server: server.to_string(),
                 reason: err.to_string(),
             })
+    }
+}
+
+/// A cheap, cloneable handle for re-discovering connected servers'
+/// tools (ADR-0020), without the manager's `&mut` lifecycle. The
+/// daemon's notification drain holds one and rebuilds the shared
+/// registry when a server signals `tools/list_changed`.
+#[derive(Clone, Default)]
+pub struct McpToolRefresher {
+    clients: Vec<(String, Arc<McpClient>)>,
+}
+
+impl McpToolRefresher {
+    /// Rebuild the full shared registry: built-ins plus every
+    /// connected server's currently-advertised tools. The registry is
+    /// append-only, so rebuild-from-scratch *is* the refresh
+    /// operation. A server whose re-discovery fails contributes no
+    /// tools (its calls would fail anyway) and is logged.
+    pub async fn rebuild_registry(&self) -> ToolRegistry {
+        let mut registry = ToolRegistry::with_builtins();
+        for (name, client) in &self.clients {
+            match McpClientManager::discover_tools(client, name).await {
+                Ok((tools, _)) => {
+                    for tool in tools {
+                        registry.register(tool);
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        server = %name,
+                        error = %err,
+                        "tool re-discovery failed during refresh; this server's \
+                         tools are absent from the rebuilt registry"
+                    );
+                }
+            }
+        }
+        registry
+    }
+}
+
+/// Drain every shared server's notification stream in the daemon
+/// (ADR-0020). Logs and progress are already folded into `tracing` by
+/// the handler — consuming them here is what stops the unbounded
+/// channels growing. `tools/list_changed` re-discovers via the
+/// `refresher` and hands the rebuilt registry to `on_tools_changed`
+/// (the daemon installs it into the shared `ReducerContext`, so the
+/// *next* invocation sees it). Returns when every server's channel has
+/// closed (shutdown).
+pub async fn drain_server_notifications<F>(
+    mut channels: Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
+    refresher: McpToolRefresher,
+    on_tools_changed: F,
+) where
+    F: Fn(ToolRegistry) + Send + Sync + 'static,
+{
+    // Receive the next notification from any server, tagged with the
+    // server name; closed channels drop out (same merge shape as the
+    // runner's server-request channel).
+    async fn recv_any(
+        channels: &mut Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
+    ) -> Option<(String, ServerNotification)> {
+        std::future::poll_fn(|cx| {
+            let mut index = 0;
+            while index < channels.len() {
+                match channels[index].1.poll_recv(cx) {
+                    std::task::Poll::Ready(Some(notification)) => {
+                        let server = channels[index].0.clone();
+                        return std::task::Poll::Ready(Some((server, notification)));
+                    }
+                    std::task::Poll::Ready(None) => {
+                        channels.remove(index);
+                    }
+                    std::task::Poll::Pending => index += 1,
+                }
+            }
+            if channels.is_empty() {
+                std::task::Poll::Ready(None)
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await
+    }
+
+    while let Some((server, notification)) = recv_any(&mut channels).await {
+        match notification {
+            ServerNotification::ToolListChanged => {
+                info!(server = %server, "tools/list_changed: rebuilding the shared registry");
+                on_tools_changed(refresher.rebuild_registry().await);
+            }
+            // Already folded into `tracing` at the handler
+            // (`on_logging_message` / `on_progress`); consumed here so
+            // the channel drains. The logs->event-bus bridge and
+            // operator surfacing hook in at this match (plan B2 /
+            // Observability backlog).
+            ServerNotification::Log { .. } | ServerNotification::Progress { .. } => {}
+            // Future notification->action loops (ADR-0020): resource
+            // invalidation, prompt-list refresh.
+            ServerNotification::ResourceUpdated { uri } => {
+                debug!(server = %server, uri = %uri, "resource updated (no action wired)");
+            }
+            note @ (ServerNotification::ResourceListChanged
+            | ServerNotification::PromptListChanged) => {
+                debug!(server = %server, ?note, "list changed (fetched on demand; no cache to refresh)");
+            }
+        }
     }
 }
 
@@ -1685,5 +1826,63 @@ mod tests {
             3,
             "refresh re-discovery should see the new tool"
         );
+    }
+
+    /// B1 / ADR-0020: the drain consumes notifications and, on
+    /// `tools/list_changed`, hands a rebuilt registry (built-ins +
+    /// the server's *current* tools) to the install callback.
+    #[tokio::test]
+    async fn drain_rebuilds_the_registry_on_tool_list_changed() {
+        let tools = Arc::new(Mutex::new(vec![mock_tool("alpha")]));
+        let client = serve_mock(tools.clone(), 10).await;
+        let refresher = McpToolRefresher {
+            clients: vec![("mock".to_string(), client)],
+        };
+
+        let (notif_tx, notif_rx) = mpsc::unbounded_channel();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let drain = tokio::spawn(drain_server_notifications(
+            vec![("mock".to_string(), notif_rx)],
+            refresher,
+            move |registry| {
+                let _ = out_tx.send(registry);
+            },
+        ));
+
+        // Logs are consumed without rebuilding anything.
+        notif_tx
+            .send(ServerNotification::Log {
+                level: "info".to_string(),
+                logger: None,
+                data: Value::String("hello".to_string()),
+            })
+            .expect("send log");
+
+        // The server mutates its tool list and signals list_changed;
+        // the drain rebuilds and the new tool is in the registry.
+        tools.lock().await.push(mock_tool("beta"));
+        notif_tx
+            .send(ServerNotification::ToolListChanged)
+            .expect("send list_changed");
+
+        let rebuilt = tokio::time::timeout(std::time::Duration::from_secs(10), out_rx.recv())
+            .await
+            .expect("drain should rebuild before the timeout")
+            .expect("registry");
+        assert!(rebuilt.get("alpha").is_some(), "existing tool present");
+        assert!(rebuilt.get("beta").is_some(), "new tool present");
+        assert!(rebuilt.get("file_read").is_some(), "built-ins present");
+        assert_eq!(
+            out_rx.try_recv().ok().map(|_| ()),
+            None,
+            "the log record must not trigger a rebuild"
+        );
+
+        // Closing the last channel ends the drain.
+        drop(notif_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .expect("drain exits when channels close")
+            .expect("drain task");
     }
 }

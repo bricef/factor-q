@@ -137,8 +137,12 @@ impl SamplingChannel {
 /// Constructed via [`ReducerContext::builder`]; the fields are
 /// private so the builder is the single construction surface.
 pub struct ReducerContext {
-    /// Tools the agent may call.
-    tools: Arc<ToolRegistry>,
+    /// Tools the agent may call. Interior-mutable (ADR-0020): the
+    /// daemon's notification drain installs a rebuilt registry on
+    /// `tools/list_changed`; each invocation snapshots the `Arc` at
+    /// start and keeps it for its whole step loop, so in-flight
+    /// invocations are never hot-swapped.
+    tools: std::sync::RwLock<Arc<ToolRegistry>>,
     /// Read-only handle over the running MCP servers, used to read
     /// the agent's `static_resources` pins at invocation start.
     /// `None` when no MCP servers are wired (e.g. most tests).
@@ -165,6 +169,21 @@ impl ReducerContext {
     /// is optional. See [`ReducerContextBuilder`].
     pub fn builder() -> ReducerContextBuilder {
         ReducerContextBuilder::default()
+    }
+
+    /// Snapshot the current shared tool registry. Each invocation
+    /// takes one snapshot at start and uses it throughout, so a
+    /// concurrent [`install_tools`](Self::install_tools) only affects
+    /// invocations that start afterwards (ADR-0020).
+    pub fn tools(&self) -> Arc<ToolRegistry> {
+        self.tools.read().expect("tools lock poisoned").clone()
+    }
+
+    /// Replace the shared tool registry (the daemon's notification
+    /// drain installs a rebuilt registry on `tools/list_changed`).
+    /// In-flight invocations keep their snapshot.
+    pub fn install_tools(&self, tools: Arc<ToolRegistry>) {
+        *self.tools.write().expect("tools lock poisoned") = tools;
     }
 }
 
@@ -223,9 +242,10 @@ impl ReducerContextBuilder {
     /// Finalise the context. Panics if `tools` was not set.
     pub fn build(self) -> ReducerContext {
         ReducerContext {
-            tools: self
-                .tools
-                .expect("ReducerContext::builder() requires .tools(..)"),
+            tools: std::sync::RwLock::new(
+                self.tools
+                    .expect("ReducerContext::builder() requires .tools(..)"),
+            ),
             resources: self.resources,
             sampling_validators: self.sampling_validators.unwrap_or_default(),
             elicitation_inbound_validators: self.elicitation_inbound_validators.unwrap_or_default(),
@@ -387,14 +407,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     trigger_source,
                     trigger_subject,
                     trigger_payload,
-                    &self.context.tools,
+                    &self.context.tools(),
                     None,
                 )
                 .await;
         }
 
         let mut manager = McpClientManager::new();
-        let mut tools = (*self.context.tools).clone();
+        let mut tools = (*self.context.tools()).clone();
         let mut channels: Vec<(String, UnboundedReceiver<ServerRequest>)> = Vec::new();
         for decl in grant_servers {
             let capabilities = AdvertisedCapabilities {
@@ -483,7 +503,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             trigger_source,
             trigger_subject,
             trigger_payload,
-            &self.context.tools,
+            &self.context.tools(),
             sampling,
         )
         .await
@@ -684,9 +704,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
         completed.sort_by_key(|x| x.0);
 
-        // Set up agent context (mirrors run()).
+        // Set up agent context (mirrors run()). One registry snapshot
+        // serves both the schemas and the loop (ADR-0020 consistency).
         let sandbox = agent.sandbox().to_tool_sandbox();
-        let tool_schemas = self.context.tools.build_schemas(agent.tools());
+        let base_tools = self.context.tools();
+        let tool_schemas = base_tools.build_schemas(agent.tools());
         let agent_config = AgentConfig {
             agent_id: agent_id.clone(),
             model: agent.model().to_string(),
@@ -753,7 +775,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             &sandbox,
             // Resume uses the base registry: grant-bearing servers are
             // not restarted on resume (ADR-0018 §5).
-            &self.context.tools,
+            &base_tools,
             state,
             last_result,
             step_index,

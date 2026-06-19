@@ -1305,14 +1305,15 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // uses it directly (via the concrete type) for auto-resume
     // of in-flight invocations. Both paths share the same WAL
     // / archive / coordination wiring.
+    let context = Arc::new(
+        fq_runtime::ReducerContext::builder()
+            .tools(tools)
+            .resources(mcp_manager.resource_reader())
+            .build(),
+    );
     let resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> =
         Arc::new(fq_runtime::ReducerRunner::new(
-            Arc::new(
-                fq_runtime::ReducerContext::builder()
-                    .tools(tools)
-                    .resources(mcp_manager.resource_reader())
-                    .build(),
-            ),
+            context.clone(),
             Arc::new(
                 fq_runtime::RunnerConfig::builder()
                     .bus(bus.clone())
@@ -1324,6 +1325,22 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             fq_runtime::Harness::new(),
         ));
     let worker: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
+
+    // Drain the shared servers' notification streams for the life of
+    // the daemon (ADR-0020): logs/progress fold into tracing, and a
+    // `tools/list_changed` installs a rebuilt registry into the shared
+    // context so the *next* invocation picks it up. The manager keeps
+    // its `&mut` lifecycle here for shutdown.
+    let notification_channels = mcp_manager.take_notifications().await;
+    if !notification_channels.is_empty() {
+        let refresher = mcp_manager.tool_refresher();
+        let drain_context = context.clone();
+        tokio::spawn(fq_runtime::mcp::drain_server_notifications(
+            notification_channels,
+            refresher,
+            move |registry| drain_context.install_tools(Arc::new(registry)),
+        ));
+    }
 
     // Spawn auto-resume tasks for each safe-resume / safe-replay
     // invocation found by the recovery scan. Ambiguous cases
