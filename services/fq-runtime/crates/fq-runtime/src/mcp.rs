@@ -1491,13 +1491,17 @@ impl McpToolRefresher {
 /// `refresher` and hands the rebuilt registry to `on_tools_changed`
 /// (the daemon installs it into the shared `ReducerContext`, so the
 /// *next* invocation sees it). Returns when every server's channel has
-/// closed (shutdown).
-pub async fn drain_server_notifications<F>(
+/// closed (shutdown). Log records are forwarded to `on_log` (the
+/// event-bus bridge, plan B2); progress is consumed. Everything is
+/// already folded into `tracing` at the handler.
+pub async fn drain_server_notifications<F, G>(
     mut channels: Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
     refresher: McpToolRefresher,
     on_tools_changed: F,
+    on_log: G,
 ) where
     F: Fn(ToolRegistry) + Send + Sync + 'static,
+    G: Fn(String, String, Option<String>, Value) + Send + Sync + 'static,
 {
     // Receive the next notification from any server, tagged with the
     // server name; closed channels drop out (same merge shape as the
@@ -1534,12 +1538,16 @@ pub async fn drain_server_notifications<F>(
                 info!(server = %server, "tools/list_changed: rebuilding the shared registry");
                 on_tools_changed(refresher.rebuild_registry().await);
             }
-            // Already folded into `tracing` at the handler
-            // (`on_logging_message` / `on_progress`); consumed here so
-            // the channel drains. The logs->event-bus bridge and
-            // operator surfacing hook in at this match (plan B2 /
-            // Observability backlog).
-            ServerNotification::Log { .. } | ServerNotification::Progress { .. } => {}
+            // Bridge log records onto the event bus (plan B2); they are
+            // already traced at the handler.
+            ServerNotification::Log {
+                level,
+                logger,
+                data,
+            } => on_log(server, level, logger, data),
+            // Progress is consumed so the channel drains; surfacing it
+            // to an operator is an Observability follow-up.
+            ServerNotification::Progress { .. } => {}
             // Future notification->action loops (ADR-0020): resource
             // invalidation, prompt-list refresh.
             ServerNotification::ResourceUpdated { uri } => {
@@ -1841,11 +1849,15 @@ mod tests {
 
         let (notif_tx, notif_rx) = mpsc::unbounded_channel();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let (log_tx, mut log_rx) = mpsc::unbounded_channel();
         let drain = tokio::spawn(drain_server_notifications(
             vec![("mock".to_string(), notif_rx)],
             refresher,
             move |registry| {
                 let _ = out_tx.send(registry);
+            },
+            move |server, level, _logger, _data| {
+                let _ = log_tx.send((server, level));
             },
         ));
 
@@ -1877,6 +1889,15 @@ mod tests {
             None,
             "the log record must not trigger a rebuild"
         );
+
+        // The log record was forwarded to the bus bridge (B2).
+        let (log_server, log_level) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), log_rx.recv())
+                .await
+                .expect("log forwarded before timeout")
+                .expect("log record");
+        assert_eq!(log_server, "mock");
+        assert_eq!(log_level, "info");
 
         // Closing the last channel ends the drain.
         drop(notif_tx);

@@ -786,6 +786,9 @@ fn print_event(event: &Event) {
             p.task_name, p.error_message
         ),
         EventPayload::WorkerHeartbeat(p) => format!("worker.heartbeat worker_id={}", p.worker_id),
+        EventPayload::McpServerLog(p) => {
+            format!("mcp.log server={} level={} {}", p.server, p.level, p.data)
+        }
         EventPayload::InvocationOperatorRecovered(p) => format!(
             "invocation.operator_recovered action={} phase={}{}",
             p.action,
@@ -1335,10 +1338,31 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     if !notification_channels.is_empty() {
         let refresher = mcp_manager.tool_refresher();
         let drain_context = context.clone();
+        let log_bus = bus.clone();
         tokio::spawn(fq_runtime::mcp::drain_server_notifications(
             notification_channels,
             refresher,
             move |registry| drain_context.install_tools(Arc::new(registry)),
+            move |server, level, logger, data| {
+                // Bridge the server's log record onto the event bus as a
+                // daemon-scoped event (ADR-0020 / plan B2). Fire-and-forget:
+                // a failed publish is logged, never blocks the drain.
+                let bus = log_bus.clone();
+                let event = Event::system(
+                    runtime_id,
+                    EventPayload::McpServerLog(fq_runtime::events::McpServerLogPayload {
+                        server,
+                        level,
+                        logger,
+                        data,
+                    }),
+                );
+                tokio::spawn(async move {
+                    if let Err(err) = bus.publish(&event).await {
+                        tracing::warn!(error = %err, "failed to publish MCP server log event");
+                    }
+                });
+            },
         ));
     }
 

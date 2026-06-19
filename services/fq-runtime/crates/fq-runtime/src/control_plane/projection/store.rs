@@ -387,6 +387,7 @@ fn extract_fields(event: &Event) -> Fields {
         | EventPayload::SystemTaskFailed(_)
         | EventPayload::SystemRecovery(_)
         | EventPayload::WorkerHeartbeat(_)
+        | EventPayload::McpServerLog(_)
         | EventPayload::InvocationOperatorRecovered(_) => Fields::default(),
     }
 }
@@ -411,6 +412,7 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
         EventPayload::SystemTaskFailed(_) => "system_task_failed",
         EventPayload::SystemRecovery(_) => "system_recovery",
         EventPayload::WorkerHeartbeat(_) => "worker_heartbeat",
+        EventPayload::McpServerLog(_) => "mcp_server_log",
     }
 }
 

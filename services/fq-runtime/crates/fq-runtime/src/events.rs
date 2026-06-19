@@ -61,6 +61,9 @@ pub mod subjects {
     pub const SYSTEM_SHUTDOWN: &str = "fq.system.shutdown";
     pub const SYSTEM_TASK_FAILED: &str = "fq.system.task_failed";
     pub const SYSTEM_RECOVERY: &str = "fq.system.recovery";
+    /// Daemon-scoped log records forwarded from connected MCP servers
+    /// (ADR-0020).
+    pub const SYSTEM_MCP_LOG: &str = "fq.system.mcp.log";
 
     /// Validate that `s` is safe to use as a single NATS subject
     /// token. NATS subjects are dot-separated tokens; a token
@@ -320,6 +323,7 @@ impl Event {
             EventPayload::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
             EventPayload::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
             EventPayload::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
+            EventPayload::McpServerLog(_) => subjects::SYSTEM_MCP_LOG.to_string(),
             // Worker events read their subject token from the
             // payload's `worker_id`, not from `envelope.agent_id`
             // (which is the system sentinel for non-agent events).
@@ -447,6 +451,7 @@ pub fn schema_id_for(payload: &EventPayload) -> &'static str {
         EventPayload::SystemTaskFailed(_) => "factor-q/system_task_failed@1",
         EventPayload::SystemRecovery(_) => "factor-q/system_recovery@1",
         EventPayload::WorkerHeartbeat(_) => "factor-q/worker_heartbeat@1",
+        EventPayload::McpServerLog(_) => "factor-q/mcp_server_log@1",
     }
 }
 
@@ -613,6 +618,11 @@ pub enum EventPayload {
     /// not in the payload, so there's only one source of
     /// truth for "when did this beat arrive."
     WorkerHeartbeat(WorkerHeartbeatPayload),
+    /// A log record forwarded from a connected MCP server
+    /// (`notifications/message`), bridged onto the bus by the daemon's
+    /// notification drain (ADR-0020). Daemon-scoped — no agent or
+    /// invocation.
+    McpServerLog(McpServerLogPayload),
 }
 
 /// Published when an agent invocation begins.
@@ -1072,6 +1082,22 @@ pub struct SystemRecoveryPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerHeartbeatPayload {
     pub worker_id: crate::worker::WorkerId,
+}
+
+/// A log record a connected MCP server emitted (`notifications/message`),
+/// forwarded to the event bus by the daemon's notification drain
+/// (ADR-0020). Daemon-scoped: shared MCP servers are not tied to a
+/// single agent or invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerLogPayload {
+    /// The MCP server that emitted the record (its declared name).
+    pub server: String,
+    /// MCP log level name (`"debug"`..`"emergency"`).
+    pub level: String,
+    /// Optional logger / category tag from the server.
+    pub logger: Option<String>,
+    /// The structured log payload as the server sent it.
+    pub data: serde_json::Value,
 }
 
 #[cfg(test)]
@@ -1879,6 +1905,12 @@ mod tests {
             }),
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: crate::worker::WorkerId::new("w").unwrap(),
+            }),
+            EventPayload::McpServerLog(McpServerLogPayload {
+                server: String::new(),
+                level: String::new(),
+                logger: None,
+                data: serde_json::Value::Null,
             }),
         ];
         for payload in cases {
