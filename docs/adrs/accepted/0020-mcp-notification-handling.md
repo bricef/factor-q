@@ -1,6 +1,7 @@
 # ADR-0020: MCP server notifications — drained in the daemon, tools refresh between invocations
 
 ## Status
+
 Accepted (2026-06-12)
 
 ## Context

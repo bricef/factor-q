@@ -1,12 +1,15 @@
 # ADR-0012: Execution Graph Definition Format
 
 ## Status
+
 Accepted
 
 ## Context
+
 Agent definitions (ADR-0005) specify what an individual agent is. A separate concern is how agents are wired together — what events flow between them, where work enters and exits the system, and what structural patterns (fan-out, fan-in, approval gates) govern the topology.
 
 The graph definition must be:
+
 - **Machine-readable** — parsed, validated (no dangling references, compatible edges), and executed by the runtime
 - **Human-readable** — understandable without specialist tooling
 - **Diffable** — produces clean diffs in version control, since the learning loop will produce new versions
@@ -97,6 +100,7 @@ YAML is widely understood, diffs cleanly, and is natively validateable against J
 - **Validation at load time, not author time** — until editor plugins or a UI exist, invalid graphs are caught when the runtime loads them. JSON Schema enables editor-side validation for users with schema-aware editors.
 
 ## Consequences
+
 - Graph definitions are stored as `.yaml` files alongside agent definition directories
 - A JSON Schema is published for graph definitions, enabling editor validation
 - The runtime validates graph definitions at load time (no dangling agent references, compatible pub/sub wiring)

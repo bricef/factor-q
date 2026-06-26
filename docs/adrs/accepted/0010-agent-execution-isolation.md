@@ -1,9 +1,11 @@
 # ADR-0010: Agent Execution Isolation Model
 
 ## Status
+
 Accepted
 
 ## Context
+
 Each agent in factor-q runs in a sandboxed execution context where nothing is available by default — filesystem, tools, environment, network, and resource limits are all explicitly declared in the agent definition.
 
 Phase 1 shipped process-level sandboxing: path canonicalisation for file tools, `exec_cwd` restrictions for the shell tool, and output caps. This is sufficient for single-tenant self-hosted use, but does not defend against a determined or adversarial agent (e.g., a compromised or untrusted model that exploits PATH-visible binaries, opens arbitrary network connections, or attempts kernel-level escapes).
@@ -38,6 +40,7 @@ Kata Containers present the standard OCI/container API — the orchestration lay
 - **Unchanged networking model** — the network proxy enforcement works identically
 
 This tier is not required for initial deployment. It becomes relevant when:
+
 - Untrusted or unvetted models are used
 - Agents have access to production credentials or high-value systems
 - Compliance or audit requirements demand hypervisor-level isolation

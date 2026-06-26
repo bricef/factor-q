@@ -1,9 +1,11 @@
 # ADR-0019: Skill Format and Discovery
 
 ## Status
+
 Accepted
 
 ## Context
+
 Skills are reusable bundles of prompt instructions and domain knowledge that shape how an agent approaches work. factor-q needs a skill format that is human-readable, composable, and manageable at scale across a swarm of agents.
 
 At scale (hundreds to thousands of skills), loading skill metadata into agent prompts is not viable — even 100 tokens per skill becomes prohibitive. Skill discovery must be a runtime capability, not prompt content.
@@ -16,7 +18,7 @@ Skills follow the [AgentSkills specification](https://agentskills.io/specificati
 
 A skill is a directory containing a `SKILL.md` file with YAML frontmatter and Markdown body:
 
-```
+```text
 code-reviewer/
 ├── SKILL.md              # Required: metadata + instructions
 ├── scripts/              # Optional: executable code
@@ -95,6 +97,7 @@ Even after discovery, skills are loaded progressively:
 - **Active discovery** — agents search when they need a skill, not passively loaded with everything
 
 ## Consequences
+
 - The skill registry is an MCP service with embedding-based search
 - Skills are embedded at registration time; the registry maintains a vector index
 - The vector database is shared infrastructure between the skill registry and memory service

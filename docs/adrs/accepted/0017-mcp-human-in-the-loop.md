@@ -1,6 +1,7 @@
 # ADR-0017: Autonomous Resolution of MCP Human-in-the-Loop Primitives
 
 ## Status
+
 Accepted (2026-05-28)
 
 ## Context

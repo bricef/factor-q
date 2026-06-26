@@ -1,10 +1,13 @@
 # ADR-0005: Agent Definition Format
 
 ## Status
+
 Accepted
 
 ## Context
+
 The agent definition is the primary artefact users author. It must be:
+
 - **LLM-writable** — agents and supervisors must be able to create and modify agent definitions programmatically
 - **Human-readable** — a user can open it, understand it, and edit it without specialist knowledge
 - **Hot-loadable** — changes take effect without recompiling the system
@@ -14,6 +17,7 @@ This rules out formats that require compilation (pure Rust code) or that are awk
 ## Decision: Markdown with YAML frontmatter
 
 Agent definitions are Markdown files where:
+
 - **YAML frontmatter** contains structured configuration — model, tools, sandbox, budget, triggers, and metadata. This is validateable against a JSON Schema.
 - **Markdown body** is the system prompt — freeform, expressive, supporting full Markdown formatting. No escaping, no indirection.
 
@@ -112,6 +116,7 @@ let agent = Agent::build("researcher")
 - **Two representations** — the Markdown file and the Rust builder are separate representations of the same concept. They must stay in sync. The builder is the source of truth for what fields exist; the Markdown parser maps into it.
 
 ## Consequences
+
 - Agent definitions are stored as `.md` files in well-known directories
 - The runtime watches for file changes and hot-reloads agent definitions
 - A JSON Schema is published for the frontmatter, enabling editor validation and autocomplete

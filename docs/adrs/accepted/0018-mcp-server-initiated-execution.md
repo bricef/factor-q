@@ -1,6 +1,7 @@
 # ADR-0018: Execution Model for Server-Initiated MCP Calls
 
 ## Status
+
 Accepted (2026-05-31)
 
 ## Context
@@ -80,7 +81,7 @@ channel, sends it on a per-invocation channel, and awaits the
 reply. The runner services it by turning the tool-dispatch await
 into a `select!`:
 
-```
+```text
 while awaiting a tool result, also service inbound
 server-initiated requests:
 
@@ -91,6 +92,7 @@ server-initiated requests:
 ```
 
 `handle_sampling`:
+
 1. **gate** — granted? within the declared sub-budget and the
    invocation total? If not → reply a structured decline, **no
    model call** (ADR-0017: the runtime is the only gate).
@@ -134,7 +136,7 @@ Server-initiated calls pass through validation on **both** sides:
 Both seams are the same shape: an **ordered chain of pluggable
 validators**, each returning a reusable
 
-```
+```text
 ValidatorResult<T> = Allow | Modify(T) | Deny(reason)
 ```
 

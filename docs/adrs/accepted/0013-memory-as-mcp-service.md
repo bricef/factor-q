@@ -1,6 +1,7 @@
 # ADR-0013: Memory as an MCP Service
 
 ## Status
+
 Accepted. Refined by
 [ADR-0021](0021-mcp-cost-control-and-memory-boundary.md), which retires
 the forcing-function rationale (the MCP client now exists), reaffirms the
@@ -9,6 +10,7 @@ protocol (deferring the embedding boundary to a future content-addressed
 storage design).
 
 ## Context
+
 Agents need persistent memory that outlasts a single invocation — the ability to store what they've learned and retrieve relevant context in future runs. The architecture document identifies three memory layers: working memory (in-context), long-term per-agent memory, and collective memory across agents.
 
 The question is whether memory is a core runtime concern built into factor-q, or an external capability that agents access as a tool.
@@ -40,6 +42,7 @@ Persistent memory (storage, retrieval, search) is implemented as one or more MCP
 - Different memory backends (KV, RAG, collective) can be different MCP servers with the same tool interface
 
 ## Consequences
+
 - factor-q must implement MCP client support (discover, connect to, and invoke tools from MCP servers)
 - Agent definitions can reference MCP servers in their tool list
 - Memory tool calls (store, retrieve, search) are standard tool invocations from the agent's perspective

@@ -1,9 +1,11 @@
 # ADR-0009: Technology Choices
 
 ## Status
+
 Accepted (language); event bus and persistence remain open — see ADR-0011.
 
 ## Context
+
 factor-q needs a host language, an event bus implementation, and a persistence layer. These choices affect the contributor pool, the extension model, the deployment story, and performance characteristics.
 
 ## Decision: Rust as the host language
@@ -35,6 +37,7 @@ factor-q is a long-running, concurrent server that manages an event bus, multipl
 These tradeoffs are accepted because the DSL and type-safety benefits compound over the lifetime of the project, while compile-time costs are a fixed tax that tooling (incremental compilation, `cargo check`) mitigates.
 
 ## Consequences
+
 - The core runtime, event bus, agent executor, and task engine are implemented in Rust
 - Agent definitions and graph wiring will use Rust's macro system and type-state patterns as embedded DSLs
 - Custom tools and extensions are language-agnostic, communicating via subprocess or MCP protocols

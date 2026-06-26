@@ -1,6 +1,7 @@
 # ADR-0021: Cost control for MCP services via `_meta`, and the memory implementation boundary
 
 ## Status
+
 Accepted (2026-06-12). Addendum to
 [ADR-0013](0013-memory-as-mcp-service.md) (memory as an MCP service);
 builds on [ADR-0004](0004-cost-controls-from-day-one.md) (cost controls)
@@ -63,16 +64,20 @@ keys and asks implementations to prefix theirs with a dot-labelled
 namespace they own, then `/`.)
 
 - **Outbound — budget hint** on `CallToolRequestParams._meta`:
+
   ```jsonc
   "_meta": { "factor-q.top/budget": { "remaining_usd": 0.042, "model": "<embed-model>" } }
   ```
+
   The runtime stamps every outbound tool call with the invocation's
   remaining budget. A well-behaved server self-limits under the ceiling.
 
 - **Inbound — cost report** on `CallToolResult._meta`:
+
   ```jsonc
   "_meta": { "factor-q.top/cost": { "usd": 0.0008, "tokens": 1200, "model": "<embed-model>" } }
   ```
+
   The runtime reads it and folds it into the invocation's cost the same
   way sampling does — a `CostMetadata` on the `tool.result` event,
   analogous to the one on `llm.response` — so it counts against `budget`
