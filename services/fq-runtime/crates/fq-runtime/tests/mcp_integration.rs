@@ -2087,9 +2087,10 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
         .tools(["trigger-sampling-request".to_string()])
         .mcp_servers(vec![McpServerDeclaration {
             server: "everything".to_string(),
-            command: "npx".to_string(),
+            command: Some("npx".to_string()),
             args: vec!["-y".to_string(), EVERYTHING_SERVER.to_string()],
             env: vec![],
+            url: None,
         }])
         .sampling_grant(SamplingGrant {
             servers: vec!["everything".to_string()],

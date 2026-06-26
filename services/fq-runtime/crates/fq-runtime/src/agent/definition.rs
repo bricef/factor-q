@@ -71,13 +71,24 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
     let mcp_servers: Vec<McpServerDeclaration> = frontmatter
         .mcp
         .into_iter()
-        .map(|m| McpServerDeclaration {
-            server: m.server,
-            command: m.command,
-            args: m.args,
-            env: m.env.into_iter().collect(),
+        .map(|m| {
+            // A server is reached over a stdio command or a Streamable
+            // HTTP url — exactly one.
+            if m.command.is_some() == m.url.is_some() {
+                return Err(ParseError::InvalidMcp(format!(
+                    "mcp server '{}' must set exactly one of `command` or `url`",
+                    m.server
+                )));
+            }
+            Ok(McpServerDeclaration {
+                server: m.server,
+                command: m.command,
+                args: m.args,
+                env: m.env.into_iter().collect(),
+                url: m.url,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, ParseError>>()?;
 
     let static_resources = frontmatter
         .static_resources
@@ -211,7 +222,10 @@ struct Frontmatter {
 #[derive(Debug, Deserialize)]
 struct McpFrontmatter {
     server: String,
-    command: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
@@ -263,6 +277,8 @@ pub enum ParseError {
     InvalidYaml(#[from] serde_yaml::Error),
     #[error("invalid agent: {0}")]
     InvalidAgent(#[from] BuildError),
+    #[error("invalid mcp server: {0}")]
+    InvalidMcp(String),
 }
 
 #[cfg(test)]
@@ -476,13 +492,13 @@ You are a test agent.
 
         let first = &agent.mcp_servers()[0];
         assert_eq!(first.server, "everything");
-        assert_eq!(first.command, "npx");
+        assert_eq!(first.command.as_deref(), Some("npx"));
         assert_eq!(first.args, vec!["@modelcontextprotocol/server-everything"]);
         assert!(first.env.is_empty());
 
         let second = &agent.mcp_servers()[1];
         assert_eq!(second.server, "custom");
-        assert_eq!(second.command, "my-server");
+        assert_eq!(second.command.as_deref(), Some("my-server"));
         assert!(second.args.is_empty());
         assert_eq!(
             second.env,
@@ -681,5 +697,59 @@ You are a test agent.
             snapshot.elicitation.is_none(),
             "no elicitation grant was declared"
         );
+    }
+
+    #[test]
+    fn parses_a_streamable_http_mcp_server() {
+        let content = r#"---
+name: http-agent
+model: claude-haiku
+mcp:
+  - server: remote
+    url: http://127.0.0.1:8000/mcp
+---
+
+You are a test agent.
+"#;
+        let agent = parse_agent(content).unwrap();
+        let server = &agent.mcp_servers()[0];
+        assert_eq!(server.url.as_deref(), Some("http://127.0.0.1:8000/mcp"));
+        assert!(server.command.is_none());
+    }
+
+    #[test]
+    fn rejects_mcp_server_with_neither_command_nor_url() {
+        let content = r#"---
+name: bad-agent
+model: claude-haiku
+mcp:
+  - server: nope
+---
+
+You are a test agent.
+"#;
+        assert!(matches!(
+            parse_agent(content),
+            Err(ParseError::InvalidMcp(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_mcp_server_with_both_command_and_url() {
+        let content = r#"---
+name: bad-agent
+model: claude-haiku
+mcp:
+  - server: nope
+    command: npx
+    url: http://127.0.0.1:8000/mcp
+---
+
+You are a test agent.
+"#;
+        assert!(matches!(
+            parse_agent(content),
+            Err(ParseError::InvalidMcp(_))
+        ));
     }
 }

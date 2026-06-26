@@ -559,10 +559,11 @@ async fn trigger_agent(
         }
         let config = McpServerConfig {
             name: decl.server.clone(),
-            command: decl.command.clone(),
+            command: decl.command.clone().unwrap_or_default(),
             args: decl.args.clone(),
             env: decl.env.clone(),
-            url: None,        };
+            url: decl.url.clone(),
+        };
         match mcp_manager.start_server(config).await {
             Ok(mcp_tools) => {
                 for tool in mcp_tools {
@@ -1272,10 +1273,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             }
             let config = McpServerConfig {
                 name: decl.server.clone(),
-                command: decl.command.clone(),
+                command: decl.command.clone().unwrap_or_default(),
                 args: decl.args.clone(),
                 env: decl.env.clone(),
-                url: None,            };
+                url: decl.url.clone(),
+            };
             match mcp_manager.start_server(config).await {
                 Ok(mcp_tools) => {
                     for tool in mcp_tools {

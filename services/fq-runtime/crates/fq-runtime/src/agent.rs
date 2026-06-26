@@ -38,9 +38,15 @@ use crate::events::{ConfigSnapshot, SandboxSnapshot};
 #[derive(Debug, Clone)]
 pub struct McpServerDeclaration {
     pub server: String,
-    pub command: String,
+    /// Executable for the stdio transport. `None` when the server is
+    /// reached over Streamable HTTP (`url`); exactly one of `command`
+    /// or `url` is set.
+    pub command: Option<String>,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// Streamable HTTP endpoint (the 2025-11-25 remote transport). When
+    /// set, `command` / `args` / `env` are unused.
+    pub url: Option<String>,
 }
 
 /// A concrete MCP resource statically pinned for guaranteed inclusion

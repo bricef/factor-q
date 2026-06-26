@@ -436,10 +436,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             );
             let config = McpServerConfig {
                 name: decl.server.clone(),
-                command: decl.command.clone(),
+                command: decl.command.clone().unwrap_or_default(),
                 args: decl.args.clone(),
                 env: decl.env.clone(),
-                url: None,
+                url: decl.url.clone(),
             };
             match manager
                 .start_server_with_requests(config, roots, capabilities)
