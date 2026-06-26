@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Every job drives its checks through a `just` target, so CI stays
+# isomorphic with the local dev workflow. Setup steps (toolchains) are the
+# only non-just glue, since they must exist before `just` can run.
+jobs:
+  docs-lint:
+    name: Docs lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # markdownlint runs via npx inside `just lint-docs`; setup-node
+      # provides npx (a Rust container / minimal runner has none).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: extractions/setup-just@v3
+      - run: just lint-docs
+
+  rust-ci:
+    name: Rust CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/fq-runtime
+      # The MCP integration tests spawn the reference server via npx.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: extractions/setup-just@v3
+      # Bring up NATS exactly as dev does (JetStream via
+      # infrastructure/nats.conf), then wait for it before the
+      # bus/integration tests run.
+      - run: just infra-up
+      - run: just infra-wait
+      - run: just rust-ci
+      - run: just infra-down
+        if: always()

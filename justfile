@@ -32,6 +32,12 @@ infra-logs:
 infra-status:
     cd {{infra_dir}} && docker compose ps
 
+# CI runs this after `infra-up`; locally NATS is usually already warm so
+# you rarely need it.
+# Wait until NATS is healthy on its monitoring port.
+infra-wait:
+    timeout 60 sh -c 'until curl -sf http://127.0.0.1:8222/healthz >/dev/null 2>&1; do sleep 1; done'
+
 # === Services (delegate to per-service justfiles) ===
 
 # Build all services
@@ -43,9 +49,16 @@ build:
 test *args:
     cd {{runtime_dir}} && just test "$@"
 
-# Run quality checks across services (Rust CI + docs lint)
-ci: lint-docs
+# The bus and MCP integration tests need NATS (`just infra-up`) and
+# Node/npx on PATH.
+# Run the Rust quality gate (fmt-check, clippy, test).
+rust-ci:
     cd {{runtime_dir}} && just ci
+
+# CI runs the two halves as separate jobs that each invoke a just target
+# (see .github/workflows/ci.yml).
+# Run all quality checks — docs lint + the Rust gate (the full local gate).
+ci: lint-docs rust-ci
 
 # Build container images for all services
 docker-build:
