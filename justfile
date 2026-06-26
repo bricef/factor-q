@@ -43,8 +43,8 @@ build:
 test *args:
     cd {{runtime_dir}} && just test "$@"
 
-# Run quality checks across services
-ci:
+# Run quality checks across services (Rust CI + docs lint)
+ci: lint-docs
     cd {{runtime_dir}} && just ci
 
 # Build container images for all services
@@ -81,6 +81,14 @@ smoke: build
 [no-cd]
 fq *args:
     cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- "$@"
+
+# === Docs ===
+
+# Uses markdownlint-cli2 (pinned) via npx; rules in .markdownlint.jsonc.
+# Auto-fix the mechanical rules with `just lint-docs --fix`.
+# Lint ADR markdown — the zero-error scope mandated by AGENTS.md.
+lint-docs *args:
+    npx --yes markdownlint-cli2@0.22.1 {{args}} "docs/adrs/**/*.md"
 
 # === Full workflows ===
 

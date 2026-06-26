@@ -1,0 +1,18 @@
+{
+  // factor-q markdown house style (markdownlint).
+  //
+  // Starts from the default rule set, with two cosmetic rules relaxed to
+  // match the existing docs. ADR files and the ADR index MUST pass with
+  // zero errors (see AGENTS.md); run `just lint-docs`.
+  "default": true,
+
+  // Line length is not enforced. Prose wraps ~72 cols by convention, but
+  // tables, fenced code, and link-heavy index rows routinely exceed 80 —
+  // hard-wrapping them would hurt readability more than help.
+  "MD013": false,
+
+  // Table column/pipe spacing style. Repo tables use compact delimiter
+  // rows (|---|---|) with spaced data cells; this newer rule flags the
+  // mix. Not worth reflowing every table for.
+  "MD060": false
+}
