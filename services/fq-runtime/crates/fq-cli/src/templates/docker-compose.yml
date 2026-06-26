@@ -1,0 +1,22 @@
+# NATS for factor-q — the event bus + JetStream store the runtime needs.
+#
+#   docker compose up -d      # start NATS in the background
+#   docker compose down       # stop it
+#   docker compose logs -f    # follow its logs
+#
+# Serves a broker on nats://localhost:4222 (the default FQ_NATS_URL) with
+# JetStream enabled, plus a monitoring endpoint on http://localhost:8222.
+# JetStream data persists in the `nats-data` volume across restarts.
+services:
+  nats:
+    image: nats:latest
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    ports:
+      - "4222:4222" # client connections (FQ_NATS_URL)
+      - "8222:8222" # monitoring / health
+    volumes:
+      - nats-data:/data
+    restart: unless-stopped
+
+volumes:
+  nats-data:

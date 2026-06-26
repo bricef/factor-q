@@ -25,7 +25,12 @@ use uuid::Uuid;
 const DEFAULT_CONFIG_PATH: &str = "fq.toml";
 
 #[derive(Parser)]
-#[command(name = "fq", about = "factor-q agent runtime")]
+#[command(
+    name = "fq",
+    about = "factor-q agent runtime",
+    version,
+    long_version = env!("FQ_VERSION_LONG")
+)]
 struct Cli {
     #[command(flatten)]
     global: GlobalArgs,
@@ -128,6 +133,12 @@ enum Commands {
     Workers {
         #[command(subcommand)]
         command: WorkerCommands,
+    },
+    /// Print version and build information
+    Version {
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -334,8 +345,39 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             } => workers_list(&cli.global, stale_only, alive_only, json).await?,
             WorkerCommands::Show { id, json } => workers_show(&cli.global, &id, json).await?,
         },
+        Commands::Version { json } => print_version(json),
     }
     Ok(())
+}
+
+/// Build-time version metadata, emitted by `build.rs`.
+const FQ_GIT_SHA: &str = env!("FQ_GIT_SHA");
+const FQ_BUILD_EPOCH: &str = env!("FQ_BUILD_EPOCH");
+const FQ_TARGET: &str = env!("FQ_TARGET");
+
+/// Print version + build information: semver, commit, build date, target.
+fn print_version(json: bool) {
+    let build_date = FQ_BUILD_EPOCH
+        .parse::<i64>()
+        .ok()
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    if json {
+        let info = serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "commit": FQ_GIT_SHA,
+            "build_date": build_date,
+            "target": FQ_TARGET,
+        });
+        println!("{}", serde_json::to_string_pretty(&info).unwrap());
+    } else {
+        println!("fq {}", env!("CARGO_PKG_VERSION"));
+        println!("  commit:      {FQ_GIT_SHA}");
+        println!("  build date:  {build_date}");
+        println!("  target:      {FQ_TARGET}");
+    }
 }
 
 /// Template files embedded in the binary. Each entry is `(destination,
@@ -343,12 +385,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 const FQ_TOML_TEMPLATE: &str = include_str!("templates/fq.toml");
 const README_TEMPLATE: &str = include_str!("templates/README.md");
 const SAMPLE_AGENT_TEMPLATE: &str = include_str!("templates/sample-agent.md");
+const DOCKER_COMPOSE_TEMPLATE: &str = include_str!("templates/docker-compose.yml");
 
 /// Initialise a new factor-q project in the current working directory.
 ///
-/// Writes three files (plus an `agents/` directory):
+/// Writes four files (plus an `agents/` directory):
 /// - `fq.toml`
 /// - `README.md`
+/// - `docker-compose.yml` (NATS with JetStream)
 /// - `agents/sample-agent.md`
 ///
 /// Errors and exits if any of the target files already exist, unless
@@ -359,6 +403,7 @@ fn init_project(force: bool) -> anyhow::Result<()> {
     let readme = cwd.join("README.md");
     let agents_dir = cwd.join("agents");
     let sample_agent = agents_dir.join("sample-agent.md");
+    let docker_compose = cwd.join("docker-compose.yml");
 
     // Detect conflicts up front so the user sees all of them at once
     // rather than fixing them one by one.
@@ -372,6 +417,9 @@ fn init_project(force: bool) -> anyhow::Result<()> {
         }
         if sample_agent.exists() {
             conflicts.push(&sample_agent);
+        }
+        if docker_compose.exists() {
+            conflicts.push(&docker_compose);
         }
         if !conflicts.is_empty() {
             let listing = conflicts
@@ -390,6 +438,7 @@ fn init_project(force: bool) -> anyhow::Result<()> {
         .with_context(|| format!("failed to create {}", agents_dir.display()))?;
     write_file(&fq_toml, FQ_TOML_TEMPLATE)?;
     write_file(&readme, README_TEMPLATE)?;
+    write_file(&docker_compose, DOCKER_COMPOSE_TEMPLATE)?;
     write_file(&sample_agent, SAMPLE_AGENT_TEMPLATE)?;
 
     println!("Initialised factor-q project in {}", cwd.display());
@@ -397,12 +446,13 @@ fn init_project(force: bool) -> anyhow::Result<()> {
     println!("Created:");
     println!("  fq.toml");
     println!("  README.md");
+    println!("  docker-compose.yml");
     println!("  agents/");
     println!("  agents/sample-agent.md");
     println!();
     println!("Next steps:");
-    println!("  1. Start a NATS server with JetStream enabled");
-    println!("     (see README.md for the deployment guide link)");
+    println!("  1. Start NATS (JetStream) in the background:");
+    println!("     docker compose up -d");
     println!("  2. Export your LLM provider API key, e.g.:");
     println!("     export ANTHROPIC_API_KEY='sk-ant-...'");
     println!("  3. Trigger the sample agent:");

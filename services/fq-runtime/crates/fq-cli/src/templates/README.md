@@ -3,25 +3,29 @@
 This directory was initialised with `fq init`. It contains:
 
 - `fq.toml` — factor-q runtime configuration
+- `docker-compose.yml` — NATS (with JetStream) for local development
 - `agents/` — agent definitions (Markdown with YAML frontmatter)
 - `agents/sample-agent.md` — a minimal working agent to test the pipeline
 
 ## Prerequisites
 
 1. **NATS with JetStream** — factor-q publishes all events through a
-   NATS server and expects JetStream to be enabled.
+   NATS server and expects JetStream to be enabled. A ready-to-use
+   `docker-compose.yml` is included; start it with `docker compose up -d`.
 2. **LLM provider API key** — export the key for any provider your
    agents target, for example:
    ```sh
    export ANTHROPIC_API_KEY='sk-ant-...'
    ```
 
-See the [deployment guide][deployment] for full setup details including
-running NATS locally with Docker Compose.
+See the [deployment guide][deployment] for full setup details.
 
 ## Quick start
 
 ```sh
+# Start NATS (JetStream) in the background
+docker compose up -d
+
 # List the agents this project defines
 fq agent list
 
