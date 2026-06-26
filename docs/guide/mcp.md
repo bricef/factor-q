@@ -12,8 +12,10 @@ For the exact frontmatter syntax, see
 
 ## What you get
 
-An MCP server is a separate process factor-q launches and speaks MCP
-to (over stdio). Depending on what the server advertises, an agent can:
+An MCP server is reached either as a child process over **stdio**
+(`command:`) or as a remote server over **Streamable HTTP** (`url:` —
+the 2025-11-25 spec remote transport). Depending on what the server
+advertises, an agent can:
 
 | Capability | Direction | What it is |
 |---|---|---|
@@ -138,6 +140,35 @@ mcp:
     elicitation: true
 ```
 
+## Validation: redaction, request policy, evaluators
+
+The inbound request and outbound result of every sampling / elicitation
+exchange pass through a validation seam you configure **per server** (off
+by default). Two layers:
+
+- **Synchronous policies** — `redact_secrets` strips high-entropy,
+  secret-looking tokens from a sampled result or elicited value;
+  `reject_sensitive_fields` declines an elicitation that asks for a
+  credential-shaped field (`api_key`, `password`, …).
+- **Evaluator gates** — ordered `input_validation` / `output_validation`
+  lists run with AND semantics (the first deny short-circuits; the
+  exchange proceeds only if all approve). Each entry is `approve_all`,
+  `deny_all`, or `llm` — a model judge, optionally on a cheaper model
+  (`{ llm: claude-haiku-4-5 }`) — that returns an approve/deny verdict
+  and fails closed.
+
+```yaml
+mcp:
+  - server: research
+    command: my-research-server
+    sampling:
+      redact_secrets: true
+      output_validation: [{ llm: claude-haiku-4-5 }, deny_all]
+```
+
+See [Writing Agent Definitions → Capability grants](agent-definitions.md#capability-grants)
+for the full syntax.
+
 ## Roots — advertising the workspace scope
 
 `roots/list` asks which filesystem roots the agent's workspace covers.
@@ -159,11 +190,14 @@ mcp:
 ## Utilities
 
 The client handles the cross-cutting machinery real servers rely on:
-**logging** (`notifications/message` folded into the runtime's tracing
-at the matching level), **progress** (`notifications/progress` for
-long-running tool calls), **cancellation** (in-flight calls can be
-cancelled, sending `notifications/cancelled`), and **pagination**
-(every `list` follows cursors to completion).
+**logging** (`notifications/message` folded into tracing *and* bridged
+onto the event bus as a daemon-scoped `mcp.log` event), **progress**
+(`notifications/progress` for long-running tool calls), **cancellation**
+(in-flight calls send `notifications/cancelled`), and **pagination**
+(every `list` follows cursors to completion). The daemon **drains every
+shared server's notification stream**; a `tools/list_changed`
+re-discovers and installs a refreshed tool registry for the next
+invocation ([ADR-0020](../adrs/accepted/0020-mcp-notification-handling.md)).
 
 ## Lifecycle
 
@@ -175,13 +209,17 @@ cancelled, sending `notifications/cancelled`), and **pagination**
 
 ## Current limits
 
-- A single grant-bearing server per invocation is wired today; granting
-  several servers server-initiated capabilities in one agent is a
-  planned extension.
-- The validation seam (inbound request / outbound result) ships with a
-  permissive default; configurable per-agent validators (redaction,
-  policy) are planned.
+- **No mid-invocation tool hot-swap.** A `tools/list_changed` refreshes
+  the registry for the *next* invocation; an in-flight invocation keeps
+  the tool set it started with
+  ([ADR-0020](../adrs/accepted/0020-mcp-notification-handling.md)).
+- **`includeContext` is forced to `none`** — sampling does not yet inject
+  the agent's own context into a server's prompt.
+- **Roots advertise `file://` only**; audio prompt content awaits an
+  upstream rmcp fix.
 
-See [ADR-0017](../adrs/accepted/0017-mcp-human-in-the-loop.md) (policy)
-and [ADR-0018](../adrs/accepted/0018-mcp-server-initiated-execution.md)
-(execution model) for the design rationale.
+See [ADR-0017](../adrs/accepted/0017-mcp-human-in-the-loop.md) (policy),
+[ADR-0018](../adrs/accepted/0018-mcp-server-initiated-execution.md)
+(execution model), and
+[ADR-0020](../adrs/accepted/0020-mcp-notification-handling.md)
+(notification handling) for the design rationale.

@@ -202,9 +202,19 @@ mcp:
       LOG_LEVEL: info
 ```
 
-Each server runs as a child process factor-q speaks MCP to. The
-server's **tools** become available exactly like built-ins — list the
-ones you want in `tools:` by their own names (MCP tool names are not
+Each server runs as a **stdio child process** (`command:`) or, with a
+`url:` instead, a remote server reached over **Streamable HTTP** (the
+2025-11-25 spec remote transport) — exactly one of `command` / `url`
+per server:
+
+```yaml
+mcp:
+  - server: remote-tools
+    url: https://tools.internal/mcp   # Streamable HTTP; no command/args/env
+```
+
+The server's **tools** become available exactly like built-ins — list
+the ones you want in `tools:` by their own names (MCP tool names are not
 prefixed):
 
 ```yaml
@@ -279,6 +289,30 @@ mcp:
   `fs_read`/`fs_write` paths (advertised ⊆ the sandbox boundary) and
   tell a cooperative server its intended scope — the sandbox itself is
   the actual wall.
+
+The inbound request and outbound result of each granted sampling /
+elicitation exchange can be **validated** — expand the boolean flag into
+a table (still off by default):
+
+```yaml
+mcp:
+  - server: research
+    command: my-research-server
+    sampling:
+      redact_secrets: true            # strip secret-looking tokens from the result
+      output_validation: [{ llm: claude-haiku-4-5 }, deny_all]
+    elicitation:
+      reject_sensitive_fields: true   # decline credential-shaped fields (api_key, password, …)
+      input_validation: [approve_all]
+```
+
+- `redact_secrets` / `reject_sensitive_fields` — synchronous redaction /
+  request-policy gates.
+- `input_validation` / `output_validation` — ordered evaluator lists run
+  with AND semantics (the first deny short-circuits; proceeds only if all
+  approve). Each entry is `approve_all`, `deny_all`, or `llm` — a model
+  judge, optionally on a cheaper model via `{ llm: <model-id> }`, that
+  fails closed.
 
 A server granted any capability runs as its **own process per
 invocation** (so its requests attribute to the right invocation's
