@@ -1,7 +1,12 @@
 # ADR-0013: Memory as an MCP Service
 
 ## Status
-Accepted
+Accepted. Refined by
+[ADR-0021](0021-mcp-cost-control-and-memory-boundary.md), which retires
+the forcing-function rationale (the MCP client now exists), reaffirms the
+decision on dependency-isolation grounds, and adds the `_meta` cost
+protocol (deferring the embedding boundary to a future content-addressed
+storage design).
 
 ## Context
 Agents need persistent memory that outlasts a single invocation — the ability to store what they've learned and retrieve relevant context in future runs. The architecture document identifies three memory layers: working memory (in-context), long-term per-agent memory, and collective memory across agents.
