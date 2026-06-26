@@ -658,9 +658,14 @@ HITL model; close the plan.
       `0014` number clash + unfiled root ADRs for a cleanup pass.
 - [x] Example agent `agents/examples/mcp-grants.md` demonstrates the
       grants end-to-end (validated by the registry example-load test).
-- [ ] Move this plan to `docs/plans/closed/` with a closing summary +
-      commit list. (Ready: Steps 1–8 done, docs landed; the remaining
-      items are backlog, non-blocking. Deferred to a deliberate close.)
+- [x] Move this plan to `docs/plans/closed/` with a closing summary +
+      commit list. **Closed 2026-06-12** alongside
+      [`2026-06-04-mcp-completion.md`](../closed/2026-06-04-mcp-completion.md),
+      which finished this plan's deferred tail (sampling/elicitation
+      validation, multi-server, notification drain, logs→bus, Streamable
+      HTTP). The full 2025-11-25 surface — resources, prompts, sampling,
+      elicitation, roots, utilities — is exercised against the pinned
+      everything server over both stdio and Streamable HTTP.
 
 ## Cross-cutting concerns
 

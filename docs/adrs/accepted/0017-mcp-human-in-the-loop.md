@@ -6,7 +6,7 @@ Accepted (2026-05-28)
 ## Context
 
 Bringing factor-q's MCP client up to full spec (see
-[`2026-05-28-mcp-client-full-spec.md`](../../plans/active/2026-05-28-mcp-client-full-spec.md))
+[`2026-05-28-mcp-client-full-spec.md`](../../plans/closed/2026-05-28-mcp-client-full-spec.md))
 means honouring MCP's *server-initiated* primitives — **sampling**
 (`sampling/createMessage`), **roots** (`roots/list`), and
 **elicitation** (`elicitation/create`) — and its user-controlled

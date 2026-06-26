@@ -38,7 +38,7 @@ discovery is the *structural* sibling of skill discovery.
 
 **Out of scope:** this is **not** part of the MCP-client
 full-spec plan
-([`2026-05-28-mcp-client-full-spec.md`](../plans/active/2026-05-28-mcp-client-full-spec.md)).
+([`2026-05-28-mcp-client-full-spec.md`](../plans/closed/2026-05-28-mcp-client-full-spec.md)).
 It depends on the signature registry existing and on a real
 population of signatures to search — neither of which is true
 today (single-agent runtime; sub-agents unbuilt). It is captured

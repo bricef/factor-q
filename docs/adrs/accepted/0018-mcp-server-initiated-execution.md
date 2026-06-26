@@ -210,6 +210,6 @@ result. No separate recovery story for sampling.
 - [ADR-0004](./0004-cost-controls-from-day-one.md) — cost
   attribution and the budget-subtree bound that sampling spend
   flows through.
-- [MCP full-spec plan](../../plans/active/2026-05-28-mcp-client-full-spec.md)
+- [MCP full-spec plan](../../plans/closed/2026-05-28-mcp-client-full-spec.md)
   — Step 5 (sampling) and Step 6 (roots + elicitation) build on
   this.

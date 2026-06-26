@@ -127,7 +127,7 @@ Key design questions:
   children, or are they independent? **(resolved below)**
 
 **Decided 2026-05-28** (surfaced in the MCP prompt-as-subagent
-discussion — see `docs/plans/active/2026-05-28-mcp-client-full-spec.md`
+discussion — see `docs/plans/closed/2026-05-28-mcp-client-full-spec.md`
 Step 4):
 
 - **The parent owns the child's definition.** A subagent is
@@ -419,8 +419,9 @@ another SQLite query once the need arises.
 
 ### MCP server logs and progress on the operator surface
 **Source:** MCP-completion plan
-([`active/2026-06-04-mcp-completion.md`](active/2026-06-04-mcp-completion.md)),
-steps B1/B2 (scope confirmed 2026-06-04).
+([`closed/2026-06-04-mcp-completion.md`](closed/2026-06-04-mcp-completion.md)),
+steps B1/B2. B1/B2 shipped (the drain + the `mcp.log` bus event); the
+richer operator-facing surfacing is what remains here.
 
 Connected MCP servers emit `notifications/message` (logs) and
 `notifications/progress`. The MCP-completion plan drains the
@@ -667,7 +668,7 @@ work and likely after step 8 (archive hand-off), so the
 
 ### Audio content in MCP prompt messages (blocked on rmcp)
 **Source:** MCP full-spec plan Step 4
-(`docs/plans/active/2026-05-28-mcp-client-full-spec.md`);
+(`docs/plans/closed/2026-05-28-mcp-client-full-spec.md`);
 `crate::prompt::PromptContent::Audio`,
 `crate::mcp::prompt_content_from_rmcp`.
 
@@ -699,7 +700,7 @@ bump (it unblocked the `resource-prompt` integration tests).
 ## MCP full-spec follow-ups (flagged 2026-06-01)
 
 **Source:** Steps 5–7 of the MCP full-spec plan
-(`docs/plans/active/2026-05-28-mcp-client-full-spec.md`); commits
+(`docs/plans/closed/2026-05-28-mcp-client-full-spec.md`); commits
 `f85a965` (sampling), `c8eaa4c` / `4bfec85` (roots / elicitation),
 `f18d1e1` / `4a646d7` / `b5bcd02` (utilities). Each capability shipped
 as a *mechanism + grant + tests*; these are the pieces deliberately
@@ -707,18 +708,18 @@ left for later. The grant-parsing + daemon-enforcement wiring lives in
 **Step 8** of that plan; the items below are polish / robustness /
 feature-gated work that does not block the plan closing.
 
-**Status (2026-06-04):** most of this list is now owned by a dedicated
-completion plan,
-[`2026-06-04-mcp-completion.md`](active/2026-06-04-mcp-completion.md),
-which takes the in-scope items to a finished state — validation
+**Status (2026-06-12): the in-plan items shipped.** The dedicated
+completion plan
+[`2026-06-04-mcp-completion.md`](closed/2026-06-04-mcp-completion.md)
+(now **closed**) took the in-scope items to done — validation
 (incl. **config-driven validators**), `origin` on the trace,
-multi-server channel, daemon notification→action wiring, logs→bus, and
-the paginating/mutating mock — and adds **Streamable HTTP transport**
-for full 2025-11-25 spec compliance. **Explicitly deferred there, kept
-here for the future:** `includeContext` injection + inbound redact
-chain, and roots non-`file://` schemes (plus audio-in-prompts under
-*MCP client gaps* above, blocked on rmcp). The bullets below are tagged
-**[in plan]** / **[deferred]** accordingly.
+multi-server channel, daemon notification drain + logs→bus, and the
+paginating/mutating mock — and added **Streamable HTTP transport** for
+full 2025-11-25 spec compliance. The **[in plan]** bullets below are
+therefore **done**; the **[deferred]** ones remain open: `includeContext`
+injection + inbound redact chain, roots non-`file://` schemes, the
+mid-invocation hot-swap + cancellation trigger (ADR-0020), and
+audio-in-prompts (under *MCP client gaps* above, blocked on rmcp).
 
 - [ ] **[in plan] `origin` on the `llm.request` / `llm.response` trace.** Today
       `LlmCallOrigin` (agent-turn vs `sampling` / `elicitation{server}`)

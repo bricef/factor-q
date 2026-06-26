@@ -1,9 +1,39 @@
 # Plan: Finish the MCP integration (hardening, config-driven validation, Streamable HTTP)
 
 **Date**: 2026-06-04
-**Status**: Active
+**Status**: Closed (2026-06-12)
 **Owns the deferred tail of**:
 [`2026-05-28-mcp-client-full-spec.md`](2026-05-28-mcp-client-full-spec.md)
+
+## Closing summary (2026-06-12)
+
+All in-scope steps shipped on `main`:
+
+- **A1 — config-driven validation.** Sync validators (`HighEntropyRedactor`
+  redaction, `ValidateRequestPolicy` request-policy) + an async evaluator
+  sequence (`approve_all` / `deny_all` / `llm`, AND / short-circuit, the
+  LLM judge on an optional cheaper model) over `input_validation` /
+  `output_validation` for sampling and elicitation, declared per server.
+  (`114deb6`, `091ef46`, `4009262`, `f25097d`, `c0cc3f0`, `1c38128`,
+  `4f633b5`, `e326de3`)
+- **A2 — per-field elicitation schema validation** (type / length /
+  format / enum / range; rejects unknown fields). (`d11204e`)
+- **B3 — `origin` on the llm.request / llm.response trace.** (`332ca8f`)
+- **C1 — multi-server server-initiated channel.** (`986c5b2`)
+- **D1 — in-process mock server** (pagination + mutation tests). (`b0d63cd`)
+- **B1 — daemon notification drain**; tools refresh between invocations
+  ([ADR-0020](../../adrs/accepted/0020-mcp-notification-handling.md)).
+  (`bb5a618`, `0229e85`)
+- **B2 — MCP server logs → event bus** (`mcp.log`). (`10d3298`)
+- **E3 — Streamable HTTP transport** + `url:` frontmatter (the 2025-11-25
+  remote transport). (`0721997`, `ecf4b78`)
+- Guide updates (`18118e0`).
+
+**Deferred (captured, not regressions):** mid-invocation tool hot-swap +
+cancellation trigger (ADR-0020), `includeContext` injection, non-`file://`
+roots, audio-in-prompts (upstream rmcp), legacy SSE — all tracked in
+`docs/plans/backlog.md` → *MCP full-spec follow-ups*. This closes the MCP
+pillar of Phase 2.
 
 ## Goal
 
