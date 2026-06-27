@@ -9,7 +9,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+# Business Source License 1.1 — source-available, converts to Apache-2.0
+# four years after each release. See /LICENSE for the parameters.
+license = "BUSL-1.1"
 description = "factor-q agent runtime"
 repository = "https://github.com/bricef/factor-q"
 
