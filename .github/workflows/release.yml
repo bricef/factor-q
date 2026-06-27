@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+# Needs write access to create the release and upload its assets.
+permissions:
+  contents: write
+
+# Like ci.yml, every job drives its work through a `just` target so the
+# release path stays isomorphic with local dev. Only toolchain/runner
+# setup and artifact transfer use actions directly.
+jobs:
+  check-version:
+    name: Tag matches Cargo version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+      - run: just check-version "${GITHUB_REF_NAME}"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/fq-runtime
+      - uses: extractions/setup-just@v3
+      # musl needs its C toolchain for the bundled SQLite.
+      - if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: just build-release ${{ matrix.target }}
+        env:
+          # Target-scoped: each only applies to its matching musl target,
+          # and is ignored by the darwin build.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+      - run: just package ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+
+  publish:
+    name: Publish draft release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: just publish-release "${GITHUB_REF_NAME}"
+        env:
+          GH_TOKEN: ${{ github.token }}

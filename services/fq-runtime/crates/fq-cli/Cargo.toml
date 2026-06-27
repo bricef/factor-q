@@ -2,10 +2,21 @@
 name = "fq-cli"
 version.workspace = true
 edition.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "fq"
 path = "src/main.rs"
+
+# cargo-binstall: fetch the pre-built `fq` binary from GitHub Releases
+# instead of compiling. Must match the release artifact naming (see
+# scripts/package.sh and .github/workflows/release.yml).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/fq-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "fq"
 
 [dependencies]
 fq-runtime = { path = "../fq-runtime" }

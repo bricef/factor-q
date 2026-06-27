@@ -1,0 +1,2 @@
+# Release packaging output (`just package` / scripts/package.sh).
+/dist/

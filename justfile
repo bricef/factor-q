@@ -103,6 +103,31 @@ fq *args:
 lint-docs *args:
     npx --yes markdownlint-cli2@0.22.1 {{args}} "docs/adrs/**/*.md"
 
+# === Release ===
+
+# Assert the release tag (vX.Y.Z) matches the workspace Cargo version.
+check-version tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo_version="$(grep -m1 '^version = ' {{runtime_dir}}/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+    if [ "{{tag}}" != "v${cargo_version}" ]; then
+        echo "release tag {{tag}} != Cargo version v${cargo_version}" >&2
+        exit 1
+    fi
+    echo "release tag {{tag}} matches Cargo version v${cargo_version}"
+
+# Build the release `fq` binary for a target triple.
+build-release target:
+    cd {{runtime_dir}} && cargo build --release --target {{target}} --bin fq
+
+# Package the built `fq` binary for a target into dist/ (.tar.gz + .sha256).
+package target:
+    bash scripts/package.sh {{target}}
+
+# Create a draft GitHub release for a tag from the dist/ artifacts.
+publish-release tag:
+    gh release create {{tag}} --draft --generate-notes ./dist/*
+
 # === Full workflows ===
 
 # Start infrastructure and build all services

@@ -10,6 +10,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "factor-q agent runtime"
+repository = "https://github.com/bricef/factor-q"
 
 # Workspace-wide lint policy. Every member opts in via
 # `[lints] workspace = true` in its Cargo.toml. The intent: a
