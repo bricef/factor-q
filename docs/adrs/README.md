@@ -30,6 +30,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0019](accepted/0019-skill-format.md) | Skill format and discovery |
 | [0020](accepted/0020-mcp-notification-handling.md) | MCP server notifications — drained in the daemon, tools refresh between invocations |
 | [0021](accepted/0021-mcp-cost-control-and-memory-boundary.md) | Cost control for MCP services via `_meta` (budget hint + cost report); memory stays MCP; embedding boundary deferred to the storage design |
+| [0022](accepted/0022-binary-distribution-and-licensing.md) | Binary distribution (musl/Apple Silicon release matrix, install.sh, cargo-binstall) and BSL 1.1 licensing |
 
 ## Draft
 

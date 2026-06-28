@@ -69,6 +69,32 @@ factor-q/
 └── README.md
 ```
 
+## Install
+
+Download a pre-built `fq` binary (Linux x86_64/aarch64, Apple Silicon macOS):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/install.sh | sh
+```
+
+Or build from source with the Rust toolchain:
+
+```sh
+cargo install --git https://github.com/bricef/factor-q fq-cli
+```
+
+Then scaffold a project — `fq init` writes a `docker-compose.yml`, so a NATS broker is one command away:
+
+```sh
+fq init                                  # fq.toml, agents/, docker-compose.yml
+docker compose up -d                     # NATS (JetStream)
+export ANTHROPIC_API_KEY='sk-ant-...'
+fq trigger sample-agent "Hello."         # run the agent
+fq events tail                           # (another terminal) watch events
+```
+
+On macOS, if you download the tarball in a browser rather than via the installer, clear the quarantine flag once: `xattr -d com.apple.quarantine ./fq`.
+
 ## Getting started
 
 See [QUICKSTART.md](QUICKSTART.md) for the full step-by-step path from a fresh clone to a running agent with event-trail inspection. The short version:
@@ -89,3 +115,7 @@ For development setup and test tiers, see [CONTRIBUTING.md](CONTRIBUTING.md).
 - [Crush](research/crush.md) — architecture analysis
 - [OpenCode](research/opencode.md) — architecture analysis
 - [open-agent.io](https://open-agent.io/)
+
+## License
+
+factor-q is licensed under the [Business Source License 1.1](LICENSE). Personal, non-commercial use by individuals is free; any organizational or commercial use requires a commercial license — contact `licensing@factorq.top`. Each release converts to Apache-2.0 four years after publication.
