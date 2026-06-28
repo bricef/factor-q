@@ -146,14 +146,22 @@ retrieval concern. They are never the same unit.
 
 ### Deployment
 
-- **Service + SDK.** The store/index runs as a standalone, concurrency-safe
-  service; consumers (the memory and skill MCP servers) use a client SDK.
-  We may ship it inside a single binary at first, but the **module
-  boundaries are kept clean so it extracts cleanly into its own service**.
-- **Polyglot embedders.** Embedders run as **plugins**, potentially in
-  different languages (Python's ecosystem, or Rust `fastembed`/`candle`),
-  behind a defined plugin protocol (fork F7). A single-binary all-Rust
-  build is the **reference implementation**.
+- **Service over `tarpc`.** The store/index runs as a standalone,
+  concurrency-safe service whose **`tarpc` trait *is* the contract** (no
+  IDL, no codegen). The *same trait* is a direct in-process call in the
+  single-binary build and a `tarpc` RPC once extracted — one contract, one
+  auth dataflow, no schema duplication. Consumers (the memory and skill MCP
+  servers) are Rust. Blob access is **range-based unary** (S3-like), not RPC
+  streaming.
+- **NATS event spine.** The service emits events (`object.stored`,
+  `granted`, …) to NATS for the grant projection, the embed-on-store
+  pipeline, and audit
+  ([ADR-0011](../accepted/0011-event-bus-and-persistence.md)); bulk bytes go
+  over the service API, not NATS.
+- **Polyglot plugins via JSON-RPC/stdio.** Embedders and extractors run as
+  **plugins over JSON-RPC on stdio** — no codegen, polyglot (Python, or Rust
+  `fastembed`/`candle`), reusing the MCP stdio child-process pattern. A
+  single-binary all-Rust build is the reference implementation.
 
 ### Design stance
 
@@ -229,25 +237,23 @@ Access control section above.
 Lean: define a **pipeline** interface (so dense-only is the v1
 implementation of a retrieve→fuse→rerank shape). Needs an API-design pass.
 
-### F6 — Service transport · high
+### F6 — Service transport · RESOLVED
 
-- **(a) NATS** — consistent with the event bus
-  ([ADR-0011](../accepted/0011-event-bus-and-persistence.md)); streaming
-  large blobs over it needs care.
-- **(b) gRPC** — natural streaming, strong typing.
-- **(c) HTTP** — simplest, S3-like.
+**Decision:** **`tarpc`** for the service API — a code-first Rust RPC where
+the service *trait is the contract* (no `.proto`, no codegen). The same
+trait is a direct call in-process and a `tarpc` RPC when extracted; blob
+access is range-based unary (S3-like). **NATS remains the event spine**
+(store/grant/delete events; bulk bytes do not cross NATS). gRPC/tonic was
+rejected for its build-time codegen and proto-evolution cost — its only
+edge, a language-neutral IDL, is unneeded while consumers are Rust. Escape
+hatch: a JSON-RPC/HTTP facade if polyglot *consumers* are ever required.
 
-Lean: undecided; gRPC suits streaming, NATS suits ecosystem fit. Tie to F7.
+### F7 — Embedder / extractor plugin protocol · RESOLVED
 
-### F7 — Embedder / extractor plugin protocol · high
-
-- **(a) Subprocess (stdio) protocol.**
-- **(b) gRPC plugin.**
-- **(c) Reuse the polyglot-tool boundary**
-  ([ADR-0015](../accepted/0015-rust-runtime-polyglot-tools.md)).
-
-Lean: a defined plugin contract so Python and Rust embedders both work;
-mechanism tied to F6.
+**Decision:** **JSON-RPC over stdio** for embedder and extractor plugins —
+no codegen, polyglot (Python or Rust), reusing the MCP stdio child-process
+pattern the runtime already runs (minimizing format/standard
+proliferation). The service manages plugin process lifecycle.
 
 ### F8 — Storage CDC algorithm · low
 
