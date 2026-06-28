@@ -8,6 +8,7 @@
 set positional-arguments
 
 runtime_dir := "services/fq-runtime"
+store_dir := "services/fq-store"
 infra_dir := "infrastructure"
 
 # Show available recipes
@@ -54,6 +55,7 @@ test *args:
 # Run the Rust quality gate (fmt-check, clippy, test).
 rust-ci:
     cd {{runtime_dir}} && just ci
+    cd {{store_dir}} && just ci
 
 # CI runs the two halves as separate jobs that each invoke a just target
 # (see .github/workflows/ci.yml).

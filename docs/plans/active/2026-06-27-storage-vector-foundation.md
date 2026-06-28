@@ -5,8 +5,13 @@
 Active (2026-06-27). Implements the design in
 [ADR-0023](../../adrs/accepted/0023-storage-and-vector-foundation.md) +
 [ADR-0024](../../adrs/accepted/0024-separate-databases-storage-foundation.md).
-Design forks and implementation decisions are resolved; ready to build,
-starting with M1a.
+Design forks and implementation decisions are resolved.
+
+**Progress:** M1a (the CAS) is implemented and conformance-tested in
+`services/fq-store` — the `ContentStore` trait, the BLAKE3/FastCDC
+filesystem backend, and the reusable property-based conformance suite (see
+`docs/guide/implementing-a-storage-backend.md`). Next: M1b (storage index
+DB).
 
 ## Goal
 

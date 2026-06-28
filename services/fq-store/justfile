@@ -1,0 +1,18 @@
+# fq-store build tasks (content-addressed storage + index service).
+
+set positional-arguments
+
+# Check formatting
+fmt-check:
+    cargo fmt --check
+
+# Clippy lints (Cargo.toml denies all warnings)
+lint:
+    cargo clippy --all-targets
+
+# Run tests, or forward cargo args (e.g. `just test conformance`)
+test *args:
+    cargo test "$@"
+
+# All quality checks — no external services required (pure filesystem CAS).
+ci: fmt-check lint test
