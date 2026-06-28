@@ -2,10 +2,11 @@
 
 ## Status
 
-Draft for review (2026-06-27). Implements the design in
+Active (2026-06-27). Implements the design in
 [ADR-0023](../../adrs/accepted/0023-storage-and-vector-foundation.md) +
 [ADR-0024](../../adrs/accepted/0024-separate-databases-storage-foundation.md).
-All design forks are closed; this plan sequences the build.
+Design forks and implementation decisions are resolved; ready to build,
+starting with M1a.
 
 ## Goal
 
@@ -50,24 +51,37 @@ Each milestone is independently shippable and testable.
 
 ### M1 — Layer-1 content store (CAS) + storage index + GC
 
-**Deliverable:** a working content store — `put`/`get`/range-read/`name`/
-`delete` with content dedup and functioning GC.
+Built as three independently testable, separately useful components.
 
-**Build:**
+#### M1a — Content-addressed store (CAS)
 
-- The `ContentStore` `tarpc` trait — the contract (names, objects,
-  streaming write, range read, delete).
-- Filesystem backend: FastCDC chunking → BLAKE3 block hashes → blocks as
-  sharded files; objects as a Merkle tree of blocks; object CID = BLAKE3
-  root. Streaming write (chunk on the fly), range read (assemble from
-  blocks).
-- Storage-index DB (SQLite #1): names → CID + version history, object →
-  blocks, the bidirectional index, object + block refcounts.
-- GC: two-level refcounting (transactional with name updates), a pluggable
-  `Collector` trait, and the background reconciliation-audit worker.
-- A new workspace crate (placement is an open question, below).
+**Deliverable:** a content-addressed blob store — write bytes → CID, read
+by CID (+ range), with content dedup. Useful standalone, and it is the pure
+**K/V** access path for files that don't need indexing.
 
-**Depends on:** nothing.
+**Build:** the `ContentStore` `tarpc` trait (the contract); filesystem
+backend — FastCDC chunking → BLAKE3 block hashes → blocks as sharded files;
+objects as a Merkle tree of blocks (object CID = BLAKE3 root); streaming
+write (chunk on the fly) and range read (assemble from blocks).
+
+#### M1b — Storage index DB
+
+**Deliverable:** the mutable name layer over M1a — names → CID + version
+history, with the bidirectional index and refcounts.
+
+**Build:** the storage-index DB (SQLite #1); name resolution (current +
+history); the `name → object → block` and reverse indexes; object + block
+refcount maintenance, transactional with name updates.
+
+#### M1c — Garbage collection
+
+**Deliverable:** unreferenced objects/blocks are reclaimed online, with the
+store available throughout.
+
+**Build:** two-level reference counting over M1b's indexes; a pluggable
+`Collector` trait; the background reconciliation-audit worker.
+
+**M1 depends on:** nothing (M1b builds on M1a; M1c on M1b).
 
 ### M2 — Access control (grants + capability tokens)
 
@@ -78,8 +92,10 @@ default-deny cross-agent; capability tokens minted and verified.
 
 - Grant events on NATS (`granted` / `revoked` / `delegated`) + their
   schemas; the grant projection DB (SQLite #2), rebuildable from the log.
-- Capability token: format, mint (from the projection), verify — the
-  uniform mint→verify dataflow used in-process now and distributed later.
+- Capability tokens (**biscuit**): mint from the projection (private key),
+  verify at the op boundary (public key only), with Datalog authorization
+  and offline attenuation — the uniform mint→verify dataflow in-process now
+  and distributed later.
 - `Principal` (extensible; `Agent` only), verbs
   (`read`/`write`/`delete`/`list`/`grant`), prefix grants over hierarchical
   namespaces, attenuation enforcement, default-deny.
@@ -104,8 +120,9 @@ the plugin protocol is proven.
 
 ### M4 — Layer-3 index (embedding + retrieval)
 
-**Deliverable:** store text → auto-embedded → semantic `search` returns
+**Deliverable:** store text → (opt-in) embedded → semantic `search` returns
 relevant chunks resolvable to `(name, CID, offset)`, ACL-filtered.
+Non-indexed files remain available as pure K/V.
 
 **Build:**
 
@@ -116,8 +133,8 @@ relevant chunks resolvable to `(name, CID, offset)`, ACL-filtered.
 - Vector-index DB (SQLite #3, sqlite-vec): chunks + vectors keyed by
   embedding space `(modality, model, version, chunk strategy)`; v1
   implements model-version + single-vector.
-- The embed-on-store pipeline: NATS event → embed worker → index (async,
-  eventually consistent).
+- The embed-on-store pipeline, **opt-in per object/namespace**: a NATS
+  event → embed worker → index (async, eventually consistent).
 - The `RetrievalStrategy::search` pipeline: `Retriever → Fuser → Reranker`
   with v1 = dense + passthrough + identity, and the over-fetch-N /
   truncate-to-k-after-rerank plumbing.
@@ -149,25 +166,27 @@ M3; M5 integrates all. By the end of M4 the service is functionally
 complete and Memory (#3) / Skills (#4) can start consuming it; M5 hardens
 and packages it.
 
-## Open implementation questions (resolve during the build)
+## Implementation decisions
 
-- **Crate/service placement** — a crate in the `fq-runtime` workspace
-  (in-process consumption now) vs a new `services/fq-store` from the start.
-  Leaning: a crate now with clean module boundaries, extract later (matches
-  the ADR's single-binary-extractable stance). *(M1)*
-- **Capability token format** — custom signed token vs `biscuit`
-  (Datalog-attenuable, Rust) vs macaroons vs a JWT profile. Attenuation +
-  delegation favor biscuit; weigh dependency + complexity. *(M2)*
-- **Auto-index vs opt-in indexing** — embedding *everything* on store is
-  expensive; likely **opt-in per namespace/object** (or per content type)
-  so cost is controlled (ties to ADR-0021's budget concerns). *(M4)*
-- **Reference embedding model + chunk strategy defaults** — e.g.
-  `bge-small`/`MiniLM` via `fastembed`; fixed+overlap vs recursive chunking.
-  *(M4)*
-- **Plugin vs in-process for the reference extractor/embedder** —
-  stdio-plugin from the start (proves the protocol) vs in-process Rust first
-  (simpler) with the plugin path added once. Leaning: in-process reference +
-  the plugin protocol both in M3/M4 so the seam is exercised. *(M3/M4)*
+- **Service placement: a new `services/fq-store`** — factor-q will have
+  multiple services, so the storage service is its own service from the
+  start, not folded into `fq-runtime`.
+- **Capability tokens: biscuit** (`biscuit-auth`) — offline attenuation +
+  public-key verification + Datalog authorization; matches the
+  build-for-distribution stance and accommodates the deferred groups/roles
+  as Datalog rules. *(M2)*
+- **Indexing is opt-in** per object/namespace (or content type) — embedding
+  everything on store is expensive; non-indexed files are still stored and
+  served as pure **K/V**, and indexing is requested explicitly (ties to
+  ADR-0021 budget). *(M4)*
+- **The embedder is an interface/plugin seam** — a local reference model
+  (`fastembed`, `bge-small`/`MiniLM` class) behind the embedder interface so
+  it can be reviewed/augmented/swapped later. *(M4)*
+- **Both the in-process and stdio-plugin paths are exercised** — an
+  in-process Rust reference *and* the JSON-RPC/stdio plugin protocol, so the
+  plugin seam is proven, not just the in-process path. *(M3/M4)*
+- **Chunk strategy** stays a versioned, swappable component (ADR-0023 layer
+  3); the reference default (fixed+overlap or recursive) is settled in M4.
 
 ## Deferred — captured for the future
 
