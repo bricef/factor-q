@@ -58,7 +58,7 @@ management stays in the runtime, unchanged from ADR-0013.
 ### 2. A bidirectional `_meta` cost protocol (first-party convention)
 
 The runtime and a *cooperating* (first-party) MCP server exchange cost
-information through `_meta`, namespaced under `factor-q.top/` — a domain
+information through `_meta`, namespaced under `factorq.top/` — a domain
 the project controls. (MCP reserves bare and `modelcontextprotocol.io/`
 keys and asks implementations to prefix theirs with a dot-labelled
 namespace they own, then `/`.)
@@ -66,7 +66,7 @@ namespace they own, then `/`.)
 - **Outbound — budget hint** on `CallToolRequestParams._meta`:
 
   ```jsonc
-  "_meta": { "factor-q.top/budget": { "remaining_usd": 0.042, "model": "<embed-model>" } }
+  "_meta": { "factorq.top/budget": { "remaining_usd": 0.042, "model": "<embed-model>" } }
   ```
 
   The runtime stamps every outbound tool call with the invocation's
@@ -75,7 +75,7 @@ namespace they own, then `/`.)
 - **Inbound — cost report** on `CallToolResult._meta`:
 
   ```jsonc
-  "_meta": { "factor-q.top/cost": { "usd": 0.0008, "tokens": 1200, "model": "<embed-model>" } }
+  "_meta": { "factorq.top/cost": { "usd": 0.0008, "tokens": 1200, "model": "<embed-model>" } }
   ```
 
   The runtime reads it and folds it into the invocation's cost the same
@@ -95,8 +95,8 @@ The runtime keeps these **hard** controls regardless of cooperation:
 | Control | Strength | Mechanism |
 |---|---|---|
 | Refuse the call when over budget | **hard, pre-spend** | the runtime's tool-dispatch gate (exists) — at tool-call granularity, not sub-operation |
-| Cap spend *within* a call | soft (cooperative) | `factor-q.top/budget` request `_meta` |
-| Account for what was spent | hard *if the server reports* | `factor-q.top/cost` result `_meta` |
+| Cap spend *within* a call | soft (cooperative) | `factorq.top/budget` request `_meta` |
+| Account for what was spent | hard *if the server reports* | `factorq.top/cost` result `_meta` |
 | Abort a running call | hard | `call_tool_cancellable` → `notifications/cancelled` |
 | True sub-call enforcement | hard | only when the runtime **owns** the spend (see §4) |
 
@@ -122,7 +122,7 @@ is **cost-accountable and budgetable** through §2/§3:
   is a no-op and isolation is maximal.
 - **Metered embedding API** → either the runtime owns the embed
   (cost-gated, handing the server a pre-computed vector) or the server
-  reports via `factor-q.top/cost` and is bounded post-hoc plus by the
+  reports via `factorq.top/cost` and is bounded post-hoc plus by the
   don't-dispatch gate.
 
 The storage / memory plan settles this; the `_meta` mechanism here keeps
@@ -139,8 +139,8 @@ factor-q limitation.
 
 ## Consequences
 
-- A small, documented `_meta` vocabulary — `factor-q.top/budget` (out),
-  `factor-q.top/cost` (in) — that the runtime writes on outbound tool calls
+- A small, documented `_meta` vocabulary — `factorq.top/budget` (out),
+  `factorq.top/cost` (in) — that the runtime writes on outbound tool calls
   and reads on results, plus a `CostMetadata` on `tool.result` when a
   cost is reported. (Reuses the `Meta`/`CostMetadata` types already in
   the codebase; the outbound `_meta` writer already exists for progress
@@ -150,7 +150,7 @@ factor-q limitation.
   reason to pull memory into the runtime.
 - The memory plan, when written, builds on this: a content-addressed
   storage primitive with a vector index over it, a memory MCP server
-  speaking the `factor-q.top/*` `_meta` convention, and `fq`-side wiring
+  speaking the `factorq.top/*` `_meta` convention, and `fq`-side wiring
   that stamps the budget hint and folds the cost report into the event
   bus + budget.
 - Guides track the live `_meta` convention; this ADR is the point-in-time
