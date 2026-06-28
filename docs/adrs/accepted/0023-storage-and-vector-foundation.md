@@ -2,11 +2,10 @@
 
 ## Status
 
-Draft — in progress (2026-06-27). This ADR records the agreed
-architecture for Phase 2's storage + embedding/vector foundation and
-enumerates the **open forks** to resolve step by step. Each fork is
-closed either by updating this draft or by a supplementary ADR; this ADR
-is accepted once the forks are settled.
+Accepted (2026-06-27). Records the architecture for Phase 2's storage +
+embedding/vector foundation; all ten design forks (F1–F10) are resolved
+below. Further refinements — e.g. the DB-separation question noted under
+F9 — are handled by supplementary ADRs.
 
 Foundation for [ADR-0013](../accepted/0013-memory-as-mcp-service.md)
 (memory MCP service) and the skill registry
@@ -116,8 +115,14 @@ retrieval concern. They are never the same unit.
 - **Progressive re-embedding**: backfill a new embedding space in the
   background, then flip an "active space" pointer (optionally serve both
   during transition). Old spaces become GC-eligible.
-- **Retrieval + ranking are a pluggable strategy** — naive first, refined
-  later (fork F5).
+- **Retrieval is a pluggable pipeline behind one `search`** (F5):
+  `Retriever(s) → Fuser → Reranker → top-k`. Retrievers emit explicitly
+  scored candidates (scores are retriever-local, not comparable across
+  retrievers); the Fuser reconciles them into one list (normalize /
+  rank-fuse, e.g. RRF); the Reranker re-scores jointly (cross-encoder /
+  LLM). The pipeline **over-fetches a candidate budget N ≫ k and truncates
+  to the caller's `k` *after* reranking** (N = strategy config, k = query).
+  v1 = one dense retriever + passthrough fuser + identity reranker.
 
 ### Access control
 
@@ -171,10 +176,10 @@ async shape that works the same in-process and remote — and **defer the
 hard implementations** (multimodal extraction, hybrid rerank, distributed
 GC, CDC tuning) behind the interface.
 
-## Open forks
+## Design forks (resolved)
 
-Stakes flag how much discussion each needs. "Low" = a default behind the
-interface, easily changed.
+Stakes flagged how much discussion each needed. "Low" = a default behind
+the interface, easily changed.
 
 ### F1 — Name version retention · RESOLVED
 
@@ -206,14 +211,12 @@ benchmarked later.
   future DB backend via real transactions); the audit recomputes truth from
   the indexes and corrects drift, online and off the hot path.
 
-### F3 — Content hash · low
+### F3 — Content hash · RESOLVED
 
-- **(a) BLAKE3** — crypto + tree-mode + bandwidth-bound (recommended).
-- **(b) Non-crypto + self-built Merkle** (XXH3/XXH128 per block) — marginal
-  speed, no crypto, ACL-collision risk.
-- **(c) KangarooTwelve** — Keccak tree hash, crypto, slower than BLAKE3.
-
-Lean: (a). Behind the interface, so swappable on benchmark evidence.
+**Decision: BLAKE3** — cryptographic + tree-mode (verified range reads,
+parallel hashing) + bandwidth-bound on large files; the multi-agent
+dedup+ACL surface makes collision resistance worth keeping. Swappable
+behind the CID interface.
 
 ### F4 — Grant / delegation mechanism · RESOLVED
 
@@ -227,15 +230,25 @@ namespace tree. **Roles and groups are deferred** — the `Principal`/verb
 model keeps the slot; the feature is not built in v1. Full model in the
 Access control section above.
 
-### F5 — Retrieval / ranking interface · high
+### F5 — Retrieval / ranking interface · RESOLVED
 
-- **(a) Single stage** — vector top-k + metadata filter.
-- **(b) Multi-stage pipeline** — retrieve → fuse (dense + sparse/BM25) →
-  rerank (cross-encoder).
-- **(c) Pluggable strategy DAG.**
+**Decision:** one `RetrievalStrategy::search(query) -> Vec<Hit>` that
+consumers call, implemented by a composable pipeline:
 
-Lean: define a **pipeline** interface (so dense-only is the v1
-implementation of a retrieve→fuse→rerank shape). Needs an API-design pass.
+- **`Retriever`** (dense / sparse / …) emits scored `Candidate`s; scores
+  are **retriever-local and not comparable across retrievers**.
+- **`Fuser`** collapses the set-of-sets into one list, reconciling those
+  incomparable scores (normalize / rank-fuse, e.g. RRF) and deduping.
+- **`Reranker`** re-scores jointly (cross-encoder / LLM) for precision.
+- The pipeline **over-fetches a candidate budget N and truncates to the
+  query's `k` *after* reranking** — `N` (over-fetch depth) is strategy
+  config, `k` (final count) is the caller. Taking top-k before rerank would
+  defeat the reranker.
+
+Strategy is configured per index/namespace with an optional per-call
+override. `Hit` carries a `ChunkRef` resolving to `(name, CID, offset
+range)`. v1 = dense retriever + passthrough fuser + identity reranker; the
+sparse/fusion/cross-encoder seams need no consumer change.
 
 ### F6 — Service transport · RESOLVED
 
@@ -255,34 +268,35 @@ no codegen, polyglot (Python or Rust), reusing the MCP stdio child-process
 pattern the runtime already runs (minimizing format/standard
 proliferation). The service manages plugin process lifecycle.
 
-### F8 — Storage CDC algorithm · low
+### F8 — Storage CDC algorithm · RESOLVED
 
-- **(a) FastCDC** (fast, good dedup — recommended), **(b) Rabin
-  fingerprint**, **(c) Gear/Buzhash**, **(d) fixed-size** (poor dedup).
+**Decision: FastCDC** — fast, good dedup ratios, the modern default for
+content-defined chunking; behind the store interface.
 
-Lean: (a), behind the store interface.
+### F9 — Vector engine (reference) · RESOLVED
 
-### F9 — Vector engine (reference + path) · low
+**Decision:** a clean **index interface** with a **sqlite-vec** reference
+implementation — consistent with factor-q's existing SQLite projections
+([ADR-0011](../accepted/0011-event-bus-and-persistence.md)), minimizing new
+storage tech. LanceDB (versioned, multimodal) and Qdrant (server-grade) are
+alternative implementations behind the same interface.
 
-- **(a) sqlite-vec** — embedded, simplest reference.
-- **(b) LanceDB** — embedded, multimodal + **versioned** (aligns with
-  progressive re-embedding).
-- **(c) Qdrant** — server, production.
+**Open follow-up:** whether to **separate the databases** (vectors vs
+projections vs the storage index) even under sqlite-vec — parked for a
+supplementary discussion/ADR.
 
-Lean: sqlite-vec or LanceDB for the reference; LanceDB's versioning is
-attractive. Behind the index interface.
+### F10 — Embedding-space axes · RESOLVED
 
-### F10 — Embedding-space axes for v1 · low
-
-Key vectors by `(modality, model, version, chunk strategy)`. Implement
-**model-version + single-vector** first; multimodal and multi-vector
-(ColBERT-style) later.
+**Decision:** vectors are keyed by **all four axes** `(modality, model,
+version, chunk strategy)` from the start, so new implementations never force
+a schema change. v1 *implements* `model-version + single-vector`;
+multimodal and multi-vector (ColBERT-style) are later additions to the same
+key.
 
 ## Consequences and process
 
-- This draft is the **design agenda**: forks are resolved one at a time,
-  high-stakes first (F1, F4, F5, F6/F7), folding decisions back here or
-  into supplementary ADRs. The ADR is **accepted once the forks close**.
+- All ten forks are resolved (F1–F10 above); further refinements — e.g. the
+  F9 DB-separation question — are handled by supplementary ADRs.
 - The v1 traits must already carry the expensive-to-retrofit shape
   (range/streaming, embedding-space key, ACL-on-name, async/remote-ready).
 - Once layer 1 + a minimal layer 3 exist, Memory (pillar #3) and Skills

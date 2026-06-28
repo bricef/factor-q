@@ -31,6 +31,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0020](accepted/0020-mcp-notification-handling.md) | MCP server notifications — drained in the daemon, tools refresh between invocations |
 | [0021](accepted/0021-mcp-cost-control-and-memory-boundary.md) | Cost control for MCP services via `_meta` (budget hint + cost report); memory stays MCP; embedding boundary deferred to the storage design |
 | [0022](accepted/0022-binary-distribution-and-licensing.md) | Binary distribution (musl/Apple Silicon release matrix, install.sh, cargo-binstall) and BSL 1.1 licensing |
+| [0023](accepted/0023-storage-and-vector-foundation.md) | Storage, extraction, and vector index foundation (Phase 2 pillar #2) |
 
 ## Draft
 
@@ -39,7 +40,6 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0006](draft/0006-api-design.md) | Runtime API design |
 | [0007](draft/0007-inter-agent-communication.md) | Inter-agent communication patterns |
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
-| [0023](draft/0023-storage-and-vector-foundation.md) | Storage, extraction, and vector index foundation (Phase 2 pillar #2) — in progress |
 
 ## Related guides
 
