@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use crate::fs::FilesystemStore;
-use crate::{Cid, ContentStore};
+use crate::{Cid, ContentStore, Stats};
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -59,6 +59,12 @@ enum Command {
     Size {
         /// The content id (hex).
         cid: String,
+    },
+    /// Print storage metrics (object/block counts, sizes, dedup ratio).
+    Metrics {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -123,6 +129,25 @@ async fn dispatch(store: &dyn ContentStore, command: Command) -> CliResult<ExitC
             println!("{}", store.size(&cid).await?);
             Ok(ExitCode::SUCCESS)
         }
+        Command::Metrics { json } => {
+            let stats = store.stats().await?;
+            if json {
+                let value = serde_json::json!({
+                    "objects": stats.objects,
+                    "blocks": stats.blocks,
+                    "logical_bytes": stats.logical_bytes,
+                    "physical_bytes": stats.physical_bytes,
+                    "block_refs": stats.block_refs,
+                    "dedup_ratio": stats.dedup_ratio(),
+                    "dedup_savings": stats.dedup_savings(),
+                    "avg_block_sharing": stats.avg_block_sharing(),
+                });
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                print_metrics(&stats);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -144,6 +169,44 @@ async fn read(
             };
             store.get_range(cid, offset, length).await
         }
+    }
+}
+
+fn print_metrics(stats: &Stats) {
+    println!("objects:        {}", stats.objects);
+    println!("blocks:         {}", stats.blocks);
+    println!(
+        "logical:        {} ({} bytes)",
+        humanize(stats.logical_bytes),
+        stats.logical_bytes
+    );
+    println!(
+        "physical:       {} ({} bytes)",
+        humanize(stats.physical_bytes),
+        stats.physical_bytes
+    );
+    println!(
+        "dedup ratio:    {:.2}x ({:.0}% saved)",
+        stats.dedup_ratio(),
+        stats.dedup_savings() * 100.0
+    );
+    println!("block refs:     {}", stats.block_refs);
+    println!("block sharing:  {:.2}x", stats.avg_block_sharing());
+}
+
+/// Format a byte count as a short human-readable string (e.g. "3.1 MB").
+fn humanize(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{Cid, ContentStore, Result, StoreError};
+use crate::{Cid, ContentStore, Result, Stats, StoreError};
 
 /// Content-defined chunking parameters (FastCDC target block sizes, bytes).
 #[derive(Clone, Copy, Debug)]
@@ -176,6 +176,23 @@ impl ContentStore for FilesystemStore {
     async fn size(&self, cid: &Cid) -> Result<u64> {
         Ok(self.read_manifest(cid).await?.size)
     }
+
+    async fn stats(&self) -> Result<Stats> {
+        let mut stats = Stats::default();
+        for path in list_files_two_level(&self.root.join("objects")).await? {
+            let bytes = tokio::fs::read(&path).await?;
+            let manifest: Manifest = serde_json::from_slice(&bytes)
+                .map_err(|e| StoreError::Corrupt(format!("manifest {}: {e}", path.display())))?;
+            stats.objects += 1;
+            stats.logical_bytes += manifest.size;
+            stats.block_refs += manifest.blocks.len() as u64;
+        }
+        for path in list_files_two_level(&self.root.join("blocks")).await? {
+            stats.blocks += 1;
+            stats.physical_bytes += tokio::fs::metadata(&path).await?.len();
+        }
+        Ok(stats)
+    }
 }
 
 impl FilesystemStore {
@@ -207,6 +224,32 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// List the files two levels deep under `dir` (the `<shard>/<file>` layout),
+/// skipping transient temp files. A missing `dir` yields an empty list.
+async fn list_files_two_level(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut shards = match tokio::fs::read_dir(dir).await {
+        Ok(reader) => reader,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    while let Some(shard) = shards.next_entry().await? {
+        if !shard.file_type().await?.is_dir() {
+            continue;
+        }
+        let mut files = tokio::fs::read_dir(shard.path()).await?;
+        while let Some(file) = files.next_entry().await? {
+            if file.file_name().to_string_lossy().starts_with('.') {
+                continue; // transient .tmp staging files
+            }
+            if file.file_type().await?.is_file() {
+                out.push(file.path());
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +265,44 @@ mod tests {
             },
         );
         (dir, store)
+    }
+
+    #[tokio::test]
+    async fn stats_reflect_dedup() {
+        let (_dir, store) = store();
+        let mut a = vec![0u8; 40_000];
+        for (i, byte) in a.iter_mut().enumerate() {
+            *byte = (i % 251) as u8;
+        }
+        let mut b = a.clone();
+        b.extend_from_slice(b" a distinct tail");
+        store.put(&a).await.unwrap();
+        store.put(&b).await.unwrap();
+        store.put(&a).await.unwrap(); // duplicate -> idempotent
+
+        let stats = store.stats().await.unwrap();
+        assert_eq!(
+            stats.objects, 2,
+            "two distinct objects (the duplicate is idempotent)"
+        );
+        assert_eq!(stats.logical_bytes, a.len() as u64 + b.len() as u64);
+        assert!(
+            stats.physical_bytes < stats.logical_bytes,
+            "a and b share blocks"
+        );
+        assert!(stats.dedup_ratio() > 1.0);
+        assert!(stats.blocks <= stats.block_refs);
+    }
+
+    #[tokio::test]
+    async fn stats_invariants_hold() {
+        let (_dir, store) = store();
+        store.put(b"alpha").await.unwrap();
+        store.put(b"beta beta beta beta").await.unwrap();
+        // Exercise the reusable conformance invariant against an isolated store.
+        crate::conformance::stats_consistent(&store, b"gamma")
+            .await
+            .unwrap();
     }
 
     fn count_blocks(root: &Path) -> usize {

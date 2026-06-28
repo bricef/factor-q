@@ -72,4 +72,25 @@ fn put_then_get_roundtrips() {
         .output()
         .unwrap();
     assert!(!out.status.success());
+
+    // metrics -> human-readable, reports the one stored object
+    let out = fq_cas()
+        .args(["--root".as_ref(), root.as_os_str()])
+        .arg("metrics")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("objects:"), "metrics output: {text}");
+    assert!(text.contains("dedup ratio:"), "metrics output: {text}");
+
+    // metrics --json -> machine-readable, objects == 1
+    let out = fq_cas()
+        .args(["--root".as_ref(), root.as_os_str()])
+        .arg("metrics")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"objects\": 1"));
 }

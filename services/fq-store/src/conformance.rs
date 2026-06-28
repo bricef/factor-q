@@ -126,6 +126,38 @@ pub async fn content_addressed<S: ContentStore + ?Sized>(store: &S, content: &[u
     Ok(())
 }
 
+/// Store statistics are internally consistent: physical bytes never exceed
+/// logical (dedup cannot grow content), every block is referenced, and the
+/// dedup ratio is at least 1 once content exists.
+///
+/// Run this against an **isolated** store: it scans the whole store, so a
+/// concurrent writer would race it — which is why it is not wired into the
+/// shared (parallel) `content_store_conformance!` suite. A backend exercises
+/// it in a dedicated test (see the filesystem backend).
+pub async fn stats_consistent<S: ContentStore + ?Sized>(store: &S, content: &[u8]) -> Check {
+    store.put(content).await.map_err(|e| format!("put: {e}"))?;
+    let stats = store.stats().await.map_err(|e| format!("stats: {e}"))?;
+    if stats.physical_bytes > stats.logical_bytes {
+        return fail(format!(
+            "physical {} exceeds logical {}",
+            stats.physical_bytes, stats.logical_bytes
+        ));
+    }
+    if stats.blocks > stats.block_refs {
+        return fail(format!(
+            "blocks {} exceeds block refs {}",
+            stats.blocks, stats.block_refs
+        ));
+    }
+    if stats.dedup_ratio() < 1.0 {
+        return fail(format!("dedup ratio {} < 1.0", stats.dedup_ratio()));
+    }
+    if stats.objects == 0 {
+        return fail("objects is 0 after a put");
+    }
+    Ok(())
+}
+
 /// Generate the full `ContentStore` conformance test suite for a backend.
 ///
 /// `$make` is an expression that constructs a store (a content-addressed

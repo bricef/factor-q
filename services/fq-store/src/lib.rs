@@ -15,12 +15,14 @@ mod error;
 
 pub mod conformance;
 pub mod fs;
+pub mod stats;
 
 #[cfg(feature = "cli")]
 pub mod cli;
 
 pub use cid::Cid;
 pub use error::{Result, StoreError};
+pub use stats::Stats;
 
 use async_trait::async_trait;
 
@@ -49,4 +51,8 @@ pub trait ContentStore: Send + Sync {
 
     /// Total size in bytes of the content for `cid`.
     async fn size(&self, cid: &Cid) -> Result<u64>;
+
+    /// Aggregate statistics over all stored content — the basis for metrics
+    /// such as the deduplication ratio. May scan the store.
+    async fn stats(&self) -> Result<Stats>;
 }
