@@ -9,12 +9,23 @@ repository = "https://github.com/bricef/factor-q"
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"
+clap = { version = "4", features = ["derive", "env"], optional = true }
 fastcdc = "3"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "rt", "rt-multi-thread", "macros"] }
+
+[features]
+# The `fq-cas` command-line tool. Optional so library consumers (the memory
+# and skill services) don't pull clap into their dependency tree.
+cli = ["dep:clap"]
+
+[[bin]]
+name = "fq-cas"
+path = "src/bin/fq-cas.rs"
+required-features = ["cli"]
 
 [dev-dependencies]
 proptest = "1"

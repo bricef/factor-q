@@ -16,6 +16,9 @@ mod error;
 pub mod conformance;
 pub mod fs;
 
+#[cfg(feature = "cli")]
+pub mod cli;
+
 pub use cid::Cid;
 pub use error::{Result, StoreError};
 

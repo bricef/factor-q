@@ -10,8 +10,9 @@ Design forks and implementation decisions are resolved.
 **Progress:** M1a (the CAS) is implemented and conformance-tested in
 `services/fq-store` — the `ContentStore` trait, the BLAKE3/FastCDC
 filesystem backend, and the reusable property-based conformance suite (see
-`docs/guide/implementing-a-storage-backend.md`). Next: M1b (storage index
-DB).
+`docs/guide/implementing-a-storage-backend.md`), plus the `fq-cas`
+standalone CLI (an optional `cli` feature of the crate). Next: M1b (storage
+index DB).
 
 ## Goal
 

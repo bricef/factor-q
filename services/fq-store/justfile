@@ -6,13 +6,14 @@ set positional-arguments
 fmt-check:
     cargo fmt --check
 
-# Clippy lints (Cargo.toml denies all warnings)
+# Clippy lints (Cargo.toml denies all warnings); --all-features covers the CLI.
 lint:
-    cargo clippy --all-targets
+    cargo clippy --all-targets --all-features
 
-# Run tests, or forward cargo args (e.g. `just test conformance`)
+# Run tests, or forward cargo args (e.g. `just test conformance`).
+# --all-features builds the fq-cas binary so the CLI test runs.
 test *args:
-    cargo test "$@"
+    cargo test --all-features "$@"
 
 # All quality checks — no external services required (pure filesystem CAS).
 ci: fmt-check lint test
