@@ -4,8 +4,9 @@
 
 Accepted (2026-06-27). Records the architecture for Phase 2's storage +
 embedding/vector foundation; all ten design forks (F1–F10) are resolved
-below. Further refinements — e.g. the DB-separation question noted under
-F9 — are handled by supplementary ADRs.
+below. Further refinements are handled by supplementary ADRs — the F9
+DB-separation question is settled by
+[ADR-0024](0024-separate-databases-storage-foundation.md).
 
 Foundation for [ADR-0013](../accepted/0013-memory-as-mcp-service.md)
 (memory MCP service) and the skill registry
