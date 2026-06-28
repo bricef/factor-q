@@ -39,6 +39,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0006](draft/0006-api-design.md) | Runtime API design |
 | [0007](draft/0007-inter-agent-communication.md) | Inter-agent communication patterns |
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
+| [0023](draft/0023-storage-and-vector-foundation.md) | Storage, extraction, and vector index foundation (Phase 2 pillar #2) — in progress |
 
 ## Related guides
 
