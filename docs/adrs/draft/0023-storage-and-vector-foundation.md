@@ -38,7 +38,8 @@ To keep the two kinds of chunking (and the layers) from blurring:
 | **Content ID (CID)** | The content-address of an object (a hash; see fork F3). |
 | **Block** | A **storage-layer** content-defined-chunking (CDC) unit. Objects split into blocks for sub-file dedup; an object's CID is the Merkle root over its blocks. |
 | **Name** | A mutable identifier mapping to a CID (like an S3 key or git ref). |
-| **Namespace** | An access-control + organizational scope holding names (per-agent by default). |
+| **Namespace** | An access-control + organizational scope holding names (per-agent by default). **Hierarchical** (dotted, e.g. `research.papers`), so grants can target a subtree. |
+| **Principal** | An access-control subject (grantee/grantor). Extensible typed reference; v1 implements `Agent(id)` only. |
 | **Representation** | A layer-2 extraction output (extracted text, transcript, …), itself stored as an object, keyed by `(source CID, extractor, extractor version)`. |
 | **Chunk** | An **embedding-layer** retrieval unit: an offset range over a representation — not a stored copy. |
 | **Embedding space** | The identity of a comparable vector family: `(modality, model, model version, chunk strategy)`. |
@@ -62,9 +63,11 @@ retrieval concern. They are never the same unit.
 
 ### Layer 1 — content store
 
-- **Availability contract:** *if a name exists in the index, its content
-  stays available.* Names are the durable handle; unreferenced objects are
-  reclaimable (see GC).
+- **Availability contract:** a name resolves to its **current** content,
+  and that current content stays available. The contract makes **no
+  promise about prior versions** — history retention is a GC policy
+  (default: keep-all), not a guarantee, so consumers must not assume old
+  versions persist.
 - Objects are a **Merkle tree of CDC blocks** for sub-file dedup of large
   binaries (a 2 GB video must not be one opaque blob).
 - **Streaming + range** reads/writes are first-class (large media; also
@@ -79,10 +82,15 @@ retrieval concern. They are never the same unit.
 
 - **Persist-what's-named; reclaim the rest.** GC runs **async and online**
   (the store stays available during GC) over the name index.
-- A **bi-directional index** (name↔object) makes reclamation cheap; naive
-  mark-and-sweep is explicitly *not* the target.
-- **GC is pluggable** so strategies can be benchmarked and swapped
-  (fork F2).
+- **The current version of every name is a GC root** (the contract);
+  historical versions are roots only while a namespace's retention policy
+  keeps them (default: keep-all).
+- **Default: two-level reference counting** (objects + blocks) over the
+  bi-directional index — transactional with name updates where the backend
+  supports it, with a periodic reachability audit as the backstop (F2).
+  Naive stop-the-world mark-and-sweep is explicitly *not* the mechanism.
+- **GC is pluggable** (a `Collector` interface) so alternatives can be
+  benchmarked and swapped.
 - This same persist-and-reclaim model **generalizes to migration**:
   superseded representations and vectors (old extractor/chunker/model
   versions) become unreferenced and are reclaimed once the new ones are
@@ -113,9 +121,25 @@ retrieval concern. They are never the same unit.
 
 ### Access control
 
-- Name/namespace-scoped, default-deny cross-agent.
-- **`grant` is a primitive**, and an agent may **delegate** access it
-  holds. Grant/delegation *mechanism* is fork F4.
+- **Source of truth = event-sourced grant claims, projected to a permission
+  state** ([ADR-0011](../accepted/0011-event-bus-and-persistence.md)'s
+  pattern): a grant / delegate / revoke is an event; current permissions
+  are a projection — giving audit, time-travel, and trivial revocation.
+- **Subjects are `Principal`s** — an extensible typed reference. v1
+  implements `Agent(id)`; `Group` / `Service` / roles slot in later as a
+  non-breaking projection + schema addition (the slot is kept; the feature
+  is not built in v1).
+- **Resources are names or namespaces**, and a grant may target a
+  **namespace prefix** over the hierarchical tree (e.g. `research.*`) —
+  covering the skill access-pattern model without group machinery.
+- **Verbs:** `read / write / delete / list / grant`. **`grant` is
+  delegatable** — a holder may delegate ≤ their own access on a resource;
+  the projection enforces attenuation (no escalation). Default-deny.
+- **Wire mechanism = scoped, short-TTL capability tokens, built in from the
+  start.** A token is minted from the projection and verified at the
+  operation boundary; the **same mint→verify dataflow runs in-process and
+  distributed** (differing only in transport), so token mechanics and
+  process-separation are never conflated during fault-finding.
 - The **dedup existence side-channel** (one agent can confirm another holds
   identical bytes) is **accepted** for this use case — noted, not
   mitigated.
@@ -144,30 +168,35 @@ GC, CDC tuning) behind the interface.
 Stakes flag how much discussion each needs. "Low" = a default behind the
 interface, easily changed.
 
-### F1 — Name version retention · high
+### F1 — Name version retention · RESOLVED
 
-Does updating a name keep prior versions?
+**Decision:** versioned names; the **contract guarantees only the current
+version**; history is retained by **GC policy**, default **unbounded**.
 
-- **(a) Last-writer-wins** — name → current CID; superseded content is
-  immediately GC-eligible.
-- **(b) Versioned** — name → ordered CID history; time-travel; old versions
-  are "named" and retained.
-- **(c) Hybrid** — current + opt-in retention/TTL per name or namespace.
+A name maps to an ordered history of `(CID, timestamp)`; the latest is
+current. The availability contract covers the current version only —
+history is a default GC policy (keep-all), **not** a guarantee, so
+consumers must not depend on old versions being retrievable. Per-namespace
+retention policies (`keep all`, `keep last N`, `keep last T`,
+`current-only`) are a **future** GC feature; the default stays unbounded
+until storage pressure motivates trimming.
 
-Lean: (b)/(c), per the "full persistence" stance — but pin down retention
-bounds so history is not unbounded.
+### F2 — GC algorithm · RESOLVED
 
-### F2 — GC algorithm · high
+**Decision:** reference counting as the online primary — transactional with
+the name-index update where the backend supports it — plus a periodic
+reachability **audit** as a universal backstop. Pluggable `Collector`
+interface so alternatives (epoch, online mark-sweep, log-structured) can be
+benchmarked later.
 
-Pluggable, but pick the default.
-
-- **(a) Reference counting** over the bi-directional index (incremental,
-  online, cheap).
-- **(b) Generational / epoch** reclamation.
-- **(c) Online concurrent mark-sweep.**
-- **(d) Log-structured store + compaction.**
-
-Lean: (a) as the default behind a pluggable `Collector` interface.
+- **Two-level refcount:** objects (refs from name versions) and blocks
+  (refs from objects); an object reaching zero decrements its blocks. Safe
+  because `name → object → block` is acyclic — no cycles to confound
+  refcounting.
+- **Crash safety:** refcount deltas are transactional with name updates
+  where the backend allows (filesystem reference impl via atomic rename; a
+  future DB backend via real transactions); the audit recomputes truth from
+  the indexes and corrects drift, online and off the hot path.
 
 ### F3 — Content hash · low
 
@@ -178,16 +207,17 @@ Lean: (a) as the default behind a pluggable `Collector` interface.
 
 Lean: (a). Behind the interface, so swappable on benchmark evidence.
 
-### F4 — Grant / delegation mechanism · high
+### F4 — Grant / delegation mechanism · RESOLVED
 
-- **(a) ACL entries** — `(subject, permission)` rows on names/namespaces.
-- **(b) Capability tokens** — unforgeable, transferable; delegation is
-  "hand someone a (attenuated) token". Aligns with the runtime's
-  capability-grant model ([ADR-0017](../accepted/0017-mcp-human-in-the-loop.md)).
-- **(c) Signed claim records** — append-only grant claims (Perkeep-style).
-
-Lean: undecided. Capabilities make delegation/attenuation natural; ACLs are
-simpler to reason about. Needs a dedicated pass.
+**Decision:** event-sourced grant claims → permission projection as the
+source of truth, with scoped short-TTL **capability tokens as the wire
+mechanism from the start** (one mint→verify dataflow in-process and
+distributed). `grant` is a **delegatable** verb with attenuation enforced
+by the projection. Subjects are an **extensible `Principal`** (v1: `Agent`
+only). Grants target names or **namespace prefixes** over the hierarchical
+namespace tree. **Roles and groups are deferred** — the `Principal`/verb
+model keeps the slot; the feature is not built in v1. Full model in the
+Access control section above.
 
 ### F5 — Retrieval / ranking interface · high
 
