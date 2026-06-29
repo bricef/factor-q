@@ -65,6 +65,21 @@ Every backend is held to one bar: the shared, property-based **conformance
 suite**. See
 [Implementing a storage backend](../../docs/guide/implementing-a-storage-backend.md).
 
+## Performance & observability
+
+The CAS sits far below LLM-call latency on the agent path, so it is not a
+bottleneck there — but the seams to ask perf questions later are in place:
+
+- **Tracing.** Every operation is `tracing`-instrumented (off unless a
+  subscriber is attached, so zero-cost by default). `fq-cas` wires one up on
+  stderr gated by `RUST_LOG` — `RUST_LOG=fq_store=debug fq-cas put file`
+  prints per-op spans with span-close timings, leaving stdout clean.
+- **Benchmarks.** `cargo bench` runs throughput baselines (`benches/throughput.rs`,
+  on-demand, not CI). Rough dev-hardware baseline: `get` ~400 MiB/s, `put`
+  ~80 MiB/s (many small block files + atomic renames), small-op latency
+  ~0.2–2 ms — orders of magnitude under a multi-second LLM call. Bulk
+  ingestion is the path where `put` throughput would matter, if it ever does.
+
 ## Features
 
 - `cli` — the `fq-cas` binary (pulls in `clap` and `service`).

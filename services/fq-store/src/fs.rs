@@ -95,10 +95,12 @@ impl FilesystemStore {
 
 #[async_trait]
 impl ContentStore for FilesystemStore {
+    #[tracing::instrument(level = "debug", skip_all, fields(bytes = content.len()))]
     async fn put(&self, content: &[u8]) -> Result<Cid> {
         let cid = Cid::of(content);
         // Idempotent: an existing manifest means the content is already stored.
         if tokio::fs::try_exists(self.object_path(&cid)).await? {
+            tracing::debug!(%cid, "deduplicated (already stored)");
             return Ok(cid);
         }
 
@@ -131,9 +133,11 @@ impl ContentStore for FilesystemStore {
         let encoded =
             serde_json::to_vec(&manifest).map_err(|e| StoreError::Corrupt(e.to_string()))?;
         write_atomic(&self.object_path(&cid), &encoded).await?;
+        tracing::debug!(%cid, blocks = manifest.blocks.len(), "stored");
         Ok(cid)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(cid = %cid))]
     async fn get(&self, cid: &Cid) -> Result<Vec<u8>> {
         let manifest = self.read_manifest(cid).await?;
         let mut out = Vec::with_capacity(manifest.size as usize);
@@ -143,6 +147,7 @@ impl ContentStore for FilesystemStore {
         Ok(out)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(cid = %cid, offset, len))]
     async fn get_range(&self, cid: &Cid, offset: u64, len: u64) -> Result<Vec<u8>> {
         let manifest = self.read_manifest(cid).await?;
         let end = offset.saturating_add(len).min(manifest.size);
@@ -177,6 +182,7 @@ impl ContentStore for FilesystemStore {
         Ok(self.read_manifest(cid).await?.size)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn stats(&self) -> Result<Stats> {
         let mut stats = Stats::default();
         for path in list_files_two_level(&self.root.join("objects")).await? {

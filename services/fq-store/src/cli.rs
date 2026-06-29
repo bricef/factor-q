@@ -104,7 +104,23 @@ pub fn main() -> ExitCode {
     }
 }
 
+/// Initialize tracing output — off unless `RUST_LOG` is set (e.g.
+/// `RUST_LOG=fq_store=debug`). Logs to stderr so stdout stays pipeable, and
+/// span-close events surface per-operation timings.
+fn init_tracing() {
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::{EnvFilter, fmt};
+    let _ = fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off")),
+        )
+        .with_span_events(FmtSpan::CLOSE)
+        .try_init();
+}
+
 fn run() -> CliResult<ExitCode> {
+    init_tracing();
     let cli = Cli::parse();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
