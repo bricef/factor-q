@@ -5,8 +5,9 @@ Content-addressed storage and semantic index for
 substrate the memory and skill services build on, and it ships **`fq-cas`**,
 a standalone CLI over the content store.
 
-**Status: M1a** — the content-addressed store (CAS). The storage index,
-garbage collection, and access-control layers are in progress (see
+**Status: M1a + M1b** — the content-addressed store (CAS) and the storage
+index (names, version history, two-level reference counts). Garbage
+collection (M1c) and access control (M2) are next (see
 [the plan](../../docs/plans/active/2026-06-27-storage-vector-foundation.md)).
 
 ## `fq-cas` — the content store CLI
@@ -64,6 +65,28 @@ network client (`service::RemoteStore`, behind the `service` feature).
 Every backend is held to one bar: the shared, property-based **conformance
 suite**. See
 [Implementing a storage backend](../../docs/guide/implementing-a-storage-backend.md).
+
+### Names, versioning & the index (M1b)
+
+Above the content store sits the **name layer**. `NameStore` (a trait, with
+a SQLite reference impl `SqliteNameStore`) maps hierarchical dotted-path
+names (`research.papers.doc1`) to CIDs, keeping version history and
+**two-level reference counts** (objects and blocks) maintained
+transactionally. `Catalog` composes a `ContentStore` with a `NameStore` into
+the user-facing API:
+
+```rust
+let cat = Catalog::new(
+    FilesystemStore::new(cas_dir),
+    SqliteNameStore::open(index_db).await?,
+);
+let cid = cat.put("research.papers.doc1", bytes).await?; // store + name
+let doc = cat.get("research.papers.doc1").await?;         // resolve + read
+cat.bind("alias", &cid).await?;                           // many names, one object
+cat.delete("research.papers.doc1").await?;                // unname -> GC candidate
+```
+
+The refcounts identify what is reclaimable; **GC (M1c)** does the reclaiming.
 
 ## Performance & observability
 

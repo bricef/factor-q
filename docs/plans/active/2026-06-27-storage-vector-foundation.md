@@ -14,8 +14,14 @@ filesystem backend, and the reusable property-based conformance suite (see
 standalone CLI. The **tarpc service boundary** (F6) is also proven early on
 M1a — `fq-cas serve` / `--server` with a `RemoteStore` client that re-runs
 the conformance suite *over the wire*, validating "same contract,
-in-process and distributed" ahead of the harder layers. Next: M1b (storage
-index DB).
+in-process and distributed" ahead of the harder layers.
+
+**M1b (the storage index) is now built:** the `NameStore` trait +
+`SqliteNameStore` reference impl (hierarchical names → CIDs, version history,
+two-level transactional refcounts) and the `Catalog` composing the named
+store over the CAS (`ContentStore::blocks` sources the object→block edges).
+Next: **M1c** — garbage collection: reclaim the objects/blocks the index
+reports as unreferenced, online with an audit backstop.
 
 ## Goal
 
