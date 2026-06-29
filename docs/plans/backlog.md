@@ -792,3 +792,35 @@ deprecated:
 ADR-0010 (agent execution isolation) has been accepted. Phase 2
 (MCP, memory, skills) will likely force ADR-0008 to resolution.
 ADR-0007 can wait for multi-agent deployments.
+
+## CI / test flakiness (flagged 2026-06-29)
+
+### Flaky EPIPE crash in the MCP stdio integration test
+
+**Source:** intermittent CI failure in the `Rust CI` job (`just rust-ci`,
+the `fq-runtime` half), seen while landing the fq-store `object` CLI rename
+(commit `7ef5fdd`); the same suite passed on the runs immediately before and
+after, and a re-run went green.
+
+An MCP integration test spawns a Node MCP server
+(`@modelcontextprotocol/sdk`) over stdio (via `npx`). On teardown the test
+closes the pipe while the server is mid-write, so `StdioServerTransport.send`
+hits `EPIPE`. The SDK's stdio transport has no `error` handler on the socket,
+so Node throws on the unhandled `'error'` event and the process exits 101,
+failing the whole step.
+
+Because `just rust-ci` runs the runtime CI **before** the store CI (and stops
+on first failure), a flake here also masks the fq-store results.
+
+**Impact:** spurious CI reds; a re-run passes. Not a product bug, but it will
+keep costing CI runs and eroding signal until fixed.
+
+**Work needed:**
+- Identify the MCP stdio integration test(s) in `fq-runtime` that launch the
+  Node server and reproduce the teardown race.
+- Shut the MCP server down gracefully before closing its stdin/pipe (send
+  EOF/close and await exit), and/or attach a server-side `error` handler that
+  swallows `EPIPE` during shutdown.
+- Consider splitting `just rust-ci` so the runtime and store suites run as
+  independent CI jobs — a runtime flake should not mask the store results.
+- If the root cause is upstream, pin/patch or wrap the SDK's stdio transport.
