@@ -11,7 +11,10 @@ Design forks and implementation decisions are resolved.
 `services/fq-store` — the `ContentStore` trait, the BLAKE3/FastCDC
 filesystem backend, and the reusable property-based conformance suite (see
 `docs/guide/implementing-a-storage-backend.md`), plus the `fq-cas`
-standalone CLI (an optional `cli` feature of the crate). Next: M1b (storage
+standalone CLI. The **tarpc service boundary** (F6) is also proven early on
+M1a — `fq-cas serve` / `--server` with a `RemoteStore` client that re-runs
+the conformance suite *over the wire*, validating "same contract,
+in-process and distributed" ahead of the harder layers. Next: M1b (storage
 index DB).
 
 ## Goal

@@ -11,16 +11,27 @@ async-trait = "0.1"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"], optional = true }
 fastcdc = "3"
+futures = { version = "0.3", optional = true }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tarpc = { version = "0.37", features = [
+    "tokio1",
+    "serde1",
+    "serde-transport",
+    "serde-transport-bincode",
+    "tcp",
+], optional = true }
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["fs", "io-util", "rt", "rt-multi-thread", "macros", "net"] }
 
 [features]
-# The `fq-cas` command-line tool. Optional so library consumers (the memory
-# and skill services) don't pull clap into their dependency tree.
-cli = ["dep:clap"]
+# The CAS network service: the tarpc server (`serve`) and the RemoteStore
+# client. Optional so in-process library consumers don't pull tarpc.
+service = ["dep:tarpc", "dep:futures"]
+# The `fq-cas` command-line tool. Pulls in the service for serve/--server.
+# Optional so library consumers don't pull clap.
+cli = ["dep:clap", "service"]
 
 [[bin]]
 name = "fq-cas"

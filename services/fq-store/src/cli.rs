@@ -22,9 +22,13 @@ type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
     about = "Content-addressed storage CLI (factor-q fq-store)"
 )]
 struct Cli {
-    /// Store root directory.
+    /// Store root directory (ignored when --server is set).
     #[arg(long, env = "FQ_CAS_ROOT", default_value = ".fq-cas", global = true)]
     root: PathBuf,
+    /// Run the command against a remote `fq-cas serve` instead of local
+    /// storage (e.g. 127.0.0.1:9000).
+    #[arg(long, global = true)]
+    server: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -66,6 +70,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Serve the local store over the network (unauthenticated; localhost
+    /// only until M2). Clients connect with `--server`.
+    Serve {
+        /// Address to bind (host:port).
+        #[arg(long, default_value = "127.0.0.1:9000")]
+        bind: String,
+    },
 }
 
 /// Entry point for the `fq-cas` binary.
@@ -81,9 +92,29 @@ pub fn main() -> ExitCode {
 
 fn run() -> CliResult<ExitCode> {
     let cli = Cli::parse();
-    let store = FilesystemStore::new(&cli.root);
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(dispatch(&store, cli.command))
+    rt.block_on(async move {
+        match cli.command {
+            Command::Serve { bind } => {
+                let store = std::sync::Arc::new(FilesystemStore::new(&cli.root));
+                eprintln!(
+                    "fq-cas serving {} on {bind} (unauthenticated — localhost only until M2)",
+                    cli.root.display()
+                );
+                crate::service::serve(&bind, store).await?;
+                Ok(ExitCode::SUCCESS)
+            }
+            command => {
+                if let Some(addr) = &cli.server {
+                    let store = crate::service::RemoteStore::connect(addr).await?;
+                    dispatch(&store, command).await
+                } else {
+                    let store = FilesystemStore::new(&cli.root);
+                    dispatch(&store, command).await
+                }
+            }
+        }
+    })
 }
 
 async fn dispatch(store: &dyn ContentStore, command: Command) -> CliResult<ExitCode> {
@@ -148,6 +179,7 @@ async fn dispatch(store: &dyn ContentStore, command: Command) -> CliResult<ExitC
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Serve { .. } => unreachable!("Serve is handled in run(), before dispatch"),
     }
 }
 

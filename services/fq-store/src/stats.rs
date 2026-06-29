@@ -2,7 +2,7 @@
 
 /// A snapshot of a store's contents. Derived ratios (deduplication, sharing)
 /// are computed on demand.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     /// Distinct objects (logical files) stored.
     pub objects: u64,

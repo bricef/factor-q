@@ -20,6 +20,9 @@ pub mod stats;
 #[cfg(feature = "cli")]
 pub mod cli;
 
+#[cfg(feature = "service")]
+pub mod service;
+
 pub use cid::Cid;
 pub use error::{Result, StoreError};
 pub use stats::Stats;

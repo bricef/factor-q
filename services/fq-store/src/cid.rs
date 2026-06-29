@@ -5,7 +5,7 @@ use crate::error::StoreError;
 /// A content identifier: the BLAKE3 hash (32 bytes) of an object's — or a
 /// block's — bytes. Content-addressing means a `Cid` both names and verifies
 /// its content.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Cid([u8; 32]);
 
 impl Cid {
