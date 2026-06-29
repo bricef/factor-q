@@ -8,7 +8,7 @@
 //! The index maintains **two-level reference counts** — objects (how many
 //! name-versions point at an object) and blocks (how many live objects
 //! reference a block) — transactionally, so GC (M1c) can reclaim whatever
-//! falls to zero. `NameStore` only maintains the counts; it never deletes
+//! falls to zero. `NameIndex` only maintains the counts; it never deletes
 //! from the CAS.
 
 use std::collections::HashSet;
@@ -22,7 +22,7 @@ use crate::{Cid, Result, StoreError};
 
 /// The mutable name index over a content store. See the module docs.
 #[async_trait]
-pub trait NameStore: Send + Sync {
+pub trait NameIndex: Send + Sync {
     /// Bind `name` to `cid`. `blocks` are the object's dedup units (from
     /// [`ContentStore::blocks`](crate::ContentStore::blocks)), used to
     /// maintain block refcounts. Re-binding a name to the CID it already
@@ -84,12 +84,12 @@ fn hexes_to_cids(hexes: Vec<String>) -> Result<Vec<Cid>> {
     hexes.iter().map(|h| Cid::from_hex(h)).collect()
 }
 
-/// SQLite-backed [`NameStore`] — the reference implementation (ADR-0024 DB #1).
-pub struct SqliteNameStore {
+/// SQLite-backed [`NameIndex`] — the reference implementation (ADR-0024 DB #1).
+pub struct SqliteNameIndex {
     pool: SqlitePool,
 }
 
-impl SqliteNameStore {
+impl SqliteNameIndex {
     /// Open (creating if needed) the index database at `path`.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let opts = SqliteConnectOptions::new()
@@ -106,7 +106,7 @@ impl SqliteNameStore {
 }
 
 #[async_trait]
-impl NameStore for SqliteNameStore {
+impl NameIndex for SqliteNameIndex {
     #[tracing::instrument(level = "debug", skip_all, fields(name, cid = %cid))]
     async fn bind(&self, name: &str, cid: &Cid, blocks: &[Cid]) -> Result<()> {
         let cid_hex = cid.to_hex();
@@ -296,9 +296,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn store() -> (TempDir, SqliteNameStore) {
+    async fn store() -> (TempDir, SqliteNameIndex) {
         let dir = tempfile::tempdir().unwrap();
-        let s = SqliteNameStore::open(dir.path().join("index.db"))
+        let s = SqliteNameIndex::open(dir.path().join("index.db"))
             .await
             .unwrap();
         (dir, s)

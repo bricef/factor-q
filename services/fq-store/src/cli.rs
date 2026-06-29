@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use crate::fs::FilesystemStore;
-use crate::{Catalog, Cid, ContentStore, SqliteNameStore, Stats, StoreError};
+use crate::{Cid, ContentStore, Repository, SqliteNameIndex, Stats, StoreError};
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -206,11 +206,11 @@ fn run() -> CliResult<ExitCode> {
                                 (a remote name service is future)"
                         .into());
                 }
-                let catalog = Catalog::new(
+                let repo = Repository::new(
                     FilesystemStore::new(&cli.root),
-                    SqliteNameStore::open(cli.root.join("index.db")).await?,
+                    SqliteNameIndex::open(cli.root.join("index.db")).await?,
                 );
-                dispatch_object(&catalog, command).await
+                dispatch_object(&repo, command).await
             }
             command => {
                 if let Some(addr) = &cli.server {
@@ -324,15 +324,15 @@ async fn write_output(data: &[u8], output: Option<PathBuf>) -> CliResult<()> {
     Ok(())
 }
 
-/// Run a named-object command against the local catalog.
+/// Run a named-object command against the local repo.
 async fn dispatch_object(
-    catalog: &Catalog<FilesystemStore, SqliteNameStore>,
+    repo: &Repository<FilesystemStore, SqliteNameIndex>,
     command: ObjectCommand,
 ) -> CliResult<ExitCode> {
     match command {
         ObjectCommand::Put { name, path } => {
             let content = read_input(&path).await?;
-            let cid = catalog.put(&name, &content).await?;
+            let cid = repo.put(&name, &content).await?;
             println!("{cid}");
             Ok(ExitCode::SUCCESS)
         }
@@ -342,25 +342,25 @@ async fn dispatch_object(
             offset,
             length,
         } => {
-            let cid = catalog
+            let cid = repo
                 .resolve(&name)
                 .await?
                 .ok_or_else(|| StoreError::NameNotFound(name.clone()))?;
-            let data = read(catalog.content(), &cid, offset, length).await?;
+            let data = read(repo.content(), &cid, offset, length).await?;
             write_output(&data, output).await?;
             Ok(ExitCode::SUCCESS)
         }
         ObjectCommand::Ls { prefix } => {
-            for name in catalog.list(&prefix).await? {
+            for name in repo.list(&prefix).await? {
                 println!("{name}");
             }
             Ok(ExitCode::SUCCESS)
         }
         ObjectCommand::Rm { name } => {
-            catalog.delete(&name).await?;
+            repo.delete(&name).await?;
             Ok(ExitCode::SUCCESS)
         }
-        ObjectCommand::Resolve { name } => match catalog.resolve(&name).await? {
+        ObjectCommand::Resolve { name } => match repo.resolve(&name).await? {
             Some(cid) => {
                 println!("{cid}");
                 Ok(ExitCode::SUCCESS)
@@ -368,14 +368,14 @@ async fn dispatch_object(
             None => Err(StoreError::NameNotFound(name).into()),
         },
         ObjectCommand::History { name } => {
-            for cid in catalog.history(&name).await? {
+            for cid in repo.history(&name).await? {
                 println!("{cid}");
             }
             Ok(ExitCode::SUCCESS)
         }
         ObjectCommand::Bind { name, cid } => {
             let cid = Cid::from_hex(&cid)?;
-            catalog.bind(&name, &cid).await?;
+            repo.bind(&name, &cid).await?;
             Ok(ExitCode::SUCCESS)
         }
     }

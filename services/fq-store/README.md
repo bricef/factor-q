@@ -88,22 +88,22 @@ suite**. See
 
 ### Names, versioning & the index (M1b)
 
-Above the content store sits the **name layer**. `NameStore` (a trait, with
-a SQLite reference impl `SqliteNameStore`) maps hierarchical dotted-path
+Above the content store sits the **name layer**. `NameIndex` (a trait, with
+a SQLite reference impl `SqliteNameIndex`) maps hierarchical dotted-path
 names (`research.papers.doc1`) to CIDs, keeping version history and
 **two-level reference counts** (objects and blocks) maintained
-transactionally. `Catalog` composes a `ContentStore` with a `NameStore` into
+transactionally. `Repository` composes a `ContentStore` with a `NameIndex` into
 the user-facing API:
 
 ```rust
-let cat = Catalog::new(
+let repo = Repository::new(
     FilesystemStore::new(cas_dir),
-    SqliteNameStore::open(index_db).await?,
+    SqliteNameIndex::open(index_db).await?,
 );
-let cid = cat.put("research.papers.doc1", bytes).await?; // store + name
-let doc = cat.get("research.papers.doc1").await?;         // resolve + read
-cat.bind("alias", &cid).await?;                           // many names, one object
-cat.delete("research.papers.doc1").await?;                // unname -> GC candidate
+let cid = repo.put("research.papers.doc1", bytes).await?; // store + name
+let doc = repo.get("research.papers.doc1").await?;        // resolve + read
+repo.bind("alias", &cid).await?;                          // many names, one object
+repo.delete("research.papers.doc1").await?;               // unname -> GC candidate
 ```
 
 The refcounts identify what is reclaimable; **GC (M1c)** does the reclaiming.

@@ -13,10 +13,10 @@
 mod cid;
 mod error;
 
-pub mod catalog;
 pub mod conformance;
 pub mod fs;
 pub mod index;
+pub mod repository;
 pub mod stats;
 
 #[cfg(feature = "cli")]
@@ -25,10 +25,10 @@ pub mod cli;
 #[cfg(feature = "service")]
 pub mod service;
 
-pub use catalog::Catalog;
 pub use cid::Cid;
 pub use error::{Result, StoreError};
-pub use index::{NameStore, SqliteNameStore};
+pub use index::{NameIndex, SqliteNameIndex};
+pub use repository::Repository;
 pub use stats::Stats;
 
 use async_trait::async_trait;

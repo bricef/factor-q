@@ -16,9 +16,9 @@ M1a — `fq-cas serve` / `--server` with a `RemoteStore` client that re-runs
 the conformance suite *over the wire*, validating "same contract,
 in-process and distributed" ahead of the harder layers.
 
-**M1b (the storage index) is now built:** the `NameStore` trait +
-`SqliteNameStore` reference impl (hierarchical names → CIDs, version history,
-two-level transactional refcounts) and the `Catalog` composing the named
+**M1b (the storage index) is now built:** the `NameIndex` trait +
+`SqliteNameIndex` reference impl (hierarchical names → CIDs, version history,
+two-level transactional refcounts) and the `Repository` composing the named
 store over the CAS (`ContentStore::blocks` sources the object→block edges).
 Next: **M1c** — garbage collection: reclaim the objects/blocks the index
 reports as unreferenced, online with an audit backstop.
@@ -192,7 +192,7 @@ and packages it.
   these strings via prefix and glob grants (`research.papers.*`, and
   `system.agents.<id>.files.*` for harness-only scopes). The `object→block`
   edges live **in the index DB** (denormalized from the CAS manifest) so the
-  two-level refcounts stay transactional; `NameStore` is a **trait + SQLite
+  two-level refcounts stay transactional; `NameIndex` is a **trait + SQLite
   reference impl**, reusing the M1a conformance pattern. To source those
   edges, the `ContentStore` trait gains `blocks(cid)` — an object's dedup
   units (`[cid]` for non-chunking backends). *(M1b)*
