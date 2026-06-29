@@ -21,6 +21,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - [Contributing](CONTRIBUTING.md) — development setup, test tiers, code conventions
 - [Agent authoring guide](docs/guide/agent-definitions.md) — write your first agent
 - [Reducer harness guide](docs/guide/reducer-harness.md) — the suspend/resume-capable execution path that drives every invocation
+- [Content storage (fq-cas)](services/fq-store/README.md) — the content-addressed store CLI + library (Phase 2 pillar #2)
 - [Event schema](docs/design/event-schema.md) — the event model everything is built around
 - [Agent orchestration tools](docs/design/agent-orchestration-tools.md) — wishlist for primitives to coordinate multi-agent work (graph substrate, handles, sinks, fragment library)
 - [Worker-side ergonomics](docs/design/worker-side-ergonomics.md) — primitives for what an agent has, knows, and controls while executing (introspection, checkpoints, structured errors)
@@ -48,6 +49,8 @@ factor-q/
 │       ├── fq-cli/              fq binary (CLI commands, daemon host)
 │       ├── fq-runtime/          core library (bus, executor, projection, dispatcher)
 │       └── fq-tools/            built-in tools and sandbox enforcement
+│
+├── services/fq-store/         Content-addressed storage + index (fq-cas CLI)
 │
 ├── infrastructure/            Deployment and local dev
 │   ├── docker-compose.yml       NATS + JetStream

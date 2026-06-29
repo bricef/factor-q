@@ -118,13 +118,15 @@ check-version tag:
     fi
     echo "release tag {{tag}} matches Cargo version v${cargo_version}"
 
-# Build the release `fq` binary for a target triple.
+# Build the release binaries (fq, fq-cas) for a target triple.
 build-release target:
     cd {{runtime_dir}} && cargo build --release --target {{target}} --bin fq
+    cd {{store_dir}} && cargo build --release --target {{target}} --features cli --bin fq-cas
 
-# Package the built `fq` binary for a target into dist/ (.tar.gz + .sha256).
+# Package the built binaries for a target into dist/ (.tar.gz + .sha256 each).
 package target:
-    bash scripts/package.sh {{target}}
+    bash scripts/package.sh {{target}} {{runtime_dir}} fq
+    bash scripts/package.sh {{target}} {{store_dir}} fq-cas
 
 # Create a draft GitHub release for a tag from the dist/ artifacts.
 publish-release tag:

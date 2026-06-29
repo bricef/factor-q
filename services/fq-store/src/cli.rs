@@ -16,10 +16,24 @@ use crate::{Cid, ContentStore, Stats};
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+const AFTER_HELP: &str = "\
+Examples:
+  fq-cas put file.bin                       store a file; prints its content id
+  echo hi | fq-cas put -                    store from stdin
+  fq-cas get <cid> -o out.bin               read content back to a file
+  fq-cas get <cid> --offset 0 --length 64   read a byte range
+  fq-cas metrics                            dedup ratio, object/block counts, sizes
+  fq-cas serve --bind 127.0.0.1:9000        serve the store over the network
+  fq-cas --server 127.0.0.1:9000 get <cid>  talk to a remote store
+
+The store lives under --root (env FQ_CAS_ROOT, default ./.fq-cas).";
+
 #[derive(Parser)]
 #[command(
     name = "fq-cas",
-    about = "Content-addressed storage CLI (factor-q fq-store)"
+    about = "Content-addressed storage CLI (factor-q fq-store)",
+    version,
+    after_help = AFTER_HELP
 )]
 struct Cli {
     /// Store root directory (ignored when --server is set).

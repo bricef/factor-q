@@ -1,6 +1,7 @@
 #!/bin/sh
-# factor-q installer. Detects your platform, downloads the matching `fq`
-# release binary from GitHub, verifies its checksum, and installs it.
+# factor-q installer. Detects your platform, downloads the matching release
+# binaries from GitHub (fq and fq-cas), verifies their checksums, and installs
+# them.
 #
 #   curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/install.sh | sh
 #
@@ -58,38 +59,42 @@ else
 fi
 version="${tag#v}"
 
-name="fq-${version}-${target}"
-url="https://github.com/$REPO/releases/download/${tag}/${name}.tar.gz"
-
-echo "Installing fq ${tag} (${target}) -> ${INSTALL_DIR}"
-
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
-
-curl -fsSL "$url" -o "$tmp/fq.tar.gz" || err "download failed: $url"
-
-# --- verify checksum when the .sha256 is published ---
-if curl -fsSL "${url}.sha256" -o "$tmp/fq.sha256" 2>/dev/null; then
-    expected="$(awk '{print $1}' "$tmp/fq.sha256")"
-    if command -v sha256sum >/dev/null 2>&1; then
-        actual="$(sha256sum "$tmp/fq.tar.gz" | awk '{print $1}')"
-    else
-        actual="$(shasum -a 256 "$tmp/fq.tar.gz" | awk '{print $1}')"
-    fi
-    [ "$expected" = "$actual" ] || err "checksum mismatch (expected $expected, got $actual)"
-    echo "  checksum ok"
-fi
-
-tar -xzf "$tmp/fq.tar.gz" -C "$tmp"
-[ -f "$tmp/fq" ] || err "archive did not contain the fq binary"
-
 mkdir -p "$INSTALL_DIR"
-if ! install -m 0755 "$tmp/fq" "$INSTALL_DIR/fq" 2>/dev/null; then
-    cp "$tmp/fq" "$INSTALL_DIR/fq"
-    chmod 0755 "$INSTALL_DIR/fq"
-fi
 
-echo "Installed fq to $INSTALL_DIR/fq"
+# Download, verify, and install one binary by name.
+install_bin() {
+    bin="$1"
+    name="${bin}-${version}-${target}"
+    url="https://github.com/$REPO/releases/download/${tag}/${name}.tar.gz"
+
+    echo "Installing ${bin} ${tag} (${target}) -> ${INSTALL_DIR}"
+    curl -fsSL "$url" -o "$tmp/${bin}.tar.gz" || err "download failed: $url"
+
+    if curl -fsSL "${url}.sha256" -o "$tmp/${bin}.sha256" 2>/dev/null; then
+        expected="$(awk '{print $1}' "$tmp/${bin}.sha256")"
+        if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$tmp/${bin}.tar.gz" | awk '{print $1}')"
+        else
+            actual="$(shasum -a 256 "$tmp/${bin}.tar.gz" | awk '{print $1}')"
+        fi
+        [ "$expected" = "$actual" ] || err "checksum mismatch for ${bin} (expected $expected, got $actual)"
+        echo "  checksum ok"
+    fi
+
+    tar -xzf "$tmp/${bin}.tar.gz" -C "$tmp"
+    [ -f "$tmp/${bin}" ] || err "archive did not contain the ${bin} binary"
+    if ! install -m 0755 "$tmp/${bin}" "$INSTALL_DIR/${bin}" 2>/dev/null; then
+        cp "$tmp/${bin}" "$INSTALL_DIR/${bin}"
+        chmod 0755 "$INSTALL_DIR/${bin}"
+    fi
+    echo "  installed $INSTALL_DIR/${bin}"
+}
+
+install_bin fq
+install_bin fq-cas
+
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *)
@@ -98,3 +103,4 @@ case ":$PATH:" in
         ;;
 esac
 echo "Run 'fq version' to verify, then 'fq init' to start a project."
+echo "(fq-cas is the content-addressed storage CLI: 'fq-cas --help'.)"
