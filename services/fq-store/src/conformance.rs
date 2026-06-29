@@ -158,6 +158,27 @@ pub async fn stats_consistent<S: ContentStore + ?Sized>(store: &S, content: &[u8
     Ok(())
 }
 
+/// `blocks` enumerates an object's dedup units: the object must exist, the
+/// result is non-empty for non-empty content, and it is stable across calls.
+pub async fn blocks_enumerated<S: ContentStore + ?Sized>(store: &S, content: &[u8]) -> Check {
+    let cid = store.put(content).await.map_err(|e| format!("put: {e}"))?;
+    let blocks = store
+        .blocks(&cid)
+        .await
+        .map_err(|e| format!("blocks: {e}"))?;
+    if !content.is_empty() && blocks.is_empty() {
+        return fail("blocks() returned no units for non-empty content");
+    }
+    let again = store
+        .blocks(&cid)
+        .await
+        .map_err(|e| format!("blocks (again): {e}"))?;
+    if blocks != again {
+        return fail("blocks() is not stable across calls");
+    }
+    Ok(())
+}
+
 /// Generate the full `ContentStore` conformance test suite for a backend.
 ///
 /// `$make` is an expression that constructs a store (a content-addressed
@@ -235,6 +256,13 @@ macro_rules! content_store_conformance {
                 #[test]
                 fn content_addressed(content in prop::collection::vec(any::<u8>(), 0..32768usize)) {
                     if let Err(e) = rt().block_on($crate::conformance::content_addressed(store(), &content)) {
+                        prop_assert!(false, "{}", e);
+                    }
+                }
+
+                #[test]
+                fn blocks_enumerated(content in prop::collection::vec(any::<u8>(), 0..32768usize)) {
+                    if let Err(e) = rt().block_on($crate::conformance::blocks_enumerated(store(), &content)) {
                         prop_assert!(false, "{}", e);
                     }
                 }

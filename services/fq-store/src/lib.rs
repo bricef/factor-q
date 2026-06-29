@@ -58,4 +58,16 @@ pub trait ContentStore: Send + Sync {
     /// Aggregate statistics over all stored content — the basis for metrics
     /// such as the deduplication ratio. May scan the store.
     async fn stats(&self) -> Result<Stats>;
+
+    /// The object's dedup units, as block content-ids in order. The default
+    /// treats the whole object as one block (`[cid]`); backends that sub-chunk
+    /// (e.g. the filesystem backend) override this so the storage index can
+    /// reference-count shared blocks. [`StoreError::NotFound`] if absent.
+    async fn blocks(&self, cid: &Cid) -> Result<Vec<Cid>> {
+        if self.has(cid).await? {
+            Ok(vec![*cid])
+        } else {
+            Err(StoreError::NotFound(*cid))
+        }
+    }
 }

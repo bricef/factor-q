@@ -199,6 +199,16 @@ impl ContentStore for FilesystemStore {
         }
         Ok(stats)
     }
+
+    #[tracing::instrument(level = "debug", skip_all, fields(cid = %cid))]
+    async fn blocks(&self, cid: &Cid) -> Result<Vec<Cid>> {
+        let manifest = self.read_manifest(cid).await?;
+        manifest
+            .blocks
+            .iter()
+            .map(|b| Cid::from_hex(&b.hash))
+            .collect()
+    }
 }
 
 impl FilesystemStore {

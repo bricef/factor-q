@@ -180,6 +180,16 @@ and packages it.
 - **Service placement: a new `services/fq-store`** — factor-q will have
   multiple services, so the storage service is its own service from the
   start, not folded into `fq-runtime`.
+- **Storage index (M1b): implicit dotted-path namespaces.** The index keys
+  on a single hierarchical name string (`research.papers.doc1`); namespaces
+  are *any prefix*, not first-class objects. Access control (M2) matches
+  these strings via prefix and glob grants (`research.papers.*`, and
+  `system.agents.<id>.files.*` for harness-only scopes). The `object→block`
+  edges live **in the index DB** (denormalized from the CAS manifest) so the
+  two-level refcounts stay transactional; `NameStore` is a **trait + SQLite
+  reference impl**, reusing the M1a conformance pattern. To source those
+  edges, the `ContentStore` trait gains `blocks(cid)` — an object's dedup
+  units (`[cid]` for non-chunking backends). *(M1b)*
 - **Capability tokens: biscuit** (`biscuit-auth`) — offline attenuation +
   public-key verification + Datalog authorization; matches the
   build-for-distribution stance and accommodates the deferred groups/roles
