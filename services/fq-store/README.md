@@ -41,6 +41,26 @@ fq-cas metrics                             # objects/blocks, sizes, dedup ratio 
 The store lives under `--root` (env `FQ_CAS_ROOT`, default `./.fq-cas`).
 Run `fq-cas --help` for the full surface.
 
+### Named objects
+
+The commands above are content-addressed (you get back a cid). The `name`
+subcommand group adds the **name layer** (M1b) — store and read content by a
+hierarchical dotted name, with version history:
+
+```sh
+fq-cas name put research.papers.doc1 paper.pdf   # store + name -> prints the cid
+fq-cas name get research.papers.doc1 -o out.pdf  # read by name (--offset/--length too)
+fq-cas name ls research.papers                   # list a namespace (prefix; empty = all)
+fq-cas name resolve research.papers.doc1         # the cid a name points at
+fq-cas name history research.papers.doc1         # version cids, newest first
+fq-cas name bind alias <cid>                     # alias a name to an existing cid
+fq-cas name rm research.papers.doc1              # remove a name (and its history)
+```
+
+Re-`put`ting a name keeps the prior version (history is keep-all); `rm` drops
+a name's references, after which its object becomes reclaimable by GC (M1c).
+Named operations are local — `--server` addresses the CID-level CAS only.
+
 ### Distributed mode
 
 The same store can run as a network service, so a client can talk to a

@@ -94,3 +94,70 @@ fn put_then_get_roundtrips() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"objects\": 1"));
 }
+
+fn run(root: &std::path::Path, args: &[&str]) -> std::process::Output {
+    fq_cas()
+        .arg("--root")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn named_operations() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let f1 = dir.path().join("f1.txt");
+    let f2 = dir.path().join("f2.txt");
+    std::fs::write(&f1, b"version one").unwrap();
+    std::fs::write(&f2, b"version two").unwrap();
+    let (f1s, f2s) = (f1.to_str().unwrap(), f2.to_str().unwrap());
+
+    // name put -> cid; name get -> bytes; resolve -> same cid
+    let out = run(root, &["name", "put", "docs.readme", f1s]);
+    assert!(
+        out.status.success(),
+        "name put: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cid = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    assert_eq!(cid.len(), 64);
+    assert_eq!(
+        run(root, &["name", "get", "docs.readme"]).stdout,
+        b"version one"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run(root, &["name", "resolve", "docs.readme"]).stdout).trim(),
+        cid
+    );
+
+    // a second name; ls the namespace (sorted)
+    run(root, &["name", "put", "docs.guide", f1s]);
+    assert_eq!(
+        String::from_utf8_lossy(&run(root, &["name", "ls", "docs"]).stdout),
+        "docs.guide\ndocs.readme\n"
+    );
+
+    // overwrite -> get reflects v2; history is newest-first, oldest == original
+    run(root, &["name", "put", "docs.readme", f2s]);
+    assert_eq!(
+        run(root, &["name", "get", "docs.readme"]).stdout,
+        b"version two"
+    );
+    let hist = String::from_utf8(run(root, &["name", "history", "docs.readme"]).stdout).unwrap();
+    let versions: Vec<&str> = hist.lines().collect();
+    assert_eq!(versions.len(), 2, "two versions in history");
+    assert_eq!(versions[1], cid, "oldest version is last");
+
+    // rm -> name gone, ls reflects it, get errors
+    assert!(run(root, &["name", "rm", "docs.guide"]).status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&run(root, &["name", "ls", "docs"]).stdout),
+        "docs.readme\n"
+    );
+    assert!(
+        !run(root, &["name", "get", "docs.guide"]).status.success(),
+        "get of a removed name should fail"
+    );
+}
