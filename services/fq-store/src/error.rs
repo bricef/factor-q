@@ -21,4 +21,8 @@ pub enum StoreError {
     /// or a bug, never normal "absent" conditions.
     #[error("store corruption: {0}")]
     Corrupt(String),
+
+    /// A storage-index (database) failure.
+    #[error("index error: {0}")]
+    Index(String),
 }

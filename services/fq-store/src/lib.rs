@@ -15,6 +15,7 @@ mod error;
 
 pub mod conformance;
 pub mod fs;
+pub mod index;
 pub mod stats;
 
 #[cfg(feature = "cli")]
@@ -25,6 +26,7 @@ pub mod service;
 
 pub use cid::Cid;
 pub use error::{Result, StoreError};
+pub use index::{NameStore, SqliteNameStore};
 pub use stats::Stats;
 
 use async_trait::async_trait;
