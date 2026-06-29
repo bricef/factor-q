@@ -25,11 +25,11 @@ Content-addressed (by id):
   fq-cas serve --bind 127.0.0.1:9000        serve the store over the network
 
 Named objects (a name -> content mapping, with version history):
-  fq-cas name put research.papers.doc1 paper.pdf   store and name a file
-  fq-cas name get research.papers.doc1 -o out.pdf  read content by name
-  fq-cas name ls research.papers                   list names in a namespace
-  fq-cas name history research.papers.doc1         show version history
-  fq-cas name rm research.papers.doc1              remove a name
+  fq-cas object put research.papers.doc1 paper.pdf   store and name a file
+  fq-cas object get research.papers.doc1 -o out.pdf  read content by name
+  fq-cas object ls research.papers                   list a namespace
+  fq-cas object history research.papers.doc1         show version history
+  fq-cas object rm research.papers.doc1              remove a name
 
 The store lives under --root (env FQ_CAS_ROOT, default ./.fq-cas).";
 
@@ -96,17 +96,17 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:9000")]
         bind: String,
     },
-    /// Named-object operations: store, read, list, and remove content by
-    /// hierarchical name (a local name index over the content store).
-    Name {
+    /// Object operations: store, read, list, and remove content by
+    /// hierarchical name (the local name index over the content store).
+    Object {
         #[command(subcommand)]
-        command: NameCommand,
+        command: ObjectCommand,
     },
 }
 
 /// Operations on the name index — the named, versioned object store.
 #[derive(Subcommand)]
-enum NameCommand {
+enum ObjectCommand {
     /// Store a file (or stdin '-') and bind it to a name; prints the cid.
     Put {
         /// The dotted, hierarchical name (e.g. research.papers.doc1).
@@ -199,7 +199,7 @@ fn run() -> CliResult<ExitCode> {
                 crate::service::serve(&bind, store).await?;
                 Ok(ExitCode::SUCCESS)
             }
-            Command::Name { command } => {
+            Command::Object { command } => {
                 if cli.server.is_some() {
                     return Err("named operations run against the local store; \
                                 --server addresses the CID-level CAS only \
@@ -210,7 +210,7 @@ fn run() -> CliResult<ExitCode> {
                     FilesystemStore::new(&cli.root),
                     SqliteNameStore::open(cli.root.join("index.db")).await?,
                 );
-                dispatch_name(&catalog, command).await
+                dispatch_object(&catalog, command).await
             }
             command => {
                 if let Some(addr) = &cli.server {
@@ -279,7 +279,7 @@ async fn dispatch(store: &dyn ContentStore, command: Command) -> CliResult<ExitC
             Ok(ExitCode::SUCCESS)
         }
         Command::Serve { .. } => unreachable!("Serve is handled in run(), before dispatch"),
-        Command::Name { .. } => unreachable!("Name is handled in run(), before dispatch"),
+        Command::Object { .. } => unreachable!("Name is handled in run(), before dispatch"),
     }
 }
 
@@ -325,18 +325,18 @@ async fn write_output(data: &[u8], output: Option<PathBuf>) -> CliResult<()> {
 }
 
 /// Run a named-object command against the local catalog.
-async fn dispatch_name(
+async fn dispatch_object(
     catalog: &Catalog<FilesystemStore, SqliteNameStore>,
-    command: NameCommand,
+    command: ObjectCommand,
 ) -> CliResult<ExitCode> {
     match command {
-        NameCommand::Put { name, path } => {
+        ObjectCommand::Put { name, path } => {
             let content = read_input(&path).await?;
             let cid = catalog.put(&name, &content).await?;
             println!("{cid}");
             Ok(ExitCode::SUCCESS)
         }
-        NameCommand::Get {
+        ObjectCommand::Get {
             name,
             output,
             offset,
@@ -350,30 +350,30 @@ async fn dispatch_name(
             write_output(&data, output).await?;
             Ok(ExitCode::SUCCESS)
         }
-        NameCommand::Ls { prefix } => {
+        ObjectCommand::Ls { prefix } => {
             for name in catalog.list(&prefix).await? {
                 println!("{name}");
             }
             Ok(ExitCode::SUCCESS)
         }
-        NameCommand::Rm { name } => {
+        ObjectCommand::Rm { name } => {
             catalog.delete(&name).await?;
             Ok(ExitCode::SUCCESS)
         }
-        NameCommand::Resolve { name } => match catalog.resolve(&name).await? {
+        ObjectCommand::Resolve { name } => match catalog.resolve(&name).await? {
             Some(cid) => {
                 println!("{cid}");
                 Ok(ExitCode::SUCCESS)
             }
             None => Err(StoreError::NameNotFound(name).into()),
         },
-        NameCommand::History { name } => {
+        ObjectCommand::History { name } => {
             for cid in catalog.history(&name).await? {
                 println!("{cid}");
             }
             Ok(ExitCode::SUCCESS)
         }
-        NameCommand::Bind { name, cid } => {
+        ObjectCommand::Bind { name, cid } => {
             let cid = Cid::from_hex(&cid)?;
             catalog.bind(&name, &cid).await?;
             Ok(ExitCode::SUCCESS)

@@ -43,18 +43,18 @@ Run `fq-cas --help` for the full surface.
 
 ### Named objects
 
-The commands above are content-addressed (you get back a cid). The `name`
+The commands above are content-addressed (you get back a cid). The `object`
 subcommand group adds the **name layer** (M1b) — store and read content by a
 hierarchical dotted name, with version history:
 
 ```sh
-fq-cas name put research.papers.doc1 paper.pdf   # store + name -> prints the cid
-fq-cas name get research.papers.doc1 -o out.pdf  # read by name (--offset/--length too)
-fq-cas name ls research.papers                   # list a namespace (prefix; empty = all)
-fq-cas name resolve research.papers.doc1         # the cid a name points at
-fq-cas name history research.papers.doc1         # version cids, newest first
-fq-cas name bind alias <cid>                     # alias a name to an existing cid
-fq-cas name rm research.papers.doc1              # remove a name (and its history)
+fq-cas object put research.papers.doc1 paper.pdf   # store + name -> prints the cid
+fq-cas object get research.papers.doc1 -o out.pdf  # read by name (--offset/--length too)
+fq-cas object ls research.papers                   # list a namespace (prefix; empty = all)
+fq-cas object resolve research.papers.doc1         # the cid a name points at
+fq-cas object history research.papers.doc1         # version cids, newest first
+fq-cas object bind alias <cid>                     # alias a name to an existing cid
+fq-cas object rm research.papers.doc1              # remove a name (and its history)
 ```
 
 Re-`put`ting a name keeps the prior version (history is keep-all); `rm` drops

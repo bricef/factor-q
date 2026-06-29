@@ -114,50 +114,50 @@ fn named_operations() {
     std::fs::write(&f2, b"version two").unwrap();
     let (f1s, f2s) = (f1.to_str().unwrap(), f2.to_str().unwrap());
 
-    // name put -> cid; name get -> bytes; resolve -> same cid
-    let out = run(root, &["name", "put", "docs.readme", f1s]);
+    // object put -> cid; object get -> bytes; resolve -> same cid
+    let out = run(root, &["object", "put", "docs.readme", f1s]);
     assert!(
         out.status.success(),
-        "name put: {}",
+        "object put: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let cid = String::from_utf8(out.stdout).unwrap().trim().to_string();
     assert_eq!(cid.len(), 64);
     assert_eq!(
-        run(root, &["name", "get", "docs.readme"]).stdout,
+        run(root, &["object", "get", "docs.readme"]).stdout,
         b"version one"
     );
     assert_eq!(
-        String::from_utf8_lossy(&run(root, &["name", "resolve", "docs.readme"]).stdout).trim(),
+        String::from_utf8_lossy(&run(root, &["object", "resolve", "docs.readme"]).stdout).trim(),
         cid
     );
 
     // a second name; ls the namespace (sorted)
-    run(root, &["name", "put", "docs.guide", f1s]);
+    run(root, &["object", "put", "docs.guide", f1s]);
     assert_eq!(
-        String::from_utf8_lossy(&run(root, &["name", "ls", "docs"]).stdout),
+        String::from_utf8_lossy(&run(root, &["object", "ls", "docs"]).stdout),
         "docs.guide\ndocs.readme\n"
     );
 
     // overwrite -> get reflects v2; history is newest-first, oldest == original
-    run(root, &["name", "put", "docs.readme", f2s]);
+    run(root, &["object", "put", "docs.readme", f2s]);
     assert_eq!(
-        run(root, &["name", "get", "docs.readme"]).stdout,
+        run(root, &["object", "get", "docs.readme"]).stdout,
         b"version two"
     );
-    let hist = String::from_utf8(run(root, &["name", "history", "docs.readme"]).stdout).unwrap();
+    let hist = String::from_utf8(run(root, &["object", "history", "docs.readme"]).stdout).unwrap();
     let versions: Vec<&str> = hist.lines().collect();
     assert_eq!(versions.len(), 2, "two versions in history");
     assert_eq!(versions[1], cid, "oldest version is last");
 
     // rm -> name gone, ls reflects it, get errors
-    assert!(run(root, &["name", "rm", "docs.guide"]).status.success());
+    assert!(run(root, &["object", "rm", "docs.guide"]).status.success());
     assert_eq!(
-        String::from_utf8_lossy(&run(root, &["name", "ls", "docs"]).stdout),
+        String::from_utf8_lossy(&run(root, &["object", "ls", "docs"]).stdout),
         "docs.readme\n"
     );
     assert!(
-        !run(root, &["name", "get", "docs.guide"]).status.success(),
+        !run(root, &["object", "get", "docs.guide"]).status.success(),
         "get of a removed name should fail"
     );
 }
