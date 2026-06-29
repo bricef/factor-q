@@ -14,7 +14,7 @@ path = "src/main.rs"
 # instead of compiling. Must match the release artifact naming (see
 # scripts/package.sh and .github/workflows/release.yml).
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/fq-{ version }-{ target }.tar.gz"
+pkg-url = "{ repo }/releases/download/v{ version }/factor-q-{ version }-{ target }.tar.gz"
 pkg-fmt = "tgz"
 bin-dir = "fq"
 

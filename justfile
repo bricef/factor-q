@@ -123,10 +123,9 @@ build-release target:
     cd {{runtime_dir}} && cargo build --release --target {{target}} --bin fq
     cd {{store_dir}} && cargo build --release --target {{target}} --features cli --bin fq-cas
 
-# Package the built binaries for a target into dist/ (.tar.gz + .sha256 each).
+# Package the built binaries into a single bundle in dist/ (.tar.gz + .sha256).
 package target:
-    bash scripts/package.sh {{target}} {{runtime_dir}} fq
-    bash scripts/package.sh {{target}} {{store_dir}} fq-cas
+    bash scripts/package.sh {{target}} {{runtime_dir}}:fq {{store_dir}}:fq-cas
 
 # Create a draft GitHub release for a tag from the dist/ artifacts.
 publish-release tag:

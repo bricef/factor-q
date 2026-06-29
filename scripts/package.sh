@@ -1,30 +1,40 @@
 #!/usr/bin/env bash
-# Package a release binary for a target triple into dist/:
-#   dist/<bin>-<version>-<target>.tar.gz   (+ .sha256)
-# The archive holds the binary plus LICENSE/README files when present.
+# Package the release binaries for a target triple into a single bundle:
+#   dist/factor-q-<version>-<target>.tar.gz   (+ .sha256)
+# The archive holds every requested binary plus LICENSE/README when present.
 #
-# Usage: scripts/package.sh <target-triple> <crate-dir> <bin-name>
-#   e.g. scripts/package.sh x86_64-unknown-linux-musl services/fq-runtime fq
+# Usage: scripts/package.sh <target-triple> <crate-dir>:<bin> [<crate-dir>:<bin> ...]
+#   e.g. scripts/package.sh x86_64-unknown-linux-musl services/fq-runtime:fq services/fq-store:fq-cas
 # (normally invoked via `just package <target>`).
 set -euo pipefail
 
-target="${1:?usage: package.sh <target> <crate-dir> <bin-name>}"
-crate_dir="${2:?usage: package.sh <target> <crate-dir> <bin-name>}"
-bin_name="${3:?usage: package.sh <target> <crate-dir> <bin-name>}"
-root="$(cd "$(dirname "$0")/.." && pwd)"
-version="$(grep -m1 '^version = ' "$root/$crate_dir/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
-bin="$root/$crate_dir/target/$target/release/$bin_name"
-
-if [ ! -x "$bin" ]; then
-    echo "binary not found: $bin (run 'just build-release $target' first)" >&2
+target="${1:?usage: package.sh <target> <crate-dir>:<bin> ...}"
+shift
+[ "$#" -ge 1 ] || {
+    echo "usage: package.sh <target> <crate-dir>:<bin> ..." >&2
     exit 1
-fi
+}
 
-name="${bin_name}-${version}-${target}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+# The release version is the runtime workspace version, which
+# `just check-version` ties to the release tag.
+version="$(grep -m1 '^version = ' "$root/services/fq-runtime/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+
+name="factor-q-${version}-${target}"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 
-cp "$bin" "$stage/$bin_name"
+for spec in "$@"; do
+    crate_dir="${spec%%:*}"
+    bin="${spec##*:}"
+    bin_path="$root/$crate_dir/target/$target/release/$bin"
+    if [ ! -x "$bin_path" ]; then
+        echo "binary not found: $bin_path (run 'just build-release $target' first)" >&2
+        exit 1
+    fi
+    cp "$bin_path" "$stage/$bin"
+done
+
 # Bundle license + readme when they exist (the LICENSE file lands once the
 # license is chosen; packaging tolerates its absence until then).
 for f in LICENSE LICENSE-MIT LICENSE-APACHE README.md; do
@@ -44,4 +54,4 @@ tar -czf "$root/dist/${name}.tar.gz" -C "$stage" .
     fi
 )
 
-echo "packaged dist/${name}.tar.gz"
+echo "packaged dist/${name}.tar.gz ($*)"

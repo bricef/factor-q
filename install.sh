@@ -1,7 +1,7 @@
 #!/bin/sh
 # factor-q installer. Detects your platform, downloads the matching release
-# binaries from GitHub (fq and fq-cas), verifies their checksums, and installs
-# them.
+# bundle from GitHub (a single archive with the fq and fq-cas binaries),
+# verifies its checksum, and installs them.
 #
 #   curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/install.sh | sh
 #
@@ -59,41 +59,38 @@ else
 fi
 version="${tag#v}"
 
+name="factor-q-${version}-${target}"
+url="https://github.com/$REPO/releases/download/${tag}/${name}.tar.gz"
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
-mkdir -p "$INSTALL_DIR"
 
-# Download, verify, and install one binary by name.
-install_bin() {
-    bin="$1"
-    name="${bin}-${version}-${target}"
-    url="https://github.com/$REPO/releases/download/${tag}/${name}.tar.gz"
+echo "Installing factor-q ${tag} (${target}) -> ${INSTALL_DIR}"
+curl -fsSL "$url" -o "$tmp/bundle.tar.gz" || err "download failed: $url"
 
-    echo "Installing ${bin} ${tag} (${target}) -> ${INSTALL_DIR}"
-    curl -fsSL "$url" -o "$tmp/${bin}.tar.gz" || err "download failed: $url"
-
-    if curl -fsSL "${url}.sha256" -o "$tmp/${bin}.sha256" 2>/dev/null; then
-        expected="$(awk '{print $1}' "$tmp/${bin}.sha256")"
-        if command -v sha256sum >/dev/null 2>&1; then
-            actual="$(sha256sum "$tmp/${bin}.tar.gz" | awk '{print $1}')"
-        else
-            actual="$(shasum -a 256 "$tmp/${bin}.tar.gz" | awk '{print $1}')"
-        fi
-        [ "$expected" = "$actual" ] || err "checksum mismatch for ${bin} (expected $expected, got $actual)"
-        echo "  checksum ok"
+# --- verify checksum when the .sha256 is published ---
+if curl -fsSL "${url}.sha256" -o "$tmp/bundle.sha256" 2>/dev/null; then
+    expected="$(awk '{print $1}' "$tmp/bundle.sha256")"
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "$tmp/bundle.tar.gz" | awk '{print $1}')"
+    else
+        actual="$(shasum -a 256 "$tmp/bundle.tar.gz" | awk '{print $1}')"
     fi
+    [ "$expected" = "$actual" ] || err "checksum mismatch (expected $expected, got $actual)"
+    echo "  checksum ok"
+fi
 
-    tar -xzf "$tmp/${bin}.tar.gz" -C "$tmp"
+tar -xzf "$tmp/bundle.tar.gz" -C "$tmp"
+
+mkdir -p "$INSTALL_DIR"
+for bin in fq fq-cas; do
     [ -f "$tmp/${bin}" ] || err "archive did not contain the ${bin} binary"
     if ! install -m 0755 "$tmp/${bin}" "$INSTALL_DIR/${bin}" 2>/dev/null; then
         cp "$tmp/${bin}" "$INSTALL_DIR/${bin}"
         chmod 0755 "$INSTALL_DIR/${bin}"
     fi
     echo "  installed $INSTALL_DIR/${bin}"
-}
-
-install_bin fq
-install_bin fq-cas
+done
 
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;

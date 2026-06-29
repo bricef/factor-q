@@ -41,7 +41,7 @@ required-features = ["cli"]
 # cargo-binstall: fetch the pre-built fq-cas binary from GitHub Releases.
 # Must match the release artifact naming (scripts/package.sh, release.yml).
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/fq-cas-{ version }-{ target }.tar.gz"
+pkg-url = "{ repo }/releases/download/v{ version }/factor-q-{ version }-{ target }.tar.gz"
 pkg-fmt = "tgz"
 bin-dir = "fq-cas"
 
