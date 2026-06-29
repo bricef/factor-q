@@ -25,4 +25,8 @@ pub enum StoreError {
     /// A storage-index (database) failure.
     #[error("index error: {0}")]
     Index(String),
+
+    /// No object is bound to the given name in the index.
+    #[error("name not found: {0}")]
+    NameNotFound(String),
 }
