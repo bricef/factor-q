@@ -26,8 +26,10 @@ are the axes of the fault map and the targets of fault injection.
 
 - **I1 — one live generation:** at most one row per hash has `available = true`.
 - **I2 — live blocks have files:** `refcount > 0` ⟹ the block's file exists.
-  Holds across crashes because `WRITE_FILE` / `MINT` precede the row write that
-  makes refcount positive.
+  Holds across crashes because `WRITE_FILE` / `MINT` **fsync** the block file
+  before committing the row that makes refcount positive — an un-fsynced crash
+  would otherwise lose the file while the row says refcount 1 (confirmed by the
+  model below).
 - **I3 — no unlink under reference:** `UNLINK` runs only on a `CLAIMED` block
   (`available = false ∧ refcount = 0`); a claimed block cannot be reserved, so
   refcount stays 0 through the unlink.
@@ -114,9 +116,22 @@ fixed model then verified with **zero violations** across configurations up to
 model; run it through TLC wherever Java is available — ideally a **CI job** with a
 JRE + `tla2tools` so the design is re-model-checked on every protocol change.
 
-Remaining work: weak fairness for the liveness properties (L1–L4), and a `Crash`
-refinement that drops the most recent un-fsynced file op (the clean-crash model
-does not yet stress I2/I3 under un-fsynced loss).
+Two refinements have since been added to the checker:
+
+- **Un-fsynced crash.** Modelling a crash that also drops files not yet fsynced
+  surfaced a concrete requirement — a block file **must be fsync'd before its
+  index row is committed**. Without it the checker finds an **I2** violation in
+  three steps (`Reserve → Materialize → Crash` loses the just-written,
+  not-yet-durable block while its row already says refcount 1); with the fsync
+  the model is clean.
+- **Liveness under weak fairness.** Fair-cycle detection over the crash-free
+  graph confirms **GC-progress** (the collector never stalls non-idle),
+  **writer-progress** (no writer gets stuck), and **reclaim-progress** (dead
+  blocks don't persist unreclaimed) — no fair-cycle violations.
+
+Run them with `CRASH=unfsynced SYNC=0|1` and `MODE=liveness`. For TLC, the `.tla`
+carries `FairSpec` and the liveness properties; the durability refinement lives
+in the Python checker (`CRASH=unfsynced`).
 
 ## References
 

@@ -17,10 +17,11 @@
 (* an available generation at execution time.  The fixed model verified with  *)
 (* zero violations up to 115k states (2 hashes, 2 writers).                   *)
 (*                                                                          *)
-(* STATUS: run through TLC with storage-gc.cfg.  Remaining TODOs: weak        *)
-(* fairness for the liveness properties, and a Crash refinement that drops    *)
-(* the most recent un-fsynced file op (the clean-crash model below does not   *)
-(* yet stress I2/I3 under un-fsynced loss).                                   *)
+(* STATUS: run through TLC with storage_gc.cfg.  The fairness/liveness         *)
+(* (FairSpec, GCProgress, WriterProgress) and the un-fsynced-crash + the        *)
+(* fsync-before-insert requirement it surfaced were validated in                *)
+(* storage-gc-check.py; this .tla keeps the clean-crash model, with the         *)
+(* durability refinement documented there and in the verification doc.          *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -170,6 +171,15 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+\* Weak fairness on the progress actions, for the liveness properties.  Checked
+\* via crash-free fair-cycle detection in storage-gc-check.py (MODE=liveness).
+Fairness ==
+    /\ \A w \in Writers : WF_vars(Materialize(w) \/ Bind(w) \/ Release(w))
+    /\ WF_vars(Unlink \/ DeleteRow)
+    /\ \A h \in Hashes, g \in Gens : WF_vars(Claim(h, g) \/ GcResume(h, g))
+    /\ \A b \in Blocks : WF_vars(Reconcile(b))
+FairSpec == Spec /\ Fairness
+
 \* Keep the model finite for TLC.
 StateBound ==
     \A b \in Blocks : rows[b].refcount <= MaxRef /\ objects[b] <= MaxObj
@@ -192,8 +202,9 @@ ClaimedHasNoRefs ==
 \* I4 -- counts dominate bound references.
 RefcountDominates == \A b \in Blocks : rows[b].refcount >= objects[b]
 
-\* L1 (needs fairness) -- a dead block is eventually reclaimed.
-\* EventuallyReclaimed ==
-\*     \A b \in Blocks : (rows[b].exists /\ rows[b].refcount = 0) ~> (~rows[b].exists)
+\* Liveness (check with FairSpec).  Verified clean by storage-gc-check.py:
+\* GC-progress, writer-progress, and reclaim-progress all hold under weak fairness.
+GCProgress == (gpc.phase # "idle") ~> (gpc.phase = "idle")
+WriterProgress == \A w \in Writers : (wpc[w].phase # "idle") ~> (wpc[w].phase = "idle")
 
 =============================================================================

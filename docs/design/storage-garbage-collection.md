@@ -117,9 +117,13 @@ is no interleaving in which both succeed.
    and act atomically:
    - one is now available → **dedup** onto it (`UPDATE … refcount + 1`) and reuse
      its file;
-   - none is available → **mint** a fresh generation: write the bytes and
-     `INSERT (hash, gen, refcount 1, available)` *conditional on no available row
-     existing*, so concurrent materialisers converge to one.
+   - none is available → **mint** a fresh generation: write the bytes,
+     **fsync the file**, then `INSERT (hash, gen, refcount 1, available)`
+     *conditional on no available row existing*. The fsync-before-insert is load-
+     bearing: a crash must never leave a committed row without durable bytes (the
+     model checker found exactly this — see
+     [verification](storage-gc-verification.md)). Concurrent materialisers
+     converge to one.
 4. Bind the object, **handing each reservation off** to a permanent object→block
    edge (no second increment). A `put` that fails before binding **releases** its
    reservations (decrement).
@@ -192,6 +196,10 @@ Transitions:
 
 ## Crash safety and recovery
 
+- **`Materialize` fsyncs the block file before committing its row**, so a crash
+  never leaves a row at refcount ≥ 1 with no durable file (the model checker
+  found this under un-fsynced loss — see
+  [verification](storage-gc-verification.md)).
 - **GC orders `unlink` before the row delete.** So "row gone" implies "file
   already gone" — never the reverse.
 - Crash after `unlink`, before the row delete → a `claimed` row with no file →
