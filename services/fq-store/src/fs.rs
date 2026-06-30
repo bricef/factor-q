@@ -48,6 +48,12 @@ pub struct FilesystemStore {
 struct BlockRef {
     hash: String,
     len: u64,
+    /// The block generation this object references — 0 (canonical) for blocks
+    /// written without a GC collision. Recording it in the manifest lets reads
+    /// resolve the block file without an index lookup. `serde(default)` keeps
+    /// pre-M1c manifests (no generation field) readable.
+    #[serde(default)]
+    generation: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -129,6 +135,7 @@ impl ContentStore for FilesystemStore {
                 blocks.push(BlockRef {
                     hash,
                     len: chunk.length as u64,
+                    generation: 0,
                 });
             }
         }
@@ -232,7 +239,7 @@ impl ContentStore for FilesystemStore {
 
 impl FilesystemStore {
     async fn read_block(&self, cid: &Cid, block: &BlockRef) -> Result<Vec<u8>> {
-        tokio::fs::read(self.block_path(&block.hash, 0))
+        tokio::fs::read(self.block_path(&block.hash, block.generation))
             .await
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -248,13 +255,21 @@ impl FilesystemStore {
 /// a concurrent reader never observes a partial file. Content-addressed paths
 /// make the final content identical regardless of which writer wins a race.
 async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_file_name(format!(".tmp.{}.{n}", std::process::id()));
-    tokio::fs::write(&tmp, bytes).await?;
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    file.write_all(bytes).await?;
+    // fsync the data before publishing the file: the bytes must be durable
+    // before any index row that references the block commits (I2 — see
+    // storage-gc-verification.md). The directory fsync that would also make the
+    // rename itself crash-durable is left to the crash-consistency tests.
+    file.sync_all().await?;
+    drop(file);
     tokio::fs::rename(&tmp, path).await?;
     Ok(())
 }
@@ -419,6 +434,14 @@ mod tests {
         let (_dir, store) = store();
         let err = store.get(&Cid::of(b"never stored")).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn manifest_without_generation_field_reads_as_zero() {
+        // A pre-M1c manifest had no `generation` on its block refs.
+        let json = r#"{"size":3,"blocks":[{"hash":"deadbeef","len":3}]}"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.blocks[0].generation, 0);
     }
 
     #[tokio::test]
