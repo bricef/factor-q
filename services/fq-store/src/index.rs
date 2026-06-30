@@ -55,6 +55,30 @@ pub trait NameIndex: Send + Sync {
     /// invariant oracle ([`crate::verify`]) and the reachability audit (M1c).
     /// Suitable for tests and small stores; the production audit may stream.
     async fn snapshot(&self) -> Result<IndexSnapshot>;
+
+    /// Atomically reserve the currently-available generation of block `hash`
+    /// (the writer's compare-and-swap): increment `refcount` on the row that is
+    /// still `available`, returning its generation. `None` if no generation is
+    /// available (none exists, or every one is claimed) — the writer then mints.
+    async fn reserve_block(&self, hash: &Cid) -> Result<Option<u32>>;
+
+    /// Atomically mint `generation` of `hash` as a fresh available block
+    /// (refcount 1), **conditional on no generation currently being available**,
+    /// so concurrent minters converge to one. `Ok(true)` if it inserted;
+    /// `Ok(false)` if an available generation already exists (reserve it). The
+    /// block file must already be written and fsynced (I2). A pre-existing
+    /// `(hash, generation)` is an error — the caller picks a fresh generation.
+    async fn mint_block(&self, hash: &Cid, generation: u32) -> Result<bool>;
+
+    /// Atomically claim `(hash, generation)` for collection (the GC
+    /// compare-and-swap): flip `available` to false, **conditional on `refcount
+    /// = 0` and still available**. `Ok(true)` if claimed; `Ok(false)` if a writer
+    /// reserved first (refcount > 0) or it was already claimed.
+    async fn claim_block(&self, hash: &Cid, generation: u32) -> Result<bool>;
+
+    /// Release a reservation on `(hash, generation)` — `refcount -= 1` — for a
+    /// failed put, or the bind hand-off's alias case.
+    async fn release_block(&self, hash: &Cid, generation: u32) -> Result<()>;
 }
 
 /// One row of the `blocks` table: a block generation and its claim state.
@@ -428,6 +452,59 @@ impl NameIndex for SqliteNameIndex {
                 .collect::<Result<_>>()?,
         })
     }
+
+    async fn reserve_block(&self, hash: &Cid) -> Result<Option<u32>> {
+        let reserved: Option<i64> = sqlx::query_scalar(
+            "UPDATE blocks SET refcount = refcount + 1
+             WHERE hash = ? AND available = 1 RETURNING generation",
+        )
+        .bind(hash.to_hex())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(index_err)?;
+        Ok(reserved.map(|g| g as u32))
+    }
+
+    async fn mint_block(&self, hash: &Cid, generation: u32) -> Result<bool> {
+        let h = hash.to_hex();
+        let affected = sqlx::query(
+            "INSERT INTO blocks (hash, generation, refcount, available)
+             SELECT ?, ?, 1, 1
+             WHERE NOT EXISTS (SELECT 1 FROM blocks WHERE hash = ? AND available = 1)",
+        )
+        .bind(&h)
+        .bind(generation as i64)
+        .bind(&h)
+        .execute(&self.pool)
+        .await
+        .map_err(index_err)?
+        .rows_affected();
+        Ok(affected == 1)
+    }
+
+    async fn claim_block(&self, hash: &Cid, generation: u32) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE blocks SET available = 0
+             WHERE hash = ? AND generation = ? AND refcount = 0 AND available = 1",
+        )
+        .bind(hash.to_hex())
+        .bind(generation as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(index_err)?
+        .rows_affected();
+        Ok(affected == 1)
+    }
+
+    async fn release_block(&self, hash: &Cid, generation: u32) -> Result<()> {
+        sqlx::query("UPDATE blocks SET refcount = refcount - 1 WHERE hash = ? AND generation = ?")
+            .bind(hash.to_hex())
+            .bind(generation as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(index_err)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -532,6 +609,58 @@ mod tests {
         // x dead -> b1 reclaimable; b2 still held by y; b3 still held by y.
         assert_eq!(s.unreferenced_objects().await.unwrap(), vec![x]);
         assert_eq!(s.unreferenced_blocks().await.unwrap(), vec![b1]);
+    }
+
+    #[tokio::test]
+    async fn reserve_and_claim_linearise() {
+        let (_d, s) = store().await;
+        let h = cid("block");
+        // Mint a fresh available generation (refcount 1 — the minter's hold).
+        assert!(s.mint_block(&h, 0).await.unwrap(), "first mint inserts");
+        // A second mint is refused while a generation is available (dedup).
+        assert!(
+            !s.mint_block(&h, 1).await.unwrap(),
+            "mint refused while available"
+        );
+
+        // A reserve bumps the available generation; refcount is now 2.
+        assert_eq!(s.reserve_block(&h).await.unwrap(), Some(0));
+        // GC's claim loses against the live refcount.
+        assert!(
+            !s.claim_block(&h, 0).await.unwrap(),
+            "claim loses to a reservation"
+        );
+
+        // Release both holds; the block is now dead (refcount 0, still available).
+        s.release_block(&h, 0).await.unwrap();
+        s.release_block(&h, 0).await.unwrap();
+        // Now the claim wins, is idempotent, and the block is no longer reservable.
+        assert!(
+            s.claim_block(&h, 0).await.unwrap(),
+            "claim wins on a dead block"
+        );
+        assert!(!s.claim_block(&h, 0).await.unwrap(), "already claimed");
+        assert_eq!(
+            s.reserve_block(&h).await.unwrap(),
+            None,
+            "reserve loses to a claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn mint_recovers_after_a_claim() {
+        let (_d, s) = store().await;
+        assert_eq!(s.reserve_block(&cid("absent")).await.unwrap(), None);
+
+        let h = cid("claimed");
+        assert!(s.mint_block(&h, 0).await.unwrap());
+        s.release_block(&h, 0).await.unwrap(); // refcount 0
+        assert!(s.claim_block(&h, 0).await.unwrap()); // generation 0 claimed
+        assert_eq!(s.reserve_block(&h).await.unwrap(), None);
+        // With the old generation claimed, a writer mints a fresh one (collision
+        // recovery) — I1 still holds: exactly one available generation.
+        assert!(s.mint_block(&h, 1).await.unwrap(), "mint a new generation");
+        assert_eq!(s.reserve_block(&h).await.unwrap(), Some(1));
     }
 
     #[tokio::test]
