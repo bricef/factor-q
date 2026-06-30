@@ -50,6 +50,28 @@ pub trait NameIndex: Send + Sync {
 
     /// Blocks no longer referenced by any live object — GC candidates.
     async fn unreferenced_blocks(&self) -> Result<Vec<Cid>>;
+
+    /// A consistent read of the two-level reference-counting state, for the
+    /// invariant oracle ([`crate::verify`]) and the reachability audit (M1c).
+    /// Suitable for tests and small stores; the production audit may stream.
+    async fn snapshot(&self) -> Result<IndexSnapshot>;
+}
+
+/// A point-in-time read of the index's reference-counting state — objects,
+/// blocks, the object→block edges, the per-object name-version counts, and the
+/// current name bindings. Consumed by [`crate::verify`] to check the invariants.
+#[derive(Debug, Clone, Default)]
+pub struct IndexSnapshot {
+    /// Object CID → stored refcount.
+    pub objects: Vec<(Cid, i64)>,
+    /// Block CID → stored refcount.
+    pub blocks: Vec<(Cid, i64)>,
+    /// `(object CID, block CID)` edges, one per object→block reference.
+    pub object_blocks: Vec<(Cid, Cid)>,
+    /// Object CID → number of name-version rows referencing it (its true refcount).
+    pub name_refs: Vec<(Cid, i64)>,
+    /// Current name → bound object CID (the newest version of each name).
+    pub current_names: Vec<(String, Cid)>,
 }
 
 const SCHEMA: &str = "
@@ -82,6 +104,12 @@ fn index_err(e: sqlx::Error) -> StoreError {
 
 fn hexes_to_cids(hexes: Vec<String>) -> Result<Vec<Cid>> {
     hexes.iter().map(|h| Cid::from_hex(h)).collect()
+}
+
+fn cid_counts(rows: Vec<(String, i64)>) -> Result<Vec<(Cid, i64)>> {
+    rows.into_iter()
+        .map(|(h, n)| Ok((Cid::from_hex(&h)?, n)))
+        .collect()
 }
 
 /// SQLite-backed [`NameIndex`] — the reference implementation (ADR-0024 DB #1).
@@ -288,6 +316,48 @@ impl NameIndex for SqliteNameIndex {
             .await
             .map_err(index_err)?;
         hexes_to_cids(hexes)
+    }
+
+    async fn snapshot(&self) -> Result<IndexSnapshot> {
+        let objects: Vec<(String, i64)> = sqlx::query_as("SELECT cid, refcount FROM objects")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(index_err)?;
+        let blocks: Vec<(String, i64)> = sqlx::query_as("SELECT cid, refcount FROM blocks")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(index_err)?;
+        let edges: Vec<(String, String)> =
+            sqlx::query_as("SELECT object_cid, block_cid FROM object_blocks")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(index_err)?;
+        let name_refs: Vec<(String, i64)> =
+            sqlx::query_as("SELECT cid, COUNT(*) FROM name_versions GROUP BY cid")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(index_err)?;
+        let current: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name, cid FROM name_versions AS nv
+             WHERE seq = (SELECT MAX(seq) FROM name_versions WHERE name = nv.name)",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(index_err)?;
+
+        Ok(IndexSnapshot {
+            objects: cid_counts(objects)?,
+            blocks: cid_counts(blocks)?,
+            object_blocks: edges
+                .into_iter()
+                .map(|(o, b)| Ok((Cid::from_hex(&o)?, Cid::from_hex(&b)?)))
+                .collect::<Result<_>>()?,
+            name_refs: cid_counts(name_refs)?,
+            current_names: current
+                .into_iter()
+                .map(|(n, c)| Ok((n, Cid::from_hex(&c)?)))
+                .collect::<Result<_>>()?,
+        })
     }
 }
 

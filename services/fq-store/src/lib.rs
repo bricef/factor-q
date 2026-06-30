@@ -18,6 +18,7 @@ pub mod fs;
 pub mod index;
 pub mod repository;
 pub mod stats;
+pub mod verify;
 
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -27,7 +28,7 @@ pub mod service;
 
 pub use cid::Cid;
 pub use error::{Result, StoreError};
-pub use index::{NameIndex, SqliteNameIndex};
+pub use index::{IndexSnapshot, NameIndex, SqliteNameIndex};
 pub use repository::Repository;
 pub use stats::Stats;
 
