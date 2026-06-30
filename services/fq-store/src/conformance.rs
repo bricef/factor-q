@@ -192,7 +192,11 @@ pub async fn removal<S: ContentStore + ?Sized>(store: &S, content: &[u8]) -> Che
         .remove(&cid)
         .await
         .map_err(|e| format!("remove: {e}"))?;
-    if store.has(&cid).await.map_err(|e| format!("has after remove: {e}"))? {
+    if store
+        .has(&cid)
+        .await
+        .map_err(|e| format!("has after remove: {e}"))?
+    {
         return fail("still present after remove");
     }
     store
@@ -212,9 +216,16 @@ pub async fn block_removal<S: ContentStore + ?Sized>(store: &S, content: &[u8]) 
         return Ok(()); // empty content has no blocks
     }
     let cid = store.put(content).await.map_err(|e| format!("put: {e}"))?;
-    let blocks = store.blocks(&cid).await.map_err(|e| format!("blocks: {e}"))?;
+    let blocks = store
+        .blocks(&cid)
+        .await
+        .map_err(|e| format!("blocks: {e}"))?;
     for b in &blocks {
-        if !store.has_block(b, 0).await.map_err(|e| format!("has_block: {e}"))? {
+        if !store
+            .has_block(b, 0)
+            .await
+            .map_err(|e| format!("has_block: {e}"))?
+        {
             return fail(format!("block {b} absent after put"));
         }
     }
@@ -223,7 +234,11 @@ pub async fn block_removal<S: ContentStore + ?Sized>(store: &S, content: &[u8]) 
         .remove_block(&target, 0)
         .await
         .map_err(|e| format!("remove_block: {e}"))?;
-    if store.has_block(&target, 0).await.map_err(|e| format!("has_block after remove: {e}"))? {
+    if store
+        .has_block(&target, 0)
+        .await
+        .map_err(|e| format!("has_block after remove: {e}"))?
+    {
         return fail("block present after remove_block");
     }
     store

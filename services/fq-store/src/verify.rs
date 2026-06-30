@@ -31,21 +31,41 @@ pub enum Violation {
     LostLiveBlock { name: String, object: Cid },
     /// An object's stored refcount disagrees with the number of name-version
     /// rows referencing it.
-    ObjectRefcountDrift { object: Cid, stored: i64, name_refs: i64 },
+    ObjectRefcountDrift {
+        object: Cid,
+        stored: i64,
+        name_refs: i64,
+    },
     /// **I4.** A block's refcount is below the number of live objects that
     /// reference it — it could be reclaimed out from under a live object.
-    BlockRefcountTooLow { block: Cid, stored: i64, live_refs: i64 },
+    BlockRefcountTooLow {
+        block: Cid,
+        stored: i64,
+        live_refs: i64,
+    },
     /// **I5.** A block referenced by a live object has a non-positive refcount,
     /// so it is (wrongly) a GC candidate.
-    LiveBlockReclaimable { object: Cid, block: Cid, refcount: i64 },
+    LiveBlockReclaimable {
+        object: Cid,
+        block: Cid,
+        refcount: i64,
+    },
     /// A refcount went negative.
-    NegativeRefcount { kind: &'static str, cid: Cid, refcount: i64 },
+    NegativeRefcount {
+        kind: &'static str,
+        cid: Cid,
+        refcount: i64,
+    },
     /// **I1.** More than one generation of a block hash is `available` — a
     /// writer could reserve a generation GC is about to reap.
     MultipleAvailableGenerations { hash: Cid, available: i64 },
     /// **I3.** A claimed (unavailable) generation still has live references, so
     /// GC would unlink a block under a reference.
-    ClaimedBlockHasRefs { hash: Cid, generation: u32, refcount: i64 },
+    ClaimedBlockHasRefs {
+        hash: Cid,
+        generation: u32,
+        refcount: i64,
+    },
 }
 
 /// Check the invariants over an index `snapshot` and the live `store`. Returns
@@ -77,7 +97,11 @@ pub async fn check<C: ContentStore + ?Sized>(
     // Refcounts never go negative.
     for (cid, rc) in &snapshot.objects {
         if *rc < 0 {
-            violations.push(Violation::NegativeRefcount { kind: "object", cid: *cid, refcount: *rc });
+            violations.push(Violation::NegativeRefcount {
+                kind: "object",
+                cid: *cid,
+                refcount: *rc,
+            });
         }
     }
     for b in &snapshot.blocks {
@@ -116,7 +140,11 @@ pub async fn check<C: ContentStore + ?Sized>(
     for (block, live) in &live_refs {
         let stored = blk_rc.get(block).copied().unwrap_or(0);
         if stored < *live {
-            violations.push(Violation::BlockRefcountTooLow { block: *block, stored, live_refs: *live });
+            violations.push(Violation::BlockRefcountTooLow {
+                block: *block,
+                stored,
+                live_refs: *live,
+            });
         }
     }
 
@@ -145,7 +173,10 @@ pub async fn check<C: ContentStore + ?Sized>(
     }
     for (hash, count) in &available {
         if *count > 1 {
-            violations.push(Violation::MultipleAvailableGenerations { hash: *hash, available: *count });
+            violations.push(Violation::MultipleAvailableGenerations {
+                hash: *hash,
+                available: *count,
+            });
         }
     }
 
@@ -163,7 +194,10 @@ pub async fn check<C: ContentStore + ?Sized>(
     // S1: every current name's object is fully retrievable.
     for (name, object) in &snapshot.current_names {
         if store.get(object).await.is_err() {
-            violations.push(Violation::LostLiveBlock { name: name.clone(), object: *object });
+            violations.push(Violation::LostLiveBlock {
+                name: name.clone(),
+                object: *object,
+            });
         }
     }
 
@@ -187,7 +221,10 @@ where
     C: ContentStore + ?Sized,
 {
     let violations = check_index(index, store).await.expect("snapshot the index");
-    assert!(violations.is_empty(), "invariant violations: {violations:#?}");
+    assert!(
+        violations.is_empty(),
+        "invariant violations: {violations:#?}"
+    );
 }
 
 #[cfg(test)]
@@ -197,12 +234,24 @@ mod tests {
     use crate::{Repository, SqliteNameIndex};
     use std::path::{Path, PathBuf};
 
-    async fn repo() -> (tempfile::TempDir, Repository<FilesystemStore, SqliteNameIndex>) {
+    async fn repo() -> (
+        tempfile::TempDir,
+        Repository<FilesystemStore, SqliteNameIndex>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let cas = dir.path().join("cas");
         std::fs::create_dir_all(&cas).unwrap();
-        let store = FilesystemStore::with_params(cas, ChunkParams { min: 256, avg: 1024, max: 4096 });
-        let index = SqliteNameIndex::open(dir.path().join("index.db")).await.unwrap();
+        let store = FilesystemStore::with_params(
+            cas,
+            ChunkParams {
+                min: 256,
+                avg: 1024,
+                max: 4096,
+            },
+        );
+        let index = SqliteNameIndex::open(dir.path().join("index.db"))
+            .await
+            .unwrap();
         (dir, Repository::new(store, index))
     }
 
@@ -229,14 +278,24 @@ mod tests {
         r.put("a.b", b"hello world, this is content").await.unwrap();
         r.put("a.c", b"hello world, this is content").await.unwrap(); // shares the object
         r.put("d", &vec![9u8; 6000]).await.unwrap();
-        assert!(check_index(r.index(), r.content()).await.unwrap().is_empty());
+        assert!(
+            check_index(r.index(), r.content())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn detects_a_lost_live_block() {
         let (d, r) = repo().await;
         r.put("doc", &vec![7u8; 8192]).await.unwrap();
-        assert!(check_index(r.index(), r.content()).await.unwrap().is_empty());
+        assert!(
+            check_index(r.index(), r.content())
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // Induce the forbidden state: delete a block file under a live name.
         let block = first_file(&d.path().join("cas").join("blocks")).expect("a block file");
@@ -244,7 +303,8 @@ mod tests {
 
         let v = check_index(r.index(), r.content()).await.unwrap();
         assert!(
-            v.iter().any(|x| matches!(x, Violation::LostLiveBlock { .. })),
+            v.iter()
+                .any(|x| matches!(x, Violation::LostLiveBlock { .. })),
             "expected a LostLiveBlock, got {v:#?}"
         );
     }
@@ -256,7 +316,11 @@ mod tests {
         let mut snap = r.index().snapshot().await.unwrap();
         snap.objects[0].1 += 5; // inflate an object refcount
         let v = check(&snap, r.content()).await.unwrap();
-        assert!(v.iter().any(|x| matches!(x, Violation::ObjectRefcountDrift { .. })), "{v:#?}");
+        assert!(
+            v.iter()
+                .any(|x| matches!(x, Violation::ObjectRefcountDrift { .. })),
+            "{v:#?}"
+        );
     }
 
     #[tokio::test]
@@ -268,8 +332,16 @@ mod tests {
             b.refcount = 0; // a live object's blocks dropped to GC-candidate
         }
         let v = check(&snap, r.content()).await.unwrap();
-        assert!(v.iter().any(|x| matches!(x, Violation::LiveBlockReclaimable { .. })), "{v:#?}");
-        assert!(v.iter().any(|x| matches!(x, Violation::BlockRefcountTooLow { .. })), "{v:#?}");
+        assert!(
+            v.iter()
+                .any(|x| matches!(x, Violation::LiveBlockReclaimable { .. })),
+            "{v:#?}"
+        );
+        assert!(
+            v.iter()
+                .any(|x| matches!(x, Violation::BlockRefcountTooLow { .. })),
+            "{v:#?}"
+        );
     }
 
     #[tokio::test]
@@ -282,7 +354,8 @@ mod tests {
         snap.blocks.push(extra);
         let v = check(&snap, r.content()).await.unwrap();
         assert!(
-            v.iter().any(|x| matches!(x, Violation::MultipleAvailableGenerations { .. })),
+            v.iter()
+                .any(|x| matches!(x, Violation::MultipleAvailableGenerations { .. })),
             "{v:#?}"
         );
     }
@@ -295,7 +368,8 @@ mod tests {
         snap.blocks[0].available = false; // claimed while still referenced
         let v = check(&snap, r.content()).await.unwrap();
         assert!(
-            v.iter().any(|x| matches!(x, Violation::ClaimedBlockHasRefs { .. })),
+            v.iter()
+                .any(|x| matches!(x, Violation::ClaimedBlockHasRefs { .. })),
             "{v:#?}"
         );
     }

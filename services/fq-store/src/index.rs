@@ -57,9 +57,6 @@ pub trait NameIndex: Send + Sync {
     async fn snapshot(&self) -> Result<IndexSnapshot>;
 }
 
-/// A point-in-time read of the index's reference-counting state — objects,
-/// blocks, the object→block edges, the per-object name-version counts, and the
-/// current name bindings. Consumed by [`crate::verify`] to check the invariants.
 /// One row of the `blocks` table: a block generation and its claim state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockRow {
@@ -73,6 +70,9 @@ pub struct BlockRow {
     pub available: bool,
 }
 
+/// A point-in-time read of the index's reference-counting state — objects,
+/// blocks, the object→block edges, the per-object name-version counts, and the
+/// current name bindings. Consumed by [`crate::verify`] to check the invariants.
 #[derive(Debug, Clone, Default)]
 pub struct IndexSnapshot {
     /// Object CID → stored refcount.
@@ -154,7 +154,10 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         let target = i as i64 + 1;
         if version < target {
             let mut tx = pool.begin().await.map_err(index_err)?;
-            sqlx::raw_sql(sql).execute(&mut *tx).await.map_err(index_err)?;
+            sqlx::raw_sql(sql)
+                .execute(&mut *tx)
+                .await
+                .map_err(index_err)?;
             // PRAGMA values cannot be bound; `target` is a trusted constant.
             sqlx::query(&format!("PRAGMA user_version = {target}"))
                 .execute(&mut *tx)
@@ -565,11 +568,16 @@ mod tests {
         blocks.sort_by_key(|row| row.hash.to_hex());
         assert_eq!(blocks.len(), 2);
         for row in &blocks {
-            assert_eq!(row.generation, 0, "migrated rows are the canonical generation");
+            assert_eq!(
+                row.generation, 0,
+                "migrated rows are the canonical generation"
+            );
             assert!(row.available, "migrated rows are available");
         }
-        let by_hash: std::collections::HashMap<_, _> =
-            blocks.iter().map(|row| (row.hash.to_hex(), row.refcount)).collect();
+        let by_hash: std::collections::HashMap<_, _> = blocks
+            .iter()
+            .map(|row| (row.hash.to_hex(), row.refcount))
+            .collect();
         assert_eq!(by_hash[&a], 3, "refcount preserved");
         assert_eq!(by_hash[&b], 0, "refcount preserved");
 

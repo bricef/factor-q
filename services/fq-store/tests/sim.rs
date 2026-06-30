@@ -30,8 +30,14 @@ fn below(state: &mut u64, n: u64) -> u64 {
 }
 
 async fn open_repo(cas: &Path, db: &Path) -> Repository<FilesystemStore, SqliteNameIndex> {
-    let store =
-        FilesystemStore::with_params(cas.to_path_buf(), ChunkParams { min: 256, avg: 1024, max: 4096 });
+    let store = FilesystemStore::with_params(
+        cas.to_path_buf(),
+        ChunkParams {
+            min: 256,
+            avg: 1024,
+            max: 4096,
+        },
+    );
     let index = SqliteNameIndex::open(db).await.unwrap();
     Repository::new(store, index)
 }
@@ -79,7 +85,10 @@ async fn run_seed(seed: u64, steps: usize) {
                 .get(name)
                 .await
                 .unwrap_or_else(|e| panic!("seed={seed} step={step}: get({name}) failed: {e}"));
-            assert_eq!(&got, content, "seed={seed} step={step}: content mismatch for {name}");
+            assert_eq!(
+                &got, content,
+                "seed={seed} step={step}: content mismatch for {name}"
+            );
         }
         for name in names {
             if !model.contains_key(name) {
@@ -91,7 +100,9 @@ async fn run_seed(seed: u64, steps: usize) {
         }
 
         // Invariant oracle.
-        let violations = verify::check_index(repo.index(), repo.content()).await.unwrap();
+        let violations = verify::check_index(repo.index(), repo.content())
+            .await
+            .unwrap();
         assert!(
             violations.is_empty(),
             "seed={seed} step={step}: invariant violations: {violations:#?}"
@@ -104,7 +115,10 @@ async fn run_seed(seed: u64, steps: usize) {
 #[tokio::test]
 async fn dst_put_delete_crash_holds_invariants() {
     fn env_or(key: &str, default: u64) -> u64 {
-        std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     }
     let seeds = env_or("FQ_SIM_SEEDS", 24);
     let steps = env_or("FQ_SIM_STEPS", 40) as usize;

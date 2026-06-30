@@ -431,10 +431,16 @@ mod tests {
 
         store.remove(&cid).await.unwrap();
         assert!(!store.has(&cid).await.unwrap());
-        assert!(matches!(store.get(&cid).await.unwrap_err(), StoreError::NotFound(_)));
+        assert!(matches!(
+            store.get(&cid).await.unwrap_err(),
+            StoreError::NotFound(_)
+        ));
         // Blocks are reference-counted; remove() leaves them for the collector.
         for b in &blocks {
-            assert!(store.has_block(b, 0).await.unwrap(), "block {b} should remain");
+            assert!(
+                store.has_block(b, 0).await.unwrap(),
+                "block {b} should remain"
+            );
         }
     }
 
@@ -445,14 +451,19 @@ mod tests {
         for content in [&b""[..], &b"a small object"[..], big.as_slice()] {
             crate::conformance::removal(&store, content).await.unwrap();
         }
-        crate::conformance::block_removal(&store, &big).await.unwrap();
+        crate::conformance::block_removal(&store, &big)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn canonical_and_minted_generations_use_distinct_paths() {
         let (_dir, store) = store();
         let hash = Cid::of(b"a block").to_hex();
-        assert_eq!(store.block_path(&hash, 0).file_name().unwrap(), hash.as_str());
+        assert_eq!(
+            store.block_path(&hash, 0).file_name().unwrap(),
+            hash.as_str()
+        );
         assert_ne!(store.block_path(&hash, 0), store.block_path(&hash, 1));
     }
 }
