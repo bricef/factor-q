@@ -238,7 +238,11 @@ In dependency order (each slice independently testable, per the M1b playbook):
 
 ## Test plan
 
-The property / integration tests target the protocol directly:
+The explicit claims, the full fault map, and the verification strategy (TLA⁺
+model + deterministic simulation + fault injection) live in
+[storage-gc-verification](storage-gc-verification.md) and
+[`storage-gc.tla`](storage-gc.tla). The protocol-level tests below are the
+summary:
 
 - **reserve-vs-claim linearises** — hammer a block with concurrent reserves and
   GC claims; assert exactly one wins each round and the loser falls back, with no
@@ -256,6 +260,9 @@ The property / integration tests target the protocol directly:
 
 ## References
 
+- [storage-gc-verification](storage-gc-verification.md) +
+  [`storage-gc.tla`](storage-gc.tla) — the claims, fault map, and verification
+  strategy (TLA⁺ + simulation + fault injection).
 - [ADR-0023](../adrs/accepted/0023-storage-and-vector-foundation.md) — storage
   foundation; fork F2 (GC algorithm) is the parent decision this elaborates.
 - [ADR-0024](../adrs/accepted/0024-separate-databases-storage-foundation.md) —
