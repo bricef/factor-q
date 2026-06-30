@@ -26,6 +26,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - [Agent orchestration tools](docs/design/agent-orchestration-tools.md) — wishlist for primitives to coordinate multi-agent work (graph substrate, handles, sinks, fragment library)
 - [Worker-side ergonomics](docs/design/worker-side-ergonomics.md) — primitives for what an agent has, knows, and controls while executing (introspection, checkpoints, structured errors)
 - [Storage and scaling](docs/design/storage-and-scaling.md) — sizing analysis for NATS and SQLite
+- [Storage garbage collection](docs/design/storage-garbage-collection.md) — the lock-free online-reclaim protocol for the CAS (M1c)
 - [Reference workloads](docs/design/reference-workloads.md) — concrete agent workloads (Canopy, TradingAgents) we use as design touchstones
 - [ADRs](docs/adrs/) — architectural decision records ([accepted](docs/adrs/accepted/), [draft](docs/adrs/draft/))
 - [Phase 1 (closed)](docs/plans/closed/2026-04-02-phase-1-foundation.md) — what shipped in the walking skeleton

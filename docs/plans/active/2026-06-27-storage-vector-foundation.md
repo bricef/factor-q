@@ -96,6 +96,10 @@ store available throughout.
 **Build:** two-level reference counting over M1b's indexes; a pluggable
 `Collector` trait; the background reconciliation-audit worker.
 
+**Design:** the lock-free online-reclaim protocol (flag-based atomic claim +
+reserve-before-rely + generation-on-collision) is written up in
+[storage garbage collection](../design/storage-garbage-collection.md).
+
 **M1 depends on:** nothing (M1b builds on M1a; M1c on M1b).
 
 ### M2 — Access control (grants + capability tokens)
