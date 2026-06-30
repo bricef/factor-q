@@ -22,16 +22,16 @@ impl<C: ContentStore, N: NameIndex> Repository<C, N> {
     /// leaves an orphan blob (GC reclaims it) rather than a dangling name.
     pub async fn put(&self, name: &str, content: &[u8]) -> Result<Cid> {
         let cid = self.content.put(content).await?;
-        let blocks = self.content.blocks(&cid).await?;
-        self.index.bind(name, &cid, &blocks).await?;
+        let reserved = self.reserve_blocks(&cid).await?;
+        self.index.bind(name, &cid, &reserved).await?;
         Ok(cid)
     }
 
     /// Bind `name` to an already-stored `cid` (aliasing — many names, one
     /// object). [`StoreError::NotFound`] if the object is absent.
     pub async fn bind(&self, name: &str, cid: &Cid) -> Result<()> {
-        let blocks = self.content.blocks(cid).await?;
-        self.index.bind(name, cid, &blocks).await
+        let reserved = self.reserve_blocks(cid).await?;
+        self.index.bind(name, cid, &reserved).await
     }
 
     /// The current CID for `name`, or `None` if unbound.
@@ -82,6 +82,38 @@ impl<C: ContentStore, N: NameIndex> Repository<C, N> {
             .resolve(name)
             .await?
             .ok_or_else(|| StoreError::NameNotFound(name.to_string()))
+    }
+
+    /// Reserve every unique block of the already-stored object `cid` (the
+    /// reserve-before-rely write path), returning the `(hash, generation)`
+    /// reserved. `bind` then hands these off to edges (or releases them on an
+    /// alias). A genuinely new block is minted at generation 0 — its file was
+    /// written and fsynced by `content.put`; collision mints onto fresh
+    /// generations arrive in slice 5c.
+    async fn reserve_blocks(&self, cid: &Cid) -> Result<Vec<(Cid, u32)>> {
+        let mut blocks = self.content.blocks(cid).await?;
+        blocks.sort_by_key(|c| c.to_hex());
+        blocks.dedup();
+        let mut reserved = Vec::with_capacity(blocks.len());
+        for hash in blocks {
+            let generation = self.reserve_or_materialize(&hash).await?;
+            reserved.push((hash, generation));
+        }
+        Ok(reserved)
+    }
+
+    async fn reserve_or_materialize(&self, hash: &Cid) -> Result<u32> {
+        loop {
+            if let Some(generation) = self.index.reserve_block(hash).await? {
+                return Ok(generation);
+            }
+            // No available generation: a brand-new block, already written and
+            // fsynced by content.put. Mint its row at generation 0.
+            if self.index.mint_block(hash, 0).await? {
+                return Ok(0);
+            }
+            // A concurrent writer minted; loop to reserve (dedup onto it).
+        }
     }
 }
 

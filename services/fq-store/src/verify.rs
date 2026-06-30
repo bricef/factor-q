@@ -9,14 +9,15 @@
 //!   retrievable (no referenced block file is missing).
 //! - **object refcount consistency:** an object's stored refcount equals the
 //!   number of name-version rows that reference it.
+//! - **I1 — one available generation:** at most one generation per hash is
+//!   available to writers.
+//! - **I3 — no unlink under reference:** a claimed (unavailable) generation has
+//!   no live references.
 //! - **I4 — counts dominate references:** a block's refcount is at least the
 //!   number of live objects that reference it.
 //! - **I5 — manifests resolve:** every block a live object references has a
 //!   positive refcount (it is not a GC candidate).
 //! - refcounts never go negative.
-//!
-//! I1 (one available generation) and I3 (no unlink under reference) arrive with
-//! the `available`/`gen` columns (slice 3).
 
 use std::collections::HashMap;
 
@@ -78,20 +79,21 @@ pub async fn check<C: ContentStore + ?Sized>(
 
     let obj_rc: HashMap<Cid, i64> = snapshot.objects.iter().copied().collect();
     let name_refs: HashMap<Cid, i64> = snapshot.name_refs.iter().copied().collect();
-    // Block hash -> canonical (generation 0) refcount, for I4/I5. Objects
-    // reference the canonical generation; collision generations (slice 4) are
-    // resolved through the manifest's recorded generation.
-    let blk_rc: HashMap<Cid, i64> = snapshot
+    // (block hash, generation) -> refcount, for I4/I5. An object's edge records
+    // the exact generation it references.
+    let blk_rc: HashMap<(Cid, u32), i64> = snapshot
         .blocks
         .iter()
-        .filter(|b| b.generation == 0)
-        .map(|b| (b.hash, b.refcount))
+        .map(|b| ((b.hash, b.generation), b.refcount))
         .collect();
 
-    // object CID -> the blocks it references.
-    let mut edges: HashMap<Cid, Vec<Cid>> = HashMap::new();
-    for (object, block) in &snapshot.object_blocks {
-        edges.entry(*object).or_default().push(*block);
+    // object CID -> the (block, generation)s it references.
+    let mut edges: HashMap<Cid, Vec<(Cid, u32)>> = HashMap::new();
+    for (object, block, generation) in &snapshot.object_blocks {
+        edges
+            .entry(*object)
+            .or_default()
+            .push((*block, *generation));
     }
 
     // Refcounts never go negative.
@@ -126,22 +128,22 @@ pub async fn check<C: ContentStore + ?Sized>(
         }
     }
 
-    // The number of live objects referencing each block.
-    let mut live_refs: HashMap<Cid, i64> = HashMap::new();
+    // The number of live objects referencing each (block, generation).
+    let mut live_refs: HashMap<(Cid, u32), i64> = HashMap::new();
     for (object, blocks) in &edges {
         if obj_rc.get(object).copied().unwrap_or(0) > 0 {
-            for block in blocks {
-                *live_refs.entry(*block).or_default() += 1;
+            for bg in blocks {
+                *live_refs.entry(*bg).or_default() += 1;
             }
         }
     }
 
     // I4: block refcount dominates the live reference count.
-    for (block, live) in &live_refs {
-        let stored = blk_rc.get(block).copied().unwrap_or(0);
+    for (bg, live) in &live_refs {
+        let stored = blk_rc.get(bg).copied().unwrap_or(0);
         if stored < *live {
             violations.push(Violation::BlockRefcountTooLow {
-                block: *block,
+                block: bg.0,
                 stored,
                 live_refs: *live,
             });
@@ -151,12 +153,12 @@ pub async fn check<C: ContentStore + ?Sized>(
     // I5: every block a live object references has a positive refcount.
     for (object, blocks) in &edges {
         if obj_rc.get(object).copied().unwrap_or(0) > 0 {
-            for block in blocks {
-                let rc = blk_rc.get(block).copied().unwrap_or(0);
+            for bg in blocks {
+                let rc = blk_rc.get(bg).copied().unwrap_or(0);
                 if rc < 1 {
                     violations.push(Violation::LiveBlockReclaimable {
                         object: *object,
-                        block: *block,
+                        block: bg.0,
                         refcount: rc,
                     });
                 }

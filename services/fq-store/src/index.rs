@@ -11,7 +11,6 @@
 //! falls to zero. `NameIndex` only maintains the counts; it never deletes
 //! from the CAS.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -23,12 +22,13 @@ use crate::{Cid, Result, StoreError};
 /// The mutable name index over a content store. See the module docs.
 #[async_trait]
 pub trait NameIndex: Send + Sync {
-    /// Bind `name` to `cid`. `blocks` are the object's dedup units (from
-    /// [`ContentStore::blocks`](crate::ContentStore::blocks)), used to
-    /// maintain block refcounts. Re-binding a name to the CID it already
-    /// holds is a no-op; otherwise a new current version is recorded and the
-    /// previous one retained as history.
-    async fn bind(&self, name: &str, cid: &Cid, blocks: &[Cid]) -> Result<()>;
+    /// Bind `name` to `cid`, handing off the writer's block reservations.
+    /// `reserved` are the object's unique blocks as `(hash, generation)` pairs,
+    /// each already reserved (its refcount bumped) by the caller. If the object
+    /// becomes live the reservations become its object→block edges; if it was
+    /// already live (an alias) or this re-binds the current CID, they are
+    /// released. A new current version is recorded; the previous is retained.
+    async fn bind(&self, name: &str, cid: &Cid, reserved: &[(Cid, u32)]) -> Result<()>;
 
     /// The current CID for `name`, or `None` if there is no such name.
     async fn resolve(&self, name: &str) -> Result<Option<Cid>>;
@@ -103,8 +103,8 @@ pub struct IndexSnapshot {
     pub objects: Vec<(Cid, i64)>,
     /// The `blocks` table rows (hash, generation, refcount, available).
     pub blocks: Vec<BlockRow>,
-    /// `(object CID, block CID)` edges, one per object→block reference.
-    pub object_blocks: Vec<(Cid, Cid)>,
+    /// `(object CID, block CID, generation)` edges, one per object→block edge.
+    pub object_blocks: Vec<(Cid, Cid, u32)>,
     /// Object CID → number of name-version rows referencing it (its true refcount).
     pub name_refs: Vec<(Cid, i64)>,
     /// Current name → bound object CID (the newest version of each name).
@@ -151,6 +151,9 @@ const MIGRATIONS: &[&str] = &[
         SELECT cid, 0, refcount, 1 FROM blocks;
     DROP TABLE blocks;
     ALTER TABLE blocks_v2 RENAME TO blocks;",
+    // v3 — M1c: record the generation on each object→block edge, so unbind
+    // decrements the right (hash, generation). Pre-existing edges are generation 0.
+    "ALTER TABLE object_blocks ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;",
 ];
 
 fn index_err(e: sqlx::Error) -> StoreError {
@@ -214,11 +217,10 @@ impl SqliteNameIndex {
 #[async_trait]
 impl NameIndex for SqliteNameIndex {
     #[tracing::instrument(level = "debug", skip_all, fields(name, cid = %cid))]
-    async fn bind(&self, name: &str, cid: &Cid, blocks: &[Cid]) -> Result<()> {
+    async fn bind(&self, name: &str, cid: &Cid, reserved: &[(Cid, u32)]) -> Result<()> {
         let cid_hex = cid.to_hex();
         let mut tx = self.pool.begin().await.map_err(index_err)?;
 
-        // No-op if this is already the current binding.
         let current: Option<String> = sqlx::query_scalar(
             "SELECT cid FROM name_versions WHERE name = ? ORDER BY seq DESC LIMIT 1",
         )
@@ -226,7 +228,21 @@ impl NameIndex for SqliteNameIndex {
         .fetch_optional(&mut *tx)
         .await
         .map_err(index_err)?;
+
+        // Re-binding the current CID is a no-op for the name — the caller's
+        // reservations are then redundant, so release them.
         if current.as_deref() == Some(cid_hex.as_str()) {
+            for (hash, generation) in reserved {
+                sqlx::query(
+                    "UPDATE blocks SET refcount = refcount - 1
+                     WHERE hash = ? AND generation = ?",
+                )
+                .bind(hash.to_hex())
+                .bind(*generation as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(index_err)?;
+            }
             tx.commit().await.map_err(index_err)?;
             return Ok(());
         }
@@ -247,7 +263,6 @@ impl NameIndex for SqliteNameIndex {
             .await
             .map_err(index_err)?;
 
-        // Bump the object refcount; set up block edges the first time it goes live.
         let prev_rc: Option<i64> = sqlx::query_scalar("SELECT refcount FROM objects WHERE cid = ?")
             .bind(&cid_hex)
             .fetch_optional(&mut *tx)
@@ -263,27 +278,30 @@ impl NameIndex for SqliteNameIndex {
         .map_err(index_err)?;
 
         if prev_rc.unwrap_or(0) == 0 {
-            let mut seen = HashSet::new();
-            for block in blocks {
-                let b = block.to_hex();
-                if !seen.insert(b.clone()) {
-                    continue; // an object referencing the same block twice = one edge
-                }
+            // Object going live: hand the reservations off to object→block edges
+            // (their refcounts are already bumped — no second increment).
+            for (hash, generation) in reserved {
                 sqlx::query(
-                    "INSERT INTO object_blocks (object_cid, block_cid) VALUES (?, ?)
-                     ON CONFLICT DO NOTHING",
+                    "INSERT INTO object_blocks (object_cid, block_cid, generation)
+                     VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
                 )
                 .bind(&cid_hex)
-                .bind(&b)
+                .bind(hash.to_hex())
+                .bind(*generation as i64)
                 .execute(&mut *tx)
                 .await
                 .map_err(index_err)?;
+            }
+        } else {
+            // Alias: the object's blocks are already held — release the
+            // now-redundant reservations.
+            for (hash, generation) in reserved {
                 sqlx::query(
-                    "INSERT INTO blocks (hash, generation, refcount, available)
-                     VALUES (?, 0, 1, 1)
-                     ON CONFLICT(hash, generation) DO UPDATE SET refcount = refcount + 1",
+                    "UPDATE blocks SET refcount = refcount - 1
+                     WHERE hash = ? AND generation = ?",
                 )
-                .bind(&b)
+                .bind(hash.to_hex())
+                .bind(*generation as i64)
                 .execute(&mut *tx)
                 .await
                 .map_err(index_err)?;
@@ -352,18 +370,20 @@ impl NameIndex for SqliteNameIndex {
             .await
             .map_err(index_err)?;
             if new_rc == 0 {
-                let block_hexes: Vec<String> =
-                    sqlx::query_scalar("SELECT block_cid FROM object_blocks WHERE object_cid = ?")
-                        .bind(&cid_hex)
-                        .fetch_all(&mut *tx)
-                        .await
-                        .map_err(index_err)?;
-                for b in block_hexes {
+                let edges: Vec<(String, i64)> = sqlx::query_as(
+                    "SELECT block_cid, generation FROM object_blocks WHERE object_cid = ?",
+                )
+                .bind(&cid_hex)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(index_err)?;
+                for (b, generation) in edges {
                     sqlx::query(
                         "UPDATE blocks SET refcount = refcount - 1
-                         WHERE hash = ? AND generation = 0",
+                         WHERE hash = ? AND generation = ?",
                     )
                     .bind(&b)
+                    .bind(generation)
                     .execute(&mut *tx)
                     .await
                     .map_err(index_err)?;
@@ -410,8 +430,8 @@ impl NameIndex for SqliteNameIndex {
                 .fetch_all(&self.pool)
                 .await
                 .map_err(index_err)?;
-        let edges: Vec<(String, String)> =
-            sqlx::query_as("SELECT object_cid, block_cid FROM object_blocks")
+        let edges: Vec<(String, String, i64)> =
+            sqlx::query_as("SELECT object_cid, block_cid, generation FROM object_blocks")
                 .fetch_all(&self.pool)
                 .await
                 .map_err(index_err)?;
@@ -443,7 +463,7 @@ impl NameIndex for SqliteNameIndex {
                 .collect::<Result<_>>()?,
             object_blocks: edges
                 .into_iter()
-                .map(|(o, b)| Ok((Cid::from_hex(&o)?, Cid::from_hex(&b)?)))
+                .map(|(o, b, g)| Ok((Cid::from_hex(&o)?, Cid::from_hex(&b)?, g as u32)))
                 .collect::<Result<_>>()?,
             name_refs: cid_counts(name_refs)?,
             current_names: current
@@ -530,11 +550,39 @@ mod tests {
         v
     }
 
+    /// Mimic a put at the index layer: reserve (or mint) each unique block, then
+    /// hand the reservations to `bind`.
+    async fn reserve_and_bind(
+        s: &SqliteNameIndex,
+        name: &str,
+        obj: &Cid,
+        blocks: &[Cid],
+    ) -> Result<()> {
+        let mut reserved = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for b in blocks {
+            if !seen.insert(*b) {
+                continue;
+            }
+            let generation = match s.reserve_block(b).await? {
+                Some(g) => g,
+                None => {
+                    assert!(s.mint_block(b, 0).await?, "fresh block minted");
+                    0
+                }
+            };
+            reserved.push((*b, generation));
+        }
+        s.bind(name, obj, &reserved).await
+    }
+
     #[tokio::test]
     async fn bind_and_resolve() {
         let (_d, s) = store().await;
         let c = cid("doc");
-        s.bind("research.papers.doc1", &c, &[c]).await.unwrap();
+        reserve_and_bind(&s, "research.papers.doc1", &c, &[c])
+            .await
+            .unwrap();
         assert_eq!(s.resolve("research.papers.doc1").await.unwrap(), Some(c));
         assert_eq!(s.resolve("research.papers.nope").await.unwrap(), None);
     }
@@ -543,10 +591,10 @@ mod tests {
     async fn rebind_keeps_history_newest_first() {
         let (_d, s) = store().await;
         let (v1, v2, v3) = (cid("v1"), cid("v2"), cid("v3"));
-        s.bind("a.b", &v1, &[v1]).await.unwrap();
-        s.bind("a.b", &v2, &[v2]).await.unwrap();
-        s.bind("a.b", &v2, &[v2]).await.unwrap(); // no-op (same cid)
-        s.bind("a.b", &v3, &[v3]).await.unwrap();
+        reserve_and_bind(&s, "a.b", &v1, &[v1]).await.unwrap();
+        reserve_and_bind(&s, "a.b", &v2, &[v2]).await.unwrap();
+        reserve_and_bind(&s, "a.b", &v2, &[v2]).await.unwrap(); // no-op (same cid)
+        reserve_and_bind(&s, "a.b", &v3, &[v3]).await.unwrap();
         assert_eq!(s.resolve("a.b").await.unwrap(), Some(v3));
         assert_eq!(s.history("a.b").await.unwrap(), vec![v3, v2, v1]);
     }
@@ -556,7 +604,7 @@ mod tests {
         let (_d, s) = store().await;
         for name in ["a.b.c", "a.b.d", "a.x", "ab.c", "z"] {
             let c = cid(name);
-            s.bind(name, &c, &[c]).await.unwrap();
+            reserve_and_bind(&s, name, &c, &[c]).await.unwrap();
         }
         assert_eq!(s.list("a.b").await.unwrap(), vec!["a.b.c", "a.b.d"]);
         assert_eq!(s.list("a").await.unwrap(), vec!["a.b.c", "a.b.d", "a.x"]);
@@ -570,7 +618,7 @@ mod tests {
     async fn unbind_unreferences_object_and_blocks() {
         let (_d, s) = store().await;
         let (obj, b1, b2) = (cid("obj"), cid("b1"), cid("b2"));
-        s.bind("a", &obj, &[b1, b2]).await.unwrap();
+        reserve_and_bind(&s, "a", &obj, &[b1, b2]).await.unwrap();
         assert!(s.unreferenced_objects().await.unwrap().is_empty());
 
         s.unbind("a").await.unwrap();
@@ -586,8 +634,12 @@ mod tests {
     async fn aliasing_holds_a_shared_object_live() {
         let (_d, s) = store().await;
         let (obj, b1, b2) = (cid("obj"), cid("b1"), cid("b2"));
-        s.bind("name.one", &obj, &[b1, b2]).await.unwrap();
-        s.bind("name.two", &obj, &[b1, b2]).await.unwrap(); // alias: refcount 2
+        reserve_and_bind(&s, "name.one", &obj, &[b1, b2])
+            .await
+            .unwrap();
+        reserve_and_bind(&s, "name.two", &obj, &[b1, b2])
+            .await
+            .unwrap(); // alias: refcount 2
 
         s.unbind("name.one").await.unwrap();
         // Still referenced by name.two — not a GC candidate.
@@ -602,8 +654,8 @@ mod tests {
     async fn shared_blocks_stay_live_until_last_object_dies() {
         let (_d, s) = store().await;
         let (x, y, b1, b2, b3) = (cid("x"), cid("y"), cid("b1"), cid("b2"), cid("b3"));
-        s.bind("x", &x, &[b1, b2]).await.unwrap();
-        s.bind("y", &y, &[b2, b3]).await.unwrap(); // b2 shared by x and y
+        reserve_and_bind(&s, "x", &x, &[b1, b2]).await.unwrap();
+        reserve_and_bind(&s, "y", &y, &[b2, b3]).await.unwrap(); // b2 shared by x and y
 
         s.unbind("x").await.unwrap();
         // x dead -> b1 reclaimable; b2 still held by y; b3 still held by y.
