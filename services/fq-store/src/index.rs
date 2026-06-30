@@ -60,12 +60,25 @@ pub trait NameIndex: Send + Sync {
 /// A point-in-time read of the index's reference-counting state — objects,
 /// blocks, the object→block edges, the per-object name-version counts, and the
 /// current name bindings. Consumed by [`crate::verify`] to check the invariants.
+/// One row of the `blocks` table: a block generation and its claim state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockRow {
+    /// The block's BLAKE3 hash.
+    pub hash: Cid,
+    /// The generation — 0 is canonical, higher generations are collision mints.
+    pub generation: u32,
+    /// Live references: bound object edges plus in-flight reservations.
+    pub refcount: i64,
+    /// Whether a writer may reserve this generation (false ⇒ claimed by GC).
+    pub available: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct IndexSnapshot {
     /// Object CID → stored refcount.
     pub objects: Vec<(Cid, i64)>,
-    /// Block CID → stored refcount.
-    pub blocks: Vec<(Cid, i64)>,
+    /// The `blocks` table rows (hash, generation, refcount, available).
+    pub blocks: Vec<BlockRow>,
     /// `(object CID, block CID)` edges, one per object→block reference.
     pub object_blocks: Vec<(Cid, Cid)>,
     /// Object CID → number of name-version rows referencing it (its true refcount).
@@ -74,29 +87,47 @@ pub struct IndexSnapshot {
     pub current_names: Vec<(String, Cid)>,
 }
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS name_versions (
-    name TEXT NOT NULL,
-    seq  INTEGER NOT NULL,
-    cid  TEXT NOT NULL,
-    PRIMARY KEY (name, seq)
-);
-CREATE INDEX IF NOT EXISTS idx_name_versions_cid ON name_versions(cid);
-CREATE TABLE IF NOT EXISTS objects (
-    cid      TEXT PRIMARY KEY,
-    refcount INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS object_blocks (
-    object_cid TEXT NOT NULL,
-    block_cid  TEXT NOT NULL,
-    PRIMARY KEY (object_cid, block_cid)
-);
-CREATE INDEX IF NOT EXISTS idx_object_blocks_block ON object_blocks(block_cid);
-CREATE TABLE IF NOT EXISTS blocks (
-    cid      TEXT PRIMARY KEY,
-    refcount INTEGER NOT NULL
-);
-";
+/// Schema migrations, applied in order. The DB's `PRAGMA user_version` records
+/// how many have run; each migration runs in its own transaction together with
+/// the version bump, so a crash mid-migration rolls back cleanly and re-runs.
+const MIGRATIONS: &[&str] = &[
+    // v1 — the M1a/M1b base. `IF NOT EXISTS` makes it a no-op on a pre-M1c
+    // database (which already has these tables, but no recorded version).
+    "CREATE TABLE IF NOT EXISTS name_versions (
+        name TEXT NOT NULL,
+        seq  INTEGER NOT NULL,
+        cid  TEXT NOT NULL,
+        PRIMARY KEY (name, seq)
+    );
+    CREATE INDEX IF NOT EXISTS idx_name_versions_cid ON name_versions(cid);
+    CREATE TABLE IF NOT EXISTS objects (
+        cid      TEXT PRIMARY KEY,
+        refcount INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS object_blocks (
+        object_cid TEXT NOT NULL,
+        block_cid  TEXT NOT NULL,
+        PRIMARY KEY (object_cid, block_cid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_object_blocks_block ON object_blocks(block_cid);
+    CREATE TABLE IF NOT EXISTS blocks (
+        cid      TEXT PRIMARY KEY,
+        refcount INTEGER NOT NULL
+    );",
+    // v2 — M1c garbage collection: re-key blocks on (hash, generation) and add
+    // the `available` claim flag. Existing rows become generation 0, available.
+    "CREATE TABLE blocks_v2 (
+        hash       TEXT    NOT NULL,
+        generation INTEGER NOT NULL DEFAULT 0,
+        refcount   INTEGER NOT NULL,
+        available  INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (hash, generation)
+    );
+    INSERT INTO blocks_v2 (hash, generation, refcount, available)
+        SELECT cid, 0, refcount, 1 FROM blocks;
+    DROP TABLE blocks;
+    ALTER TABLE blocks_v2 RENAME TO blocks;",
+];
 
 fn index_err(e: sqlx::Error) -> StoreError {
     StoreError::Index(e.to_string())
@@ -112,6 +143,29 @@ fn cid_counts(rows: Vec<(String, i64)>) -> Result<Vec<(Cid, i64)>> {
         .collect()
 }
 
+/// Apply any migrations the database has not yet seen, tracked by
+/// `PRAGMA user_version`.
+async fn migrate(pool: &SqlitePool) -> Result<()> {
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(pool)
+        .await
+        .map_err(index_err)?;
+    for (i, sql) in MIGRATIONS.iter().enumerate() {
+        let target = i as i64 + 1;
+        if version < target {
+            let mut tx = pool.begin().await.map_err(index_err)?;
+            sqlx::raw_sql(sql).execute(&mut *tx).await.map_err(index_err)?;
+            // PRAGMA values cannot be bound; `target` is a trusted constant.
+            sqlx::query(&format!("PRAGMA user_version = {target}"))
+                .execute(&mut *tx)
+                .await
+                .map_err(index_err)?;
+            tx.commit().await.map_err(index_err)?;
+        }
+    }
+    Ok(())
+}
+
 /// SQLite-backed [`NameIndex`] — the reference implementation (ADR-0024 DB #1).
 pub struct SqliteNameIndex {
     pool: SqlitePool,
@@ -125,10 +179,7 @@ impl SqliteNameIndex {
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePool::connect_with(opts).await.map_err(index_err)?;
-        sqlx::raw_sql(SCHEMA)
-            .execute(&pool)
-            .await
-            .map_err(index_err)?;
+        migrate(&pool).await?;
         Ok(Self { pool })
     }
 }
@@ -201,8 +252,9 @@ impl NameIndex for SqliteNameIndex {
                 .await
                 .map_err(index_err)?;
                 sqlx::query(
-                    "INSERT INTO blocks (cid, refcount) VALUES (?, 1)
-                     ON CONFLICT(cid) DO UPDATE SET refcount = refcount + 1",
+                    "INSERT INTO blocks (hash, generation, refcount, available)
+                     VALUES (?, 0, 1, 1)
+                     ON CONFLICT(hash, generation) DO UPDATE SET refcount = refcount + 1",
                 )
                 .bind(&b)
                 .execute(&mut *tx)
@@ -280,11 +332,14 @@ impl NameIndex for SqliteNameIndex {
                         .await
                         .map_err(index_err)?;
                 for b in block_hexes {
-                    sqlx::query("UPDATE blocks SET refcount = refcount - 1 WHERE cid = ?")
-                        .bind(&b)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(index_err)?;
+                    sqlx::query(
+                        "UPDATE blocks SET refcount = refcount - 1
+                         WHERE hash = ? AND generation = 0",
+                    )
+                    .bind(&b)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(index_err)?;
                 }
             }
         }
@@ -311,7 +366,7 @@ impl NameIndex for SqliteNameIndex {
     }
 
     async fn unreferenced_blocks(&self) -> Result<Vec<Cid>> {
-        let hexes: Vec<String> = sqlx::query_scalar("SELECT cid FROM blocks WHERE refcount = 0")
+        let hexes: Vec<String> = sqlx::query_scalar("SELECT hash FROM blocks WHERE refcount = 0")
             .fetch_all(&self.pool)
             .await
             .map_err(index_err)?;
@@ -323,10 +378,11 @@ impl NameIndex for SqliteNameIndex {
             .fetch_all(&self.pool)
             .await
             .map_err(index_err)?;
-        let blocks: Vec<(String, i64)> = sqlx::query_as("SELECT cid, refcount FROM blocks")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(index_err)?;
+        let blocks: Vec<(String, i64, i64, i64)> =
+            sqlx::query_as("SELECT hash, generation, refcount, available FROM blocks")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(index_err)?;
         let edges: Vec<(String, String)> =
             sqlx::query_as("SELECT object_cid, block_cid FROM object_blocks")
                 .fetch_all(&self.pool)
@@ -347,7 +403,17 @@ impl NameIndex for SqliteNameIndex {
 
         Ok(IndexSnapshot {
             objects: cid_counts(objects)?,
-            blocks: cid_counts(blocks)?,
+            blocks: blocks
+                .into_iter()
+                .map(|(h, g, rc, av)| {
+                    Ok(BlockRow {
+                        hash: Cid::from_hex(&h)?,
+                        generation: g as u32,
+                        refcount: rc,
+                        available: av != 0,
+                    })
+                })
+                .collect::<Result<_>>()?,
             object_blocks: edges
                 .into_iter()
                 .map(|(o, b)| Ok((Cid::from_hex(&o)?, Cid::from_hex(&b)?)))
@@ -463,5 +529,53 @@ mod tests {
         // x dead -> b1 reclaimable; b2 still held by y; b3 still held by y.
         assert_eq!(s.unreferenced_objects().await.unwrap(), vec![x]);
         assert_eq!(s.unreferenced_blocks().await.unwrap(), vec![b1]);
+    }
+
+    #[tokio::test]
+    async fn migrates_a_pre_m1c_blocks_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let (a, b) = (cid("block-a").to_hex(), cid("block-b").to_hex());
+
+        // Hand-build a pre-M1c database: the old `blocks (cid, refcount)` table,
+        // no recorded schema version.
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let pool = SqlitePool::connect_with(opts).await.unwrap();
+            sqlx::raw_sql("CREATE TABLE blocks (cid TEXT PRIMARY KEY, refcount INTEGER NOT NULL);")
+                .execute(&pool)
+                .await
+                .unwrap();
+            for (c, rc) in [(a.as_str(), 3), (b.as_str(), 0)] {
+                sqlx::query("INSERT INTO blocks (cid, refcount) VALUES (?, ?)")
+                    .bind(c)
+                    .bind(rc)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            pool.close().await;
+        }
+
+        // Opening it migrates blocks to (hash, generation, refcount, available).
+        let s = SqliteNameIndex::open(&path).await.unwrap();
+        let mut blocks = s.snapshot().await.unwrap().blocks;
+        blocks.sort_by_key(|row| row.hash.to_hex());
+        assert_eq!(blocks.len(), 2);
+        for row in &blocks {
+            assert_eq!(row.generation, 0, "migrated rows are the canonical generation");
+            assert!(row.available, "migrated rows are available");
+        }
+        let by_hash: std::collections::HashMap<_, _> =
+            blocks.iter().map(|row| (row.hash.to_hex(), row.refcount)).collect();
+        assert_eq!(by_hash[&a], 3, "refcount preserved");
+        assert_eq!(by_hash[&b], 0, "refcount preserved");
+
+        // Re-opening is idempotent (the migration does not run a second time).
+        drop(s);
+        let s2 = SqliteNameIndex::open(&path).await.unwrap();
+        assert_eq!(s2.snapshot().await.unwrap().blocks.len(), 2);
     }
 }

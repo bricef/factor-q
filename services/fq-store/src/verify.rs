@@ -40,6 +40,12 @@ pub enum Violation {
     LiveBlockReclaimable { object: Cid, block: Cid, refcount: i64 },
     /// A refcount went negative.
     NegativeRefcount { kind: &'static str, cid: Cid, refcount: i64 },
+    /// **I1.** More than one generation of a block hash is `available` — a
+    /// writer could reserve a generation GC is about to reap.
+    MultipleAvailableGenerations { hash: Cid, available: i64 },
+    /// **I3.** A claimed (unavailable) generation still has live references, so
+    /// GC would unlink a block under a reference.
+    ClaimedBlockHasRefs { hash: Cid, generation: u32, refcount: i64 },
 }
 
 /// Check the invariants over an index `snapshot` and the live `store`. Returns
@@ -51,8 +57,16 @@ pub async fn check<C: ContentStore + ?Sized>(
     let mut violations = Vec::new();
 
     let obj_rc: HashMap<Cid, i64> = snapshot.objects.iter().copied().collect();
-    let blk_rc: HashMap<Cid, i64> = snapshot.blocks.iter().copied().collect();
     let name_refs: HashMap<Cid, i64> = snapshot.name_refs.iter().copied().collect();
+    // Block hash -> canonical (generation 0) refcount, for I4/I5. Objects
+    // reference the canonical generation; collision generations (slice 4) are
+    // resolved through the manifest's recorded generation.
+    let blk_rc: HashMap<Cid, i64> = snapshot
+        .blocks
+        .iter()
+        .filter(|b| b.generation == 0)
+        .map(|b| (b.hash, b.refcount))
+        .collect();
 
     // object CID -> the blocks it references.
     let mut edges: HashMap<Cid, Vec<Cid>> = HashMap::new();
@@ -66,9 +80,13 @@ pub async fn check<C: ContentStore + ?Sized>(
             violations.push(Violation::NegativeRefcount { kind: "object", cid: *cid, refcount: *rc });
         }
     }
-    for (cid, rc) in &snapshot.blocks {
-        if *rc < 0 {
-            violations.push(Violation::NegativeRefcount { kind: "block", cid: *cid, refcount: *rc });
+    for b in &snapshot.blocks {
+        if b.refcount < 0 {
+            violations.push(Violation::NegativeRefcount {
+                kind: "block",
+                cid: b.hash,
+                refcount: b.refcount,
+            });
         }
     }
 
@@ -115,6 +133,30 @@ pub async fn check<C: ContentStore + ?Sized>(
                     });
                 }
             }
+        }
+    }
+
+    // I1: at most one available generation per block hash.
+    let mut available: HashMap<Cid, i64> = HashMap::new();
+    for b in &snapshot.blocks {
+        if b.available {
+            *available.entry(b.hash).or_default() += 1;
+        }
+    }
+    for (hash, count) in &available {
+        if *count > 1 {
+            violations.push(Violation::MultipleAvailableGenerations { hash: *hash, available: *count });
+        }
+    }
+
+    // I3: a claimed (unavailable) generation has no live references.
+    for b in &snapshot.blocks {
+        if !b.available && b.refcount != 0 {
+            violations.push(Violation::ClaimedBlockHasRefs {
+                hash: b.hash,
+                generation: b.generation,
+                refcount: b.refcount,
+            });
         }
     }
 
@@ -223,10 +265,38 @@ mod tests {
         r.put("a", &vec![3u8; 4096]).await.unwrap();
         let mut snap = r.index().snapshot().await.unwrap();
         for b in &mut snap.blocks {
-            b.1 = 0; // a live object's blocks dropped to GC-candidate
+            b.refcount = 0; // a live object's blocks dropped to GC-candidate
         }
         let v = check(&snap, r.content()).await.unwrap();
         assert!(v.iter().any(|x| matches!(x, Violation::LiveBlockReclaimable { .. })), "{v:#?}");
         assert!(v.iter().any(|x| matches!(x, Violation::BlockRefcountTooLow { .. })), "{v:#?}");
+    }
+
+    #[tokio::test]
+    async fn detects_multiple_available_generations() {
+        let (_d, r) = repo().await;
+        r.put("a", &vec![1u8; 4096]).await.unwrap();
+        let mut snap = r.index().snapshot().await.unwrap();
+        let mut extra = snap.blocks[0]; // a second available generation of the hash
+        extra.generation = 1;
+        snap.blocks.push(extra);
+        let v = check(&snap, r.content()).await.unwrap();
+        assert!(
+            v.iter().any(|x| matches!(x, Violation::MultipleAvailableGenerations { .. })),
+            "{v:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detects_claimed_block_with_references() {
+        let (_d, r) = repo().await;
+        r.put("a", &vec![1u8; 4096]).await.unwrap();
+        let mut snap = r.index().snapshot().await.unwrap();
+        snap.blocks[0].available = false; // claimed while still referenced
+        let v = check(&snap, r.content()).await.unwrap();
+        assert!(
+            v.iter().any(|x| matches!(x, Violation::ClaimedBlockHasRefs { .. })),
+            "{v:#?}"
+        );
     }
 }

@@ -28,7 +28,7 @@ pub mod service;
 
 pub use cid::Cid;
 pub use error::{Result, StoreError};
-pub use index::{IndexSnapshot, NameIndex, SqliteNameIndex};
+pub use index::{BlockRow, IndexSnapshot, NameIndex, SqliteNameIndex};
 pub use repository::Repository;
 pub use stats::Stats;
 
