@@ -95,22 +95,28 @@ Each technique mapped to the claims it covers and when it runs.
   linearizability check (Elle/Knossos) can be added when the service goes
   multi-node (M5). Single-node now ⟹ TLA⁺ + DST + `loom`; full Jepsen later.
 
-## The TLA⁺ model
+## The model and how it was checked
 
-[`storage-gc.tla`](storage-gc.tla) models the protocol abstractly — block rows
-`(refcount, available)`, the named steps as actions, a crash that can fire
-between any two steps, and a recovering audit — and has TLC check **S1** and
-**I1–I3** across every interleaving, plus the liveness properties under fairness.
-The model is deliberately small (1–2 hashes, 2 writers, 1 collector, a bounded
-generation count) but **exhaustive**: it validates the *design* before any Rust,
-and is re-checked whenever the protocol changes.
+[`storage_gc.tla`](storage_gc.tla) (config [`storage_gc.cfg`](storage_gc.cfg))
+models the protocol abstractly — block rows `(refcount, available)` keyed by
+`(hash, gen)`, the named steps as actions, a crash that can fire between any two
+steps, and a recovering audit — and has TLC check **S1** and **I1–I4** across
+every interleaving.
 
-It is a **skeleton** to complete and run, not a finished proof. Two things to
-finish: the first cut models a **clean crash** (committed rows/files survive,
-in-flight steps are abandoned) — a refinement should add **un-fsynced loss** (a
-crash may drop the most recent unsynced file op) to exercise I2/I3 under real
-crash semantics; and the liveness properties need weak fairness on the writer and
-collector actions.
+Because TLC needs Java (unavailable in this environment), the model is also
+encoded as an independent explicit-state checker,
+[`storage-gc-check.py`](storage-gc-check.py), and **run here**. It found a real
+gap — a stale "write a fixed generation" decision could create a second
+available generation (violating **I1**) — now fixed by unifying the new-block and
+collision paths into one `Materialize` that re-checks at execution time. The
+fixed model then verified with **zero violations** across configurations up to
+**115,425 states** (2 hashes, 2 writers). The `.tla` mirrors this validated
+model; run it through TLC wherever Java is available — ideally a **CI job** with a
+JRE + `tla2tools` so the design is re-model-checked on every protocol change.
+
+Remaining work: weak fairness for the liveness properties (L1–L4), and a `Crash`
+refinement that drops the most recent un-fsynced file op (the clean-crash model
+does not yet stress I2/I3 under un-fsynced loss).
 
 ## References
 

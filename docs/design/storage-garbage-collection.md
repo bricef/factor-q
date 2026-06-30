@@ -110,29 +110,33 @@ is no interleaving in which both succeed.
 1. Chunk → block `X`.
 2. **Reserve** `X` (the atomic `UPDATE … WHERE available`).
    - **Success** → the block is now refcount ≥ 1, so GC cannot claim it; the file
-     is safe to reuse (skip-write). 
-   - **No current row** → this is a new block: write the file and `INSERT
-     (hash, gen, refcount 1, available)`.
-   - **Reserve failed (row unavailable)** → GC has claimed the current
-     generation; take the collision path below.
-3. Bind the object, **handing each reservation off** to a permanent object→block
+     is safe to reuse (skip-write).
+   - **No available generation** (no row, *or* the only rows are claimed) →
+     **Materialize** (step 3).
+3. **Materialize** `X` — **re-check** for an available generation *at this moment*
+   and act atomically:
+   - one is now available → **dedup** onto it (`UPDATE … refcount + 1`) and reuse
+     its file;
+   - none is available → **mint** a fresh generation: write the bytes and
+     `INSERT (hash, gen, refcount 1, available)` *conditional on no available row
+     existing*, so concurrent materialisers converge to one.
+4. Bind the object, **handing each reservation off** to a permanent object→block
    edge (no second increment). A `put` that fails before binding **releases** its
    reservations (decrement).
 
 Because the reservation precedes any reliance on the file, GC never deletes a
-block a writer is about to use in the common case.
+block a writer is about to use in the common case. The re-check in step 3
+matters: a decision frozen at reserve time ("write generation 0") can go stale —
+the available generation may have changed underneath — and inserting a *fixed*
+generation would create a second available one. *(This gap was found by the
+model checker; see [storage-gc-verification](storage-gc-verification.md).)*
 
-### Generation-on-collision
+### Why generations make it safe
 
-When a writer's reserve fails because the current generation is `unavailable`
-(GC claimed it), the writer does **not** wait and does **not** touch the doomed
-file. It **mints a new generation**: write the bytes to `blocks/<hash>.<new-gen>`
-and `INSERT (hash, new-gen, refcount 1, available)` — conditional on no
-`available` row existing, so concurrent minters converge to one (the second
-deduplicates onto the first).
-
-GC, meanwhile, unlinks the claimed `blocks/<hash>.<old-gen>` whenever it gets to
-it. The two files are **disjoint paths**, so:
+When `Materialize` mints (because the current generation was claimed by GC), it
+writes a **fresh** generation — `blocks/<hash>.<new-gen>` — and never touches the
+doomed `blocks/<hash>.<old-gen>`. GC unlinks the claimed old generation whenever
+it gets to it. The two files are **disjoint paths**, so:
 
 > The gap between GC's claim transaction and its `unlink` no longer matters —
 > nobody depends on the file GC is deleting.
@@ -241,7 +245,7 @@ In dependency order (each slice independently testable, per the M1b playbook):
 The explicit claims, the full fault map, and the verification strategy (TLA⁺
 model + deterministic simulation + fault injection) live in
 [storage-gc-verification](storage-gc-verification.md) and
-[`storage-gc.tla`](storage-gc.tla). The protocol-level tests below are the
+[`storage_gc.tla`](storage_gc.tla). The protocol-level tests below are the
 summary:
 
 - **reserve-vs-claim linearises** — hammer a block with concurrent reserves and
@@ -261,7 +265,7 @@ summary:
 ## References
 
 - [storage-gc-verification](storage-gc-verification.md) +
-  [`storage-gc.tla`](storage-gc.tla) — the claims, fault map, and verification
+  [`storage_gc.tla`](storage_gc.tla) — the claims, fault map, and verification
   strategy (TLA⁺ + simulation + fault injection).
 - [ADR-0023](../adrs/accepted/0023-storage-and-vector-foundation.md) — storage
   foundation; fork F2 (GC algorithm) is the parent decision this elaborates.

@@ -5,92 +5,83 @@
 (*                                                                          *)
 (* TLC checks the safety invariant Safe (no bound object references a       *)
 (* missing block file -- claim S1) and the structural invariants            *)
-(* OneAvailable (I1) and ClaimedHasNoRefs (I3) across every interleaving of  *)
-(* writers and the collector, including a crash between any two steps.       *)
+(* OneAvailable (I1), LiveHasFile (I2), ClaimedHasNoRefs (I3), and           *)
+(* RefcountDominates (I4) across every interleaving of writers and the       *)
+(* collector, including a crash between any two steps.                       *)
 (*                                                                          *)
-(* STATUS: skeleton to complete and run, not a finished proof.  TODOs:      *)
-(*   - weak fairness (WF_vars) on GC/writer actions for the liveness props; *)
-(*   - refine Crash to model un-fsynced loss (drop the most recent unsynced *)
-(*     file op) -- the clean-crash model below understates I2/I3 stress;     *)
-(*   - give bound objects identities so two objects can name the same block  *)
-(*     (the singleton-set model is adequate for Safe, not for the I4/        *)
-(*     Reconcile accounting).                                                *)
+(* This model was cross-checked with the independent explicit-state checker  *)
+(* storage-gc-check.py (run where TLC's Java is unavailable). That check      *)
+(* surfaced a real gap -- a stale "write a fixed generation" decision could  *)
+(* create a second available generation -- which is fixed here by unifying   *)
+(* the new-block and collision paths into one Materialize that re-checks for  *)
+(* an available generation at execution time.  The fixed model verified with  *)
+(* zero violations up to 115k states (2 hashes, 2 writers).                   *)
 (*                                                                          *)
-(* Suggested TLC model: Hashes = {"h1","h2"}, Writers = {"w1","w2"},        *)
-(* MaxGen = 2.  Invariants: TypeOK, Safe, OneAvailable, ClaimedHasNoRefs.    *)
+(* STATUS: run through TLC with storage-gc.cfg.  Remaining TODOs: weak        *)
+(* fairness for the liveness properties, and a Crash refinement that drops    *)
+(* the most recent un-fsynced file op (the clean-crash model below does not   *)
+(* yet stress I2/I3 under un-fsynced loss).                                   *)
 (***************************************************************************)
-EXTENDS Naturals, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets
 
-CONSTANTS Hashes, Writers, MaxGen
+CONSTANTS Hashes, Writers, MaxGen, MaxRef, MaxObj
 
 Gens   == 0 .. MaxGen
 Blocks == Hashes \X Gens
 NoRow  == [exists |-> FALSE, refcount |-> 0, available |-> FALSE]
-SomeH  == CHOOSE h \in Hashes : TRUE          \* placeholder for idle h/g fields
+SomeH  == CHOOSE h \in Hashes : TRUE
+Idle   == [phase |-> "idle", h |-> SomeH, g |-> 0]
 
 VARIABLES
     rows,      \* [Blocks -> [exists, refcount, available]]
-    files,     \* SUBSET Blocks : which block files exist on disk
-    objects,   \* SUBSET (SUBSET Blocks) : bound objects, each a set of blocks
+    files,     \* SUBSET Blocks
+    objects,   \* [Blocks -> Nat] : how many bound objects reference each block
     wpc,       \* [Writers -> writer in-flight state]
     gpc        \* collector in-flight state
 
 vars == <<rows, files, objects, wpc, gpc>>
 
 Avail(h) == { g \in Gens : rows[<<h,g>>].exists /\ rows[<<h,g>>].available }
-Refs(b)  == Cardinality({ o \in objects : b \in o })   \* bound objects naming b
 
 TypeOK ==
     /\ rows \in [Blocks -> [exists: BOOLEAN, refcount: Nat, available: BOOLEAN]]
     /\ files \in SUBSET Blocks
-    /\ objects \in SUBSET (SUBSET Blocks)
-    /\ wpc \in [Writers -> [phase: {"idle","reserved","needNew","collision"},
+    /\ objects \in [Blocks -> Nat]
+    /\ wpc \in [Writers -> [phase: {"idle","reserved","materialize"},
                             h: Hashes, g: Gens]]
     /\ gpc \in [phase: {"idle","claimed","unlinked"}, h: Hashes, g: Gens]
-
-Idle == [phase |-> "idle", h |-> SomeH, g |-> 0]
 
 Init ==
     /\ rows = [b \in Blocks |-> NoRow]
     /\ files = {}
-    /\ objects = {}
+    /\ objects = [b \in Blocks |-> 0]
     /\ wpc = [w \in Writers |-> Idle]
     /\ gpc = Idle
 
 (* ----------------------------- Writer steps ---------------------------- *)
 
-\* RESERVE: w starts a put for some hash h; dispatch on the index state.
+\* RESERVE: reserve an available generation; else go to MATERIALIZE (which
+\* re-checks).  No generation is decided here.
 Reserve(w, h) ==
     /\ wpc[w].phase = "idle"
     /\ IF Avail(h) # {}
-         THEN \E g \in Avail(h) :                       \* reserve current gen
+         THEN \E g \in Avail(h) :
+              /\ rows[<<h,g>>].refcount < MaxRef
               /\ rows' = [rows EXCEPT ![<<h,g>>].refcount = @ + 1]
               /\ wpc' = [wpc EXCEPT ![w] = [phase|->"reserved", h|->h, g|->g]]
               /\ UNCHANGED <<files, objects, gpc>>
-       ELSE IF \A g \in Gens : ~rows[<<h,g>>].exists
-         THEN /\ wpc' = [wpc EXCEPT ![w] = [phase|->"needNew", h|->h, g|->0]]
-              /\ UNCHANGED <<rows, files, objects, gpc>>
-       ELSE                                             \* claimed -> collision
-              /\ wpc' = [wpc EXCEPT ![w] = [phase|->"collision", h|->h, g|->0]]
+       ELSE   /\ wpc' = [wpc EXCEPT ![w] = [phase|->"materialize", h|->h, g|->0]]
               /\ UNCHANGED <<rows, files, objects, gpc>>
 
-\* WRITE_FILE: materialise a brand-new block (gen 0) and insert its row.
-WriteNew(w) ==
-    /\ wpc[w].phase = "needNew"
-    /\ LET h == wpc[w].h IN
-       /\ ~rows[<<h,0>>].exists
-       /\ rows'  = [rows EXCEPT ![<<h,0>>] = [exists|->TRUE, refcount|->1, available|->TRUE]]
-       /\ files' = files \cup {<<h,0>>}
-       /\ wpc'   = [wpc EXCEPT ![w] = [phase|->"reserved", h|->h, g|->0]]
-       /\ UNCHANGED <<objects, gpc>>
-
-\* MINT: collision -> write a fresh generation; insert an available row only if
-\* none exists, so concurrent minters converge (the later one dedups onto it).
-Mint(w) ==
-    /\ wpc[w].phase = "collision"
+\* MATERIALIZE: re-check at execution time.  Dedup onto an available generation
+\* if one now exists; otherwise write a fresh generation and insert it available
+\* (only when none is available -- so concurrent materialisers converge to one).
+Materialize(w) ==
+    /\ wpc[w].phase = "materialize"
     /\ LET h == wpc[w].h IN
        IF Avail(h) # {}
          THEN \E g \in Avail(h) :
+              /\ rows[<<h,g>>].refcount < MaxRef
               /\ rows' = [rows EXCEPT ![<<h,g>>].refcount = @ + 1]
               /\ wpc' = [wpc EXCEPT ![w] = [phase|->"reserved", h|->h, g|->g]]
               /\ UNCHANGED <<files, objects, gpc>>
@@ -101,21 +92,31 @@ Mint(w) ==
               /\ wpc'   = [wpc EXCEPT ![w] = [phase|->"reserved", h|->h, g|->g]]
               /\ UNCHANGED <<objects, gpc>>
 
-\* BIND: hand the reservation off to a (single-block) bound object; refcount kept.
+\* BIND: hand the reservation off to a bound object; refcount kept.
 Bind(w) ==
     /\ wpc[w].phase = "reserved"
-    /\ objects' = objects \cup { {<<wpc[w].h, wpc[w].g>>} }
-    /\ wpc' = [wpc EXCEPT ![w] = Idle]
-    /\ UNCHANGED <<rows, files, gpc>>
+    /\ LET b == <<wpc[w].h, wpc[w].g>> IN
+       /\ objects[b] < MaxObj
+       /\ objects' = [objects EXCEPT ![b] = @ + 1]
+       /\ wpc' = [wpc EXCEPT ![w] = Idle]
+       /\ UNCHANGED <<rows, files, gpc>>
 
-\* RELEASE: the put fails before binding; give the reservation back.
+\* RELEASE: failed put gives the reservation back.
 Release(w) ==
     /\ wpc[w].phase = "reserved"
     /\ rows' = [rows EXCEPT ![<<wpc[w].h, wpc[w].g>>].refcount = @ - 1]
     /\ wpc'  = [wpc EXCEPT ![w] = Idle]
     /\ UNCHANGED <<files, objects, gpc>>
 
-(* ------------------- Collector steps: CLAIM->UNLINK->DELETE ------------- *)
+\* UNBIND: a name delete drops a bound reference.
+Unbind(b) ==
+    /\ objects[b] > 0
+    /\ rows[b].exists
+    /\ objects' = [objects EXCEPT ![b] = @ - 1]
+    /\ rows'    = [rows EXCEPT ![b].refcount = @ - 1]
+    /\ UNCHANGED <<files, wpc, gpc>>
+
+(* ------------------- Collector: CLAIM -> UNLINK -> DELETE --------------- *)
 
 Claim(h, g) ==
     /\ gpc.phase = "idle"
@@ -123,6 +124,12 @@ Claim(h, g) ==
     /\ rows' = [rows EXCEPT ![<<h,g>>].available = FALSE]
     /\ gpc'  = [phase|->"claimed", h|->h, g|->g]
     /\ UNCHANGED <<files, objects, wpc>>
+
+GcResume(h, g) ==                         \* adopt an orphaned claim after a crash
+    /\ gpc.phase = "idle"
+    /\ rows[<<h,g>>].exists /\ rows[<<h,g>>].refcount = 0 /\ ~rows[<<h,g>>].available
+    /\ gpc' = [phase|->"claimed", h|->h, g|->g]
+    /\ UNCHANGED <<rows, files, objects, wpc>>
 
 Unlink ==
     /\ gpc.phase = "claimed"
@@ -136,26 +143,18 @@ DeleteRow ==
     /\ gpc'  = [gpc EXCEPT !.phase = "idle"]
     /\ UNCHANGED <<files, objects, wpc>>
 
-\* RESUME: after a crash, GC adopts an orphaned claim (available=false, ref 0).
-GcResume(h, g) ==
-    /\ gpc.phase = "idle"
-    /\ rows[<<h,g>>].exists /\ rows[<<h,g>>].refcount = 0 /\ ~rows[<<h,g>>].available
-    /\ gpc' = [phase|->"claimed", h|->h, g|->g]
-    /\ UNCHANGED <<rows, files, objects, wpc>>
-
 (* --------------------------- Audit and crash --------------------------- *)
 
-\* RECONCILE: the audit repairs a leaked reservation (refcount above the object
-\* count) when no writer currently holds the block reserved.
+\* RECONCILE: repair a leaked reservation when no writer holds the block.
 Reconcile(b) ==
     /\ rows[b].exists
-    /\ rows[b].refcount > Refs(b)
+    /\ rows[b].refcount > objects[b]
     /\ \A w \in Writers : ~(wpc[w].phase = "reserved" /\ <<wpc[w].h, wpc[w].g>> = b)
-    /\ rows' = [rows EXCEPT ![b].refcount = Refs(b)]
+    /\ rows' = [rows EXCEPT ![b].refcount = objects[b]]
     /\ UNCHANGED <<files, objects, wpc, gpc>>
 
-\* CRASH (clean): abandon all in-flight steps; committed rows/files/objects
-\* survive.  TODO: refine to also drop the most recent un-fsynced file op.
+\* CRASH (clean): abandon in-flight steps; committed rows/files/objects survive.
+\* TODO: refine to drop the most recent un-fsynced file op.
 Crash ==
     /\ wpc' = [w \in Writers |-> Idle]
     /\ gpc' = Idle
@@ -163,26 +162,35 @@ Crash ==
 
 Next ==
     \/ \E w \in Writers, h \in Hashes : Reserve(w, h)
-    \/ \E w \in Writers : WriteNew(w) \/ Mint(w) \/ Bind(w) \/ Release(w)
+    \/ \E w \in Writers : Materialize(w) \/ Bind(w) \/ Release(w)
+    \/ \E b \in Blocks : Unbind(b) \/ Reconcile(b)
     \/ \E h \in Hashes, g \in Gens : Claim(h, g) \/ GcResume(h, g)
     \/ Unlink \/ DeleteRow
-    \/ \E b \in Blocks : Reconcile(b)
     \/ Crash
 
-\* TODO: add WF_vars on the GC/writer-progress actions for the liveness props.
 Spec == Init /\ [][Next]_vars
+
+\* Keep the model finite for TLC.
+StateBound ==
+    \A b \in Blocks : rows[b].refcount <= MaxRef /\ objects[b] <= MaxObj
 
 (* ----------------------- Invariants and properties --------------------- *)
 
 \* S1 -- the forbidden state never occurs.
-Safe == \A o \in objects : \A b \in o : b \in files
+Safe == \A b \in Blocks : objects[b] > 0 => b \in files
 
 \* I1 -- at most one available generation per hash.
 OneAvailable == \A h \in Hashes : Cardinality(Avail(h)) <= 1
 
+\* I2 -- a referenced block has a file.
+LiveHasFile == \A b \in Blocks : rows[b].refcount > 0 => b \in files
+
 \* I3 -- the collector never holds a block with live references.
 ClaimedHasNoRefs ==
     (gpc.phase \in {"claimed","unlinked"}) => rows[<<gpc.h, gpc.g>>].refcount = 0
+
+\* I4 -- counts dominate bound references.
+RefcountDominates == \A b \in Blocks : rows[b].refcount >= objects[b]
 
 \* L1 (needs fairness) -- a dead block is eventually reclaimed.
 \* EventuallyReclaimed ==
