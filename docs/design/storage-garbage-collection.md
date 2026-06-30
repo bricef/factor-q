@@ -232,20 +232,31 @@ A periodic worker, the safety net ADR-0023 F2 requires:
 
 ## What M1c builds
 
-In dependency order (each slice independently testable, per the M1b playbook):
+In dependency order (each slice independently testable, per the M1b playbook).
+**Verification leads**: the harness lands first so every feature slice below is
+born testable, with the invariants as live oracles.
 
-1. **CAS deletion primitive** — `ContentStore::remove` for objects and blocks,
+1. **Verification harness** — the design-for-testability seams (filesystem,
+   clock, crash point, and named `fail`-points behind traits) and the **invariant
+   oracle**: a `check_invariants(index, store)` that reads the real index +
+   filesystem and asserts S1 and I1–I4. Plus the deterministic-simulation
+   scaffold (seeded scheduler, seed logging for replay). Everything below is built
+   and fault-tested against it, and the oracle becomes the audit's core.
+2. **CAS deletion primitive** — `ContentStore::remove` for objects and blocks,
    plus generation-aware block paths and a cheap existence check.
    Conformance-tested.
-2. **`blocks` schema migration** — add `gen` and `available`, re-key on
+3. **`blocks` schema migration** — add `gen` and `available`, re-key on
    `(hash, gen)`.
-3. **Reserve-before-rely in the write path** — move the block refcount bump to
-   write time; bind hands reservations off to edges; failed puts release.
-4. **The `Collector` trait + reference collector** — claim → unlink → delete in
+4. **Reserve-before-rely in the write path** — move the block refcount bump to
+   write time; bind hands reservations off to edges; failed puts release. The
+   block file is **fsync'd before its row commits** (I2).
+5. **The `Collector` trait + reference collector** — claim → unlink → delete in
    small batches (online), over the index's unreferenced sets.
-5. **The reachability audit** — orphan reaper, drift reconcile, the forbidden-
-   state alarm.
-6. **UX** — `fq-cas gc` (run a pass, report bytes reclaimed). The always-on
+6. **The reachability audit** — orphan reaper, drift reconcile, the forbidden-
+   state alarm. Provides the systematic (strong-fairness) coverage the model
+   shows is **required** for reclamation liveness — the online collector alone can
+   leave a crash-orphaned generation unreclaimed forever.
+7. **UX** — `fq-cas gc` (run a pass, report bytes reclaimed). The always-on
    background worker lands with the service in M5.
 
 ## Test plan

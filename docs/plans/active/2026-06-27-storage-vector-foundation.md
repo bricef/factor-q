@@ -93,12 +93,23 @@ refcount maintenance, transactional with name updates.
 **Deliverable:** unreferenced objects/blocks are reclaimed online, with the
 store available throughout.
 
-**Build:** two-level reference counting over M1b's indexes; a pluggable
-`Collector` trait; the background reconciliation-audit worker.
+**Build (verification-first):** the test harness lands first — the invariant
+oracle, the fs/clock/crash/`fail`-point seams, and the deterministic-simulation
+scaffold — then the feature slices against it: the CAS deletion primitive, the
+`blocks` schema migration, reserve-before-rely, a pluggable `Collector` trait,
+and the reachability-audit worker.
 
 **Design:** the lock-free online-reclaim protocol (flag-based atomic claim +
 reserve-before-rely + generation-on-collision) is written up in
-[storage garbage collection](../design/storage-garbage-collection.md).
+[storage garbage collection](../../design/storage-garbage-collection.md); its
+correctness claims, fault map, and verification strategy are in
+[storage GC verification](../../design/storage-gc-verification.md).
+
+**Verification:** the design is model-checked *before* code — TLC proves safety
+(226k states) and liveness (204k states), cross-checked by an independent Python
+explicit-state checker — and the model established that the **reachability audit
+is required** for reclamation liveness (the online collector alone can leave a
+crash-orphaned generation unreclaimed forever), not merely a backstop.
 
 **M1 depends on:** nothing (M1b builds on M1a; M1c on M1b).
 

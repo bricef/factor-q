@@ -76,7 +76,7 @@ Each technique mapped to the claims it covers and when it runs.
 
 | Technique | Covers | When |
 |---|---|---|
-| **TLA⁺ / TLC model check** — exhaustive over interleavings + crash points | S1, I1–I5, L1–L4 (design level) | *before* code; re-run on any protocol change |
+| **TLA⁺ / TLC model check** — exhaustive over interleavings + crash points | S1, I1–I4, L1–L3 (design level) | *before* code; re-run on any protocol change |
 | **Deterministic simulation + nemesis** — seed-reproducible, *real* code, injected crashes / I-O faults / conflicts | S1, all invariants, recovery | continuous; millions of seeds |
 | **Fault-matrix failpoints** (`fail` crate, every named step) | the fault map, recovery | per slice |
 | **`loom` / `shuttle`** — exhaustive / randomised Rust interleavings | the concurrency (reserve-vs-claim) | per slice |
@@ -85,6 +85,10 @@ Each technique mapped to the claims it covers and when it runs.
 | **Adversarial reach-the-forbidden-state** — hand-crafted worst interleavings | S1 (as an attack) | dedicated |
 | **Soak / chaos** — long randomised workload + `kill -9` + restart + audit | accumulation / rare bugs | CI nightly |
 | **Differential** — GC vs no-GC return identical content for every read | GC is observably invisible | per slice |
+
+TLC checks I1–I4 and L1–L3 directly; **I5** is a corollary of I4 (a referenced
+block has `refcount ≥ 1 > 0`), and **L4** (recovery in *bounded* work) is a
+complexity property covered by the deterministic simulation, not TLC.
 
 ### Cross-cutting requirements
 
