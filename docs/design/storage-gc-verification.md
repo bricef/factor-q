@@ -105,16 +105,15 @@ models the protocol abstractly — block rows `(refcount, available)` keyed by
 steps, and a recovering audit — and has TLC check **S1** and **I1–I4** across
 every interleaving.
 
-Because TLC needs Java (unavailable in this environment), the model is also
-encoded as an independent explicit-state checker,
-[`storage-gc-check.py`](storage-gc-check.py), and **run here**. It found a real
-gap — a stale "write a fixed generation" decision could create a second
-available generation (violating **I1**) — now fixed by unifying the new-block and
-collision paths into one `Materialize` that re-checks at execution time. The
-fixed model then verified with **zero violations** across configurations up to
-**115,425 states** (2 hashes, 2 writers). The `.tla` mirrors this validated
-model; run it through TLC wherever Java is available — ideally a **CI job** with a
-JRE + `tla2tools` so the design is re-model-checked on every protocol change.
+**TLC** model-checks it: safety (`storage_gc.cfg`) is clean across **226,008
+states** (S1, I1–I4, crashes bounded by `MaxCrash`). An independent explicit-state
+checker, [`storage-gc-check.py`](storage-gc-check.py), encodes the same transition
+system and agrees; it was written when TLC's Java was unavailable, and earned its
+keep — it found a real gap (a stale "write a fixed generation" decision could
+create a second available generation, violating **I1**), now fixed by unifying the
+new-block and collision paths into one `Materialize` that re-checks at execution
+time. A **CI job** with a JRE + `tla2tools` could re-run TLC on every protocol
+change.
 
 Two refinements have since been added to the checker:
 
@@ -124,14 +123,23 @@ Two refinements have since been added to the checker:
   three steps (`Reserve → Materialize → Crash` loses the just-written,
   not-yet-durable block while its row already says refcount 1); with the fsync
   the model is clean.
-- **Liveness under weak fairness.** Fair-cycle detection over the crash-free
-  graph confirms **GC-progress** (the collector never stalls non-idle),
-  **writer-progress** (no writer gets stuck), and **reclaim-progress** (dead
-  blocks don't persist unreclaimed) — no fair-cycle violations.
+- **Liveness — and why the audit is load-bearing.** TLC's per-action fairness
+  found what the Python checker's coarser fairness missed: under only *weak*
+  fairness, a crash can orphan a generation (claimed, refcount 0, collector idle)
+  that the online collector never resumes because it stays busy with live churn —
+  a permanent leak that (with bounded generations) even starves a writer.
+  Modelling the **reachability audit as strong fairness** — it systematically
+  visits every block — and bounding crashes (liveness holds only modulo finitely
+  many faults), TLC confirms across **203,770 states** that `GCProgress`,
+  `WriterProgress`, and `EventualReclaim` (every dead block, crash-orphans
+  included, is eventually reclaimed or reused) all hold. This is the formal
+  argument for *why M1c needs the audit*, not just the online collector.
 
-Run them with `CRASH=unfsynced SYNC=0|1` and `MODE=liveness`. For TLC, the `.tla`
-carries `FairSpec` and the liveness properties; the durability refinement lives
-in the Python checker (`CRASH=unfsynced`).
+Reproduce: `java -cp tla2tools.jar tlc2.TLC storage_gc.tla` (safety) and the same
+with `-config storage_gc_liveness.cfg` (liveness); for the Python cross-check,
+`CRASH=unfsynced SYNC=0|1` and `MODE=liveness`. The un-fsynced durability
+refinement lives only in the Python checker; the `.tla` keeps the clean-crash
+model plus a bounded-crash counter for liveness.
 
 ## References
 

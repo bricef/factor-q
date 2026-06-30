@@ -1,2 +1,5 @@
 # Release packaging output (`just package` / scripts/package.sh).
 /dist/
+
+# TLA+ / TLC model-checker scratch output (docs/design/storage_gc.tla).
+docs/design/states/

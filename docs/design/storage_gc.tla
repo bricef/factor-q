@@ -9,23 +9,22 @@
 (* RefcountDominates (I4) across every interleaving of writers and the       *)
 (* collector, including a crash between any two steps.                       *)
 (*                                                                          *)
-(* This model was cross-checked with the independent explicit-state checker  *)
-(* storage-gc-check.py (run where TLC's Java is unavailable). That check      *)
-(* surfaced a real gap -- a stale "write a fixed generation" decision could  *)
-(* create a second available generation -- which is fixed here by unifying   *)
-(* the new-block and collision paths into one Materialize that re-checks for  *)
-(* an available generation at execution time.  The fixed model verified with  *)
-(* zero violations up to 115k states (2 hashes, 2 writers).                   *)
+(* Verified with TLC: safety (storage_gc.cfg) is clean across 226k states, and  *)
+(* liveness (storage_gc_liveness.cfg, the FairSpec) holds across 204k states --  *)
+(* GCProgress, WriterProgress, and EventualReclaim.  The independent checker     *)
+(* storage-gc-check.py agrees on safety and found the Materialize gap (a stale   *)
+(* fixed-generation write could create a second available generation, I1).       *)
 (*                                                                          *)
-(* STATUS: run through TLC with storage_gc.cfg.  The fairness/liveness         *)
-(* (FairSpec, GCProgress, WriterProgress) and the un-fsynced-crash + the        *)
-(* fsync-before-insert requirement it surfaced were validated in                *)
-(* storage-gc-check.py; this .tla keeps the clean-crash model, with the         *)
-(* durability refinement documented there and in the verification doc.          *)
+(* The liveness fairness is deliberate: the audit's Claim/GcResume are STRONG-   *)
+(* fair (it visits every block) while writers are weak-fair -- TLC shows weak    *)
+(* fairness alone lets a crash-orphaned generation leak forever.  The un-fsynced *)
+(* durability refinement (fsync the block file before its row) lives in the      *)
+(* Python checker; this .tla keeps the clean-crash model plus a bounded-crash    *)
+(* counter (MaxCrash) so liveness holds modulo finitely many faults.            *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Hashes, Writers, MaxGen, MaxRef, MaxObj
+CONSTANTS Hashes, Writers, MaxGen, MaxRef, MaxObj, MaxCrash
 
 Gens   == 0 .. MaxGen
 Blocks == Hashes \X Gens
@@ -38,9 +37,11 @@ VARIABLES
     files,     \* SUBSET Blocks
     objects,   \* [Blocks -> Nat] : how many bound objects reference each block
     wpc,       \* [Writers -> writer in-flight state]
-    gpc        \* collector in-flight state
+    gpc,       \* collector in-flight state
+    crashes    \* count of crashes so far (bounded by MaxCrash, for liveness)
 
-vars == <<rows, files, objects, wpc, gpc>>
+vars  == <<rows, files, objects, wpc, gpc, crashes>>
+pvars == <<rows, files, objects, wpc, gpc>>   \* state minus the crash counter, for fairness
 
 Avail(h) == { g \in Gens : rows[<<h,g>>].exists /\ rows[<<h,g>>].available }
 
@@ -51,6 +52,7 @@ TypeOK ==
     /\ wpc \in [Writers -> [phase: {"idle","reserved","materialize"},
                             h: Hashes, g: Gens]]
     /\ gpc \in [phase: {"idle","claimed","unlinked"}, h: Hashes, g: Gens]
+    /\ crashes \in 0 .. MaxCrash
 
 Init ==
     /\ rows = [b \in Blocks |-> NoRow]
@@ -58,6 +60,7 @@ Init ==
     /\ objects = [b \in Blocks |-> 0]
     /\ wpc = [w \in Writers |-> Idle]
     /\ gpc = Idle
+    /\ crashes = 0
 
 (* ----------------------------- Writer steps ---------------------------- *)
 
@@ -157,27 +160,34 @@ Reconcile(b) ==
 \* CRASH (clean): abandon in-flight steps; committed rows/files/objects survive.
 \* TODO: refine to drop the most recent un-fsynced file op.
 Crash ==
+    /\ crashes < MaxCrash                  \* only finitely many crashes (for liveness)
+    /\ crashes' = crashes + 1
     /\ wpc' = [w \in Writers |-> Idle]
     /\ gpc' = Idle
     /\ UNCHANGED <<rows, files, objects>>
 
-Next ==
+NonCrashNext ==
     \/ \E w \in Writers, h \in Hashes : Reserve(w, h)
     \/ \E w \in Writers : Materialize(w) \/ Bind(w) \/ Release(w)
     \/ \E b \in Blocks : Unbind(b) \/ Reconcile(b)
     \/ \E h \in Hashes, g \in Gens : Claim(h, g) \/ GcResume(h, g)
     \/ Unlink \/ DeleteRow
-    \/ Crash
+
+Next == (NonCrashNext /\ UNCHANGED crashes) \/ Crash
 
 Spec == Init /\ [][Next]_vars
 
-\* Weak fairness on the progress actions, for the liveness properties.  Checked
-\* via crash-free fair-cycle detection in storage-gc-check.py (MODE=liveness).
+\* Fairness for the liveness properties.  The collector's claim/resume and the
+\* audit's reconcile are STRONG-fair: this models the reachability audit, which
+\* systematically visits every block.  Weak fairness there is NOT enough -- TLC
+\* shows it lets a crash-orphaned generation (claimed, refcount 0, gpc idle) leak
+\* forever while the collector services active churn, which (with bounded gens)
+\* in turn starves a writer.  Writers and the in-flight unlink/delete are weak-fair.
 Fairness ==
-    /\ \A w \in Writers : WF_vars(Materialize(w) \/ Bind(w) \/ Release(w))
-    /\ WF_vars(Unlink \/ DeleteRow)
-    /\ \A h \in Hashes, g \in Gens : WF_vars(Claim(h, g) \/ GcResume(h, g))
-    /\ \A b \in Blocks : WF_vars(Reconcile(b))
+    /\ \A w \in Writers : WF_pvars(Materialize(w) \/ Bind(w) \/ Release(w))
+    /\ WF_pvars(Unlink \/ DeleteRow)
+    /\ \A h \in Hashes, g \in Gens : SF_pvars(Claim(h, g) \/ GcResume(h, g))
+    /\ \A b \in Blocks : SF_pvars(Reconcile(b))
 FairSpec == Spec /\ Fairness
 
 \* Keep the model finite for TLC.
@@ -202,9 +212,16 @@ ClaimedHasNoRefs ==
 \* I4 -- counts dominate bound references.
 RefcountDominates == \A b \in Blocks : rows[b].refcount >= objects[b]
 
-\* Liveness (check with FairSpec).  Verified clean by storage-gc-check.py:
-\* GC-progress, writer-progress, and reclaim-progress all hold under weak fairness.
+\* Liveness (check with FairSpec, no CONSTRAINT -- the model is naturally finite,
+\* and a state constraint corrupts TLC's fairness reasoning).  GC-progress and
+\* writer-progress hold, and a dead block is eventually reclaimed or reused --
+\* given the audit's strong fairness above.  (The Python checker's coarser,
+\* prefix-level fairness missed the writer starvation that TLC's per-action
+\* fairness catches.)
 GCProgress == (gpc.phase # "idle") ~> (gpc.phase = "idle")
 WriterProgress == \A w \in Writers : (wpc[w].phase # "idle") ~> (wpc[w].phase = "idle")
+EventualReclaim ==
+    \A b \in Blocks : (rows[b].exists /\ rows[b].refcount = 0)
+                        ~> (~rows[b].exists \/ rows[b].refcount > 0)
 
 =============================================================================
