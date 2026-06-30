@@ -65,9 +65,9 @@ pub trait NameIndex: Send + Sync {
     /// Atomically mint `generation` of `hash` as a fresh available block
     /// (refcount 1), **conditional on no generation currently being available**,
     /// so concurrent minters converge to one. `Ok(true)` if it inserted;
-    /// `Ok(false)` if an available generation already exists (reserve it). The
-    /// block file must already be written and fsynced (I2). A pre-existing
-    /// `(hash, generation)` is an error — the caller picks a fresh generation.
+    /// `Ok(false)` if an available generation already exists, or `(hash,
+    /// generation)` is already present (the caller picks another generation). The
+    /// block file must already be written and fsynced (I2).
     async fn mint_block(&self, hash: &Cid, generation: u32) -> Result<bool>;
 
     /// Atomically claim `(hash, generation)` for collection (the GC
@@ -79,6 +79,19 @@ pub trait NameIndex: Send + Sync {
     /// Release a reservation on `(hash, generation)` — `refcount -= 1` — for a
     /// failed put, or the bind hand-off's alias case.
     async fn release_block(&self, hash: &Cid, generation: u32) -> Result<()>;
+
+    /// Blocks eligible for collection — `(hash, generation, available)` for every
+    /// row at refcount 0. An `available` row is claimed first; an unavailable one
+    /// is an orphaned claim (a crash mid-reclaim) the collector adopts directly.
+    async fn claimable_blocks(&self) -> Result<Vec<(Cid, u32, bool)>>;
+
+    /// Delete a claimed, dead block row (`refcount = 0` and unavailable), after
+    /// its file is unlinked. Idempotent.
+    async fn delete_block(&self, hash: &Cid, generation: u32) -> Result<()>;
+
+    /// Delete a dead object (`refcount = 0`) — its row and its object→block
+    /// edges — after its manifest is removed. A no-op if a writer resurrected it.
+    async fn delete_object(&self, cid: &Cid) -> Result<()>;
 }
 
 /// One row of the `blocks` table: a block generation and its claim state.
@@ -490,7 +503,8 @@ impl NameIndex for SqliteNameIndex {
         let affected = sqlx::query(
             "INSERT INTO blocks (hash, generation, refcount, available)
              SELECT ?, ?, 1, 1
-             WHERE NOT EXISTS (SELECT 1 FROM blocks WHERE hash = ? AND available = 1)",
+             WHERE NOT EXISTS (SELECT 1 FROM blocks WHERE hash = ? AND available = 1)
+             ON CONFLICT(hash, generation) DO NOTHING",
         )
         .bind(&h)
         .bind(generation as i64)
@@ -523,6 +537,54 @@ impl NameIndex for SqliteNameIndex {
             .execute(&self.pool)
             .await
             .map_err(index_err)?;
+        Ok(())
+    }
+
+    async fn claimable_blocks(&self) -> Result<Vec<(Cid, u32, bool)>> {
+        let rows: Vec<(String, i64, i64)> =
+            sqlx::query_as("SELECT hash, generation, available FROM blocks WHERE refcount = 0")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(index_err)?;
+        rows.into_iter()
+            .map(|(h, g, a)| Ok((Cid::from_hex(&h)?, g as u32, a != 0)))
+            .collect()
+    }
+
+    async fn delete_block(&self, hash: &Cid, generation: u32) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM blocks
+             WHERE hash = ? AND generation = ? AND refcount = 0 AND available = 0",
+        )
+        .bind(hash.to_hex())
+        .bind(generation as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(index_err)?;
+        Ok(())
+    }
+
+    async fn delete_object(&self, cid: &Cid) -> Result<()> {
+        let cid_hex = cid.to_hex();
+        let mut tx = self.pool.begin().await.map_err(index_err)?;
+        let rc: Option<i64> = sqlx::query_scalar("SELECT refcount FROM objects WHERE cid = ?")
+            .bind(&cid_hex)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(index_err)?;
+        if rc == Some(0) {
+            sqlx::query("DELETE FROM object_blocks WHERE object_cid = ?")
+                .bind(&cid_hex)
+                .execute(&mut *tx)
+                .await
+                .map_err(index_err)?;
+            sqlx::query("DELETE FROM objects WHERE cid = ?")
+                .bind(&cid_hex)
+                .execute(&mut *tx)
+                .await
+                .map_err(index_err)?;
+        }
+        tx.commit().await.map_err(index_err)?;
         Ok(())
     }
 }

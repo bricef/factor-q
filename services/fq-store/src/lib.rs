@@ -13,6 +13,7 @@
 mod cid;
 mod error;
 
+pub mod collector;
 pub mod conformance;
 pub mod fs;
 pub mod index;
@@ -27,6 +28,7 @@ pub mod cli;
 pub mod service;
 
 pub use cid::Cid;
+pub use collector::{Collector, Reclaimed, ReferenceCollector};
 pub use error::{Result, StoreError};
 pub use index::{BlockRow, IndexSnapshot, NameIndex, SqliteNameIndex};
 pub use repository::Repository;

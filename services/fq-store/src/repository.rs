@@ -103,17 +103,25 @@ impl<C: ContentStore, N: NameIndex> Repository<C, N> {
     }
 
     async fn reserve_or_materialize(&self, hash: &Cid) -> Result<u32> {
-        loop {
-            if let Some(generation) = self.index.reserve_block(hash).await? {
-                return Ok(generation);
-            }
-            // No available generation: a brand-new block, already written and
-            // fsynced by content.put. Mint its row at generation 0.
-            if self.index.mint_block(hash, 0).await? {
-                return Ok(0);
-            }
-            // A concurrent writer minted; loop to reserve (dedup onto it).
+        if let Some(generation) = self.index.reserve_block(hash).await? {
+            return Ok(generation);
         }
+        // No available generation: content.put wrote the canonical (generation 0)
+        // file, so mint its row.
+        if self.index.mint_block(hash, 0).await? {
+            return Ok(0);
+        }
+        // The mint was refused: either a concurrent writer just minted an
+        // available generation (reserve it), or generation 0 is claimed by GC.
+        if let Some(generation) = self.index.reserve_block(hash).await? {
+            return Ok(generation);
+        }
+        // Generation 0 is claimed and none is available — a write/GC collision.
+        // The generation-on-collision mint (writing a fresh generation) lands in
+        // slice 5d; until then a collision surfaces as a rare, safe error.
+        Err(StoreError::Corrupt(format!(
+            "block {hash} collided with GC; generation-on-collision is slice 5d"
+        )))
     }
 }
 

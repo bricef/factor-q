@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use fq_store::fs::{ChunkParams, FilesystemStore};
-use fq_store::{Repository, SqliteNameIndex, verify};
+use fq_store::{Collector, ReferenceCollector, Repository, SqliteNameIndex, verify};
 
 fn next_u64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -54,7 +54,7 @@ async fn run_seed(seed: u64, steps: usize) {
     let names = ["a", "a.b", "a.b.c", "a.x", "d", "d.e"];
 
     for step in 0..steps {
-        match below(&mut rng, 10) {
+        match below(&mut rng, 12) {
             0..=5 => {
                 let name = names[below(&mut rng, names.len() as u64) as usize];
                 // Sometimes reuse an existing value — exercises dedup + aliasing.
@@ -72,6 +72,11 @@ async fn run_seed(seed: u64, steps: usize) {
                 let name = names[below(&mut rng, names.len() as u64) as usize];
                 repo.delete(name).await.unwrap();
                 model.remove(name);
+            }
+            8..=9 => {
+                // Online GC: reclaim what's unreferenced. It must hold the oracle
+                // and leave every live name untouched.
+                ReferenceCollector.collect(&repo).await.unwrap();
             }
             _ => {
                 // Simulated crash: committed state must survive a reopen.
