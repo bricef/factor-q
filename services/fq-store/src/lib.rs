@@ -75,4 +75,27 @@ pub trait ContentStore: Send + Sync {
             Err(StoreError::NotFound(*cid))
         }
     }
+
+    /// Remove the object `cid` (its manifest / representation). Removing an
+    /// absent object is a no-op. This does **not** remove the object's blocks —
+    /// those are reference-counted and reclaimed separately via
+    /// [`remove_block`](Self::remove_block). The garbage collector calls this
+    /// for objects the index reports unreferenced.
+    async fn remove(&self, cid: &Cid) -> Result<()>;
+
+    /// Whether the block file for `(block, generation)` is present. Generation
+    /// 0 is the canonical block; a non-zero generation is a collision-minted
+    /// copy (M1c). Backends that do not sub-chunk treat a block as the object
+    /// and ignore the generation. A cheap existence check for GC and the audit.
+    async fn has_block(&self, block: &Cid, generation: u32) -> Result<bool> {
+        let _ = generation;
+        self.has(block).await
+    }
+
+    /// Remove the block file for `(block, generation)`. Removing an absent block
+    /// is a no-op. Backends that do not sub-chunk remove the object instead.
+    async fn remove_block(&self, block: &Cid, generation: u32) -> Result<()> {
+        let _ = generation;
+        self.remove(block).await
+    }
 }

@@ -64,6 +64,9 @@ pub trait CasService {
     async fn has(cid: Cid) -> std::result::Result<bool, WireError>;
     async fn size(cid: Cid) -> std::result::Result<u64, WireError>;
     async fn stats() -> std::result::Result<Stats, WireError>;
+    async fn remove(cid: Cid) -> std::result::Result<(), WireError>;
+    async fn has_block(block: Cid, generation: u32) -> std::result::Result<bool, WireError>;
+    async fn remove_block(block: Cid, generation: u32) -> std::result::Result<(), WireError>;
 }
 
 /// Server handler: forwards each RPC to a backing [`ContentStore`].
@@ -108,6 +111,34 @@ impl CasService for CasServer {
 
     async fn stats(self, _: context::Context) -> std::result::Result<Stats, WireError> {
         self.store.stats().await.map_err(WireError::from)
+    }
+
+    async fn remove(self, _: context::Context, cid: Cid) -> std::result::Result<(), WireError> {
+        self.store.remove(&cid).await.map_err(WireError::from)
+    }
+
+    async fn has_block(
+        self,
+        _: context::Context,
+        block: Cid,
+        generation: u32,
+    ) -> std::result::Result<bool, WireError> {
+        self.store
+            .has_block(&block, generation)
+            .await
+            .map_err(WireError::from)
+    }
+
+    async fn remove_block(
+        self,
+        _: context::Context,
+        block: Cid,
+        generation: u32,
+    ) -> std::result::Result<(), WireError> {
+        self.store
+            .remove_block(&block, generation)
+            .await
+            .map_err(WireError::from)
     }
 }
 
@@ -207,6 +238,30 @@ impl ContentStore for RemoteStore {
     async fn stats(&self) -> Result<Stats> {
         self.client
             .stats(context::current())
+            .await
+            .map_err(rpc_err)?
+            .map_err(StoreError::from)
+    }
+
+    async fn remove(&self, cid: &Cid) -> Result<()> {
+        self.client
+            .remove(context::current(), *cid)
+            .await
+            .map_err(rpc_err)?
+            .map_err(StoreError::from)
+    }
+
+    async fn has_block(&self, block: &Cid, generation: u32) -> Result<bool> {
+        self.client
+            .has_block(context::current(), *block, generation)
+            .await
+            .map_err(rpc_err)?
+            .map_err(StoreError::from)
+    }
+
+    async fn remove_block(&self, block: &Cid, generation: u32) -> Result<()> {
+        self.client
+            .remove_block(context::current(), *block, generation)
             .await
             .map_err(rpc_err)?
             .map_err(StoreError::from)

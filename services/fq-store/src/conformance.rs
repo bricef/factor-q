@@ -179,6 +179,60 @@ pub async fn blocks_enumerated<S: ContentStore + ?Sized>(store: &S, content: &[u
     Ok(())
 }
 
+/// `remove` deletes an object: afterwards `has` is false and `get` is
+/// `NotFound`; the object's blocks are **not** removed (they are
+/// reference-counted and reclaimed separately); and removing an absent object
+/// is a no-op. Destructive — run against an **isolated** store.
+pub async fn removal<S: ContentStore + ?Sized>(store: &S, content: &[u8]) -> Check {
+    let cid = store.put(content).await.map_err(|e| format!("put: {e}"))?;
+    if !store.has(&cid).await.map_err(|e| format!("has: {e}"))? {
+        return fail("absent right after put");
+    }
+    store
+        .remove(&cid)
+        .await
+        .map_err(|e| format!("remove: {e}"))?;
+    if store.has(&cid).await.map_err(|e| format!("has after remove: {e}"))? {
+        return fail("still present after remove");
+    }
+    store
+        .remove(&cid)
+        .await
+        .map_err(|e| format!("remove (idempotent): {e}"))?;
+    Ok(())
+}
+
+/// `has_block` reflects block presence and `remove_block` deletes it
+/// idempotently: after `put` every enumerated block is present; after
+/// `remove_block` the target is absent; a second `remove_block` is a no-op.
+/// Destructive (and uses sub-block addressing) — run against an **isolated**
+/// store whose `blocks` enumerates real blocks.
+pub async fn block_removal<S: ContentStore + ?Sized>(store: &S, content: &[u8]) -> Check {
+    if content.is_empty() {
+        return Ok(()); // empty content has no blocks
+    }
+    let cid = store.put(content).await.map_err(|e| format!("put: {e}"))?;
+    let blocks = store.blocks(&cid).await.map_err(|e| format!("blocks: {e}"))?;
+    for b in &blocks {
+        if !store.has_block(b, 0).await.map_err(|e| format!("has_block: {e}"))? {
+            return fail(format!("block {b} absent after put"));
+        }
+    }
+    let target = blocks[0];
+    store
+        .remove_block(&target, 0)
+        .await
+        .map_err(|e| format!("remove_block: {e}"))?;
+    if store.has_block(&target, 0).await.map_err(|e| format!("has_block after remove: {e}"))? {
+        return fail("block present after remove_block");
+    }
+    store
+        .remove_block(&target, 0)
+        .await
+        .map_err(|e| format!("remove_block (idempotent): {e}"))?;
+    Ok(())
+}
+
 /// Generate the full `ContentStore` conformance test suite for a backend.
 ///
 /// `$make` is an expression that constructs a store (a content-addressed

@@ -74,8 +74,15 @@ impl FilesystemStore {
         }
     }
 
-    fn block_path(&self, hash: &str) -> PathBuf {
-        self.root.join("blocks").join(&hash[0..2]).join(hash)
+    fn block_path(&self, hash: &str, generation: u32) -> PathBuf {
+        let dir = self.root.join("blocks").join(&hash[0..2]);
+        if generation == 0 {
+            dir.join(hash)
+        } else {
+            // Collision-minted generations carry a suffix; the canonical block
+            // (generation 0) does not, so reads need no index lookup (M1c).
+            dir.join(format!("{hash}.{generation}"))
+        }
     }
 
     fn object_path(&self, cid: &Cid) -> PathBuf {
@@ -115,7 +122,7 @@ impl ContentStore for FilesystemStore {
             for chunk in chunker {
                 let block = &content[chunk.offset..chunk.offset + chunk.length];
                 let hash = Cid::of(block).to_hex();
-                let path = self.block_path(&hash);
+                let path = self.block_path(&hash, 0);
                 if !tokio::fs::try_exists(&path).await? {
                     write_atomic(&path, block).await?;
                 }
@@ -209,11 +216,23 @@ impl ContentStore for FilesystemStore {
             .map(|b| Cid::from_hex(&b.hash))
             .collect()
     }
+
+    async fn remove(&self, cid: &Cid) -> Result<()> {
+        remove_file_idempotent(&self.object_path(cid)).await
+    }
+
+    async fn has_block(&self, block: &Cid, generation: u32) -> Result<bool> {
+        Ok(tokio::fs::try_exists(self.block_path(&block.to_hex(), generation)).await?)
+    }
+
+    async fn remove_block(&self, block: &Cid, generation: u32) -> Result<()> {
+        remove_file_idempotent(&self.block_path(&block.to_hex(), generation)).await
+    }
 }
 
 impl FilesystemStore {
     async fn read_block(&self, cid: &Cid, block: &BlockRef) -> Result<Vec<u8>> {
-        tokio::fs::read(self.block_path(&block.hash))
+        tokio::fs::read(self.block_path(&block.hash, 0))
             .await
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -238,6 +257,17 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     tokio::fs::write(&tmp, bytes).await?;
     tokio::fs::rename(&tmp, path).await?;
     Ok(())
+}
+
+/// Remove `path`, treating an already-absent file as success — block and object
+/// deletion are idempotent (a retried GC pass must not fail on a file a prior
+/// pass already unlinked).
+async fn remove_file_idempotent(path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// List the files two levels deep under `dir` (the `<shard>/<file>` layout),
@@ -389,5 +419,40 @@ mod tests {
         let (_dir, store) = store();
         let err = store.get(&Cid::of(b"never stored")).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_the_object_but_keeps_blocks() {
+        let (_dir, store) = store();
+        let content = vec![3u8; 30_000];
+        let cid = store.put(&content).await.unwrap();
+        let blocks = store.blocks(&cid).await.unwrap();
+        assert!(!blocks.is_empty());
+
+        store.remove(&cid).await.unwrap();
+        assert!(!store.has(&cid).await.unwrap());
+        assert!(matches!(store.get(&cid).await.unwrap_err(), StoreError::NotFound(_)));
+        // Blocks are reference-counted; remove() leaves them for the collector.
+        for b in &blocks {
+            assert!(store.has_block(b, 0).await.unwrap(), "block {b} should remain");
+        }
+    }
+
+    #[tokio::test]
+    async fn deletion_conformance() {
+        let (_dir, store) = store();
+        let big = vec![5u8; 40_000];
+        for content in [&b""[..], &b"a small object"[..], big.as_slice()] {
+            crate::conformance::removal(&store, content).await.unwrap();
+        }
+        crate::conformance::block_removal(&store, &big).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canonical_and_minted_generations_use_distinct_paths() {
+        let (_dir, store) = store();
+        let hash = Cid::of(b"a block").to_hex();
+        assert_eq!(store.block_path(&hash, 0).file_name().unwrap(), hash.as_str());
+        assert_ne!(store.block_path(&hash, 0), store.block_path(&hash, 1));
     }
 }

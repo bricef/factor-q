@@ -65,3 +65,16 @@ async fn remote_store_passes_conformance_over_the_wire() {
         .await
         .unwrap();
 }
+
+/// `remove` over the wire — an isolated store, since deletion leaves orphan
+/// blocks (reclaimed by the collector, slice 5) that would trip the shared
+/// store's `stats_consistent` check.
+#[tokio::test]
+async fn remote_store_supports_deletion_over_the_wire() {
+    let addr = start_server().await;
+    let store = RemoteStore::connect(&addr).await.unwrap();
+    let big = vec![4u8; 40_000];
+    for content in [&b""[..], &b"a deletable object"[..], big.as_slice()] {
+        conformance::removal(&store, content).await.unwrap();
+    }
+}
