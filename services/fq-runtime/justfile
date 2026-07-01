@@ -60,8 +60,12 @@ clean:
 fq *args:
     cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fq -- "$@"
 
+# Build the docs with warnings denied — catches broken intra-doc links.
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
 # Run all quality checks
-ci: fmt-check lint test
+ci: fmt-check lint doc test
 
 # Drift detector against the live Anthropic API. Sends one short
 # Haiku call (~fractions of a cent) and asserts the response

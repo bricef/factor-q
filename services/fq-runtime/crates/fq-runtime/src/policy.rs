@@ -1,8 +1,8 @@
 //! Concrete validation policies for MCP server-initiated calls.
 //!
 //! [`crate::validation`] defines the generic, provider-neutral seam
-//! ([`Validator`](crate::validation::Validator),
-//! [`ValidatorChain`](crate::validation::ValidatorChain)); this module
+//! ([`Validator`],
+//! [`ValidatorChain`]); this module
 //! holds the concrete factor-q policies that plug into it. They are
 //! *synchronous* — pure inspection / transformation of a value — and
 //! are declared per agent-def (see the MCP guide) and installed on the

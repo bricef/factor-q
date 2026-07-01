@@ -96,7 +96,7 @@ enum Commands {
         agent: String,
         /// Optional payload (JSON or plain string)
         payload: Option<String>,
-        /// Publish the trigger to NATS (fq.trigger.<agent>) and let a
+        /// Publish the trigger to NATS (`fq.trigger.<agent>`) and let a
         /// running `fq run` daemon dispatch it, instead of running
         /// the runner in-process.
         #[arg(long)]

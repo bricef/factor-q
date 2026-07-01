@@ -575,20 +575,20 @@ pub enum EventPayload {
     /// the control-plane needs to write
     /// `invocation_archive`. The worker holds onto its local
     /// `invocation_state` row until the corresponding
-    /// [`InvocationArchiveAcked`] arrives.
+    /// [`Self::InvocationArchiveAcked`] arrives.
     InvocationArchived(InvocationArchivedPayload),
 
     /// Control-plane → worker acknowledgement of an
-    /// [`InvocationArchived`] event. On receipt the worker
+    /// [`Self::InvocationArchived`] event. On receipt the worker
     /// deletes the local `invocation_state` row. The invocation
     /// id lives on the envelope; the payload carries `worker_id`
     /// only because the subject is built from it (mirroring
-    /// [`WorkerHeartbeat`]).
+    /// [`Self::WorkerHeartbeat`]).
     InvocationArchiveAcked(InvocationArchiveAckedPayload),
 
     /// Operator → control-plane (step 9). Emitted by
     /// `fq invocation drop` and other future operator-issued
-    /// recovery actions. Distinct from [`InvocationArchived`]
+    /// recovery actions. Distinct from [`Self::InvocationArchived`]
     /// so audit can filter operator-triggered terminal
     /// transitions from worker-triggered ones. The
     /// coordination consumer writes an `invocation_archive`

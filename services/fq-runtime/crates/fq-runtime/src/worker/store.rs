@@ -52,7 +52,7 @@ pub const SCHEMA_CLASS: &str = "worker";
 
 /// Schema version this binary expects. Bump on incompatible
 /// schema changes; additive migrations between versions belong
-/// in [`run_migrations`].
+/// in `run_migrations`.
 ///
 /// Versions:
 /// - **v1** — initial worker tables (`invocation_state`,
@@ -894,7 +894,7 @@ impl WorkerStore {
         rows.into_iter().map(row_to_tool_dispatch).collect()
     }
 
-    /// Symmetric to [`list_tool_dispatches_for_invocation`] for
+    /// Symmetric to [`Self::list_tool_dispatches_for_invocation`] for
     /// the LLM dispatch table.
     pub async fn list_llm_dispatches_for_invocation(
         &self,

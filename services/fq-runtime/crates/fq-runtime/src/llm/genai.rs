@@ -1,4 +1,4 @@
-//! Adapter that implements [`LlmClient`](super::LlmClient) on top of the
+//! Adapter that implements [`LlmClient`] on top of the
 //! `genai` crate.
 //!
 //! The adapter owns the conversion between factor-q's internal types

@@ -2,7 +2,7 @@
 //!
 //! Provides [`McpTool`], which adapts a tool from an external MCP server
 //! into the [`fq_tools::Tool`] trait so it can be registered in the
-//! [`ToolRegistry`](crate::tools::ToolRegistry) alongside built-in tools.
+//! [`ToolRegistry`] alongside built-in tools.
 //!
 //! [`McpClientManager`] owns the lifecycle of MCP server child processes:
 //! starting them, discovering their tools, and shutting them down.
@@ -916,7 +916,7 @@ impl McpClientManager {
     /// server-initiated request channel and advertised `roots`
     /// (ADR-0018).
     ///
-    /// Unlike [`start_server`], this never deduplicates: a server
+    /// Unlike [`Self::start_server`], this never deduplicates: a server
     /// granted an inbound capability (sampling, elicitation, roots)
     /// runs as its own child process per invocation, so its
     /// server-initiated requests attribute to the right invocation's
@@ -1109,7 +1109,7 @@ impl McpClientManager {
     /// Re-discover a server's tools and refresh the cached tool-name
     /// list, reacting to `notifications/tools/list_changed` (Step 7).
     /// Returns the current tool set so the caller can re-register it in
-    /// its [`ToolRegistry`](crate::tools::ToolRegistry) rather than
+    /// its [`ToolRegistry`] rather than
     /// serving the stale set discovered at startup. Resources and
     /// prompts are fetched on-demand (never cached), so they need no
     /// refresh.
