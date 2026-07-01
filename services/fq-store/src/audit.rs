@@ -28,7 +28,7 @@ use crate::{
 };
 
 /// What one audit pass did. All-zero / empty is a clean, fully-reclaimed store.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuditReport {
     /// Freed by the systematic reclaim pass (guaranteed, not best-effort).
     pub reclaimed: Reclaimed,
