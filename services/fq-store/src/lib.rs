@@ -40,6 +40,19 @@ use async_trait::async_trait;
 /// read by `Cid`, in full or by range. Identical content is deduplicated and
 /// always maps to the same `Cid`.
 ///
+/// A content-defined block within an object: its content-id and the byte span
+/// `[offset, offset + len)` it occupies. Returned by [`ContentStore::chunk`] so
+/// the write path can address a block's bytes without re-deriving the split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chunk {
+    /// The block's content id.
+    pub hash: Cid,
+    /// Byte offset of the block within the object.
+    pub offset: usize,
+    /// Block length in bytes.
+    pub len: usize,
+}
+
 /// This is the storage substrate (ADR-0023 layer 1). Every backend must
 /// satisfy the conformance suite — see the crate docs.
 #[async_trait]
@@ -99,5 +112,46 @@ pub trait ContentStore: Send + Sync {
     async fn remove_block(&self, block: &Cid, generation: u32) -> Result<()> {
         let _ = generation;
         self.remove(block).await
+    }
+
+    /// Split `content` into its content-defined blocks — each a [`Chunk`] with
+    /// the block's content-id and byte span — without writing anything. The
+    /// default treats the whole object as one block; sub-chunking backends (the
+    /// filesystem backend) override this with their chunker. The reserve-before-
+    /// rely write path uses this to learn a block's bytes so it can mint a fresh
+    /// generation when GC has claimed the canonical one (M1c).
+    fn chunk(&self, content: &[u8]) -> Vec<Chunk> {
+        if content.is_empty() {
+            Vec::new()
+        } else {
+            vec![Chunk {
+                hash: Cid::of(content),
+                offset: 0,
+                len: content.len(),
+            }]
+        }
+    }
+
+    /// Durably write (fsync) the block file for `(block, generation)` from
+    /// `bytes`, idempotently — an already-present file is left untouched. The
+    /// write path calls this *before* the index row exists (fsync-before-insert,
+    /// fault I2). The default errors: only sub-chunking backends store blocks
+    /// individually (remote backends gain this over the wire in M5).
+    async fn write_block(&self, block: &Cid, generation: u32, bytes: &[u8]) -> Result<()> {
+        let _ = (block, generation, bytes);
+        Err(StoreError::Corrupt(
+            "write_block is not supported by this backend".into(),
+        ))
+    }
+
+    /// Write the object manifest for `cid`: its total `size` and ordered blocks,
+    /// each a `(block, generation, len)`. Recording the generation lets the read
+    /// path open the exact block file. The default errors (see
+    /// [`write_block`](Self::write_block)).
+    async fn write_object(&self, cid: &Cid, size: u64, blocks: &[(Cid, u32, u64)]) -> Result<()> {
+        let _ = (cid, size, blocks);
+        Err(StoreError::Corrupt(
+            "write_object is not supported by this backend".into(),
+        ))
     }
 }

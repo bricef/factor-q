@@ -15,7 +15,7 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use crate::{Cid, Result, StoreError};
 
@@ -69,6 +69,12 @@ pub trait NameIndex: Send + Sync {
     /// generation)` is already present (the caller picks another generation). The
     /// block file must already be written and fsynced (I2).
     async fn mint_block(&self, hash: &Cid, generation: u32) -> Result<bool>;
+
+    /// The smallest generation of `hash` not currently present in the index — the
+    /// generation a writer mints when reserving fails (a fresh block, or a GC
+    /// collision where every existing generation is claimed). 0 for a hash with
+    /// no rows.
+    async fn next_generation(&self, hash: &Cid) -> Result<u32>;
 
     /// Atomically claim `(hash, generation)` for collection (the GC
     /// compare-and-swap): flip `available` to false, **conditional on `refcount
@@ -220,8 +226,18 @@ impl SqliteNameIndex {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal);
-        let pool = SqlitePool::connect_with(opts).await.map_err(index_err)?;
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        // A single connection serializes every index operation, so the two
+        // reference-counting compare-and-swaps (reserve / claim) and the
+        // multi-statement transactions (bind / unbind) linearize exactly as the
+        // verified protocol assumes: SQLite's single writer. It also sidesteps
+        // WAL's `SQLITE_BUSY_SNAPSHOT`, which a busy timeout cannot retry away.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .map_err(index_err)?;
         migrate(&pool).await?;
         Ok(Self { pool })
     }
@@ -401,6 +417,16 @@ impl NameIndex for SqliteNameIndex {
                     .await
                     .map_err(index_err)?;
                 }
+                // The object is dead: drop its edges now (not at collection) so a
+                // later resurrection — possibly onto a different block generation
+                // after a GC collision — rebuilds a clean reference set instead of
+                // accumulating a stale edge. This keeps the invariant that an edge
+                // exists iff its object currently references the block.
+                sqlx::query("DELETE FROM object_blocks WHERE object_cid = ?")
+                    .bind(&cid_hex)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(index_err)?;
             }
         }
         tx.commit().await.map_err(index_err)?;
@@ -434,32 +460,38 @@ impl NameIndex for SqliteNameIndex {
     }
 
     async fn snapshot(&self) -> Result<IndexSnapshot> {
+        // One transaction so all five reads see a single consistent index state —
+        // the oracle and the reachability audit (M1c slice 6) must not observe a
+        // half-applied writer or collector. (A read transaction takes its snapshot
+        // on the first read and holds it.)
+        let mut tx = self.pool.begin().await.map_err(index_err)?;
         let objects: Vec<(String, i64)> = sqlx::query_as("SELECT cid, refcount FROM objects")
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await
             .map_err(index_err)?;
         let blocks: Vec<(String, i64, i64, i64)> =
             sqlx::query_as("SELECT hash, generation, refcount, available FROM blocks")
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(index_err)?;
         let edges: Vec<(String, String, i64)> =
             sqlx::query_as("SELECT object_cid, block_cid, generation FROM object_blocks")
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(index_err)?;
         let name_refs: Vec<(String, i64)> =
             sqlx::query_as("SELECT cid, COUNT(*) FROM name_versions GROUP BY cid")
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(index_err)?;
         let current: Vec<(String, String)> = sqlx::query_as(
             "SELECT name, cid FROM name_versions AS nv
              WHERE seq = (SELECT MAX(seq) FROM name_versions WHERE name = nv.name)",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(index_err)?;
+        tx.commit().await.map_err(index_err)?;
 
         Ok(IndexSnapshot {
             objects: cid_counts(objects)?,
@@ -514,6 +546,20 @@ impl NameIndex for SqliteNameIndex {
         .map_err(index_err)?
         .rows_affected();
         Ok(affected == 1)
+    }
+
+    async fn next_generation(&self, hash: &Cid) -> Result<u32> {
+        let used: Vec<i64> = sqlx::query_scalar("SELECT generation FROM blocks WHERE hash = ?")
+            .bind(hash.to_hex())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(index_err)?;
+        let used: std::collections::HashSet<i64> = used.into_iter().collect();
+        let mut generation = 0i64;
+        while used.contains(&generation) {
+            generation += 1;
+        }
+        Ok(generation as u32)
     }
 
     async fn claim_block(&self, hash: &Cid, generation: u32) -> Result<bool> {

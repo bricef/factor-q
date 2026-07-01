@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{Cid, ContentStore, Result, Stats, StoreError};
+use crate::{Chunk, Cid, ContentStore, Result, Stats, StoreError};
 
 /// Content-defined chunking parameters (FastCDC target block sizes, bytes).
 #[derive(Clone, Copy, Debug)]
@@ -234,6 +234,46 @@ impl ContentStore for FilesystemStore {
 
     async fn remove_block(&self, block: &Cid, generation: u32) -> Result<()> {
         remove_file_idempotent(&self.block_path(&block.to_hex(), generation)).await
+    }
+
+    fn chunk(&self, content: &[u8]) -> Vec<Chunk> {
+        if content.is_empty() {
+            return Vec::new();
+        }
+        fastcdc::v2020::FastCDC::new(content, self.params.min, self.params.avg, self.params.max)
+            .map(|c| Chunk {
+                hash: Cid::of(&content[c.offset..c.offset + c.length]),
+                offset: c.offset,
+                len: c.length,
+            })
+            .collect()
+    }
+
+    async fn write_block(&self, block: &Cid, generation: u32, bytes: &[u8]) -> Result<()> {
+        let path = self.block_path(&block.to_hex(), generation);
+        // Content-addressed and idempotent: an extant file is already these bytes.
+        if !tokio::fs::try_exists(&path).await? {
+            write_atomic(&path, bytes).await?;
+        }
+        Ok(())
+    }
+
+    async fn write_object(&self, cid: &Cid, size: u64, blocks: &[(Cid, u32, u64)]) -> Result<()> {
+        let manifest = Manifest {
+            size,
+            blocks: blocks
+                .iter()
+                .map(|(hash, generation, len)| BlockRef {
+                    hash: hash.to_hex(),
+                    len: *len,
+                    generation: *generation,
+                })
+                .collect(),
+        };
+        let encoded =
+            serde_json::to_vec(&manifest).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        write_atomic(&self.object_path(cid), &encoded).await?;
+        Ok(())
     }
 }
 

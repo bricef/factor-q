@@ -3,6 +3,8 @@
 //! into the user-facing API: store and read content by hierarchical name,
 //! with version history and the reference counts that drive GC.
 
+use std::collections::HashMap;
+
 use crate::{Cid, ContentStore, NameIndex, Result, StoreError};
 
 /// A named, versioned object store over a content store and a name index.
@@ -17,20 +19,63 @@ impl<C: ContentStore, N: NameIndex> Repository<C, N> {
         Self { content, index }
     }
 
-    /// Store `content` and bind it to `name`, returning its CID. The blob is
-    /// written **first**, then the index updated — so a crash in between
-    /// leaves an orphan blob (GC reclaims it) rather than a dangling name.
+    /// Store `content` and bind it to `name`, returning its CID. Ordering is the
+    /// crash-safe one the protocol requires: each block is **materialized**
+    /// (written + fsynced) first, then the **manifest**, then the **index** —
+    /// so a crash in between leaves orphan blocks / an orphan manifest (GC
+    /// reclaims them) rather than a name pointing at absent bytes. Each block is
+    /// reserved on the index's available generation, or — if GC has claimed every
+    /// generation — minted onto a fresh one (the verified generation-on-collision
+    /// write path: reserve-before-rely).
     pub async fn put(&self, name: &str, content: &[u8]) -> Result<Cid> {
-        let cid = self.content.put(content).await?;
-        let reserved = self.reserve_blocks(&cid).await?;
+        let cid = Cid::of(content);
+        let chunks = self.content.chunk(content);
+
+        // Reserve or materialize each *unique* block, recording the generation it
+        // landed on; duplicate chunks within the object reuse the first's.
+        let mut generations: HashMap<Cid, u32> = HashMap::new();
+        let mut reserved: Vec<(Cid, u32)> = Vec::new();
+        for chunk in &chunks {
+            if generations.contains_key(&chunk.hash) {
+                continue;
+            }
+            let bytes = &content[chunk.offset..chunk.offset + chunk.len];
+            let generation = self.reserve_or_materialize(&chunk.hash, bytes).await?;
+            generations.insert(chunk.hash, generation);
+            reserved.push((chunk.hash, generation));
+        }
+
+        // The manifest records each block's resolved generation, then the index
+        // edges hand off the reservations.
+        let blocks: Vec<(Cid, u32, u64)> = chunks
+            .iter()
+            .map(|c| (c.hash, generations[&c.hash], c.len as u64))
+            .collect();
+        self.content
+            .write_object(&cid, content.len() as u64, &blocks)
+            .await?;
         self.index.bind(name, &cid, &reserved).await?;
         Ok(cid)
     }
 
     /// Bind `name` to an already-stored `cid` (aliasing — many names, one
-    /// object). [`StoreError::NotFound`] if the object is absent.
+    /// object). [`StoreError::NotFound`] if the object is absent. It reserves the
+    /// object's existing blocks; it cannot resurrect a block GC has already
+    /// claimed (minting one needs the bytes, which only [`put`](Self::put) has),
+    /// so aliasing an object mid-collection errors — re-`put` the content.
     pub async fn bind(&self, name: &str, cid: &Cid) -> Result<()> {
-        let reserved = self.reserve_blocks(cid).await?;
+        let mut blocks = self.content.blocks(cid).await?;
+        blocks.sort_by_key(|c| c.to_hex());
+        blocks.dedup();
+        let mut reserved = Vec::with_capacity(blocks.len());
+        for hash in blocks {
+            let generation = self.index.reserve_block(&hash).await?.ok_or_else(|| {
+                StoreError::Corrupt(format!(
+                    "cannot alias block {hash}: no available generation (collected concurrently)"
+                ))
+            })?;
+            reserved.push((hash, generation));
+        }
         self.index.bind(name, cid, &reserved).await
     }
 
@@ -84,52 +129,38 @@ impl<C: ContentStore, N: NameIndex> Repository<C, N> {
             .ok_or_else(|| StoreError::NameNotFound(name.to_string()))
     }
 
-    /// Reserve every unique block of the already-stored object `cid` (the
-    /// reserve-before-rely write path), returning the `(hash, generation)`
-    /// reserved. `bind` then hands these off to edges (or releases them on an
-    /// alias). A genuinely new block is minted at generation 0 — its file was
-    /// written and fsynced by `content.put`; collision mints onto fresh
-    /// generations arrive in slice 5c.
-    async fn reserve_blocks(&self, cid: &Cid) -> Result<Vec<(Cid, u32)>> {
-        let mut blocks = self.content.blocks(cid).await?;
-        blocks.sort_by_key(|c| c.to_hex());
-        blocks.dedup();
-        let mut reserved = Vec::with_capacity(blocks.len());
-        for hash in blocks {
-            let generation = self.reserve_or_materialize(&hash).await?;
-            reserved.push((hash, generation));
+    /// Reserve block `hash` on its currently-available generation; or, if none is
+    /// available — a genuinely new block, or GC has claimed every existing
+    /// generation — materialize a fresh one from `bytes`. Returns the generation
+    /// the block landed on.
+    ///
+    /// This is the verified write path. Reserve first (reserve-before-rely): if a
+    /// generation is available, take it. Otherwise mint — write+fsync the file at
+    /// the smallest free generation *before* its row exists (I2), then insert that
+    /// row conditional on none being available, so concurrent minters and a racing
+    /// GC converge: a refused mint means either a peer just minted an available
+    /// generation (the next reserve takes it) or it grabbed this generation first
+    /// (the next mint picks a higher one). The loop is wait-free — it never blocks
+    /// on or fails because of GC.
+    async fn reserve_or_materialize(&self, hash: &Cid, bytes: &[u8]) -> Result<u32> {
+        loop {
+            if let Some(generation) = self.index.reserve_block(hash).await? {
+                return Ok(generation);
+            }
+            let generation = self.index.next_generation(hash).await?;
+            self.content.write_block(hash, generation, bytes).await?;
+            if self.index.mint_block(hash, generation).await? {
+                return Ok(generation);
+            }
         }
-        Ok(reserved)
-    }
-
-    async fn reserve_or_materialize(&self, hash: &Cid) -> Result<u32> {
-        if let Some(generation) = self.index.reserve_block(hash).await? {
-            return Ok(generation);
-        }
-        // No available generation: content.put wrote the canonical (generation 0)
-        // file, so mint its row.
-        if self.index.mint_block(hash, 0).await? {
-            return Ok(0);
-        }
-        // The mint was refused: either a concurrent writer just minted an
-        // available generation (reserve it), or generation 0 is claimed by GC.
-        if let Some(generation) = self.index.reserve_block(hash).await? {
-            return Ok(generation);
-        }
-        // Generation 0 is claimed and none is available — a write/GC collision.
-        // The generation-on-collision mint (writing a fresh generation) lands in
-        // slice 5d; until then a collision surfaces as a rare, safe error.
-        Err(StoreError::Corrupt(format!(
-            "block {hash} collided with GC; generation-on-collision is slice 5d"
-        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SqliteNameIndex;
     use crate::fs::FilesystemStore;
+    use crate::{SqliteNameIndex, verify};
     use tempfile::TempDir;
 
     async fn repository() -> (TempDir, Repository<FilesystemStore, SqliteNameIndex>) {
@@ -200,5 +231,39 @@ mod tests {
         let (_d, repo) = repository().await;
         repo.put("data", b"0123456789").await.unwrap();
         assert_eq!(repo.get_range("data", 3, 4).await.unwrap(), b"3456");
+    }
+
+    #[tokio::test]
+    async fn put_mints_a_fresh_generation_when_gc_claimed_the_block() {
+        let (_d, repo) = repository().await;
+        // Store content (a single block), then delete the name — the block is now
+        // unreferenced (refcount 0), but its row and file remain.
+        let content = b"a small object that is exactly one block";
+        let cid = repo.put("a", content).await.unwrap();
+        repo.delete("a").await.unwrap();
+
+        // Simulate GC mid-reclaim: claim generation 0 (refcount 0 → unavailable)
+        // but stop before unlinking. A writer re-putting the same content must not
+        // touch the claimed generation.
+        let block = repo.content().blocks(&cid).await.unwrap()[0];
+        assert!(repo.index().claim_block(&block, 0).await.unwrap());
+
+        // Re-put: reserve fails (generation 0 is claimed, none available), so the
+        // writer mints a fresh generation rather than blocking or failing.
+        let cid2 = repo.put("a2", content).await.unwrap();
+        assert_eq!(cid2, cid); // same content → same object id
+        assert_eq!(repo.get("a2").await.unwrap(), content);
+
+        // Exactly one generation is available — the fresh one (1) — and the
+        // claimed orphan (0) is left for the collector. Invariants hold.
+        let snap = repo.index().snapshot().await.unwrap();
+        let available: Vec<_> = snap
+            .blocks
+            .iter()
+            .filter(|b| b.hash == block && b.available)
+            .collect();
+        assert_eq!(available.len(), 1, "one available generation: {snap:#?}");
+        assert_eq!(available[0].generation, 1);
+        verify::assert_clean(repo.index(), repo.content()).await;
     }
 }
