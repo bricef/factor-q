@@ -86,6 +86,20 @@ pub trait NameIndex: Send + Sync {
     /// failed put, or the bind hand-off's alias case.
     async fn release_block(&self, hash: &Cid, generation: u32) -> Result<()>;
 
+    /// Reduce block `(hash, generation)`'s `refcount` to `to_refcount` — the
+    /// audit's leaked-reservation reconcile. Conditional and atomic: it fires
+    /// only if `refcount > to_refcount` (there is drift to shed) **and** the row
+    /// was last touched at or before `touched_before` (quiescent past the grace,
+    /// so no live in-flight reservation is being reduced). `Ok(true)` if it
+    /// reconciled. Never increases a refcount.
+    async fn reconcile_block(
+        &self,
+        hash: &Cid,
+        generation: u32,
+        to_refcount: i64,
+        touched_before: i64,
+    ) -> Result<bool>;
+
     /// Blocks eligible for collection — `(hash, generation, available)` for every
     /// row at refcount 0. An `available` row is claimed first; an unavailable one
     /// is an orphaned claim (a crash mid-reclaim) the collector adopts directly.
@@ -111,6 +125,10 @@ pub struct BlockRow {
     pub refcount: i64,
     /// Whether a writer may reserve this generation (false ⇒ claimed by GC).
     pub available: bool,
+    /// When a writer last reserved or minted this generation, as Unix
+    /// milliseconds (0 for rows predating the audit). The audit uses it to tell
+    /// a leaked reservation from a live in-flight one.
+    pub touched_at: i64,
 }
 
 /// One `object_blocks` edge: a live object references a specific block
@@ -187,6 +205,13 @@ const MIGRATIONS: &[&str] = &[
     // v3 — M1c: record the generation on each object→block edge, so unbind
     // decrements the right (hash, generation). Pre-existing edges are generation 0.
     "ALTER TABLE object_blocks ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;",
+    // v4 — M1c audit: stamp when a block was last reserved/minted (Unix millis).
+    // The reachability audit only reconciles a drifted refcount once the block
+    // has gone untouched past the grace, so a live in-flight reservation (touched
+    // just now) is never mistaken for a leaked one. Existing rows start at 0 (the
+    // distant past → immediately eligible, which is correct: they predate any
+    // in-flight reservation).
+    "ALTER TABLE blocks ADD COLUMN touched_at INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Release the writer's reservations on `reserved` (`refcount -= 1` per
@@ -208,6 +233,15 @@ async fn release_reservations(
 
 fn hexes_to_cids(hexes: Vec<String>) -> Result<Vec<Cid>> {
     hexes.iter().map(|h| Cid::from_hex(h)).collect()
+}
+
+/// The current time in Unix milliseconds — the `touched_at` stamp on a reserve or
+/// mint, and the audit's reconcile cutoff. Clamped at 0 (never negative here).
+pub(crate) fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn cid_counts(rows: Vec<(String, i64)>) -> Result<Vec<(Cid, i64)>> {
@@ -452,8 +486,8 @@ impl NameIndex for SqliteNameIndex {
         let objects: Vec<(String, i64)> = sqlx::query_as("SELECT cid, refcount FROM objects")
             .fetch_all(&mut *tx)
             .await?;
-        let blocks: Vec<(String, i64, i64, i64)> =
-            sqlx::query_as("SELECT hash, generation, refcount, available FROM blocks")
+        let blocks: Vec<(String, i64, i64, i64, i64)> =
+            sqlx::query_as("SELECT hash, generation, refcount, available, touched_at FROM blocks")
                 .fetch_all(&mut *tx)
                 .await?;
         let edges: Vec<(String, String, i64)> =
@@ -476,12 +510,13 @@ impl NameIndex for SqliteNameIndex {
             objects: cid_counts(objects)?,
             blocks: blocks
                 .into_iter()
-                .map(|(h, g, rc, av)| {
+                .map(|(h, g, rc, av, touched)| {
                     Ok(BlockRow {
                         hash: Cid::from_hex(&h)?,
                         generation: g as u32,
                         refcount: rc,
                         available: av != 0,
+                        touched_at: touched,
                     })
                 })
                 .collect::<Result<_>>()?,
@@ -505,9 +540,10 @@ impl NameIndex for SqliteNameIndex {
 
     async fn reserve_block(&self, hash: &Cid) -> Result<Option<u32>> {
         let reserved: Option<i64> = sqlx::query_scalar(
-            "UPDATE blocks SET refcount = refcount + 1
+            "UPDATE blocks SET refcount = refcount + 1, touched_at = ?
              WHERE hash = ? AND available = 1 RETURNING generation",
         )
+        .bind(now_millis())
         .bind(hash.to_hex())
         .fetch_optional(&self.pool)
         .await?;
@@ -517,14 +553,37 @@ impl NameIndex for SqliteNameIndex {
     async fn mint_block(&self, hash: &Cid, generation: u32) -> Result<bool> {
         let h = hash.to_hex();
         let affected = sqlx::query(
-            "INSERT INTO blocks (hash, generation, refcount, available)
-             SELECT ?, ?, 1, 1
+            "INSERT INTO blocks (hash, generation, refcount, available, touched_at)
+             SELECT ?, ?, 1, 1, ?
              WHERE NOT EXISTS (SELECT 1 FROM blocks WHERE hash = ? AND available = 1)
              ON CONFLICT(hash, generation) DO NOTHING",
         )
         .bind(&h)
         .bind(generation as i64)
+        .bind(now_millis())
         .bind(&h)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(affected == 1)
+    }
+
+    async fn reconcile_block(
+        &self,
+        hash: &Cid,
+        generation: u32,
+        to_refcount: i64,
+        touched_before: i64,
+    ) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE blocks SET refcount = ?
+             WHERE hash = ? AND generation = ? AND refcount > ? AND touched_at <= ?",
+        )
+        .bind(to_refcount)
+        .bind(hash.to_hex())
+        .bind(generation as i64)
+        .bind(to_refcount)
+        .bind(touched_before)
         .execute(&self.pool)
         .await?
         .rows_affected();
