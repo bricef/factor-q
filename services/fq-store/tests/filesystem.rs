@@ -9,9 +9,5 @@ use fq_store::fs::{ChunkParams, FilesystemStore};
 // exercising multi-block objects, dedup, and cross-block range reads.
 content_store_conformance!(FilesystemStore::with_params(
     tempfile::tempdir().unwrap().keep(),
-    ChunkParams {
-        min: 256,
-        avg: 1024,
-        max: 4096,
-    },
+    ChunkParams::small(),
 ));

@@ -357,7 +357,7 @@ async fn dispatch_object(
             Ok(ExitCode::SUCCESS)
         }
         ObjectCommand::Rm { name } => {
-            repo.delete(&name).await?;
+            repo.unbind(&name).await?;
             Ok(ExitCode::SUCCESS)
         }
         ObjectCommand::Resolve { name } => match repo.resolve(&name).await? {
@@ -427,14 +427,7 @@ mod tests {
     #[tokio::test]
     async fn read_full_and_ranges() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FilesystemStore::with_params(
-            dir.path(),
-            ChunkParams {
-                min: 256,
-                avg: 1024,
-                max: 4096,
-            },
-        );
+        let store = FilesystemStore::with_params(dir.path(), ChunkParams::small());
         let content: Vec<u8> = (0..5000u32).map(|i| i as u8).collect();
         let cid = store.put(&content).await.unwrap();
 

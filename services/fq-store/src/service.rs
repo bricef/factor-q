@@ -50,7 +50,7 @@ impl From<WireError> for StoreError {
             WireError::NotFound(hex) => Cid::from_hex(&hex)
                 .map(StoreError::NotFound)
                 .unwrap_or_else(|_| StoreError::Corrupt(format!("not found: {hex}"))),
-            WireError::Message(msg) => StoreError::Corrupt(msg),
+            WireError::Message(msg) => StoreError::Remote(msg),
         }
     }
 }
@@ -64,6 +64,9 @@ pub trait CasService {
     async fn has(cid: Cid) -> std::result::Result<bool, WireError>;
     async fn size(cid: Cid) -> std::result::Result<u64, WireError>;
     async fn stats() -> std::result::Result<Stats, WireError>;
+    async fn remove(cid: Cid) -> std::result::Result<(), WireError>;
+    async fn has_block(block: Cid, generation: u32) -> std::result::Result<bool, WireError>;
+    async fn remove_block(block: Cid, generation: u32) -> std::result::Result<(), WireError>;
 }
 
 /// Server handler: forwards each RPC to a backing [`ContentStore`].
@@ -109,6 +112,34 @@ impl CasService for CasServer {
     async fn stats(self, _: context::Context) -> std::result::Result<Stats, WireError> {
         self.store.stats().await.map_err(WireError::from)
     }
+
+    async fn remove(self, _: context::Context, cid: Cid) -> std::result::Result<(), WireError> {
+        self.store.remove(&cid).await.map_err(WireError::from)
+    }
+
+    async fn has_block(
+        self,
+        _: context::Context,
+        block: Cid,
+        generation: u32,
+    ) -> std::result::Result<bool, WireError> {
+        self.store
+            .has_block(&block, generation)
+            .await
+            .map_err(WireError::from)
+    }
+
+    async fn remove_block(
+        self,
+        _: context::Context,
+        block: Cid,
+        generation: u32,
+    ) -> std::result::Result<(), WireError> {
+        self.store
+            .remove_block(&block, generation)
+            .await
+            .map_err(WireError::from)
+    }
 }
 
 /// Bind a TCP listener and return its address plus a future that serves
@@ -119,7 +150,11 @@ pub async fn bind(
     store: Arc<dyn ContentStore>,
 ) -> std::io::Result<(SocketAddr, BoxFuture<'static, ()>)> {
     let mut listener = tarpc::serde_transport::tcp::listen(addr, Bincode::default).await?;
-    listener.config_mut().max_frame_length(usize::MAX);
+    // Bound the frame size a client can declare: without this, a 4-byte length
+    // header would pre-allocate gigabytes before any payload arrives (an
+    // amplification DoS). This caps one request/object; streaming larger objects
+    // and per-connection quotas are M5.
+    listener.config_mut().max_frame_length(256 << 20); // 256 MiB
     let local_addr = listener.local_addr();
     let serving: BoxFuture<'static, ()> = Box::pin(async move {
         listener
@@ -211,8 +246,32 @@ impl ContentStore for RemoteStore {
             .map_err(rpc_err)?
             .map_err(StoreError::from)
     }
+
+    async fn remove(&self, cid: &Cid) -> Result<()> {
+        self.client
+            .remove(context::current(), *cid)
+            .await
+            .map_err(rpc_err)?
+            .map_err(StoreError::from)
+    }
+
+    async fn has_block(&self, block: &Cid, generation: u32) -> Result<bool> {
+        self.client
+            .has_block(context::current(), *block, generation)
+            .await
+            .map_err(rpc_err)?
+            .map_err(StoreError::from)
+    }
+
+    async fn remove_block(&self, block: &Cid, generation: u32) -> Result<()> {
+        self.client
+            .remove_block(context::current(), *block, generation)
+            .await
+            .map_err(rpc_err)?
+            .map_err(StoreError::from)
+    }
 }
 
 fn rpc_err(e: tarpc::client::RpcError) -> StoreError {
-    StoreError::Corrupt(format!("rpc error: {e}"))
+    StoreError::Remote(format!("rpc error: {e}"))
 }

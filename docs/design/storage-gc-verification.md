@@ -15,8 +15,10 @@ is **every failure leans to retention — leak a block, never lose one.**
 Every operation is a sequence of named, individually-failable steps. These names
 are the axes of the fault map and the targets of fault injection.
 
-- **put (per block):** `RESERVE` → (`WRITE_FILE` | `MINT` on collision) → `BIND`
-  (or `RELEASE` on failure)
+- **put (per block):** `RESERVE` → `MATERIALIZE` (= `WRITE_FILE` | `MINT` on
+  collision) → `BIND` (or `RELEASE` on failure). `MATERIALIZE` is the model's
+  action and the code's `reserve_or_materialize`; `WRITE_FILE` and `MINT` are its
+  fault-injection points.
 - **gc (per block):** `CLAIM` → `UNLINK` → `DELETE_ROW`
 - **audit:** `REAP_ORPHAN`, `RECONCILE`, `ALARM`
 
@@ -24,7 +26,7 @@ are the axes of the fault map and the targets of fault injection.
 
 ### Invariants (hold in every committed state)
 
-- **I1 — one live generation:** at most one row per hash has `available = true`.
+- **I1 — one available generation:** at most one row per hash has `available = true`.
 - **I2 — live blocks have files:** `refcount > 0` ⟹ the block's file exists.
   Holds across crashes because `WRITE_FILE` / `MINT` **fsync** the block file
   before committing the row that makes refcount positive — an un-fsynced crash
@@ -33,9 +35,9 @@ are the axes of the fault map and the targets of fault injection.
 - **I3 — no unlink under reference:** `UNLINK` runs only on a `CLAIMED` block
   (`available = false ∧ refcount = 0`); a claimed block cannot be reserved, so
   refcount stays 0 through the unlink.
-- **I4 — counts dominate references:** `refcount ≥` the number of bound objects
+- **I4 — counts dominate references:** `refcount ≥` the number of live objects
   referencing the block; any excess is in-flight reservations.
-- **I5 — manifests resolve:** every block a bound object names has `refcount ≥ 1`.
+- **I5 — manifests resolve:** every block a live object names has `refcount ≥ 1`.
 
 ### Safety — the one claim that matters
 
@@ -105,7 +107,7 @@ complexity property covered by the deterministic simulation, not TLC.
 
 [`storage_gc.tla`](storage_gc.tla) (config [`storage_gc.cfg`](storage_gc.cfg))
 models the protocol abstractly — block rows `(refcount, available)` keyed by
-`(hash, gen)`, the named steps as actions, a crash that can fire between any two
+`(hash, generation)`, the named steps as actions, a crash that can fire between any two
 steps, and a recovering audit — and has TLC check **S1** and **I1–I4** across
 every interleaving.
 

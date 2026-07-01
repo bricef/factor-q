@@ -74,15 +74,17 @@ The shape follows established practice:
 
 ### Index state
 
-The `blocks` table is keyed by `(hash, gen)` with columns `refcount` and
+The `blocks` table is keyed by `(hash, generation)` with columns `refcount` and
 `available`:
 
 - **`refcount`** — references to this block (reservations + bound-object edges).
 - **`available`** — `true` while the block is usable; GC flips it `false` to
   claim the block for deletion.
-- **`gen`** — a generation token (random; no coordination), almost always the
-  single canonical generation. A second generation appears only transiently,
-  during a collision (below).
+- **`generation`** — the block generation. Deterministic: a materialising writer
+  takes the smallest generation not currently present for the hash (usually 0,
+  the single canonical generation). A second generation appears only transiently,
+  during a collision (below); concurrent writers converge via the conditional
+  insert, so no random coordination token is needed.
 
 **Invariant: at most one `available` row per hash** — the current generation.
 Any `unavailable` rows are claimed-and-being-reaped.
@@ -96,7 +98,7 @@ for a contended block exactly one wins and the loser sees zero rows affected:
   WHERE hash = ? AND available` — bumps the current generation if it is still
   usable.
 - **GC claim:** `UPDATE blocks SET available = false
-  WHERE hash = ? AND gen = ? AND refcount = 0 AND available` — claims a dead
+  WHERE hash = ? AND generation = ? AND refcount = 0 AND available` — claims a dead
   block for deletion.
 
 If a writer reserves first, GC's claim finds `refcount > 0` and fails. If GC
@@ -118,7 +120,7 @@ is no interleaving in which both succeed.
    - one is now available → **dedup** onto it (`UPDATE … refcount + 1`) and reuse
      its file;
    - none is available → **mint** a fresh generation: write the bytes,
-     **fsync the file**, then `INSERT (hash, gen, refcount 1, available)`
+     **fsync the file**, then `INSERT (hash, generation, refcount 1, available)`
      *conditional on no available row existing*. The fsync-before-insert is load-
      bearing: a crash must never leave a committed row without durable bytes (the
      model checker found exactly this — see
@@ -238,15 +240,16 @@ born testable, with the invariants as live oracles.
 
 1. **Verification harness** — the design-for-testability seams (filesystem,
    clock, crash point, and named `fail`-points behind traits) and the **invariant
-   oracle**: a `check_invariants(index, store)` that reads the real index +
-   filesystem and asserts S1 and I1–I4. Plus the deterministic-simulation
+   oracle**: a `check_index(index, store)` that reads the real index +
+   filesystem and asserts S1 and I1, I3–I5 (I2 — durability — is left to the
+   model and the fsync tests). Plus the deterministic-simulation
    scaffold (seeded scheduler, seed logging for replay). Everything below is built
    and fault-tested against it, and the oracle becomes the audit's core.
 2. **CAS deletion primitive** — `ContentStore::remove` for objects and blocks,
    plus generation-aware block paths and a cheap existence check.
    Conformance-tested.
 3. **`blocks` schema migration** — add `gen` and `available`, re-key on
-   `(hash, gen)`.
+   `(hash, generation)`.
 4. **Reserve-before-rely in the write path** — move the block refcount bump to
    write time; bind hands reservations off to edges; failed puts release. The
    block file is **fsync'd before its row commits** (I2).
