@@ -11,7 +11,7 @@
 //!
 //! Backends implement [`ContentStore`] (and [`BlockStore`] if they materialize
 //! individual blocks) and prove correctness against the shared,
-//! backend-agnostic conformance suite ([`content_store_conformance!`]). See
+//! backend-agnostic conformance suite ([`crate::content_store_conformance!`]). See
 //! `docs/guide/implementing-a-storage-backend.md`.
 
 mod cid;

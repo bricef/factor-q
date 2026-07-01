@@ -1,8 +1,8 @@
-//! Backend-agnostic conformance suite for [`ContentStore`](crate::ContentStore).
+//! Backend-agnostic conformance suite for [`ContentStore`].
 //!
 //! These are the correctness properties *every* backend must satisfy. They
 //! are expressed as backend-agnostic `async` check functions plus the
-//! [`content_store_conformance!`] macro, which drives them with `proptest`.
+//! [`crate::content_store_conformance!`] macro, which drives them with `proptest`.
 //! A backend proves itself by invoking the macro in its own tests — see
 //! `docs/guide/implementing-a-storage-backend.md`.
 //!
