@@ -15,5 +15,9 @@ lint:
 test *args:
     cargo test --all-features "$@"
 
+# Build the docs with warnings denied — catches broken intra-doc links.
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+
 # All quality checks — no external services required (pure filesystem CAS).
-ci: fmt-check lint test
+ci: fmt-check lint doc test
