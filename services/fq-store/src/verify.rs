@@ -1,7 +1,9 @@
 //! The invariant oracle — runnable checks of the storage-GC correctness claims
 //! (`docs/design/storage-gc-verification.md`) against the *real* index + content
-//! store. It is the executable form of the invariants the TLA⁺ model checks
-//! abstractly, and it doubles as the core of the reachability audit (M1c slice 6).
+//! store. It is the runnable counterpart of the invariants the TLA⁺ model checks
+//! abstractly — those expressible on the live index; durability (I2) is left to
+//! the model and the fsync tests — and it doubles as the core of the
+//! reachability audit (M1c).
 //!
 //! Today it covers the claims expressible on the current schema:
 //!
@@ -89,11 +91,11 @@ pub async fn check<C: ContentStore + ?Sized>(
 
     // object CID -> the (block, generation)s it references.
     let mut edges: HashMap<Cid, Vec<(Cid, u32)>> = HashMap::new();
-    for (object, block, generation) in &snapshot.object_blocks {
+    for edge in &snapshot.object_blocks {
         edges
-            .entry(*object)
+            .entry(edge.object)
             .or_default()
-            .push((*block, *generation));
+            .push((edge.block, edge.generation));
     }
 
     // Refcounts never go negative.
@@ -193,9 +195,21 @@ pub async fn check<C: ContentStore + ?Sized>(
         }
     }
 
-    // S1: every current name's object is fully retrievable.
+    // S1: every current name's object is retrievable — its manifest is present
+    // and every block it references has a file. Existence checks (not a full
+    // read) keep this cheap, and a transient I/O error is skipped rather than
+    // misread as a lost block (the audit re-runs).
     for (name, object) in &snapshot.current_names {
-        if store.get(object).await.is_err() {
+        let mut lost = matches!(store.has(object).await, Ok(false)); // manifest gone
+        if !lost {
+            for &(block, generation) in edges.get(object).into_iter().flatten() {
+                if let Ok(false) = store.has_block(&block, generation).await {
+                    lost = true; // a referenced block file is gone
+                    break;
+                }
+            }
+        }
+        if lost {
             violations.push(Violation::LostLiveBlock {
                 name: name.clone(),
                 object: *object,
@@ -232,7 +246,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::{ChunkParams, FilesystemStore};
+    use crate::fs::FilesystemStore;
     use crate::{Repository, SqliteNameIndex};
     use std::path::{Path, PathBuf};
 
@@ -240,21 +254,7 @@ mod tests {
         tempfile::TempDir,
         Repository<FilesystemStore, SqliteNameIndex>,
     ) {
-        let dir = tempfile::tempdir().unwrap();
-        let cas = dir.path().join("cas");
-        std::fs::create_dir_all(&cas).unwrap();
-        let store = FilesystemStore::with_params(
-            cas,
-            ChunkParams {
-                min: 256,
-                avg: 1024,
-                max: 4096,
-            },
-        );
-        let index = SqliteNameIndex::open(dir.path().join("index.db"))
-            .await
-            .unwrap();
-        (dir, Repository::new(store, index))
+        crate::test_support::repo().await
     }
 
     /// First regular file found under `dir` (recursive), if any.

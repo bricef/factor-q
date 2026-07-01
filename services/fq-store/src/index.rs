@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
-use crate::{Cid, Result, StoreError};
+use crate::{Cid, Result};
 
 /// The mutable name index over a content store. See the module docs.
 #[async_trait]
@@ -113,6 +113,20 @@ pub struct BlockRow {
     pub available: bool,
 }
 
+/// One `object_blocks` edge: a live object references a specific block
+/// generation. `block` is the block's hash — the `object_blocks.block_cid`
+/// column holds that same value (it joins `blocks.hash`) under the join table's
+/// own column name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edge {
+    /// The referencing object's CID.
+    pub object: Cid,
+    /// The referenced block's hash (= `blocks.hash`).
+    pub block: Cid,
+    /// The block generation this edge pins.
+    pub generation: u32,
+}
+
 /// A point-in-time read of the index's reference-counting state — objects,
 /// blocks, the object→block edges, the per-object name-version counts, and the
 /// current name bindings. Consumed by [`crate::verify`] to check the invariants.
@@ -122,8 +136,8 @@ pub struct IndexSnapshot {
     pub objects: Vec<(Cid, i64)>,
     /// The `blocks` table rows (hash, generation, refcount, available).
     pub blocks: Vec<BlockRow>,
-    /// `(object CID, block CID, generation)` edges, one per object→block edge.
-    pub object_blocks: Vec<(Cid, Cid, u32)>,
+    /// The object→block edges (see [`Edge`]).
+    pub object_blocks: Vec<Edge>,
     /// Object CID → number of name-version rows referencing it (its true refcount).
     pub name_refs: Vec<(Cid, i64)>,
     /// Current name → bound object CID (the newest version of each name).
@@ -175,8 +189,21 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE object_blocks ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;",
 ];
 
-fn index_err(e: sqlx::Error) -> StoreError {
-    StoreError::Index(e.to_string())
+/// Release the writer's reservations on `reserved` (`refcount -= 1` per
+/// `(hash, generation)`) within a transaction — used by [`NameIndex::bind`] when
+/// the reservations are redundant: an alias, or a re-bind of the current CID.
+async fn release_reservations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    reserved: &[(Cid, u32)],
+) -> Result<()> {
+    for (hash, generation) in reserved {
+        sqlx::query("UPDATE blocks SET refcount = refcount - 1 WHERE hash = ? AND generation = ?")
+            .bind(hash.to_hex())
+            .bind(*generation as i64)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }
 
 fn hexes_to_cids(hexes: Vec<String>) -> Result<Vec<Cid>> {
@@ -194,22 +221,17 @@ fn cid_counts(rows: Vec<(String, i64)>) -> Result<Vec<(Cid, i64)>> {
 async fn migrate(pool: &SqlitePool) -> Result<()> {
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
-        .await
-        .map_err(index_err)?;
+        .await?;
     for (i, sql) in MIGRATIONS.iter().enumerate() {
         let target = i as i64 + 1;
         if version < target {
-            let mut tx = pool.begin().await.map_err(index_err)?;
-            sqlx::raw_sql(sql)
-                .execute(&mut *tx)
-                .await
-                .map_err(index_err)?;
+            let mut tx = pool.begin().await?;
+            sqlx::raw_sql(sql).execute(&mut *tx).await?;
             // PRAGMA values cannot be bound; `target` is a trusted constant.
             sqlx::query(&format!("PRAGMA user_version = {target}"))
                 .execute(&mut *tx)
-                .await
-                .map_err(index_err)?;
-            tx.commit().await.map_err(index_err)?;
+                .await?;
+            tx.commit().await?;
         }
     }
     Ok(())
@@ -236,8 +258,7 @@ impl SqliteNameIndex {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(opts)
-            .await
-            .map_err(index_err)?;
+            .await?;
         migrate(&pool).await?;
         Ok(Self { pool })
     }
@@ -248,31 +269,20 @@ impl NameIndex for SqliteNameIndex {
     #[tracing::instrument(level = "debug", skip_all, fields(name, cid = %cid))]
     async fn bind(&self, name: &str, cid: &Cid, reserved: &[(Cid, u32)]) -> Result<()> {
         let cid_hex = cid.to_hex();
-        let mut tx = self.pool.begin().await.map_err(index_err)?;
+        let mut tx = self.pool.begin().await?;
 
         let current: Option<String> = sqlx::query_scalar(
             "SELECT cid FROM name_versions WHERE name = ? ORDER BY seq DESC LIMIT 1",
         )
         .bind(name)
         .fetch_optional(&mut *tx)
-        .await
-        .map_err(index_err)?;
+        .await?;
 
         // Re-binding the current CID is a no-op for the name — the caller's
         // reservations are then redundant, so release them.
         if current.as_deref() == Some(cid_hex.as_str()) {
-            for (hash, generation) in reserved {
-                sqlx::query(
-                    "UPDATE blocks SET refcount = refcount - 1
-                     WHERE hash = ? AND generation = ?",
-                )
-                .bind(hash.to_hex())
-                .bind(*generation as i64)
-                .execute(&mut *tx)
-                .await
-                .map_err(index_err)?;
-            }
-            tx.commit().await.map_err(index_err)?;
+            release_reservations(&mut tx, reserved).await?;
+            tx.commit().await?;
             return Ok(());
         }
 
@@ -282,29 +292,25 @@ impl NameIndex for SqliteNameIndex {
         )
         .bind(name)
         .fetch_one(&mut *tx)
-        .await
-        .map_err(index_err)?;
+        .await?;
         sqlx::query("INSERT INTO name_versions (name, seq, cid) VALUES (?, ?, ?)")
             .bind(name)
             .bind(next_seq)
             .bind(&cid_hex)
             .execute(&mut *tx)
-            .await
-            .map_err(index_err)?;
+            .await?;
 
         let prev_rc: Option<i64> = sqlx::query_scalar("SELECT refcount FROM objects WHERE cid = ?")
             .bind(&cid_hex)
             .fetch_optional(&mut *tx)
-            .await
-            .map_err(index_err)?;
+            .await?;
         sqlx::query(
             "INSERT INTO objects (cid, refcount) VALUES (?, 1)
              ON CONFLICT(cid) DO UPDATE SET refcount = refcount + 1",
         )
         .bind(&cid_hex)
         .execute(&mut *tx)
-        .await
-        .map_err(index_err)?;
+        .await?;
 
         if prev_rc.unwrap_or(0) == 0 {
             // Object going live: hand the reservations off to object→block edges
@@ -318,26 +324,15 @@ impl NameIndex for SqliteNameIndex {
                 .bind(hash.to_hex())
                 .bind(*generation as i64)
                 .execute(&mut *tx)
-                .await
-                .map_err(index_err)?;
+                .await?;
             }
         } else {
             // Alias: the object's blocks are already held — release the
             // now-redundant reservations.
-            for (hash, generation) in reserved {
-                sqlx::query(
-                    "UPDATE blocks SET refcount = refcount - 1
-                     WHERE hash = ? AND generation = ?",
-                )
-                .bind(hash.to_hex())
-                .bind(*generation as i64)
-                .execute(&mut *tx)
-                .await
-                .map_err(index_err)?;
-            }
+            release_reservations(&mut tx, reserved).await?;
         }
 
-        tx.commit().await.map_err(index_err)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -347,8 +342,7 @@ impl NameIndex for SqliteNameIndex {
         )
         .bind(name)
         .fetch_optional(&self.pool)
-        .await
-        .map_err(index_err)?;
+        .await?;
         hex.map(|h| Cid::from_hex(&h)).transpose()
     }
 
@@ -368,26 +362,23 @@ impl NameIndex for SqliteNameIndex {
             .bind(format!("{prefix}/"))
             .fetch_all(&self.pool)
             .await
-        }
-        .map_err(index_err)?;
+        }?;
         Ok(names)
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(name))]
     async fn unbind(&self, name: &str) -> Result<()> {
-        let mut tx = self.pool.begin().await.map_err(index_err)?;
+        let mut tx = self.pool.begin().await?;
         // This name's references per object (with multiplicity).
         let refs: Vec<(String, i64)> =
             sqlx::query_as("SELECT cid, COUNT(*) FROM name_versions WHERE name = ? GROUP BY cid")
                 .bind(name)
                 .fetch_all(&mut *tx)
-                .await
-                .map_err(index_err)?;
+                .await?;
         sqlx::query("DELETE FROM name_versions WHERE name = ?")
             .bind(name)
             .execute(&mut *tx)
-            .await
-            .map_err(index_err)?;
+            .await?;
 
         for (cid_hex, m) in refs {
             let new_rc: i64 = sqlx::query_scalar(
@@ -396,16 +387,14 @@ impl NameIndex for SqliteNameIndex {
             .bind(m)
             .bind(&cid_hex)
             .fetch_one(&mut *tx)
-            .await
-            .map_err(index_err)?;
+            .await?;
             if new_rc == 0 {
                 let edges: Vec<(String, i64)> = sqlx::query_as(
                     "SELECT block_cid, generation FROM object_blocks WHERE object_cid = ?",
                 )
                 .bind(&cid_hex)
                 .fetch_all(&mut *tx)
-                .await
-                .map_err(index_err)?;
+                .await?;
                 for (b, generation) in edges {
                     sqlx::query(
                         "UPDATE blocks SET refcount = refcount - 1
@@ -414,8 +403,7 @@ impl NameIndex for SqliteNameIndex {
                     .bind(&b)
                     .bind(generation)
                     .execute(&mut *tx)
-                    .await
-                    .map_err(index_err)?;
+                    .await?;
                 }
                 // The object is dead: drop its edges now (not at collection) so a
                 // later resurrection — possibly onto a different block generation
@@ -425,11 +413,10 @@ impl NameIndex for SqliteNameIndex {
                 sqlx::query("DELETE FROM object_blocks WHERE object_cid = ?")
                     .bind(&cid_hex)
                     .execute(&mut *tx)
-                    .await
-                    .map_err(index_err)?;
+                    .await?;
             }
         }
-        tx.commit().await.map_err(index_err)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -438,24 +425,21 @@ impl NameIndex for SqliteNameIndex {
             sqlx::query_scalar("SELECT cid FROM name_versions WHERE name = ? ORDER BY seq DESC")
                 .bind(name)
                 .fetch_all(&self.pool)
-                .await
-                .map_err(index_err)?;
+                .await?;
         hexes_to_cids(hexes)
     }
 
     async fn unreferenced_objects(&self) -> Result<Vec<Cid>> {
         let hexes: Vec<String> = sqlx::query_scalar("SELECT cid FROM objects WHERE refcount = 0")
             .fetch_all(&self.pool)
-            .await
-            .map_err(index_err)?;
+            .await?;
         hexes_to_cids(hexes)
     }
 
     async fn unreferenced_blocks(&self) -> Result<Vec<Cid>> {
         let hexes: Vec<String> = sqlx::query_scalar("SELECT hash FROM blocks WHERE refcount = 0")
             .fetch_all(&self.pool)
-            .await
-            .map_err(index_err)?;
+            .await?;
         hexes_to_cids(hexes)
     }
 
@@ -464,34 +448,29 @@ impl NameIndex for SqliteNameIndex {
         // the oracle and the reachability audit (M1c slice 6) must not observe a
         // half-applied writer or collector. (A read transaction takes its snapshot
         // on the first read and holds it.)
-        let mut tx = self.pool.begin().await.map_err(index_err)?;
+        let mut tx = self.pool.begin().await?;
         let objects: Vec<(String, i64)> = sqlx::query_as("SELECT cid, refcount FROM objects")
             .fetch_all(&mut *tx)
-            .await
-            .map_err(index_err)?;
+            .await?;
         let blocks: Vec<(String, i64, i64, i64)> =
             sqlx::query_as("SELECT hash, generation, refcount, available FROM blocks")
                 .fetch_all(&mut *tx)
-                .await
-                .map_err(index_err)?;
+                .await?;
         let edges: Vec<(String, String, i64)> =
             sqlx::query_as("SELECT object_cid, block_cid, generation FROM object_blocks")
                 .fetch_all(&mut *tx)
-                .await
-                .map_err(index_err)?;
+                .await?;
         let name_refs: Vec<(String, i64)> =
             sqlx::query_as("SELECT cid, COUNT(*) FROM name_versions GROUP BY cid")
                 .fetch_all(&mut *tx)
-                .await
-                .map_err(index_err)?;
+                .await?;
         let current: Vec<(String, String)> = sqlx::query_as(
             "SELECT name, cid FROM name_versions AS nv
              WHERE seq = (SELECT MAX(seq) FROM name_versions WHERE name = nv.name)",
         )
         .fetch_all(&mut *tx)
-        .await
-        .map_err(index_err)?;
-        tx.commit().await.map_err(index_err)?;
+        .await?;
+        tx.commit().await?;
 
         Ok(IndexSnapshot {
             objects: cid_counts(objects)?,
@@ -508,7 +487,13 @@ impl NameIndex for SqliteNameIndex {
                 .collect::<Result<_>>()?,
             object_blocks: edges
                 .into_iter()
-                .map(|(o, b, g)| Ok((Cid::from_hex(&o)?, Cid::from_hex(&b)?, g as u32)))
+                .map(|(o, b, g)| {
+                    Ok(Edge {
+                        object: Cid::from_hex(&o)?,
+                        block: Cid::from_hex(&b)?,
+                        generation: g as u32,
+                    })
+                })
                 .collect::<Result<_>>()?,
             name_refs: cid_counts(name_refs)?,
             current_names: current
@@ -525,8 +510,7 @@ impl NameIndex for SqliteNameIndex {
         )
         .bind(hash.to_hex())
         .fetch_optional(&self.pool)
-        .await
-        .map_err(index_err)?;
+        .await?;
         Ok(reserved.map(|g| g as u32))
     }
 
@@ -542,8 +526,7 @@ impl NameIndex for SqliteNameIndex {
         .bind(generation as i64)
         .bind(&h)
         .execute(&self.pool)
-        .await
-        .map_err(index_err)?
+        .await?
         .rows_affected();
         Ok(affected == 1)
     }
@@ -552,8 +535,7 @@ impl NameIndex for SqliteNameIndex {
         let used: Vec<i64> = sqlx::query_scalar("SELECT generation FROM blocks WHERE hash = ?")
             .bind(hash.to_hex())
             .fetch_all(&self.pool)
-            .await
-            .map_err(index_err)?;
+            .await?;
         let used: std::collections::HashSet<i64> = used.into_iter().collect();
         let mut generation = 0i64;
         while used.contains(&generation) {
@@ -570,8 +552,7 @@ impl NameIndex for SqliteNameIndex {
         .bind(hash.to_hex())
         .bind(generation as i64)
         .execute(&self.pool)
-        .await
-        .map_err(index_err)?
+        .await?
         .rows_affected();
         Ok(affected == 1)
     }
@@ -581,8 +562,7 @@ impl NameIndex for SqliteNameIndex {
             .bind(hash.to_hex())
             .bind(generation as i64)
             .execute(&self.pool)
-            .await
-            .map_err(index_err)?;
+            .await?;
         Ok(())
     }
 
@@ -590,8 +570,7 @@ impl NameIndex for SqliteNameIndex {
         let rows: Vec<(String, i64, i64)> =
             sqlx::query_as("SELECT hash, generation, available FROM blocks WHERE refcount = 0")
                 .fetch_all(&self.pool)
-                .await
-                .map_err(index_err)?;
+                .await?;
         rows.into_iter()
             .map(|(h, g, a)| Ok((Cid::from_hex(&h)?, g as u32, a != 0)))
             .collect()
@@ -605,32 +584,28 @@ impl NameIndex for SqliteNameIndex {
         .bind(hash.to_hex())
         .bind(generation as i64)
         .execute(&self.pool)
-        .await
-        .map_err(index_err)?;
+        .await?;
         Ok(())
     }
 
     async fn delete_object(&self, cid: &Cid) -> Result<()> {
         let cid_hex = cid.to_hex();
-        let mut tx = self.pool.begin().await.map_err(index_err)?;
+        let mut tx = self.pool.begin().await?;
         let rc: Option<i64> = sqlx::query_scalar("SELECT refcount FROM objects WHERE cid = ?")
             .bind(&cid_hex)
             .fetch_optional(&mut *tx)
-            .await
-            .map_err(index_err)?;
+            .await?;
         if rc == Some(0) {
             sqlx::query("DELETE FROM object_blocks WHERE object_cid = ?")
                 .bind(&cid_hex)
                 .execute(&mut *tx)
-                .await
-                .map_err(index_err)?;
+                .await?;
             sqlx::query("DELETE FROM objects WHERE cid = ?")
                 .bind(&cid_hex)
                 .execute(&mut *tx)
-                .await
-                .map_err(index_err)?;
+                .await?;
         }
-        tx.commit().await.map_err(index_err)?;
+        tx.commit().await?;
         Ok(())
     }
 }

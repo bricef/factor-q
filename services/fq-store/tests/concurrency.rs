@@ -24,14 +24,7 @@ async fn writers_and_collector_race_on_shared_blocks() {
     let dir = tempfile::tempdir().unwrap();
     let cas = dir.path().join("cas");
     std::fs::create_dir_all(&cas).unwrap();
-    let store = FilesystemStore::with_params(
-        cas,
-        ChunkParams {
-            min: 256,
-            avg: 1024,
-            max: 4096,
-        },
-    );
+    let store = FilesystemStore::with_params(cas, ChunkParams::small());
     let index = SqliteNameIndex::open(dir.path().join("index.db"))
         .await
         .unwrap();
@@ -50,7 +43,7 @@ async fn writers_and_collector_race_on_shared_blocks() {
             // through reservable → released → claimable while GC races alongside.
             for _ in 0..15 {
                 repo.put(&name, &content).await.unwrap();
-                repo.delete(&name).await.unwrap();
+                repo.unbind(&name).await.unwrap();
             }
             repo.put(&name, &content).await.unwrap(); // leave it bound
         }));

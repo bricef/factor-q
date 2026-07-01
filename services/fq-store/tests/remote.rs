@@ -14,14 +14,8 @@ use fq_store::service::{self, RemoteStore};
 /// Start a CAS server on an ephemeral localhost port; return its address.
 async fn start_server() -> String {
     let dir = tempfile::tempdir().unwrap().keep();
-    let store: Arc<dyn ContentStore> = Arc::new(FilesystemStore::with_params(
-        dir,
-        ChunkParams {
-            min: 256,
-            avg: 1024,
-            max: 4096,
-        },
-    ));
+    let store: Arc<dyn ContentStore> =
+        Arc::new(FilesystemStore::with_params(dir, ChunkParams::small()));
     let (addr, serving) = service::bind("127.0.0.1:0", store).await.unwrap();
     tokio::spawn(serving);
     addr.to_string()

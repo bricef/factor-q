@@ -26,7 +26,27 @@ pub enum StoreError {
     #[error("index error: {0}")]
     Index(String),
 
+    /// A conflicting concurrent operation the caller may retry — e.g. a block a
+    /// writer was reserving was claimed by the collector at the same moment.
+    /// Not corruption: retry, or re-`put` the content.
+    #[error("conflict: {0}")]
+    Conflict(String),
+
+    /// A remote store failed — either a transport error reaching it, or an
+    /// error it reported that has no typed variant here. Distinct from
+    /// [`Corrupt`](Self::Corrupt): the fault is at or beyond the remote
+    /// boundary, not in local stored data.
+    #[error("remote store error: {0}")]
+    Remote(String),
+
     /// No object is bound to the given name in the index.
     #[error("name not found: {0}")]
     NameNotFound(String),
+}
+
+impl From<sqlx::Error> for StoreError {
+    /// Any database error surfaces as [`StoreError::Index`].
+    fn from(e: sqlx::Error) -> Self {
+        StoreError::Index(e.to_string())
+    }
 }

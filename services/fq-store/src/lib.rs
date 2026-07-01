@@ -2,13 +2,17 @@
 //! service (Phase 2 pillar #2). See `docs/adrs/accepted/0023-*` and
 //! `0024-*` for the design.
 //!
-//! This is **M1a**: the content-addressed store (CAS) — the bedrock layer.
-//! It stores arbitrary bytes, deduplicated at the block level, addressed by
-//! the BLAKE3 hash of their content.
+//! The content-addressed store (CAS, **M1a**) is the bedrock: arbitrary bytes,
+//! deduplicated at the block level, addressed by the BLAKE3 hash of their
+//! content. On top of it sit the mutable name index ([`index`], M1b), the
+//! named and versioned object store ([`Repository`]) that composes the two, an
+//! invariant oracle ([`verify`]), and the online garbage collector
+//! ([`collector`], M1c).
 //!
-//! Backends implement [`ContentStore`] and prove correctness against the
-//! shared, backend-agnostic conformance suite ([`content_store_conformance!`]).
-//! See `docs/guide/implementing-a-storage-backend.md`.
+//! Backends implement [`ContentStore`] (and [`BlockStore`] if they materialize
+//! individual blocks) and prove correctness against the shared,
+//! backend-agnostic conformance suite ([`content_store_conformance!`]). See
+//! `docs/guide/implementing-a-storage-backend.md`.
 
 mod cid;
 mod error;
@@ -21,6 +25,9 @@ pub mod repository;
 pub mod stats;
 pub mod verify;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 #[cfg(feature = "cli")]
 pub mod cli;
 
@@ -30,18 +37,14 @@ pub mod service;
 pub use cid::Cid;
 pub use collector::{Collector, Reclaimed, ReferenceCollector};
 pub use error::{Result, StoreError};
-pub use index::{BlockRow, IndexSnapshot, NameIndex, SqliteNameIndex};
+pub use index::{BlockRow, Edge, IndexSnapshot, NameIndex, SqliteNameIndex};
 pub use repository::Repository;
 pub use stats::Stats;
 
 use async_trait::async_trait;
 
-/// A content-addressed blob store: write bytes and get back their [`Cid`];
-/// read by `Cid`, in full or by range. Identical content is deduplicated and
-/// always maps to the same `Cid`.
-///
 /// A content-defined block within an object: its content-id and the byte span
-/// `[offset, offset + len)` it occupies. Returned by [`ContentStore::chunk`] so
+/// `[offset, offset + len)` it occupies. Returned by [`BlockStore::chunk`] so
 /// the write path can address a block's bytes without re-deriving the split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chunk {
@@ -53,6 +56,10 @@ pub struct Chunk {
     pub len: usize,
 }
 
+/// A content-addressed blob store: write bytes and get back their [`Cid`];
+/// read by `Cid`, in full or by range. Identical content is deduplicated and
+/// always maps to the same `Cid`.
+///
 /// This is the storage substrate (ADR-0023 layer 1). Every backend must
 /// satisfy the conformance suite — see the crate docs.
 #[async_trait]
@@ -113,7 +120,19 @@ pub trait ContentStore: Send + Sync {
         let _ = generation;
         self.remove(block).await
     }
+}
 
+/// The block-level write path: the operations a [`Repository`] needs to
+/// materialize an object's content-defined blocks and manifest under the
+/// verified reserve-before-rely protocol.
+///
+/// Separate from [`ContentStore`] because not every backend can materialize
+/// individual blocks — a read-only remote client is a `ContentStore` but not a
+/// `BlockStore`, so `Repository<ThatClient, _>` is rejected at compile time
+/// rather than failing at run time. Remote backends gain a wire implementation
+/// in M5.
+#[async_trait]
+pub trait BlockStore: ContentStore {
     /// Split `content` into its content-defined blocks — each a [`Chunk`] with
     /// the block's content-id and byte span — without writing anything. The
     /// default treats the whole object as one block; sub-chunking backends (the
@@ -135,23 +154,11 @@ pub trait ContentStore: Send + Sync {
     /// Durably write (fsync) the block file for `(block, generation)` from
     /// `bytes`, idempotently — an already-present file is left untouched. The
     /// write path calls this *before* the index row exists (fsync-before-insert,
-    /// fault I2). The default errors: only sub-chunking backends store blocks
-    /// individually (remote backends gain this over the wire in M5).
-    async fn write_block(&self, block: &Cid, generation: u32, bytes: &[u8]) -> Result<()> {
-        let _ = (block, generation, bytes);
-        Err(StoreError::Corrupt(
-            "write_block is not supported by this backend".into(),
-        ))
-    }
+    /// fault I2).
+    async fn write_block(&self, block: &Cid, generation: u32, bytes: &[u8]) -> Result<()>;
 
     /// Write the object manifest for `cid`: its total `size` and ordered blocks,
     /// each a `(block, generation, len)`. Recording the generation lets the read
-    /// path open the exact block file. The default errors (see
-    /// [`write_block`](Self::write_block)).
-    async fn write_object(&self, cid: &Cid, size: u64, blocks: &[(Cid, u32, u64)]) -> Result<()> {
-        let _ = (cid, size, blocks);
-        Err(StoreError::Corrupt(
-            "write_object is not supported by this backend".into(),
-        ))
-    }
+    /// path open the exact block file.
+    async fn write_object(&self, cid: &Cid, size: u64, blocks: &[(Cid, u32, u64)]) -> Result<()>;
 }

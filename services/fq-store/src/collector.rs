@@ -1,16 +1,16 @@
-//! The reference garbage collector (M1c slice 5c) — the online reclaim worker.
+//! The reference garbage collector (M1c) — the online reclaim worker.
 //!
 //! It reclaims what the index reports unreferenced, in the order the protocol
 //! requires (`docs/design/storage-garbage-collection.md`): an object's manifest
 //! then its row; a block's `claim → unlink → delete`. Claiming is the GC
 //! compare-and-swap — a writer that reserves first wins and the block is left
-//! alone. This is the *online* collector; the reachability audit (slice 6) is the
-//! systematic backstop the model proves is also required for reclamation
+//! alone. This is the *online* collector; the reachability audit (still to come)
+//! is the systematic backstop the model proves is also required for reclamation
 //! liveness.
 
 use async_trait::async_trait;
 
-use crate::{ContentStore, NameIndex, Repository, Result};
+use crate::{BlockStore, NameIndex, Repository, Result};
 
 /// What a collection pass reclaimed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub struct Reclaimed {
 /// A garbage collector over a [`Repository`]. Pluggable so retention policies
 /// (online batches, full sweep, …) can vary.
 #[async_trait]
-pub trait Collector<C: ContentStore, N: NameIndex>: Send + Sync {
+pub trait Collector<C: BlockStore, N: NameIndex>: Send + Sync {
     /// Run one reclamation pass, returning what was freed.
     async fn collect(&self, repo: &Repository<C, N>) -> Result<Reclaimed>;
 }
@@ -34,7 +34,7 @@ pub trait Collector<C: ContentStore, N: NameIndex>: Send + Sync {
 pub struct ReferenceCollector;
 
 #[async_trait]
-impl<C: ContentStore, N: NameIndex> Collector<C, N> for ReferenceCollector {
+impl<C: BlockStore, N: NameIndex> Collector<C, N> for ReferenceCollector {
     async fn collect(&self, repo: &Repository<C, N>) -> Result<Reclaimed> {
         let content = repo.content();
         let index = repo.index();
@@ -70,28 +70,14 @@ impl<C: ContentStore, N: NameIndex> Collector<C, N> for ReferenceCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::{ChunkParams, FilesystemStore};
+    use crate::fs::FilesystemStore;
     use crate::{SqliteNameIndex, verify};
 
     async fn repository() -> (
         tempfile::TempDir,
         Repository<FilesystemStore, SqliteNameIndex>,
     ) {
-        let dir = tempfile::tempdir().unwrap();
-        let cas = dir.path().join("cas");
-        std::fs::create_dir_all(&cas).unwrap();
-        let store = FilesystemStore::with_params(
-            cas,
-            ChunkParams {
-                min: 256,
-                avg: 1024,
-                max: 4096,
-            },
-        );
-        let index = SqliteNameIndex::open(dir.path().join("index.db"))
-            .await
-            .unwrap();
-        (dir, Repository::new(store, index))
+        crate::test_support::repo().await
     }
 
     #[tokio::test]
@@ -99,7 +85,7 @@ mod tests {
         let (_d, repo) = repository().await;
         repo.put("a", &vec![1u8; 20_000]).await.unwrap();
         repo.put("b", &vec![2u8; 20_000]).await.unwrap();
-        repo.delete("a").await.unwrap();
+        repo.unbind("a").await.unwrap();
 
         let reclaimed = ReferenceCollector.collect(&repo).await.unwrap();
         assert!(
@@ -133,7 +119,7 @@ mod tests {
         repo.put("a", &a).await.unwrap();
         repo.put("b", &b).await.unwrap(); // shares a's blocks
 
-        repo.delete("a").await.unwrap();
+        repo.unbind("a").await.unwrap();
         ReferenceCollector.collect(&repo).await.unwrap();
 
         // b is intact — its blocks (shared with the late a) were not reclaimed.

@@ -17,13 +17,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{Chunk, Cid, ContentStore, Result, Stats, StoreError};
+use crate::{BlockStore, Chunk, Cid, ContentStore, Result, Stats, StoreError};
 
 /// Content-defined chunking parameters (FastCDC target block sizes, bytes).
 #[derive(Clone, Copy, Debug)]
 pub struct ChunkParams {
+    /// Minimum block size in bytes; content shorter than this stays one block.
     pub min: u32,
+    /// Target (average) block size in bytes — the FastCDC cut-point setpoint.
     pub avg: u32,
+    /// Maximum block size in bytes; a block is cut here even without a match.
     pub max: u32,
 }
 
@@ -34,6 +37,18 @@ impl Default for ChunkParams {
             min: 16 * 1024,
             avg: 64 * 1024,
             max: 256 * 1024,
+        }
+    }
+}
+
+impl ChunkParams {
+    /// Small target sizes (256 B / 1 KiB / 4 KiB) so tests exercise the
+    /// multi-block and shared-block paths on modest inputs.
+    pub fn small() -> Self {
+        Self {
+            min: 256,
+            avg: 1024,
+            max: 4096,
         }
     }
 }
@@ -97,12 +112,27 @@ impl FilesystemStore {
     }
 
     async fn read_manifest(&self, cid: &Cid) -> Result<Manifest> {
-        match tokio::fs::read(self.object_path(cid)).await {
+        let manifest: Manifest = match tokio::fs::read(self.object_path(cid)).await {
             Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| StoreError::Corrupt(format!("manifest {cid}: {e}"))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(StoreError::NotFound(*cid)),
-            Err(e) => Err(e.into()),
+                .map_err(|e| StoreError::Corrupt(format!("manifest {cid}: {e}")))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StoreError::NotFound(*cid));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        // Every block hash becomes a filesystem path component (see `block_path`),
+        // so validate each is a well-formed CID before use. A manifest's hash
+        // strings are untrusted the moment any manifest-ingest path exists; this
+        // bounds them to 64 hex chars — no traversal, no short-slice panic.
+        for block in &manifest.blocks {
+            Cid::from_hex(&block.hash).map_err(|_| {
+                StoreError::Corrupt(format!(
+                    "manifest {cid}: invalid block hash {:?}",
+                    block.hash
+                ))
+            })?;
         }
+        Ok(manifest)
     }
 }
 
@@ -117,27 +147,22 @@ impl ContentStore for FilesystemStore {
             return Ok(cid);
         }
 
+        // One chunker: reuse the shared content-defined split (see `chunk`), so
+        // the raw-CAS path and the reserve-before-rely write path can never
+        // diverge on where block boundaries fall.
         let mut blocks = Vec::new();
-        if !content.is_empty() {
-            let chunker = fastcdc::v2020::FastCDC::new(
-                content,
-                self.params.min,
-                self.params.avg,
-                self.params.max,
-            );
-            for chunk in chunker {
-                let block = &content[chunk.offset..chunk.offset + chunk.length];
-                let hash = Cid::of(block).to_hex();
-                let path = self.block_path(&hash, 0);
-                if !tokio::fs::try_exists(&path).await? {
-                    write_atomic(&path, block).await?;
-                }
-                blocks.push(BlockRef {
-                    hash,
-                    len: chunk.length as u64,
-                    generation: 0,
-                });
+        for chunk in self.chunk(content) {
+            let block = &content[chunk.offset..chunk.offset + chunk.len];
+            let hash = chunk.hash.to_hex();
+            let path = self.block_path(&hash, 0);
+            if !tokio::fs::try_exists(&path).await? {
+                write_atomic(&path, block).await?;
             }
+            blocks.push(BlockRef {
+                hash,
+                len: chunk.len as u64,
+                generation: 0,
+            });
         }
 
         let manifest = Manifest {
@@ -154,7 +179,9 @@ impl ContentStore for FilesystemStore {
     #[tracing::instrument(level = "debug", skip_all, fields(cid = %cid))]
     async fn get(&self, cid: &Cid) -> Result<Vec<u8>> {
         let manifest = self.read_manifest(cid).await?;
-        let mut out = Vec::with_capacity(manifest.size as usize);
+        // Cap the up-front reservation so a corrupt manifest `size` can't drive
+        // an unbounded allocation; the buffer still grows as blocks append.
+        let mut out = Vec::with_capacity((manifest.size as usize).min(64 << 20));
         for block in &manifest.blocks {
             out.extend_from_slice(&self.read_block(cid, block).await?);
         }
@@ -172,7 +199,7 @@ impl ContentStore for FilesystemStore {
         let mut pos = 0u64;
         for block in &manifest.blocks {
             let block_start = pos;
-            let block_end = pos + block.len;
+            let block_end = pos.saturating_add(block.len);
             pos = block_end;
             if block_end <= offset {
                 continue; // entirely before the range
@@ -181,9 +208,11 @@ impl ContentStore for FilesystemStore {
                 break; // entirely after the range
             }
             let data = self.read_block(cid, block).await?;
-            let from = offset.saturating_sub(block_start) as usize;
-            let to = (end - block_start).min(block.len) as usize;
-            out.extend_from_slice(&data[from..to]);
+            // Clamp to the block file's actual length: a manifest whose recorded
+            // `len` exceeds the stored block must not drive an out-of-bounds slice.
+            let from = (offset.saturating_sub(block_start) as usize).min(data.len());
+            let to = ((end - block_start).min(block.len) as usize).min(data.len());
+            out.extend_from_slice(&data[from..to.max(from)]);
         }
         Ok(out)
     }
@@ -235,7 +264,10 @@ impl ContentStore for FilesystemStore {
     async fn remove_block(&self, block: &Cid, generation: u32) -> Result<()> {
         remove_file_idempotent(&self.block_path(&block.to_hex(), generation)).await
     }
+}
 
+#[async_trait]
+impl BlockStore for FilesystemStore {
     fn chunk(&self, content: &[u8]) -> Vec<Chunk> {
         if content.is_empty() {
             return Vec::new();
@@ -357,14 +389,7 @@ mod tests {
 
     fn store() -> (tempfile::TempDir, FilesystemStore) {
         let dir = tempfile::tempdir().unwrap();
-        let store = FilesystemStore::with_params(
-            dir.path(),
-            ChunkParams {
-                min: 256,
-                avg: 1024,
-                max: 4096,
-            },
-        );
+        let store = FilesystemStore::with_params(dir.path(), ChunkParams::small());
         (dir, store)
     }
 

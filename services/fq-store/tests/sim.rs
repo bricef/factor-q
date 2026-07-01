@@ -30,14 +30,7 @@ fn below(state: &mut u64, n: u64) -> u64 {
 }
 
 async fn open_repo(cas: &Path, db: &Path) -> Repository<FilesystemStore, SqliteNameIndex> {
-    let store = FilesystemStore::with_params(
-        cas.to_path_buf(),
-        ChunkParams {
-            min: 256,
-            avg: 1024,
-            max: 4096,
-        },
-    );
+    let store = FilesystemStore::with_params(cas.to_path_buf(), ChunkParams::small());
     let index = SqliteNameIndex::open(db).await.unwrap();
     Repository::new(store, index)
 }
@@ -70,7 +63,7 @@ async fn run_seed(seed: u64, steps: usize) {
             }
             6..=7 => {
                 let name = names[below(&mut rng, names.len() as u64) as usize];
-                repo.delete(name).await.unwrap();
+                repo.unbind(name).await.unwrap();
                 model.remove(name);
             }
             8..=9 => {

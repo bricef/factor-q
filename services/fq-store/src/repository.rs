@@ -1,11 +1,11 @@
-//! The named object store — composes a [`ContentStore`] (immutable,
-//! content-addressed blobs) with a [`NameIndex`] (the mutable name index)
-//! into the user-facing API: store and read content by hierarchical name,
-//! with version history and the reference counts that drive GC.
+//! The named object store — composes a [`crate::BlockStore`] (immutable,
+//! content-addressed blobs with block-level writes) with a [`NameIndex`] (the
+//! mutable name index) into the user-facing API: store and read content by
+//! hierarchical name, with version history and the reference counts that drive GC.
 
 use std::collections::HashMap;
 
-use crate::{Cid, ContentStore, NameIndex, Result, StoreError};
+use crate::{BlockStore, Cid, NameIndex, Result, StoreError};
 
 /// A named, versioned object store over a content store and a name index.
 pub struct Repository<C, N> {
@@ -13,7 +13,7 @@ pub struct Repository<C, N> {
     index: N,
 }
 
-impl<C: ContentStore, N: NameIndex> Repository<C, N> {
+impl<C: BlockStore, N: NameIndex> Repository<C, N> {
     /// Compose a repository from a content store and a name index.
     pub fn new(content: C, index: N) -> Self {
         Self { content, index }
@@ -62,15 +62,20 @@ impl<C: ContentStore, N: NameIndex> Repository<C, N> {
     /// object). [`StoreError::NotFound`] if the object is absent. It reserves the
     /// object's existing blocks; it cannot resurrect a block GC has already
     /// claimed (minting one needs the bytes, which only [`put`](Self::put) has),
-    /// so aliasing an object mid-collection errors — re-`put` the content.
+    /// so aliasing an object mid-collection fails with [`StoreError::Conflict`] —
+    /// retry, or re-`put` the content.
     pub async fn bind(&self, name: &str, cid: &Cid) -> Result<()> {
         let mut blocks = self.content.blocks(cid).await?;
-        blocks.sort_by_key(|c| c.to_hex());
+        blocks.sort_by_key(|c| *c.as_bytes());
         blocks.dedup();
         let mut reserved = Vec::with_capacity(blocks.len());
         for hash in blocks {
+            // A live object holds each block on its one available generation, so
+            // reserving that generation yields exactly the one the manifest
+            // references. `None` means GC claimed it mid-flight — a retryable
+            // conflict, not corruption.
             let generation = self.index.reserve_block(&hash).await?.ok_or_else(|| {
-                StoreError::Corrupt(format!(
+                StoreError::Conflict(format!(
                     "cannot alias block {hash}: no available generation (collected concurrently)"
                 ))
             })?;
@@ -97,8 +102,9 @@ impl<C: ContentStore, N: NameIndex> Repository<C, N> {
         self.content.get_range(&cid, offset, len).await
     }
 
-    /// Remove `name` (current binding and history). Idempotent.
-    pub async fn delete(&self, name: &str) -> Result<()> {
+    /// Unbind `name` (current binding and history) — the inverse of
+    /// [`bind`](Self::bind) / [`put`](Self::put). Idempotent.
+    pub async fn unbind(&self, name: &str) -> Result<()> {
         self.index.unbind(name).await
     }
 
@@ -160,16 +166,11 @@ impl<C: ContentStore, N: NameIndex> Repository<C, N> {
 mod tests {
     use super::*;
     use crate::fs::FilesystemStore;
-    use crate::{SqliteNameIndex, verify};
+    use crate::{ContentStore, SqliteNameIndex, verify};
     use tempfile::TempDir;
 
     async fn repository() -> (TempDir, Repository<FilesystemStore, SqliteNameIndex>) {
-        let dir = tempfile::tempdir().unwrap();
-        let content = FilesystemStore::new(dir.path().join("cas"));
-        let index = SqliteNameIndex::open(dir.path().join("index.db"))
-            .await
-            .unwrap();
-        (dir, Repository::new(content, index))
+        crate::test_support::repo().await
     }
 
     #[tokio::test]
@@ -218,7 +219,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        repo.delete("temp").await.unwrap();
+        repo.unbind("temp").await.unwrap();
         assert_eq!(repo.resolve("temp").await.unwrap(), None);
         assert_eq!(
             repo.index().unreferenced_objects().await.unwrap(),
@@ -240,7 +241,7 @@ mod tests {
         // unreferenced (refcount 0), but its row and file remain.
         let content = b"a small object that is exactly one block";
         let cid = repo.put("a", content).await.unwrap();
-        repo.delete("a").await.unwrap();
+        repo.unbind("a").await.unwrap();
 
         // Simulate GC mid-reclaim: claim generation 0 (refcount 0 → unavailable)
         // but stop before unlinking. A writer re-putting the same content must not

@@ -50,7 +50,7 @@ impl From<WireError> for StoreError {
             WireError::NotFound(hex) => Cid::from_hex(&hex)
                 .map(StoreError::NotFound)
                 .unwrap_or_else(|_| StoreError::Corrupt(format!("not found: {hex}"))),
-            WireError::Message(msg) => StoreError::Corrupt(msg),
+            WireError::Message(msg) => StoreError::Remote(msg),
         }
     }
 }
@@ -150,7 +150,11 @@ pub async fn bind(
     store: Arc<dyn ContentStore>,
 ) -> std::io::Result<(SocketAddr, BoxFuture<'static, ()>)> {
     let mut listener = tarpc::serde_transport::tcp::listen(addr, Bincode::default).await?;
-    listener.config_mut().max_frame_length(usize::MAX);
+    // Bound the frame size a client can declare: without this, a 4-byte length
+    // header would pre-allocate gigabytes before any payload arrives (an
+    // amplification DoS). This caps one request/object; streaming larger objects
+    // and per-connection quotas are M5.
+    listener.config_mut().max_frame_length(256 << 20); // 256 MiB
     let local_addr = listener.local_addr();
     let serving: BoxFuture<'static, ()> = Box::pin(async move {
         listener
@@ -269,5 +273,5 @@ impl ContentStore for RemoteStore {
 }
 
 fn rpc_err(e: tarpc::client::RpcError) -> StoreError {
-    StoreError::Corrupt(format!("rpc error: {e}"))
+    StoreError::Remote(format!("rpc error: {e}"))
 }
