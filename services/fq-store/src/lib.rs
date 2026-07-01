@@ -161,4 +161,14 @@ pub trait BlockStore: ContentStore {
     /// each a `(block, generation, len)`. Recording the generation lets the read
     /// path open the exact block file.
     async fn write_object(&self, cid: &Cid, size: u64, blocks: &[(Cid, u32, u64)]) -> Result<()>;
+
+    /// Enumerate every stored block file as `(hash, generation, last-modified)`.
+    /// The reachability audit (M1c slice 6) cross-checks these against the index
+    /// to find orphan files — present on disk with no row — and ages each against
+    /// the reap grace via its mtime.
+    async fn list_stored_blocks(&self) -> Result<Vec<(Cid, u32, std::time::SystemTime)>>;
+
+    /// Enumerate every stored object manifest as `(cid, last-modified)` — the
+    /// object counterpart of [`list_stored_blocks`](Self::list_stored_blocks).
+    async fn list_stored_objects(&self) -> Result<Vec<(Cid, std::time::SystemTime)>>;
 }

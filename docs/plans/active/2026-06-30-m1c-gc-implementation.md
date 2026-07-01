@@ -62,6 +62,30 @@ model assumes. The `fail`-point crash-recovery cases move to slice 6, where
 recovery is the focus; the coarse DST crash step and the collector's orphan-claim
 adoption already cover the crash paths.
 
+## Slice 6 sub-slices
+
+The reachability audit — the strong-fairness backstop, built as the **full**
+self-healing worker (decision below). Oracle + DST after each, as with slice 5.
+
+- **6a — seams.** An injectable `Clock` (real in prod, controllable in the DST)
+  and file enumeration with mtimes (`(hash, generation, mtime)` for blocks,
+  `(cid, mtime)` for objects), so the reaper can cross-check disk against the
+  index and age files against the grace.
+- **6b — reap + finish.** The `Auditor` (mirrors `Collector`): reap orphan
+  block/object files (on disk, no index row, older than the mtime grace) and
+  finish orphaned claims / dead blocks the online collector missed. A lightweight
+  orphaned-claim reset at `open()` for bounded crash recovery (L4).
+- **6c — reconcile.** Block-refcount drift: for a block quiescent past the grace,
+  reduce a *stored > derived* refcount to the oracle's recomputed truth
+  (transactional, re-checked) — the leaked-reservation leak. Alarm, never
+  auto-fix, on *stored < derived* (I4) and the forbidden state (S1).
+- **6d — fault DST + soak.** Inject leaked reservations / orphaned claims / stale
+  files and advance the clock past grace; assert the audit restores every
+  invariant (L4). Cranked soak.
+
+Grace default ~15 min, configurable. A periodic scheduler is deferred — slice 7's
+CLI and the startup hook cover invocation until a daemon exists.
+
 ## Decisions taken while building
 
 - **Hand-off / aliasing accounting.** Reserve bumps a block's refcount

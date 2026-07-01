@@ -307,6 +307,48 @@ impl BlockStore for FilesystemStore {
         write_atomic(&self.object_path(cid), &encoded).await?;
         Ok(())
     }
+
+    async fn list_stored_blocks(&self) -> Result<Vec<(Cid, u32, std::time::SystemTime)>> {
+        let mut out = Vec::new();
+        for path in list_files_two_level(&self.root.join("blocks")).await? {
+            let mtime = tokio::fs::metadata(&path).await?.modified()?;
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            // `<hash>` (canonical, generation 0) or `<hash>.<generation>`.
+            let (hash_hex, generation) = match name.split_once('.') {
+                Some((h, g)) => {
+                    let Ok(generation) = g.parse::<u32>() else {
+                        continue;
+                    };
+                    (h, generation)
+                }
+                None => (name, 0),
+            };
+            let Ok(hash) = Cid::from_hex(hash_hex) else {
+                continue;
+            };
+            out.push((hash, generation, mtime));
+        }
+        Ok(out)
+    }
+
+    async fn list_stored_objects(&self) -> Result<Vec<(Cid, std::time::SystemTime)>> {
+        let mut out = Vec::new();
+        for path in list_files_two_level(&self.root.join("objects")).await? {
+            let mtime = tokio::fs::metadata(&path).await?.modified()?;
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            let Ok(cid) = Cid::from_hex(name) else {
+                continue;
+            };
+            out.push((cid, mtime));
+        }
+        Ok(out)
+    }
 }
 
 impl FilesystemStore {
@@ -553,5 +595,30 @@ mod tests {
             hash.as_str()
         );
         assert_ne!(store.block_path(&hash, 0), store.block_path(&hash, 1));
+    }
+
+    #[tokio::test]
+    async fn enumerates_stored_blocks_and_objects() {
+        use std::collections::HashSet;
+        let (_dir, store) = store();
+        let content = vec![4u8; 30_000]; // multi-block
+        let cid = store.put(&content).await.unwrap();
+        let manifest_blocks = store.blocks(&cid).await.unwrap();
+
+        // The enumerated block set matches the manifest exactly (no orphans, none
+        // missing), all at generation 0 for a fresh put, each with an mtime.
+        let listed = store.list_stored_blocks().await.unwrap();
+        assert!(!listed.is_empty());
+        for (_hash, generation, _mtime) in &listed {
+            assert_eq!(*generation, 0, "a fresh put is generation 0");
+        }
+        let listed_hashes: HashSet<_> = listed.iter().map(|(h, _, _)| *h).collect();
+        let expected: HashSet<_> = manifest_blocks.into_iter().collect();
+        assert_eq!(listed_hashes, expected);
+
+        // The one object manifest is enumerated.
+        let objects = store.list_stored_objects().await.unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].0, cid);
     }
 }
