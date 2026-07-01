@@ -17,6 +17,7 @@
 mod cid;
 mod error;
 
+pub mod audit;
 pub mod collector;
 pub mod conformance;
 pub mod fs;
@@ -34,6 +35,7 @@ pub mod cli;
 #[cfg(feature = "service")]
 pub mod service;
 
+pub use audit::{AuditReport, ReachabilityAuditor};
 pub use cid::Cid;
 pub use collector::{Collector, Reclaimed, ReferenceCollector};
 pub use error::{Result, StoreError};
