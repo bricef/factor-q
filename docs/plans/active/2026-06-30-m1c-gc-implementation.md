@@ -23,8 +23,8 @@ later slice; each slice is green on `cargo test` + `cargo clippy --all-features`
 | 3 | `blocks` re-keyed on `(hash, gen)` + `available`; oracle gains I1, I3 | I1, I3 | done |
 | 4 | Generation-aware storage + fsync-before-publish durability | I2 | done |
 | 5 | Online-reclaim protocol + collector | S1, I1–I4, the race | done |
-| 6 | Reachability audit (the strong-fairness backstop) | L1, L4, recovery | **next** |
-| 7 | `fq-cas gc` UX | — | |
+| 6 | Reachability audit (the strong-fairness backstop) | L1, L4, recovery | done |
+| 7 | `fq-cas gc` UX | — | **next** |
 
 > This refines the design doc's "What M1c builds": its original slice 4
 > (reserve-before-rely) and 5 (collector) are **merged into slice 5 here**, since
@@ -85,6 +85,15 @@ self-healing worker (decision below). Oracle + DST after each, as with slice 5.
 
 Grace default ~15 min, configurable. A periodic scheduler is deferred — slice 7's
 CLI and the startup hook cover invocation until a daemon exists.
+
+
+**Status: all four done** (through commit `1971dde`). The `Clock` trait was
+dropped for a real clock + a `grace: Duration` — grace extremes (0 / large) are
+deterministic in tests, so no fake clock is needed. Reconcile uses a `touched_at`
+column (migration v4, also surfaced on `BlockRow` as useful metadata) to tell a
+leaked reservation from a live in-flight one, and re-checks it atomically. The
+DST injects orphan files + leaked reservations and asserts a full audit converges
+— a second audit is a no-op (L4) — holding across a 64×60 soak.
 
 ## Decisions taken while building
 
