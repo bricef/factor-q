@@ -24,7 +24,7 @@ later slice; each slice is green on `cargo test` + `cargo clippy --all-features`
 | 4 | Generation-aware storage + fsync-before-publish durability | I2 | done |
 | 5 | Online-reclaim protocol + collector | S1, I1–I4, the race | done |
 | 6 | Reachability audit (the strong-fairness backstop) | L1, L4, recovery | done |
-| 7 | `fq-cas gc` UX | — | **next** |
+| 7 | `fq-cas gc` UX | — | done |
 
 > This refines the design doc's "What M1c builds": its original slice 4
 > (reserve-before-rely) and 5 (collector) are **merged into slice 5 here**, since
