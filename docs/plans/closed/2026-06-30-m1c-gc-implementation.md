@@ -1,7 +1,11 @@
 # M1c — garbage collection: implementation plan
 
-**Status:** active (2026-06-30). The slice-by-slice build of the online-reclaim
-protocol, on branch `m1c-garbage-collection` (PR #1).
+**Status:** Closed (2026-07-03). All seven slices shipped and merged to `main`
+in `49c8ed8` (branch `m1c-garbage-collection`, PR #1). The Slices table below
+records what landed; "Decisions taken while building" is the durable record.
+Follow-ups live outside this plan: the GC observability work
+([ADR-0025 draft](../../adrs/draft/0025-storage-gc-observability.md)) and the
+M5 service wiring (the GC worker + `/metrics`).
 
 The **"what"** and **"why correct"** live elsewhere — the protocol in
 [storage garbage collection](../../design/storage-garbage-collection.md), and the

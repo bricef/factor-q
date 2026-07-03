@@ -20,8 +20,14 @@ in-process and distributed" ahead of the harder layers.
 `SqliteNameIndex` reference impl (hierarchical names → CIDs, version history,
 two-level transactional refcounts) and the `Repository` composing the named
 store over the CAS (`ContentStore::blocks` sources the object→block edges).
-Next: **M1c** — garbage collection: reclaim the objects/blocks the index
-reports as unreferenced, online with an audit backstop.
+**M1c (garbage collection) is done** — merged in `49c8ed8`: the verified
+online-reclaim protocol (reserve-before-rely, generation-on-collision, the
+reference collector), the reachability-audit backstop, and the `fq-cas gc`
+operator command + manual. See the
+[closed implementation plan](../closed/2026-06-30-m1c-gc-implementation.md)
+and the draft
+[GC observability ADR](../../adrs/draft/0025-storage-gc-observability.md).
+Next: **M2** — access control (grants + capability tokens).
 
 ## Goal
 
