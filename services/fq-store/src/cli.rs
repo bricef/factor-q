@@ -8,11 +8,15 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
 use crate::fs::FilesystemStore;
-use crate::{Cid, ContentStore, Repository, SqliteNameIndex, Stats, StoreError};
+use crate::{
+    AuditReport, Cid, ContentStore, ReachabilityAuditor, Repository, SqliteNameIndex, Stats,
+    StoreError,
+};
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -30,6 +34,10 @@ Named objects (a name -> content mapping, with version history):
   fq-cas object ls research.papers                   list a namespace
   fq-cas object history research.papers.doc1         show version history
   fq-cas object rm research.papers.doc1              remove a name
+
+Maintenance:
+  fq-cas gc                                 reclaim unreferenced storage (safe on a live store)
+  fq-cas gc --grace 60 --json               shorter grace, machine-readable report
 
 The store lives under --root (env FQ_CAS_ROOT, default ./.fq-cas).";
 
@@ -101,6 +109,20 @@ enum Command {
     Object {
         #[command(subcommand)]
         command: ObjectCommand,
+    },
+    /// Reclaim unreferenced storage. Runs the reachability audit: reclaim dead
+    /// objects and blocks, reap orphan files, reconcile leaked reservations, and
+    /// alarm on the forbidden state. Safe to run on a live store, and never
+    /// removes anything a live name still needs. Exits non-zero if it alarms.
+    Gc {
+        /// Reap/reconcile grace, in seconds: a file or reservation must have gone
+        /// untouched at least this long to be eligible, so an in-flight write is
+        /// never mistaken for garbage. Default 900 (15 minutes).
+        #[arg(long, default_value_t = 900)]
+        grace: u64,
+        /// Emit a machine-readable JSON report instead of text.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -212,6 +234,18 @@ fn run() -> CliResult<ExitCode> {
                 );
                 dispatch_object(&repo, command).await
             }
+            Command::Gc { grace, json } => {
+                if cli.server.is_some() {
+                    return Err("gc runs against the local store; --server addresses \
+                                the CID-level CAS only"
+                        .into());
+                }
+                let repo = Repository::new(
+                    FilesystemStore::new(&cli.root),
+                    SqliteNameIndex::open(cli.root.join("index.db")).await?,
+                );
+                run_gc(&repo, grace, json).await
+            }
             command => {
                 if let Some(addr) = &cli.server {
                     let store = crate::service::RemoteStore::connect(addr).await?;
@@ -279,7 +313,61 @@ async fn dispatch(store: &dyn ContentStore, command: Command) -> CliResult<ExitC
             Ok(ExitCode::SUCCESS)
         }
         Command::Serve { .. } => unreachable!("Serve is handled in run(), before dispatch"),
-        Command::Object { .. } => unreachable!("Name is handled in run(), before dispatch"),
+        Command::Object { .. } => unreachable!("Object is handled in run(), before dispatch"),
+        Command::Gc { .. } => unreachable!("Gc is handled in run(), before dispatch"),
+    }
+}
+
+/// Run the reachability audit as the `gc` command and report what it did. Exits
+/// non-zero when it alarms — the forbidden state (a live object missing a block)
+/// must never occur, so surfacing it to a script or operator is the point.
+async fn run_gc(
+    repo: &Repository<FilesystemStore, SqliteNameIndex>,
+    grace_secs: u64,
+    json: bool,
+) -> CliResult<ExitCode> {
+    let report = ReachabilityAuditor
+        .audit(repo, Duration::from_secs(grace_secs))
+        .await?;
+    if json {
+        let value = serde_json::json!({
+            "reclaimed_objects": report.reclaimed.objects,
+            "reclaimed_blocks": report.reclaimed.blocks,
+            "orphan_blocks": report.orphan_blocks,
+            "orphan_objects": report.orphan_objects,
+            "reconciled": report.reconciled,
+            "alarms": report.alarms.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        print_gc_report(&report);
+    }
+    Ok(if report.alarms.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Human-readable GC report. Alarms go to stderr, loudly.
+fn print_gc_report(report: &AuditReport) {
+    println!("reclaimed objects     {}", report.reclaimed.objects);
+    println!("reclaimed blocks      {}", report.reclaimed.blocks);
+    println!(
+        "orphan files reaped   {}",
+        report.orphan_blocks + report.orphan_objects
+    );
+    println!("refcounts reconciled  {}", report.reconciled);
+    if report.alarms.is_empty() {
+        println!("alarms                none — every invariant holds");
+    } else {
+        eprintln!(
+            "\nALARM: {} invariant violation(s) — this must never happen; investigate:",
+            report.alarms.len()
+        );
+        for violation in &report.alarms {
+            eprintln!("  {violation:?}");
+        }
     }
 }
 
