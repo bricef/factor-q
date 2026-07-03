@@ -161,3 +161,48 @@ fn named_operations() {
         "get of a removed name should fail"
     );
 }
+
+#[test]
+fn gc_reclaims_unreferenced_and_spares_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let keep = dir.path().join("keep.bin");
+    let drop = dir.path().join("drop.bin");
+    std::fs::write(&keep, vec![1u8; 20_000]).unwrap();
+    std::fs::write(&drop, vec![2u8; 20_000]).unwrap();
+
+    run(root, &["object", "put", "keep", keep.to_str().unwrap()]);
+    run(root, &["object", "put", "drop", drop.to_str().unwrap()]);
+    // Remove one name → its object is now unreferenced (dead).
+    assert!(run(root, &["object", "rm", "drop"]).status.success());
+
+    // gc reclaims the dead object and reports no alarms.
+    let out = run(root, &["gc"]);
+    assert!(
+        out.status.success(),
+        "gc: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("reclaimed objects"), "gc report: {text}");
+    assert!(
+        text.contains("alarms                none"),
+        "gc report: {text}"
+    );
+
+    // The live name survives untouched.
+    assert_eq!(
+        run(root, &["object", "get", "keep"]).stdout,
+        vec![1u8; 20_000]
+    );
+
+    // A second gc is a clean no-op — nothing left to reclaim, still no alarms.
+    let out = run(root, &["gc", "--json"]);
+    assert!(out.status.success());
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        json.contains("\"reclaimed_objects\": 0"),
+        "second gc: {json}"
+    );
+    assert!(json.contains("\"alarms\": []"), "second gc: {json}");
+}
