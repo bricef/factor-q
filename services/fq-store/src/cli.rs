@@ -1,7 +1,8 @@
 //! `fq-cas` — a command-line interface over the content-addressed store.
 //!
-//! A small standalone tool that exercises the M1a CAS: store files (or
-//! stdin), read content back by id, and query presence and size. The store
+//! Four surfaces: content-addressed ops (store/read by id), named objects (a
+//! name → content mapping with version history), maintenance (`gc`), and
+//! access control (`key`/`grant`/`token` — the operator surface). The store
 //! lives under a root directory (`--root`, env `FQ_CAS_ROOT`, default
 //! `./.fq-cas`).
 
@@ -17,8 +18,9 @@ use std::collections::BTreeSet;
 
 use crate::grants::{Grantor, Principal, Scope, Verb};
 use crate::{
-    AuditReport, Cid, ContentStore, ReachabilityAuditor, Repository, SqliteGrantLog,
-    SqliteNameIndex, Stats, StoreError, TokenMinter, TokenVerifier, generate_keypair,
+    AuditReport, Cid, ContentStore, DEFAULT_TOKEN_TTL, ReachabilityAuditor, Repository,
+    SqliteGrantLog, SqliteNameIndex, Stats, StoreError, TokenMinter, TokenVerifier,
+    generate_keypair,
 };
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -107,8 +109,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Serve the local store over the network (unauthenticated; localhost
-    /// only until M2). Clients connect with `--server`.
+    /// Serve the local store over the network (unauthenticated; keep it
+    /// localhost-only — token-gated remote exposure of the named service
+    /// arrives with M5). Clients connect with `--server`.
     Serve {
         /// Address to bind (host:port).
         #[arg(long, default_value = "127.0.0.1:9000")]
@@ -207,9 +210,9 @@ enum TokenCommand {
     Mint {
         /// The agent id.
         agent: String,
-        /// Token TTL in seconds. The default (300) is deliberate — see the
+        /// Token TTL in seconds. The default is deliberate — see the
         /// access-control guide before raising it.
-        #[arg(long, default_value_t = 300)]
+        #[arg(long, default_value_t = DEFAULT_TOKEN_TTL.as_secs())]
         ttl: u64,
         /// Hex Ed25519 private key for minting.
         #[arg(long, env = "FQ_BISCUIT_PRIVATE_KEY", hide_env_values = true)]
@@ -329,7 +332,7 @@ fn run() -> CliResult<ExitCode> {
             Command::Serve { bind } => {
                 let store = std::sync::Arc::new(FilesystemStore::new(&cli.root));
                 eprintln!(
-                    "fq-cas serving {} on {bind} (unauthenticated — localhost only until M2)",
+                    "fq-cas serving {} on {bind} (unauthenticated — keep localhost-only; token-gated remote access is M5)",
                     cli.root.display()
                 );
                 crate::service::serve(&bind, store).await?;
@@ -487,10 +490,12 @@ async fn dispatch_grant(grants: &SqliteGrantLog, command: GrantCommand) -> CliRe
                 let rows: Vec<_> = live
                     .iter()
                     .map(|g| {
+                        // Structured for machine consumers: verbs as an array,
+                        // scope as {kind, value}. Text output keeps the sugar.
                         serde_json::json!({
                             "id": g.id,
-                            "verbs": verbs_display(&g.verbs),
-                            "scope": scope_display(&g.scope),
+                            "verbs": g.verbs.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+                            "scope": { "kind": g.scope.kind(), "value": g.scope.value() },
                         })
                     })
                     .collect();
@@ -523,7 +528,7 @@ async fn dispatch_grant(grants: &SqliteGrantLog, command: GrantCommand) -> CliRe
             })
         }
         GrantCommand::Rm { id } => {
-            if grants.grantor_of(id).await?.is_none() {
+            if grants.issued_grant(id).await?.is_none() {
                 return Err(format!("grant {id} does not exist").into());
             }
             grants.append_revoked(id).await?;
@@ -581,7 +586,8 @@ fn principal(agent: &str) -> CliResult<Principal> {
     let principal = Principal::Agent(agent.to_string());
     if !principal.has_valid_id() {
         return Err(format!(
-            "'{agent}' is not a valid agent id (non-empty; no dots, wildcards, or whitespace)"
+            "'{agent}' is not a valid agent id \
+             (non-empty; no dots, wildcards, whitespace, or control characters)"
         )
         .into());
     }
@@ -589,14 +595,10 @@ fn principal(agent: &str) -> CliResult<Principal> {
 }
 
 fn parse_verb(s: &str) -> CliResult<Verb> {
-    match s {
-        "read" => Ok(Verb::Read),
-        "write" => Ok(Verb::Write),
-        "delete" => Ok(Verb::Delete),
-        "list" => Ok(Verb::List),
-        "grant" => Ok(Verb::Grant),
-        other => Err(format!("unknown verb '{other}' (read|write|delete|list|grant)").into()),
-    }
+    Verb::from_token(s).ok_or_else(|| {
+        let names: Vec<_> = Verb::ALL.iter().map(|v| v.as_str()).collect();
+        format!("unknown verb '{s}' ({})", names.join("|")).into()
+    })
 }
 
 /// Parse `read,write`-style verb lists; `all` is every verb.
@@ -632,13 +634,7 @@ fn scope_display(scope: &Scope) -> String {
 fn verbs_display(verbs: &BTreeSet<Verb>) -> String {
     verbs
         .iter()
-        .map(|v| match v {
-            Verb::Read => "read",
-            Verb::Write => "write",
-            Verb::Delete => "delete",
-            Verb::List => "list",
-            Verb::Grant => "grant",
-        })
+        .map(|v| v.as_str())
         .collect::<Vec<_>>()
         .join(",")
 }

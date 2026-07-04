@@ -1,4 +1,4 @@
-//! Capability tokens (M2 slice 4) — biscuit mint, verify, and attenuation.
+//! Capability tokens (M2 access control) — biscuit mint, verify, attenuate.
 //!
 //! A token is portable, cryptographically-verifiable proof of **identity**
 //! (the principal), **freshness** (a TTL check), a **rights snapshot** (the
@@ -7,9 +7,9 @@
 //! reads the projection ([`crate::SqliteGrantLog::live_grants_for`]) with the
 //! private key; verification needs only the public key (ADR-0023 F4).
 //!
-//! Two authorization semantics, deliberately distinct (see the
-//! [access-control guide](../../../docs/guide/access-control.md) and the M2
-//! plan's belt-and-braces decision):
+//! Two authorization semantics, deliberately distinct (see the access-control
+//! guide, `docs/guide/access-control.md`, and the M2 plan's belt-and-braces
+//! decision):
 //!
 //! - [`VerifiedToken::authorizes`] — the **offline / remote** semantic: the
 //!   operation must be covered by a `right` embedded in the token (and pass
@@ -44,8 +44,8 @@ use crate::{Result, StoreError};
 pub const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(300);
 
 /// Generate a fresh Ed25519 keypair, hex-encoded as `(private, public)` —
-/// the `fq-cas key generate` helper (CLI in M2 slice 6). The private key
-/// belongs to the minting store only; verifiers get the public key.
+/// backs the `fq-cas key generate` command. The private key belongs to the
+/// minting store only; verifiers get the public key.
 pub fn generate_keypair() -> (String, String) {
     let keypair = KeyPair::new();
     (
@@ -71,14 +71,7 @@ fn run_limits() -> RunLimits {
 }
 
 fn verb_term(verb: Verb) -> Term {
-    let s = match verb {
-        Verb::Read => "read",
-        Verb::Write => "write",
-        Verb::Delete => "delete",
-        Verb::List => "list",
-        Verb::Grant => "grant",
-    };
-    Term::Str(s.to_string())
+    Term::Str(verb.as_str().to_string())
 }
 
 fn date_term(at: SystemTime) -> Term {
@@ -98,10 +91,11 @@ pub struct TokenMinter {
 impl TokenMinter {
     /// A minter from the hex-encoded Ed25519 private key (CLI arg
     /// `--biscuit-private-key` / env `FQ_BISCUIT_PRIVATE_KEY`) and a token
-    /// TTL ([`DEFAULT_TOKEN_TTL`] unless configured).
+    /// `ttl` (callers pass [`DEFAULT_TOKEN_TTL`] for the default). The error
+    /// deliberately does not echo the supplied key material.
     pub fn from_private_key_hex(private_key_hex: &str, ttl: Duration) -> Result<Self> {
         let private = PrivateKey::from_bytes_hex(private_key_hex, Algorithm::Ed25519)
-            .map_err(|e| token_err("private key", e))?;
+            .map_err(|_| StoreError::Token("private key: malformed hex or wrong length".into()))?;
         Ok(Self {
             keypair: KeyPair::from(&private),
             ttl,
@@ -141,15 +135,12 @@ impl TokenMinter {
 
         // Rights, flattened one fact per verb: right(verb, kind, value).
         for (i, grant) in grants.iter().enumerate() {
-            let (kind, value) = match &grant.scope {
-                Scope::Name(name) => ("name", name.clone()),
-                Scope::Namespace(ns) => ("namespace", ns.clone()),
-            };
+            let (kind, value) = (grant.scope.kind(), grant.scope.value());
             for verb in &grant.verbs {
                 let mut params = HashMap::new();
                 params.insert("verb".to_string(), verb_term(*verb));
                 params.insert("kind".to_string(), Term::Str(kind.to_string()));
-                params.insert("value".to_string(), Term::Str(value.clone()));
+                params.insert("value".to_string(), Term::Str(value.to_string()));
                 builder = builder
                     .code_with_params("right({verb}, {kind}, {value});", params, HashMap::new())
                     .map_err(|e| token_err(&format!("mint right {i}"), e))?;
@@ -173,7 +164,7 @@ impl TokenVerifier {
     /// A verifier from the hex-encoded Ed25519 public key.
     pub fn from_public_key_hex(public_key_hex: &str) -> Result<Self> {
         let root = PublicKey::from_bytes_hex(public_key_hex, Algorithm::Ed25519)
-            .map_err(|e| token_err("public key", e))?;
+            .map_err(|_| StoreError::Token("public key: malformed hex or wrong length".into()))?;
         Ok(Self { root })
     }
 
@@ -457,6 +448,30 @@ mod tests {
         assert!(verified.permits(Verb::Read, "research.papers.doc1", now()));
         assert!(!verified.permits(Verb::Write, "research.papers.doc1", now()));
         assert!(!verified.permits(Verb::Read, "docs.readme", now()));
+    }
+
+    #[test]
+    fn attenuation_respects_the_namespace_segment_boundary() {
+        // A token with rights over `research` (which covers `research.papersX`),
+        // attenuated to the namespace `research.papers`, must NOT act on
+        // `research.papersX` — the attenuation check is segment-aware, not a
+        // raw prefix. This pins the boundary in both semantics (the parent's
+        // rights would otherwise mask a missing `.` in the attenuation).
+        let (minter, verifier) = minter();
+        let grants = [live(1, &[Verb::Read], Scope::Namespace("research".into()))];
+        let token = minter.mint(&alice(), &grants).unwrap();
+        let narrowed = verifier
+            .attenuate(
+                &token,
+                Some(&Scope::Namespace("research.papers".into())),
+                None,
+            )
+            .unwrap();
+        let verified = verifier.verify(&narrowed).unwrap();
+        assert!(verified.authorizes(Verb::Read, "research.papers.doc1", now()));
+        assert!(!verified.authorizes(Verb::Read, "research.papersX", now()));
+        assert!(verified.permits(Verb::Read, "research.papers.doc1", now()));
+        assert!(!verified.permits(Verb::Read, "research.papersX", now()));
     }
 
     #[test]

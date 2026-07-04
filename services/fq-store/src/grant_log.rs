@@ -1,4 +1,4 @@
-//! The durable grant-event log and its fan-out bus (M2 slice 2).
+//! The durable grant-event log and its fan-out bus (M2 access control).
 //!
 //! Grants are event-sourced (ADR-0023 F4). This module supplies the log and
 //! its transport, split so that **bus failure can never affect store
@@ -8,7 +8,7 @@
 //!   (SQLite database #2 per ADR-0024, alongside the storage index). Appends
 //!   assign the [`GrantId`]s; replay feeds the projection and the reference
 //!   model. Nothing about appending or replaying touches the network.
-//! - The **projection** (M2 slice 3) — the queryable current-permission state
+//! - The **projection** — the queryable current-permission state
 //!   ([`can`](SqliteGrantLog::can), [`live_grants_for`](SqliteGrantLog::live_grants_for)),
 //!   stored beside the log and updated **in the same transaction** as every
 //!   append, so projection ≡ replay at every commit point (A5). Liveness (the
@@ -65,7 +65,7 @@ const MIGRATIONS: &[&str] = &[
         occurred_at   INTEGER NOT NULL,
         published     INTEGER NOT NULL DEFAULT 0
     );",
-    // v2 — the grant projection (M2 slice 3): the queryable current-permission
+    // v2 — the grant projection: the queryable current-permission
     // state, derived from the log and updated in the same transaction as every
     // append, so projection ≡ replay at every commit point (A5).
     // `projected_grants.live` caches chain liveness; `projected_revocations`
@@ -133,12 +133,8 @@ impl SqliteGrantLog {
             Grantor::Agent(id) => Some(id.clone()),
         };
         let Principal::Agent(grantee_agent) = grantee;
-        let verbs_json =
-            serde_json::to_string(verbs).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-        let (scope_kind, scope_value) = match scope {
-            Scope::Name(name) => ("name", name.clone()),
-            Scope::Namespace(ns) => ("namespace", ns.clone()),
-        };
+        let verbs_json = encode_verbs(verbs);
+        let (scope_kind, scope_value) = (scope.kind(), scope.value().to_string());
         // Log append and projection update commit atomically: at every commit
         // point the projection equals a replay of the log (A5).
         let mut tx = self.pool.begin().await?;
@@ -298,11 +294,8 @@ impl EventRow {
                 )
                 .map_err(|_| corrupt("verbs", self.seq))?;
                 let value = self.scope_value.ok_or_else(|| corrupt("scope", self.seq))?;
-                let scope = match self.scope_kind.as_deref() {
-                    Some("name") => Scope::Name(value),
-                    Some("namespace") => Scope::Namespace(value),
-                    _ => return Err(corrupt("scope kind", self.seq)),
-                };
+                let scope = Scope::from_kind_value(self.scope_kind.as_deref().unwrap_or(""), value)
+                    .ok_or_else(|| corrupt("scope kind", self.seq))?;
                 Ok(GrantEvent::Granted {
                     id: self.seq as GrantId,
                     grantor,
@@ -333,15 +326,8 @@ impl EventRow {
 
 /// The stable payload-schema id for an event (`factor-q/<kind>@1`): operator
 /// grants are `granted`, agent grants (delegations) are `delegated`.
-fn schema_id(event: &GrantEvent) -> &'static str {
-    match event {
-        GrantEvent::Granted {
-            grantor: Grantor::Operator,
-            ..
-        } => "factor-q/granted@1",
-        GrantEvent::Granted { .. } => "factor-q/delegated@1",
-        GrantEvent::Revoked { .. } => "factor-q/revoked@1",
-    }
+fn schema_id(event: &GrantEvent) -> String {
+    format!("factor-q/{}@1", event.wire_kind())
 }
 
 /// A grant event as published on the bus: the store's compact envelope
@@ -361,15 +347,7 @@ pub struct WireGrantEvent {
 impl WireGrantEvent {
     /// The NATS subject this event publishes to (`fq.store.grant.<kind>`).
     pub fn subject(&self) -> String {
-        let kind = match &self.event {
-            GrantEvent::Granted {
-                grantor: Grantor::Operator,
-                ..
-            } => "granted",
-            GrantEvent::Granted { .. } => "delegated",
-            GrantEvent::Revoked { .. } => "revoked",
-        };
-        format!("fq.store.grant.{kind}")
+        format!("fq.store.grant.{}", self.event.wire_kind())
     }
 }
 
@@ -470,11 +448,9 @@ pub mod nats {
         }
 
         fn subject_for(&self, event: &WireGrantEvent) -> String {
-            // The envelope computes the canonical `fq.store.grant.<kind>`;
-            // re-prefix so tests can publish to an isolated subject space.
-            let kind = event.subject();
-            let kind = kind.rsplit('.').next().unwrap_or("event");
-            format!("{}.{kind}", self.subject_prefix)
+            // The canonical subject is `fq.store.grant.<kind>`; re-prefix with
+            // the configured root so tests can publish to an isolated space.
+            format!("{}.{}", self.subject_prefix, event.event.wire_kind())
         }
     }
 
@@ -503,7 +479,9 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         let target = i as i64 + 1;
         if version < target {
             let mut tx = pool.begin().await?;
-            sqlx::query(migration).execute(&mut *tx).await?;
+            // `raw_sql` steps through multi-statement migration scripts (v2 is
+            // several statements), matching the storage index's `migrate`.
+            sqlx::raw_sql(migration).execute(&mut *tx).await?;
             sqlx::query(&format!("PRAGMA user_version = {target}"))
                 .execute(&mut *tx)
                 .await?;
@@ -798,8 +776,9 @@ mod tests {
     }
 }
 
-/// One live grant as the projection holds it — what the token minter (M2
-/// slice 4) embeds and the gate (slice 5) consults.
+/// One live grant as the projection holds it — what the token minter
+/// ([`crate::TokenMinter`]) embeds and the gate ([`crate::GatedRepository`])
+/// consults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveGrant {
     /// The grant's id (its log seq).
@@ -967,9 +946,12 @@ async fn recompute_liveness(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Res
                 Some(delegator) => grants[..i].iter().any(|sup| {
                     sup.live
                         && sup.grantee_agent == *delegator
-                        && sup.verbs.contains(&Verb::Grant)
-                        && sup.verbs.is_superset(&grants[i].verbs)
-                        && sup.scope.covers_scope(&grants[i].scope)
+                        && crate::grants::supports(
+                            &sup.verbs,
+                            &sup.scope,
+                            &grants[i].verbs,
+                            &grants[i].scope,
+                        )
                 }),
             };
         grants[i].live = live;
@@ -996,6 +978,13 @@ async fn set_cursor(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, seq: i64) -> R
     Ok(())
 }
 
+/// Encode a verb set to its stored JSON. Infallible in practice — a
+/// `BTreeSet<Verb>` always serializes — so a failure would be a serde bug, not
+/// stored-data corruption.
+fn encode_verbs(verbs: &BTreeSet<Verb>) -> String {
+    serde_json::to_string(verbs).expect("a verb set always serializes")
+}
+
 /// Decode a stored verbs JSON array; a malformed value is corruption.
 fn decode_verbs(json: &str, id: i64) -> Result<BTreeSet<Verb>> {
     serde_json::from_str(json)
@@ -1005,13 +994,9 @@ fn decode_verbs(json: &str, id: i64) -> Result<BTreeSet<Verb>> {
 /// Decode a stored (scope_kind, scope_value) pair; a malformed kind is
 /// corruption.
 fn decode_scope(kind: &str, value: String, id: i64) -> Result<Scope> {
-    match kind {
-        "name" => Ok(Scope::Name(value)),
-        "namespace" => Ok(Scope::Namespace(value)),
-        _ => Err(StoreError::Corrupt(format!(
-            "projected grant {id}: invalid scope kind {kind:?}"
-        ))),
-    }
+    Scope::from_kind_value(kind, value).ok_or_else(|| {
+        StoreError::Corrupt(format!("projected grant {id}: invalid scope kind {kind:?}"))
+    })
 }
 
 #[cfg(test)]
@@ -1275,18 +1260,25 @@ mod projection_tests {
 }
 
 impl SqliteGrantLog {
-    /// Who issued the grant `id`, if such a grant exists (revoked or not) —
-    /// the gate's revoke rule consults this (an agent may revoke only grants
-    /// it issued; the operator may revoke anything).
-    pub async fn grantor_of(&self, id: GrantId) -> Result<Option<Grantor>> {
-        let row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT grantor_agent FROM projected_grants WHERE id = ?")
-                .bind(id as i64)
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(row.map(|(agent,)| match agent {
-            Some(agent) => Grantor::Agent(agent),
-            None => Grantor::Operator,
-        }))
+    /// The `(grantor, scope)` of the grant `id`, if it exists (revoked or
+    /// not) — the gate's revoke rule consults the grantor (an agent may revoke
+    /// only grants it issued; the operator may revoke anything) and the scope
+    /// (to enforce the caller's token bounds on the `grant` verb).
+    pub async fn issued_grant(&self, id: GrantId) -> Result<Option<(Grantor, Scope)>> {
+        let row: Option<(Option<String>, String, String)> = sqlx::query_as(
+            "SELECT grantor_agent, scope_kind, scope_value FROM projected_grants WHERE id = ?",
+        )
+        .bind(id as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|(agent, scope_kind, scope_value)| {
+            let grantor = match agent {
+                Some(agent) => Grantor::Agent(agent),
+                None => Grantor::Operator,
+            };
+            let scope = decode_scope(&scope_kind, scope_value, id as i64)?;
+            Ok((grantor, scope))
+        })
+        .transpose()
     }
 }

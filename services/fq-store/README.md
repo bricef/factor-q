@@ -5,10 +5,13 @@ Content-addressed storage and semantic index for
 substrate the memory and skill services build on, and it ships **`fq-cas`**,
 a standalone CLI over the content store.
 
-**Status: M1a + M1b** — the content-addressed store (CAS) and the storage
-index (names, version history, two-level reference counts). Garbage
-collection (M1c) and access control (M2) are next (see
-[the plan](../../docs/plans/active/2026-06-27-storage-vector-foundation.md)).
+**Status: M1a–M1c + M2** — the content-addressed store (CAS), the storage
+index (names, version history, two-level reference counts), garbage collection
+(M1c), and access control (M2: grants, capability tokens, the op-boundary
+gate). The gate is a library API driven by the CLI's operator paths; remote
+exposure of the named service is M5 (see
+[the plan](../../docs/plans/active/2026-06-27-storage-vector-foundation.md) and
+the [access-control guide](../../docs/guide/access-control.md)).
 
 ## `fq-cas` — the content store CLI
 
@@ -72,8 +75,9 @@ fq-cas --server 127.0.0.1:9000 put file      # client: every command works remot
 fq-cas --server 127.0.0.1:9000 metrics
 ```
 
-> The server is **unauthenticated** for now (capability tokens land in M2),
-> so keep it on localhost.
+> This CID-level `serve` is **unauthenticated** — the M2 access-control gate
+> sits at the named `Repository` layer, not on this endpoint. Keep it on
+> localhost; token-gated remote exposure of the named service is M5's charter.
 
 ## Library
 

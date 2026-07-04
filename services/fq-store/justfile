@@ -10,14 +10,22 @@ fmt-check:
 lint:
     cargo clippy --all-targets --all-features
 
-# Run tests, or forward cargo args (e.g. `just test conformance`).
-# --all-features builds the fq-cas binary so the CLI test runs.
+# Run tests, or forward cargo args (e.g. `just test conformance`). Hermetic:
+# `cli,service` builds the fq-cas binary and tarpc service without pulling in
+# the `bus` feature, whose grant-bus integration test needs a live NATS broker.
 test *args:
-    cargo test --all-features "$@"
+    cargo test --features cli,service "$@"
+
+# The NATS-backed grant-bus integration test (needs a broker: `just infra-up`
+# from the repo root). Kept out of the hermetic `test`/`ci` path.
+test-bus:
+    cargo test --features bus --test grant_bus
 
 # Build the docs with warnings denied — catches broken intra-doc links.
+# `--all-features` type-checks the `bus` code too (compiling needs no broker).
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
-# All quality checks — no external services required (pure filesystem CAS).
+# All quality checks — hermetic, no external services required. Run `test-bus`
+# separately (with NATS up) to cover the bus integration test.
 ci: fmt-check lint doc test

@@ -4,13 +4,12 @@
 //! vocabulary (principals, verbs, scopes, grant events) and a deliberately
 //! naive, obviously-correct reference model ([`GrantModel`]) that answers
 //! `can(principal, verb, resource)`. The design is ADR-0023 F4 (event-sourced
-//! grant claims); the claims it must satisfy are A1–A6 in the
-//! [M2 plan](https://github.com/bricef/factor-q) (`docs/plans/active/`,
-//! 2026-07-03): default-deny (A1), revocation wins (A3), delegation is
-//! grant-gated (A4). Later milestones' machinery — the grant projection, the
-//! biscuit token gate — must agree with this model; the property tests here
-//! prove the model itself, and differential tests elsewhere prove the
-//! implementations against it.
+//! grant claims); the claims it must satisfy are A1–A6 in the M2 plan
+//! (`docs/plans/active/2026-07-03-m2-access-control.md`): default-deny (A1),
+//! revocation wins (A3), delegation is grant-gated (A4). The projection
+//! ([`crate::SqliteGrantLog`]) and the token gate ([`crate::GatedRepository`])
+//! must agree with this model; the property tests here prove the model itself,
+//! and the differential tests in `grant_log` prove the projection against it.
 //!
 //! Semantics pinned by this model:
 //!
@@ -28,8 +27,9 @@
 //! - **The log may contain garbage; garbage confers nothing.** `apply` is
 //!   total and deterministic (a projection must never diverge on replay):
 //!   an unauthorized delegation, a duplicate grant id (first wins), or a
-//!   revocation of an unknown id are all tolerated — the API gate (M2 slice 5)
-//!   rejects them up front, but nothing relies on that for safety.
+//!   revocation of an unknown id are all tolerated — the op-boundary gate
+//!   ([`crate::GatedRepository`]) rejects them up front, but nothing relies on
+//!   that for safety.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -99,15 +99,43 @@ pub enum Verb {
 }
 
 impl Verb {
+    /// Every verb, in declaration order — the single source of truth for the
+    /// verb set. The lowercase [`as_str`](Verb::as_str) names are the wire,
+    /// DB, datalog, and CLI encoding (the serde derive above matches them).
+    pub const ALL: [Verb; 5] = [
+        Verb::Read,
+        Verb::Write,
+        Verb::Delete,
+        Verb::List,
+        Verb::Grant,
+    ];
+
     /// Every verb — the widest possible grant.
     pub fn all() -> BTreeSet<Verb> {
-        BTreeSet::from([
-            Verb::Read,
-            Verb::Write,
-            Verb::Delete,
-            Verb::List,
-            Verb::Grant,
-        ])
+        Self::ALL.into_iter().collect()
+    }
+
+    /// The canonical lowercase name, used everywhere a verb is encoded as a
+    /// string (DB columns, wire JSON via serde, biscuit datalog, the CLI).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Verb::Read => "read",
+            Verb::Write => "write",
+            Verb::Delete => "delete",
+            Verb::List => "list",
+            Verb::Grant => "grant",
+        }
+    }
+
+    /// Parse a verb from its canonical name; `None` if unrecognized.
+    pub fn from_token(s: &str) -> Option<Verb> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+}
+
+impl std::fmt::Display for Verb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -125,6 +153,32 @@ pub enum Scope {
 }
 
 impl Scope {
+    /// The persisted discriminant (`"name"` | `"namespace"`) — the single
+    /// source for the DB `scope_kind` column and the token datalog `kind`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Scope::Name(_) => "name",
+            Scope::Namespace(_) => "namespace",
+        }
+    }
+
+    /// The scope's string value (the name, or the namespace root).
+    pub fn value(&self) -> &str {
+        match self {
+            Scope::Name(v) | Scope::Namespace(v) => v,
+        }
+    }
+
+    /// Reconstruct a scope from its persisted `(kind, value)` pair; `None` if
+    /// `kind` is neither `"name"` nor `"namespace"` (a corrupt row).
+    pub fn from_kind_value(kind: &str, value: String) -> Option<Scope> {
+        match kind {
+            "name" => Some(Scope::Name(value)),
+            "namespace" => Some(Scope::Namespace(value)),
+            _ => None,
+        }
+    }
+
     /// Whether `resource` (a dotted name) falls inside this scope.
     pub fn covers(&self, resource: &str) -> bool {
         match self {
@@ -154,13 +208,33 @@ fn namespace_covers(ns: &str, name: &str) -> bool {
         || (name.len() > ns.len() && name.starts_with(ns) && name.as_bytes()[ns.len()] == b'.')
 }
 
-/// A grant's identity — assigned by the event log (M2 slice 2); unique per
-/// store. Revocations reference it, and delegation chains order by it.
+/// The delegation-support predicate (A4), in one place: may a grant conferring
+/// `supporter_verbs` over `supporter_scope` authorize issuing a grant of
+/// `verbs` over `scope`? It can iff it carries the `Grant` verb, its verbs are
+/// a superset, and its scope covers the delegated scope. Shared by the
+/// reference model's liveness ([`GrantModel`]), the projection's liveness
+/// recompute, and the gate's up-front delegation check, so the three cannot
+/// drift.
+pub(crate) fn supports(
+    supporter_verbs: &BTreeSet<Verb>,
+    supporter_scope: &Scope,
+    verbs: &BTreeSet<Verb>,
+    scope: &Scope,
+) -> bool {
+    supporter_verbs.contains(&Verb::Grant)
+        && supporter_verbs.is_superset(verbs)
+        && supporter_scope.covers_scope(scope)
+}
+
+/// A grant's identity — assigned by the event log ([`crate::SqliteGrantLog`]);
+/// unique per store. Revocations reference it, and delegation chains order by
+/// it.
 pub type GrantId = u64;
 
 /// A grant-domain event. This is the domain vocabulary; the wire schemas
-/// (envelopes, `factor-q/granted@1`-style ids, NATS subjects) wrap it in M2
-/// slice 2. A *delegation* is a `Granted` whose grantor is an agent.
+/// (envelopes, `factor-q/granted@1`-style ids, NATS subjects) wrap it in
+/// [`crate::WireGrantEvent`]. A *delegation* is a `Granted` whose grantor is an
+/// agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantEvent {
@@ -175,6 +249,25 @@ pub enum GrantEvent {
     /// Withdraw the grant with `id` (and, transitively, every delegation
     /// standing on it — see the module docs).
     Revoked { id: GrantId },
+}
+
+impl GrantEvent {
+    /// The wire kind for this event — `"granted"` (operator), `"delegated"`
+    /// (agent grantor), or `"revoked"`. The single source for the schema id
+    /// and the NATS subject suffix.
+    pub(crate) fn wire_kind(&self) -> &'static str {
+        match self {
+            GrantEvent::Granted {
+                grantor: Grantor::Operator,
+                ..
+            } => "granted",
+            GrantEvent::Granted {
+                grantor: Grantor::Agent(_),
+                ..
+            } => "delegated",
+            GrantEvent::Revoked { .. } => "revoked",
+        }
+    }
 }
 
 /// One applied grant, as the model stores it.
@@ -244,38 +337,54 @@ impl GrantModel {
         if principal.owns(resource) {
             return true;
         }
+        let live = self.live_ids();
         self.grants.iter().any(|(id, grant)| {
-            grant.grantee == *principal
+            live.contains(id)
+                && grant.grantee == *principal
                 && grant.verbs.contains(&verb)
                 && grant.scope.covers(resource)
-                && self.is_live(*id)
         })
     }
 
-    /// Whether the grant `id` currently confers authority: present, not
-    /// revoked, and — for a delegation — still standing on a live supporting
-    /// grant (which must be *earlier*, so chains are well-founded).
-    fn is_live(&self, id: GrantId) -> bool {
-        if self.revoked.contains(&id) {
-            return false;
-        }
-        let Some(grant) = self.grants.get(&id) else {
-            return false;
-        };
-        match &grant.grantor {
-            Grantor::Operator => true,
-            Grantor::Agent(agent) => {
-                let delegator = Principal::Agent(agent.clone());
-                self.grants.iter().any(|(sup_id, sup)| {
-                    *sup_id < id
-                        && sup.grantee == delegator
-                        && sup.verbs.contains(&Verb::Grant)
-                        && sup.verbs.is_superset(&grant.verbs)
-                        && sup.scope.covers_scope(&grant.scope)
-                        && self.is_live(*sup_id)
-                })
+    /// Whether the grant `id` currently confers authority (present, not
+    /// revoked, and — for a delegation — its chain still stands).
+    pub fn is_live(&self, id: GrantId) -> bool {
+        self.live_ids().contains(&id)
+    }
+
+    /// The set of currently-live grant ids, computed in one forward pass in id
+    /// order — the same algorithm the projection uses (`recompute_liveness`),
+    /// so model and projection cannot diverge. A grant is live iff it is not
+    /// revoked and either operator-issued or backed by a strictly-earlier,
+    /// already-live grant that [`supports`] the delegation. The forward pass is
+    /// exact because liveness depends only on strictly-earlier grants, and it
+    /// avoids the exponential blow-up of re-walking chains per query.
+    fn live_ids(&self) -> BTreeSet<GrantId> {
+        let mut ids: Vec<GrantId> = self.grants.keys().copied().collect();
+        ids.sort_unstable();
+        let mut live = BTreeSet::new();
+        for id in ids {
+            let grant = &self.grants[&id];
+            if self.revoked.contains(&id) {
+                continue;
+            }
+            let ok = match &grant.grantor {
+                Grantor::Operator => true,
+                Grantor::Agent(agent) => {
+                    let delegator = Principal::Agent(agent.clone());
+                    self.grants.iter().any(|(sup_id, sup)| {
+                        *sup_id < id
+                            && live.contains(sup_id)
+                            && sup.grantee == delegator
+                            && supports(&sup.verbs, &sup.scope, &grant.verbs, &grant.scope)
+                    })
+                }
+            };
+            if ok {
+                live.insert(id);
             }
         }
+        live
     }
 }
 
@@ -306,6 +415,47 @@ mod tests {
             verbs,
             scope,
         }
+    }
+
+    // ---- encodings: the wire/DB names must match the canonical strings ----
+
+    #[test]
+    fn verb_serde_matches_as_str() {
+        // The DB `verbs` columns and the bus JSON persist verbs via serde; the
+        // datalog/CLI use `as_str`. They MUST agree, byte for byte.
+        for verb in Verb::ALL {
+            let json = serde_json::to_string(&verb).unwrap();
+            assert_eq!(json, format!("\"{}\"", verb.as_str()));
+            assert_eq!(Verb::from_token(verb.as_str()), Some(verb));
+        }
+        assert_eq!(Verb::from_token("nope"), None);
+    }
+
+    #[test]
+    fn supports_is_grant_gated_superset_and_covering() {
+        let wide = BTreeSet::from([Verb::Read, Verb::Write, Verb::Grant]);
+        let ns = Scope::Namespace("research".into());
+        // Grant verb + superset verbs + covering scope → supports.
+        assert!(supports(
+            &wide,
+            &ns,
+            &BTreeSet::from([Verb::Read]),
+            &Scope::Namespace("research.papers".into())
+        ));
+        // No Grant verb → never supports.
+        assert!(!supports(
+            &BTreeSet::from([Verb::Read, Verb::Write]),
+            &ns,
+            &BTreeSet::from([Verb::Read]),
+            &Scope::Name("research.x".into())
+        ));
+        // Wider scope than held → no support.
+        assert!(!supports(
+            &wide,
+            &Scope::Namespace("research.papers".into()),
+            &BTreeSet::from([Verb::Read]),
+            &Scope::Namespace("research".into())
+        ));
     }
 
     // ---- A1: default-deny + own scope ----

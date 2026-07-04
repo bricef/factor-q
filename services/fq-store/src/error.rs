@@ -53,9 +53,11 @@ pub enum StoreError {
     #[error("token error: {0}")]
     Token(String),
 
-    /// An authorization denial: the credential is valid but the principal
-    /// lacks authority for the operation (no live covering grant, or the
-    /// bearer attenuated it away). Default-deny surfaces here (M2).
+    /// An authorization denial: the credential parsed and its signature is
+    /// valid, but it does not authorize the operation — no live covering
+    /// grant, or the token is expired or attenuated away from the op.
+    /// (A malformed/wrongly-signed credential is [`Self::Token`] instead.)
+    /// Default-deny surfaces here (M2).
     #[error("permission denied: {0}")]
     Denied(String),
 

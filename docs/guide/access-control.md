@@ -7,10 +7,11 @@ revoke**. This implements
 the build is tracked in the
 [M2 plan](../plans/active/2026-07-03-m2-access-control.md).
 
-> **Status:** built and verified — the model, event log, projection,
-> capability tokens, the enforcement gate, and the operator CLI below. The
-> remaining M2 work (fault-injection soak) hardens, but does not change,
-> these semantics.
+> **Status:** built, verified, and soak-tested — the model, event log,
+> projection, capability tokens, the enforcement gate, and the operator CLI
+> below. The gate is a library API: it is exercised in tests and driven by the
+> CLI's operator paths, but is not yet wired to a remote transport (that is
+> M5's charter — see [Where authorization is decided](#where-authorization-is-decided)).
 
 ## The model in one paragraph
 
@@ -26,6 +27,13 @@ agent that itself holds the `grant` verb over a covering scope; a delegation
 can only *narrow* what its delegator holds, and revoking a grant instantly
 invalidates every delegation standing on it, transitively.
 
+Two details worth knowing up front. **Listing** a namespace enumerates its
+whole subtree, so it needs a `list` grant over the **namespace** (a
+`Namespace` scope) — a grant on a single `Name` lets you read that one object
+but not enumerate a tree. And an **agent id** is a plain slug (no dots,
+wildcards, or whitespace); the dot-free rule is what keeps one agent's own
+scope from nesting inside another's.
+
 ## Where authorization is decided
 
 Grants are event-sourced: every grant, delegation, and revocation is an event
@@ -35,10 +43,14 @@ liveness precomputed) is updated **in the same database transaction as every
 event append**, so the projection is never behind the log — not by a little,
 not briefly, not at a crash point.
 
-Events also fan out to NATS (`fq.store.grant.*`) for audit and other
-consumers, but that feed is **never consulted for authorization** — a broker
-outage delays external visibility, never local enforcement, and never grant
-writes (they queue durably and drain when the bus returns).
+Every event is also queued in a durable **outbox** for fan-out to NATS
+(`fq.store.grant.*`) — an audit/replication feed for external consumers. That
+feed is **never consulted for authorization**: a broker outage delays external
+visibility, never local enforcement, and never grant writes (they commit
+locally regardless and the outbox drains when the bus returns). The outbox
+pump (`drain` / the `bus`-feature NATS publisher) is wired into a running
+deployment as part of the service integration; the CLI and library do not
+publish on their own.
 
 ## Revocation semantics and the token TTL
 
@@ -113,7 +125,7 @@ Tokens are minted from an agent's **live** grants (a mint after a revocation
 carries nothing) and verified with only the public key:
 
 ```console
-$ export FQ_BISCUIT_PRIVATE_KEY=8a4b…
+$ export FQ_BISCUIT_PRIVATE_KEY=$(cat store.key)   # avoid the literal in shell history
 $ fq-cas token mint bob --ttl 300
 <base64 token>
 $ fq-cas token attenuate <token> --scope research.papers.reviews.* --verbs read \

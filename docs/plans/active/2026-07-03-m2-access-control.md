@@ -29,9 +29,12 @@ properties and gates every later slice; each slice is green on the fq-store
   bounds only future *remote* verifiers (M5), where new mints already fail and
   extant tokens die with their TTL.
 - **A4 — delegation is grant-gated:** only a principal holding `grant` on a
-  scope can delegate within it, and only attenuated (⊆ its own scope).
-- **A5 — projection ≡ replay:** the projection equals a fresh rebuild from the
-  event log + pending outbox, after any event sequence and at any crash point.
+  scope can delegate within it, and only attenuated (⊆ what the delegator
+  holds — verbs and scope).
+- **A5 — projection ≡ replay:** the projection equals a fresh replay of the
+  local event log, after any event sequence and at any crash point (the outbox
+  is a `published` flag on the same log rows, not a separate source — see the
+  slice-2 decision below).
 - **A6 — availability:** data-plane operations never touch the bus; with the
   publisher down, reads/writes/authorization proceed and grant writes still
   commit locally (outbox), draining when the bus returns.
@@ -50,24 +53,27 @@ properties and gates every later slice; each slice is green on the fq-store
 
 ## Decisions taken up front
 
-- **The event log sits behind a seam.** A small trait (append + replay) with an
-  in-memory implementation for tests and a NATS/JetStream implementation for
-  real — the `ContentStore`/`NameIndex` conformance pattern. fq-store stays
-  hermetically testable; NATS-backed integration tests run against the local
-  infra via the `just` recipes.
+- **The event log sits behind a seam.** *(Refined in slice 2 — see below: the
+  local SQLite log is authoritative and the seam is the publish-only `GrantBus`,
+  not an append+replay trait.)* An in-memory bus implementation for tests and a
+  NATS/JetStream one for real — the `ContentStore`/`NameIndex` conformance
+  pattern. fq-store stays hermetically testable (`just ci`); the NATS-backed
+  integration test runs against the local infra via `just test-bus`.
 - **Publisher failure never affects store availability.** Two rules. The data
   plane (read/write/authorize) makes **no bus calls** — verification is local
   (token + projection). Grant *writes* append to a **durable local outbox** in
   the same transaction that updates the projection, and an async drain publishes
   to NATS with retry; a bus outage delays publication, never grant acceptance.
-  The rebuild contract is therefore `replay(published log) + pending outbox`
-  (A5), and the oracle checks it under outage + crash injection.
+  The rebuild contract is therefore a fresh **replay of the local log** (the
+  `published` flag is metadata on those rows, not a second source), A5, and the
+  oracle checks it under outage + crash injection.
 - **The gate sits at the Repository/service level, not the CAS.** A gating
   layer wraps the named operations and evaluates `can(Principal, Op, Resource)`
   before delegating; `ContentStore` (and the raw `Repository` beneath the gate)
   remain **preserved internal APIs** — same layering lesson as M1c's
-  `BlockStore` split. Prefix/glob grants match the dotted names
-  (`research.papers.*`; `system.agents.<id>.files.*` for harness-only scopes).
+  `BlockStore` split. Grants are scoped by exact **name** or by **namespace**
+  subtree (`research.papers.*`; `system.agents.<id>.files.*` for harness-only
+  scopes) — segment-aware, not raw prefixes.
 - **Keys are config: CLI args + env vars.** `--biscuit-private-key` /
   `FQ_BISCUIT_PRIVATE_KEY` (mint path only) and `--biscuit-public-key` /
   `FQ_BISCUIT_PUBLIC_KEY` (verify path — public key only, per F4). No key
@@ -230,8 +236,37 @@ properties and gates every later slice; each slice is green on the fq-store
   documented: consumers de-duplicate by `seq`.
 
 **Status: all seven slices done.** The A1–A6 claims hold end-to-end — model,
-log + outbox, projection, tokens, gate, CLI, and the fault DST + soak. Next:
-the pre-merge review pass, then merge (the M1c pattern).
+log + outbox, projection, tokens, gate, CLI, and the fault DST + soak.
+
+## Pre-merge review (2026-07-04)
+
+A four-dimension subagent review (security, code quality, docs, consistency),
+every candidate finding then independently verified against the code. Outcome
+and fixes applied:
+
+- **Security: clean.** No authorization bypass and no injection — datalog
+  injection, SQL injection, the dot-free own-scope defense, attenuation-can-
+  only-narrow (checked against biscuit-auth 6.0's `TrustedOrigins`), revoke
+  DoS bounds, and delegation escalation were all verified sound.
+- **Behavior fixes.** `revoke` now enforces the caller's token TTL and
+  attenuation over the grant's scope like every other op (it previously
+  checked only the signature + issuer — fail-safe, but it broke the "every
+  operation" contract); `list` now requires a `List` grant covering the
+  **namespace** (a point `Name` grant no longer enumerates a subtree); token
+  key-parse errors no longer echo supplied key material. New tests pin each,
+  with an injected clock making TTL testable end-to-end.
+- **Refactors.** The delegation-support predicate, the verb↔string encoding,
+  and the scope/wire-kind encodings are each defined once and shared (model,
+  projection, gate, CLI); the reference model's liveness became a forward pass
+  (no more exponential worst case), matching the projection's own algorithm.
+- **Docs.** Stale "until M2" server strings, the "soak remaining" status, the
+  NATS fan-out/drain framing, and rustdoc→guide links corrected; the guide
+  gained the `list` and agent-id-shape rules.
+- **Acknowledged, not a bug:** the gate is a library API with no production
+  caller yet — `serve` exposes only the unauthenticated CID-level CAS, and
+  token-gated remote exposure of the named service is M5's charter. Every
+  gate/token finding is therefore latent-M5; the logic is what this milestone
+  verifies.
 
 ## Sequencing note
 

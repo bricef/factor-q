@@ -8,8 +8,8 @@ repository = "https://github.com/bricef/factor-q"
 
 [dependencies]
 async-nats = { version = "0.38", optional = true }
-biscuit-auth = "6"
 async-trait = "0.1"
+biscuit-auth = "6"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"], optional = true }
 fastcdc = "3"

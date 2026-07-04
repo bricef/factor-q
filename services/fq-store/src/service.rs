@@ -6,9 +6,10 @@
 //! implements `ContentStore`, the conformance suite runs against it over the
 //! wire.
 //!
-//! The server is **unauthenticated** (capability tokens are M2). Default the
-//! bind address to localhost; do not expose it on a public interface until
-//! M2 lands.
+//! This CID-level server is **unauthenticated** — the M2 access-control gate
+//! sits at the named `Repository` layer, not here. Keep the bind address on
+//! localhost; token-gated remote exposure of the named service is M5's
+//! charter.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -1,8 +1,8 @@
-//! The op-boundary gate (M2 slice 5): access control at the named layer.
+//! The op-boundary gate (M2 access control): the named layer.
 //!
 //! [`GatedRepository`] wraps the named operations of a [`Repository`] and
 //! evaluates every call under **belt-and-braces** enforcement (see the
-//! [access-control guide](../../../docs/guide/access-control.md)):
+//! access-control guide, `docs/guide/access-control.md`):
 //!
 //! 1. **verify** the caller's token (signature chain, principal extraction),
 //!    and re-validate the principal id's shape — the dot-free rule protects
@@ -35,12 +35,17 @@ use crate::tokens::TokenVerifier;
 use crate::{BlockStore, Cid, NameIndex, Repository, Result, StoreError};
 
 /// A [`Repository`] whose named operations are authorization-gated. Every
-/// method takes the caller's token; the operation runs only if the token is
-/// valid, permits the op, and the live projection authorizes it.
+/// named operation takes the caller's token; the operation runs only if the
+/// token is valid, permits the op, and the live projection authorizes it. (The
+/// `operator_*` methods and the trusted accessors below are the exceptions —
+/// each documents its own trust basis.)
 pub struct GatedRepository<C, N> {
     repo: Repository<C, N>,
     grants: SqliteGrantLog,
     verifier: TokenVerifier,
+    /// The clock used for token-expiry checks — the real clock in production;
+    /// tests override it to exercise TTL without sleeping.
+    clock: Box<dyn Fn() -> SystemTime + Send + Sync>,
 }
 
 impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
@@ -50,7 +55,21 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
             repo,
             grants,
             verifier,
+            clock: Box::new(SystemTime::now),
         }
+    }
+
+    /// The current time for expiry checks (the injected clock).
+    fn now(&self) -> SystemTime {
+        (self.clock)()
+    }
+
+    /// Replace the expiry clock (tests only) — e.g. jump the gate's clock
+    /// forward to exercise TTL expiry without sleeping.
+    #[cfg(test)]
+    fn with_clock(mut self, clock: impl Fn() -> SystemTime + Send + Sync + 'static) -> Self {
+        self.clock = Box::new(clock);
+        self
     }
 
     /// Store `content` under `name` (requires `write` on `name`).
@@ -101,17 +120,35 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
         self.repo.unbind(name).await
     }
 
-    /// List names under `prefix` (requires `list` on the namespace). Listing
-    /// *everything* (an empty prefix) is an operator affordance, not a
-    /// grantable one — no scope can cover the root — so the gate refuses it
-    /// for token callers.
+    /// List names under `prefix` — a recursive, segment-aware enumeration of
+    /// the whole `prefix.*` subtree. Because the result set *is* the subtree,
+    /// authorization requires a live `List` grant whose scope **covers the
+    /// namespace** `prefix` (a `Namespace` grant at or above it — a
+    /// point `Name` grant does not license enumerating a subtree), or `prefix`
+    /// falling in the caller's own scope. Listing *everything* (an empty
+    /// prefix) is an operator affordance, not a grantable one — no scope can
+    /// cover the root — so the gate refuses it for token callers.
     pub async fn list(&self, token: &str, prefix: &str) -> Result<Vec<String>> {
         if prefix.is_empty() {
             return Err(StoreError::Denied(
                 "listing all names requires the operator; supply a namespace prefix".into(),
             ));
         }
-        self.authorize(token, Verb::List, prefix).await?;
+        let principal = self.identify(token, Verb::List, prefix).await?;
+        let subtree = Scope::Namespace(prefix.to_string());
+        let authorized = principal.owns(prefix)
+            || self
+                .grants
+                .live_grants_for(&principal)
+                .await?
+                .iter()
+                .any(|g| g.verbs.contains(&Verb::List) && g.scope.covers_scope(&subtree));
+        if !authorized {
+            let Principal::Agent(id) = &principal;
+            return Err(StoreError::Denied(format!(
+                "{id} may not list {prefix} (needs a list grant covering the namespace {prefix}.*)"
+            )));
+        }
         self.repo.list(prefix).await
     }
 
@@ -127,8 +164,7 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
         verbs: &BTreeSet<Verb>,
         scope: &Scope,
     ) -> Result<GrantId> {
-        let scope_root = scope_root(scope);
-        let principal = self.identify(token, Verb::Grant, scope_root).await?;
+        let principal = self.identify(token, Verb::Grant, scope.value()).await?;
         if !grantee.has_valid_id() {
             return Err(StoreError::Token(
                 "grantee id is not a valid agent id".into(),
@@ -138,12 +174,8 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
             .grants
             .live_grants_for(&principal)
             .await?
-            .into_iter()
-            .any(|g| {
-                g.verbs.contains(&Verb::Grant)
-                    && g.verbs.is_superset(verbs)
-                    && g.scope.covers_scope(scope)
-            });
+            .iter()
+            .any(|g| crate::grants::supports(&g.verbs, &g.scope, verbs, scope));
         if !authority {
             let Principal::Agent(id) = &principal;
             return Err(StoreError::Denied(format!(
@@ -160,8 +192,10 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
     /// grants **it issued**; anything else is the operator's call
     /// ([`operator_revoke`](Self::operator_revoke)).
     pub async fn revoke(&self, token: &str, grant_id: GrantId) -> Result<()> {
-        // Revocation targets a grant, not a name: identity + token bounds on
-        // the grant verb apply, with the issuing check as the authority.
+        // Revocation targets a grant, not a name, but the caller's token bounds
+        // still apply as on every other op: after checking the issuer, the
+        // token must permit `grant` over the target grant's scope — so an
+        // expired token, or one attenuated away from `grant`, cannot revoke.
         let verified = self.verifier.verify(token)?;
         let principal = verified.principal().clone();
         if !principal.has_valid_id() {
@@ -170,22 +204,33 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
             ));
         }
         let Principal::Agent(id) = &principal;
-        match self.grants.grantor_of(grant_id).await? {
-            Some(Grantor::Agent(issuer)) if issuer == *id => {
-                self.grants.append_revoked(grant_id).await
-            }
-            Some(_) => Err(StoreError::Denied(format!(
-                "{id} did not issue grant {grant_id}; only its issuer or the operator may revoke it"
-            ))),
-            None => Err(StoreError::Denied(format!(
+        let Some((grantor, scope)) = self.grants.issued_grant(grant_id).await? else {
+            return Err(StoreError::Denied(format!(
                 "grant {grant_id} does not exist"
-            ))),
+            )));
+        };
+        match grantor {
+            Grantor::Agent(issuer) if issuer == *id => {}
+            _ => {
+                return Err(StoreError::Denied(format!(
+                    "{id} did not issue grant {grant_id}; only its issuer or the operator may revoke it"
+                )));
+            }
         }
+        if !verified.permits(Verb::Grant, scope.value(), self.now()) {
+            return Err(StoreError::Denied(format!(
+                "{id}'s token does not permit revoking grant {grant_id} \
+                 (expired, or attenuated away from grant on {})",
+                scope.value()
+            )));
+        }
+        self.grants.append_revoked(grant_id).await
     }
 
     /// Operator grant: root authority, no token — the store owner acting
-    /// locally (the CLI). Trust is possession of the process/store, exactly
-    /// like every other ungated internal API.
+    /// locally (the operator surface for embedders of the gate; the `fq-cas`
+    /// CLI drives the grant log directly). Trust is possession of the
+    /// process/store, exactly like every other ungated internal API.
     pub async fn operator_grant(
         &self,
         grantee: &Principal,
@@ -204,7 +249,7 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
 
     /// Operator revocation: root authority, revokes any grant.
     pub async fn operator_revoke(&self, grant_id: GrantId) -> Result<()> {
-        if self.grants.grantor_of(grant_id).await?.is_none() {
+        if self.grants.issued_grant(grant_id).await?.is_none() {
             return Err(StoreError::Denied(format!(
                 "grant {grant_id} does not exist"
             )));
@@ -232,7 +277,7 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
         if !self.grants.can(&principal, verb, resource).await? {
             let Principal::Agent(id) = &principal;
             return Err(StoreError::Denied(format!(
-                "{id} may not {verb:?} {resource}"
+                "{id} may not {verb} {resource}"
             )));
         }
         Ok(principal)
@@ -248,22 +293,13 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
                 "principal id is not a valid agent id".into(),
             ));
         }
-        if !verified.permits(verb, resource, SystemTime::now()) {
+        if !verified.permits(verb, resource, self.now()) {
             let Principal::Agent(id) = &principal;
             return Err(StoreError::Denied(format!(
-                "{id}'s token does not permit {verb:?} on {resource} (expired or attenuated)"
+                "{id}'s token does not permit {verb} on {resource} (expired or attenuated)"
             )));
         }
         Ok(principal)
-    }
-}
-
-/// The name a scope is anchored at — the resource the token's attenuation is
-/// checked against for delegation.
-fn scope_root(scope: &Scope) -> &str {
-    match scope {
-        Scope::Name(name) => name,
-        Scope::Namespace(ns) => ns,
     }
 }
 
@@ -593,6 +629,159 @@ mod tests {
         ));
         assert!(matches!(
             f.gate.list(&token, "docs").await,
+            Err(StoreError::Denied(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoke_denies_an_expired_or_attenuated_token() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // A gate whose clock we can jump forward on demand.
+        let dir = tempfile::tempdir().unwrap();
+        let cas = dir.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let store = FilesystemStore::with_params(cas, crate::fs::ChunkParams::small());
+        let index = SqliteNameIndex::open(dir.path().join("index.db"))
+            .await
+            .unwrap();
+        let grants = SqliteGrantLog::open(dir.path().join("grants.db"))
+            .await
+            .unwrap();
+        let (private, public) = generate_keypair();
+        let minter = TokenMinter::from_private_key_hex(&private, Duration::from_secs(60)).unwrap();
+        let verifier = TokenVerifier::from_public_key_hex(&public).unwrap();
+        let offset = Arc::new(AtomicU64::new(0));
+        let clock_off = offset.clone();
+        let gate = GatedRepository::new(Repository::new(store, index), grants, verifier)
+            .with_clock(move || {
+                SystemTime::now() + Duration::from_secs(clock_off.load(Ordering::Relaxed))
+            });
+
+        // alice holds grant over research; she delegates to bob (grant `id`).
+        gate.operator_grant(
+            &alice(),
+            &BTreeSet::from([Verb::Read, Verb::Grant]),
+            &Scope::Namespace("research".into()),
+        )
+        .await
+        .unwrap();
+        let alice_token = minter.mint_for(gate.grants(), &alice()).await.unwrap();
+        let id = gate
+            .grant(
+                &alice_token,
+                &bob(),
+                &BTreeSet::from([Verb::Read]),
+                &Scope::Namespace("research.papers".into()),
+            )
+            .await
+            .unwrap();
+
+        // A token attenuated away from `grant` cannot revoke — even fresh.
+        let attenuated = TokenVerifier::from_public_key_hex(&public)
+            .unwrap()
+            .attenuate(&alice_token, None, Some(&BTreeSet::from([Verb::Read])))
+            .unwrap();
+        assert!(matches!(
+            gate.revoke(&attenuated, id).await,
+            Err(StoreError::Denied(_))
+        ));
+
+        // Jump the clock past the TTL: the unattenuated token is now expired
+        // and must also be refused (the TTL is enforced on revoke).
+        offset.store(600, Ordering::Relaxed);
+        assert!(matches!(
+            gate.revoke(&alice_token, id).await,
+            Err(StoreError::Denied(_))
+        ));
+
+        // Back within the TTL, the issuer's own token revokes — and bob loses
+        // access immediately.
+        offset.store(0, Ordering::Relaxed);
+        gate.revoke(&alice_token, id).await.unwrap();
+        let bob_token = minter.mint_for(gate.grants(), &bob()).await.unwrap();
+        assert!(matches!(
+            gate.get(&bob_token, "research.papers.doc1").await,
+            Err(StoreError::Denied(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_name_scoped_grant_does_not_enumerate_the_subtree() {
+        let f = fixture().await;
+        // A *point* List grant on the name `research.papers` must NOT license
+        // enumerating the research.papers.* subtree (the review finding).
+        f.gate
+            .operator_grant(
+                &alice(),
+                &BTreeSet::from([Verb::List]),
+                &Scope::Name("research.papers".into()),
+            )
+            .await
+            .unwrap();
+        let token = token_for(&f, &alice()).await;
+        assert!(matches!(
+            f.gate.list(&token, "research.papers").await,
+            Err(StoreError::Denied(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_namespace_grant_recurses_but_is_contained() {
+        let f = fixture().await;
+        // A List grant on the namespace research.papers: lists that subtree at
+        // any depth, but cannot list up-and-out to a parent (which would
+        // reveal sibling names).
+        f.gate
+            .operator_grant(
+                &alice(),
+                &BTreeSet::from([Verb::Write, Verb::List]),
+                &Scope::Namespace("research.papers".into()),
+            )
+            .await
+            .unwrap();
+        // Give alice write over the wider tree just to seed names.
+        f.gate
+            .operator_grant(
+                &alice(),
+                &BTreeSet::from([Verb::Write]),
+                &Scope::Namespace("research".into()),
+            )
+            .await
+            .unwrap();
+        let token = token_for(&f, &alice()).await;
+        f.gate
+            .put(&token, "research.papers.doc1", b"1")
+            .await
+            .unwrap();
+        f.gate
+            .put(&token, "research.papers.reviews.r1", b"2")
+            .await
+            .unwrap();
+        f.gate
+            .put(&token, "research.notes.todo", b"3")
+            .await
+            .unwrap();
+
+        // Recurses into the granted subtree (both depths).
+        assert_eq!(
+            f.gate.list(&token, "research.papers").await.unwrap(),
+            vec![
+                "research.papers.doc1".to_string(),
+                "research.papers.reviews.r1".to_string()
+            ]
+        );
+        assert_eq!(
+            f.gate
+                .list(&token, "research.papers.reviews")
+                .await
+                .unwrap(),
+            vec!["research.papers.reviews.r1".to_string()]
+        );
+        // Cannot list the parent `research` (would reveal research.notes.*).
+        assert!(matches!(
+            f.gate.list(&token, "research").await,
             Err(StoreError::Denied(_))
         ));
     }
