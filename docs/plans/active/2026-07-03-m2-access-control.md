@@ -43,8 +43,8 @@ properties and gates every later slice; each slice is green on the fq-store
 | 1 | Verification harness — the authorization oracle + property/DST scaffold | the net itself | done |
 | 2 | Grant events + the event-log seam + durable outbox | A5, A6 | done |
 | 3 | The grant projection (SQLite #2): apply, rebuild, idempotency | A3, A5 | done |
-| 4 | Biscuit tokens: mint / verify / attenuate; key config | A1, A2, TTL | **next** |
-| 5 | The op-boundary gate — `can()` at the named layer | A1, A3, A4 end-to-end | |
+| 4 | Biscuit tokens: mint / verify / attenuate; key config | A1, A2, TTL | done |
+| 5 | The op-boundary gate — `can()` at the named layer | A1, A3, A4 end-to-end | **next** |
 | 6 | CLI UX (`grant` / `token`) + user + operator docs | — | |
 | 7 | Fault DST — bus outage, crash-replay, revocation races + soak | A5, A6, recovery | |
 
@@ -161,6 +161,26 @@ properties and gates every later slice; each slice is green on the fq-store
   matters only for M5's distributed verifiers, where biscuit revocation-id
   distribution is the planned complement. Pure offline verification is a remote
   optimisation, never the in-process authority.
+
+- **(Slice 4) Two token semantics, named and separate.** `authorizes()` is the
+  offline/remote semantic (an embedded `right` must cover the operation —
+  M5's path, TTL-bounded); `permits()` is the in-process gate semantic (TTL +
+  the bearer's attenuation only, with the live projection as authority). The
+  gate composes `verify → permits ∧ projection.can` — which is also how
+  own-scope operations work with an unattenuated token.
+- **(Slice 4) Token shape:** rights flattened one fact per verb
+  (`right(verb, kind, value)`); segment-aware namespace matching expressed in
+  the authorizer's policies; attenuation = appended conjunctive checks
+  (scope / verb-set), so widening is structurally impossible (A2). Every
+  caller-supplied string enters datalog via builder **parameters** — a hostile
+  name or agent id cannot inject datalog.
+- **(Slice 4) biscuit-auth 6.0, with explicit run limits.** Biscuit's default
+  datalog `max_time` is 1 ms, which under load fails evaluations
+  *nondeterministically* — and a timeout reads as deny. Found by the property
+  suite as a flake; every authorizer now runs with explicit limits (100 ms
+  wall clock, default fact/iteration caps). Keys are hex Ed25519
+  (`generate_keypair` backs the slice-6 CLI helper); `DEFAULT_TOKEN_TTL` =
+  300 s per the belt-and-braces decision.
 
 ## Sequencing note
 

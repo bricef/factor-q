@@ -46,6 +46,13 @@ pub enum StoreError {
     #[error("event bus error: {0}")]
     Bus(String),
 
+    /// A capability token (or its key material) is invalid — unparseable,
+    /// wrongly signed, or malformed. Distinct from an *authorization* denial:
+    /// this is "the credential itself is bad", not "the credential lacks
+    /// authority" (M2).
+    #[error("token error: {0}")]
+    Token(String),
+
     /// No object is bound to the given name in the index.
     #[error("name not found: {0}")]
     NameNotFound(String),
