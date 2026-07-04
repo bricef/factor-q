@@ -122,6 +122,17 @@ properties and gates every later slice; each slice is green on the fq-store
   (`async-nats 0.38`, matching fq-runtime) so the crate stays hermetic without
   a broker; the integration test round-trips through real JetStream.
 
+- **(For slice 5) Principal ids are runtime agent slugs — and the gate must
+  re-validate them.** Agent identity is the runtime's `AgentId`: a validated
+  NATS-subject token (non-empty, **no dots**/wildcards/whitespace), not a UUID
+  (UUIDs identify events/invocations). The store treats the id as opaque, but
+  the dot-free rule is load-bearing for the own-scope boundary: a dotted
+  "agent id" like `alice.files` would compute an own-namespace *inside*
+  another agent's `system.agents.alice.*` subtree. The slice-5 gate therefore
+  enforces the same token validation at the store boundary (defense in depth —
+  never trusting the caller's id shape), and `Principal` stays
+  `#[non_exhaustive]` for any future differently-keyed principal type.
+
 ## Sequencing note
 
 M2 touches fq-store only (plus its new NATS dependency behind the seam); it can
