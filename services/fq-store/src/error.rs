@@ -39,6 +39,13 @@ pub enum StoreError {
     #[error("remote store error: {0}")]
     Remote(String),
 
+    /// The grant-event bus (the fan-out feed) failed — the broker is
+    /// unreachable or rejected a publish. By design this never affects store
+    /// availability: events stay durably queued locally and drain when the
+    /// bus returns (M2).
+    #[error("event bus error: {0}")]
+    Bus(String),
+
     /// No object is bound to the given name in the index.
     #[error("name not found: {0}")]
     NameNotFound(String),

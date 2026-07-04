@@ -33,10 +33,13 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use serde::{Deserialize, Serialize};
+
 /// An access-control subject. Extensible by design (ADR-0023); v1 implements
 /// agents only.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Principal {
     /// An agent, by id. Own scope: `system.agents.<id>` and below.
     Agent(String),
@@ -54,7 +57,8 @@ impl Principal {
 /// Who issued a grant: the store operator (root authority — the local owner
 /// acting via the CLI/service), or an agent delegating within its own
 /// authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Grantor {
     /// The store owner. Operator grants are root-valid (no supporting chain).
     Operator,
@@ -65,7 +69,8 @@ pub enum Grantor {
 /// The operation verbs a grant can confer (ADR-0023 F4). `Grant` is the
 /// delegation verb: holding it (over a scope) is what authorizes issuing
 /// further grants within that scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verb {
     Read,
     Write,
@@ -91,7 +96,8 @@ impl Verb {
 /// Namespace matching is segment-aware, exactly like [`crate::NameIndex::list`]:
 /// `Namespace("research.papers")` covers `research.papers` and
 /// `research.papers.<anything>`, and does **not** cover `research.papersX`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Scope {
     /// Exactly this name.
     Name(String),
@@ -136,7 +142,8 @@ pub type GrantId = u64;
 /// A grant-domain event. This is the domain vocabulary; the wire schemas
 /// (envelopes, `factor-q/granted@1`-style ids, NATS subjects) wrap it in M2
 /// slice 2. A *delegation* is a `Granted` whose grantor is an agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GrantEvent {
     /// Confer `verbs` over `scope` on `grantee`.
     Granted {

@@ -7,6 +7,7 @@ description = "factor-q content-addressed storage + semantic index service"
 repository = "https://github.com/bricef/factor-q"
 
 [dependencies]
+async-nats = { version = "0.38", optional = true }
 async-trait = "0.1"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"], optional = true }
@@ -35,6 +36,9 @@ service = ["dep:tarpc", "dep:futures"]
 # The `fq-cas` command-line tool. Pulls in the service for serve/--server.
 # Optional so library consumers don't pull clap.
 cli = ["dep:clap", "service", "dep:tracing-subscriber"]
+# The NATS-backed grant-event bus (M2). Optional so the store stays hermetic
+# for library consumers and tests; only the fan-out feed needs a broker.
+bus = ["dep:async-nats"]
 
 [[bin]]
 name = "fq-cas"
@@ -50,6 +54,7 @@ bin-dir = "fq-cas"
 
 [dev-dependencies]
 criterion = "0.5"
+futures = "0.3"
 proptest = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }

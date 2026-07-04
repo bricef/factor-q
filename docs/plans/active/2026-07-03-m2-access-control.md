@@ -39,8 +39,8 @@ properties and gates every later slice; each slice is green on the fq-store
 | # | Slice | Validates | Status |
 |---|---|---|---|
 | 1 | Verification harness — the authorization oracle + property/DST scaffold | the net itself | done |
-| 2 | Grant events + the event-log seam + durable outbox | A5, A6 | **next** |
-| 3 | The grant projection (SQLite #2): apply, rebuild, idempotency | A3, A5 | |
+| 2 | Grant events + the event-log seam + durable outbox | A5, A6 | done |
+| 3 | The grant projection (SQLite #2): apply, rebuild, idempotency | A3, A5 | **next** |
 | 4 | Biscuit tokens: mint / verify / attenuate; key config | A1, A2, TTL | |
 | 5 | The op-boundary gate — `can()` at the named layer | A1, A3, A4 end-to-end | |
 | 6 | CLI UX (`grant` / `token`) + user + operator docs | — | |
@@ -103,6 +103,24 @@ properties and gates every later slice; each slice is green on the fq-store
   rejects invalid requests up front, but no safety property depends on that.
 - **(Slice 1) Own scope needs no grant:** `system.agents.<id>` and below is the
   principal's own subtree (A1's carve-out).
+
+- **(Slice 2) The local log is authoritative; the bus is a feed.** A deliberate
+  refinement of ADR-0023's dataflow: `SqliteGrantLog` (SQLite #2 per ADR-0024)
+  is the durable, ordered source of truth — appends assign `GrantId`s and
+  rebuild replays it — while NATS carries `WireGrantEvent` envelopes outward
+  for external consumers. Nothing in the store ever *reads* the bus, so A6
+  holds by construction; `drain` is the outbox pump (publish in log order,
+  mark on ack, resume after failure exactly where it stopped).
+- **(Slice 2) `seq` = `GrantId`.** One AUTOINCREMENT sequence is both the log
+  position and a granted event's id (monotone, never reused) — delegation
+  chains order by it, revocations reference it. Events are stored relationally
+  (no JSON blob), so replay decodes without a parser and malformed rows surface
+  as `Corrupt`.
+- **(Slice 2) Wire naming settled:** schema ids `factor-q/granted@1` /
+  `delegated@1` (agent grantor) / `revoked@1`; subjects `fq.store.grant.<kind>`;
+  stream `FQ_GRANTS`. The NATS impl lives behind the `bus` feature
+  (`async-nats 0.38`, matching fq-runtime) so the crate stays hermetic without
+  a broker; the integration test round-trips through real JetStream.
 
 ## Sequencing note
 
