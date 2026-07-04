@@ -44,8 +44,8 @@ properties and gates every later slice; each slice is green on the fq-store
 | 2 | Grant events + the event-log seam + durable outbox | A5, A6 | done |
 | 3 | The grant projection (SQLite #2): apply, rebuild, idempotency | A3, A5 | done |
 | 4 | Biscuit tokens: mint / verify / attenuate; key config | A1, A2, TTL | done |
-| 5 | The op-boundary gate — `can()` at the named layer | A1, A3, A4 end-to-end | **next** |
-| 6 | CLI UX (`grant` / `token`) + user + operator docs | — | |
+| 5 | The op-boundary gate — `can()` at the named layer | A1, A3, A4 end-to-end | done |
+| 6 | CLI UX (`grant` / `token`) + user + operator docs | — | **next** |
 | 7 | Fault DST — bus outage, crash-replay, revocation races + soak | A5, A6, recovery | |
 
 ## Decisions taken up front
@@ -181,6 +181,24 @@ properties and gates every later slice; each slice is green on the fq-store
   wall clock, default fact/iteration caps). Keys are hex Ed25519
   (`generate_keypair` backs the slice-6 CLI helper); `DEFAULT_TOKEN_TTL` =
   300 s per the belt-and-braces decision.
+
+- **(Slice 5) The gate is `GatedRepository`**, wrapping the named operations;
+  every method takes the caller's token and runs `verify → id-shape check →
+  permits ∧ projection.can`. Error taxonomy: `Token` (the credential is bad —
+  including a dotted/forged principal id) vs `Denied` (valid credential, no
+  authority). The raw `Repository`, CAS, and grant log stay reachable as
+  documented **trusted accessors** for in-process callers (operator CLI,
+  collector, audit).
+- **(Slice 5) Delegation authority uses `covers_scope`, not `can()`.** The
+  gate checks the delegator's live grants directly (`Grant` verb ∧ superset
+  verbs ∧ scope-covering) — a `can()` check on the scope's root name would
+  wrongly let a Name-scoped grant delegate the Namespace anchored at the same
+  string. Delegation is also bounded by the token's own attenuation.
+- **(Slice 5) Revocation rule v1:** the operator may revoke anything; an agent
+  may revoke only grants **it issued**. (Upstream authorities already kill
+  whole subtrees by revoking their own delegation — no supervisory revoke
+  needed in v1.) Listing with an empty prefix is operator-only: no grantable
+  scope can cover the root.
 
 ## Sequencing note
 

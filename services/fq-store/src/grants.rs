@@ -58,6 +58,19 @@ impl Principal {
     pub fn owns(&self, resource: &str) -> bool {
         namespace_covers(&self.own_namespace(), resource)
     }
+
+    /// Whether this principal's id has the shape the runtime enforces for
+    /// agent ids (a NATS subject token: non-empty; no dots, wildcards, or
+    /// whitespace). The gate re-validates this at the store boundary because
+    /// the **dot-free rule is load-bearing**: a dotted "agent id" like
+    /// `alice.files` would compute an own-namespace *inside* another agent's
+    /// `system.agents.alice` subtree.
+    pub fn has_valid_id(&self) -> bool {
+        let Principal::Agent(id) = self;
+        !id.is_empty()
+            && !id.contains(['.', '*', '>'])
+            && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+    }
 }
 
 /// Who issued a grant: the store operator (root authority — the local owner

@@ -1273,3 +1273,20 @@ mod projection_tests {
             .unwrap();
     }
 }
+
+impl SqliteGrantLog {
+    /// Who issued the grant `id`, if such a grant exists (revoked or not) —
+    /// the gate's revoke rule consults this (an agent may revoke only grants
+    /// it issued; the operator may revoke anything).
+    pub async fn grantor_of(&self, id: GrantId) -> Result<Option<Grantor>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT grantor_agent FROM projected_grants WHERE id = ?")
+                .bind(id as i64)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(agent,)| match agent {
+            Some(agent) => Grantor::Agent(agent),
+            None => Grantor::Operator,
+        }))
+    }
+}

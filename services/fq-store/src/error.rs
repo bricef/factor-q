@@ -53,6 +53,12 @@ pub enum StoreError {
     #[error("token error: {0}")]
     Token(String),
 
+    /// An authorization denial: the credential is valid but the principal
+    /// lacks authority for the operation (no live covering grant, or the
+    /// bearer attenuated it away). Default-deny surfaces here (M2).
+    #[error("permission denied: {0}")]
+    Denied(String),
+
     /// No object is bound to the given name in the index.
     #[error("name not found: {0}")]
     NameNotFound(String),
