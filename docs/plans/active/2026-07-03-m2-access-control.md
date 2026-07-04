@@ -38,8 +38,8 @@ properties and gates every later slice; each slice is green on the fq-store
 
 | # | Slice | Validates | Status |
 |---|---|---|---|
-| 1 | Verification harness — the authorization oracle + property/DST scaffold | the net itself | **next** |
-| 2 | Grant events + the event-log seam + durable outbox | A5, A6 | |
+| 1 | Verification harness — the authorization oracle + property/DST scaffold | the net itself | done |
+| 2 | Grant events + the event-log seam + durable outbox | A5, A6 | **next** |
 | 3 | The grant projection (SQLite #2): apply, rebuild, idempotency | A3, A5 | |
 | 4 | Biscuit tokens: mint / verify / attenuate; key config | A1, A2, TTL | |
 | 5 | The op-boundary gate — `can()` at the named layer | A1, A3, A4 end-to-end | |
@@ -83,6 +83,26 @@ properties and gates every later slice; each slice is green on the fq-store
 - **Event naming** follows the established conventions (`factor-q/granted@1`
   -style schema ids, `fq.*` subjects), settled concretely in slice 2 alongside
   the schemas.
+
+## Decisions taken while building
+
+- **(Slice 1) One `Granted` event; "delegated" = an agent grantor.** The domain
+  event is `Granted { grantor: Operator | Agent, … } | Revoked { id }`; the
+  wire layer (slice 2) may still emit distinct `granted`/`delegated` schema ids,
+  but the semantics live in one variant. `Grantor::Operator` is the bootstrap
+  root authority (the local store owner via CLI/service); `Principal` itself
+  stays agent-only per ADR-0023.
+- **(Slice 1) Liveness is evaluated at query time, chains ordered by id.** A
+  delegation is live only while an **earlier, still-live** grant backs it
+  (grantor holds `Grant`, covering scope, superset verbs) — so upstream
+  revocation kills the delegated subtree transitively (A3), and chains are
+  well-founded (no cycles). Attenuation-violating delegations are inert.
+- **(Slice 1) The log tolerates garbage; garbage confers nothing.** `apply` is
+  total and deterministic (duplicate grant id: first wins; revocation wins
+  regardless of event order, even revoke-before-grant). The API gate (slice 5)
+  rejects invalid requests up front, but no safety property depends on that.
+- **(Slice 1) Own scope needs no grant:** `system.agents.<id>` and below is the
+  principal's own subtree (A1's carve-out).
 
 ## Sequencing note
 
