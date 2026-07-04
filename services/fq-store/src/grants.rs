@@ -52,6 +52,12 @@ impl Principal {
             Principal::Agent(id) => format!("system.agents.{id}"),
         }
     }
+
+    /// Whether `resource` falls inside this principal's own scope
+    /// (`system.agents.<id>` and below) — allowed without any grant (A1).
+    pub fn owns(&self, resource: &str) -> bool {
+        namespace_covers(&self.own_namespace(), resource)
+    }
 }
 
 /// Who issued a grant: the store operator (root authority — the local owner
@@ -222,7 +228,7 @@ impl GrantModel {
     /// The authorization decision: may `principal` perform `verb` on the
     /// dotted name `resource`? Default-deny; own scope always allowed.
     pub fn can(&self, principal: &Principal, verb: Verb, resource: &str) -> bool {
-        if namespace_covers(&principal.own_namespace(), resource) {
+        if principal.owns(resource) {
             return true;
         }
         self.grants.iter().any(|(id, grant)| {
@@ -543,80 +549,7 @@ mod tests {
 
     // ---- property tests: the oracle over random event sequences ----
 
-    /// A small closed universe keeps collisions (and therefore interesting
-    /// interactions) frequent.
-    const AGENTS: &[&str] = &["alice", "bob", "carol"];
-    const NAMESPACES: &[&str] = &["research", "research.papers", "docs", "system.agents.alice"];
-    const RESOURCES: &[&str] = &[
-        "research",
-        "research.papers",
-        "research.papers.doc1",
-        "research.papersX",
-        "docs.readme",
-        "system.agents.alice.files.x",
-        "system.agents.bob.files.x",
-    ];
-
-    fn arb_verbs() -> impl Strategy<Value = BTreeSet<Verb>> {
-        proptest::collection::btree_set(
-            prop_oneof![
-                Just(Verb::Read),
-                Just(Verb::Write),
-                Just(Verb::Delete),
-                Just(Verb::List),
-                Just(Verb::Grant)
-            ],
-            1..=5,
-        )
-    }
-
-    fn arb_scope() -> impl Strategy<Value = Scope> {
-        prop_oneof![
-            proptest::sample::select(NAMESPACES).prop_map(|ns| Scope::Namespace(ns.into())),
-            proptest::sample::select(RESOURCES).prop_map(|n| Scope::Name(n.into())),
-        ]
-    }
-
-    fn arb_grantor() -> impl Strategy<Value = Grantor> {
-        prop_oneof![
-            Just(Grantor::Operator),
-            proptest::sample::select(AGENTS).prop_map(|a| Grantor::Agent(a.into())),
-        ]
-    }
-
-    /// A sequence of events with ids assigned in order and revocations aimed
-    /// at plausibly-issued ids.
-    fn arb_events(max: usize) -> impl Strategy<Value = Vec<GrantEvent>> {
-        proptest::collection::vec(
-            (
-                arb_grantor(),
-                proptest::sample::select(AGENTS),
-                arb_verbs(),
-                arb_scope(),
-                any::<bool>(),
-                0..max as u64,
-            ),
-            0..max,
-        )
-        .prop_map(|rows| {
-            rows.into_iter()
-                .enumerate()
-                .map(|(i, (grantor, grantee, verbs, scope, revoke, target))| {
-                    if revoke {
-                        GrantEvent::Revoked { id: target }
-                    } else {
-                        GrantEvent::Granted {
-                            id: i as u64,
-                            grantor,
-                            grantee: Principal::Agent(grantee.into()),
-                            verbs,
-                            scope,
-                        }
-                    }
-                })
-                .collect()
-        })
-    }
+    use super::test_strategies::*;
 
     /// Every decision over the sampled query grid.
     fn decisions(model: &GrantModel) -> Vec<bool> {
@@ -708,5 +641,89 @@ mod tests {
             let b = GrantModel::replay(&events);
             prop_assert_eq!(decisions(&a), decisions(&b));
         }
+    }
+}
+
+/// Shared property-test building blocks for the grants domain: a small closed
+/// universe (so collisions — and therefore interesting interactions — stay
+/// frequent) and `proptest` strategies over it. Used by the model's own
+/// property tests and by the projection's differential tests.
+#[cfg(test)]
+pub(crate) mod test_strategies {
+    use super::*;
+    use proptest::prelude::*;
+
+    pub(crate) const AGENTS: &[&str] = &["alice", "bob", "carol"];
+    pub(crate) const NAMESPACES: &[&str] =
+        &["research", "research.papers", "docs", "system.agents.alice"];
+    pub(crate) const RESOURCES: &[&str] = &[
+        "research",
+        "research.papers",
+        "research.papers.doc1",
+        "research.papersX",
+        "docs.readme",
+        "system.agents.alice.files.x",
+        "system.agents.bob.files.x",
+    ];
+
+    pub(crate) fn arb_verbs() -> impl Strategy<Value = BTreeSet<Verb>> {
+        proptest::collection::btree_set(
+            prop_oneof![
+                Just(Verb::Read),
+                Just(Verb::Write),
+                Just(Verb::Delete),
+                Just(Verb::List),
+                Just(Verb::Grant)
+            ],
+            1..=5,
+        )
+    }
+
+    pub(crate) fn arb_scope() -> impl Strategy<Value = Scope> {
+        prop_oneof![
+            proptest::sample::select(NAMESPACES).prop_map(|ns| Scope::Namespace(ns.into())),
+            proptest::sample::select(RESOURCES).prop_map(|n| Scope::Name(n.into())),
+        ]
+    }
+
+    pub(crate) fn arb_grantor() -> impl Strategy<Value = Grantor> {
+        prop_oneof![
+            Just(Grantor::Operator),
+            proptest::sample::select(AGENTS).prop_map(|a| Grantor::Agent(a.into())),
+        ]
+    }
+
+    /// A sequence of events with ids assigned in order and revocations aimed
+    /// at plausibly-issued ids.
+    pub(crate) fn arb_events(max: usize) -> impl Strategy<Value = Vec<GrantEvent>> {
+        proptest::collection::vec(
+            (
+                arb_grantor(),
+                proptest::sample::select(AGENTS),
+                arb_verbs(),
+                arb_scope(),
+                any::<bool>(),
+                0..max as u64,
+            ),
+            0..max,
+        )
+        .prop_map(|rows| {
+            rows.into_iter()
+                .enumerate()
+                .map(|(i, (grantor, grantee, verbs, scope, revoke, target))| {
+                    if revoke {
+                        GrantEvent::Revoked { id: target }
+                    } else {
+                        GrantEvent::Granted {
+                            id: i as u64,
+                            grantor,
+                            grantee: Principal::Agent(grantee.into()),
+                            verbs,
+                            scope,
+                        }
+                    }
+                })
+                .collect()
+        })
     }
 }

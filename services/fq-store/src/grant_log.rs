@@ -8,6 +8,14 @@
 //!   (SQLite database #2 per ADR-0024, alongside the storage index). Appends
 //!   assign the [`GrantId`]s; replay feeds the projection and the reference
 //!   model. Nothing about appending or replaying touches the network.
+//! - The **projection** (M2 slice 3) — the queryable current-permission state
+//!   ([`can`](SqliteGrantLog::can), [`live_grants_for`](SqliteGrantLog::live_grants_for)),
+//!   stored beside the log and updated **in the same transaction** as every
+//!   append, so projection ≡ replay at every commit point (A5). Liveness (the
+//!   delegation-chain rule from [`crate::GrantModel`]) is cached per grant and
+//!   recomputed on each event; [`rebuild_projection`](SqliteGrantLog::rebuild_projection)
+//!   re-derives everything from the log, and `open` catches up a stale
+//!   projection via the applied-seq cursor.
 //! - [`GrantBus`] — the fan-out seam: a publish-only trait carrying
 //!   [`WireGrantEvent`] envelopes to external consumers (audit, other
 //!   services). [`InMemoryGrantBus`] backs tests (with an outage toggle);
@@ -57,6 +65,30 @@ const MIGRATIONS: &[&str] = &[
         occurred_at   INTEGER NOT NULL,
         published     INTEGER NOT NULL DEFAULT 0
     );",
+    // v2 — the grant projection (M2 slice 3): the queryable current-permission
+    // state, derived from the log and updated in the same transaction as every
+    // append, so projection ≡ replay at every commit point (A5).
+    // `projected_grants.live` caches chain liveness; `projected_revocations`
+    // mirrors the model's revoked set (an id can be revoked before any grant
+    // carries it); `projection_cursor` records the last log seq applied, so
+    // `open` can idempotently catch up a projection created by an older binary
+    // or wiped for rebuild.
+    "CREATE TABLE projected_grants (
+        id            INTEGER PRIMARY KEY,
+        grantor_agent TEXT,
+        grantee_agent TEXT    NOT NULL,
+        verbs         TEXT    NOT NULL,
+        scope_kind    TEXT    NOT NULL CHECK (scope_kind IN ('name', 'namespace')),
+        scope_value   TEXT    NOT NULL,
+        live          INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX idx_projected_grants_grantee ON projected_grants(grantee_agent);
+    CREATE TABLE projected_revocations (id INTEGER PRIMARY KEY);
+    CREATE TABLE projection_cursor (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        applied_seq INTEGER NOT NULL
+    );
+    INSERT INTO projection_cursor (id, applied_seq) VALUES (1, 0);",
 ];
 
 /// The authoritative, locally-durable grant-event log (SQLite database #2).
@@ -79,7 +111,12 @@ impl SqliteGrantLog {
             .connect_with(opts)
             .await?;
         migrate(&pool).await?;
-        Ok(Self { pool })
+        let log = Self { pool };
+        // Catch the projection up with the log (a no-op when they are already
+        // level): idempotent recovery for a database written before the
+        // projection existed, or wiped for rebuild.
+        log.catch_up().await?;
+        Ok(log)
     }
 
     /// Append a grant, assigning its [`GrantId`] (the log sequence). Durable
@@ -102,32 +139,60 @@ impl SqliteGrantLog {
             Scope::Name(name) => ("name", name.clone()),
             Scope::Namespace(ns) => ("namespace", ns.clone()),
         };
+        // Log append and projection update commit atomically: at every commit
+        // point the projection equals a replay of the log (A5).
+        let mut tx = self.pool.begin().await?;
         let seq: i64 = sqlx::query_scalar(
             "INSERT INTO grant_events
                  (kind, grantor_agent, grantee_agent, verbs, scope_kind, scope_value, occurred_at)
              VALUES ('granted', ?, ?, ?, ?, ?, ?) RETURNING seq",
         )
-        .bind(grantor_agent)
+        .bind(&grantor_agent)
         .bind(grantee_agent)
-        .bind(verbs_json)
+        .bind(&verbs_json)
         .bind(scope_kind)
-        .bind(scope_value)
+        .bind(&scope_value)
         .bind(now_millis())
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO projected_grants
+                 (id, grantor_agent, grantee_agent, verbs, scope_kind, scope_value)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(seq)
+        .bind(&grantor_agent)
+        .bind(grantee_agent)
+        .bind(&verbs_json)
+        .bind(scope_kind)
+        .bind(&scope_value)
+        .execute(&mut *tx)
+        .await?;
+        recompute_liveness(&mut tx).await?;
+        set_cursor(&mut tx, seq).await?;
+        tx.commit().await?;
         Ok(seq as GrantId)
     }
 
     /// Append a revocation of the grant `target`. Durable on return; queued
     /// for fan-out.
     pub async fn append_revoked(&self, target: GrantId) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO grant_events (kind, target_id, occurred_at) VALUES ('revoked', ?, ?)",
+        let mut tx = self.pool.begin().await?;
+        let seq: i64 = sqlx::query_scalar(
+            "INSERT INTO grant_events (kind, target_id, occurred_at)
+             VALUES ('revoked', ?, ?) RETURNING seq",
         )
         .bind(target as i64)
         .bind(now_millis())
-        .execute(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+        sqlx::query("INSERT OR IGNORE INTO projected_revocations (id) VALUES (?)")
+            .bind(target as i64)
+            .execute(&mut *tx)
+            .await?;
+        recompute_liveness(&mut tx).await?;
+        set_cursor(&mut tx, seq).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -726,6 +791,482 @@ mod tests {
                     assert_eq!(replayed, expected);
                     // Replay feeds the reference model without complaint.
                     let _ = GrantModel::replay(&replayed);
+                });
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+/// One live grant as the projection holds it — what the token minter (M2
+/// slice 4) embeds and the gate (slice 5) consults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveGrant {
+    /// The grant's id (its log seq).
+    pub id: GrantId,
+    /// The verbs it confers.
+    pub verbs: BTreeSet<Verb>,
+    /// The scope it covers.
+    pub scope: Scope,
+}
+
+impl SqliteGrantLog {
+    /// The projection's authorization decision: may `principal` perform `verb`
+    /// on `resource`? Own scope needs no grant (A1); otherwise some live grant
+    /// must cover it. Must agree with [`crate::GrantModel::can`] over the
+    /// replayed log — the differential property the tests enforce.
+    pub async fn can(&self, principal: &Principal, verb: Verb, resource: &str) -> Result<bool> {
+        if principal.owns(resource) {
+            return Ok(true);
+        }
+        Ok(self
+            .live_grants_for(principal)
+            .await?
+            .iter()
+            .any(|grant| grant.verbs.contains(&verb) && grant.scope.covers(resource)))
+    }
+
+    /// Every currently-live grant held by `principal`, in grant order.
+    pub async fn live_grants_for(&self, principal: &Principal) -> Result<Vec<LiveGrant>> {
+        let Principal::Agent(agent) = principal;
+        let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT id, verbs, scope_kind, scope_value FROM projected_grants
+             WHERE grantee_agent = ? AND live = 1 ORDER BY id",
+        )
+        .bind(agent)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(id, verbs, scope_kind, scope_value)| {
+                Ok(LiveGrant {
+                    id: id as GrantId,
+                    verbs: decode_verbs(&verbs, id)?,
+                    scope: decode_scope(&scope_kind, scope_value, id)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Re-derive the whole projection from the log (wipe + replay + recompute),
+    /// atomically. The recovery path for a corrupted or lost projection — the
+    /// log stays untouched.
+    pub async fn rebuild_projection(&self) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM projected_grants")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM projected_revocations")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE projection_cursor SET applied_seq = 0 WHERE id = 1")
+            .execute(&mut *tx)
+            .await?;
+        apply_events_after(&mut tx, 0).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Apply any log events beyond the projection cursor (idempotent; a no-op
+    /// when level). Runs at `open`.
+    async fn catch_up(&self) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let cursor: i64 =
+            sqlx::query_scalar("SELECT applied_seq FROM projection_cursor WHERE id = 1")
+                .fetch_one(&mut *tx)
+                .await?;
+        apply_events_after(&mut tx, cursor).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+/// Fold every log event with `seq > after` into the projection tables, then
+/// recompute liveness and advance the cursor. Liveness is a pure function of
+/// the final grant/revocation sets, so one recompute after the batch is exact.
+async fn apply_events_after(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    after: i64,
+) -> Result<()> {
+    let max_seq: Option<i64> = sqlx::query_scalar("SELECT MAX(seq) FROM grant_events")
+        .fetch_one(&mut **tx)
+        .await?;
+    let Some(max_seq) = max_seq else {
+        return Ok(());
+    };
+    if max_seq <= after {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT OR IGNORE INTO projected_grants
+             (id, grantor_agent, grantee_agent, verbs, scope_kind, scope_value)
+         SELECT seq, grantor_agent, grantee_agent, verbs, scope_kind, scope_value
+         FROM grant_events WHERE seq > ? AND kind = 'granted'",
+    )
+    .bind(after)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO projected_revocations (id)
+         SELECT target_id FROM grant_events
+         WHERE seq > ? AND kind = 'revoked' AND target_id IS NOT NULL",
+    )
+    .bind(after)
+    .execute(&mut **tx)
+    .await?;
+    recompute_liveness(tx).await?;
+    set_cursor(tx, max_seq).await?;
+    Ok(())
+}
+
+/// Recompute every grant's cached liveness — the projection's copy of the
+/// model's chain rule: unrevoked, and (for a delegation) backed by an
+/// **earlier, live** grant giving the grantor `Grant` over a covering scope
+/// with superset verbs. A single forward pass in id order is exact, because a
+/// grant's liveness depends only on strictly earlier grants.
+async fn recompute_liveness(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<()> {
+    use std::collections::HashSet;
+    let revoked: HashSet<i64> = sqlx::query_scalar("SELECT id FROM projected_revocations")
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .collect();
+    // (id, grantor_agent, grantee_agent, verbs, scope_kind, scope_value, live)
+    type ProjectedTuple = (i64, Option<String>, String, String, String, String, i64);
+    let rows: Vec<ProjectedTuple> = sqlx::query_as(
+        "SELECT id, grantor_agent, grantee_agent, verbs, scope_kind, scope_value, live
+         FROM projected_grants ORDER BY id",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    struct Decoded {
+        id: i64,
+        grantor_agent: Option<String>,
+        grantee_agent: String,
+        verbs: BTreeSet<Verb>,
+        scope: Scope,
+        was_live: bool,
+        live: bool,
+    }
+    let mut grants = Vec::with_capacity(rows.len());
+    for (id, grantor_agent, grantee_agent, verbs, scope_kind, scope_value, live) in rows {
+        grants.push(Decoded {
+            id,
+            grantor_agent,
+            grantee_agent,
+            verbs: decode_verbs(&verbs, id)?,
+            scope: decode_scope(&scope_kind, scope_value, id)?,
+            was_live: live != 0,
+            live: false,
+        });
+    }
+    for i in 0..grants.len() {
+        let live = !revoked.contains(&grants[i].id)
+            && match &grants[i].grantor_agent {
+                None => true,
+                Some(delegator) => grants[..i].iter().any(|sup| {
+                    sup.live
+                        && sup.grantee_agent == *delegator
+                        && sup.verbs.contains(&Verb::Grant)
+                        && sup.verbs.is_superset(&grants[i].verbs)
+                        && sup.scope.covers_scope(&grants[i].scope)
+                }),
+            };
+        grants[i].live = live;
+    }
+    for grant in &grants {
+        if grant.live != grant.was_live {
+            sqlx::query("UPDATE projected_grants SET live = ? WHERE id = ?")
+                .bind(grant.live as i64)
+                .bind(grant.id)
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Advance the projection cursor to `seq` (monotone: never moves backwards).
+async fn set_cursor(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, seq: i64) -> Result<()> {
+    sqlx::query("UPDATE projection_cursor SET applied_seq = ? WHERE id = 1 AND applied_seq < ?")
+        .bind(seq)
+        .bind(seq)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Decode a stored verbs JSON array; a malformed value is corruption.
+fn decode_verbs(json: &str, id: i64) -> Result<BTreeSet<Verb>> {
+    serde_json::from_str(json)
+        .map_err(|_| StoreError::Corrupt(format!("projected grant {id}: invalid verbs")))
+}
+
+/// Decode a stored (scope_kind, scope_value) pair; a malformed kind is
+/// corruption.
+fn decode_scope(kind: &str, value: String, id: i64) -> Result<Scope> {
+    match kind {
+        "name" => Ok(Scope::Name(value)),
+        "namespace" => Ok(Scope::Namespace(value)),
+        _ => Err(StoreError::Corrupt(format!(
+            "projected grant {id}: invalid scope kind {kind:?}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use crate::grants::GrantModel;
+    use crate::grants::test_strategies::{AGENTS, RESOURCES, arb_grantor, arb_scope, arb_verbs};
+    use proptest::prelude::*;
+
+    async fn log() -> (tempfile::TempDir, SqliteGrantLog) {
+        let dir = tempfile::tempdir().unwrap();
+        let log = SqliteGrantLog::open(dir.path().join("grants.db"))
+            .await
+            .unwrap();
+        (dir, log)
+    }
+
+    fn alice() -> Principal {
+        Principal::Agent("alice".into())
+    }
+
+    fn bob() -> Principal {
+        Principal::Agent("bob".into())
+    }
+
+    /// The store's decisions over the shared query grid.
+    async fn store_decisions(log: &SqliteGrantLog) -> Vec<bool> {
+        let mut out = Vec::new();
+        for agent in AGENTS {
+            for verb in Verb::all() {
+                for resource in RESOURCES {
+                    out.push(
+                        log.can(&Principal::Agent((*agent).into()), verb, resource)
+                            .await
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// The model's decisions over the same grid, from the log's own replay.
+    fn model_decisions(model: &GrantModel) -> Vec<bool> {
+        let mut out = Vec::new();
+        for agent in AGENTS {
+            for verb in Verb::all() {
+                for resource in RESOURCES {
+                    out.push(model.can(&Principal::Agent((*agent).into()), verb, resource));
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn projection_tracks_grant_and_revocation() {
+        let (_d, log) = log().await;
+        assert!(
+            !log.can(&alice(), Verb::Read, "research.papers.doc1")
+                .await
+                .unwrap()
+        );
+        let id = log
+            .append_granted(
+                &Grantor::Operator,
+                &alice(),
+                &BTreeSet::from([Verb::Read]),
+                &Scope::Namespace("research".into()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            log.can(&alice(), Verb::Read, "research.papers.doc1")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !log.can(&alice(), Verb::Write, "research.papers.doc1")
+                .await
+                .unwrap()
+        );
+
+        log.append_revoked(id).await.unwrap();
+        assert!(
+            !log.can(&alice(), Verb::Read, "research.papers.doc1")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_revocation_cascades_through_the_projection() {
+        let (_d, log) = log().await;
+        let root = log
+            .append_granted(
+                &Grantor::Operator,
+                &alice(),
+                &BTreeSet::from([Verb::Read, Verb::Grant]),
+                &Scope::Namespace("research".into()),
+            )
+            .await
+            .unwrap();
+        log.append_granted(
+            &Grantor::Agent("alice".into()),
+            &bob(),
+            &BTreeSet::from([Verb::Read]),
+            &Scope::Namespace("research.papers".into()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            log.can(&bob(), Verb::Read, "research.papers.doc1")
+                .await
+                .unwrap()
+        );
+
+        log.append_revoked(root).await.unwrap();
+        assert!(
+            !log.can(&bob(), Verb::Read, "research.papers.doc1")
+                .await
+                .unwrap(),
+            "the delegated subtree dies with its support (A3)"
+        );
+        assert!(log.live_grants_for(&bob()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn own_scope_needs_no_grant() {
+        let (_d, log) = log().await;
+        assert!(
+            log.can(&alice(), Verb::Write, "system.agents.alice.files.notes")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !log.can(&alice(), Verb::Read, "system.agents.bob.files.x")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_recovers_a_corrupted_projection() {
+        let (_d, log) = log().await;
+        let id = log
+            .append_granted(
+                &Grantor::Operator,
+                &alice(),
+                &BTreeSet::from([Verb::Read, Verb::Grant]),
+                &Scope::Namespace("research".into()),
+            )
+            .await
+            .unwrap();
+        log.append_granted(
+            &Grantor::Agent("alice".into()),
+            &bob(),
+            &BTreeSet::from([Verb::Read]),
+            &Scope::Namespace("research.papers".into()),
+        )
+        .await
+        .unwrap();
+        log.append_revoked(id).await.unwrap();
+        let truth = store_decisions(&log).await;
+
+        // Corrupt the derived state: flip every liveness flag and drop a row.
+        sqlx::query("UPDATE projected_grants SET live = 1 - live")
+            .execute(&log.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM projected_revocations")
+            .execute(&log.pool)
+            .await
+            .unwrap();
+        assert_ne!(store_decisions(&log).await, truth, "corruption is visible");
+
+        // Rebuild from the log restores exactly the pre-corruption decisions.
+        log.rebuild_projection().await.unwrap();
+        assert_eq!(store_decisions(&log).await, truth);
+    }
+
+    #[tokio::test]
+    async fn open_catches_up_a_stale_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grants.db");
+        let log = SqliteGrantLog::open(&path).await.unwrap();
+        log.append_granted(
+            &Grantor::Operator,
+            &alice(),
+            &BTreeSet::from([Verb::Read]),
+            &Scope::Namespace("research".into()),
+        )
+        .await
+        .unwrap();
+        let truth = store_decisions(&log).await;
+
+        // Simulate a projection that lags the log (e.g. written by a binary
+        // that predates the projection): wipe it and reset the cursor.
+        sqlx::query("DELETE FROM projected_grants")
+            .execute(&log.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projection_cursor SET applied_seq = 0")
+            .execute(&log.pool)
+            .await
+            .unwrap();
+        drop(log);
+
+        // Reopening catches up from the cursor: decisions are back.
+        let log = SqliteGrantLog::open(&path).await.unwrap();
+        assert_eq!(store_decisions(&log).await, truth);
+    }
+
+    /// The A5/A3 differential: after any sequence of appends, the projection's
+    /// decisions equal the reference model's over the replayed log — and stay
+    /// equal after a full rebuild.
+    #[test]
+    fn projection_agrees_with_the_model_on_arbitrary_sequences() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let strategy = proptest::collection::vec(
+            (
+                arb_grantor(),
+                proptest::sample::select(AGENTS),
+                arb_verbs(),
+                arb_scope(),
+                any::<bool>(),
+                1u64..10,
+            ),
+            0..10,
+        );
+        let mut runner =
+            proptest::test_runner::TestRunner::new(proptest::test_runner::Config::with_cases(24));
+        runner
+            .run(&strategy, |rows| {
+                rt.block_on(async {
+                    let (_d, log) = log().await;
+                    for (grantor, grantee, verbs, scope, revoke, target) in rows {
+                        if revoke {
+                            log.append_revoked(target).await.unwrap();
+                        } else {
+                            log.append_granted(
+                                &grantor,
+                                &Principal::Agent(grantee.into()),
+                                &verbs,
+                                &scope,
+                            )
+                            .await
+                            .unwrap();
+                        }
+                    }
+                    let model = GrantModel::replay(&log.replay().await.unwrap());
+                    let expected = model_decisions(&model);
+                    assert_eq!(store_decisions(&log).await, expected, "projection ≡ model");
+                    log.rebuild_projection().await.unwrap();
+                    assert_eq!(store_decisions(&log).await, expected, "rebuild ≡ model");
                 });
                 Ok(())
             })

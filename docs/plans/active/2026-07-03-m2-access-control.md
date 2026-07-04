@@ -40,8 +40,8 @@ properties and gates every later slice; each slice is green on the fq-store
 |---|---|---|---|
 | 1 | Verification harness — the authorization oracle + property/DST scaffold | the net itself | done |
 | 2 | Grant events + the event-log seam + durable outbox | A5, A6 | done |
-| 3 | The grant projection (SQLite #2): apply, rebuild, idempotency | A3, A5 | **next** |
-| 4 | Biscuit tokens: mint / verify / attenuate; key config | A1, A2, TTL | |
+| 3 | The grant projection (SQLite #2): apply, rebuild, idempotency | A3, A5 | done |
+| 4 | Biscuit tokens: mint / verify / attenuate; key config | A1, A2, TTL | **next** |
 | 5 | The op-boundary gate — `can()` at the named layer | A1, A3, A4 end-to-end | |
 | 6 | CLI UX (`grant` / `token`) + user + operator docs | — | |
 | 7 | Fault DST — bus outage, crash-replay, revocation races + soak | A5, A6, recovery | |
@@ -132,6 +132,24 @@ properties and gates every later slice; each slice is green on the fq-store
   enforces the same token validation at the store boundary (defense in depth —
   never trusting the caller's id shape), and `Principal` stays
   `#[non_exhaustive]` for any future differently-keyed principal type.
+
+- **(Slice 3) The projection commits with the append.** It lives in the same
+  grants DB and updates in the **same transaction** as every log append, so
+  projection ≡ replay holds at every commit point (A5) — there is no window in
+  which they can diverge. An `applied_seq` cursor + catch-up at `open` recovers
+  a projection that lags the log (older binary, or wiped); `rebuild_projection`
+  is wipe + replay with the log untouched.
+- **(Slice 3) Liveness is cached, recomputed as one forward pass.** Each grant
+  row carries a `live` flag re-derived on every event by a single pass in id
+  order — exact, because liveness is a pure function of the final
+  grant/revocation sets and a grant's chain depends only on strictly earlier
+  grants. `projected_revocations` mirrors the model's revoked-id set, so
+  revoke-before-grant behaves identically to the model.
+- **(Slice 3) One semantics source.** `can` / `live_grants_for` decode rows
+  into the domain types and evaluate with `Scope::covers` / verb sets — never
+  parallel SQL string matching — and the differential proptest holds the
+  projection equal to `GrantModel` over random sequences, before and after
+  rebuild. `live_grants_for` is the feed token minting (slice 4) embeds.
 
 ## Sequencing note
 

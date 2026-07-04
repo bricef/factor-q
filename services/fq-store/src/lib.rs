@@ -41,7 +41,7 @@ pub use audit::{AuditReport, ReachabilityAuditor};
 pub use cid::Cid;
 pub use collector::{Collector, Reclaimed, ReferenceCollector};
 pub use error::{Result, StoreError};
-pub use grant_log::{GrantBus, InMemoryGrantBus, SqliteGrantLog, WireGrantEvent, drain};
+pub use grant_log::{GrantBus, InMemoryGrantBus, LiveGrant, SqliteGrantLog, WireGrantEvent, drain};
 pub use grants::{GrantEvent, GrantId, GrantModel, Grantor, Principal, Scope, Verb};
 pub use index::{BlockRow, Edge, IndexSnapshot, NameIndex, SqliteNameIndex};
 pub use repository::Repository;
