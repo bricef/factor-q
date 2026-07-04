@@ -206,3 +206,123 @@ fn gc_reclaims_unreferenced_and_spares_live() {
     );
     assert!(json.contains("\"alarms\": []"), "second gc: {json}");
 }
+
+#[test]
+fn access_control_operator_flow() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // key generate -> a hex keypair on stdout.
+    let out = run(root, &["key", "generate"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let mut private = None;
+    let mut public = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("private:") {
+            private = Some(rest.trim().to_string());
+        }
+        if let Some(rest) = line.strip_prefix("public:") {
+            public = Some(rest.trim().to_string());
+        }
+    }
+    let (private, public) = (private.unwrap(), public.unwrap());
+
+    // grant add -> prints the grant id; ls shows it; check allows.
+    let out = run(
+        root,
+        &["grant", "add", "bob", "read,write", "research.papers.*"],
+    );
+    assert!(
+        out.status.success(),
+        "grant add: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let ls = String::from_utf8(run(root, &["grant", "ls", "bob"]).stdout).unwrap();
+    assert!(ls.contains(&id) && ls.contains("read,write") && ls.contains("research.papers.*"));
+    assert!(
+        run(
+            root,
+            &["grant", "check", "bob", "read", "research.papers.doc1"]
+        )
+        .status
+        .success()
+    );
+    // Outside the scope, and a dotted agent id: refused.
+    assert!(
+        !run(root, &["grant", "check", "bob", "read", "docs.readme"])
+            .status
+            .success()
+    );
+    assert!(
+        !run(root, &["grant", "add", "a.b", "read", "docs.*"])
+            .status
+            .success()
+    );
+
+    // token mint (key via flag) -> verify + inspect round-trips the principal.
+    let out = run(
+        root,
+        &["token", "mint", "bob", "--biscuit-private-key", &private],
+    );
+    assert!(
+        out.status.success(),
+        "mint: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let token = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let out = run(
+        root,
+        &["token", "inspect", &token, "--biscuit-public-key", &public],
+    );
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("principal: bob"));
+
+    // Attenuate to read-only on a narrower scope: still a valid token.
+    let out = run(
+        root,
+        &[
+            "token",
+            "attenuate",
+            &token,
+            "--scope",
+            "research.papers.reviews.*",
+            "--verbs",
+            "read",
+            "--biscuit-public-key",
+            &public,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "attenuate: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let narrowed = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    assert_ne!(narrowed, token);
+    let out = run(
+        root,
+        &[
+            "token",
+            "inspect",
+            &narrowed,
+            "--biscuit-public-key",
+            &public,
+        ],
+    );
+    assert!(out.status.success());
+
+    // grant rm -> revocation is immediate: check flips to denied.
+    assert!(run(root, &["grant", "rm", &id]).status.success());
+    assert!(
+        !run(
+            root,
+            &["grant", "check", "bob", "read", "research.papers.doc1"]
+        )
+        .status
+        .success()
+    );
+    // Removing a nonexistent grant fails loudly.
+    assert!(!run(root, &["grant", "rm", "9999"]).status.success());
+}

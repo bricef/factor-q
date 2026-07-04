@@ -13,9 +13,12 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 
 use crate::fs::FilesystemStore;
+use std::collections::BTreeSet;
+
+use crate::grants::{Grantor, Principal, Scope, Verb};
 use crate::{
-    AuditReport, Cid, ContentStore, ReachabilityAuditor, Repository, SqliteNameIndex, Stats,
-    StoreError,
+    AuditReport, Cid, ContentStore, ReachabilityAuditor, Repository, SqliteGrantLog,
+    SqliteNameIndex, Stats, StoreError, TokenMinter, TokenVerifier, generate_keypair,
 };
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -38,6 +41,13 @@ Named objects (a name -> content mapping, with version history):
 Maintenance:
   fq-cas gc                                 reclaim unreferenced storage (safe on a live store)
   fq-cas gc --grace 60 --json               shorter grace, machine-readable report
+
+Access control (operator; see docs/guide/access-control.md):
+  fq-cas key generate                                 keypair for token mint/verify
+  fq-cas grant add bob read,write research.papers.*   grant over a namespace ('.*')
+  fq-cas grant check bob read research.papers.doc1    allowed right now? (exit 0/1)
+  fq-cas grant rm 3                                   revoke by grant id (immediate)
+  fq-cas token mint bob                               needs FQ_BISCUIT_PRIVATE_KEY
 
 The store lives under --root (env FQ_CAS_ROOT, default ./.fq-cas).";
 
@@ -123,6 +133,110 @@ enum Command {
         /// Emit a machine-readable JSON report instead of text.
         #[arg(long)]
         json: bool,
+    },
+    /// Access-control keys: the Ed25519 pair capability tokens are minted and
+    /// verified with.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
+    /// Operator grant management: issue, list, check, and revoke grants.
+    /// Root authority — possession of the store is the trust; agent-issued
+    /// delegation goes through the gated API, not this CLI.
+    Grant {
+        #[command(subcommand)]
+        command: GrantCommand,
+    },
+    /// Capability tokens: mint (needs the private key), attenuate and inspect
+    /// (public key only).
+    Token {
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyCommand {
+    /// Generate an Ed25519 keypair (hex): the private key mints tokens, the
+    /// public key verifies them.
+    Generate,
+}
+
+#[derive(Subcommand)]
+enum GrantCommand {
+    /// Grant verbs over a scope to an agent (operator authority); prints the
+    /// grant id.
+    Add {
+        /// The grantee agent id.
+        agent: String,
+        /// Comma-separated verbs (read,write,delete,list,grant), or 'all'.
+        verbs: String,
+        /// The scope: an exact name (research.papers.doc1), or a namespace
+        /// subtree with a trailing '.*' (research.papers.*).
+        scope: String,
+    },
+    /// List an agent's live grants (id, verbs, scope).
+    Ls {
+        /// The agent id.
+        agent: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check whether an agent may perform a verb on a resource right now.
+    /// Prints allowed/denied; exit 0 if allowed, 1 if denied.
+    Check {
+        /// The agent id.
+        agent: String,
+        /// One verb: read|write|delete|list|grant.
+        verb: String,
+        /// The resource (a dotted name).
+        resource: String,
+    },
+    /// Revoke a grant by id (operator authority). Revocation is immediate and
+    /// cascades through any delegations standing on the grant.
+    Rm {
+        /// The grant id, as printed by `grant add` / `grant ls`.
+        id: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum TokenCommand {
+    /// Mint a capability token for an agent from its live grants.
+    Mint {
+        /// The agent id.
+        agent: String,
+        /// Token TTL in seconds. The default (300) is deliberate — see the
+        /// access-control guide before raising it.
+        #[arg(long, default_value_t = 300)]
+        ttl: u64,
+        /// Hex Ed25519 private key for minting.
+        #[arg(long, env = "FQ_BISCUIT_PRIVATE_KEY", hide_env_values = true)]
+        biscuit_private_key: String,
+    },
+    /// Attenuate a token offline: narrow it to a scope and/or verbs. Only
+    /// narrowing is possible; the result is a new token.
+    Attenuate {
+        /// The token (base64), or '-' to read it from stdin.
+        token: String,
+        /// Narrow to this scope (exact name, or namespace with trailing '.*').
+        #[arg(long)]
+        scope: Option<String>,
+        /// Narrow to these comma-separated verbs.
+        #[arg(long)]
+        verbs: Option<String>,
+        /// Hex Ed25519 public key.
+        #[arg(long, env = "FQ_BISCUIT_PUBLIC_KEY")]
+        biscuit_public_key: String,
+    },
+    /// Verify a token's signature chain and print its principal.
+    Inspect {
+        /// The token (base64), or '-' to read it from stdin.
+        token: String,
+        /// Hex Ed25519 public key.
+        #[arg(long, env = "FQ_BISCUIT_PUBLIC_KEY")]
+        biscuit_public_key: String,
     },
 }
 
@@ -246,6 +360,20 @@ fn run() -> CliResult<ExitCode> {
                 );
                 run_gc(&repo, grace, json).await
             }
+            Command::Key { command } => dispatch_key(command),
+            Command::Grant { command } => {
+                if cli.server.is_some() {
+                    return Err("grant management runs against the local store".into());
+                }
+                let grants = SqliteGrantLog::open(cli.root.join("grants.db")).await?;
+                dispatch_grant(&grants, command).await
+            }
+            Command::Token { command } => {
+                if cli.server.is_some() {
+                    return Err("token operations run against the local store".into());
+                }
+                dispatch_token(&cli.root, command).await
+            }
             command => {
                 if let Some(addr) = &cli.server {
                     let store = crate::service::RemoteStore::connect(addr).await?;
@@ -315,6 +443,214 @@ async fn dispatch(store: &dyn ContentStore, command: Command) -> CliResult<ExitC
         Command::Serve { .. } => unreachable!("Serve is handled in run(), before dispatch"),
         Command::Object { .. } => unreachable!("Object is handled in run(), before dispatch"),
         Command::Gc { .. } => unreachable!("Gc is handled in run(), before dispatch"),
+        Command::Key { .. } => unreachable!("Key is handled in run(), before dispatch"),
+        Command::Grant { .. } => unreachable!("Grant is handled in run(), before dispatch"),
+        Command::Token { .. } => unreachable!("Token is handled in run(), before dispatch"),
+    }
+}
+
+fn dispatch_key(command: KeyCommand) -> CliResult<ExitCode> {
+    match command {
+        KeyCommand::Generate => {
+            let (private, public) = generate_keypair();
+            println!("private: {private}");
+            println!("public:  {public}");
+            eprintln!(
+                "Keep the private key secret (e.g. in FQ_BISCUIT_PRIVATE_KEY); \
+                 share only the public key with verifiers."
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+async fn dispatch_grant(grants: &SqliteGrantLog, command: GrantCommand) -> CliResult<ExitCode> {
+    match command {
+        GrantCommand::Add {
+            agent,
+            verbs,
+            scope,
+        } => {
+            let grantee = principal(&agent)?;
+            let verbs = parse_verbs(&verbs)?;
+            let scope = parse_scope(&scope)?;
+            let id = grants
+                .append_granted(&Grantor::Operator, &grantee, &verbs, &scope)
+                .await?;
+            println!("{id}");
+            Ok(ExitCode::SUCCESS)
+        }
+        GrantCommand::Ls { agent, json } => {
+            let grantee = principal(&agent)?;
+            let live = grants.live_grants_for(&grantee).await?;
+            if json {
+                let rows: Vec<_> = live
+                    .iter()
+                    .map(|g| {
+                        serde_json::json!({
+                            "id": g.id,
+                            "verbs": verbs_display(&g.verbs),
+                            "scope": scope_display(&g.scope),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                for g in &live {
+                    println!(
+                        "{}\t{}\t{}",
+                        g.id,
+                        verbs_display(&g.verbs),
+                        scope_display(&g.scope)
+                    );
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        GrantCommand::Check {
+            agent,
+            verb,
+            resource,
+        } => {
+            let principal = principal(&agent)?;
+            let verb = parse_verb(&verb)?;
+            let allowed = grants.can(&principal, verb, &resource).await?;
+            println!("{}", if allowed { "allowed" } else { "denied" });
+            Ok(if allowed {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        GrantCommand::Rm { id } => {
+            if grants.grantor_of(id).await?.is_none() {
+                return Err(format!("grant {id} does not exist").into());
+            }
+            grants.append_revoked(id).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+async fn dispatch_token(root: &std::path::Path, command: TokenCommand) -> CliResult<ExitCode> {
+    match command {
+        TokenCommand::Mint {
+            agent,
+            ttl,
+            biscuit_private_key,
+        } => {
+            let grants = SqliteGrantLog::open(root.join("grants.db")).await?;
+            let principal = principal(&agent)?;
+            let minter =
+                TokenMinter::from_private_key_hex(&biscuit_private_key, Duration::from_secs(ttl))?;
+            println!("{}", minter.mint_for(&grants, &principal).await?);
+            Ok(ExitCode::SUCCESS)
+        }
+        TokenCommand::Attenuate {
+            token,
+            scope,
+            verbs,
+            biscuit_public_key,
+        } => {
+            let token = read_token(&token).await?;
+            let verifier = TokenVerifier::from_public_key_hex(&biscuit_public_key)?;
+            let scope = scope.map(|s| parse_scope(&s)).transpose()?;
+            let verbs = verbs.map(|v| parse_verbs(&v)).transpose()?;
+            println!(
+                "{}",
+                verifier.attenuate(&token, scope.as_ref(), verbs.as_ref())?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        TokenCommand::Inspect {
+            token,
+            biscuit_public_key,
+        } => {
+            let token = read_token(&token).await?;
+            let verifier = TokenVerifier::from_public_key_hex(&biscuit_public_key)?;
+            let verified = verifier.verify(&token)?;
+            let Principal::Agent(id) = verified.principal();
+            println!("principal: {id}");
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// A validated agent principal — the same id shape the gate enforces.
+fn principal(agent: &str) -> CliResult<Principal> {
+    let principal = Principal::Agent(agent.to_string());
+    if !principal.has_valid_id() {
+        return Err(format!(
+            "'{agent}' is not a valid agent id (non-empty; no dots, wildcards, or whitespace)"
+        )
+        .into());
+    }
+    Ok(principal)
+}
+
+fn parse_verb(s: &str) -> CliResult<Verb> {
+    match s {
+        "read" => Ok(Verb::Read),
+        "write" => Ok(Verb::Write),
+        "delete" => Ok(Verb::Delete),
+        "list" => Ok(Verb::List),
+        "grant" => Ok(Verb::Grant),
+        other => Err(format!("unknown verb '{other}' (read|write|delete|list|grant)").into()),
+    }
+}
+
+/// Parse `read,write`-style verb lists; `all` is every verb.
+fn parse_verbs(s: &str) -> CliResult<BTreeSet<Verb>> {
+    if s == "all" {
+        return Ok(Verb::all());
+    }
+    s.split(',').map(|v| parse_verb(v.trim())).collect()
+}
+
+/// Parse the CLI scope sugar: a trailing `.*` means the namespace subtree;
+/// anything else is an exact name.
+fn parse_scope(s: &str) -> CliResult<Scope> {
+    if let Some(ns) = s.strip_suffix(".*") {
+        if ns.is_empty() {
+            return Err("'.*' alone would grant the root; grants need a namespace".into());
+        }
+        Ok(Scope::Namespace(ns.to_string()))
+    } else if s.is_empty() || s == "*" {
+        Err("the scope must be a name or a namespace like research.papers.*".into())
+    } else {
+        Ok(Scope::Name(s.to_string()))
+    }
+}
+
+fn scope_display(scope: &Scope) -> String {
+    match scope {
+        Scope::Name(name) => name.clone(),
+        Scope::Namespace(ns) => format!("{ns}.*"),
+    }
+}
+
+fn verbs_display(verbs: &BTreeSet<Verb>) -> String {
+    verbs
+        .iter()
+        .map(|v| match v {
+            Verb::Read => "read",
+            Verb::Write => "write",
+            Verb::Delete => "delete",
+            Verb::List => "list",
+            Verb::Grant => "grant",
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A token argument: literal, or '-' to read one from stdin.
+async fn read_token(arg: &str) -> CliResult<String> {
+    if arg == "-" {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        Ok(buf.trim().to_string())
+    } else {
+        Ok(arg.to_string())
     }
 }
 

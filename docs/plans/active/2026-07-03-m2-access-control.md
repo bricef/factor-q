@@ -45,8 +45,8 @@ properties and gates every later slice; each slice is green on the fq-store
 | 3 | The grant projection (SQLite #2): apply, rebuild, idempotency | A3, A5 | done |
 | 4 | Biscuit tokens: mint / verify / attenuate; key config | A1, A2, TTL | done |
 | 5 | The op-boundary gate — `can()` at the named layer | A1, A3, A4 end-to-end | done |
-| 6 | CLI UX (`grant` / `token`) + user + operator docs | — | **next** |
-| 7 | Fault DST — bus outage, crash-replay, revocation races + soak | A5, A6, recovery | |
+| 6 | CLI UX (`grant` / `token`) + user + operator docs | — | done |
+| 7 | Fault DST — bus outage, crash-replay, revocation races + soak | A5, A6, recovery | **next** |
 
 ## Decisions taken up front
 
@@ -199,6 +199,18 @@ properties and gates every later slice; each slice is green on the fq-store
   whole subtrees by revoking their own delegation — no supervisory revoke
   needed in v1.) Listing with an empty prefix is operator-only: no grantable
   scope can cover the root.
+
+- **(Slice 6) The CLI is the operator surface only.** `key generate`,
+  `grant add/ls/check/rm`, `token mint/attenuate/inspect` — root authority by
+  possession of the store, no token required. Agent-issued *delegation* is a
+  gate API affordance (`GatedRepository::grant`), deliberately not a CLI
+  command. `grant check` prints allowed/denied and exits 0/1 (scriptable,
+  mirroring `has`); `grant rm` refuses unknown ids loudly.
+- **(Slice 6) Scope sugar:** a trailing `.*` is the namespace subtree
+  (`research.papers.*` ⇒ `Namespace("research.papers")`); a bare dotted string
+  is an exact `Name`. Bare `*`, empty, and `.*`-alone are rejected — nothing
+  grants the root. The same sugar round-trips in `grant ls` output. Agent ids
+  are validated in the CLI with the same rule as the gate.
 
 ## Sequencing note
 

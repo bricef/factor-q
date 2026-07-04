@@ -15,6 +15,7 @@ Everything sits under one root directory (`--root`, env `FQ_CAS_ROOT`, default
 <root>/blocks/<aa>/<hash>[.<gen>]   content-defined blocks, deduplicated
 <root>/objects/<aa>/<cid>           JSON manifests (an object's ordered blocks)
 <root>/index.db                     SQLite: names, versions, reference counts
+<root>/grants.db                    SQLite: the grant-event log + permission projection
 ```
 
 Content is immutable and shared: identical blocks across objects are stored once.

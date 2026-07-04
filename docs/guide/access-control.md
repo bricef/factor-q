@@ -7,10 +7,10 @@ revoke**. This implements
 the build is tracked in the
 [M2 plan](../plans/active/2026-07-03-m2-access-control.md).
 
-> **Status:** the model, event log, and projection below are built and
-> verified; capability tokens and the enforcement gate are in progress, and
-> the `fq-cas grant` / `fq-cas token` CLI ships when M2 completes. The
-> semantics documented here are the contract that work is built against.
+> **Status:** built and verified — the model, event log, projection,
+> capability tokens, the enforcement gate, and the operator CLI below. The
+> remaining M2 work (fault-injection soak) hardens, but does not change,
+> these semantics.
 
 ## The model in one paragraph
 
@@ -83,6 +83,50 @@ Two things follow for operators:
 - **Don't stretch the TTL for convenience.** A long TTL costs nothing
   in-process today, but it widens the future remote window; the 300 s default
   is deliberate.
+
+## Managing grants and tokens
+
+The `fq-cas` CLI is the **operator** surface — root authority by possession of
+the store, no token needed. (Agent-issued *delegation* is an API operation
+through the enforcement gate, not a CLI command.)
+
+Scopes use one piece of sugar: a trailing `.*` means the namespace subtree
+(`research.papers.*` covers `research.papers` and everything under it); a bare
+dotted name means exactly that name. Verbs are a comma list
+(`read,write,delete,list,grant`) or `all`.
+
+```console
+$ fq-cas key generate                # once per store: keep private secret
+private: 8a4b…
+public:  f31c…
+
+$ fq-cas grant add bob read,write research.papers.*
+7                                    # the grant id
+$ fq-cas grant ls bob
+7	read,write	research.papers.*
+$ fq-cas grant check bob read research.papers.doc1
+allowed                              # exit 0 (denied -> exit 1): scriptable
+$ fq-cas grant rm 7                  # immediate, cascades through delegations
+```
+
+Tokens are minted from an agent's **live** grants (a mint after a revocation
+carries nothing) and verified with only the public key:
+
+```console
+$ export FQ_BISCUIT_PRIVATE_KEY=8a4b…
+$ fq-cas token mint bob --ttl 300
+<base64 token>
+$ fq-cas token attenuate <token> --scope research.papers.reviews.* --verbs read \
+    --biscuit-public-key f31c…
+<narrower base64 token>              # attenuation can only narrow (offline)
+$ fq-cas token inspect <token> --biscuit-public-key f31c…
+principal: bob
+```
+
+Keys come from `--biscuit-private-key` / `FQ_BISCUIT_PRIVATE_KEY` (minting
+only) and `--biscuit-public-key` / `FQ_BISCUIT_PUBLIC_KEY` (verification).
+The grant history and current permissions live in `<root>/grants.db`,
+alongside the storage index.
 
 ## See also
 
