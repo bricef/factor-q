@@ -24,8 +24,10 @@ properties and gates every later slice; each slice is green on the fq-store
 - **A2 — attenuation never widens:** an attenuated token authorizes a subset of
   its parent, always.
 - **A3 — revocation wins:** after a revoke event is applied, no operation under
-  the revoked grant succeeds (new mints fail; extant tokens die with their TTL,
-  which bounds the revocation window).
+  the revoked grant succeeds. In-process the gate checks the live projection on
+  every op (belt-and-braces), so the revocation gap is **zero**; the token TTL
+  bounds only future *remote* verifiers (M5), where new mints already fail and
+  extant tokens die with their TTL.
 - **A4 — delegation is grant-gated:** only a principal holding `grant` on a
   scope can delegate within it, and only attenuated (⊆ its own scope).
 - **A5 — projection ≡ replay:** the projection equals a fresh rebuild from the
@@ -150,6 +152,15 @@ properties and gates every later slice; each slice is green on the fq-store
   parallel SQL string matching — and the differential proptest holds the
   projection equal to `GrantModel` over random sequences, before and after
   rebuild. `live_grants_for` is the feed token minting (slice 4) embeds.
+
+- **(For slices 4–5) Belt-and-braces enforcement.** The in-process gate requires
+  **both** a valid token (identity, attenuation, expiry) **and**
+  `projection.can()` on every operation. The projection updates in the same
+  transaction as the revocation event, so revocation is effective immediately
+  in-process — no TTL-sized window. The token TTL (default 300 s, configurable)
+  matters only for M5's distributed verifiers, where biscuit revocation-id
+  distribution is the planned complement. Pure offline verification is a remote
+  optimisation, never the in-process authority.
 
 ## Sequencing note
 
