@@ -145,3 +145,7 @@ properties hold by construction:
   the online-reclaim protocol and the reachability-audit backstop.
 - [`storage-gc-verification.md`](../design/storage-gc-verification.md) — the
   invariants, the fault map, and the TLA⁺ / DST verification behind the above.
+
+- [Access control](access-control.md) — the grants model, and revocation
+  semantics / the token TTL (what takes effect when, and why revocation is
+  immediate in-process).
