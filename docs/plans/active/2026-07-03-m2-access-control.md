@@ -46,7 +46,7 @@ properties and gates every later slice; each slice is green on the fq-store
 | 4 | Biscuit tokens: mint / verify / attenuate; key config | A1, A2, TTL | done |
 | 5 | The op-boundary gate — `can()` at the named layer | A1, A3, A4 end-to-end | done |
 | 6 | CLI UX (`grant` / `token`) + user + operator docs | — | done |
-| 7 | Fault DST — bus outage, crash-replay, revocation races + soak | A5, A6, recovery | **next** |
+| 7 | Fault DST — bus outage, crash-replay, revocation races + soak | A5, A6, recovery | done |
 
 ## Decisions taken up front
 
@@ -211,6 +211,27 @@ properties and gates every later slice; each slice is green on the fq-store
   is an exact `Name`. Bare `*`, empty, and `.*`-alone are rejected — nothing
   grants the root. The same sugar round-trips in `grant ls` output. Agent ids
   are validated in the CLI with the same rule as the gate.
+
+- **(Slice 7) The grants DST drives the real stack against a lockstep model.**
+  Seeded steps interleave operator grants, unchecked "delegations" (the log
+  tolerates garbage; the projection must keep them inert), revocations of
+  plausible-or-bogus ids, crash-reopens, bus outages, drains, mid-stream full
+  rebuilds, and held tokens. Every step asserts projection ≡ model (A5), log
+  replay ≡ the appended events, **outbox conservation** (published ∪ pending =
+  everything, ordered — the bus survives crashes as an external broker), and
+  the belt-and-braces composition for stale tokens ≡ the model (the
+  zero-revocation-gap claim under races). CI runs 12 seeds × 40 steps; the
+  deep soak (64 × 80 ≈ 5,120 steps) passed.
+- **(Slice 7) Soak finding: drain over an empty outbox is `Ok(0)` even while
+  the bus is down** — no publish is attempted, so nothing can fail. The deep
+  soak caught the DST's original assertion being over-strict (seed 21 flipped
+  the bus down after everything had drained); the semantics are now pinned in
+  the harness. At-least-once fan-out on a crash between publish and mark is
+  documented: consumers de-duplicate by `seq`.
+
+**Status: all seven slices done.** The A1–A6 claims hold end-to-end — model,
+log + outbox, projection, tokens, gate, CLI, and the fault DST + soak. Next:
+the pre-merge review pass, then merge (the M1c pattern).
 
 ## Sequencing note
 
