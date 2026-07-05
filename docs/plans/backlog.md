@@ -840,12 +840,16 @@ observed, not hypothesised.
 
 ### No prompt caching on the Anthropic path
 
-The conversation is re-sent in full on every LLM turn; a six-turn run
-with one fat tool output reached 93.9k cumulative input tokens for 705
-output ($0.29). Anthropic prompt caching (`cache_control` on the system
-prompt + stable history prefix) would cut resend cost ~90% on exactly
-this shape. Likely lives in the `GenAiClient` adapter or needs a raw
-provider path. High leverage: every long-running agent pays this tax.
+**Addressed (2026-07-05, `2889c44`).** The genai adapter now marks the
+system prompt and the final message as cache breakpoints on every
+request, and `ModelPricing` prices uncached/read/write tokens
+separately. Measured on the dogfood loop the same day: per-turn costs
+flattened from an escalating $0.007→$0.084 to a steady ~$0.005–0.009,
+36% off the total on a like-for-like run. Residue kept here: genai
+0.4.4 drops the marker on a single system message (off-by-one in its
+Anthropic adapter, pinned in `cache_control_reaches_the_wire...`) —
+worth an upstream PR; and `fq costs`/the projection don't yet surface
+cache columns (see the costs-filter finding below).
 
 ### Agent definitions load once at daemon startup — no reload
 
