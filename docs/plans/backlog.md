@@ -845,10 +845,14 @@ shared streams. With the daemon stopped, the same gate passes cleanly
 back-to-back; GitHub CI never sees this because its NATS starts fresh
 and daemon-free.
 
-Interim rule of thumb: stop any local daemon before `just ci` (noted
-in the dogfood project README). Proper fixes, pick any: per-run
-subject prefixes for tests, a dedicated test broker on another port,
-or unique stream names per suite run.
+**Resolved for the dogfood box (2026-07-05):** the dogfood project
+now runs its own broker (`~/fq-dogfood/infra/docker-compose.yml`,
+loopback-only on 4223) so the daemon and the suite never share
+streams — verified by running the full gate concurrently with a live
+invocation, green. The general hazard stands for anyone running a
+daemon against the dev broker: per-run subject prefixes or unique
+stream names per suite run would fix it structurally in the tests
+themselves.
 
 ## Dogfood findings (flagged 2026-07-05)
 
