@@ -257,6 +257,9 @@ mod tests {
             workspace_ref: None,
             archive_status: None,
             archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
         }
     }
 

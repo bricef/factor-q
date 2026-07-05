@@ -312,7 +312,7 @@ mod tests {
     use crate::llm::ChatResponse;
     use crate::test_support::oracle;
 
-    fn sim_tool_call(call_id: &str) -> ChatResponse {
+    pub(super) fn sim_tool_call(call_id: &str) -> ChatResponse {
         ChatResponse {
             content: None,
             tool_calls: vec![MessageToolCall {
@@ -330,7 +330,7 @@ mod tests {
         }
     }
 
-    fn end_turn(text: &str) -> ChatResponse {
+    pub(super) fn end_turn(text: &str) -> ChatResponse {
         ChatResponse {
             content: Some(text.to_string()),
             tool_calls: vec![],
@@ -456,5 +456,170 @@ mod tests {
             .await
             .expect("query");
         assert!(in_flight.is_empty(), "no invocation left in flight");
+    }
+}
+
+#[cfg(test)]
+mod resume_equivalence {
+    //! Slice 4 (claim R4): suspension is structural. For any script
+    //! and any span boundary, interrupting at the boundary and
+    //! resuming yields the same observational trace, outcome, and
+    //! tool dispatches as the uninterrupted run.
+    //!
+    //! Boundaries are each span's *first publish* (`1 + 3·span` —
+    //! `triggered` is publish 0 and every span emits a triple). The
+    //! fault lands before the span does externally-visible work, so
+    //! the recorded prefix is exactly the completed spans, and resume
+    //! re-runs the interrupted span in full: the combined trace must
+    //! equal the reference under the observational mask.
+
+    use super::tests::{end_turn, sim_tool_call};
+    use super::*;
+    use crate::llm::ChatResponse;
+    use crate::test_support::oracle::observational_trace;
+
+    /// The LLM script for `turns` tool calls followed by an end turn.
+    fn script(turns: usize) -> Vec<ChatResponse> {
+        let mut responses: Vec<ChatResponse> = (0..turns)
+            .map(|k| sim_tool_call(&format!("c{k}")))
+            .collect();
+        responses.push(end_turn("all-done"));
+        responses
+    }
+
+    fn load_fixture(llm: &FixtureClient, responses: &[ChatResponse]) {
+        for r in responses {
+            llm.push_response(r.clone());
+        }
+    }
+
+    fn queue_tool_outputs(world: &SimWorld, turns: usize) {
+        for k in 0..turns {
+            world.tool.push_output(ToolResult::ok(format!("out-{k}")));
+        }
+    }
+
+    struct RunResult {
+        observed: Vec<Value>,
+        summary: Option<String>,
+        dispatches: Vec<Value>,
+    }
+
+    fn summary_of(outcome: &InvocationOutcome) -> Option<String> {
+        match outcome {
+            InvocationOutcome::Completed { response, .. } => response.content.clone(),
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    async fn run_reference(seed: u64, turns: usize) -> RunResult {
+        let world = SimWorld::new(seed, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &script(turns));
+        let outcome = world.run(&llm).await.expect("reference run");
+        RunResult {
+            observed: observational_trace(&world.sink.events()),
+            summary: summary_of(&outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        }
+    }
+
+    async fn run_interrupted(seed: u64, turns: usize, boundary_span: usize) -> RunResult {
+        let world = SimWorld::new(seed, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        let responses = script(turns);
+
+        // Fault at the first publish of the chosen span.
+        world.sink.fail_publish_at(1 + 3 * boundary_span);
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &responses);
+        let err = world
+            .run(&llm)
+            .await
+            .expect_err("must crash at the boundary");
+        assert!(
+            matches!(err, ExecutorError::Bus(_)),
+            "expected the injected fault, got {err:?}"
+        );
+
+        // Resume with the not-yet-consumed LLM turns: the fixture was
+        // read once per *completed* LLM span, i.e. (span + 1) / 2.
+        let consumed = boundary_span.div_ceil(2);
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &responses[consumed..]);
+        let outcome = world.resume(&resume_llm).await.expect("resume");
+
+        RunResult {
+            observed: observational_trace(&world.sink.events()),
+            summary: summary_of(&outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        }
+    }
+
+    fn assert_equivalent(reference: &RunResult, resumed: &RunResult, label: &str) {
+        for (i, (a, b)) in reference
+            .observed
+            .iter()
+            .zip(resumed.observed.iter())
+            .enumerate()
+        {
+            assert_eq!(a, b, "observational traces diverge at event {i} ({label})");
+        }
+        assert_eq!(
+            reference.observed.len(),
+            resumed.observed.len(),
+            "trace lengths diverge ({label})"
+        );
+        assert_eq!(
+            reference.summary, resumed.summary,
+            "outcome diverges ({label})"
+        );
+        assert_eq!(
+            reference.dispatches, resumed.dispatches,
+            "tool dispatches diverge ({label})"
+        );
+    }
+
+    /// Every boundary of a fixed two-tool-turn script, exhaustively.
+    #[tokio::test]
+    async fn every_boundary_of_a_fixed_script_is_equivalent() {
+        let turns = 2;
+        let reference = run_reference(1234, turns).await;
+        for boundary in 0..=(2 * turns) {
+            let resumed = run_interrupted(1234, turns, boundary).await;
+            assert_equivalent(&reference, &resumed, &format!("boundary {boundary}"));
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 24, ..Default::default()
+        })]
+
+        /// Random scripts × random boundaries × random seeds: the
+        /// interrupted-and-resumed run is observationally identical
+        /// to the uninterrupted one.
+        #[test]
+        fn interrupted_runs_are_observationally_equivalent(
+            seed: u64,
+            turns in 1usize..=3,
+            boundary in 0usize..=6,
+        ) {
+            proptest::prop_assume!(boundary <= 2 * turns);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("sim runtime");
+            runtime.block_on(async {
+                let reference = run_reference(seed, turns).await;
+                let resumed = run_interrupted(seed, turns, boundary).await;
+                assert_equivalent(
+                    &reference,
+                    &resumed,
+                    &format!("seed {seed}, turns {turns}, boundary {boundary}"),
+                );
+            });
+        }
     }
 }

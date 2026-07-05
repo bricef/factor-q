@@ -77,7 +77,7 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   sweeper uses `archive_published_at` to decide when to
 ///   republish. On `invocation.archive_acked` the row is
 ///   deleted outright.
-pub const WORKER_SCHEMA_VERSION: u32 = 4;
+pub const WORKER_SCHEMA_VERSION: u32 = 5;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -167,6 +167,23 @@ ALTER TABLE invocation_state ADD COLUMN archive_status TEXT;
 ALTER TABLE invocation_state ADD COLUMN archive_published_at INTEGER;
 CREATE INDEX IF NOT EXISTS idx_invocation_state_archive
     ON invocation_state(archive_status, archive_published_at);
+"#;
+
+/// v5 migration: persist the trigger on `invocation_state`.
+///
+/// Found by the slice-4 resume-equivalence property (reducer
+/// verification plan): `resume()` passed a null trigger on the
+/// grounds that "step 0 is past us", but replay re-runs step 0 —
+/// so every resumed invocation re-seeded its conversation with
+/// "(no input)" instead of the original request. The trigger is
+/// invocation input, and input must survive a crash like
+/// everything else in the WAL. Rows written before v5 have NULLs
+/// here; resume logs a warning and degrades to the old behaviour
+/// for those.
+const WORKER_MIGRATION_V5_SQL: &str = r#"
+ALTER TABLE invocation_state ADD COLUMN trigger_source TEXT;
+ALTER TABLE invocation_state ADD COLUMN trigger_subject TEXT;
+ALTER TABLE invocation_state ADD COLUMN trigger_payload TEXT;
 "#;
 
 /// One of the three WAL states a dispatch can be in.
@@ -262,6 +279,15 @@ pub struct InvocationStateRow {
     /// published, in unix ms. Used by the retry sweeper to
     /// decide when to republish.
     pub archive_published_at: Option<i64>,
+    /// The trigger that started this invocation (v5): source kind
+    /// (`manual` / `subject` / `schedule`), optional subject, and
+    /// the payload as JSON text. Resume replays step 0, which
+    /// re-seeds the conversation from the trigger — so the trigger
+    /// must survive a crash like every other input. `None` on rows
+    /// written before v5.
+    pub trigger_source: Option<String>,
+    pub trigger_subject: Option<String>,
+    pub trigger_payload: Option<String>,
 }
 
 /// Worker-side store. Cheap to clone (the underlying connection
@@ -400,7 +426,12 @@ impl WorkerStore {
                 sqlx::query(&stmt).execute(&self.pool).await?;
             }
         }
-        // Future migrations: 4 → 5, etc.
+        if from < 5 && to >= 5 {
+            for stmt in split_sql(WORKER_MIGRATION_V5_SQL) {
+                sqlx::query(&stmt).execute(&self.pool).await?;
+            }
+        }
+        // Future migrations: 5 → 6, etc.
         Ok(())
     }
 
@@ -732,15 +763,19 @@ impl WorkerStore {
             r#"
             INSERT INTO invocation_state
                 (invocation_id, agent_id, schema_version, phase, state_blob,
-                 iteration, started_at, updated_at, terminal_at, workspace_ref)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 iteration, started_at, updated_at, terminal_at, workspace_ref,
+                 trigger_source, trigger_subject, trigger_payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(invocation_id) DO UPDATE SET
                 phase = excluded.phase,
                 state_blob = excluded.state_blob,
                 iteration = excluded.iteration,
                 updated_at = excluded.updated_at,
                 terminal_at = excluded.terminal_at,
-                workspace_ref = excluded.workspace_ref
+                workspace_ref = excluded.workspace_ref,
+                trigger_source = excluded.trigger_source,
+                trigger_subject = excluded.trigger_subject,
+                trigger_payload = excluded.trigger_payload
             "#,
         )
         .bind(&row.invocation_id)
@@ -753,6 +788,9 @@ impl WorkerStore {
         .bind(row.updated_at)
         .bind(row.terminal_at)
         .bind(&row.workspace_ref)
+        .bind(&row.trigger_source)
+        .bind(&row.trigger_subject)
+        .bind(&row.trigger_payload)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -801,7 +839,8 @@ impl WorkerStore {
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
                    iteration, started_at, updated_at, terminal_at, workspace_ref,
-                   archive_status, archive_published_at
+                   archive_status, archive_published_at,
+                   trigger_source, trigger_subject, trigger_payload
             FROM invocation_state
             WHERE terminal_at IS NOT NULL
               AND (archive_status IS NULL OR archive_status = 'pending')
@@ -822,7 +861,8 @@ impl WorkerStore {
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
                    iteration, started_at, updated_at, terminal_at, workspace_ref,
-                   archive_status, archive_published_at
+                   archive_status, archive_published_at,
+                   trigger_source, trigger_subject, trigger_payload
             FROM invocation_state
             WHERE invocation_id = ?
             "#,
@@ -846,7 +886,8 @@ impl WorkerStore {
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
                    iteration, started_at, updated_at, terminal_at, workspace_ref,
-                   archive_status, archive_published_at
+                   archive_status, archive_published_at,
+                   trigger_source, trigger_subject, trigger_payload
             FROM invocation_state
             WHERE terminal_at IS NULL
             ORDER BY started_at
@@ -1007,6 +1048,9 @@ fn row_to_invocation_state(
         workspace_ref: row.get("workspace_ref"),
         archive_status: row.get("archive_status"),
         archive_published_at: row.get("archive_published_at"),
+        trigger_source: row.get("trigger_source"),
+        trigger_subject: row.get("trigger_subject"),
+        trigger_payload: row.get("trigger_payload"),
     })
 }
 
@@ -1336,6 +1380,9 @@ mod tests {
             workspace_ref: None,
             archive_status: None,
             archive_published_at: None,
+            trigger_source: Some("subject".to_string()),
+            trigger_subject: Some("fq.agent.agent-y.trigger".to_string()),
+            trigger_payload: Some("{\"ask\":\"review the docs\"}".to_string()),
         };
         store.upsert_invocation_state(&row).await.unwrap();
         let back = store.get_invocation_state("inv-x").await.unwrap().unwrap();
@@ -1367,6 +1414,9 @@ mod tests {
             workspace_ref: None,
             archive_status: None,
             archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
         };
         let mut done = alive.clone();
         done.invocation_id = "done".to_string();
@@ -1397,6 +1447,9 @@ mod tests {
             workspace_ref: None,
             archive_status: None,
             archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
         };
         store.upsert_invocation_state(&row).await.unwrap();
         let n = store.delete_invocation_state("to-delete").await.unwrap();
@@ -1424,6 +1477,9 @@ mod tests {
             workspace_ref: None,
             archive_status: None,
             archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
         }
     }
 

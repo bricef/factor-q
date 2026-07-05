@@ -1,9 +1,11 @@
 # Reducer verification: implementation plan
 
 **Status:** active (2026-07-05) — claims R1–R7 reviewed and approved;
-slices 1–2 landed the same day (both pre-registered findings were
-confirmed and fixed before the net: the budget accumulator and the
-error-kind semantics). Adopts critique 3 of the
+slices 1–4 landed the same day. Both pre-registered findings were
+confirmed and fixed before the net (the budget accumulator and the
+error-kind semantics), and slice 4's first property sweep caught a
+third: resume dropped the trigger, re-seeding resumed conversations
+with "(no input)" (fixed via worker-store schema v5). Adopts critique 3 of the
 [2026-07-05 project assessment](../../design/2026-07-05-project-assessment.md)
 and absorbs the "Round-trip invariants on `HarnessState`" thread of
 [backlog § Reducer boundary invariants](../backlog.md).
@@ -152,6 +154,22 @@ Stated before the net is built, to be confirmed or refuted by it:
    Consciously untouched: `FailurePhase` has no reducer-step phase (the
    step-error path reports `llm_response`) — a smaller shape question the
    R1 oracle can revisit.
+3. **Discovered by slice 4, first property sweep (2026-07-05): resume
+   dropped the trigger.** `resume()` passed a null trigger, reasoning
+   "the harness only consumes it on step 0, which we've moved past via
+   replay" — but replay *starts at* step 0, so every resumed invocation
+   re-seeded its conversation with `"(no input)"` instead of the
+   original request. The WAL preserved every LLM and tool result while
+   losing the invocation's *input*; a resumed agent would continue a
+   conversation whose first user message was wrong. The pre-existing
+   safe-replay test missed it because it asserted completion, not
+   conversation fidelity — observational equivalence caught it at the
+   first boundary of the first exhaustive sweep. Fixed by worker-store
+   schema **v5**: `invocation_state` persists
+   `trigger_source`/`trigger_subject`/`trigger_payload`, the run loop
+   writes them, and `resume()` reconstructs the trigger from the row
+   (legacy pre-v5 rows warn and degrade to the old behaviour). Pinned
+   by the slice-4 suite itself.
 
 ## Slices
 
@@ -160,7 +178,7 @@ Stated before the net is built, to be confirmed or refuted by it:
 | 1 | Trace oracle — claims as pure predicates over recorded (events, WAL, outcome) traces; existing happy-path tests re-driven through it | the net itself, R1/R6 shape | **done** — `test_support::oracle`: the grammar automaton (LLM triples, tool spans with nested sampling, synthetic lone error results, one terminal + archived, envelope chain), 9 hermetic oracle tests, wired into the two canonical runner traces |
 | 2 | `HarnessState::validate` + state-blob property tests (round-trip, corruption/invalid-state rejection, unknown-field tolerance) | R7 | **done** — validate at load and save, targeted corruption tests, byte round-trip, unknown-field tolerance, two proptest properties |
 | 3 | Hermetic sim harness — scripted LLM + recording tools + in-memory event sink + tempdir `WorkerStore`, seeded scheduler, fault plan | enables 4–7 | **done** — `test_support::sim`: `EventSink` + `Clock` seams through `RunnerConfig` (production defaults unchanged), `SimWorld` with `RecordingSink` publish faults, `ScriptedTool` dispatch recording, `SimClock`; three smoke tests: hermetic oracle-valid run, same-seed byte-identical determinism, crash-at-publish → resume with at-most-once tools. Note: sim lives in-crate (`test_support` is `#[cfg(test)]`), not `tests/sim.rs` as originally named — revisit if test_support ever gets feature-exposed |
-| 4 | Resume-equivalence properties — random scripts × every step boundary | R4 | todo |
+| 4 | Resume-equivalence properties — random scripts × every step boundary | R4 | **done** — `observational_trace` masking in the oracle (volatile fields: per-call UUIDs, measured durations, clock stamps); exhaustive fixed-script boundary sweep + 24-case proptest over scripts × boundaries × seeds. Found and fixed finding 3 (resume dropped the trigger) on the first sweep |
 | 5 | Crash DST — fault plans over every WAL/publish/dispatch boundary; recovery categorisation soundness; ambiguous handling; archive hand-off under ack loss | R2, R3, R1-under-faults | todo |
 | 6 | Budget properties — random pricing scripts, sampling/evaluator origins, crash/resume accumulation (resolves finding 1) | R5 | todo |
 | 7 | Soak — long randomised runs with all oracles on; CI-hermetic seeds + a deep local soak recipe | everything, in volume | todo |

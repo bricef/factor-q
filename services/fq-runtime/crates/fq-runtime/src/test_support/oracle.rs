@@ -256,6 +256,52 @@ fn kind(payload: &EventPayload) -> &'static str {
     super::events::event_kind_of(payload)
 }
 
+/// The observational projection of a trace (reducer verification
+/// plan, R4): per event, its kind plus the payload with volatile
+/// fields masked — per-call UUIDs, measured durations, and clock
+/// stamps whose values depend on *when* work ran rather than *what*
+/// ran. Everything else (messages, tool parameters and outputs,
+/// stop reasons, token usage, totals, the final state blob) is load-
+/// bearing and kept. Two runs are observationally equivalent iff
+/// their projections are equal.
+pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
+    const VOLATILE_KEYS: &[&str] = &[
+        "call_id",
+        "duration_ms",
+        "total_duration_ms",
+        "started_at_ms",
+        "terminal_at_ms",
+    ];
+
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for key in VOLATILE_KEYS {
+                    map.remove(*key);
+                }
+                for child in map.values_mut() {
+                    strip(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items.iter_mut() {
+                    strip(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    events
+        .iter()
+        .map(|event| {
+            let mut value = serde_json::to_value(&event.payload).expect("event payload serialises");
+            strip(&mut value);
+            value
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

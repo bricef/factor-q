@@ -788,15 +788,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             allowed_tool_names: agent.tools().to_vec(),
             max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
         };
-        // Trigger payload is past us: the original `triggered`
-        // event was emitted on initial run. Pass a null trigger;
-        // the harness only consumes it on step 0, which we've
-        // moved past via replay.
-        let trigger = TriggerPayload {
-            source: TriggerSourceKind::Manual,
-            subject: None,
-            payload: Value::Null,
-        };
+        // Reconstruct the original trigger from the state row (v5).
+        // Replay starts at step 0, and step 0 seeds the conversation
+        // from the trigger — resuming with a null trigger would
+        // rewrite the invocation's first user message to "(no input)"
+        // (found by the slice-4 resume-equivalence property). Rows
+        // written before v5 lack the columns; warn and degrade.
+        let trigger = trigger_from_state_row(&state_row);
 
         // Replay the reducer deterministically through every
         // completed action. The reducer is pure; reading the
@@ -976,6 +974,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     workspace_ref: None,
                     archive_status: None,
                     archive_published_at: None,
+                    trigger_source: Some(trigger_source_label(&trigger.source).to_string()),
+                    trigger_subject: trigger.subject.clone(),
+                    trigger_payload: Some(trigger.payload.to_string()),
                 })
                 .await
                 .map_err(map_store_err)?;
@@ -3075,6 +3076,49 @@ fn rand_u64() -> u64 {
     h.finish()
 }
 
+fn trigger_source_label(kind: &TriggerSourceKind) -> &'static str {
+    match kind {
+        TriggerSourceKind::Manual => "manual",
+        TriggerSourceKind::Subject => "subject",
+        TriggerSourceKind::Schedule => "schedule",
+    }
+}
+
+fn trigger_from_state_row(row: &crate::worker::store::InvocationStateRow) -> TriggerPayload {
+    let source = match row.trigger_source.as_deref() {
+        Some("manual") => TriggerSourceKind::Manual,
+        Some("subject") => TriggerSourceKind::Subject,
+        Some("schedule") => TriggerSourceKind::Schedule,
+        Some(other) => {
+            warn!(
+                trigger_source = other,
+                "unknown stored trigger source; assuming manual"
+            );
+            TriggerSourceKind::Manual
+        }
+        None => TriggerSourceKind::Manual,
+    };
+    let payload = match row.trigger_payload.as_deref() {
+        Some(text) => serde_json::from_str(text).unwrap_or_else(|err| {
+            warn!(error = %err, "stored trigger payload is not valid JSON; using null");
+            Value::Null
+        }),
+        None => {
+            warn!(
+                invocation_id = %row.invocation_id,
+                "state row predates trigger persistence (schema v5); \
+                 replay will seed the conversation with \"(no input)\""
+            );
+            Value::Null
+        }
+    };
+    TriggerPayload {
+        source,
+        subject: row.trigger_subject.clone(),
+        payload,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Behavioural-equivalence and end-to-end tests for the
@@ -4653,6 +4697,9 @@ mod tests {
                 workspace_ref: None,
                 archive_status: None,
                 archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
             })
             .await
             .unwrap();
@@ -4806,6 +4853,9 @@ mod tests {
                 workspace_ref: None,
                 archive_status: None,
                 archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
             })
             .await
             .unwrap();
@@ -4929,6 +4979,9 @@ mod tests {
                 workspace_ref: None,
                 archive_status: None,
                 archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
             })
             .await
             .unwrap();

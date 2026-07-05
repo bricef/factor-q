@@ -211,6 +211,9 @@ mod tests {
             workspace_ref: None,
             archive_status: None,
             archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
         }
     }
 
@@ -394,6 +397,9 @@ mod tests {
                     workspace_ref: None,
                     archive_status: None,
                     archive_published_at: None,
+                    trigger_source: None,
+                    trigger_subject: None,
+                    trigger_payload: None,
                 })
                 .await
                 .unwrap();
@@ -442,6 +448,9 @@ mod tests {
             workspace_ref: None,
             archive_status: None,
             archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
         };
         store.upsert_invocation_state(&terminal_row).await.unwrap();
         terminal_row.invocation_id = "terminal-2".to_string();
