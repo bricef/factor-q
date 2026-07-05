@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4a6b380cc133c32adb740718a9f567845438e7864f9a24eaa229e2970874d2af # shrinks to turns = 4, end_in_dispatch = false, finish = false
+cc 4b8827ad450d2f9889716b13ff615b03065377b32531d3fe2c762dee0fefa967 # shrinks to turns = 3, end_in_dispatch = false, wrong_phase = "initial"

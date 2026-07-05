@@ -87,17 +87,98 @@ impl HarnessState {
         if bytes.is_empty() {
             return Ok(Self::default());
         }
-        serde_json::from_slice(bytes).map_err(|err| HarnessError {
+        let state: Self = serde_json::from_slice(bytes).map_err(|err| HarnessError {
             kind: HarnessErrorKind::InternalError,
             message: format!("state deserialise failed: {err}"),
-        })
+        })?;
+        // Serde catches structural malformation; this catches a
+        // corrupt or stale persisted blob whose contents contradict
+        // its phase.
+        state.validate()?;
+        Ok(state)
     }
 
     fn save(&self) -> Result<Vec<u8>, HarnessError> {
+        // Validating on save catches a reducer bug that produced an
+        // inconsistent state in-memory, before it can be persisted.
+        self.validate()?;
         serde_json::to_vec(self).map_err(|err| HarnessError {
             kind: HarnessErrorKind::InternalError,
             message: format!("state serialise failed: {err}"),
         })
+    }
+
+    /// The phase ↔ contents invariants the state machine enforces
+    /// (reducer verification plan, claim R7; written out from
+    /// `initial_step` / `model_response_step` / `tool_results_step`):
+    ///
+    /// - `Initial` ⇒ the conversation is empty.
+    /// - `AwaitingModel` ⇒ non-empty, and the last message is not an
+    ///   assistant message (an assistant turn either completed the
+    ///   invocation or moved it to `DispatchingTools`).
+    /// - `DispatchingTools` ⇒ the last message is an assistant
+    ///   message carrying at least one tool call.
+    /// - `Done` ⇒ the conversation was seeded (only `Initial` may be
+    ///   empty).
+    /// - `iteration` is at least the number of assistant messages —
+    ///   each assistant message in the history was one counted LLM
+    ///   turn (turns that completed the invocation count without
+    ///   appending a message, so this is a lower bound).
+    fn validate(&self) -> Result<(), HarnessError> {
+        let violation = match self.phase {
+            Phase::Initial => (!self.messages.is_empty()).then(|| {
+                format!(
+                    "phase Initial requires an empty conversation, found {} message(s)",
+                    self.messages.len()
+                )
+            }),
+            Phase::AwaitingModel => match self.messages.last() {
+                None => Some("phase AwaitingModel requires a seeded conversation".to_string()),
+                Some(last) if matches!(last.role, MessageRole::Assistant) => {
+                    Some("phase AwaitingModel cannot follow an assistant message".to_string())
+                }
+                Some(_) => None,
+            },
+            Phase::DispatchingTools => match self.messages.last() {
+                Some(last) if matches!(last.role, MessageRole::Assistant) => {
+                    last.tool_calls.is_empty().then(|| {
+                        "phase DispatchingTools requires the last assistant message to carry \
+                         tool calls"
+                            .to_string()
+                    })
+                }
+                Some(_) => Some(
+                    "phase DispatchingTools requires the last message to be an assistant \
+                     message"
+                        .to_string(),
+                ),
+                None => Some("phase DispatchingTools requires a seeded conversation".to_string()),
+            },
+            Phase::Done => self
+                .messages
+                .is_empty()
+                .then(|| "phase Done requires a seeded conversation".to_string()),
+        };
+        let violation = violation.or_else(|| {
+            let assistant_count = self
+                .messages
+                .iter()
+                .filter(|m| matches!(m.role, MessageRole::Assistant))
+                .count();
+            ((self.iteration as usize) < assistant_count).then(|| {
+                format!(
+                    "iteration {} is below the {} assistant message(s) in the history",
+                    self.iteration, assistant_count
+                )
+            })
+        });
+        match violation {
+            Some(message) => Err(HarnessError {
+                kind: HarnessErrorKind::InternalError,
+                message: format!("invalid harness state: {message}"),
+            }),
+            None => Ok(()),
+        }
     }
 }
 
@@ -703,6 +784,195 @@ mod tests {
         match final_step.next_action {
             NextAction::Complete(text) => assert_eq!(text, "after-resume."),
             other => panic!("expected Complete after resume, got {other:?}"),
+        }
+    }
+
+    // --- R7: state-blob integrity (reducer verification plan, slice 2)
+
+    /// Drive the machine to each mid-flight phase and return the
+    /// persisted blob. Uses a high iteration cap so property walks
+    /// never trip the max-iterations terminal mid-construction.
+    fn state_after_steps(tool_turns: usize, end_in_dispatch: bool) -> Vec<u8> {
+        let mk = |state, last_result, step_index: u32| {
+            let mut cfg = config();
+            cfg.max_iterations = 1_000;
+            StepInput {
+                config: cfg,
+                trigger: trigger(json!("hello")),
+                state,
+                last_result,
+                now_ms: 1_000_000 + step_index as u64,
+                random_seed: step_index as u64,
+                step_index,
+                static_resource_context: None,
+            }
+        };
+        let h = Harness::new();
+        let mut state = h.step(mk(vec![], None, 0)).unwrap().state;
+        let mut idx = 1u32;
+        for turn in 0..tool_turns {
+            state = h
+                .step(mk(
+                    state,
+                    Some(CapabilityResult::ModelResult(tool_use_response(
+                        "echo",
+                        &format!("c{turn}"),
+                        json!({}),
+                    ))),
+                    idx,
+                ))
+                .unwrap()
+                .state;
+            idx += 1;
+            if end_in_dispatch && turn == tool_turns - 1 {
+                return state;
+            }
+            state = h
+                .step(mk(
+                    state,
+                    Some(CapabilityResult::ToolResult(ToolCallResult {
+                        tool_call_id: crate::events::ToolCallId::new(format!("c{turn}")).unwrap(),
+                        output: "ok".to_string(),
+                        is_error: false,
+                        error_kind: None,
+                        duration_ms: 1,
+                    })),
+                    idx,
+                ))
+                .unwrap()
+                .state;
+            idx += 1;
+        }
+        state
+    }
+
+    #[test]
+    fn valid_states_round_trip_byte_identically() {
+        for blob in [
+            state_after_steps(0, false), // AwaitingModel, post-seed
+            state_after_steps(2, false), // AwaitingModel, post-tools
+            state_after_steps(1, true),  // DispatchingTools
+        ] {
+            let state = HarnessState::load(&blob).expect("valid state loads");
+            assert_eq!(state.save().expect("valid state saves"), blob);
+        }
+    }
+
+    #[test]
+    fn unknown_fields_in_persisted_state_are_tolerated() {
+        // Schema evolution: a blob written by a future version with an
+        // extra field must still load (compaction will rely on this).
+        let blob = state_after_steps(1, false);
+        let mut value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        value["future_field"] = json!("from a newer version");
+        let bytes = serde_json::to_vec(&value).unwrap();
+        HarnessState::load(&bytes).expect("unknown fields tolerated");
+    }
+
+    /// Corrupt a valid blob by rewriting its phase, and expect load to
+    /// name the invariant instead of continuing on nonsense state.
+    #[test]
+    fn load_rejects_phase_contradicting_contents() {
+        let cases = [
+            // AwaitingModel blob relabelled as fresh.
+            (state_after_steps(0, false), "initial", "Initial requires"),
+            // AwaitingModel blob (last message is a tool result)
+            // relabelled as dispatching.
+            (
+                state_after_steps(1, false),
+                "dispatching_tools",
+                "assistant message",
+            ),
+            // DispatchingTools blob (last message is an assistant
+            // tool call) relabelled as awaiting the model.
+            (
+                state_after_steps(1, true),
+                "awaiting_model",
+                "cannot follow an assistant message",
+            ),
+        ];
+        for (blob, phase, expected) in cases {
+            let mut value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+            value["phase"] = json!(phase);
+            let bytes = serde_json::to_vec(&value).unwrap();
+            let err = HarnessState::load(&bytes).expect_err("corrupt state must not load");
+            assert_eq!(err.kind, HarnessErrorKind::InternalError);
+            assert!(
+                err.message.contains(expected),
+                "expected violation naming '{expected}', got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn load_rejects_iteration_below_assistant_count() {
+        let blob = state_after_steps(2, false);
+        let mut value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        value["iteration"] = json!(0);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let err = HarnessState::load(&bytes).expect_err("must reject");
+        assert!(err.message.contains("assistant message"), "{}", err.message);
+    }
+
+    #[test]
+    fn save_rejects_inconsistent_in_memory_state() {
+        let state = HarnessState {
+            phase: Phase::DispatchingTools,
+            messages: vec![],
+            iteration: 0,
+        };
+        let err = state.save().expect_err("must reject on save");
+        assert_eq!(err.kind, HarnessErrorKind::InternalError);
+    }
+
+    proptest::proptest! {
+        /// Every state the real machine can persist validates and
+        /// round-trips byte-identically, for arbitrary interaction
+        /// scripts (a random mix of tool turns ending mid-dispatch,
+        /// awaiting the model, or terminal).
+        #[test]
+        fn machine_generated_states_always_validate(
+            turns in 0usize..6,
+            end_in_dispatch: bool,
+            finish: bool,
+        ) {
+            let blob = state_after_steps(turns.max(usize::from(end_in_dispatch)), end_in_dispatch);
+            let state = HarnessState::load(&blob).expect("machine state loads");
+            proptest::prop_assert_eq!(state.save().expect("machine state saves"), blob.clone());
+
+            if finish && !end_in_dispatch {
+                // Drive to Done and check the terminal blob too.
+                let h = Harness::new();
+                let out = h
+                    .step(step_input(
+                        blob,
+                        Some(CapabilityResult::ModelResult(end_turn_response("done."))),
+                        99,
+                    ))
+                    .expect("terminal step");
+                HarnessState::load(&out.state).expect("terminal state loads");
+            }
+        }
+
+        /// Relabelling a mid-flight state with a random *different*
+        /// phase is always caught by load — no phase confusion can
+        /// slip through the boundary silently.
+        #[test]
+        fn phase_relabelling_never_loads(
+            turns in 1usize..4,
+            end_in_dispatch: bool,
+            wrong_phase in proptest::sample::select(vec![
+                "initial", "awaiting_model", "dispatching_tools",
+            ]),
+        ) {
+            let blob = state_after_steps(turns, end_in_dispatch);
+            let mut value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+            let current = value["phase"].as_str().unwrap().to_string();
+            proptest::prop_assume!(current != wrong_phase);
+            value["phase"] = json!(wrong_phase);
+            let bytes = serde_json::to_vec(&value).unwrap();
+            proptest::prop_assert!(HarnessState::load(&bytes).is_err());
         }
     }
 

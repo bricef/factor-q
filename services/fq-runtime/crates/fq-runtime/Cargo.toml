@@ -26,6 +26,7 @@ rmcp = { version = "1.7", default-features = false, features = ["client", "trans
 strum = { version = "0.27", features = ["derive"] }
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3"
 axum = "0.7"
 # Integration tests construct rmcp wire types (e.g. a canned
