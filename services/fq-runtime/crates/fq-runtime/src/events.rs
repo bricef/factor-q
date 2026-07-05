@@ -805,6 +805,15 @@ pub enum StopReason {
     StopSequence,
 }
 
+/// Token usage for one LLM call.
+///
+/// Invariant: `input_tokens` is the **total** prompt size;
+/// `cache_read_tokens` and `cache_write_tokens` are subsets of it
+/// (the uncached portion is `input - read - write`). The genai
+/// adapter normalises every provider to this shape — Anthropic
+/// reports the three parts separately and they are summed; OpenAI
+/// and Gemini already report totals with cached counts as details.
+/// Pricing depends on this (see [`crate::pricing::ModelPricing`]).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u32,

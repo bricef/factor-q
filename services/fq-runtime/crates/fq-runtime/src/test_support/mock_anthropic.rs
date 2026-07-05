@@ -41,12 +41,19 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 /// One canned response served by the mock.
+///
+/// `input_tokens` here follows Anthropic's wire semantics: the
+/// *uncached* portion only, with cache reads/writes reported in the
+/// separate fields (the genai adapter sums the three into the
+/// runtime's total-prompt `TokenUsage::input_tokens`).
 #[derive(Debug, Clone)]
 pub struct MockResponse {
     pub content: Vec<ContentBlock>,
     pub stop_reason: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
 }
 
 /// Either a text block or a tool_use block in the response.
@@ -70,7 +77,17 @@ impl MockResponse {
             stop_reason: "end_turn".to_string(),
             input_tokens,
             output_tokens,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         }
+    }
+
+    /// Report prompt-cache activity in the response usage
+    /// (`cache_read_input_tokens` / `cache_creation_input_tokens`).
+    pub fn with_cache_usage(mut self, cache_read_tokens: u32, cache_write_tokens: u32) -> Self {
+        self.cache_read_tokens = cache_read_tokens;
+        self.cache_write_tokens = cache_write_tokens;
+        self
     }
 
     /// Build a tool-use response carrying one `tool_use` block. Stop
@@ -91,6 +108,8 @@ impl MockResponse {
             stop_reason: "tool_use".to_string(),
             input_tokens,
             output_tokens,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         }
     }
 
@@ -125,6 +144,8 @@ impl MockResponse {
             "usage": {
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
+                "cache_read_input_tokens": self.cache_read_tokens,
+                "cache_creation_input_tokens": self.cache_write_tokens,
             },
         })
     }

@@ -123,6 +123,23 @@ fn into_provider_request(
         chat_messages.push(convert_message(msg)?);
     }
 
+    // Prompt-caching breakpoints. Two markers per request: the system
+    // prompt, whose prefix (tools + system) is byte-identical on every
+    // turn of an invocation, and the final message — the moving
+    // breakpoint that lets each turn read the previous turn's cache
+    // and extend it. The runner rebuilds the conversation append-only
+    // from a single registry snapshot (ADR-0020), so the prefix match
+    // holds by construction. genai maps the hint to `cache_control`
+    // blocks on its Anthropic adapter only; other providers ignore it
+    // (OpenAI/Gemini cache automatically, no marker exists to send).
+    let last = chat_messages.len().saturating_sub(1);
+    for (index, message) in chat_messages.iter_mut().enumerate() {
+        let is_system = matches!(message.role, provider::chat::ChatRole::System);
+        if is_system || index == last {
+            message.options = Some(provider::chat::CacheControl::Ephemeral.into());
+        }
+    }
+
     let mut chat_req = provider::chat::ChatRequest::new(chat_messages);
     if !tools.is_empty() {
         let converted_tools: Vec<provider::chat::Tool> =
@@ -337,6 +354,117 @@ mod tests {
         assert_eq!(req.messages.len(), 2);
         assert_eq!(opts.temperature, Some(0.2));
         assert_eq!(opts.max_tokens, Some(64));
+    }
+
+    #[test]
+    fn marks_system_and_last_message_for_prompt_caching() {
+        let (_, req, _) =
+            into_provider_request(request_with_system_and_user("claude-sonnet-4-5")).unwrap();
+        let marked: Vec<bool> = req
+            .messages
+            .iter()
+            .map(|m| {
+                m.options
+                    .as_ref()
+                    .is_some_and(|o| o.cache_control.is_some())
+            })
+            .collect();
+        // System prompt and the final (user) message carry the
+        // breakpoint; nothing else does.
+        assert_eq!(marked, vec![true, true]);
+    }
+
+    #[test]
+    fn marks_only_system_and_final_message_in_longer_conversations() {
+        let mut request = request_with_system_and_user("claude-sonnet-4-5");
+        request.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: Some("Hello!".to_string()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+        request.messages.push(Message {
+            role: MessageRole::User,
+            content: Some("And again.".to_string()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+        let (_, req, _) = into_provider_request(request).unwrap();
+        let marked: Vec<bool> = req
+            .messages
+            .iter()
+            .map(|m| {
+                m.options
+                    .as_ref()
+                    .is_some_and(|o| o.cache_control.is_some())
+            })
+            .collect();
+        assert_eq!(marked, vec![true, false, false, true]);
+    }
+
+    /// End-to-end through the mock Anthropic server: the wire request
+    /// carries `cache_control` breakpoints where genai is expected to
+    /// place them (system block + final message part), and the cache
+    /// usage the server reports round-trips into [`TokenUsage`] with
+    /// the total-prompt invariant (`input_tokens` = uncached + read +
+    /// written).
+    #[tokio::test]
+    async fn cache_control_reaches_the_wire_and_usage_round_trips() {
+        use crate::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
+
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+        let server = MockAnthropicServer::start().await;
+        server.push_response(MockResponse::text("hello", 10, 5).with_cache_usage(70, 20));
+
+        let client = GenAiClient::with_base_url(server.base_url());
+        let response = client
+            .chat(request_with_system_and_user("claude-sonnet-4-5"))
+            .await
+            .expect("chat via mock");
+
+        // Usage invariant: Anthropic's wire `input_tokens` excludes
+        // cache tokens; the adapter reports the total.
+        assert_eq!(response.usage.input_tokens, 100);
+        assert_eq!(response.usage.cache_read_tokens, 70);
+        assert_eq!(response.usage.cache_write_tokens, 20);
+
+        let received = server.received_requests();
+        assert_eq!(received.len(), 1);
+        let body = &received[0];
+
+        // The system prompt is present. Note: genai 0.4.4 drops the
+        // cache marker on a *single* system message (its Anthropic
+        // adapter only renders system parts when the marked index is
+        // > 0 — an off-by-one). That costs nothing within a run: the
+        // final-message breakpoint below covers the whole prefix,
+        // system included. If genai fixes the bug, the system block
+        // becomes a parts array carrying its own marker — accept both.
+        assert!(
+            body["system"].is_string() || body["system"].is_array(),
+            "system missing from wire request, got {:?}",
+            body["system"]
+        );
+
+        // The final message's final content part carries the
+        // load-bearing breakpoint.
+        let messages = body["messages"].as_array().expect("messages array");
+        let last_content = messages
+            .last()
+            .expect("at least one message")
+            .get("content")
+            .expect("content");
+        let has_marker = match last_content {
+            Value::Array(parts) => parts
+                .iter()
+                .any(|part| part["cache_control"]["type"] == "ephemeral"),
+            other => other["cache_control"]["type"] == "ephemeral",
+        };
+        assert!(
+            has_marker,
+            "final message should carry cache_control, got {last_content:?}"
+        );
+
+        server.shutdown().await;
     }
 
     #[test]

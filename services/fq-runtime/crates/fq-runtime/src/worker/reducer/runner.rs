@@ -1944,7 +1944,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             );
         }
         let (input_cost, output_cost, total_cost) = pricing
-            .map(|p| p.calculate(response.usage.input_tokens, response.usage.output_tokens))
+            .map(|p| p.calculate(&response.usage))
             .unwrap_or((0.0, 0.0, 0.0));
         totals.total_cost += total_cost;
 

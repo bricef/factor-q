@@ -28,6 +28,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
+use crate::events::TokenUsage;
+
 /// URL of the LiteLLM pricing JSON, main branch.
 pub const LITELLM_PRICING_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -42,14 +44,35 @@ pub struct ModelPricing {
 }
 
 impl ModelPricing {
-    /// Calculate the total cost in USD for the given token counts.
+    /// Calculate the total cost in USD for the given usage.
     ///
-    /// Returns `(input_cost, output_cost, total_cost)`.
-    /// Cache tokens are included in the total when cache pricing is
-    /// available for the model.
-    pub fn calculate(&self, input_tokens: u32, output_tokens: u32) -> (f64, f64, f64) {
-        let input_cost = (input_tokens as f64) * self.input_per_million / 1_000_000.0;
-        let output_cost = (output_tokens as f64) * self.output_per_million / 1_000_000.0;
+    /// Returns `(input_cost, output_cost, total_cost)` where
+    /// `input_cost` covers the whole prompt: the uncached portion at
+    /// the base input rate, cache reads at the (discounted) read rate,
+    /// and cache writes at the (premium) write rate. `usage.input_tokens`
+    /// is the *total* prompt size with the cache counts as subsets of
+    /// it — see [`TokenUsage`] — so the uncached portion is derived by
+    /// subtraction. Models without cache rates in the pricing table
+    /// charge cache tokens at the base input rate (conservative; a
+    /// provider that reports cache hits without published discounts is
+    /// never under-billed).
+    pub fn calculate(&self, usage: &TokenUsage) -> (f64, f64, f64) {
+        let read = usage.cache_read_tokens;
+        let write = usage.cache_write_tokens;
+        let uncached = usage
+            .input_tokens
+            .saturating_sub(read.saturating_add(write));
+        let read_rate = self
+            .cache_read_per_million
+            .unwrap_or(self.input_per_million);
+        let write_rate = self
+            .cache_write_per_million
+            .unwrap_or(self.input_per_million);
+        let input_cost = ((uncached as f64) * self.input_per_million
+            + (read as f64) * read_rate
+            + (write as f64) * write_rate)
+            / 1_000_000.0;
+        let output_cost = (usage.output_tokens as f64) * self.output_per_million / 1_000_000.0;
         (input_cost, output_cost, input_cost + output_cost)
     }
 }
@@ -348,7 +371,7 @@ mod tests {
             cache_read_per_million: None,
             cache_write_per_million: None,
         };
-        let (input, output, total) = pricing.calculate(100, 200);
+        let (input, output, total) = pricing.calculate(&usage(100, 200, 0, 0));
         assert!((input - 0.0001).abs() < 1e-9);
         assert!((output - 0.001).abs() < 1e-9);
         assert!((total - 0.0011).abs() < 1e-9);
@@ -448,5 +471,62 @@ mod tests {
         assert!(cache_path.exists(), "cache file should have been written");
         let cached = std::fs::read_to_string(&cache_path).unwrap();
         assert!(cached.len() > 1000, "cached file should contain full JSON");
+    }
+
+    fn usage(input: u32, output: u32, read: u32, write: u32) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+        }
+    }
+
+    #[test]
+    fn calculate_without_cache_tokens_charges_base_rates() {
+        let table = PricingTable::from_litellm_json(LITELLM_SAMPLE).unwrap();
+        let sonnet = table.lookup("claude-sonnet-test").unwrap();
+        // 100k in at $3/M + 1k out at $15/M.
+        let (input, output, total) = sonnet.calculate(&usage(100_000, 1_000, 0, 0));
+        assert!((input - 0.3).abs() < 1e-9);
+        assert!((output - 0.015).abs() < 1e-9);
+        assert!((total - 0.315).abs() < 1e-9);
+    }
+
+    #[test]
+    fn calculate_prices_cache_reads_and_writes_separately() {
+        let table = PricingTable::from_litellm_json(LITELLM_SAMPLE).unwrap();
+        let sonnet = table.lookup("claude-sonnet-test").unwrap();
+        // Total prompt 100k = 10k uncached + 70k read + 20k written.
+        // 10k*$3/M + 70k*$0.3/M + 20k*$3.75/M = 0.03 + 0.021 + 0.075.
+        let (input, _, total) = sonnet.calculate(&usage(100_000, 0, 70_000, 20_000));
+        assert!((input - 0.126).abs() < 1e-9, "got {input}");
+        assert!((total - 0.126).abs() < 1e-9);
+        // Sanity: strictly cheaper than the same prompt uncached.
+        let (uncached_input, _, _) = sonnet.calculate(&usage(100_000, 0, 0, 0));
+        assert!(input < uncached_input);
+    }
+
+    #[test]
+    fn calculate_falls_back_to_input_rate_without_cache_pricing() {
+        let table = PricingTable::from_litellm_json(LITELLM_SAMPLE).unwrap();
+        let haiku = table.lookup("claude-haiku-test").unwrap();
+        assert!(haiku.cache_read_per_million.is_none());
+        // Cache tokens with no published rates: charged at the base
+        // input rate, i.e. identical to the fully-uncached cost.
+        let (with_cache, _, _) = haiku.calculate(&usage(100_000, 0, 70_000, 20_000));
+        let (without, _, _) = haiku.calculate(&usage(100_000, 0, 0, 0));
+        assert!((with_cache - without).abs() < 1e-12);
+    }
+
+    #[test]
+    fn calculate_saturates_when_cache_counts_exceed_total() {
+        // Defensive: a provider reporting cache counts larger than the
+        // prompt total must not underflow into a huge uncached count.
+        let table = PricingTable::from_litellm_json(LITELLM_SAMPLE).unwrap();
+        let sonnet = table.lookup("claude-sonnet-test").unwrap();
+        let (input, _, _) = sonnet.calculate(&usage(1_000, 0, 2_000, 0));
+        // 0 uncached + 2000 reads at $0.3/M.
+        assert!((input - 0.0006).abs() < 1e-9, "got {input}");
     }
 }
