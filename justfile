@@ -59,8 +59,9 @@ rust-ci:
 
 # CI runs the two halves as separate jobs that each invoke a just target
 # (see .github/workflows/ci.yml).
-# Run all quality checks — docs lint + the Rust gate (the full local gate).
-ci: lint-docs rust-ci
+# Run all quality checks — docs lint + link check + the Rust gate (the
+# full local gate).
+ci: lint-docs check-links rust-ci
 
 # Build container images for all services
 docker-build:
@@ -104,6 +105,11 @@ fq *args:
 # Lint ADR markdown — the zero-error scope mandated by AGENTS.md.
 lint-docs *args:
     npx --yes markdownlint-cli2@0.22.1 {{args}} "docs/adrs/**/*.md"
+
+# Check that relative links in all repo markdown resolve. Links pointing
+# outside the repo (sibling checkouts) are reported but not failed.
+check-links:
+    python3 scripts/check-links.py
 
 # === Release ===
 

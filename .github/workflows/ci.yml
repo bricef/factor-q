@@ -29,6 +29,9 @@ jobs:
           node-version: "20"
       - uses: extractions/setup-just@v3
       - run: just lint-docs
+      # Relative-link integrity across all repo markdown (stdlib Python,
+      # preinstalled on the runner).
+      - run: just check-links
 
   rust-ci:
     name: Rust CI
