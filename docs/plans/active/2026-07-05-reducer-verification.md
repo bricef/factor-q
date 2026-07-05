@@ -159,7 +159,7 @@ Stated before the net is built, to be confirmed or refuted by it:
 |---|---|---|---|
 | 1 | Trace oracle — claims as pure predicates over recorded (events, WAL, outcome) traces; existing happy-path tests re-driven through it | the net itself, R1/R6 shape | **done** — `test_support::oracle`: the grammar automaton (LLM triples, tool spans with nested sampling, synthetic lone error results, one terminal + archived, envelope chain), 9 hermetic oracle tests, wired into the two canonical runner traces |
 | 2 | `HarnessState::validate` + state-blob property tests (round-trip, corruption/invalid-state rejection, unknown-field tolerance) | R7 | **done** — validate at load and save, targeted corruption tests, byte round-trip, unknown-field tolerance, two proptest properties |
-| 3 | Hermetic sim harness — scripted LLM + recording tools + in-memory event sink + tempdir `WorkerStore`, seeded scheduler, fault plan | enables 4–7 | todo |
+| 3 | Hermetic sim harness — scripted LLM + recording tools + in-memory event sink + tempdir `WorkerStore`, seeded scheduler, fault plan | enables 4–7 | **done** — `test_support::sim`: `EventSink` + `Clock` seams through `RunnerConfig` (production defaults unchanged), `SimWorld` with `RecordingSink` publish faults, `ScriptedTool` dispatch recording, `SimClock`; three smoke tests: hermetic oracle-valid run, same-seed byte-identical determinism, crash-at-publish → resume with at-most-once tools. Note: sim lives in-crate (`test_support` is `#[cfg(test)]`), not `tests/sim.rs` as originally named — revisit if test_support ever gets feature-exposed |
 | 4 | Resume-equivalence properties — random scripts × every step boundary | R4 | todo |
 | 5 | Crash DST — fault plans over every WAL/publish/dispatch boundary; recovery categorisation soundness; ambiguous handling; archive hand-off under ack loss | R2, R3, R1-under-faults | todo |
 | 6 | Budget properties — random pricing scripts, sampling/evaluator origins, crash/resume accumulation (resolves finding 1) | R5 | todo |
@@ -181,7 +181,10 @@ specified in the backlog). Slice 3 is the investment the rest rides on.
   free functions (`now_ms()` / `rand_u64()`); slice 3 threads an injectable
   clock + seeded entropy through `RunnerConfig` (production default:
   system), the same injected-clock judgment M2 made for TTL testing. No
-  behavioural change outside tests.
+  behavioural change outside tests. *(Landed as designed; one scope note:
+  `Event::new` still stamps envelope timestamps from the system clock —
+  the oracle and equivalence checks treat those as volatile, so full
+  envelope-timestamp determinism is deferred until a claim needs it.)*
 - **The event-sink seam.** `EventBus` is concrete NATS; hermetic DST needs
   an in-memory sink. Slice 3 extracts the narrowest trait that covers the
   runner's publish path (publish + chained-publish), with `EventBus` as the

@@ -59,6 +59,54 @@ use crate::worker::store::{
 };
 use crate::worker::{ExecutorError, InvocationOutcome, WorkerId};
 
+/// The narrowest seam over event publication (reducer verification
+/// plan, slice 3). The runner publishes through this trait so the
+/// hermetic sim can capture events in memory and inject publish
+/// faults; production wires [`EventBus`], the NATS implementation.
+/// Envelope timestamps are stamped by `Event::new` from the system
+/// clock either way — the trace oracle and the equivalence checks
+/// treat them as volatile.
+#[async_trait::async_trait]
+pub trait EventSink: Send + Sync {
+    async fn publish(&self, event: &Event) -> Result<(), crate::bus::BusError>;
+}
+
+#[async_trait::async_trait]
+impl EventSink for EventBus {
+    async fn publish(&self, event: &Event) -> Result<(), crate::bus::BusError> {
+        EventBus::publish(self, event).await
+    }
+}
+
+/// Injectable time + entropy (reducer verification plan, slice 3).
+/// The runner reads wall-clock and randomness through this trait so
+/// the sim can drive invocations deterministically; production uses
+/// [`SystemClock`]. The M2 access-control work established the
+/// injected-clock pattern for exactly this reason.
+pub trait Clock: Send + Sync {
+    /// Wall-clock milliseconds since epoch, for [`StepInput::now_ms`].
+    fn now_ms(&self) -> u64;
+    /// Unix milliseconds as `i64`, for WAL rows and state rows.
+    fn unix_now_ms(&self) -> i64;
+    /// Fresh randomness for [`StepInput::random_seed`].
+    fn rand_u64(&self) -> u64;
+}
+
+/// Production clock: system time and OS entropy.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        now_ms()
+    }
+    fn unix_now_ms(&self) -> i64 {
+        unix_now_ms()
+    }
+    fn rand_u64(&self) -> u64 {
+        rand_u64()
+    }
+}
+
 /// Soft cap on the number of `step()` calls per invocation.
 /// Independent of the reducer's own `max_iterations` so a buggy
 /// reducer (e.g. one that perpetually returns CallModel without
@@ -264,8 +312,9 @@ impl ReducerContextBuilder {
 /// Constructed via [`RunnerConfig::builder`]; the fields are
 /// private so the builder is the single construction surface.
 pub struct RunnerConfig {
-    /// Event bus for publishing the canonical event sequence.
-    bus: EventBus,
+    /// Where the canonical event sequence is published: the NATS
+    /// [`EventBus`] in production, an in-memory sink in the sim.
+    sink: Arc<dyn EventSink>,
     /// Model→price lookup for cost accounting.
     pricing: Arc<PricingTable>,
     /// Three-state WAL / invocation-state persistence
@@ -274,6 +323,9 @@ pub struct RunnerConfig {
     /// Identity of the worker hosting this runner (coordination /
     /// archive-ack routing on `fq.worker.{worker_id}.*`).
     worker_id: WorkerId,
+    /// Time + entropy source. [`SystemClock`] in production; the sim
+    /// injects a deterministic one.
+    clock: Arc<dyn Clock>,
 }
 
 impl RunnerConfig {
@@ -289,16 +341,30 @@ impl RunnerConfig {
 /// construction sites are internal and known at compile time.
 #[derive(Default)]
 pub struct RunnerConfigBuilder {
-    bus: Option<EventBus>,
+    sink: Option<Arc<dyn EventSink>>,
     pricing: Option<Arc<PricingTable>>,
     store: Option<Arc<WorkerStore>>,
     worker_id: Option<WorkerId>,
+    clock: Option<Arc<dyn Clock>>,
 }
 
 impl RunnerConfigBuilder {
     /// Event bus for publishing the canonical event sequence.
     pub fn bus(mut self, bus: EventBus) -> Self {
-        self.bus = Some(bus);
+        self.sink = Some(Arc::new(bus));
+        self
+    }
+
+    /// Publish through an arbitrary [`EventSink`] instead of the NATS
+    /// bus — the hermetic sim's entry point.
+    pub fn event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Override the time/entropy source. Defaults to [`SystemClock`].
+    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = Some(clock);
         self
     }
 
@@ -320,10 +386,13 @@ impl RunnerConfigBuilder {
         self
     }
 
-    /// Finalise the config. Panics if any field was not set.
+    /// Finalise the config. Panics if any required field was not set
+    /// (`clock` is optional and defaults to [`SystemClock`]).
     pub fn build(self) -> RunnerConfig {
         RunnerConfig {
-            bus: self.bus.expect("RunnerConfig::builder() requires .bus(..)"),
+            sink: self
+                .sink
+                .expect("RunnerConfig::builder() requires .bus(..) or .event_sink(..)"),
             pricing: self
                 .pricing
                 .expect("RunnerConfig::builder() requires .pricing(..)"),
@@ -333,6 +402,7 @@ impl RunnerConfigBuilder {
             worker_id: self
                 .worker_id
                 .expect("RunnerConfig::builder() requires .worker_id(..)"),
+            clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
         }
     }
 }
@@ -582,7 +652,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         let state: Vec<u8> = Vec::new();
         let last_result: Option<CapabilityResult> = None;
-        let started_at_ms = unix_now_ms();
+        let started_at_ms = self.config.clock.unix_now_ms();
         let step_index_start: u32 = 0;
 
         // Read the agent's `static_resources` pins once, before the
@@ -741,8 +811,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 trigger: trigger.clone(),
                 state,
                 last_result,
-                now_ms: now_ms(),
-                random_seed: rand_u64(),
+                now_ms: self.config.clock.now_ms(),
+                random_seed: self.config.clock.rand_u64(),
                 step_index,
                 // Replay reconstructs persisted state; pins were
                 // already injected on the original step 0.
@@ -848,8 +918,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 trigger: trigger.clone(),
                 state,
                 last_result,
-                now_ms: now_ms(),
-                random_seed: rand_u64(),
+                now_ms: self.config.clock.now_ms(),
+                random_seed: self.config.clock.rand_u64(),
                 step_index,
                 // Static-resource content is injected exactly once,
                 // on step 0. Later steps and resumed runs carry it
@@ -890,7 +960,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // step's `next_action` — Complete/Failed mark the
             // row terminal, everything else leaves it open.
             let (phase_label, terminal_at) =
-                phase_and_terminal_from(&output.next_action, unix_now_ms());
+                phase_and_terminal_from(&output.next_action, self.config.clock.unix_now_ms());
             self.config
                 .store
                 .upsert_invocation_state(&InvocationStateRow {
@@ -901,7 +971,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     state_blob: output.state.clone(),
                     iteration: step_index,
                     started_at: started_at_ms,
-                    updated_at: unix_now_ms(),
+                    updated_at: self.config.clock.unix_now_ms(),
                     terminal_at,
                     workspace_ref: None,
                     archive_status: None,
@@ -1165,7 +1235,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // `tool.result`. Synthetic-error and self_inspect paths
         // bypass the dispatch WAL (no real tool execution).
         let inv_str = invocation_id.to_string();
-        let intent_at = unix_now_ms();
+        let intent_at = self.config.clock.unix_now_ms();
         let parameters_json =
             serde_json::to_string(&req.parameters).unwrap_or_else(|_| "{}".to_string());
         self.config
@@ -1221,7 +1291,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // it as `dispatched` forever.
                 self.config
                     .store
-                    .write_tool_dispatched(&inv_str, req.tool_call_id.as_str(), unix_now_ms())
+                    .write_tool_dispatched(
+                        &inv_str,
+                        req.tool_call_id.as_str(),
+                        self.config.clock.unix_now_ms(),
+                    )
                     .await
                     .map_err(map_store_err)?;
                 let msg = format!("no implementation registered for tool '{}'", req.tool_name);
@@ -1232,7 +1306,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         req.tool_call_id.as_str(),
                         &msg,
                         true,
-                        unix_now_ms(),
+                        self.config.clock.unix_now_ms(),
                     )
                     .await
                     .map_err(map_store_err)?;
@@ -1299,7 +1373,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // ambiguous-window state) before processing the result.
         self.config
             .store
-            .write_tool_dispatched(&inv_str, req.tool_call_id.as_str(), unix_now_ms())
+            .write_tool_dispatched(
+                &inv_str,
+                req.tool_call_id.as_str(),
+                self.config.clock.unix_now_ms(),
+            )
             .await
             .map_err(map_store_err)?;
         self.publish_chained(
@@ -1324,7 +1402,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         req.tool_call_id.as_str(),
                         &result.output,
                         result.is_error,
-                        unix_now_ms(),
+                        self.config.clock.unix_now_ms(),
                     )
                     .await
                     .map_err(map_store_err)?;
@@ -1360,7 +1438,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         req.tool_call_id.as_str(),
                         &message,
                         true,
-                        unix_now_ms(),
+                        self.config.clock.unix_now_ms(),
                     )
                     .await
                     .map_err(map_store_err)?;
@@ -1427,7 +1505,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // Close the WAL: dispatched, then completed.
         self.config
             .store
-            .write_tool_dispatched(inv_str, req.tool_call_id.as_str(), unix_now_ms())
+            .write_tool_dispatched(
+                inv_str,
+                req.tool_call_id.as_str(),
+                self.config.clock.unix_now_ms(),
+            )
             .await
             .map_err(map_store_err)?;
         self.publish_chained(
@@ -1449,7 +1531,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 req.tool_call_id.as_str(),
                 &output,
                 false,
-                unix_now_ms(),
+                self.config.clock.unix_now_ms(),
             )
             .await
             .map_err(map_store_err)?;
@@ -1529,7 +1611,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let id = event.envelope.event_id;
         debug!(event_type = ?event.payload, "publishing event");
         self.config
-            .bus
+            .sink
             .publish(&event)
             .await
             .map_err(ExecutorError::Bus)?;
@@ -1578,7 +1660,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // authoritative point at which `invocation_state` is
         // marked terminal. Idempotent: a no-op if the row is
         // already terminal.
-        let terminal_at_ms = unix_now_ms();
+        let terminal_at_ms = self.config.clock.unix_now_ms();
         self.ensure_terminal("failed", invocation_id, terminal_at_ms)
             .await?;
         self.publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
@@ -1695,7 +1777,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // the most recent publish went out, not from terminal.
         self.config
             .store
-            .set_archive_pending(&invocation_id_str, unix_now_ms())
+            .set_archive_pending(&invocation_id_str, self.config.clock.unix_now_ms())
             .await
             .map_err(map_store_err)?;
         Ok(())
@@ -1855,7 +1937,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 &req_str,
                 &chat_request.model,
                 &request_payload_json,
-                unix_now_ms(),
+                self.config.clock.unix_now_ms(),
             )
             .await
             .map_err(map_store_err)?;
@@ -1885,7 +1967,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // not the ambiguous `dispatched` state.
                 self.config
                     .store
-                    .write_llm_dispatched(&inv_str, &req_str, unix_now_ms())
+                    .write_llm_dispatched(&inv_str, &req_str, self.config.clock.unix_now_ms())
                     .await
                     .map_err(map_store_err)?;
                 self.config
@@ -1896,7 +1978,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         &err.to_string(),
                         true,
                         0.0,
-                        unix_now_ms(),
+                        self.config.clock.unix_now_ms(),
                     )
                     .await
                     .map_err(map_store_err)?;
@@ -1913,7 +1995,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // to completed before the response/cost events go out.
         self.config
             .store
-            .write_llm_dispatched(&inv_str, &req_str, unix_now_ms())
+            .write_llm_dispatched(&inv_str, &req_str, self.config.clock.unix_now_ms())
             .await
             .map_err(map_store_err)?;
         self.publish_chained(
@@ -1937,7 +2019,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 &response_json,
                 false,
                 0.0, // cost filled in below; for the WAL we record the response presence
-                unix_now_ms(),
+                self.config.clock.unix_now_ms(),
             )
             .await
             .map_err(map_store_err)?;
