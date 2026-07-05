@@ -6,8 +6,8 @@
 //! deduplicated at the block level, addressed by the BLAKE3 hash of their
 //! content. On top of it sit the mutable name index ([`index`], M1b), the
 //! named and versioned object store ([`Repository`]) that composes the two, an
-//! invariant oracle ([`verify`]), and the online garbage collector
-//! ([`collector`], M1c).
+//! invariant oracle ([`verify`]), the online garbage collector
+//! ([`collector`], M1c), and the access-control grants model ([`grants`], M2).
 //!
 //! Backends implement [`ContentStore`] (and [`BlockStore`] if they materialize
 //! individual blocks) and prove correctness against the shared,
@@ -21,9 +21,13 @@ pub mod audit;
 pub mod collector;
 pub mod conformance;
 pub mod fs;
+pub mod gate;
+pub mod grant_log;
+pub mod grants;
 pub mod index;
 pub mod repository;
 pub mod stats;
+pub mod tokens;
 pub mod verify;
 
 #[cfg(test)]
@@ -39,9 +43,13 @@ pub use audit::{AuditReport, ReachabilityAuditor};
 pub use cid::Cid;
 pub use collector::{Collector, Reclaimed, ReferenceCollector};
 pub use error::{Result, StoreError};
+pub use gate::GatedRepository;
+pub use grant_log::{GrantBus, InMemoryGrantBus, LiveGrant, SqliteGrantLog, WireGrantEvent, drain};
+pub use grants::{GrantEvent, GrantId, GrantModel, Grantor, Principal, Scope, Verb};
 pub use index::{BlockRow, Edge, IndexSnapshot, NameIndex, SqliteNameIndex};
 pub use repository::Repository;
 pub use stats::Stats;
+pub use tokens::{DEFAULT_TOKEN_TTL, TokenMinter, TokenVerifier, VerifiedToken, generate_keypair};
 
 use async_trait::async_trait;
 

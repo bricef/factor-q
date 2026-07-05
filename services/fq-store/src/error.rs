@@ -39,6 +39,28 @@ pub enum StoreError {
     #[error("remote store error: {0}")]
     Remote(String),
 
+    /// The grant-event bus (the fan-out feed) failed — the broker is
+    /// unreachable or rejected a publish. By design this never affects store
+    /// availability: events stay durably queued locally and drain when the
+    /// bus returns (M2).
+    #[error("event bus error: {0}")]
+    Bus(String),
+
+    /// A capability token (or its key material) is invalid — unparseable,
+    /// wrongly signed, or malformed. Distinct from an *authorization* denial:
+    /// this is "the credential itself is bad", not "the credential lacks
+    /// authority" (M2).
+    #[error("token error: {0}")]
+    Token(String),
+
+    /// An authorization denial: the credential parsed and its signature is
+    /// valid, but it does not authorize the operation — no live covering
+    /// grant, or the token is expired or attenuated away from the op.
+    /// (A malformed/wrongly-signed credential is [`Self::Token`] instead.)
+    /// Default-deny surfaces here (M2).
+    #[error("permission denied: {0}")]
+    Denied(String),
+
     /// No object is bound to the given name in the index.
     #[error("name not found: {0}")]
     NameNotFound(String),

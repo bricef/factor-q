@@ -15,6 +15,7 @@ Everything sits under one root directory (`--root`, env `FQ_CAS_ROOT`, default
 <root>/blocks/<aa>/<hash>[.<gen>]   content-defined blocks, deduplicated
 <root>/objects/<aa>/<cid>           JSON manifests (an object's ordered blocks)
 <root>/index.db                     SQLite: names, versions, reference counts
+<root>/grants.db                    SQLite: the grant-event log + permission projection
 ```
 
 Content is immutable and shared: identical blocks across objects are stored once.
@@ -145,3 +146,7 @@ properties hold by construction:
   the online-reclaim protocol and the reachability-audit backstop.
 - [`storage-gc-verification.md`](../design/storage-gc-verification.md) — the
   invariants, the fault map, and the TLA⁺ / DST verification behind the above.
+
+- [Access control](access-control.md) — the grants model, and revocation
+  semantics / the token TTL (what takes effect when, and why revocation is
+  immediate in-process).
