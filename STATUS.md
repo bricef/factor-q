@@ -46,9 +46,12 @@ memory, and skills — is at its midpoint:
 
 M3, then M4, then M5, per the
 [storage + vector foundation plan](docs/plans/active/2026-06-27-storage-vector-foundation.md);
-Memory and Skills MVPs build on the result. In parallel on the runtime
-side: the [reducer verification plan](docs/plans/active/2026-07-05-reducer-verification.md)
-(draft — claims R1–R7, oracle + crash DST for the harness/runner/WAL).
+Memory and Skills MVPs build on the result. On the runtime side the
+[reducer verification plan](docs/plans/closed/2026-07-05-reducer-verification.md)
+is **complete** (claims R1–R7 all oracle-backed in the hermetic CI
+path: trace oracle, state validation, sim world, resume equivalence,
+crash DST, budget properties, soak — seven real bugs found and fixed
+by it; `just soak` scales the lifecycle driver for deep local runs).
 The v0 dogfood loop is **live**: a `doc-drift` agent reviews this repo's
 commits daily on the local runtime (project at `~/fq-dogfood`, outside
 the repo) — its findings feed the

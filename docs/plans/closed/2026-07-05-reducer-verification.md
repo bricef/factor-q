@@ -1,11 +1,19 @@
 # Reducer verification: implementation plan
 
-**Status:** active (2026-07-05) — claims R1–R7 reviewed and approved;
-slices 1–6 landed the same day. Both pre-registered findings were
-confirmed and fixed before the net (the budget accumulator and the
-error-kind semantics), and slice 4's first property sweep caught a
-third: resume dropped the trigger, re-seeding resumed conversations
-with "(no input)" (fixed via worker-store schema v5). Adopts critique 3 of the
+**Status: complete (2026-07-05)** — all seven slices landed the day
+the plan was written. The closing condition is met: every claim R1–R7
+has an oracle in the hermetic `just ci` path (fixed seeds; `just soak`
+scales the lifecycle driver locally), the crash DST covers the fault
+model (store-write faults deferred to the storage plan's M3 trait
+boundaries by agreement — see Fault model), and the reducer-harness
+guide's suspend/resume section links the R4 equivalence property as
+its evidence. **Seven real findings, all fixed the same day:** the
+budget accumulator reset (1, pre-registered), error-kind semantics
+(2, pre-registered), resume dropping the trigger (3, slice 4),
+the WAL never carrying call costs (4, slice 6), the crash window
+that laundered overspends (5, soak), resume choking on
+provider-errored WALs (6, deep soak), and synthetic tool errors
+invisible to replay (7, deep soak). Adopts critique 3 of the
 [2026-07-05 project assessment](../../design/2026-07-05-project-assessment.md)
 and absorbs the "Round-trip invariants on `HarnessState`" thread of
 [backlog § Reducer boundary invariants](../backlog.md).
@@ -186,6 +194,42 @@ Stated before the net is built, to be confirmed or refuted by it:
    property now discriminates (fails on the bug, passes on the fix),
    and the sampling accounting test pins the same fix on the sampling
    path.
+5. **Discovered by slice 7's first soak run (2026-07-05): a crash in
+   the write→check window launders an overspend.** The budget check
+   is post-call inside `run_model_with_llm`; a crash at the
+   `llm.response` publish lands *after* the WAL completed-write (cost
+   durably recorded) but *before* the check. SafeReplay then replays
+   the stored response — and if it was the final call, the invocation
+   completes with no further model call to re-trigger the check:
+   **Completed, over budget**, where the uninterrupted run tripped
+   `BudgetExceeded`. Fixed by re-evaluating the ceiling in `resume()`
+   immediately after totals reconstitution — the check that would
+   have fired post-call fires at resume time, producing the same
+   terminal the uninterrupted run produced.
+6. **Discovered by the deep soak (2026-07-05): resume choked on a
+   provider-errored WAL.** An LLM provider error writes its WAL row
+   as completed-with-`is_error`, the response column holding the
+   error *string*. If the crash then ate the `failed`-event publish,
+   the invocation stayed in-flight, categorised SafeReplay — and
+   resume tried to parse `"rate limited"` as a `ChatResponse`,
+   dying with a deserialise error instead of reproducing the failed
+   terminal. Fixed: resume detects the error row, re-emits
+   `failed(llm_error)` and returns the same `ExecutorError::Llm` the
+   original attempt returned.
+7. **Discovered by the deep soak (2026-07-05): synthetic tool errors
+   were invisible to replay.** Unknown-tool / denied calls published
+   a lone error `tool.result` but deliberately bypassed the dispatch
+   WAL ("no real execution to guard") — leaving the journal
+   incomplete: two consecutive LLM rows with no tool result between
+   them, so replay fed a `ModelResult` where the state machine
+   demanded a `ToolResult` and resume failed with an internal error.
+   Fixed: `emit_synthetic_tool_error` journals all three WAL
+   transitions (there is still no side effect to guard, but the WAL
+   must be a complete record — replay reconstructs the conversation
+   from it alone). The allowlist-denial test, which pinned the old
+   bypass, now pins the journaled invariant. (Checked in passing:
+   `self_inspect` was always fully journaled; the old §5.5 comment
+   claiming otherwise was wrong and is corrected.)
 
 ## Slices
 
@@ -197,7 +241,7 @@ Stated before the net is built, to be confirmed or refuted by it:
 | 4 | Resume-equivalence properties — random scripts × every step boundary | R4 | **done** — `observational_trace` masking in the oracle (volatile fields: per-call UUIDs, measured durations, clock stamps); exhaustive fixed-script boundary sweep + 24-case proptest over scripts × boundaries × seeds. Found and fixed finding 3 (resume dropped the trigger) on the first sweep |
 | 5 | Crash DST — fault plans over every WAL/publish/dispatch boundary; recovery categorisation soundness; ambiguous handling; archive hand-off under ack loss | R2, R3, R1-under-faults | **done** — `crash_dst` in the sim: exhaustive sweep over every publish index (all five WAL classes asserted covered: nothing-persisted / SafeResume / Ambiguous / SafeReplay / already-terminal), 24-case proptest, crash-while-resuming, sweeper heal + ack-quiescence (via the `EventSink` seam widened to `ArchiveRetrySweeper`), LLM-error canonicality; oracle gained prefix and resume modes. **No new findings** — recovery, refusal, and at-most-once held at every point. Store-fault axis deferred to M3 (see Fault model); consume-side double-ack stays NATS-tier |
 | 6 | Budget properties — random pricing scripts, sampling/evaluator origins, crash/resume accumulation (resolves finding 1) | R5 | **done** — `budget_properties` in the sim: post-call ceiling semantics pinned (Completed ⇒ cost ≤ budget; BudgetExceeded ⇒ crossed by at most the final call; no request after the trip; exact cost recomputation), 24-case proptest, budget-across-resume property (closes finding 1 — and caught **finding 4**: the WAL never carried call costs, so reconstitution summed zeros). Sampling axis pinned hermetically via `handle_sampling`: both decline boundaries + spend flowing into totals, the sub-accumulator, and the WAL row |
-| 7 | Soak — long randomised runs with all oracles on; CI-hermetic seeds + a deep local soak recipe | everything, in volume | todo |
+| 7 | Soak — long randomised runs with all oracles on; CI-hermetic seeds + a deep local soak recipe | everything, in volume | **done** — `soak` in the sim: a seeded lifecycle driver composing random scripts (plain/error/unknown tools, LLM provider errors), real pricing with tripping budgets, and up to two crash/resume cycles; checks only universal invariants (segment canonicality via the new prefix/resume-prefix oracle modes, at-most-once tools, the WAL cost triangle, blob validity via `validate_state_blob`, the budget ceiling). CI runs 48 fixed seeds; `just soak` scales via `FQ_SOAK_ITERS` (1000-scenario deep run green, covering all six lifecycle classes). **Caught findings 5, 6, and 7** |
 
 Slices 1–2 land immediate value with no new infrastructure (the oracle
 runs over what `test_support::events` already captures; `validate` is

@@ -1280,3 +1280,424 @@ mod budget_properties {
         }
     }
 }
+
+#[cfg(test)]
+mod soak {
+    //! Slice 7: everything, in volume.
+    //!
+    //! One seeded lifecycle driver composes the whole net: random
+    //! scripts (plain tool turns, error-result tools, unknown-tool
+    //! turns that take the synthetic-error path, LLM provider
+    //! errors), real pricing with budgets that sometimes trip, and up
+    //! to two crash/resume cycles at random publish indices. The
+    //! checks are deliberately *universal invariants* — things that
+    //! must hold on every path without the checker predicting the
+    //! path, so it never becomes a second implementation:
+    //!
+    //! 1. Every crash segment is a canonical prefix; every resumed
+    //!    segment is resume-canonical (prefix form if it crashed
+    //!    again); at most one terminal event across the whole life.
+    //! 2. Every logical tool call executes at most once, ever.
+    //! 3. The WAL cost triangle: each completed LLM row's stored
+    //!    `cost_usd` equals the price recomputed from its stored
+    //!    usage, and any terminal totals equal the rows' sum.
+    //! 4. Every persisted state blob (rows and archived payloads)
+    //!    passes the phase ↔ contents invariants.
+    //! 5. The budget ceiling: `Completed` ⇒ cost ≤ budget;
+    //!    `BudgetExceeded` ⇒ cost > budget.
+    //!
+    //! CI runs a fixed seed range; `just soak` scales iterations via
+    //! `FQ_SOAK_ITERS` for deep local runs.
+
+    use std::collections::{HashMap, HashSet};
+
+    use super::resume_equivalence::load_fixture;
+    use super::tests::{end_turn, sim_tool_call};
+    use super::*;
+    use crate::events::TokenUsage;
+    use crate::llm::{ChatResponse, LlmError};
+    use crate::pricing::ModelPricing;
+    use crate::test_support::oracle::{
+        check_invocation_trace_prefix, check_resume_trace, check_resume_trace_prefix,
+    };
+    use crate::worker::recovery::{RecoveryCategory, categorise};
+    use crate::worker::store::DispatchStatus;
+
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    fn pick(state: &mut u64, bound: u64) -> u64 {
+        xorshift(state) % bound
+    }
+
+    fn sim_rates() -> ModelPricing {
+        ModelPricing {
+            input_per_million: 10.0,
+            output_per_million: 50.0,
+            cache_read_per_million: Some(1.0),
+            cache_write_per_million: Some(12.5),
+        }
+    }
+
+    fn sim_pricing() -> Arc<PricingTable> {
+        let mut entries = HashMap::new();
+        entries.insert("claude-sim".to_string(), sim_rates());
+        Arc::new(PricingTable::from_map(entries))
+    }
+
+    #[derive(Debug)]
+    struct Scenario {
+        turns: usize,
+        usages: Vec<TokenUsage>,
+        /// Per tool turn: Some(false) = ok result, Some(true) =
+        /// error result, None = unknown tool (synthetic error path).
+        tool_kinds: Vec<Option<bool>>,
+        llm_error_at: Option<usize>,
+        budget: f64,
+        /// Absolute (sink-lifetime) publish indices to fault, sorted.
+        faults: Vec<usize>,
+    }
+
+    fn generate(seed: u64) -> Scenario {
+        let mut rng = seed.max(1);
+        let turns = pick(&mut rng, 4) as usize; // 0..=3
+        let usages: Vec<TokenUsage> = (0..=turns)
+            .map(|_| TokenUsage {
+                input_tokens: 1_000 + pick(&mut rng, 400_000) as u32,
+                output_tokens: pick(&mut rng, 80_000) as u32,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            })
+            .collect();
+        let tool_kinds: Vec<Option<bool>> = (0..turns)
+            .map(|_| match pick(&mut rng, 10) {
+                0 => None,           // unknown tool
+                1 | 2 => Some(true), // error result
+                _ => Some(false),    // ok
+            })
+            .collect();
+        let llm_error_at = if pick(&mut rng, 5) == 0 {
+            Some(pick(&mut rng, (turns + 1) as u64) as usize)
+        } else {
+            None
+        };
+        // Budgets: mostly generous, sometimes guaranteed to trip.
+        let max_cost: f64 = usages.iter().map(|u| sim_rates().calculate(u).2).sum();
+        let budget = if pick(&mut rng, 3) == 0 {
+            (max_cost * (pick(&mut rng, 80) as f64 + 10.0) / 100.0).max(0.01)
+        } else {
+            max_cost + 1.0
+        };
+        // Up to two faults inside the maximum possible trace.
+        let ceiling = (6 * turns + 6) as u64;
+        let mut faults: Vec<usize> = (0..pick(&mut rng, 3))
+            .map(|_| pick(&mut rng, ceiling) as usize)
+            .collect();
+        faults.sort_unstable();
+        faults.dedup();
+        Scenario {
+            turns,
+            usages,
+            tool_kinds,
+            llm_error_at,
+            budget,
+            faults,
+        }
+    }
+
+    fn build_responses(s: &Scenario) -> Vec<ChatResponse> {
+        let mut responses = Vec::new();
+        for k in 0..s.turns {
+            let mut r = sim_tool_call(&format!("c{k}"));
+            if s.tool_kinds[k].is_none() {
+                r.tool_calls[0].tool_name = "ghost_tool".to_string();
+            }
+            r.usage = s.usages[k];
+            responses.push(r);
+        }
+        let mut last = end_turn("soak-done");
+        last.usage = s.usages[s.turns];
+        responses.push(last);
+        responses
+    }
+
+    fn assert_no_violations(
+        result: Result<(), Vec<crate::test_support::oracle::TraceViolation>>,
+        what: &str,
+        seed: u64,
+    ) {
+        if let Err(violations) = result {
+            let lines: Vec<String> = violations.iter().map(|v| format!("  - {v}")).collect();
+            panic!("{what} not canonical (seed {seed}):\n{}", lines.join("\n"));
+        }
+    }
+
+    async fn check_wal_cost_triangle(world: &SimWorld, inv: &str, seed: u64) -> f64 {
+        let rows = world
+            .store
+            .list_llm_dispatches_for_invocation(inv)
+            .await
+            .unwrap();
+        let mut sum = 0.0;
+        for row in rows
+            .iter()
+            .filter(|r| r.status == DispatchStatus::Completed && r.is_error != Some(true))
+        {
+            let response: ChatResponse =
+                serde_json::from_str(row.response.as_deref().expect("completed row has response"))
+                    .expect("stored response parses");
+            let expected = sim_rates().calculate(&response.usage).2;
+            let stored = row.cost_usd.unwrap_or(0.0);
+            assert!(
+                (stored - expected).abs() < 1e-12,
+                "WAL cost {stored} != recomputed {expected} (seed {seed})"
+            );
+            sum += stored;
+        }
+        sum
+    }
+
+    async fn check_blobs(world: &SimWorld, seed: u64) {
+        for event in world.sink.events() {
+            if let EventPayload::InvocationArchived(p) = &event.payload {
+                crate::worker::reducer::harness::validate_state_blob(&p.final_state_blob)
+                    .unwrap_or_else(|e| panic!("archived blob invalid (seed {seed}): {e}"));
+            }
+        }
+        for row in world.store.find_in_flight_invocations().await.unwrap() {
+            crate::worker::reducer::harness::validate_state_blob(&row.state_blob)
+                .unwrap_or_else(|e| panic!("in-flight blob invalid (seed {seed}): {e}"));
+        }
+    }
+
+    /// Drive one full lifecycle from a seed; panic on any violated
+    /// invariant. Returns a coarse label for coverage accounting.
+    async fn run_scenario(seed: u64) -> &'static str {
+        let s = generate(seed);
+        let world = SimWorld::with_pricing(seed, s.budget, sim_pricing()).await;
+        for (k, kind) in s.tool_kinds.iter().enumerate() {
+            match kind {
+                Some(false) => world.tool.push_output(ToolResult::ok(format!("out-{k}"))),
+                Some(true) => world.tool.push_output(ToolResult {
+                    output: format!("err-{k}"),
+                    is_error: true,
+                }),
+                None => {} // unknown tool never reaches the registry
+            }
+        }
+        let responses = build_responses(&s);
+
+        let mut segment_starts = vec![0usize];
+        let mut faults = s.faults.clone().into_iter();
+        let mut next_fault = faults.next();
+        if let Some(f) = next_fault {
+            world.sink.fail_publish_at(f);
+        }
+
+        let llm = FixtureClient::new();
+        if let Some(k) = s.llm_error_at {
+            load_fixture(&llm, &responses[..k]);
+            llm.push_error(LlmError::RateLimited);
+        } else {
+            load_fixture(&llm, &responses);
+        }
+
+        let mut attempt = world.run(&llm).await;
+        let label;
+
+        loop {
+            match attempt {
+                Ok(outcome) => {
+                    // Terminal via the normal path: ceiling + totals.
+                    let inv = world.invocation_id().to_string();
+                    let wal_sum = check_wal_cost_triangle(&world, &inv, seed).await;
+                    match outcome {
+                        InvocationOutcome::Completed { cost, .. } => {
+                            assert!(
+                                cost <= s.budget,
+                                "overspend: cost {cost} > budget {} (seed {seed}, wal_sum \
+                                 {wal_sum}, scenario {s:?})",
+                                s.budget
+                            );
+                            assert!((cost - wal_sum).abs() < 1e-9, "seed {seed}");
+                            label = "completed";
+                        }
+                        InvocationOutcome::BudgetExceeded { cost, .. } => {
+                            assert!(
+                                cost > s.budget,
+                                "phantom trip: cost {cost} <= budget {} (seed {seed})",
+                                s.budget
+                            );
+                            assert!((cost - wal_sum).abs() < 1e-9, "seed {seed}");
+                            label = "budget_exceeded";
+                        }
+                    }
+                    break;
+                }
+                Err(ExecutorError::Bus(_)) => {
+                    // Our injected crash. Segment bookkeeping, then
+                    // recover by category.
+                    let events = world.sink.events();
+                    segment_starts.push(events.len());
+                    let in_flight = world.store.find_in_flight_invocations().await.unwrap();
+                    if in_flight.is_empty() {
+                        // Crash at the triggered publish (or the row
+                        // went terminal before the fault): if a
+                        // terminal row exists the sweeper owns it.
+                        let pending = world.store.list_archive_pending().await.unwrap();
+                        label = if pending.is_empty() {
+                            "no_residue"
+                        } else {
+                            "terminal_crash"
+                        };
+                        break;
+                    }
+                    let inv = in_flight[0].invocation_id.clone();
+                    let tools = world
+                        .store
+                        .list_tool_dispatches_for_invocation(&inv)
+                        .await
+                        .unwrap();
+                    let llms = world
+                        .store
+                        .list_llm_dispatches_for_invocation(&inv)
+                        .await
+                        .unwrap();
+                    match categorise(&in_flight[0], &tools, &llms) {
+                        RecoveryCategory::Ambiguous => {
+                            let err = world
+                                .runner
+                                .resume(&world.agent, &FixtureClient::new(), world.invocation_id())
+                                .await
+                                .expect_err("ambiguous must refuse");
+                            assert!(err.to_string().contains("ambiguous"), "seed {seed}");
+                            label = "ambiguous_refused";
+                            break;
+                        }
+                        RecoveryCategory::SafeResume | RecoveryCategory::SafeReplay => {
+                            let consumed = llms
+                                .iter()
+                                .filter(|r| r.status == DispatchStatus::Completed)
+                                .count();
+                            let resume_llm = FixtureClient::new();
+                            match s.llm_error_at {
+                                Some(k) if consumed < k + 1 => {
+                                    load_fixture(&resume_llm, &responses[consumed..k]);
+                                    resume_llm.push_error(LlmError::RateLimited);
+                                }
+                                _ => load_fixture(&resume_llm, &responses[consumed..]),
+                            }
+                            next_fault = faults.next();
+                            match next_fault {
+                                Some(f) if f > world.sink.events().len() => {
+                                    world.sink.fail_publish_at(f);
+                                    attempt = world
+                                        .runner
+                                        .resume(&world.agent, &resume_llm, world.invocation_id())
+                                        .await;
+                                }
+                                _ => {
+                                    attempt =
+                                        world.resume(&resume_llm).await.map(Ok).unwrap_or_else(Err);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(ExecutorError::Llm(_)) => {
+                    // The scheduled provider error: terminal failed.
+                    assert!(
+                        s.llm_error_at.is_some(),
+                        "unscheduled llm error (seed {seed})"
+                    );
+                    let failed = world
+                        .sink
+                        .events()
+                        .iter()
+                        .filter(|e| matches!(e.payload, EventPayload::Failed(_)))
+                        .count();
+                    assert!(failed >= 1, "no failed event (seed {seed})");
+                    label = "llm_failed";
+                    break;
+                }
+                Err(other) => panic!("unexpected error (seed {seed}): {other}"),
+            }
+        }
+
+        // --- Universal invariants over the whole life. ---
+        let events = world.sink.events();
+
+        // Segment canonicality: the first segment is a run prefix;
+        // later segments are resume traces. Only lives that ended
+        // through the normal path (terminal outcome or provider
+        // failure) demand completeness of their final segment —
+        // crash-ended lives are all-prefix by construction.
+        if segment_starts.last() != Some(&events.len()) {
+            segment_starts.push(events.len());
+        }
+        let life_completed = matches!(label, "completed" | "budget_exceeded" | "llm_failed");
+        for (i, pair) in segment_starts.windows(2).enumerate() {
+            let segment = &events[pair[0]..pair[1]];
+            let is_last = i + 2 == segment_starts.len();
+            let result = match (i == 0, is_last && life_completed) {
+                (true, true) => crate::test_support::oracle::check_invocation_trace(segment),
+                (true, false) => check_invocation_trace_prefix(segment),
+                (false, true) => check_resume_trace(segment),
+                (false, false) => check_resume_trace_prefix(segment),
+            };
+            assert_no_violations(result, &format!("segment {i} ({label})"), seed);
+        }
+
+        // At most one terminal event, ever.
+        let terminals = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.payload,
+                    EventPayload::Completed(_) | EventPayload::Failed(_)
+                )
+            })
+            .count();
+        assert!(terminals <= 1, "{terminals} terminals (seed {seed})");
+
+        // Each logical tool call executed at most once.
+        let dispatches = world.tool.dispatches().lock().unwrap().clone();
+        let mut seen = HashSet::new();
+        for params in &dispatches {
+            assert!(
+                seen.insert(params.to_string()),
+                "logical tool call ran twice: {params} (seed {seed})"
+            );
+        }
+
+        // Every persisted blob still satisfies the state invariants.
+        check_blobs(&world, seed).await;
+
+        label
+    }
+
+    /// The CI tier: a fixed seed range, every invariant on.
+    #[tokio::test]
+    async fn soak_fixed_seed_range() {
+        let iters: u64 = std::env::var("FQ_SOAK_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(48);
+        let mut coverage: HashMap<&'static str, usize> = HashMap::new();
+        for seed in 1..=iters {
+            let label = run_scenario(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)).await;
+            *coverage.entry(label).or_default() += 1;
+        }
+        eprintln!("soak coverage over {iters} scenarios: {coverage:?}");
+        // The fixed CI range must at least exercise the two dominant
+        // classes; deep runs (just soak) cover the rest by volume.
+        assert!(coverage.get("completed").copied().unwrap_or(0) > 0);
+        assert!(coverage.len() >= 3, "coverage collapsed: {coverage:?}");
+    }
+}

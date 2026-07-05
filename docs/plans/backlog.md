@@ -438,7 +438,7 @@ log levels, progress display) lands with this work.
 
 > **Update (2026-07-05):** the "Round-trip invariants on
 > `HarnessState`" thread below is absorbed as slice 2 of the
-> [reducer verification plan](active/2026-07-05-reducer-verification.md)
+> [reducer verification plan](closed/2026-07-05-reducer-verification.md)
 > — **and shipped the same day** (`HarnessState::validate` at both
 > persistence boundaries, with property tests). The other two threads
 > are unchanged.

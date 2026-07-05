@@ -211,6 +211,19 @@ In production, `fq run` automates the host side of this: the `WorkerStore` write
 
 For a working unit test of the reducer-only round-trip pattern, see `state_round_trips_across_drop_and_resume` in [`harness.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/harness.rs).
 
+**Evidence for the claim.** "Suspension is structural" is not just a design
+assertion — it is verified as a property. The
+[reducer verification plan](../plans/closed/2026-07-05-reducer-verification.md)
+(claim R4, slice 4) checks that for any script and *any* span boundary,
+interrupting the invocation at the boundary and resuming yields the same
+observational trace, outcome, and tool dispatches as the uninterrupted
+run — exhaustively over a fixed script's boundaries and property-tested
+over random scripts × boundaries × seeds
+(`resume_equivalence` in
+[`sim.rs`](../../services/fq-runtime/crates/fq-runtime/src/test_support/sim.rs)).
+The first sweep caught a real bug (the resumed conversation lost its
+trigger), which is exactly the kind of drift this property now prevents.
+
 ## Host-fulfilled tools
 
 Most tools execute as ordinary `Tool` impls registered in the

@@ -752,9 +752,37 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
         }
         for r in &llms {
-            if r.status == DispatchStatus::Completed {
-                completed.push((r.completed_at.unwrap_or(0), llm_row_to_capability(r)?));
+            if r.status != DispatchStatus::Completed {
+                continue;
             }
+            // A completed-with-error row records a provider failure
+            // whose failed terminal was lost to the crash — the
+            // response column holds the error string, not a
+            // ChatResponse. The invocation's fate was already
+            // determined; reproduce it instead of trying to replay
+            // the row (finding 6, caught by the slice-7 deep soak:
+            // resume previously died on a deserialise error here).
+            if r.is_error == Some(true) {
+                let message = r
+                    .response
+                    .clone()
+                    .unwrap_or_else(|| "provider error (no detail recorded)".to_string());
+                let mut cursor: Option<Uuid> = None;
+                self.emit_failed(
+                    &agent_id,
+                    invocation_id,
+                    FailureKind::LlmError,
+                    format!("{message} (reproduced on resume)"),
+                    FailurePhase::LlmRequest,
+                    InvocationTotals::default(),
+                    &mut cursor,
+                )
+                .await?;
+                return Err(ExecutorError::Llm(crate::llm::LlmError::RequestFailed(
+                    message,
+                )));
+            }
+            completed.push((r.completed_at.unwrap_or(0), llm_row_to_capability(r)?));
         }
         completed.sort_by_key(|x| x.0);
 
@@ -837,6 +865,36 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .count() as u32;
         let start = Instant::now();
         let mut cursor: Option<Uuid> = None;
+
+        // The post-call budget check that would have fired on the
+        // original attempt fires here instead: a crash in the window
+        // between the WAL completed-write and the check must not
+        // launder an overspend into a successful completion (finding
+        // 5, caught by the slice-7 soak — a SafeReplay of a
+        // budget-crossing final call otherwise completes without any
+        // further model call to re-trigger the check).
+        if let Some(budget) = agent.budget()
+            && totals.total_cost > budget
+        {
+            let kind = FailureKind::BudgetExceeded;
+            self.emit_failed(
+                &agent_id,
+                invocation_id,
+                kind,
+                format!(
+                    "cost ${:.6} exceeded budget ${budget:.2} (detected on resume)",
+                    totals.total_cost
+                ),
+                FailurePhase::LlmResponse,
+                totals,
+                &mut cursor,
+            )
+            .await?;
+            return Ok(InvocationOutcome::BudgetExceeded {
+                invocation_id,
+                cost: totals.total_cost,
+            });
+        }
         self.run_loop_inner(
             agent,
             llm,
@@ -1216,8 +1274,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // §5.5 write order: persist `intent` to SQLite, then
         // publish `tool.call` to NATS, then execute, then write
         // `dispatched`, then `completed`, then publish
-        // `tool.result`. Synthetic-error and self_inspect paths
-        // bypass the dispatch WAL (no real tool execution).
+        // `tool.result`. Synthetic-error results are journaled too —
+        // all three transitions at once, inside
+        // `emit_synthetic_tool_error`: there is no side effect to
+        // guard, but replay reconstructs the conversation from the
+        // WAL alone (finding 7). Only their `tool.call` /
+        // `tool.dispatched` events are skipped.
         let inv_str = invocation_id.to_string();
         let intent_at = self.config.clock.unix_now_ms();
         let parameters_json =
@@ -1554,6 +1616,47 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         message: String,
         cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
+        // Synthetic errors are journaled like real tool results —
+        // intent then completed, before the event publish. There is
+        // no side effect to guard, but replay reconstructs the
+        // conversation from the WAL alone: an unjournaled synthetic
+        // result leaves two consecutive LLM rows and the replay
+        // feeds a ModelResult where the state machine expects a
+        // ToolResult (finding 7, caught by the slice-7 deep soak).
+        let inv_str = invocation_id.to_string();
+        let params_json =
+            serde_json::to_string(&req.parameters).unwrap_or_else(|_| "{}".to_string());
+        self.config
+            .store
+            .write_tool_intent(
+                &inv_str,
+                req.tool_call_id.as_str(),
+                &req.tool_name,
+                &params_json,
+                self.config.clock.unix_now_ms(),
+            )
+            .await
+            .map_err(map_store_err)?;
+        self.config
+            .store
+            .write_tool_dispatched(
+                &inv_str,
+                req.tool_call_id.as_str(),
+                self.config.clock.unix_now_ms(),
+            )
+            .await
+            .map_err(map_store_err)?;
+        self.config
+            .store
+            .write_tool_completed(
+                &inv_str,
+                req.tool_call_id.as_str(),
+                &message,
+                true,
+                self.config.clock.unix_now_ms(),
+            )
+            .await
+            .map_err(map_store_err)?;
         self.publish_chained(
             cursor,
             Event::new(
@@ -4210,16 +4313,26 @@ mod tests {
             tool_result.error_kind
         );
 
-        // No WAL row was written for the denied call — the
-        // synthetic-error path bypasses tool_dispatch entirely.
+        // The denied call is journaled like any other result — a
+        // completed error row, so resume can replay the conversation
+        // from the WAL alone (finding 7; this test previously pinned
+        // the opposite, replay-breaking behaviour).
         let inv_str = events[0].envelope.invocation_id.to_string();
         let dispatch = store
             .get_tool_dispatch(&inv_str, "call_deny")
             .await
-            .unwrap();
+            .unwrap()
+            .expect("denied call must journal a completed error row");
+        assert_eq!(dispatch.status, DispatchStatus::Completed);
+        assert_eq!(dispatch.is_error, Some(true));
         assert!(
-            dispatch.is_none(),
-            "denied call must not write a tool_dispatch row; got {dispatch:?}"
+            dispatch
+                .result
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not available"),
+            "got {:?}",
+            dispatch.result
         );
     }
 

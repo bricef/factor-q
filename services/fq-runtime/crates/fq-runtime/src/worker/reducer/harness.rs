@@ -82,6 +82,14 @@ enum Phase {
     Done,
 }
 
+/// Validate a persisted state blob without exposing the state type:
+/// deserialises and runs the phase ↔ contents invariants. Used by the
+/// verification soak (slice 7) to check every archived blob in volume.
+#[cfg(test)]
+pub(crate) fn validate_state_blob(bytes: &[u8]) -> Result<(), HarnessError> {
+    HarnessState::load(bytes).map(|_| ())
+}
+
 impl HarnessState {
     fn load(bytes: &[u8]) -> Result<Self, HarnessError> {
         if bytes.is_empty() {

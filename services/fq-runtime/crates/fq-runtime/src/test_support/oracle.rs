@@ -92,6 +92,15 @@ pub fn check_resume_trace(events: &[Event]) -> Result<(), Vec<TraceViolation>> {
     check_with(events, State::Idle, true)
 }
 
+/// Resume-prefix mode (slice 7): a resumed run that itself crashed —
+/// headless like a resume trace, truncatable like a prefix.
+pub fn check_resume_trace_prefix(events: &[Event]) -> Result<(), Vec<TraceViolation>> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    check_with(events, State::Idle, false)
+}
+
 fn check_with(
     events: &[Event],
     start_state: State,

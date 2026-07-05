@@ -92,3 +92,10 @@ test-shell-sandbox:
     docker run --rm --network none \
         -v {{justfile_directory()}}:/src:ro \
         factor-q/shell-test
+
+# Deep verification soak (reducer verification plan, slice 7): the
+# randomised lifecycle driver with every oracle on. CI runs 48
+# scenarios inside the normal test suite; this recipe scales the
+# iteration count for local bug-hunting (~3 min per 1000).
+soak iters="1000":
+    FQ_SOAK_ITERS={{iters}} cargo test -p fq-runtime --lib soak_fixed -- --nocapture
