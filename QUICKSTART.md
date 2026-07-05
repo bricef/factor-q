@@ -101,7 +101,8 @@ just fq events query --agent sample-agent --type tool_result
 # Per-agent cost totals
 just fq costs
 
-# Costs since a given time
+# Costs for one agent, or since a given time (combine freely)
+just fq costs --agent sample-agent
 just fq costs --since 2026-04-25
 ```
 

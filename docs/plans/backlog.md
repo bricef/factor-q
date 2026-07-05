@@ -848,8 +848,8 @@ flattened from an escalating $0.007→$0.084 to a steady ~$0.005–0.009,
 36% off the total on a like-for-like run. Residue kept here: genai
 0.4.4 drops the marker on a single system message (off-by-one in its
 Anthropic adapter, pinned in `cache_control_reaches_the_wire...`) —
-worth an upstream PR; and `fq costs`/the projection don't yet surface
-cache columns (see the costs-filter finding below).
+worth an upstream PR; and the projection doesn't yet store cache
+token columns (see the corrected costs finding below).
 
 ### Agent definitions load once at daemon startup — no reload
 
@@ -865,10 +865,20 @@ document the restart requirement loudly in the agent-definitions guide.
 Exit 101 when the pipe closes early — the usual Rust
 `println!`-panics-on-EPIPE issue. Handle or ignore SIGPIPE in the CLI.
 
-### `fq costs` has no agent filter and no cost-origin split
+### `fq costs` filtering — finding corrected
 
-The costs table interleaves real spend with mock-priced test agents on
-a shared NATS (a $1.00 fixture agent dwarfs the real numbers), and
-events on the same stream age out at different times. A `--agent`
-filter (like `events query`) and/or an `--since` window would make it
-usable as the dogfood Q-baseline denominator.
+**Corrected (2026-07-05): the filters already existed.** `fq costs`
+takes `--agent` and `--since` (RFC3339 prefix), wired through
+`ProjectionStore::cost_summary` and covered by store tests; both
+verified working against the live dogfood projection. The original
+finding was filed from a bare `fq costs` run without checking
+`--help` — a process lesson for dogfood reports: verify a gap exists
+before filing it (the same discipline the reducer plan applies to its
+pre-registered findings).
+
+What genuinely remains from this thread: the projection does not
+store cache read/write token columns, so `fq costs` can't show cache
+efficiency (hit rates, cached vs uncached spend) — relevant now that
+prompt caching landed (`2889c44`). Needs a projection schema bump plus
+consumer/CLI plumbing; worth doing when cost observability next gets
+attention.
