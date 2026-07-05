@@ -868,11 +868,9 @@ system prompt and the final message as cache breakpoints on every
 request, and `ModelPricing` prices uncached/read/write tokens
 separately. Measured on the dogfood loop the same day: per-turn costs
 flattened from an escalating $0.007→$0.084 to a steady ~$0.005–0.009,
-36% off the total on a like-for-like run. Residue kept here: genai
-0.4.4 drops the marker on a single system message (off-by-one in its
-Anthropic adapter, pinned in `cache_control_reaches_the_wire...`) —
-worth an upstream PR; and the projection doesn't yet store cache
-token columns (see the corrected costs finding below).
+36% off the total on a like-for-like run. Residue: the genai
+system-marker quirk (own entry below) and the missing cache token
+columns in the projection (see the corrected costs finding below).
 
 ### Agent definitions load once at daemon startup — no reload
 
@@ -910,3 +908,24 @@ efficiency (hit rates, cached vs uncached spend) — relevant now that
 prompt caching landed (`2889c44`). Needs a projection schema bump plus
 consumer/CLI plumbing; worth doing when cost observability next gets
 attention.
+
+
+### genai 0.4.4 drops the cache marker on a single system message
+
+Found while wiring prompt caching (`2889c44`): genai 0.4.4's
+Anthropic adapter only renders the system prompt as cache-marked
+parts when the marked index is `> 0` (`last_cache_idx` in
+`adapter_impl.rs`), so the common case — exactly one system message,
+marked — silently loses its `cache_control`. Harmless for us: the
+final-message breakpoint covers the whole prefix, and our wire test
+(`cache_control_reaches_the_wire_and_usage_round_trips`) pins the
+current behaviour while accepting the fixed shape.
+
+**No upstream PR needed** — verified against genai `main`
+(2026-07-05): the cache path was rewritten with per-message
+breakpoint tracking that explicitly includes system-role messages,
+plus TTL variants (5m/1h/24h) and request-level placement. Resolve
+by upgrading genai past 0.4.x when convenient; expect API churn
+(`CacheControl` gained variants, `ChatRequest` gained request-level
+cache options) and a small bonus (1h-TTL support). Our test's
+accept-both assertion already tolerates the post-upgrade wire shape.
