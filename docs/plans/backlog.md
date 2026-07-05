@@ -931,3 +931,64 @@ by upgrading genai past 0.4.x when convenient; expect API churn
 (`CacheControl` gained variants, `ChatRequest` gained request-level
 cache options) and a small bonus (1h-TTL support). Our test's
 accept-both assertion already tolerates the post-upgrade wire shape.
+
+## Schema-migration testing (flagged 2026-07-05)
+
+**Priority: high — release gate for v1.0.0.** No schema migration
+should ship after v1.0.0 without having run against populated
+databases in CI first.
+
+### Populated-database migration tests for every versioned store
+
+**What exists today.** Two stores carry versioned schemas — the
+worker store (`WORKER_SCHEMA_VERSION`, currently v5) and the
+control-plane store (`CONTROL_PLANE_SCHEMA_VERSION`, v1) — with a
+shared mechanism: `check_compatibility` decides
+FreshInstall / Current / NeedsUpgrade / BinaryTooOld, and
+`run_migrations(from, to)` applies additive SQL steps. fq-store
+(M3, the Layer-2 extraction) will add a third.
+
+**The gap.** `check_compatibility` has pure unit tests, and every
+store test opens a fresh database — so migration SQL executes in CI
+only via the `FreshInstall` path, always against an **empty**
+database. The `NeedsUpgrade` path — migrating a *populated* vN
+database to vN+1 — has never run in CI. The v4→v5 migration
+(trigger persistence, 2026-07-05) executed against real data for
+the first time on the dogfood box's live worker DB. It worked, but
+that is the wrong place for a first run: a defective migration
+could corrupt or strand in-flight invocations, and nothing today
+would catch it before deployment.
+
+**The shape of the fix** (sketch agreed 2026-07-05):
+
+1. **Build vN, populate, migrate, verify.** For each historical
+   step N→N+1 (and the full ladder 0→latest): create a schema at
+   vN via `run_migrations(0, N)` — the migration history *is* the
+   vN schema definition, no frozen snapshots needed while
+   migrations stay additive. Populate with representative data,
+   run the remaining migrations, then assert: no error; row counts
+   preserved; every pre-existing row readable through the current
+   readers; new columns take their documented defaults (e.g.
+   pre-v5 rows exercise `resume()`'s warn-and-degrade trigger
+   path); `PRAGMA integrity_check` clean.
+2. **Generate the data by simulation, not hand-written fixtures.**
+   Drive `test_support::sim::SimWorld` invocations — completed,
+   crashed mid-flight at span boundaries, and budget-failed — so
+   the populated database contains realistic WAL shapes
+   (intent/dispatched/completed rows, terminal and non-terminal
+   state rows, archive-pending rows). Wrinkle to solve: the
+   current binary's writers emit latest-schema rows, so the
+   generator runs at HEAD and the rows are projected down to vN's
+   column set for insertion (mechanical while migrations are
+   additive; revisit if a migration ever transforms data).
+3. **Guard the other paths too.** BinaryTooOld still errors;
+   reopening at Current does not re-run migrations (some steps,
+   e.g. `ALTER TABLE ADD COLUMN`, are not idempotent).
+4. **Hermetic, default tier.** SQLite in a tempdir, plain
+   `cargo test` — no NATS gate, runs in every CI pass.
+
+Applies to both existing stores now and to fq-store's conformance
+suite when M3 lands (that suite's proptest style is the natural
+home for a randomised variant). Cross-refs: the reducer
+verification plan's sim harness (slice 3) provides the data
+generator; the v5 migration commit is the motivating example.
