@@ -1,7 +1,7 @@
 # M2 — access control: implementation plan
 
 **Status:** Closed (2026-07-05). All seven slices shipped and merged to `main`
-from branch `m2-access-control` (no-ff). The Slices table below records what
+in `627a5ec` (branch `m2-access-control`, no-ff). The Slices table below records what
 landed; "Decisions taken while building" and the pre-merge review are the
 durable record. The gate's first production caller — token-gated remote
 exposure of the named service — is M5's charter.
