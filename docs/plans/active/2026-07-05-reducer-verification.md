@@ -128,11 +128,15 @@ final `InvocationOutcome`.
 
 Stated before the net is built, to be confirmed or refuted by it:
 
-1. **R5 fails as written.** `resume()` reconstitutes
-   `InvocationTotals::default()` (`runner.rs`, resume path) — pre-crash
-   spend is forgotten, so the ceiling is per-attempt. Expected fix:
-   recompute totals from the WAL's completed LLM dispatch rows (they carry
-   cost) at resume, or persist totals in `invocation_state`. Slice 6.
+1. **R5 failed as written — confirmed and fixed ahead of the net
+   (2026-07-05).** `resume()` reconstituted `InvocationTotals::default()` —
+   pre-crash spend was forgotten, so the ceiling was per-attempt. Fixed by
+   folding totals from the WAL's completed dispatch rows at resume
+   (errored dispatches excluded, matching the live path; sub-costs stay
+   zero, safe per ADR-0018 §5); pinned by `resume_enforces_lifetime_budget`,
+   verified to fail against the unfixed code. Slice 6 still owns the
+   property coverage (random pricing scripts, sub-budget semantics, the
+   attempt-vs-lifetime duration question).
 2. **Outcome/error-kind coarseness (shape question, maybe fine).** Several
    distinct failure paths (reducer step error, host step-budget exhaustion,
    terminal `Failed`) all return `ExecutorError::MaxIterationsExceeded`

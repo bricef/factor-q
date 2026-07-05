@@ -763,7 +763,27 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // invocation_id only. A `recovered_from_event_id` envelope
         // field could be added later if audit needs cross-incarnation
         // stitching (see step 2 of the envelope-refactor plan).
-        let totals = InvocationTotals::default();
+        // Reconstitute lifetime totals from the WAL so the budget
+        // ceiling bounds the invocation's lifetime spend, not the
+        // current attempt's. Errored LLM dispatches are excluded to
+        // match the live path, which counts a call only once the
+        // provider returns. Sampling/elicitation sub-costs cannot be
+        // split back out of the WAL and stay zero — safe, because a
+        // resumed run cannot service server-initiated requests
+        // (ADR-0018 §5), so no sub-budget is consulted after resume.
+        // `total_duration_ms` stays attempt-scoped: it is what
+        // `start` below measures.
+        let mut totals = InvocationTotals::default();
+        for r in &llms {
+            if r.status == DispatchStatus::Completed && r.is_error != Some(true) {
+                totals.total_llm_calls += 1;
+                totals.total_cost += r.cost_usd.unwrap_or(0.0);
+            }
+        }
+        totals.total_tool_calls = tools
+            .iter()
+            .filter(|r| r.status == DispatchStatus::Completed)
+            .count() as u32;
         let start = Instant::now();
         let mut cursor: Option<Uuid> = None;
         self.run_loop_inner(
@@ -4460,6 +4480,173 @@ mod tests {
         let row = store.get_invocation_state(&inv_str).await.unwrap().unwrap();
         assert!(row.terminal_at.is_some());
         assert_eq!(row.phase, "completed");
+    }
+
+    #[tokio::test]
+    async fn resume_enforces_lifetime_budget() {
+        // Pre-registered finding 1 of the reducer verification
+        // plan: totals used to reset on resume, making the budget
+        // ceiling per-attempt. Pre-crash spend recorded in the WAL
+        // must count against the budget after resume.
+        //
+        // Shape: the WAL says a completed pre-crash LLM call spent
+        // $0.20 against a $0.05 budget, and its response was a
+        // tool call, so the resumed loop must take another model
+        // turn. That first post-resume call must terminate the
+        // invocation as BudgetExceeded carrying the lifetime cost
+        // — not run to completion on a fresh accumulator.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        use crate::worker::reducer::types::{
+            AgentConfig, StepInput, TriggerPayload, TriggerSourceKind,
+        };
+
+        let dir = tempdir().unwrap();
+        let store_path = dir.path().join("events.db");
+        let store = Arc::new(WorkerStore::open(&store_path).await.unwrap());
+
+        let agent_id_str = unique_agent_id("resume-budget");
+        let agent = Agent::builder()
+            .id(&agent_id_str)
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .budget(0.05)
+            .build()
+            .unwrap();
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        // State as persisted after step 0 (awaiting the model).
+        let harness = Harness::new();
+        let agent_config = AgentConfig {
+            agent_id: AgentId::new(&agent_id_str).unwrap(),
+            model: "claude-haiku".to_string(),
+            system_prompt: "You are a test agent.".to_string(),
+            tools_available: vec![],
+            allowed_tool_names: vec![],
+            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+        };
+        let trigger = TriggerPayload {
+            source: TriggerSourceKind::Manual,
+            subject: None,
+            payload: json!("hello"),
+        };
+        let s0_output = harness
+            .step(StepInput {
+                config: agent_config.clone(),
+                trigger: trigger.clone(),
+                state: vec![],
+                last_result: None,
+                now_ms: 0,
+                random_seed: 0,
+                step_index: 0,
+                static_resource_context: None,
+            })
+            .expect("step 0");
+
+        store
+            .upsert_invocation_state(&InvocationStateRow {
+                invocation_id: inv_str.clone(),
+                agent_id: agent_id_str.clone(),
+                schema_version: 1,
+                phase: "awaiting_model".to_string(),
+                state_blob: s0_output.state,
+                iteration: 0,
+                started_at: 1_000,
+                updated_at: 1_000,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+            })
+            .await
+            .unwrap();
+
+        // The completed pre-crash LLM call: $0.20 already spent
+        // (past the $0.05 budget on its own) and a tool-use
+        // response, so the resumed loop has more work to do. The
+        // tool is not in the agent's (empty) tool list, so the
+        // runner feeds back a synthetic error result and the
+        // reducer asks for the next model turn.
+        let response = ChatResponse {
+            content: None,
+            tool_calls: vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("call-0").unwrap(),
+                tool_name: "unavailable_tool".to_string(),
+                parameters: json!({}),
+            }],
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage {
+                input_tokens: 50,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        };
+        let response_json = serde_json::to_string(&response).unwrap();
+        store
+            .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
+            .await
+            .unwrap();
+        store
+            .write_llm_dispatched(&inv_str, "req-0", 2)
+            .await
+            .unwrap();
+        store
+            .write_llm_completed(&inv_str, "req-0", &response_json, false, 0.20, 3)
+            .await
+            .unwrap();
+
+        let bus = EventBus::connect(&url).await.unwrap();
+        let runner = ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus)
+                    .pricing(test_pricing())
+                    .store(store.clone())
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
+            Harness::new(),
+        );
+
+        // The post-resume model turn (reached after the synthetic
+        // tool error is fed back to the reducer).
+        let llm = FixtureClient::new();
+        llm.push_response(ChatResponse {
+            content: Some("wrapping up".to_string()),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 50,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        });
+
+        let outcome = runner
+            .resume(&agent, &llm, invocation_id)
+            .await
+            .expect("resume runs");
+
+        match outcome {
+            InvocationOutcome::BudgetExceeded { cost, .. } => {
+                assert!(
+                    cost >= 0.20,
+                    "lifetime cost must include pre-crash spend, got {cost}"
+                );
+            }
+            other => panic!("expected BudgetExceeded from lifetime spend, got {other:?}"),
+        }
     }
 
     #[tokio::test]
