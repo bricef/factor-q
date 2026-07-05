@@ -5,7 +5,7 @@
 //! naive, obviously-correct reference model ([`GrantModel`]) that answers
 //! `can(principal, verb, resource)`. The design is ADR-0023 F4 (event-sourced
 //! grant claims); the claims it must satisfy are A1–A6 in the M2 plan
-//! (`docs/plans/active/2026-07-03-m2-access-control.md`): default-deny (A1),
+//! (`docs/plans/closed/2026-07-03-m2-access-control.md`): default-deny (A1),
 //! revocation wins (A3), delegation is grant-gated (A4). The projection
 //! ([`crate::SqliteGrantLog`]) and the token gate ([`crate::GatedRepository`])
 //! must agree with this model; the property tests here prove the model itself,

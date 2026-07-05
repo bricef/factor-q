@@ -1,13 +1,16 @@
 # M2 — access control: implementation plan
 
-**Status:** active (2026-07-03). The slice-by-slice build of grants + capability
-tokens, on branch `m2-access-control`.
+**Status:** Closed (2026-07-05). All seven slices shipped and merged to `main`
+from branch `m2-access-control` (no-ff). The Slices table below records what
+landed; "Decisions taken while building" and the pre-merge review are the
+durable record. The gate's first production caller — token-gated remote
+exposure of the named service — is M5's charter.
 
 The **"what"** and **"why"** live elsewhere — the resolved design in
 [ADR-0023](../../adrs/accepted/0023-storage-and-vector-foundation.md) (F4:
 event-sourced grant claims → permission projection, biscuit capability tokens as
 the wire mechanism) and the milestone in the
-[storage + vector foundation plan](2026-06-27-storage-vector-foundation.md).
+[storage + vector foundation plan](../active/2026-06-27-storage-vector-foundation.md).
 This doc is the **"how, in what order"**: the slices, the decisions taken up
 front, and where each is verified.
 
@@ -279,6 +282,6 @@ service (where these tokens ride the wire) is M5's charter.
 
 - [ADR-0023 — storage and vector foundation](../../adrs/accepted/0023-storage-and-vector-foundation.md)
   (F4, F6) · [ADR-0024 — separate databases](../../adrs/accepted/0024-separate-databases-storage-foundation.md)
-- [Storage + vector foundation plan](2026-06-27-storage-vector-foundation.md) (M2)
-- [M1c implementation plan (closed)](../closed/2026-06-30-m1c-gc-implementation.md)
+- [Storage + vector foundation plan](../active/2026-06-27-storage-vector-foundation.md) (M2)
+- [M1c implementation plan (closed)](2026-06-30-m1c-gc-implementation.md)
   — the slice/verification pattern this plan mirrors

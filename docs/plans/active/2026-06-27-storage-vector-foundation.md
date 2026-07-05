@@ -27,7 +27,14 @@ operator command + manual. See the
 [closed implementation plan](../closed/2026-06-30-m1c-gc-implementation.md)
 and the draft
 [GC observability ADR](../../adrs/draft/0025-storage-gc-observability.md).
-Next: **M2** — access control (grants + capability tokens).
+**M2 (access control) is done** — merged from branch `m2-access-control`:
+grant events + the durable outbox, the rebuildable grant projection
+(SQLite #2), biscuit capability tokens (mint / verify / attenuate), the
+`can()` op-boundary gate, the `fq-cas grant` / `token` CLI + the
+[access-control guide](../../guide/access-control.md), and the fault DST +
+soak. See the
+[closed implementation plan](../closed/2026-07-03-m2-access-control.md).
+Next: **M3** — Layer-2 extraction.
 
 ## Goal
 

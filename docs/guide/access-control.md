@@ -5,7 +5,7 @@ is enforced, and (most importantly for operators) **what happens when you
 revoke**. This implements
 [ADR-0023](../adrs/accepted/0023-storage-and-vector-foundation.md) F4;
 the build is tracked in the
-[M2 plan](../plans/active/2026-07-03-m2-access-control.md).
+[M2 plan](../plans/closed/2026-07-03-m2-access-control.md).
 
 > **Status:** built, verified, and soak-tested — the model, event log,
 > projection, capability tokens, the enforcement gate, and the operator CLI
@@ -143,7 +143,7 @@ alongside the storage index.
 ## See also
 
 - [Operating fq-cas](operating-fq-cas.md) — running the store day to day.
-- [M2 — access control: implementation plan](../plans/active/2026-07-03-m2-access-control.md)
+- [M2 — access control: implementation plan](../plans/closed/2026-07-03-m2-access-control.md)
   — the claims (A1–A6), slices, and decisions behind these semantics.
 - [ADR-0023](../adrs/accepted/0023-storage-and-vector-foundation.md) (F4) —
   the design fork this implements.
