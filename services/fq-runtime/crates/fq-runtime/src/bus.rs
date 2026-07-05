@@ -16,6 +16,26 @@ use tracing::{debug, info, warn};
 
 use crate::events::Event;
 
+/// The narrowest seam over event publication (reducer verification
+/// plan, slice 3; widened to the archive sweeper in slice 5). The
+/// reducer runner and the archive retry sweeper publish through this
+/// trait so the hermetic sim can capture events in memory and inject
+/// publish faults; production wires [`EventBus`], the NATS
+/// implementation. Envelope timestamps are stamped by `Event::new`
+/// from the system clock either way — the trace oracle and the
+/// equivalence checks treat them as volatile.
+#[async_trait::async_trait]
+pub trait EventSink: Send + Sync {
+    async fn publish(&self, event: &Event) -> Result<(), BusError>;
+}
+
+#[async_trait::async_trait]
+impl EventSink for EventBus {
+    async fn publish(&self, event: &Event) -> Result<(), BusError> {
+        EventBus::publish(self, event).await
+    }
+}
+
 /// Name of the JetStream stream that holds all factor-q events.
 pub const STREAM_NAME: &str = "fq-events";
 

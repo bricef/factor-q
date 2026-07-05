@@ -479,7 +479,7 @@ mod resume_equivalence {
     use crate::test_support::oracle::observational_trace;
 
     /// The LLM script for `turns` tool calls followed by an end turn.
-    fn script(turns: usize) -> Vec<ChatResponse> {
+    pub(super) fn script(turns: usize) -> Vec<ChatResponse> {
         let mut responses: Vec<ChatResponse> = (0..turns)
             .map(|k| sim_tool_call(&format!("c{k}")))
             .collect();
@@ -487,32 +487,32 @@ mod resume_equivalence {
         responses
     }
 
-    fn load_fixture(llm: &FixtureClient, responses: &[ChatResponse]) {
+    pub(super) fn load_fixture(llm: &FixtureClient, responses: &[ChatResponse]) {
         for r in responses {
             llm.push_response(r.clone());
         }
     }
 
-    fn queue_tool_outputs(world: &SimWorld, turns: usize) {
+    pub(super) fn queue_tool_outputs(world: &SimWorld, turns: usize) {
         for k in 0..turns {
             world.tool.push_output(ToolResult::ok(format!("out-{k}")));
         }
     }
 
-    struct RunResult {
-        observed: Vec<Value>,
-        summary: Option<String>,
-        dispatches: Vec<Value>,
+    pub(super) struct RunResult {
+        pub(super) observed: Vec<Value>,
+        pub(super) summary: Option<String>,
+        pub(super) dispatches: Vec<Value>,
     }
 
-    fn summary_of(outcome: &InvocationOutcome) -> Option<String> {
+    pub(super) fn summary_of(outcome: &InvocationOutcome) -> Option<String> {
         match outcome {
             InvocationOutcome::Completed { response, .. } => response.content.clone(),
             other => panic!("expected Completed, got {other:?}"),
         }
     }
 
-    async fn run_reference(seed: u64, turns: usize) -> RunResult {
+    pub(super) async fn run_reference(seed: u64, turns: usize) -> RunResult {
         let world = SimWorld::new(seed, 5.0).await;
         queue_tool_outputs(&world, turns);
         let llm = FixtureClient::new();
@@ -621,5 +621,406 @@ mod resume_equivalence {
                 );
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod crash_dst {
+    //! Slice 5 (claims R2, R3, R1-under-faults): the crash DST.
+    //!
+    //! Every publish index of a scripted run is a fault point. The
+    //! WAL writes and publishes interleave strictly, so the fault
+    //! index determines the WAL state the crash leaves behind:
+    //! span-first publish → intent-only (SafeResume), span-middle →
+    //! dispatched-without-completed (Ambiguous — on the tool path
+    //! the side effect has already run), span-last →
+    //! completed-with-events-lost (SafeReplay), terminal publishes →
+    //! terminal row with the archive hand-off incomplete (healed by
+    //! the sweeper). Each point is checked for: crash trace is a
+    //! canonical prefix (R1-under-faults), `categorise` predicts
+    //! resume's behaviour (R2), and tools execute at most once per
+    //! logical call — exactly once wherever auto-recovery proceeds,
+    //! never re-executed where it refuses (R3).
+
+    use std::collections::HashSet;
+
+    use super::resume_equivalence::{load_fixture, run_reference, script, summary_of};
+    use super::*;
+    use crate::llm::{ChatResponse, LlmError};
+    use crate::test_support::oracle::{
+        check_invocation_trace, check_invocation_trace_prefix, check_resume_trace,
+    };
+    use crate::worker::ArchiveRetrySweeper;
+    use crate::worker::recovery::{RecoveryCategory, categorise};
+    use crate::worker::store::DispatchStatus;
+
+    /// What the fault-index geometry says the crash must leave.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    enum Expect {
+        /// Fault at the `triggered` publish: nothing persisted.
+        NothingPersisted,
+        SafeResume,
+        Ambiguous,
+        SafeReplay,
+        /// Fault at a terminal publish: the row is already terminal;
+        /// resume refuses and the archive sweeper heals.
+        AlreadyTerminal,
+    }
+
+    fn total_publishes(turns: usize) -> usize {
+        6 * turns + 6
+    }
+
+    fn expect_for(fault: usize, turns: usize) -> Expect {
+        let completed_idx = 6 * turns + 4;
+        if fault == 0 {
+            Expect::NothingPersisted
+        } else if fault >= completed_idx {
+            Expect::AlreadyTerminal
+        } else {
+            match (fault - 1) % 3 {
+                0 => Expect::SafeResume,
+                1 => Expect::Ambiguous,
+                _ => Expect::SafeReplay,
+            }
+        }
+    }
+
+    fn queue_outputs(world: &SimWorld, turns: usize) {
+        for k in 0..turns {
+            world.tool.push_output(ToolResult::ok(format!("out-{k}")));
+        }
+    }
+
+    /// Run to the injected crash; assert it surfaced as the fault.
+    async fn crash_at(seed: u64, turns: usize, fault: usize) -> (SimWorld, Vec<ChatResponse>) {
+        let world = SimWorld::new(seed, 5.0).await;
+        queue_outputs(&world, turns);
+        let responses = script(turns);
+        world.sink.fail_publish_at(fault);
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &responses);
+        let err = world.run(&llm).await.expect_err("must crash at the fault");
+        assert!(
+            matches!(err, ExecutorError::Bus(_)),
+            "expected the injected fault, got {err:?}"
+        );
+        (world, responses)
+    }
+
+    /// Categorise the (single) in-flight invocation's WAL directly.
+    async fn wal_category(world: &SimWorld, inv: &str) -> RecoveryCategory {
+        let state = world
+            .store
+            .get_invocation_state(inv)
+            .await
+            .unwrap()
+            .expect("state row");
+        let tools = world
+            .store
+            .list_tool_dispatches_for_invocation(inv)
+            .await
+            .unwrap();
+        let llms = world
+            .store
+            .list_llm_dispatches_for_invocation(inv)
+            .await
+            .unwrap();
+        categorise(&state, &tools, &llms)
+    }
+
+    async fn completed_llm_turns(world: &SimWorld, inv: &str) -> usize {
+        world
+            .store
+            .list_llm_dispatches_for_invocation(inv)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.status == DispatchStatus::Completed)
+            .count()
+    }
+
+    fn assert_prefix_canonical(events: &[Event], label: &str) {
+        if let Err(violations) = check_invocation_trace_prefix(events) {
+            let lines: Vec<String> = violations.iter().map(|v| format!("  - {v}")).collect();
+            panic!(
+                "crash trace not a canonical prefix ({label}):\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+
+    /// The full matrix at one fault point. Returns a short label of
+    /// the branch taken, for the sweep's coverage sanity check.
+    async fn check_fault_point(
+        seed: u64,
+        turns: usize,
+        fault: usize,
+        reference_summary: &Option<String>,
+    ) -> Expect {
+        let label = format!("seed {seed}, turns {turns}, fault {fault}");
+        let (world, responses) = crash_at(seed, turns, fault).await;
+        let crash_events = world.sink.events();
+        assert_eq!(
+            crash_events.len(),
+            fault,
+            "sink must hold exactly the pre-fault publishes ({label})"
+        );
+        assert_prefix_canonical(&crash_events, &label);
+
+        let expected = expect_for(fault, turns);
+        match expected {
+            Expect::NothingPersisted => {
+                let in_flight = world.store.find_in_flight_invocations().await.unwrap();
+                assert!(in_flight.is_empty(), "no residue expected ({label})");
+            }
+            Expect::AlreadyTerminal => {
+                let inv = world.invocation_id().to_string();
+                let err = world
+                    .runner
+                    .resume(&world.agent, &FixtureClient::new(), world.invocation_id())
+                    .await
+                    .expect_err("terminal rows must refuse resume");
+                assert!(
+                    err.to_string().contains("already terminal"),
+                    "({label}) got: {err}"
+                );
+                // The archive hand-off is incomplete but healable —
+                // the row is terminal and un-acked, so the sweeper
+                // must pick it up (proved in the dedicated test).
+                let pending = world.store.list_archive_pending().await.unwrap();
+                assert_eq!(pending.len(), 1, "sweeper must see the row ({label})");
+                assert_eq!(pending[0].invocation_id, inv);
+            }
+            Expect::Ambiguous => {
+                let inv = world.invocation_id().to_string();
+                assert_eq!(
+                    wal_category(&world, &inv).await,
+                    RecoveryCategory::Ambiguous,
+                    "({label})"
+                );
+                let before = world.tool.dispatches().lock().unwrap().len();
+                let err = world
+                    .runner
+                    .resume(&world.agent, &FixtureClient::new(), world.invocation_id())
+                    .await
+                    .expect_err("ambiguous WAL must refuse auto-resume");
+                assert!(
+                    err.to_string().contains("ambiguous"),
+                    "({label}) got: {err}"
+                );
+                assert_eq!(
+                    world.tool.dispatches().lock().unwrap().len(),
+                    before,
+                    "refusal must not re-dispatch tools ({label})"
+                );
+            }
+            Expect::SafeResume | Expect::SafeReplay => {
+                let inv = world.invocation_id().to_string();
+                let category = wal_category(&world, &inv).await;
+                let want = if expected == Expect::SafeResume {
+                    RecoveryCategory::SafeResume
+                } else {
+                    RecoveryCategory::SafeReplay
+                };
+                assert_eq!(category, want, "({label})");
+
+                let consumed = completed_llm_turns(&world, &inv).await;
+                let resume_llm = FixtureClient::new();
+                load_fixture(&resume_llm, &responses[consumed..]);
+                let outcome = world.resume(&resume_llm).await.expect("auto-resume");
+                assert_eq!(
+                    &summary_of(&outcome),
+                    reference_summary,
+                    "outcome must match the uninterrupted run ({label})"
+                );
+                assert_eq!(
+                    world.tool.dispatches().lock().unwrap().len(),
+                    turns,
+                    "each logical tool call exactly once across crash+resume ({label})"
+                );
+                let resume_events = &world.sink.events()[fault..];
+                if let Err(violations) = check_resume_trace(resume_events) {
+                    let lines: Vec<String> =
+                        violations.iter().map(|v| format!("  - {v}")).collect();
+                    panic!(
+                        "resume trace not canonical ({label}):\n{}",
+                        lines.join("\n")
+                    );
+                }
+            }
+        }
+        expected
+    }
+
+    /// Every publish index of a fixed two-turn script.
+    #[tokio::test]
+    async fn exhaustive_fault_sweep_covers_the_wal_lattice() {
+        let turns = 2;
+        let reference = run_reference(77, turns).await;
+        let mut seen = HashSet::new();
+        for fault in 0..total_publishes(turns) {
+            seen.insert(check_fault_point(77, turns, fault, &reference.summary).await);
+        }
+        // The sweep must have exercised every lattice class.
+        assert_eq!(seen.len(), 5, "all five WAL classes covered: {seen:?}");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 24, ..Default::default()
+        })]
+
+        /// Random scripts × random fault points × random seeds.
+        #[test]
+        fn random_faults_recover_or_refuse(
+            seed: u64,
+            turns in 1usize..=3,
+            fault in 0usize..24,
+        ) {
+            proptest::prop_assume!(fault < total_publishes(turns));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("sim runtime");
+            runtime.block_on(async {
+                let reference = run_reference(seed, turns).await;
+                check_fault_point(seed, turns, fault, &reference.summary).await;
+            });
+        }
+    }
+
+    /// Crash during recovery itself: a second fault lands mid-resume,
+    /// and a second resume still completes with tools exactly-once.
+    #[tokio::test]
+    async fn crash_while_resuming_then_second_resume_completes() {
+        let turns = 2;
+        let reference = run_reference(11, turns).await;
+        // First crash: llm turn 1's response publish is lost, but its
+        // WAL row completed → SafeReplay.
+        let (world, responses) = crash_at(11, turns, 3).await;
+        let inv = world.invocation_id();
+        assert_eq!(
+            wal_category(&world, &inv.to_string()).await,
+            RecoveryCategory::SafeReplay
+        );
+
+        // Second fault: the first publish the resume attempts (the
+        // tool span opening) fails too. Call the runner directly —
+        // SimWorld::resume would clear the injected fault.
+        world.sink.fail_publish_at(world.sink.events().len());
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &responses[1..]);
+        let err = world
+            .runner
+            .resume(&world.agent, &resume_llm, inv)
+            .await
+            .expect_err("second crash mid-resume");
+        assert!(matches!(err, ExecutorError::Bus(_)));
+        assert_eq!(
+            wal_category(&world, &inv.to_string()).await,
+            RecoveryCategory::SafeResume,
+            "second crash left an intent-only tool row"
+        );
+
+        // Second resume completes; the tool still ran exactly once
+        // per logical call across all three attempts.
+        let resume_llm2 = FixtureClient::new();
+        load_fixture(&resume_llm2, &responses[1..]);
+        let outcome = world.resume(&resume_llm2).await.expect("second resume");
+        assert_eq!(summary_of(&outcome), reference.summary);
+        assert_eq!(world.tool.dispatches().lock().unwrap().len(), turns);
+    }
+
+    /// Terminal publishes lost → the sweeper republishes
+    /// `invocation.archived` until acked; an ack (simulated as the
+    /// row deletion it causes) stops the republishing.
+    #[tokio::test]
+    async fn lost_terminal_publishes_heal_via_the_sweeper() {
+        let turns = 1;
+        for fault_offset in [0usize, 1] {
+            let fault = 6 * turns + 4 + fault_offset; // completed / archived publish
+            let (world, _) = crash_at(21, turns, fault).await;
+            let inv = world.invocation_id().to_string();
+            world.sink.clear_fault();
+
+            let sweeper = ArchiveRetrySweeper::new_with_sink(
+                Arc::clone(&world.sink) as Arc<dyn EventSink>,
+                WorkerId::new("sim-worker").unwrap(),
+                Arc::clone(&world.store),
+            );
+            let mut warned = HashSet::new();
+
+            let archived_count = |events: &[Event]| {
+                events
+                    .iter()
+                    .filter(|e| {
+                        matches!(e.payload, EventPayload::InvocationArchived(_))
+                            && e.envelope.invocation_id.to_string() == inv
+                    })
+                    .count()
+            };
+
+            // Ack never arrives: every sweep republishes.
+            sweeper.sweep_once(&mut warned).await.unwrap();
+            assert_eq!(archived_count(&world.sink.events()), 1, "fault {fault}");
+            sweeper.sweep_once(&mut warned).await.unwrap();
+            assert_eq!(archived_count(&world.sink.events()), 2, "fault {fault}");
+
+            // The republished payload carries the row's truth.
+            let row = world
+                .store
+                .get_invocation_state(&inv)
+                .await
+                .unwrap()
+                .expect("terminal row survives until acked");
+            let last = world.sink.events().into_iter().last().unwrap();
+            match last.payload {
+                EventPayload::InvocationArchived(p) => {
+                    assert_eq!(p.final_phase, row.phase);
+                    assert_eq!(p.final_state_blob, row.state_blob);
+                }
+                other => panic!("expected archived republish, got {other:?}"),
+            }
+
+            // Ack: the consumer deletes the row; the sweep goes quiet.
+            world.store.delete_invocation_state(&inv).await.unwrap();
+            sweeper.sweep_once(&mut warned).await.unwrap();
+            assert_eq!(archived_count(&world.sink.events()), 2, "fault {fault}");
+        }
+    }
+
+    /// LLM provider error: the invocation fails canonically — the
+    /// trace ends in a `failed` terminal + archived (full-oracle
+    /// valid), the WAL row completes with `is_error`, and nothing is
+    /// left in flight.
+    #[tokio::test]
+    async fn llm_provider_error_fails_canonically() {
+        let world = SimWorld::new(31, 5.0).await;
+        let llm = FixtureClient::new();
+        llm.push_error(LlmError::RateLimited);
+
+        let err = world.run(&llm).await.expect_err("provider error");
+        assert!(matches!(err, ExecutorError::Llm(_)), "got {err:?}");
+
+        let events = world.sink.events();
+        if let Err(violations) = check_invocation_trace(&events) {
+            let lines: Vec<String> = violations.iter().map(|v| format!("  - {v}")).collect();
+            panic!("failed run's trace not canonical:\n{}", lines.join("\n"));
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.payload, EventPayload::Failed(_)))
+        );
+        assert!(
+            world
+                .store
+                .find_in_flight_invocations()
+                .await
+                .unwrap()
+                .is_empty(),
+            "a failed invocation must not linger in flight"
+        );
     }
 }

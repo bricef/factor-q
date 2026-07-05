@@ -59,24 +59,7 @@ use crate::worker::store::{
 };
 use crate::worker::{ExecutorError, InvocationOutcome, WorkerId};
 
-/// The narrowest seam over event publication (reducer verification
-/// plan, slice 3). The runner publishes through this trait so the
-/// hermetic sim can capture events in memory and inject publish
-/// faults; production wires [`EventBus`], the NATS implementation.
-/// Envelope timestamps are stamped by `Event::new` from the system
-/// clock either way — the trace oracle and the equivalence checks
-/// treat them as volatile.
-#[async_trait::async_trait]
-pub trait EventSink: Send + Sync {
-    async fn publish(&self, event: &Event) -> Result<(), crate::bus::BusError>;
-}
-
-#[async_trait::async_trait]
-impl EventSink for EventBus {
-    async fn publish(&self, event: &Event) -> Result<(), crate::bus::BusError> {
-        EventBus::publish(self, event).await
-    }
-}
+pub use crate::bus::EventSink;
 
 /// Injectable time + entropy (reducer verification plan, slice 3).
 /// The runner reads wall-clock and randomness through this trait so

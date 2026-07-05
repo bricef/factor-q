@@ -33,7 +33,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::AgentId;
-use crate::bus::EventBus;
+use crate::bus::{EventBus, EventSink};
 use crate::events::{Event, EventPayload, InvocationArchivedPayload};
 
 use super::WorkerId;
@@ -54,7 +54,7 @@ pub const DEFAULT_WARN_AFTER_MS: i64 = 60_000;
 /// Retry sweeper. Spawn its [`run`](Self::run) method as a
 /// tokio task and feed it a shutdown signal.
 pub struct ArchiveRetrySweeper {
-    bus: EventBus,
+    sink: Arc<dyn EventSink>,
     worker_id: WorkerId,
     store: Arc<WorkerStore>,
     retry_interval_ms: u64,
@@ -63,8 +63,18 @@ pub struct ArchiveRetrySweeper {
 
 impl ArchiveRetrySweeper {
     pub fn new(bus: EventBus, worker_id: WorkerId, store: Arc<WorkerStore>) -> Self {
+        Self::new_with_sink(Arc::new(bus), worker_id, store)
+    }
+
+    /// Construct over an arbitrary [`EventSink`] — the hermetic
+    /// sim's entry point (reducer verification, slice 5).
+    pub fn new_with_sink(
+        sink: Arc<dyn EventSink>,
+        worker_id: WorkerId,
+        store: Arc<WorkerStore>,
+    ) -> Self {
         Self {
-            bus,
+            sink,
             worker_id,
             store,
             retry_interval_ms: DEFAULT_RETRY_INTERVAL_MS,
@@ -202,7 +212,7 @@ impl ArchiveRetrySweeper {
                 terminal_at_ms,
             }),
         );
-        self.bus
+        self.sink
             .publish(&event)
             .await
             .map_err(|err| ArchiveRetryError::Publish(err.to_string()))?;

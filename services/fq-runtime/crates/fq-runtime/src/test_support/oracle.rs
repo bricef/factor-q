@@ -69,6 +69,34 @@ enum State {
 /// sequence (claim R1) and the exactly-one-terminal /
 /// archived-at-end shape (R6's trace footprint). Pure; NATS-free.
 pub fn check_invocation_trace(events: &[Event]) -> Result<(), Vec<TraceViolation>> {
+    check_with(events, State::Start, true)
+}
+
+/// Prefix mode (R1-under-faults, slice 5): a crashed run's captured
+/// events must be a *prefix* of a canonical trace — grammar breaks
+/// mid-trace are still violations, but the trace may end anywhere
+/// (mid-span, after a terminal with the archived publish lost, or
+/// even empty when the crash hit the `triggered` publish itself).
+pub fn check_invocation_trace_prefix(events: &[Event]) -> Result<(), Vec<TraceViolation>> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    check_with(events, State::Start, false)
+}
+
+/// Resume mode (slice 5): a resumed run starts a fresh chain with no
+/// `triggered` re-publish — the trace begins mid-invocation (between
+/// actions) and must still run to exactly one terminal followed by
+/// `invocation.archived`.
+pub fn check_resume_trace(events: &[Event]) -> Result<(), Vec<TraceViolation>> {
+    check_with(events, State::Idle, true)
+}
+
+fn check_with(
+    events: &[Event],
+    start_state: State,
+    require_complete: bool,
+) -> Result<(), Vec<TraceViolation>> {
     let mut violations: Vec<TraceViolation> = Vec::new();
     let mut push =
         |index: usize, message: String| violations.push(TraceViolation { index, message });
@@ -80,7 +108,7 @@ pub fn check_invocation_trace(events: &[Event]) -> Result<(), Vec<TraceViolation
 
     let invocation_id = events[0].envelope.invocation_id;
     let mut seen_ids: Vec<Uuid> = Vec::with_capacity(events.len());
-    let mut state = State::Start;
+    let mut state = start_state;
 
     for (i, event) in events.iter().enumerate() {
         // -- Envelope invariants.
@@ -221,16 +249,18 @@ pub fn check_invocation_trace(events: &[Event]) -> Result<(), Vec<TraceViolation
         };
     }
 
-    match state {
-        State::Terminal { archived: 0 } => push(
-            usize::MAX,
-            "terminal event was never followed by invocation.archived".to_string(),
-        ),
-        State::Terminal { .. } => {}
-        _ => push(
-            usize::MAX,
-            "trace ended without a terminal (completed/failed) event".to_string(),
-        ),
+    if require_complete {
+        match state {
+            State::Terminal { archived: 0 } => push(
+                usize::MAX,
+                "terminal event was never followed by invocation.archived".to_string(),
+            ),
+            State::Terminal { .. } => {}
+            _ => push(
+                usize::MAX,
+                "trace ended without a terminal (completed/failed) event".to_string(),
+            ),
+        }
     }
 
     if violations.is_empty() {

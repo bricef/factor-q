@@ -1,7 +1,7 @@
 # Reducer verification: implementation plan
 
 **Status:** active (2026-07-05) — claims R1–R7 reviewed and approved;
-slices 1–4 landed the same day. Both pre-registered findings were
+slices 1–5 landed the same day. Both pre-registered findings were
 confirmed and fixed before the net (the budget accumulator and the
 error-kind semantics), and slice 4's first property sweep caught a
 third: resume dropped the trigger, re-seeding resumed conversations
@@ -179,7 +179,7 @@ Stated before the net is built, to be confirmed or refuted by it:
 | 2 | `HarnessState::validate` + state-blob property tests (round-trip, corruption/invalid-state rejection, unknown-field tolerance) | R7 | **done** — validate at load and save, targeted corruption tests, byte round-trip, unknown-field tolerance, two proptest properties |
 | 3 | Hermetic sim harness — scripted LLM + recording tools + in-memory event sink + tempdir `WorkerStore`, seeded scheduler, fault plan | enables 4–7 | **done** — `test_support::sim`: `EventSink` + `Clock` seams through `RunnerConfig` (production defaults unchanged), `SimWorld` with `RecordingSink` publish faults, `ScriptedTool` dispatch recording, `SimClock`; three smoke tests: hermetic oracle-valid run, same-seed byte-identical determinism, crash-at-publish → resume with at-most-once tools. Note: sim lives in-crate (`test_support` is `#[cfg(test)]`), not `tests/sim.rs` as originally named — revisit if test_support ever gets feature-exposed |
 | 4 | Resume-equivalence properties — random scripts × every step boundary | R4 | **done** — `observational_trace` masking in the oracle (volatile fields: per-call UUIDs, measured durations, clock stamps); exhaustive fixed-script boundary sweep + 24-case proptest over scripts × boundaries × seeds. Found and fixed finding 3 (resume dropped the trigger) on the first sweep |
-| 5 | Crash DST — fault plans over every WAL/publish/dispatch boundary; recovery categorisation soundness; ambiguous handling; archive hand-off under ack loss | R2, R3, R1-under-faults | todo |
+| 5 | Crash DST — fault plans over every WAL/publish/dispatch boundary; recovery categorisation soundness; ambiguous handling; archive hand-off under ack loss | R2, R3, R1-under-faults | **done** — `crash_dst` in the sim: exhaustive sweep over every publish index (all five WAL classes asserted covered: nothing-persisted / SafeResume / Ambiguous / SafeReplay / already-terminal), 24-case proptest, crash-while-resuming, sweeper heal + ack-quiescence (via the `EventSink` seam widened to `ArchiveRetrySweeper`), LLM-error canonicality; oracle gained prefix and resume modes. **No new findings** — recovery, refusal, and at-most-once held at every point. Store-fault axis deferred to M3 (see Fault model); consume-side double-ack stays NATS-tier |
 | 6 | Budget properties — random pricing scripts, sampling/evaluator origins, crash/resume accumulation (resolves finding 1) | R5 | todo |
 | 7 | Soak — long randomised runs with all oracles on; CI-hermetic seeds + a deep local soak recipe | everything, in volume | todo |
 
@@ -242,6 +242,11 @@ the oracle post-recovery:
   crash, double-ack.
 - **Store faults:** write failure surfaced at each WAL call site (the
   runner must fail the invocation loudly, not proceed un-journaled).
+  *Deferred (2026-07-05, agreed at slice-5 scoping): needs a trait seam
+  over the worker store — rides with the storage plan's M3 trait
+  boundaries instead of hand-rolled test scaffolding; captured as an M3
+  scope addendum there. The weaker no-silent-swallow claim holds
+  structurally today (every WAL call site `?`-propagates).*
 
 ## Out of scope
 

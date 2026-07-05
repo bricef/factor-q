@@ -159,6 +159,19 @@ the plugin protocol is proven.
   plugins). Representations are stored as CAS objects keyed by
   `(source CID, extractor, version)`.
 
+**Scope addendum (2026-07-05, from reducer verification slice 5):**
+M3 is the agreed vehicle for the deferred **store-write-fault axis**.
+The reducer crash DST needs to assert "the runner fails the
+invocation loudly on a journal-write failure at every WAL call site",
+which requires a trait seam over the worker store's WAL surface —
+deliberately *not* hand-rolled as test-only scaffolding during slice
+5. When this milestone introduces its storage trait boundaries,
+include the `WorkerStore` WAL surface and ship a fault-injecting test
+implementation so the reducer verification plan can close that axis
+(see its Fault model section). Until then the weaker claim holds
+structurally: every WAL call site `?`-propagates into
+`ExecutorError::WorkerStore`.
+
 **Depends on:** M1.
 
 ### M4 — Layer-3 index (embedding + retrieval)
