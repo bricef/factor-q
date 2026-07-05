@@ -865,17 +865,19 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 Ok(o) => o,
                 Err(err) => {
                     totals.total_duration_ms = start.elapsed().as_millis() as u64;
+                    let kind = FailureKind::RuntimeError;
+                    let message = format!("reducer step failed: {err}");
                     self.emit_failed(
                         agent_id,
                         invocation_id,
-                        FailureKind::RuntimeError,
-                        format!("reducer step failed: {err}"),
+                        kind,
+                        message.clone(),
                         FailurePhase::LlmResponse,
                         totals,
                         cursor,
                     )
                     .await?;
-                    return Err(ExecutorError::MaxIterationsExceeded);
+                    return Err(ExecutorError::InvocationFailed { kind, message });
                 }
             };
 
@@ -971,7 +973,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         cursor,
                     )
                     .await?;
-                    return Err(ExecutorError::MaxIterationsExceeded);
+                    return Err(ExecutorError::InvocationFailed {
+                        kind,
+                        message: err.message,
+                    });
                 }
                 NextAction::CallModel(request) => {
                     let outcome = self
@@ -1050,19 +1055,23 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
         }
 
-        // Host step budget exhausted. Surface as a runtime failure.
+        // Host step budget exhausted. Surface as a runtime failure —
+        // this is the host's backstop against a wedged reducer, not
+        // the agent-level `max_iterations` cap.
         totals.total_duration_ms = start.elapsed().as_millis() as u64;
+        let kind = FailureKind::RuntimeError;
+        let message = format!("host step budget exhausted ({HOST_STEP_BUDGET})");
         self.emit_failed(
             agent_id,
             invocation_id,
-            FailureKind::RuntimeError,
-            format!("host step budget exhausted ({HOST_STEP_BUDGET})"),
+            kind,
+            message.clone(),
             FailurePhase::LlmResponse,
             totals,
             cursor,
         )
         .await?;
-        Err(ExecutorError::MaxIterationsExceeded)
+        Err(ExecutorError::InvocationFailed { kind, message })
     }
 
     /// Read the agent's `static_resources` pins through the MCP
@@ -2957,7 +2966,7 @@ fn classify_tool_error(err: &ToolError) -> (ToolErrorKind, String) {
 fn harness_error_to_failure_kind(err: &HarnessError) -> FailureKind {
     use super::types::HarnessErrorKind::*;
     match err.kind {
-        MaxIterations => FailureKind::RuntimeError,
+        MaxIterations => FailureKind::MaxIterations,
         InternalError => FailureKind::RuntimeError,
     }
 }
@@ -4333,6 +4342,154 @@ mod tests {
         // The state blob is reducer-readable JSON.
         let _: serde_json::Value =
             serde_json::from_slice(&row.state_blob).expect("state_blob deserialises as JSON");
+    }
+
+    /// The error returned to the caller must carry the same
+    /// `FailureKind` the `failed` event was emitted with — here the
+    /// genuine `max_iterations` case, which previously surfaced as a
+    /// bare `MaxIterationsExceeded` while the event said
+    /// `runtime_error` (neither side was right).
+    #[tokio::test]
+    async fn max_iterations_failure_carries_the_max_iterations_kind() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        let bus = EventBus::connect(&url).await.expect("connect to NATS");
+
+        let agent_id_str = unique_agent_id("max-iter-kind");
+        let agent = Agent::builder()
+            .id(&agent_id_str)
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .budget(5.0)
+            .build()
+            .unwrap();
+
+        // The model asks for an unavailable tool on every turn; each
+        // synthetic error feeds back and the loop burns one iteration
+        // per model turn until DEFAULT_MAX_ITERATIONS trips.
+        let llm = FixtureClient::new();
+        for i in 0..=crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS {
+            llm.push_response(tool_use(
+                "unavailable_tool",
+                &format!("call-{i}"),
+                json!({}),
+                (10, 5),
+            ));
+        }
+
+        let store_dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            WorkerStore::open(&store_dir.path().join("events.db"))
+                .await
+                .expect("worker store"),
+        );
+        let runner = ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus)
+                    .pricing(test_pricing())
+                    .store(store)
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
+            Harness::new(),
+        );
+
+        let err = runner
+            .run(&agent, &llm, TriggerSource::Manual, None, json!("loop"))
+            .await
+            .expect_err("must fail on max iterations");
+        match err {
+            ExecutorError::InvocationFailed { kind, message } => {
+                assert!(
+                    matches!(kind, FailureKind::MaxIterations),
+                    "expected MaxIterations kind, got {kind:?}: {message}"
+                );
+                assert!(message.contains("max iterations"), "got: {message}");
+            }
+            other => panic!("expected InvocationFailed, got {other:?}"),
+        }
+    }
+
+    /// A reducer that errors on `step` is a runtime defect — the
+    /// returned error must say so, not claim max-iterations.
+    #[tokio::test]
+    async fn reducer_step_error_carries_the_runtime_error_kind() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        let bus = EventBus::connect(&url).await.expect("connect to NATS");
+
+        use crate::worker::reducer::types::StepOutput;
+
+        struct FailingReducer;
+        impl Reducer for FailingReducer {
+            fn step(&self, _input: StepInput) -> Result<StepOutput, HarnessError> {
+                Err(HarnessError {
+                    kind: crate::worker::reducer::types::HarnessErrorKind::InternalError,
+                    message: "synthetic reducer defect".to_string(),
+                })
+            }
+        }
+
+        let agent_id_str = unique_agent_id("step-error-kind");
+        let agent = Agent::builder()
+            .id(&agent_id_str)
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .budget(1.0)
+            .build()
+            .unwrap();
+        let llm = FixtureClient::new();
+
+        let store_dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            WorkerStore::open(&store_dir.path().join("events.db"))
+                .await
+                .expect("worker store"),
+        );
+        let runner = ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus)
+                    .pricing(test_pricing())
+                    .store(store)
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
+            FailingReducer,
+        );
+
+        let err = runner
+            .run(&agent, &llm, TriggerSource::Manual, None, json!("x"))
+            .await
+            .expect_err("must fail on reducer step error");
+        match err {
+            ExecutorError::InvocationFailed { kind, message } => {
+                assert!(
+                    matches!(kind, FailureKind::RuntimeError),
+                    "expected RuntimeError kind, got {kind:?}: {message}"
+                );
+                assert!(
+                    message.contains("synthetic reducer defect"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("expected InvocationFailed, got {other:?}"),
+        }
     }
 
     #[tokio::test]

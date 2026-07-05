@@ -137,12 +137,19 @@ Stated before the net is built, to be confirmed or refuted by it:
    verified to fail against the unfixed code. Slice 6 still owns the
    property coverage (random pricing scripts, sub-budget semantics, the
    attempt-vs-lifetime duration question).
-2. **Outcome/error-kind coarseness (shape question, maybe fine).** Several
-   distinct failure paths (reducer step error, host step-budget exhaustion,
-   terminal `Failed`) all return `ExecutorError::MaxIterationsExceeded`
-   even when the emitted `failed` event carries a more specific
-   `FailureKind`. The oracle judges the *events*; whether the returned
-   error type should be richer is a finding to file, not a claim.
+2. **Outcome/error-kind coarseness — confirmed and fixed ahead of the
+   net (2026-07-05).** Worse than filed: three distinct failure paths all
+   returned `ExecutorError::MaxIterationsExceeded`, *and* the genuine
+   max-iterations case was evented as `runtime_error` (`FailureKind` had
+   no max-iterations variant). Fixed by the invariant the review asked
+   for: invocation-level failures return
+   `ExecutorError::InvocationFailed { kind, message }` carrying exactly
+   the `FailureKind` the `failed` event was emitted with, and
+   `FailureKind` gained `MaxIterations`. Pinned by two regression tests
+   (`..carries_the_max_iterations_kind`, `..carries_the_runtime_error_kind`).
+   Consciously untouched: `FailurePhase` has no reducer-step phase (the
+   step-error path reports `llm_response`) — a smaller shape question the
+   R1 oracle can revisit.
 
 ## Slices
 

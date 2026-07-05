@@ -969,6 +969,10 @@ pub struct FailedPayload {
 pub enum FailureKind {
     BudgetExceeded,
     LlmError,
+    /// The agent's `max_iterations` cap was reached before the model
+    /// declared a final answer. Distinct from `RuntimeError`: hitting
+    /// the cap is a configured limit doing its job, not a defect.
+    MaxIterations,
     ToolError,
     SandboxViolation,
     RuntimeError,

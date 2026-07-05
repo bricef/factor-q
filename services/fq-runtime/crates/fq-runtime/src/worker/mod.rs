@@ -83,8 +83,15 @@ pub enum ExecutorError {
     #[error("worker store error: {0}")]
     WorkerStore(String),
 
-    #[error("max iterations exceeded")]
-    MaxIterationsExceeded,
+    /// The invocation reached a terminal `failed` event. Carries the
+    /// same [`FailureKind`](crate::events::FailureKind) as that event
+    /// — the error returned to the caller and the event trail never
+    /// disagree about why an invocation failed.
+    #[error("invocation failed ({kind:?}): {message}")]
+    InvocationFailed {
+        kind: crate::events::FailureKind,
+        message: String,
+    },
 }
 
 /// What the control-plane asks of a worker.

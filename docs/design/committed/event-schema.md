@@ -342,7 +342,7 @@ Published when an invocation terminates with an error.
 
 ```json
 {
-  "error_kind": "budget_exceeded | llm_error | tool_error | sandbox_violation | runtime_error",
+  "error_kind": "budget_exceeded | llm_error | max_iterations | tool_error | sandbox_violation | runtime_error",
   "error_message": "Agent budget of $0.50 exceeded after 5 LLM calls",
   "phase": "llm_request | llm_response | tool_call | tool_result | setup",
   "partial_totals": {

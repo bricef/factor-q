@@ -225,8 +225,8 @@ impl TriggerDispatcher {
             ExecutorError::WorkerStore(msg) => {
                 error!(error = %msg, "worker store error during dispatch")
             }
-            ExecutorError::MaxIterationsExceeded => {
-                error!("agent exceeded max iterations during dispatch")
+            ExecutorError::InvocationFailed { kind, message } => {
+                error!(kind = ?kind, error = %message, "invocation failed during dispatch")
             }
         }
     }
