@@ -48,8 +48,12 @@ M3, then M4, then M5, per the
 [storage + vector foundation plan](docs/plans/active/2026-06-27-storage-vector-foundation.md);
 Memory and Skills MVPs build on the result. In parallel on the runtime
 side: the [reducer verification plan](docs/plans/active/2026-07-05-reducer-verification.md)
-(draft — claims R1–R7, oracle + crash DST for the harness/runner/WAL). Open strategic questions
-(dogfood loop, security sequencing, the API layer) are in the
+(draft — claims R1–R7, oracle + crash DST for the harness/runner/WAL).
+The v0 dogfood loop is **live**: a `doc-drift` agent reviews this repo's
+commits daily on the local runtime (project at `~/fq-dogfood`, outside
+the repo) — its findings feed the
+[backlog](docs/plans/backlog.md). Open strategic questions
+(security sequencing, the API layer) are in the
 [2026-07-05 project assessment](docs/design/2026-07-05-project-assessment.md).
 
 ## Not built yet

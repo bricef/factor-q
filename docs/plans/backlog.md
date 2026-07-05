@@ -829,3 +829,42 @@ keep costing CI runs and eroding signal until fixed.
 - Consider splitting `just rust-ci` so the runtime and store suites run as
   independent CI jobs — a runtime flake should not mask the store results.
 - If the root cause is upstream, pin/patch or wrap the SDK's stdio transport.
+
+
+## Dogfood findings (flagged 2026-07-05)
+
+**Source:** the first live runs of the v0 dogfood loop (the `doc-drift`
+agent reviewing this repo daily; project lives outside the repo at
+`~/fq-dogfood`). Real workload, real spend — each item below was
+observed, not hypothesised.
+
+### No prompt caching on the Anthropic path
+
+The conversation is re-sent in full on every LLM turn; a six-turn run
+with one fat tool output reached 93.9k cumulative input tokens for 705
+output ($0.29). Anthropic prompt caching (`cache_control` on the system
+prompt + stable history prefix) would cut resend cost ~90% on exactly
+this shape. Likely lives in the `GenAiClient` adapter or needs a raw
+provider path. High leverage: every long-running agent pays this tax.
+
+### Agent definitions load once at daemon startup — no reload
+
+Already tracked as [Hot-reload of agent definitions](#hot-reload-of-agent-definitions)
+(§ Deferred from phase 1); the dogfood loop hit it in practice on day
+one — an agent budget bump was silently ignored until the daemon
+restarted, and the run failed at the old ceiling. Evidence that the
+deferral now has a real cost: bump its priority, and until it lands,
+document the restart requirement loudly in the agent-definitions guide.
+
+### `fq status | head` panics on SIGPIPE
+
+Exit 101 when the pipe closes early — the usual Rust
+`println!`-panics-on-EPIPE issue. Handle or ignore SIGPIPE in the CLI.
+
+### `fq costs` has no agent filter and no cost-origin split
+
+The costs table interleaves real spend with mock-priced test agents on
+a shared NATS (a $1.00 fixture agent dwarfs the real numbers), and
+events on the same stream age out at different times. A `--agent`
+filter (like `events query`) and/or an `--since` window would make it
+usable as the dogfood Q-baseline denominator.
