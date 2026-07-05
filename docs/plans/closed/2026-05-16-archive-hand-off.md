@@ -12,7 +12,7 @@ status block for the canonical record.
 **Parent plan**:
 [`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md) — step 8.
 **Design references**:
-- [`docs/design/data-architecture.md`](../../design/data-architecture.md) §5.3 (state retention), §5.5 (archive hand-off write order), and §9.3 (new event types).
+- [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) §5.3 (state retention), §5.5 (archive hand-off write order), and §9.3 (new event types).
 - Schema: §10 `invocation_archive` table is already implemented in
   `services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs`.
 
@@ -51,8 +51,8 @@ Deferred:
 
 - Live acceptance test against NATS + Anthropic — cannot run
   from the dev sandbox.
-- `docs/design/event-schema.md` and
-  `docs/design/data-architecture.md` updates for the two new
+- `docs/design/committed/event-schema.md` and
+  `docs/design/committed/data-architecture.md` updates for the two new
   event types and the §5.5 write-order detail.
 
 ## Goal
@@ -641,10 +641,10 @@ status block is the canonical record.
 
 #### Done when
 
-- [x] Update `docs/design/event-schema.md` to document the
+- [x] Update `docs/design/committed/event-schema.md` to document the
       two new event types and their canonical position
       (`completed → invocation.archived → invocation.archive_acked`).
-- [x] Update `docs/design/data-architecture.md` §5.5 with
+- [x] Update `docs/design/committed/data-architecture.md` §5.5 with
       the worker's archive emission write order.
 - [x] Update `fq.toml` template / operator docs with the
       `[worker]` keys.

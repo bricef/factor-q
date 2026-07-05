@@ -81,7 +81,7 @@ architectural completeness rather than by what a running workload needs.
 this repo's CI and triages failures, or a docs-drift checker — and run it
 *now*. The pieces exist (MCP, shell/file tools, triggers, budgets). Let its
 gaps reorder the milestones. The
-[reference workloads](./reference-workloads.md) are good touchstones, but
+[reference workloads](committed/reference-workloads.md) are good touchstones, but
 touchstones aren't running loads.
 
 ### 2. Pillar 2 grew from a scope item into a platform

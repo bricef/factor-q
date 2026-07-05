@@ -12,7 +12,7 @@
 //!
 //! Each layer has different write permissions, read audiences, and
 //! mutability rules; see
-//! `docs/design/inter-node-contracts-and-event-layers.md` for the
+//! `docs/design/aspirational/inter-node-contracts-and-event-layers.md` for the
 //! rationale.
 
 use std::collections::BTreeMap;

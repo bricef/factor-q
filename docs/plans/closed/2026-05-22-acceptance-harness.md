@@ -25,8 +25,8 @@ Two real bugs found and fixed inline (per the plan's
    replaying days of stream history. Fix: narrow the test
    consumer's filter to its own agent.
 **Design references**:
-- [`docs/design/data-architecture.md`](../../design/data-architecture.md) §3.4 (ambiguous), §5.5 (archive write order), §7 (recovery).
-- [`docs/design/event-schema.md`](../../design/event-schema.md) — every event the harness asserts on.
+- [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) §3.4 (ambiguous), §5.5 (archive write order), §7 (recovery).
+- [`docs/design/committed/event-schema.md`](../../design/committed/event-schema.md) — every event the harness asserts on.
 
 ## Goal
 

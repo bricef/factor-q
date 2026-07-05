@@ -13,7 +13,7 @@ under 50 concurrent invocations?"), the question to ask is
 "what does this look like for Canopy / TradingAgents?".
 
 For factor-q's high-level use-case categories see
-[`VISION.md` § Target Use Cases](../../VISION.md). The
+[`VISION.md` § Target Use Cases](../../../VISION.md). The
 workloads below are concrete instances within those categories.
 
 ## Canopy
@@ -23,7 +23,7 @@ state, UK, and EU education / children's-data law. EdTech
 vendors and school districts subscribe; daily digests arrive
 filtered by jurisdiction, role, and product profile.
 
-External brief: [`../../Canopy/docs/product/canopy_brief.md`](../../Canopy/docs/product/canopy_brief.md)
+External brief: [`Canopy/docs/product/canopy_brief.md` (sibling repo)](../../../../Canopy/docs/product/canopy_brief.md)
 (separate repo, internal product planning).
 
 ### Profile
@@ -96,7 +96,7 @@ External: [github.com/TauricResearch/TradingAgents](https://github.com/TauricRes
 - **Cross-run shared memory.** The `trading_memory.md`
   pattern (append-only journal, fed back as context in
   future runs) is the load-bearing case for memory
-  MCP services per [ADR-0013](../adrs/accepted/0013-memory-as-mcp-services.md).
+  MCP services per [ADR-0013](../../adrs/accepted/0013-memory-as-mcp-service.md).
   When designing memory MCP servers, "append-only journal
   that prior runs read" is a primary pattern.
 - **Heavy multi-provider LLM use.** 10+ providers, two
@@ -153,8 +153,8 @@ production.
 
 ## Cross-references
 
-- [`VISION.md`](../../VISION.md) — high-level use case categories
+- [`VISION.md`](../../../VISION.md) — high-level use case categories
 - [`data-architecture.md`](./data-architecture.md) — the storage / persistence design these workloads stress-test
 - [`tool-isolation-model.md`](./tool-isolation-model.md) — workspace and sandbox model
-- [`agent-os-architecture.md`](./agent-os-architecture.md) — the broader runtime architecture
-- [`ADR-0013`](../adrs/accepted/0013-memory-as-mcp-services.md) — memory-as-MCP-services (TradingAgents' `trading_memory.md` is a primary use case)
+- [`agent-os-architecture.md`](../aspirational/agent-os-architecture.md) — the broader runtime architecture
+- [`ADR-0013`](../../adrs/accepted/0013-memory-as-mcp-service.md) — memory-as-MCP-services (TradingAgents' `trading_memory.md` is a primary use case)

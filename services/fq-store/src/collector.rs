@@ -1,7 +1,7 @@
 //! The reference garbage collector (M1c) — the online reclaim worker.
 //!
 //! It reclaims what the index reports unreferenced, in the order the protocol
-//! requires (`docs/design/storage-garbage-collection.md`): an object's manifest
+//! requires (`docs/design/committed/storage-garbage-collection.md`): an object's manifest
 //! then its row; a block's `claim → unlink → delete`. Claiming is the GC
 //! compare-and-swap — a writer that reserves first wins and the block is left
 //! alone. This is the *online* collector; the reachability audit (still to come)

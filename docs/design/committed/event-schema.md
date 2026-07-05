@@ -8,7 +8,7 @@ Events are the primary observability and audit surface of factor-q. Every meanin
 
 ## The three-layer model
 
-Every event has three structurally distinct layers, each with different write permissions, read audiences, and rules. The rationale lives in `docs/design/inter-node-contracts-and-event-layers.md` and ADR-0016; the table below summarises:
+Every event has three structurally distinct layers, each with different write permissions, read audiences, and rules. The rationale lives in `docs/design/aspirational/inter-node-contracts-and-event-layers.md` and ADR-0016; the table below summarises:
 
 | Layer | Written by | Read by | Mutability |
 |---|---|---|---|
@@ -308,7 +308,7 @@ Error case:
 
 ### `invocation.ambiguous`
 
-Published by the worker on startup when its WAL categorisation finds an invocation in the ambiguous state (a `dispatched`-without-`completed` row). See `docs/design/data-architecture.md` §3.4.
+Published by the worker on startup when its WAL categorisation finds an invocation in the ambiguous state (a `dispatched`-without-`completed` row). See `docs/design/committed/data-architecture.md` §3.4.
 
 ```json
 {
@@ -447,7 +447,7 @@ A hosted task inside `fq run` (the projection consumer, the trigger dispatcher, 
 
 ### `system.recovery`
 
-Emitted once per daemon startup with the counts of in-flight invocations classified by recovery category (see `docs/design/data-architecture.md` §7.1).
+Emitted once per daemon startup with the counts of in-flight invocations classified by recovery category (see `docs/design/committed/data-architecture.md` §7.1).
 
 ```json
 {

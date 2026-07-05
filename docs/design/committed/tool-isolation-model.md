@@ -88,7 +88,7 @@ declaration.
 | **In-process** | Native function call, no sandbox, no overhead | Pure computation: regex, jq, base64, date parsing, JSON schema validation |
 | **Subprocess** | Child process with restricted cwd, argv-only args, timeout, output cap, minimal env | Bounded native commands where the argv itself is trusted: the phase-1 `shell`, `git` with validated subcommands |
 | **Container per call** | Full OCI container, short-lived, filesystem and network policy enforced, resource limits | Arbitrary shell commands, language runtimes (python/node), MCP servers of moderate trust |
-| **WASM instance** | Wasmtime sandbox with hermetic execution, no syscalls by default, bounded memory and fuel | Hermetic tool implementations: jq-in-wasm, busybox-in-wasm, pure-computation tools that need resource bounds. See [`wasm-posix-sandbox.md`](./wasm-posix-sandbox.md) for the specific direction on WASM-native shell and file tools. |
+| **WASM instance** | Wasmtime sandbox with hermetic execution, no syscalls by default, bounded memory and fuel | Hermetic tool implementations: jq-in-wasm, busybox-in-wasm, pure-computation tools that need resource bounds. See [`wasm-posix-sandbox.md`](../aspirational/wasm-posix-sandbox.md) for the specific direction on WASM-native shell and file tools. |
 | **microVM** | Kata+Firecracker hypervisor isolation, separate kernel, strong tenant separation | Third-party MCP servers with no trust basis, user-submitted tools, tools that must run untrusted code (e.g., executing arbitrary model-generated scripts) |
 
 Most tools don't need the top tier. A `jq` tool is pure

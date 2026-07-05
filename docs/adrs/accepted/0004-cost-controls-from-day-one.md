@@ -50,7 +50,7 @@ deferred until sub-agent spawning is built:
 - **Aggregate-and-halt** — children draw from a shared pool; stop
   spawning when the running total hits the cap (the "Inheritance
   rule" already described in
-  `docs/design/agent-orchestration-tools.md`). Optimistic; a
+  `docs/design/aspirational/agent-orchestration-tools.md`). Optimistic; a
   child can be starved mid-flight.
 
 Both satisfy the invariant above.

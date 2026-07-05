@@ -12,8 +12,8 @@ live end-to-end acceptance test).
 **Parent plan**:
 [`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md) — step 9.
 **Design references**:
-- [`docs/design/data-architecture.md`](../../design/data-architecture.md) §3.4 (ambiguous cases), §4.4 (operator surface), §7 (recovery).
-- [`docs/design/event-schema.md`](../../design/event-schema.md) — adds `invocation.operator_recovered`.
+- [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) §3.4 (ambiguous cases), §4.4 (operator surface), §7 (recovery).
+- [`docs/design/committed/event-schema.md`](../../design/committed/event-schema.md) — adds `invocation.operator_recovered`.
 
 ## Goal
 
@@ -350,10 +350,10 @@ When everything is green, the section prints "All clear."
 
 **Goal.** Make the new surface discoverable.
 
-- [x] Update `docs/design/event-schema.md` to add
+- [x] Update `docs/design/committed/event-schema.md` to add
       `invocation.operator_recovered` (event type +
       subject row + invariant).
-- [x] Update `docs/design/data-architecture.md` §4.4
+- [x] Update `docs/design/committed/data-architecture.md` §4.4
       (operator surface) to point at the new commands.
 - [x] Update `services/fq-runtime/README.md`'s testing
       table if any new commands need a recipe.

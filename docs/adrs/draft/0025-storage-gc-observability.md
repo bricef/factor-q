@@ -5,7 +5,7 @@
 Draft (2026-07-03). Builds on
 [ADR-0023](../accepted/0023-storage-and-vector-foundation.md) (the storage
 foundation and its M5 service) and the
-[storage GC design](../../design/storage-garbage-collection.md) (M1c, built);
+[storage GC design](../../design/committed/storage-garbage-collection.md) (M1c, built);
 sets the metrics convention later runtime instrumentation should follow.
 
 ## Context
@@ -107,5 +107,5 @@ loss, see the [operator manual](../../guide/operating-fq-cas.md));
 
 - [ADR-0023 — storage and vector foundation](../accepted/0023-storage-and-vector-foundation.md)
 - [Storage + vector foundation plan — M5](../../plans/active/2026-06-27-storage-vector-foundation.md)
-- [Storage garbage collection (design)](../../design/storage-garbage-collection.md)
+- [Storage garbage collection (design)](../../design/committed/storage-garbage-collection.md)
 - [Operating fq-cas (operator manual)](../../guide/operating-fq-cas.md)

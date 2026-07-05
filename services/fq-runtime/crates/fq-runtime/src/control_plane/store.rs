@@ -1,7 +1,7 @@
 //! Control-plane SQLite store: coordination state, schedules,
 //! pending waits, and the completed-invocation archive.
 //!
-//! Per `docs/design/data-architecture.md` §3 and §9.2, this is
+//! Per `docs/design/committed/data-architecture.md` §3 and §9.2, this is
 //! the control-plane's source-of-truth for the data that is
 //! *not* a projection of the audit log. The `events_*` tables
 //! managed by [`crate::control_plane::projection::ProjectionStore`]

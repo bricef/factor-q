@@ -142,9 +142,9 @@ properties hold by construction:
 
 ## See also
 
-- [`storage-garbage-collection.md`](../design/storage-garbage-collection.md) —
+- [`storage-garbage-collection.md`](../design/committed/storage-garbage-collection.md) —
   the online-reclaim protocol and the reachability-audit backstop.
-- [`storage-gc-verification.md`](../design/storage-gc-verification.md) — the
+- [`storage-gc-verification.md`](../design/committed/storage-gc-verification.md) — the
   invariants, the fault map, and the TLA⁺ / DST verification behind the above.
 
 - [Access control](access-control.md) — the grants model, and revocation

@@ -7,7 +7,7 @@
 //! and feeds the results back on the next step.
 //!
 //! This is the native realisation of the boundary described in
-//! `docs/design/wasm-boundary-design.md`. WASM packaging is
+//! `docs/design/committed/wasm-boundary-design.md`. WASM packaging is
 //! deliberately out of scope here: the architectural claim the
 //! shape makes is that a state-enum reducer is a tractable shape
 //! for the agent harness. WASM is a packaging question that

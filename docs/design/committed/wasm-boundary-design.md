@@ -11,7 +11,7 @@ listed at the end.
 ADR-0010 accepted containers as the default isolation tier with
 Kata+Firecracker as an upgrade path, and identified WASM as a
 future tier worth investigating. Subsequent architectural work
-(see [agent-os-architecture.md](./agent-os-architecture.md))
+(see [agent-os-architecture.md](../aspirational/agent-os-architecture.md))
 established that WASM isolation has the strongest theoretical
 fit for factor-q's capability-based security model and enables
 single-binary deployment of the entire runtime.
@@ -627,7 +627,7 @@ Reconsider only if the prototype reveals a specific blocker.
 ### Debugging tractability
 
 Empirical — covered by the (now-deferred) prototype plan
-([`docs/plans/closed/2026-04-19-wasm-harness-prototype.md`](../plans/closed/2026-04-19-wasm-harness-prototype.md))
+([`docs/plans/closed/2026-04-19-wasm-harness-prototype.md`](../../plans/closed/2026-04-19-wasm-harness-prototype.md))
 with concrete evaluation criteria. Can't be settled on paper.
 The plan was deferred 2026-05-22; see its status block for
 the reframe rationale and the strategic positioning of WASM

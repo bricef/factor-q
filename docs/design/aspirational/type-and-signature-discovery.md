@@ -6,7 +6,7 @@ factor-q's bedrock primitive is the **signature** — a typed
 input schema, a typed output schema, and an intent statement —
 with **bindings** (implementations) as a separate, tunable layer
 (see [`signatures-and-optimization-hierarchy.md`](./signatures-and-optimization-hierarchy.md)).
-[ADR-0015](../adrs/accepted/0015-rust-runtime-polyglot-tools.md)
+[ADR-0015](../../adrs/accepted/0015-rust-runtime-polyglot-tools.md)
 already commits the Rust runtime to owning a **schema registry
 and validation**. This document proposes giving that registry a
 *discovery surface*, and sketches where that leads.
@@ -15,7 +15,7 @@ The motivation comes from two directions:
 
 - **Off-the-shelf types.** Once agents spawn typed sub-tasks
   (`spawn(definition, seed, [OutputType])`, see
-  [`backlog.md`](../plans/backlog.md) → Agent concurrency
+  [`backlog.md`](../../plans/backlog.md) → Agent concurrency
   primitives), they need to *name* the types they pass and
   return. Reconstructing `ReportSummary` ad-hoc at every call
   site is wasteful and breaks composability — two agents'
@@ -33,12 +33,12 @@ two: **fragments** discover by name/tag/version with a reverse
 index built from `FragmentRef` edges
 ([`agent-orchestration-tools.md`](./agent-orchestration-tools.md)),
 and **skills** discover by embedding-based *semantic* search
-([ADR-0019](../adrs/accepted/0019-skill-format.md)). Type
+([ADR-0019](../../adrs/accepted/0019-skill-format.md)). Type
 discovery is the *structural* sibling of skill discovery.
 
 **Out of scope:** this is **not** part of the MCP-client
 full-spec plan
-([`2026-05-28-mcp-client-full-spec.md`](../plans/closed/2026-05-28-mcp-client-full-spec.md)).
+([`2026-05-28-mcp-client-full-spec.md`](../../plans/closed/2026-05-28-mcp-client-full-spec.md)).
 It depends on the signature registry existing and on a real
 population of signatures to search — neither of which is true
 today (single-agent runtime; sub-agents unbuilt). It is captured
@@ -92,7 +92,7 @@ output without knowing its name.
 
 The same index is searchable by humans through `fq`, consistent
 with the `fq <noun> <verb>` convention
-([operator-cli plan](../plans/closed/2026-05-22-operator-cli.md):
+([operator-cli plan](../../plans/closed/2026-05-22-operator-cli.md):
 `fq invocation list`, `fq workers show`):
 
 - `fq signature search --in 'List(DataSource)' --out Graph`

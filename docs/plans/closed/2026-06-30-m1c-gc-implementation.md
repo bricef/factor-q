@@ -8,9 +8,9 @@ Follow-ups live outside this plan: the GC observability work
 M5 service wiring (the GC worker + `/metrics`).
 
 The **"what"** and **"why correct"** live elsewhere — the protocol in
-[storage garbage collection](../../design/storage-garbage-collection.md), and the
+[storage garbage collection](../../design/committed/storage-garbage-collection.md), and the
 claims, fault map, and model in
-[verification](../../design/storage-gc-verification.md) + `storage_gc.tla`. This
+[verification](../../design/committed/storage-gc-verification.md) + `storage_gc.tla`. This
 doc is the **"how, in what order"**: the implementation slices, the decisions
 taken while building, and where each is verified.
 
@@ -145,6 +145,6 @@ DST injects orphan files + leaked reservations and asserts a full audit converge
 
 ## References
 
-- [storage garbage collection](../../design/storage-garbage-collection.md) — the protocol.
-- [verification](../../design/storage-gc-verification.md) + `storage_gc.tla` — claims, fault map, model.
-- [storage + vector foundation](2026-06-27-storage-vector-foundation.md) — the parent plan (M1–M5).
+- [storage garbage collection](../../design/committed/storage-garbage-collection.md) — the protocol.
+- [verification](../../design/committed/storage-gc-verification.md) + `storage_gc.tla` — claims, fault map, model.
+- [storage + vector foundation](../active/2026-06-27-storage-vector-foundation.md) — the parent plan (M1–M5).

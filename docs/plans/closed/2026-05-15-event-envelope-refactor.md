@@ -3,9 +3,9 @@
 **Date**: 2026-05-15
 **Status**: Closed (2026-05-16)
 **Design references**:
-- [`docs/design/inter-node-contracts-and-event-layers.md`](../../design/inter-node-contracts-and-event-layers.md) — the three-layer event model.
-- [`docs/adrs/ADR-0016-typed-operations-no-free-form-apis.md`](../../adrs/ADR-0016-typed-operations-no-free-form-apis.md) — typed-operations discipline that motivates the annotation barrier.
-- [`docs/design/event-schema.md`](../../design/event-schema.md) — current (v1) schema; updated to v2 in this plan.
+- [`docs/design/aspirational/inter-node-contracts-and-event-layers.md`](../../design/aspirational/inter-node-contracts-and-event-layers.md) — the three-layer event model.
+- [`docs/adrs/accepted/0016-typed-operations-no-free-form-apis.md`](../../adrs/accepted/0016-typed-operations-no-free-form-apis.md) — typed-operations discipline that motivates the annotation barrier.
+- [`docs/design/committed/event-schema.md`](../../design/committed/event-schema.md) — current (v1) schema; updated to v2 in this plan.
 
 ## Goal
 
@@ -342,10 +342,10 @@ up cold and not be confused by the v1 schema doc.
 
 #### What changes
 
-- `docs/design/event-schema.md` — rewritten for v2. Top-level
+- `docs/design/committed/event-schema.md` — rewritten for v2. Top-level
   structure shows envelope/payload/annotations; each section
   cross-links the inter-node-contracts doc.
-- `docs/design/data-architecture.md` — any v1-schema example
+- `docs/design/committed/data-architecture.md` — any v1-schema example
   payloads updated to v2 shape.
 - `docs/plans/active/2026-05-05-native-reducer-prototype.md` —
   moved to `closed/` with a one-paragraph note that this plan

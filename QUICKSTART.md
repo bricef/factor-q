@@ -85,7 +85,7 @@ just fq events tail
 
 Then run `just fq trigger sample-agent ...` again. You'll see each event scroll past as it happens: `triggered`, `llm.request`, `llm.response`, `tool.call`, `tool.result`, `cost`, `completed`. Every decision the agent made is on the bus.
 
-`fq events tail --subject fq.agent.sample-agent.>` narrows to one agent. `--subject fq.agent.>.tool.call` narrows to all tool calls across all agents. Subjects compose; see [`docs/design/event-schema.md`](docs/design/event-schema.md) for the full hierarchy.
+`fq events tail --subject fq.agent.sample-agent.>` narrows to one agent. `--subject fq.agent.>.tool.call` narrows to all tool calls across all agents. Subjects compose; see [`docs/design/committed/event-schema.md`](docs/design/committed/event-schema.md) for the full hierarchy.
 
 ## 6. Query history and costs
 
@@ -140,7 +140,7 @@ The daemon picks up the trigger, runs the agent, and emits events. The CLI retur
 | Goal | Where to look |
 |---|---|
 | Write your own agent | [Agent authoring guide](docs/guide/agent-definitions.md) |
-| Understand the event model | [Event schema](docs/design/event-schema.md) |
+| Understand the event model | [Event schema](docs/design/committed/event-schema.md) |
 | Run agents on the suspend/resume-capable path | [Reducer harness guide](docs/guide/reducer-harness.md) |
 | Understand the architecture | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | Contribute changes | [`CONTRIBUTING.md`](CONTRIBUTING.md) |

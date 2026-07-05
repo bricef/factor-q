@@ -18,17 +18,17 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - [Quickstart](QUICKSTART.md) — clone to running agent in under ten minutes
 - [Vision](VISION.md) — what factor-q is and why it exists
 - [Architecture](ARCHITECTURE.md) — core subsystems and implementation
-- [Design principles](docs/design/design-principles.md) — cross-cutting rules that guide design decisions
+- [Design principles](docs/design/committed/design-principles.md) — cross-cutting rules that guide design decisions
 - [Contributing](CONTRIBUTING.md) — development setup, test tiers, code conventions
 - [Agent authoring guide](docs/guide/agent-definitions.md) — write your first agent
 - [Reducer harness guide](docs/guide/reducer-harness.md) — the suspend/resume-capable execution path that drives every invocation
 - [Content storage (fq-cas)](services/fq-store/README.md) — the content-addressed store CLI + library (Phase 2 pillar #2)
-- [Event schema](docs/design/event-schema.md) — the event model everything is built around
-- [Agent orchestration tools](docs/design/agent-orchestration-tools.md) — wishlist for primitives to coordinate multi-agent work (graph substrate, handles, sinks, fragment library)
-- [Worker-side ergonomics](docs/design/worker-side-ergonomics.md) — primitives for what an agent has, knows, and controls while executing (introspection, checkpoints, structured errors)
-- [Storage and scaling](docs/design/storage-and-scaling.md) — sizing analysis for NATS and SQLite
-- [Storage garbage collection](docs/design/storage-garbage-collection.md) — the lock-free online-reclaim protocol for the CAS (M1c)
-- [Reference workloads](docs/design/reference-workloads.md) — concrete agent workloads (Canopy, TradingAgents) we use as design touchstones
+- [Event schema](docs/design/committed/event-schema.md) — the event model everything is built around
+- [Agent orchestration tools](docs/design/aspirational/agent-orchestration-tools.md) — wishlist for primitives to coordinate multi-agent work (graph substrate, handles, sinks, fragment library)
+- [Worker-side ergonomics](docs/design/aspirational/worker-side-ergonomics.md) — primitives for what an agent has, knows, and controls while executing (introspection, checkpoints, structured errors)
+- [Storage and scaling](docs/design/committed/storage-and-scaling.md) — sizing analysis for NATS and SQLite
+- [Storage garbage collection](docs/design/committed/storage-garbage-collection.md) — the lock-free online-reclaim protocol for the CAS (M1c)
+- [Reference workloads](docs/design/committed/reference-workloads.md) — concrete agent workloads (Canopy, TradingAgents) we use as design touchstones
 - [ADRs](docs/adrs/) — architectural decision records ([accepted](docs/adrs/accepted/), [draft](docs/adrs/draft/))
 - [Phase 1 (closed)](docs/plans/closed/2026-04-02-phase-1-foundation.md) — what shipped in the walking skeleton
 - [Phase 2 (active)](docs/plans/active/2026-04-11-phase-2-mcp-and-memory.md) — MCP, memory, and skills

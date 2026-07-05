@@ -3,7 +3,7 @@
 //! The online [`ReferenceCollector`] reclaims what the index reports
 //! unreferenced, but only opportunistically — the TLA⁺ model shows weak fairness
 //! alone can leave a crash-orphaned generation unreclaimed forever
-//! (`docs/design/storage-gc-verification.md`). The audit is the systematic sweep
+//! (`docs/design/committed/storage-gc-verification.md`). The audit is the systematic sweep
 //! that closes that gap. It:
 //!
 //! 1. **reclaims completely** — runs the collector to guarantee every dead block

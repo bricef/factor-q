@@ -3,7 +3,7 @@
 //! The projection is a materialised view over NATS events, optimised
 //! for metadata queries (filter by agent, event type, time range) and
 //! cost aggregation. Per the design in
-//! `docs/design/storage-and-scaling.md`, NATS is the source of truth:
+//! `docs/design/committed/storage-and-scaling.md`, NATS is the source of truth:
 //!
 //! - The projection stores envelope fields plus denormalised columns
 //!   for common query filters. It does not store full payloads.

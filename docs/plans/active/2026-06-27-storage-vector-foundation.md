@@ -114,9 +114,9 @@ and the reachability-audit worker.
 
 **Design:** the lock-free online-reclaim protocol (flag-based atomic claim +
 reserve-before-rely + generation-on-collision) is written up in
-[storage garbage collection](../../design/storage-garbage-collection.md); its
+[storage garbage collection](../../design/committed/storage-garbage-collection.md); its
 correctness claims, fault map, and verification strategy are in
-[storage GC verification](../../design/storage-gc-verification.md).
+[storage GC verification](../../design/committed/storage-gc-verification.md).
 
 **Verification:** the design is model-checked *before* code — TLC proves safety
 (226k states) and liveness (204k states), cross-checked by an independent Python

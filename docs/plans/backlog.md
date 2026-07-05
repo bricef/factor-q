@@ -55,7 +55,7 @@ model routing in a multi-agent system.
 ## Known gaps flagged during phase 1 design
 
 ### Scheduled refresh of pricing data (internal job scheduler)
-**Source:** `docs/plans/closed/2026-04-02-phase-1-foundation.md` deferred-work section, and `docs/design/storage-and-scaling.md`.
+**Source:** `docs/plans/closed/2026-04-02-phase-1-foundation.md` deferred-work section, and `docs/design/committed/storage-and-scaling.md`.
 
 Pricing is fetched once at `fq run` start from the LiteLLM JSON.
 Continuously running deployments will keep stale pricing
@@ -163,7 +163,7 @@ Step 4):
   [ADR-0004](../adrs/accepted/0004-cost-controls-from-day-one.md).
   The *enforcement mechanism* — reservation/escrow vs. the
   aggregate-and-halt "Inheritance rule" in
-  `docs/design/agent-orchestration-tools.md` — is an open choice
+  `docs/design/aspirational/agent-orchestration-tools.md` — is an open choice
   deferred to spawn-build time. The ADR-0017 sampling sub-budget
   is one line item inside the same bound.
 - **Enforced by the runtime at spawn time, not by the LLM.** The
@@ -234,7 +234,7 @@ GitHub, Slack (via Events API), and generic integrations.
 **Source:** ADR-0010 (agent execution isolation), design
 discussion on shadow mode (April 2026), and the
 tool-isolation model
-(`docs/design/tool-isolation-model.md`).
+(`docs/design/committed/tool-isolation-model.md`).
 
 A network proxy sitting between tools (and the host) and
 external systems, serving as the trust enforcement point.
@@ -253,12 +253,12 @@ tool passes through it. Responsibilities:
 - Trust-based access control (different allowlists per model
   trust tier)
 
-See `docs/design/shadow-mode-and-self-improvement.md`,
-`docs/design/tool-isolation-model.md`, and ADR-0010 for
+See `docs/design/aspirational/shadow-mode-and-self-improvement.md`,
+`docs/design/committed/tool-isolation-model.md`, and ADR-0010 for
 full context.
 
 ### WASM-native POSIX sandbox for shell and file tools
-**Source:** `docs/design/wasm-posix-sandbox.md`, design
+**Source:** `docs/design/aspirational/wasm-posix-sandbox.md`, design
 discussion April 2026.
 
 Investigate compiling a POSIX utility bundle (BusyBox, Rust
@@ -284,7 +284,7 @@ Investigation shape:
 
 ### Agent tool catalogue design
 **Source:** Design discussion, April 2026. Related to
-`docs/design/tool-isolation-model.md`.
+`docs/design/committed/tool-isolation-model.md`.
 
 The set of tools the runtime provides (beyond the phase-1
 `file_read` / `file_write` / `shell`) directly determines
@@ -309,7 +309,7 @@ agents need to do useful work.
 
 ### Workspace state: snapshotting and base layers
 **Source:** Design discussion, April 2026. Related to
-`docs/design/tool-isolation-model.md`.
+`docs/design/committed/tool-isolation-model.md`.
 
 The tool-isolation model introduces per-agent workspaces as
 the third tier of invocation state (alongside harness state
@@ -441,7 +441,7 @@ during the envelope-refactor work surfaced three threads. The
 first two are worth doing now; the third is deferred to the
 graph-executor work that will need it for its own reasons.
 
-See `docs/design/inter-node-contracts-and-event-layers.md` §2
+See `docs/design/aspirational/inter-node-contracts-and-event-layers.md` §2
 ("validation runs at both ends") for the longer-term picture.
 The items below are the *cheap* pieces that pay off before any
 graph executor exists.
@@ -567,7 +567,7 @@ without touching this.
 
 **Source:** discussion 2026-05-15. Related: design doc §2
 ("validation runs at both ends") in
-`docs/design/inter-node-contracts-and-event-layers.md`,
+`docs/design/aspirational/inter-node-contracts-and-event-layers.md`,
 ADR-0016 (typed operations).
 
 When the LLM produces a tool call, the runtime today executes

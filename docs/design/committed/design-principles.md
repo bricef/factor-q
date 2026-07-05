@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document is the working list of design principles that guide decisions across the factor-q project. It is distinct from [VISION.md](../../VISION.md) (*what* factor-q is and *why* it exists) and [ARCHITECTURE.md](../../ARCHITECTURE.md) (*what* subsystems compose it and *how* they fit together). Principles are the *how we decide* layer — rules that should apply to a design choice regardless of which subsystem is in play.
+This document is the working list of design principles that guide decisions across the factor-q project. It is distinct from [VISION.md](../../../VISION.md) (*what* factor-q is and *why* it exists) and [ARCHITECTURE.md](../../../ARCHITECTURE.md) (*what* subsystems compose it and *how* they fit together). Principles are the *how we decide* layer — rules that should apply to a design choice regardless of which subsystem is in play.
 
 Principles are testable against new design decisions: when presented with a choice, we should be able to ask "does this honour the principles?" and get a clear answer. When a proposal appears to violate a principle, the resolution is either to change the proposal or to consciously revise the principle — never to ignore it silently.
 
@@ -25,7 +25,7 @@ This rests on a practical observation: LLMs have structural ergonomic needs that
 - Feedback channels that an LLM can use productively exist — structured errors, introspection, explicit uncertainty, confidence signals.
 - Documentation is as legible to an LLM reader as to a human reader. Code examples are complete and unambiguous; tables and structured formats are preferred over long prose where structure would help.
 
-**Practice: co-design sessions.** The direct consequence of this principle is a specific development practice: design work that affects LLM-facing surfaces is conducted as a co-design session between a human collaborator and an LLM, with both participants' contributions treated as primary material — not as a spec drafted in isolation with LLM review requested after the fact. This is a first-class practice in how factor-q is built, documented in [CONTRIBUTING.md § Design sessions](../../CONTRIBUTING.md#design-sessions). Collaborators joining the project are expected to continue it.
+**Practice: co-design sessions.** The direct consequence of this principle is a specific development practice: design work that affects LLM-facing surfaces is conducted as a co-design session between a human collaborator and an LLM, with both participants' contributions treated as primary material — not as a spec drafted in isolation with LLM review requested after the fact. This is a first-class practice in how factor-q is built, documented in [CONTRIBUTING.md § Design sessions](../../../CONTRIBUTING.md#design-sessions). Collaborators joining the project are expected to continue it.
 
 ### 2. No confabulation where data exists
 

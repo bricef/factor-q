@@ -13,7 +13,7 @@
 //! The output is JSON, not free-form text. LLMs parse JSON
 //! reliably, and structured output makes the data easier to
 //! quote back to the user without re-asserting it (see design
-//! principle #1 in `docs/design/design-principles.md`).
+//! principle #1 in `docs/design/committed/design-principles.md`).
 
 use fq_tools::builtin::SELF_INSPECT_SECTIONS;
 use serde::Deserialize;

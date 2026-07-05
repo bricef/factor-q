@@ -132,7 +132,7 @@ interfaces, orchestration primitives, worker-side affordances — is
 conducted as co-design sessions between a human collaborator and an
 LLM, with both participants' contributions treated as primary
 material. This is a deliberate practice, grounded in the principle
-that [LLMs are first-class users and a source of requirements](docs/design/design-principles.md#1-llms-are-first-class-users-and-a-source-of-requirements).
+that [LLMs are first-class users and a source of requirements](docs/design/committed/design-principles.md#1-llms-are-first-class-users-and-a-source-of-requirements).
 The shape of the orchestration-tools and worker-side-ergonomics
 specs was materially informed by an LLM surfacing friction in its
 own execution that a human working top-down would not have found.
@@ -177,9 +177,9 @@ Start with these docs to understand the system:
 
 1. [VISION.md](VISION.md) — what factor-q is and why it exists
 2. [ARCHITECTURE.md](ARCHITECTURE.md) — subsystems and concerns
-3. [docs/design/design-principles.md](docs/design/design-principles.md)
+3. [docs/design/committed/design-principles.md](docs/design/committed/design-principles.md)
    — cross-cutting rules that guide design decisions
-4. [docs/design/event-schema.md](docs/design/event-schema.md) — the
+4. [docs/design/committed/event-schema.md](docs/design/committed/event-schema.md) — the
    event model that everything else is built around
 5. [docs/adrs/](docs/adrs/) — every significant design decision
    with rationale

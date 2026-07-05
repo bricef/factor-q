@@ -9,11 +9,11 @@ infrastructure choice is committed to.
 
 This document exists because durable suspension came up as a
 near-term need and the first cut at solving it
-([context](./2026-04-19-design-assessment.md))
+([context](../2026-04-19-design-assessment.md))
 anchored on a single store before surveying the broader data
 architecture. Solving one persistence problem in isolation
 risks locking in answers that fight the next four problems
-([backlog](../plans/backlog.md)). This doc structures the
+([backlog](../../plans/backlog.md)). This doc structures the
 broader picture so the next decision is made across the full
 surface.
 
@@ -29,7 +29,7 @@ In scope: anything factor-q itself produces or consumes that
 must outlive a single process invocation.
 
 Out of scope: data inside MCP services (memory, per
-[ADR-0013](../adrs/accepted/0013-memory-as-mcp-services.md)),
+[ADR-0013](../../adrs/accepted/0013-memory-as-mcp-service.md)),
 data inside agent-spawned tools (their problem, scoped by the
 sandbox), and the contents of the LLM provider's own systems.
 
@@ -75,12 +75,12 @@ Mapping the open problems on factor-q's roadmap to the shapes above. The point i
 | Problem (open) | Source | Shape | Notes |
 |---|---|---|---|
 | Durable suspension of in-flight invocations | discussed during reducer prototype | Latest state per invocation | The motivating example. |
-| Approval gates | [`ARCHITECTURE.md` cross-cutting concerns](../../ARCHITECTURE.md#security-and-access-control) | Pending approvals / waits | Same shape as suspension plus metadata about what's needed. |
-| Scheduled refresh of pricing data | [backlog](../plans/backlog.md) | Schedules / wakeups | Tiny, low-frequency, but durable — pricing should refresh even if the operator restarts. |
-| Scheduled agent triggers | [backlog](../plans/backlog.md) | Schedules / wakeups | Same shape; user-facing rather than runtime-internal. |
+| Approval gates | [`ARCHITECTURE.md` cross-cutting concerns](../../../ARCHITECTURE.md#security-and-access-control) | Pending approvals / waits | Same shape as suspension plus metadata about what's needed. |
+| Scheduled refresh of pricing data | [backlog](../../plans/backlog.md) | Schedules / wakeups | Tiny, low-frequency, but durable — pricing should refresh even if the operator restarts. |
+| Scheduled agent triggers | [backlog](../../plans/backlog.md) | Schedules / wakeups | Same shape; user-facing rather than runtime-internal. |
 | Workspace snapshotting | [`tool-isolation-model.md`](./tool-isolation-model.md) backlog | Per-invocation workspaces | Likely needs its own store; large blobs. |
-| Hot-reload of agent definitions | [backlog](../plans/backlog.md) | Static configuration (read-side) | Doesn't introduce new persistence; introduces a watcher. |
-| Long-lived agent waits (e.g. webhook receivers) | [`agent-os-architecture.md`](./agent-os-architecture.md) | Latest state + a wakeup trigger | Composite — needs both the suspension shape and the wakeup shape. |
+| Hot-reload of agent definitions | [backlog](../../plans/backlog.md) | Static configuration (read-side) | Doesn't introduce new persistence; introduces a watcher. |
+| Long-lived agent waits (e.g. webhook receivers) | [`agent-os-architecture.md`](../aspirational/agent-os-architecture.md) | Latest state + a wakeup trigger | Composite — needs both the suspension shape and the wakeup shape. |
 | Crash recovery | discussed during reducer prototype | Latest state + a "what was in-flight" index | Composite — uses suspension state plus a way to enumerate it on startup. |
 
 **What this groups into:**
@@ -100,10 +100,10 @@ Listed roughly in order of how strong a constraint each is.
 
 | Force | Source | Implication |
 |---|---|---|
-| **Single-tenant, self-hosted** | [`VISION.md`](../../VISION.md) | No tenant isolation requirements. No multi-tenant rate-limiting. Operator owns the deployment end-to-end. Stores can assume a single trust boundary. |
-| **Single-node default, multi-node aspiration** | [`ARCHITECTURE.md`](../../ARCHITECTURE.md) | Single-node must work without coordination overhead. Multi-node should not require a redesign — but designing for multi-node *now*, before any node is overloaded, is premature. |
+| **Single-tenant, self-hosted** | [`VISION.md`](../../../VISION.md) | No tenant isolation requirements. No multi-tenant rate-limiting. Operator owns the deployment end-to-end. Stores can assume a single trust boundary. |
+| **Single-node default, multi-node aspiration** | [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) | Single-node must work without coordination overhead. Multi-node should not require a redesign — but designing for multi-node *now*, before any node is overloaded, is premature. |
 | **No timeline pressure; optimise for correctness** | project posture | Permits choosing slightly more careful foundations over minimal-viable. Does not justify designing for hypothetical scale or future tenants. |
-| **Local-dev simplicity** | [`QUICKSTART.md`](../../QUICKSTART.md) promises `just up` works | Adding required infrastructure (a Postgres, a Redis, an object store) degrades the "clone and run" property. Trade-off must be argued explicitly. |
+| **Local-dev simplicity** | [`QUICKSTART.md`](../../../QUICKSTART.md) promises `just up` works | Adding required infrastructure (a Postgres, a Redis, an object store) degrades the "clone and run" property. Trade-off must be argued explicitly. |
 | **Operator backup-and-recovery story** | implicit in self-hosted posture | Each new store adds a backup path. Operators reasonably expect a small number of clearly-named things to back up. |
 | **Audit trail is sacred** | [`event-schema.md`](./event-schema.md), the projection's "rebuildable from events" invariant | Anything that is a projection of events must remain rebuildable. Anything that is *not* a projection of events is by definition new source-of-truth and must be backed up. |
 | **NATS is already load-bearing** | implementation | Adding a second event-bus-shaped store is a hard sell. NATS already has the durability story for the audit log. |
@@ -366,14 +366,14 @@ are constraints, not choices.
 
 | Decision | Source |
 |---|---|
-| NATS+JetStream is the source of truth for the agent audit log and the trigger work queue. | [`ADR-0011`](../adrs/accepted/0011-event-bus-and-persistence.md) |
+| NATS+JetStream is the source of truth for the agent audit log and the trigger work queue. | [`ADR-0011`](../../adrs/accepted/0011-event-bus-and-persistence.md) |
 | SQLite holds the queryable projection over the audit log. | [`event-schema.md`](./event-schema.md), implementation in `fq-runtime/src/projection/`. |
 | The projection is **rebuildable from events**. | implementation invariant; the projection consumer is idempotent on `event_id`. |
-| Memory (long-term, collective) is delivered as MCP services, not built into the runtime's persistence. | [`ADR-0013`](../adrs/accepted/0013-memory-as-mcp-services.md) |
-| Static configuration (`fq.toml`), agent definitions, and skills are filesystem files. | [`ADR-0005`](../adrs/accepted/0005-agent-definition-format.md), implementation. |
+| Memory (long-term, collective) is delivered as MCP services, not built into the runtime's persistence. | [`ADR-0013`](../../adrs/accepted/0013-memory-as-mcp-service.md) |
+| Static configuration (`fq.toml`), agent definitions, and skills are filesystem files. | [`ADR-0005`](../../adrs/accepted/0005-agent-definition-format.md), implementation. |
 | Pricing data is fetched from a remote source and cached locally; the cache is rebuildable. | implementation. |
-| Audit-log retention is operator-set; events default to 30 days, triggers to 24 hours. | [`bus.rs`](../../services/fq-runtime/crates/fq-runtime/src/bus.rs) defaults. |
-| Secrets (API keys) are read from environment variables; factor-q itself does not write them anywhere. | [`fq.toml`](../../services/fq-runtime/crates/fq-cli/src/templates/fq.toml) provider section. |
+| Audit-log retention is operator-set; events default to 30 days, triggers to 24 hours. | [`bus.rs`](../../../services/fq-runtime/crates/fq-runtime/src/bus.rs) defaults. |
+| Secrets (API keys) are read from environment variables; factor-q itself does not write them anywhere. | [`fq.toml`](../../../services/fq-runtime/crates/fq-cli/src/templates/fq.toml) provider section. |
 
 ---
 
@@ -384,7 +384,7 @@ solution accidentally pays for it.
 
 | Non-force | Reason |
 |---|---|
-| Multi-tenant isolation | factor-q is single-tenant per [`VISION.md`](../../VISION.md). No data partitioning by tenant; no tenant-aware permission model in stores. |
+| Multi-tenant isolation | factor-q is single-tenant per [`VISION.md`](../../../VISION.md). No data partitioning by tenant; no tenant-aware permission model in stores. |
 | Cloud-managed deployment | Self-hosted is the deployment shape. Stores must be operable by a single operator, not require a managed-service provider. |
 | Internet-scale throughput | Realistic scale: one operator, dozens to hundreds of invocations per day, peak bursts during agent fan-out. Anything that optimises for >10k writes/sec is over-engineered. |
 | Real-time analytics | Operator-facing queries (`fq events query`, `fq costs`) are bounded and infrequent. No need for OLAP-shaped stores. |

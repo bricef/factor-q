@@ -20,7 +20,7 @@ what shipped, what was deferred, and where deferred items live.
   historical inspection of the event stream and the SQLite projection.
 - NATS + JetStream as the event bus with S2 compression on the event
   stream and Limits retention on the trigger stream. Event schema is
-  typed, versioned, and documented in `docs/design/event-schema.md`.
+  typed, versioned, and documented in `docs/design/committed/event-schema.md`.
 - SQLite projection stores envelope + denormalised columns only
   (~300–500 B per row), keeping growth predictable. NATS remains the
   source of truth; the projection is rebuildable.

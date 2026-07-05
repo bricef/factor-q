@@ -64,8 +64,8 @@ multi-node deployment, approval-gate UI/flow, per-agent
 durability mode opt-in.
 
 **Design references**:
-- [`docs/design/data-architecture.md`](../../design/data-architecture.md) — the architectural commitments this plan implements.
-- [`docs/design/data-architecture-requirements.md`](../../design/data-architecture-requirements.md) — the requirements baseline.
+- [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) — the architectural commitments this plan implements.
+- [`docs/design/committed/data-architecture-requirements.md`](../../design/committed/data-architecture-requirements.md) — the requirements baseline.
 
 ## Goal
 
@@ -639,7 +639,7 @@ ambiguous invocations, so honest resume needs further work
 (see the closed sub-plan's Decisions section).
 
 New event variant introduced: `invocation.operator_recovered`
-(see `docs/design/event-schema.md`). Audit can filter
+(see `docs/design/committed/event-schema.md`). Audit can filter
 operator-triggered terminal transitions from worker-
 triggered ones. The `invocation.archived` handler gained a
 no-downgrade guard so a late `archived` from a still-alive

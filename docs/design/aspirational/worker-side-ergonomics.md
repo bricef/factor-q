@@ -14,7 +14,7 @@ This doc catalogues the primitives that would make worker-side execution ergonom
 
 **An agent should be able to reason about and influence its own execution, not just produce results.** The current model treats the agent as a pure function from prompt to output; worker-side ergonomics acknowledges that agents are stateful processes with budgets, uncertainty, interruption risk, and the ability to self-govern — and gives them the tools to act on that.
 
-**No confabulation where data exists.** This principle — that anything the runtime tracks about an agent's execution must be exposed through a tool rather than left to inference — is the single largest driver of the surfaces in this doc. `SelfInspect`, `ToolVersions`, `LoadCheckpoint`, and the structured error surface all exist in its service. Canonical statement in [`design-principles.md`](design-principles.md#2-no-confabulation-where-data-exists).
+**No confabulation where data exists.** This principle — that anything the runtime tracks about an agent's execution must be exposed through a tool rather than left to inference — is the single largest driver of the surfaces in this doc. `SelfInspect`, `ToolVersions`, `LoadCheckpoint`, and the structured error surface all exist in its service. Canonical statement in [`design-principles.md`](../committed/design-principles.md#2-no-confabulation-where-data-exists).
 
 ---
 

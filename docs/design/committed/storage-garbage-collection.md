@@ -3,10 +3,10 @@
 How the content store reclaims unreferenced objects and blocks **online** — the
 store stays fully available for reads and writes throughout — without ever
 losing a block a live object still needs. This elaborates
-[ADR-0023](../adrs/accepted/0023-storage-and-vector-foundation.md) fork **F2**
+[ADR-0023](../../adrs/accepted/0023-storage-and-vector-foundation.md) fork **F2**
 (GC algorithm: two-level reference counting + reachability-audit backstop) into
 the concrete concurrency protocol for **M1c** of the
-[storage + vector foundation plan](../plans/active/2026-06-27-storage-vector-foundation.md).
+[storage + vector foundation plan](../../plans/active/2026-06-27-storage-vector-foundation.md).
 M1a (the CAS) and M1b (the storage index) are built; this is the design for the
 collector that reclaims what the index reports as unreferenced.
 
@@ -289,9 +289,9 @@ summary:
 - [storage-gc-verification](storage-gc-verification.md) +
   [`storage_gc.tla`](storage_gc.tla) — the claims, fault map, and verification
   strategy (TLA⁺ + simulation + fault injection).
-- [ADR-0023](../adrs/accepted/0023-storage-and-vector-foundation.md) — storage
+- [ADR-0023](../../adrs/accepted/0023-storage-and-vector-foundation.md) — storage
   foundation; fork F2 (GC algorithm) is the parent decision this elaborates.
-- [ADR-0024](../adrs/accepted/0024-separate-databases-storage-foundation.md) —
+- [ADR-0024](../../adrs/accepted/0024-separate-databases-storage-foundation.md) —
   the storage index is SQLite #1, the single writer this protocol linearises on.
-- [Storage + vector foundation plan](../plans/active/2026-06-27-storage-vector-foundation.md)
+- [Storage + vector foundation plan](../../plans/active/2026-06-27-storage-vector-foundation.md)
   — M1c is where this is built.

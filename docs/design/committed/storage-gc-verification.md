@@ -151,7 +151,7 @@ model plus a bounded-crash counter for liveness.
 
 - [Storage garbage collection](storage-garbage-collection.md) — the protocol this
   verifies.
-- [ADR-0023](../adrs/accepted/0023-storage-and-vector-foundation.md) F2 — the GC
+- [ADR-0023](../../adrs/accepted/0023-storage-and-vector-foundation.md) F2 — the GC
   decision (refcounting + audit backstop).
 - Method prior art: FoundationDB / TigerBeetle deterministic simulation; Jepsen
   (concurrent histories + nemesis, Elle/Knossos); TLA⁺ / TLC; `loom` / `shuttle`

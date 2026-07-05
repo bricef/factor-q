@@ -153,7 +153,7 @@ retention window at the per-invocation rate above. At the default
 | 100,000 invocations/day|      90 GB |      900 GB |
 
 The fq-events stream is configured with S2 compression (see
-[bus.rs](../../services/fq-runtime/crates/fq-runtime/src/bus.rs) and
+[bus.rs](../../../services/fq-runtime/crates/fq-runtime/src/bus.rs) and
 ADR-0011). Text-heavy event bodies typically compress 2–4x at
 negligible CPU cost, so divide the raw numbers above by 2–3 in
 practice.
@@ -242,7 +242,7 @@ adjust:
 
 Deferred work: factor-q should provide a scheduled job in the
 internal job scheduler that refreshes external data (see
-[the phase 1 plan](../plans/active/2026-04-02-phase-1-foundation.md)
+[the phase 1 plan](../../plans/closed/2026-04-02-phase-1-foundation.md)
 deferred-work section) and, in the same spirit, periodically prunes
 old SQLite projection rows. The SQLite cleanup can be an ordinary
 DELETE statement since NATS remains the source of truth.

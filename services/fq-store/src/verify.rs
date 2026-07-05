@@ -1,5 +1,5 @@
 //! The invariant oracle — runnable checks of the storage-GC correctness claims
-//! (`docs/design/storage-gc-verification.md`) against the *real* index + content
+//! (`docs/design/committed/storage-gc-verification.md`) against the *real* index + content
 //! store. It is the runnable counterpart of the invariants the TLA⁺ model checks
 //! abstractly — those expressible on the live index; durability (I2) is left to
 //! the model and the fsync tests — and it doubles as the core of the

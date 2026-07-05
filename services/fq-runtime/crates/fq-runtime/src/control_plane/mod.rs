@@ -1,6 +1,6 @@
 //! Control-plane role.
 //!
-//! Per `docs/design/data-architecture.md` §3, the control-plane
+//! Per `docs/design/committed/data-architecture.md` §3, the control-plane
 //! is the global view of the runtime: trigger ingestion and
 //! routing, projection over the audit log, schedules, pending
 //! waits, coordination state, and the operator-facing surface.

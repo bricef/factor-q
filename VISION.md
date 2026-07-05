@@ -19,7 +19,7 @@ The name "factor-q" comes from the Q factor in fusion physics — the ratio of e
 | **M2: Parity** | Q20 | Leverage of 20x, roughly in line with the best AI harnesses available today. |
 | **M3: North star** | Q200 | The true target. Requires automated self-improvement, multi-agent orchestration, and minimal human intervention for routine work. |
 
-The path from Q20 to Q200 depends on the self-improvement loop — the system must be able to continuously improve its own workflows, prompts, and strategies without human intervention for each change. See `docs/design/shadow-mode-and-self-improvement.md`.
+The path from Q20 to Q200 depends on the self-improvement loop — the system must be able to continuously improve its own workflows, prompts, and strategies without human intervention for each change. See `docs/design/aspirational/shadow-mode-and-self-improvement.md`.
 
 ## Core Thesis
 

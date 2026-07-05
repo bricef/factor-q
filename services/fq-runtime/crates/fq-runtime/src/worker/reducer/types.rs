@@ -1,7 +1,7 @@
 //! Boundary types between the reducer harness and its host.
 //!
 //! These types intentionally mirror the shapes described in
-//! `docs/design/wasm-boundary-design.md`. They are JSON-
+//! `docs/design/committed/wasm-boundary-design.md`. They are JSON-
 //! serialisable so they can later be passed across the WASM
 //! component-model ABI without restructuring; for the native
 //! prototype they cross only ordinary Rust function boundaries.

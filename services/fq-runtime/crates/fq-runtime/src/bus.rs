@@ -4,7 +4,7 @@
 //! events. All events flow through a single JetStream stream, using
 //! subject-based filtering for consumption.
 //!
-//! See `docs/design/event-schema.md` for the event schema and subject
+//! See `docs/design/committed/event-schema.md` for the event schema and subject
 //! hierarchy.
 
 use async_nats::jetstream::{self, consumer, stream};
@@ -37,7 +37,7 @@ pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60); //
 /// Separate from the event stream because triggers have different
 /// semantics: work-queue delivery (one consumer per message), short
 /// retention, and no compression. See
-/// `docs/design/storage-and-scaling.md` for the rationale.
+/// `docs/design/committed/storage-and-scaling.md` for the rationale.
 pub const TRIGGER_STREAM_NAME: &str = "fq-triggers";
 
 /// Subject pattern matching all agent triggers.
@@ -133,7 +133,7 @@ impl EventBus {
     /// (JSON with large system prompts and tool outputs) and compress
     /// 2–4x with negligible CPU cost, which meaningfully extends the
     /// retention window at a given storage budget. See
-    /// `docs/design/storage-and-scaling.md` for the rationale.
+    /// `docs/design/committed/storage-and-scaling.md` for the rationale.
     async fn ensure_event_stream(&self) -> Result<(), BusError> {
         debug!(
             stream = STREAM_NAME,

@@ -1,7 +1,7 @@
 //! Worker-side SQLite store: in-flight invocation state and the
 //! three-state WAL for tool and LLM dispatches.
 //!
-//! Per `docs/design/data-architecture.md` §3 and §9.1, this is
+//! Per `docs/design/committed/data-architecture.md` §3 and §9.1, this is
 //! the worker's source-of-truth for invocations it currently
 //! owns. Each row is non-rebuildable from NATS — losing this
 //! file means losing in-flight state.

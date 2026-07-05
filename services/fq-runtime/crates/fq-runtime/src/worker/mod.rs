@@ -1,6 +1,6 @@
 //! Worker role.
 //!
-//! Per `docs/design/data-architecture.md` §3, a worker is where
+//! Per `docs/design/committed/data-architecture.md` §3, a worker is where
 //! work happens: it claims invocations the control-plane routes
 //! to it, runs the host loop for those invocations, owns local
 //! in-flight state, executes tool calls, and publishes lifecycle

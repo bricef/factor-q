@@ -13,7 +13,7 @@ adoption — see "What would need to be true" below.
 ## Context
 
 The tool-isolation model
-([`tool-isolation-model.md`](./tool-isolation-model.md))
+([`tool-isolation-model.md`](../committed/tool-isolation-model.md))
 defines isolation tiers ranging from in-process through
 subprocess, container, WASM instance, and microVM. The WASM
 tier is listed but thinly described: "Wasmtime sandbox with
@@ -402,12 +402,12 @@ tested.
 
 ## Related documents
 
-- [`tool-isolation-model.md`](./tool-isolation-model.md) —
+- [`tool-isolation-model.md`](../committed/tool-isolation-model.md) —
   the broader framework this tier slots into
-- [`wasm-boundary-design.md`](./wasm-boundary-design.md) —
+- [`wasm-boundary-design.md`](../committed/wasm-boundary-design.md) —
   a different use of WASM (rejected for the harness, kept
   as an option for tools like this one)
-- [ADR-0010](../adrs/accepted/0010-agent-execution-isolation.md)
+- [ADR-0010](../../adrs/accepted/0010-agent-execution-isolation.md)
   — isolation strategy including WASM as a future tier
 
 ## Summary

@@ -9,8 +9,8 @@ test against the mock), `3759b1a` (manual drift detector +
 status block notes the previously-deferred live acceptance
 test now runs in every CI build via the mock.
 **Design references**:
-- [`docs/design/event-schema.md`](../../design/event-schema.md) — event types under test.
-- [`docs/design/data-architecture.md`](../../design/data-architecture.md) §9.3 — the canonical end-to-end flow.
+- [`docs/design/committed/event-schema.md`](../../design/committed/event-schema.md) — event types under test.
+- [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) §9.3 — the canonical end-to-end flow.
 
 ## Goal
 
