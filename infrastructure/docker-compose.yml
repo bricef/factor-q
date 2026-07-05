@@ -2,8 +2,11 @@ services:
   nats:
     image: nats:latest
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      # Bound to loopback: the dev broker is reachable only from this
+      # host (assessment critique #4). Client connections require the
+      # token from infrastructure/nats/nats.conf.
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
     command: ["--config", "/etc/nats/nats.conf"]
     volumes:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro

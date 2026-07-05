@@ -920,7 +920,7 @@ async fn show_status(global: &GlobalArgs) -> anyhow::Result<()> {
     // NATS.
     println!();
     println!("NATS");
-    let client = match async_nats::connect(&config.nats.url).await {
+    let client = match fq_runtime::bus::connect_with_url_credentials(&config.nats.url).await {
         Ok(c) => {
             println!("  connection:       ✓ connected at {}", config.nats.url);
             c

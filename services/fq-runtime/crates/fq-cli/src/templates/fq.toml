@@ -9,7 +9,10 @@
 
 [nats]
 # URL of the NATS server. JetStream must be enabled on the server.
-url = "nats://localhost:4222"
+# The token in the userinfo must match the broker's (see
+# docker-compose.yml's --auth flag). Change both together for any
+# deployment that leaves this machine.
+url = "nats://fq-dev-token@localhost:4222"
 
 [agents]
 # Directory containing agent definition files (.md with YAML frontmatter).

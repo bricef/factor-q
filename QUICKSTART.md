@@ -25,7 +25,7 @@ cd factor-q
 just up
 ```
 
-`just up` is two things: `just infra-up` (Docker compose for NATS) and `just build` (cargo build of the workspace). When it finishes you have a NATS server on `nats://localhost:4222` and a usable `fq` CLI behind `just fq`.
+`just up` is two things: `just infra-up` (Docker compose for NATS) and `just build` (cargo build of the workspace). When it finishes you have a NATS server on `nats://localhost:4222` — bound to loopback, token-authenticated (the token lives in `infrastructure/nats/nats.conf` and rides in the default `FQ_NATS_URL` as URL userinfo) — and a usable `fq` CLI behind `just fq`.
 
 Verify it:
 

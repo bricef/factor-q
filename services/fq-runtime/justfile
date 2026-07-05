@@ -6,7 +6,10 @@ set positional-arguments
 # The bus/integration tests need a NATS endpoint. Default to the local
 # dev instance (`just infra-up`); override by exporting FQ_NATS_URL in
 # the environment before invoking just.
-export FQ_NATS_URL := env_var_or_default("FQ_NATS_URL", "nats://127.0.0.1:4222")
+# The dev broker requires token auth (infrastructure/nats/nats.conf);
+# the credential rides in the URL userinfo (see bus.rs
+# url_credentials).
+export FQ_NATS_URL := env_var_or_default("FQ_NATS_URL", "nats://fq-dev-token@127.0.0.1:4222")
 
 # Show available recipes
 default:

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 fq-tools = { path = "../fq-tools" }
 async-nats = "0.38"
+url = "2"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

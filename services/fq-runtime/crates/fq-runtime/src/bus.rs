@@ -133,12 +133,44 @@ pub struct EventBus {
     jetstream: jetstream::Context,
 }
 
+/// Extract auth credentials from a NATS URL's userinfo.
+/// `async_nats::connect` ignores URL userinfo entirely; factor-q
+/// honours it so credentials can travel inside `FQ_NATS_URL` /
+/// `fq.toml`'s `url` without a separate secret channel (project
+/// assessment 2026-07-05, critique #4):
+/// `nats://TOKEN@host` selects token auth,
+/// `nats://USER:PASS@host` selects user/password auth.
+fn url_credentials(url: &str) -> Option<(String, Option<String>)> {
+    let parsed = url::Url::parse(url).ok()?;
+    let user = parsed.username();
+    if user.is_empty() {
+        return None;
+    }
+    Some((user.to_string(), parsed.password().map(str::to_string)))
+}
+
+/// Connect a raw NATS client, honouring URL userinfo (see
+/// `url_credentials` above). `EventBus::connect` and the CLI's
+/// direct client path both route through this.
+pub async fn connect_with_url_credentials(
+    url: &str,
+) -> Result<async_nats::Client, async_nats::ConnectError> {
+    let options = match url_credentials(url) {
+        Some((user, Some(password))) => {
+            async_nats::ConnectOptions::with_user_and_password(user, password)
+        }
+        Some((token, None)) => async_nats::ConnectOptions::with_token(token),
+        None => async_nats::ConnectOptions::new(),
+    };
+    options.connect(url).await
+}
+
 impl EventBus {
     /// Connect to a NATS server and ensure both the event and
     /// trigger streams exist.
     pub async fn connect(url: &str) -> Result<Self, BusError> {
         info!(nats_url = url, "connecting to NATS");
-        let client = async_nats::connect(url).await?;
+        let client = connect_with_url_credentials(url).await?;
         let jetstream = jetstream::new(client.clone());
 
         let bus = Self { client, jetstream };
@@ -454,6 +486,22 @@ impl EventBus {
 mod tests {
     use super::*;
     use crate::agent::AgentId;
+
+    #[test]
+    fn url_credentials_parses_token_user_pass_and_bare_forms() {
+        assert_eq!(
+            url_credentials("nats://fq-dev-token@127.0.0.1:4222"),
+            Some(("fq-dev-token".to_string(), None)),
+            "bare userinfo is a token"
+        );
+        assert_eq!(
+            url_credentials("nats://fq:secret@localhost:4222"),
+            Some(("fq".to_string(), Some("secret".to_string()))),
+            "user:pass form"
+        );
+        assert_eq!(url_credentials("nats://127.0.0.1:4222"), None);
+        assert_eq!(url_credentials("not a url"), None);
+    }
     use crate::events::{
         ConfigSnapshot, EventPayload, SandboxSnapshot, TriggerSource, TriggeredPayload,
     };

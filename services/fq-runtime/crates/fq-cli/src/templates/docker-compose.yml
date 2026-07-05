@@ -4,16 +4,26 @@
 #   docker compose down       # stop it
 #   docker compose logs -f    # follow its logs
 #
-# Serves a broker on nats://localhost:4222 (the default FQ_NATS_URL) with
-# JetStream enabled, plus a monitoring endpoint on http://localhost:8222.
+# Serves a broker on nats://localhost:4222 with JetStream enabled,
+# plus a monitoring endpoint on http://localhost:8222. Both ports are
+# bound to loopback and client connections require the token below —
+# it must match the userinfo in fq.toml's `url`. Change both together
+# for any deployment that leaves this machine.
 # JetStream data persists in the `nats-data` volume across restarts.
 services:
   nats:
     image: nats:latest
-    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    command:
+      [
+        "--jetstream",
+        "--store_dir=/data",
+        "--http_port=8222",
+        "--auth",
+        "fq-dev-token",
+      ]
     ports:
-      - "4222:4222" # client connections (FQ_NATS_URL)
-      - "8222:8222" # monitoring / health
+      - "127.0.0.1:4222:4222" # client connections (fq.toml [nats].url)
+      - "127.0.0.1:8222:8222" # monitoring / health
     volumes:
       - nats-data:/data
     restart: unless-stopped
