@@ -1,7 +1,7 @@
 # Reducer verification: implementation plan
 
 **Status:** active (2026-07-05) — claims R1–R7 reviewed and approved;
-slices 1–5 landed the same day. Both pre-registered findings were
+slices 1–6 landed the same day. Both pre-registered findings were
 confirmed and fixed before the net (the budget accumulator and the
 error-kind semantics), and slice 4's first property sweep caught a
 third: resume dropped the trigger, re-seeding resumed conversations
@@ -170,6 +170,22 @@ Stated before the net is built, to be confirmed or refuted by it:
    writes them, and `resume()` reconstructs the trigger from the row
    (legacy pre-v5 rows warn and degrade to the old behaviour). Pinned
    by the slice-4 suite itself.
+4. **Discovered by slice 6, first property run (2026-07-05): the WAL
+   never carried LLM call costs.** `write_llm_completed` was passed a
+   hard `0.0` with a comment claiming the cost was "filled in below" —
+   it never was; the real cost was computed a few lines later and
+   flowed into totals and events but never back to the row. So
+   finding 1's fix (reconstituting the budget accumulator from
+   `cost_usd` on resume) was correct logic over data that was always
+   zero: **the lifetime budget silently forgot all pre-crash spend on
+   every resume.** The finding-1 regression test missed it because it
+   hand-built WAL rows with costs; the slice-6 property drove the real
+   write path and the resumed run completed under a budget the
+   reference tripped. Fixed by computing the cost before the
+   completed-write and passing it through — the budget-across-resume
+   property now discriminates (fails on the bug, passes on the fix),
+   and the sampling accounting test pins the same fix on the sampling
+   path.
 
 ## Slices
 
@@ -180,7 +196,7 @@ Stated before the net is built, to be confirmed or refuted by it:
 | 3 | Hermetic sim harness — scripted LLM + recording tools + in-memory event sink + tempdir `WorkerStore`, seeded scheduler, fault plan | enables 4–7 | **done** — `test_support::sim`: `EventSink` + `Clock` seams through `RunnerConfig` (production defaults unchanged), `SimWorld` with `RecordingSink` publish faults, `ScriptedTool` dispatch recording, `SimClock`; three smoke tests: hermetic oracle-valid run, same-seed byte-identical determinism, crash-at-publish → resume with at-most-once tools. Note: sim lives in-crate (`test_support` is `#[cfg(test)]`), not `tests/sim.rs` as originally named — revisit if test_support ever gets feature-exposed |
 | 4 | Resume-equivalence properties — random scripts × every step boundary | R4 | **done** — `observational_trace` masking in the oracle (volatile fields: per-call UUIDs, measured durations, clock stamps); exhaustive fixed-script boundary sweep + 24-case proptest over scripts × boundaries × seeds. Found and fixed finding 3 (resume dropped the trigger) on the first sweep |
 | 5 | Crash DST — fault plans over every WAL/publish/dispatch boundary; recovery categorisation soundness; ambiguous handling; archive hand-off under ack loss | R2, R3, R1-under-faults | **done** — `crash_dst` in the sim: exhaustive sweep over every publish index (all five WAL classes asserted covered: nothing-persisted / SafeResume / Ambiguous / SafeReplay / already-terminal), 24-case proptest, crash-while-resuming, sweeper heal + ack-quiescence (via the `EventSink` seam widened to `ArchiveRetrySweeper`), LLM-error canonicality; oracle gained prefix and resume modes. **No new findings** — recovery, refusal, and at-most-once held at every point. Store-fault axis deferred to M3 (see Fault model); consume-side double-ack stays NATS-tier |
-| 6 | Budget properties — random pricing scripts, sampling/evaluator origins, crash/resume accumulation (resolves finding 1) | R5 | todo |
+| 6 | Budget properties — random pricing scripts, sampling/evaluator origins, crash/resume accumulation (resolves finding 1) | R5 | **done** — `budget_properties` in the sim: post-call ceiling semantics pinned (Completed ⇒ cost ≤ budget; BudgetExceeded ⇒ crossed by at most the final call; no request after the trip; exact cost recomputation), 24-case proptest, budget-across-resume property (closes finding 1 — and caught **finding 4**: the WAL never carried call costs, so reconstitution summed zeros). Sampling axis pinned hermetically via `handle_sampling`: both decline boundaries + spend flowing into totals, the sub-accumulator, and the WAL row |
 | 7 | Soak — long randomised runs with all oracles on; CI-hermetic seeds + a deep local soak recipe | everything, in volume | todo |
 
 Slices 1–2 land immediate value with no new infrastructure (the oracle

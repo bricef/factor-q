@@ -1994,23 +1994,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             ),
         )
         .await?;
-        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
-        self.config
-            .store
-            .write_llm_completed(
-                &inv_str,
-                &req_str,
-                &response_json,
-                false,
-                0.0, // cost filled in below; for the WAL we record the response presence
-                self.config.clock.unix_now_ms(),
-            )
-            .await
-            .map_err(map_store_err)?;
-
-        // Cost folds into the llm.response envelope (envelope-refactor
-        // plan step 3). Compute before publishing so the response
-        // event carries its cost in one publish, not two.
+        // Cost is computed before the WAL completed-write so the row
+        // carries the call's real cost — resume() reconstitutes the
+        // budget accumulator from exactly this column, so a 0.0 here
+        // silently forgets pre-crash spend on every resume (finding 4,
+        // caught by the slice-6 budget-across-resume property; the
+        // old comment claimed the cost was "filled in below", which
+        // never happened).
         let pricing = self.config.pricing.lookup(&request.model);
         if pricing.is_none() {
             warn!(
@@ -2022,6 +2012,20 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .map(|p| p.calculate(&response.usage))
             .unwrap_or((0.0, 0.0, 0.0));
         totals.total_cost += total_cost;
+
+        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+        self.config
+            .store
+            .write_llm_completed(
+                &inv_str,
+                &req_str,
+                &response_json,
+                false,
+                total_cost,
+                self.config.clock.unix_now_ms(),
+            )
+            .await
+            .map_err(map_store_err)?;
 
         self.publish_chained(
             cursor,
@@ -5055,5 +5059,210 @@ mod tests {
         );
         assert!(row.started_at <= row.updated_at);
         assert!(row.terminal_at.unwrap_or(0) >= row.updated_at);
+    }
+
+    // --- R5, sampling axis (reducer verification slice 6): the
+    // sampling gate's budget boundaries, and sampling spend flowing
+    // into the invocation accumulator. Hermetic via the sim doubles;
+    // handle_sampling is private, hence tested here.
+
+    fn sampling_world() -> (
+        std::sync::Arc<crate::test_support::sim::RecordingSink>,
+        tempfile::TempDir,
+    ) {
+        (
+            std::sync::Arc::new(crate::test_support::sim::RecordingSink::new()),
+            tempdir().expect("tempdir"),
+        )
+    }
+
+    async fn sampling_runner(
+        sink: &std::sync::Arc<crate::test_support::sim::RecordingSink>,
+        dir: &tempfile::TempDir,
+    ) -> ReducerRunner {
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("events.db"))
+                .await
+                .expect("worker store"),
+        );
+        ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .event_sink(Arc::clone(sink) as Arc<dyn EventSink>)
+                    .pricing(test_pricing())
+                    .store(store)
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
+            Harness::new(),
+        )
+    }
+
+    fn sampling_agent(budget: f64, sub_budget: Option<f64>) -> Agent {
+        Agent::builder()
+            .id(unique_agent_id("sampling-budget"))
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .budget(budget)
+            .sampling_grant(crate::agent::SamplingGrant {
+                servers: vec!["srv".to_string()],
+                max_cost: sub_budget,
+            })
+            .build()
+            .unwrap()
+    }
+
+    fn sampling_params() -> CreateMessageRequestParams {
+        serde_json::from_value(serde_json::json!({
+            "messages": [
+                {"role": "user", "content": {"type": "text", "text": "hello"}}
+            ],
+            "maxTokens": 50
+        }))
+        .expect("sampling params")
+    }
+
+    #[tokio::test]
+    async fn sampling_declined_when_invocation_budget_exhausted() {
+        let (sink, dir) = sampling_world();
+        let runner = sampling_runner(&sink, &dir).await;
+        let agent = sampling_agent(1.0, None);
+        let llm = FixtureClient::new(); // must never be consulted
+        let mut totals = InvocationTotals {
+            total_cost: 1.0,
+            ..Default::default()
+        };
+        let mut cursor = None;
+        let declined = runner
+            .handle_sampling(
+                &agent,
+                "srv",
+                &llm,
+                agent.id(),
+                Uuid::now_v7(),
+                sampling_params(),
+                &mut totals,
+                Instant::now(),
+                &mut cursor,
+            )
+            .await
+            .expect("infrastructure ok")
+            .expect_err("must decline");
+        assert!(
+            declined.message.contains("invocation budget exhausted"),
+            "got: {}",
+            declined.message
+        );
+        assert!(sink.events().is_empty(), "no model call on refusal");
+        assert_eq!(totals.total_cost, 1.0, "refusal spends nothing");
+    }
+
+    #[tokio::test]
+    async fn sampling_declined_when_sub_budget_exhausted() {
+        let (sink, dir) = sampling_world();
+        let runner = sampling_runner(&sink, &dir).await;
+        let agent = sampling_agent(10.0, Some(0.5));
+        let llm = FixtureClient::new();
+        let mut totals = InvocationTotals {
+            total_cost: 0.5,
+            sampling_cost: 0.5,
+            ..Default::default()
+        };
+        let mut cursor = None;
+        let declined = runner
+            .handle_sampling(
+                &agent,
+                "srv",
+                &llm,
+                agent.id(),
+                Uuid::now_v7(),
+                sampling_params(),
+                &mut totals,
+                Instant::now(),
+                &mut cursor,
+            )
+            .await
+            .expect("infrastructure ok")
+            .expect_err("must decline");
+        assert!(
+            declined.message.contains("sub-budget exhausted"),
+            "got: {}",
+            declined.message
+        );
+        assert!(sink.events().is_empty());
+    }
+
+    /// Sampling spends the agent's budget through the shared path:
+    /// totals and the sampling sub-accumulator both grow by the
+    /// priced amount, the WAL row carries the cost (the finding-4
+    /// fix, on the sampling path), and the published request is
+    /// attributed to the requesting server.
+    #[tokio::test]
+    async fn sampling_spends_into_the_invocation_budget() {
+        let (sink, dir) = sampling_world();
+        let runner = sampling_runner(&sink, &dir).await;
+        let agent = sampling_agent(10.0, Some(1.0));
+        let llm = FixtureClient::new();
+        // haiku rates in test_pricing: $1/M in, $5/M out.
+        llm.push_response(canned("sampled.", 100_000, 10_000)); // $0.15
+        let mut totals = InvocationTotals::default();
+        let mut cursor = None;
+        let invocation_id = Uuid::now_v7();
+        let result = runner
+            .handle_sampling(
+                &agent,
+                "srv",
+                &llm,
+                agent.id(),
+                invocation_id,
+                sampling_params(),
+                &mut totals,
+                Instant::now(),
+                &mut cursor,
+            )
+            .await
+            .expect("infrastructure ok")
+            .expect("sampling succeeds");
+        drop(result);
+        assert!(
+            (totals.total_cost - 0.15).abs() < 1e-12,
+            "{}",
+            totals.total_cost
+        );
+        assert!(
+            (totals.sampling_cost - 0.15).abs() < 1e-12,
+            "{}",
+            totals.sampling_cost
+        );
+
+        let events = sink.events();
+        let origin = events
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::LlmRequest(p) => Some(p.origin.clone()),
+                _ => None,
+            })
+            .expect("llm.request published");
+        assert!(
+            matches!(origin, crate::events::LlmCallOrigin::Sampling { server } if server == "srv")
+        );
+
+        let rows = runner
+            .config
+            .store
+            .list_llm_dispatches_for_invocation(&invocation_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            (rows[0].cost_usd.unwrap_or(0.0) - 0.15).abs() < 1e-12,
+            "WAL row must carry the sampling call's cost, got {:?}",
+            rows[0].cost_usd
+        );
     }
 }

@@ -197,7 +197,14 @@ pub const SIM_TOOL: &str = "sim_tool";
 impl SimWorld {
     /// Build a world with the given entropy seed and per-invocation
     /// budget. The agent declares one scripted tool ([`SIM_TOOL`]).
+    /// Costs are zero (empty pricing table) — budget never trips.
     pub async fn new(seed: u64, budget: f64) -> Self {
+        Self::with_pricing(seed, budget, Arc::new(PricingTable::empty())).await
+    }
+
+    /// Build a world with real pricing, for the budget properties
+    /// (reducer verification, slice 6).
+    pub async fn with_pricing(seed: u64, budget: f64, pricing: Arc<PricingTable>) -> Self {
         let clock = Arc::new(SimClock::new(seed));
         let sink = Arc::new(RecordingSink::new());
         let tool = Arc::new(ScriptedTool::new(SIM_TOOL));
@@ -221,7 +228,7 @@ impl SimWorld {
             .build()
             .expect("sim agent");
 
-        let runner = Self::build_runner(&clock, &sink, &registry, &store);
+        let runner = Self::build_runner(&clock, &sink, &registry, &store, pricing);
 
         Self {
             clock,
@@ -239,6 +246,7 @@ impl SimWorld {
         sink: &Arc<RecordingSink>,
         registry: &ToolRegistry,
         store: &Arc<WorkerStore>,
+        pricing: Arc<PricingTable>,
     ) -> ReducerRunner {
         ReducerRunner::new(
             Arc::new(
@@ -250,7 +258,7 @@ impl SimWorld {
                 RunnerConfig::builder()
                     .event_sink(Arc::clone(sink) as Arc<dyn EventSink>)
                     .clock(Arc::clone(clock) as Arc<dyn Clock>)
-                    .pricing(Arc::new(PricingTable::empty()))
+                    .pricing(pricing)
                     .store(Arc::clone(store))
                     .worker_id(WorkerId::new("sim-worker").expect("worker id"))
                     .build(),
@@ -1022,5 +1030,253 @@ mod crash_dst {
                 .is_empty(),
             "a failed invocation must not linger in flight"
         );
+    }
+}
+
+#[cfg(test)]
+mod budget_properties {
+    //! Slice 6 (claim R5): the budget ceiling, as properties.
+    //!
+    //! Enforcement semantics under test (from `run_model_with_llm`):
+    //! the check is **post-call** — a call completes, its cost joins
+    //! the totals, and only then is `total > budget` evaluated. So a
+    //! `Completed` run's final cost is ≤ budget, a `BudgetExceeded`
+    //! run's cost exceeds it by at most the crossing call, and no
+    //! `llm.request` follows the trip. Crash/resume accumulation
+    //! (pre-registered finding 1, fixed before the net existed) is
+    //! closed here as a property: for any recoverable crash point,
+    //! the resumed run trips at exactly the same total as the
+    //! uninterrupted reference.
+
+    use std::collections::HashMap;
+
+    use super::resume_equivalence::load_fixture;
+    use super::tests::{end_turn, sim_tool_call};
+    use super::*;
+    use crate::events::TokenUsage;
+    use crate::llm::ChatResponse;
+    use crate::pricing::ModelPricing;
+    use crate::test_support::events::event_kind;
+    use crate::test_support::oracle::check_invocation_trace;
+
+    fn sim_rates() -> ModelPricing {
+        ModelPricing {
+            input_per_million: 10.0,
+            output_per_million: 50.0,
+            cache_read_per_million: Some(1.0),
+            cache_write_per_million: Some(12.5),
+        }
+    }
+
+    fn sim_pricing() -> Arc<PricingTable> {
+        let mut entries = HashMap::new();
+        entries.insert("claude-sim".to_string(), sim_rates());
+        Arc::new(PricingTable::from_map(entries))
+    }
+
+    fn with_usage(mut response: ChatResponse, usage: TokenUsage) -> ChatResponse {
+        response.usage = usage;
+        response
+    }
+
+    fn usage(input: u32, output: u32) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }
+    }
+
+    fn cost_of(u: &TokenUsage) -> f64 {
+        sim_rates().calculate(u).2
+    }
+
+    /// A `turns`-tool-call script where every call carries `usages[k]`.
+    fn priced_script(turns: usize, usages: &[TokenUsage]) -> Vec<ChatResponse> {
+        assert_eq!(usages.len(), turns + 1);
+        let mut responses: Vec<ChatResponse> = (0..turns)
+            .map(|k| with_usage(sim_tool_call(&format!("c{k}")), usages[k]))
+            .collect();
+        responses.push(with_usage(end_turn("all-done"), usages[turns]));
+        responses
+    }
+
+    fn llm_request_count(events: &[Event]) -> usize {
+        events
+            .iter()
+            .filter(|e| event_kind(e) == "llm_request")
+            .count()
+    }
+
+    fn failed_kind(events: &[Event]) -> Option<crate::events::FailureKind> {
+        events.iter().find_map(|e| match &e.payload {
+            EventPayload::Failed(p) => Some(p.error_kind),
+            _ => None,
+        })
+    }
+
+    /// Deterministic anchor: three calls at $1.50 each against a
+    /// $2.00 budget must trip after the second call, with the
+    /// crossing call's cost included and the trace canonical.
+    #[tokio::test]
+    async fn budget_trips_after_the_crossing_call() {
+        let world = SimWorld::with_pricing(51, 2.0, sim_pricing()).await;
+        world.tool.push_output(ToolResult::ok("out-0"));
+        let usages = vec![usage(100_000, 10_000); 3]; // $1.50 each
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &priced_script(2, &usages));
+
+        let outcome = world.run(&llm).await.expect("run");
+        let InvocationOutcome::BudgetExceeded { cost, .. } = outcome else {
+            panic!("expected BudgetExceeded, got {outcome:?}");
+        };
+        assert_eq!(cost, 3.0, "the crossing call's cost is included");
+
+        let events = world.sink.events();
+        assert_eq!(llm_request_count(&events), 2, "no request after the trip");
+        assert_eq!(
+            world.tool.dispatches().lock().unwrap().len(),
+            1,
+            "the crossing response's tool call must never dispatch"
+        );
+        assert!(matches!(
+            failed_kind(&events),
+            Some(crate::events::FailureKind::BudgetExceeded)
+        ));
+        if let Err(violations) = check_invocation_trace(&events) {
+            panic!("budget-exceeded trace not canonical: {violations:?}");
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 24, ..Default::default()
+        })]
+
+        /// Random usages × random budget: cost accounting is exact
+        /// (the outcome's total equals the independent recomputation
+        /// from the pricing table), `Completed` never exceeds the
+        /// budget, and `BudgetExceeded` exceeds it by at most the
+        /// crossing call.
+        #[test]
+        fn ceiling_and_accounting_invariants(
+            seed: u64,
+            turns in 1usize..=3,
+            per_call in proptest::collection::vec((1_000u32..500_000, 0u32..100_000), 4),
+            budget in 0.5f64..12.0,
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("sim runtime");
+            runtime.block_on(async {
+                let usages: Vec<TokenUsage> = per_call
+                    .iter()
+                    .take(turns + 1)
+                    .map(|(i, o)| usage(*i, *o))
+                    .collect();
+                let world = SimWorld::with_pricing(seed, budget, sim_pricing()).await;
+                for k in 0..turns {
+                    world.tool.push_output(ToolResult::ok(format!("out-{k}")));
+                }
+                let llm = FixtureClient::new();
+                load_fixture(&llm, &priced_script(turns, &usages));
+
+                let outcome = world.run(&llm).await.expect("run");
+                let events = world.sink.events();
+                let k = llm_request_count(&events);
+                let spent: f64 = usages[..k].iter().map(cost_of).sum();
+
+                match outcome {
+                    InvocationOutcome::Completed { .. } => {
+                        assert_eq!(k, turns + 1, "completed runs make every call");
+                        assert!(spent <= budget, "completed run overspent: {spent} > {budget}");
+                    }
+                    InvocationOutcome::BudgetExceeded { cost, .. } => {
+                        assert_eq!(cost, spent, "outcome total must equal the recomputation");
+                        assert!(cost > budget, "trip without crossing: {cost} <= {budget}");
+                        let before: f64 = usages[..k - 1].iter().map(cost_of).sum();
+                        assert!(
+                            before <= budget,
+                            "should have tripped a call earlier: {before} > {budget}"
+                        );
+                        if let Err(violations) = check_invocation_trace(&events) {
+                            panic!("trace not canonical: {violations:?}");
+                        }
+                    }
+                }
+            });
+        }
+
+        /// Finding 1, closed as a property: a crash at any
+        /// recoverable point must not reset the accumulator — the
+        /// resumed run trips at exactly the reference's total.
+        #[test]
+        fn budget_accumulates_across_resume(
+            seed: u64,
+            turns in 2usize..=3,
+            span in 0usize..4,
+            span_first: bool,
+        ) {
+            proptest::prop_assume!(span < 2 * turns);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("sim runtime");
+            runtime.block_on(async {
+                // Every call costs $1.50; the budget admits all but
+                // the final llm call, which crosses it.
+                let usages = vec![usage(100_000, 10_000); turns + 1];
+                let budget = 1.5 * (turns as f64 + 1.0) - 0.1;
+                let expected_cost = 1.5 * (turns as f64 + 1.0);
+
+                // Reference: uninterrupted.
+                let reference = SimWorld::with_pricing(seed, budget, sim_pricing()).await;
+                for k in 0..turns {
+                    reference.tool.push_output(ToolResult::ok(format!("out-{k}")));
+                }
+                let llm = FixtureClient::new();
+                load_fixture(&llm, &priced_script(turns, &usages));
+                let ref_outcome = reference.run(&llm).await.expect("reference");
+                let InvocationOutcome::BudgetExceeded { cost: ref_cost, .. } = ref_outcome else {
+                    panic!("reference must trip, got {ref_outcome:?}");
+                };
+                assert_eq!(ref_cost, expected_cost);
+
+                // Interrupted at a recoverable point, then resumed.
+                let world = SimWorld::with_pricing(seed, budget, sim_pricing()).await;
+                for k in 0..turns {
+                    world.tool.push_output(ToolResult::ok(format!("out-{k}")));
+                }
+                let fault = 1 + 3 * span + if span_first { 0 } else { 2 };
+                world.sink.fail_publish_at(fault);
+                let llm = FixtureClient::new();
+                let responses = priced_script(turns, &usages);
+                load_fixture(&llm, &responses);
+                world.run(&llm).await.expect_err("must crash");
+
+                let inv = world.invocation_id().to_string();
+                let consumed = world
+                    .store
+                    .list_llm_dispatches_for_invocation(&inv)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r.status == crate::worker::store::DispatchStatus::Completed)
+                    .count();
+                let resume_llm = FixtureClient::new();
+                load_fixture(&resume_llm, &responses[consumed..]);
+                let outcome = world.resume(&resume_llm).await.expect("resume");
+                let InvocationOutcome::BudgetExceeded { cost, .. } = outcome else {
+                    panic!("resumed run must trip like the reference, got {outcome:?}");
+                };
+                assert_eq!(
+                    cost, ref_cost,
+                    "resume reset or double-counted the accumulator"
+                );
+                assert_eq!(world.tool.dispatches().lock().unwrap().len(), turns);
+            });
+        }
     }
 }
