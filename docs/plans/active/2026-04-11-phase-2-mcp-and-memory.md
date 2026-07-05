@@ -1,5 +1,11 @@
 # Phase 2: MCP, Memory, and Skills
 
+**Status:** active (2026-04-11). Scope item 1 (the MCP client) is done, and
+item 6 partially (the `mcp:` agent-definition extension). Item 2 grew into
+the [storage + vector foundation plan](2026-06-27-storage-vector-foundation.md)
+(M1–M2 done, M3–M5 remain). Items 3–5 (memory, skills, context window
+management) are not started. One-screen view: [STATUS.md](../../../STATUS.md).
+
 ## Goal
 
 Extend the phase 1 walking skeleton with MCP client support, persistent agent memory, and a skill registry. Phase 2 makes agents stateful across invocations, proves the extension model via MCP, and enables reusable domain knowledge via skills.

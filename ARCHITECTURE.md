@@ -6,9 +6,10 @@ cross-cutting concerns the system must address.
 
 The first half describes the **design vision** — the full scope of
 what factor-q is designed to become. The second half
-([Implementation status](#implementation-status-phase-1)) describes
+([Implementation status](#implementation-status)) describes
 what has been **concretely built** so far, how the Rust codebase is
-structured, and where each module lives.
+structured, and where each module lives. For the always-current
+one-screen view, see [STATUS.md](STATUS.md).
 
 ## Core Subsystems
 
@@ -114,13 +115,15 @@ How users extend factor-q with custom tools, skills, and integrations. Includes 
 
 ---
 
-## Implementation status (phase 1)
+## Implementation status
 
 Phase 1 built a working walking skeleton that proves the core
-architecture end-to-end. This section maps the vision-level
-subsystems above to the concrete modules and types that implement
-them. For full detail, see the
-[phase 1 closing summary](docs/plans/closed/2026-04-02-phase-1-foundation.md).
+architecture end-to-end (see the
+[phase 1 closing summary](docs/plans/closed/2026-04-02-phase-1-foundation.md));
+phase 2 has since added the full MCP client and the first two
+milestones of the storage foundation (`services/fq-store`). This
+section maps the vision-level subsystems above to the concrete
+modules and types that implement them.
 
 ### Event bus (`fq-runtime/src/bus.rs`)
 
@@ -208,7 +211,17 @@ violations are reported as `tool.result` events with
 The shell tool uses argv (no shell invocation), mandatory timeout,
 output cap, and a fresh child env with only a pinned PATH.
 
-### Projection consumer (`fq-runtime/src/projection/`)
+### MCP client (`fq-runtime/src/mcp.rs`)
+
+The full client described under
+[Tool and skill system](#tool-and-skill-system): stdio and Streamable
+HTTP transports; tools, resources, and prompts; the server-initiated
+capabilities (sampling, elicitation, roots) resolved autonomously
+under declarative per-server grants that default to nothing. MCP tool
+calls emit the same canonical event sequence as built-ins, and cost
+controls apply (ADR-0021). See the [MCP guide](docs/guide/mcp.md).
+
+### Projection consumer (`fq-runtime/src/control_plane/projection/`)
 
 A durable JetStream consumer on `fq.agent.>` + `fq.system.>` that
 materialises every event into a SQLite database. Only envelope
@@ -216,7 +229,7 @@ fields and denormalised columns (model, tokens, cost, error_kind,
 duration) are stored — no full payloads. NATS is the source of
 truth; the projection is rebuildable by replaying from the stream.
 
-### Trigger dispatcher (`fq-runtime/src/dispatcher.rs`)
+### Trigger dispatcher (`fq-runtime/src/control_plane/dispatcher.rs`)
 
 A durable JetStream consumer on `fq.trigger.>` that dispatches
 incoming trigger messages to the correct agent via the executor.
@@ -258,6 +271,35 @@ non-zero.
 | `fq costs` | Per-agent cost aggregation |
 | `fq status` | Runtime health check |
 
+### Content store (`services/fq-store`)
+
+A separate service crate — the storage substrate the Memory and
+Skills services will build on (phase 2 pillar #2), shipped through M2
+of the
+[storage + vector foundation plan](docs/plans/active/2026-06-27-storage-vector-foundation.md):
+
+- **CAS** (`fs.rs`, `cid.rs`) — BLAKE3-addressed, FastCDC-chunked
+  content store behind the `ContentStore` trait, with a
+  property-based conformance suite that also runs over the wire
+  against the `tarpc` remote client (`service.rs`).
+- **Name index + repository** (`index.rs`, `repository.rs`) —
+  hierarchical names → CIDs, version history, transactional
+  two-level refcounts.
+- **Garbage collection** (`collector.rs`, `verify.rs`, `audit.rs`)
+  — the verified lock-free online-reclaim protocol plus the
+  reachability-audit backstop.
+- **Access control** (`grants.rs`, `grant_log.rs`, `tokens.rs`,
+  `gate.rs`) — event-sourced grants (SQLite log of record, NATS
+  fan-out behind a durable outbox), biscuit capability tokens, and
+  the default-deny `can()` gate at the op boundary. See the
+  [access-control guide](docs/guide/access-control.md).
+- **CLI** (`fq-cas`) — content and named-object commands plus the
+  `gc`, `grant`, and `token` operator surfaces. `fq-cas serve` stays
+  localhost-only and unauthenticated until M5.
+
+Layer 2 (extraction) and layer 3 (embedding + retrieval) are
+M3–M5, next on the active plan.
+
 ### What is NOT yet built
 
 These subsystems from the vision are not implemented:
@@ -269,3 +311,5 @@ These subsystems from the vision are not implemented:
 - Continuous learning
 - Container-level isolation (ADR-0010 accepted: containers by default, Kata+Firecracker upgrade path)
 - Scheduled triggers / internal job scheduler
+- Observability floor beyond `fq status` (JSON logs, metrics,
+  alerting — deferred in the [backlog](docs/plans/backlog.md))
