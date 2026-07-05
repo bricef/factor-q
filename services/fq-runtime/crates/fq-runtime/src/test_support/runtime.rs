@@ -8,7 +8,7 @@
 //! can run in parallel against a shared NATS without
 //! stepping on each other.
 //!
-//! See `docs/plans/active/2026-05-22-acceptance-harness.md`.
+//! See `docs/plans/closed/2026-05-22-acceptance-harness.md`.
 //!
 //! # Example
 //!

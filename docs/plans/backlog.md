@@ -436,6 +436,11 @@ log levels, progress display) lands with this work.
 
 ## Reducer boundary invariants (flagged 2026-05-15)
 
+> **Update (2026-07-05):** the "Round-trip invariants on
+> `HarnessState`" thread below is absorbed as slice 2 of the
+> [reducer verification plan](active/2026-07-05-reducer-verification.md);
+> the other two threads are unchanged.
+
 A design pass on validation at the reducer host/guest boundary
 during the envelope-refactor work surfaced three threads. The
 first two are worth doing now; the third is deferred to the

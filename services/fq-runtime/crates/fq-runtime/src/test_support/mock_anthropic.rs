@@ -11,7 +11,7 @@
 //! captures each request body so tests can assert on what we
 //! sent (model, system prompt, messages, etc.) if they care.
 //!
-//! See `docs/plans/active/2026-05-18-mock-llm-test-harness.md`.
+//! See `docs/plans/closed/2026-05-18-mock-llm-test-harness.md`.
 //!
 //! # Example
 //!
