@@ -264,6 +264,22 @@ async fn main() -> ExitCode {
 
     let cli = Cli::parse();
 
+    // Restore the default SIGPIPE disposition for query-style commands
+    // so `fq status | head` dies silently like any Unix filter instead
+    // of panicking on EPIPE (Rust's startup sets SIGPIPE to ignore,
+    // which turns a closed pipe into a write error that `println!`
+    // panics on). The daemon and the in-process trigger keep the
+    // ignore disposition: long-running paths must not be killable by a
+    // closed stdout, and the shell tool's child processes inherit
+    // whatever disposition is in effect at spawn time.
+    #[cfg(unix)]
+    if !matches!(cli.command, Commands::Run | Commands::Trigger { .. }) {
+        // SAFETY: changing a process signal disposition before any
+        // output has been written; no handler is installed, only the
+        // kernel default is restored.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
+
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

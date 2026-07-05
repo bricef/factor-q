@@ -831,6 +831,25 @@ keep costing CI runs and eroding signal until fixed.
 - If the root cause is upstream, pin/patch or wrap the SDK's stdio transport.
 
 
+
+### Local NATS-gated tests flake when a daemon shares the broker
+
+**Source:** dogfood day one (2026-07-05). With a live `fq run` daemon
+on the same NATS as the test suite, the NATS-gated lib tests
+(`dispatcher_executes_published_trigger`, the heartbeat-consumer and
+retry-sweeper end-to-end tests) flake at a high rate: the daemon's
+trigger dispatcher consumes test triggers before the test's own
+dispatcher sees them (its log shows "trigger for unknown agent,
+dropping" for `dispatch-test-*` ids), and its consumers add races on
+shared streams. With the daemon stopped, the same gate passes cleanly
+back-to-back; GitHub CI never sees this because its NATS starts fresh
+and daemon-free.
+
+Interim rule of thumb: stop any local daemon before `just ci` (noted
+in the dogfood project README). Proper fixes, pick any: per-run
+subject prefixes for tests, a dedicated test broker on another port,
+or unique stream names per suite run.
+
 ## Dogfood findings (flagged 2026-07-05)
 
 **Source:** the first live runs of the v0 dogfood loop (the `doc-drift`
@@ -862,8 +881,13 @@ document the restart requirement loudly in the agent-definitions guide.
 
 ### `fq status | head` panics on SIGPIPE
 
-Exit 101 when the pipe closes early — the usual Rust
-`println!`-panics-on-EPIPE issue. Handle or ignore SIGPIPE in the CLI.
+**Addressed (2026-07-05).** `fq` restores the default SIGPIPE
+disposition for query-style commands (everything except `run` and
+`trigger`, whose long-running paths must not die from a closed
+stdout), so `fq status | head` now exits 141 silently like any Unix
+filter. Pinned by `fq-cli/tests/sigpipe.rs`, which spawns the real
+binary against a closed pipe and was verified to fail (exit 101)
+against the unfixed code.
 
 ### `fq costs` filtering — finding corrected
 
