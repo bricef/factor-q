@@ -14,6 +14,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 
 ## Documentation
 
+- [Status](STATUS.md) — one screen: what runs today, where we are, what's next
 - [Quickstart](QUICKSTART.md) — clone to running agent in under ten minutes
 - [Vision](VISION.md) — what factor-q is and why it exists
 - [Architecture](ARCHITECTURE.md) — core subsystems and implementation
