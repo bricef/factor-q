@@ -3356,6 +3356,9 @@ mod tests {
         }
 
         crate::test_support::events::assert_parent_chain(&events);
+        // The full R1 grammar: canonical sequence, one terminal,
+        // archived at the end, chained envelopes (slice 1 oracle).
+        crate::test_support::oracle::assert_valid_trace(&events);
         // Schema version on every envelope must be the v2 constant.
         for e in &events {
             assert_eq!(e.envelope.schema_version, crate::events::SCHEMA_VERSION);
@@ -3901,7 +3904,8 @@ mod tests {
         // 9. llm.dispatched (turn 2)
         // 10. llm.response (turn 2, envelope.cost set)
         // 11. completed
-        let (store, events) = run_with_wal(&url, agent, responses, 11, Some(dir.path())).await;
+        // 12. invocation.archived
+        let (store, events) = run_with_wal(&url, agent, responses, 12, Some(dir.path())).await;
 
         let kinds: Vec<&str> = events
             .iter()
@@ -3922,6 +3926,8 @@ mod tests {
         );
         // The tool.dispatched event is present at all.
         assert!(kinds.contains(&"tool_dispatched"), "kinds: {kinds:?}");
+        // And the whole trace satisfies the canonical grammar.
+        crate::test_support::oracle::assert_valid_trace(&events);
 
         // Every WAL row should be `completed` at end-of-invocation.
         assert!(

@@ -1,7 +1,9 @@
 # Reducer verification: implementation plan
 
-**Status:** draft (2026-07-05) — claims and slices proposed for review; no
-slice work started. Adopts critique 3 of the
+**Status:** active (2026-07-05) — claims R1–R7 reviewed and approved;
+slices 1–2 landed the same day (both pre-registered findings were
+confirmed and fixed before the net: the budget accumulator and the
+error-kind semantics). Adopts critique 3 of the
 [2026-07-05 project assessment](../../design/2026-07-05-project-assessment.md)
 and absorbs the "Round-trip invariants on `HarnessState`" thread of
 [backlog § Reducer boundary invariants](../backlog.md).
@@ -155,8 +157,8 @@ Stated before the net is built, to be confirmed or refuted by it:
 
 | # | Slice | Validates | Status |
 |---|---|---|---|
-| 1 | Trace oracle — claims as pure predicates over recorded (events, WAL, outcome) traces; existing happy-path tests re-driven through it | the net itself, R1/R6 shape | todo |
-| 2 | `HarnessState::validate` + state-blob property tests (round-trip, corruption/invalid-state rejection, unknown-field tolerance) | R7 | todo |
+| 1 | Trace oracle — claims as pure predicates over recorded (events, WAL, outcome) traces; existing happy-path tests re-driven through it | the net itself, R1/R6 shape | **done** — `test_support::oracle`: the grammar automaton (LLM triples, tool spans with nested sampling, synthetic lone error results, one terminal + archived, envelope chain), 9 hermetic oracle tests, wired into the two canonical runner traces |
+| 2 | `HarnessState::validate` + state-blob property tests (round-trip, corruption/invalid-state rejection, unknown-field tolerance) | R7 | **done** — validate at load and save, targeted corruption tests, byte round-trip, unknown-field tolerance, two proptest properties |
 | 3 | Hermetic sim harness — scripted LLM + recording tools + in-memory event sink + tempdir `WorkerStore`, seeded scheduler, fault plan | enables 4–7 | todo |
 | 4 | Resume-equivalence properties — random scripts × every step boundary | R4 | todo |
 | 5 | Crash DST — fault plans over every WAL/publish/dispatch boundary; recovery categorisation soundness; ambiguous handling; archive hand-off under ack loss | R2, R3, R1-under-faults | todo |

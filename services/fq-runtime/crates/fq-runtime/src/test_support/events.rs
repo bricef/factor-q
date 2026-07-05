@@ -34,7 +34,13 @@ use crate::events::{Event, EventPayload};
 /// runner tests; replacing those duplicates with this function
 /// is the first refactor that uses this module.
 pub fn event_kind(event: &Event) -> &'static str {
-    match &event.payload {
+    event_kind_of(&event.payload)
+}
+
+/// Payload-level variant of [`event_kind`], for callers that hold a
+/// payload without its envelope (e.g. the trace oracle's messages).
+pub fn event_kind_of(payload: &EventPayload) -> &'static str {
+    match payload {
         EventPayload::Triggered(_) => "triggered",
         EventPayload::LlmRequest(_) => "llm_request",
         EventPayload::LlmDispatched(_) => "llm_dispatched",
