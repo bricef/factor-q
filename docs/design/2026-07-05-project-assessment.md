@@ -159,7 +159,7 @@ future readers — human or agent — don't mistake them for commitments.
 ### 7. The draft ADRs are the real frontier
 
 [ADR-0006 (API)](../adrs/draft/0006-api-design.md),
-[ADR-0007 (inter-agent communication)](../adrs/draft/0007-inter-agent-communication.md),
+[ADR-0007 (inter-agent communication)](../adrs/accepted/0007-inter-agent-communication.md),
 and [ADR-0008 (extension model)](../adrs/draft/0008-extension-model.md) have
 been drafts since the April design push — and the project's one-line
 description is "multi-agent systems," which lives or dies on 0007.
