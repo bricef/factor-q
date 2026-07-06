@@ -1611,31 +1611,61 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // agents invalid) are logged and the current registry is kept, so
     // a bad edit can never leave the daemon with no agents. Best-effort
     // core-NATS subscription: reload signals are ephemeral.
+    //
+    // Non-fatal tier: hot-reload is a convenience, not a critical
+    // task — the daemon keeps dispatching triggers perfectly well
+    // without it. So, unlike the dispatcher/consumer tasks, losing
+    // the reload channel must NOT tear the runtime down. If the
+    // subscription ever drops we log and resubscribe rather than
+    // exiting, and (see the main select! below) this task's handle is
+    // deliberately not watched as a daemon-fatal arm.
     let (reload_shutdown_tx, mut reload_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let reload_bus = bus.clone();
     let reload_registry = shared_registry.clone();
     let reload_dir = config.agents.directory.clone();
-    let mut reload_handle = tokio::spawn(async move {
-        let mut sub = match reload_bus.subscribe_control_reload().await {
-            Ok(sub) => sub,
-            Err(err) => {
-                tracing::error!(error = %err, "failed to subscribe to control reload");
-                return;
-            }
-        };
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut reload_shutdown_rx => {
-                    tracing::info!("control-reload listener received shutdown signal");
-                    break;
+    let reload_handle = tokio::spawn(async move {
+        'resubscribe: loop {
+            let mut sub = match reload_bus.subscribe_control_reload().await {
+                Ok(sub) => sub,
+                Err(err) => {
+                    // Can't establish the subscription. Log and wait a
+                    // beat before retrying rather than spinning or
+                    // exiting — hot-reload is best-effort, its absence
+                    // never justifies killing the daemon.
+                    tracing::error!(
+                        error = %err,
+                        "failed to subscribe to control reload; retrying in 5s"
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = &mut reload_shutdown_rx => {
+                            tracing::info!("control-reload listener received shutdown signal");
+                            break 'resubscribe;
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
+                    }
                 }
-                msg = sub.next() => {
-                    match msg {
-                        Some(_) => reload_agents(&reload_registry, &reload_dir).await,
-                        None => {
-                            tracing::warn!("control-reload subscription ended");
-                            break;
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut reload_shutdown_rx => {
+                        tracing::info!("control-reload listener received shutdown signal");
+                        break 'resubscribe;
+                    }
+                    msg = sub.next() => {
+                        match msg {
+                            Some(_) => reload_agents(&reload_registry, &reload_dir).await,
+                            None => {
+                                // Subscription dropped. This is not a
+                                // daemon-fatal condition — resubscribe
+                                // and carry on so hot-reload recovers on
+                                // its own.
+                                tracing::warn!(
+                                    "control-reload subscription ended; resubscribing"
+                                );
+                                continue 'resubscribe;
+                            }
                         }
                     }
                 }
@@ -1731,23 +1761,13 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             let err_msg = describe_task_result("trigger dispatcher", result);
             ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
         }
-        result = &mut reload_handle => {
-            // The control-reload listener returns () — a panic
-            // shows up as Err(JoinError).
-            match result {
-                Ok(()) => (
-                    "task_failed",
-                    false,
-                    Some(("control_reload_listener", "exited cleanly".to_string())),
-                ),
-                Err(err) => (
-                    "task_failed",
-                    false,
-                    Some(("control_reload_listener", format!("task panicked: {err}"))),
-                ),
-            }
-        }
     };
+    // NOTE: the control-reload listener handle is intentionally NOT
+    // watched here. Hot-reload is a non-fatal convenience: its task
+    // ending (subscription loss it can't recover, or a panic) must not
+    // classify as a daemon-fatal `task_failed` and tear the runtime
+    // down. It is signalled to stop and joined during the shutdown
+    // sequence below like the other tasks.
 
     // If a task failed, publish a system.task_failed event with
     // its details before we tear everything else down.
