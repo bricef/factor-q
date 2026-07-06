@@ -67,6 +67,16 @@ This keeps the number of things the runtime must be good at small. It also means
 
 **What this demands in practice.** Sugar tools (`AgentSpawn`, `AgentMap`, `AgentLoop`) compile to graph instances and the runtime handles them through the same executor as any other graph. The fragment library is the extension mechanism for new canonical patterns. Workflows that need dynamic branching, cycles, or multi-round convergence drop down to `AgentGraph` directly rather than encoding control flow in prompts.
 
+### 6. The simplest thing that works, behind a verified, swappable seam
+
+Every core capability is the simplest implementation that works, behind a well-defined interface, under a verification net that pins the interface's contract. Sophistication is deferred — it arrives later as a swap behind the same seam, not as complexity baked into the first version. Build the end-to-end experience on reference implementations first; deepen a component only once the whole loop runs.
+
+**What this rules out.** Building the sophisticated version before the end-to-end path exists — a fast vector engine before `search` returns anything, a reranker before retrieval works, a clever compactor before the null policy is replaced. Coupling that cannot be swapped: a consumer reaching past the seam into a specific implementation, or a capability with no interface at all. And a seam without a contract — an interface not pinned by claims and a test net is not swappable in practice, because a replacement has nothing to be checked against.
+
+**What this demands in practice.** Core capabilities sit behind traits: the event sink and injected clock, the [context policy and strategy](../aspirational/context-management.md), the extractor plugin protocol and the vector-engine boundary in the [storage foundation](../../plans/active/2026-06-27-storage-vector-foundation.md), the graph executor (Principle 5). Each ships a reference implementation first — a UTF-8 passthrough extractor, sqlite-vec, the two-stage default compactor, an in-memory event sink — and each seam carries the claims and verification the [reducer verification](../../plans/closed/2026-07-05-reducer-verification.md) work established, so a later, better implementation is validated against the same contract. Sophistication (hybrid search, rerankers, a faster engine, smarter compaction) is scheduled as a swap, never as a reason to delay the end-to-end path.
+
+**Why this compounds — it is what makes fq-work-on-fq tractable.** A module behind a stable, tested seam is exactly what an autonomous agent can safely improve: the interface bounds the blast radius, and the verification net makes the change checkable against a contract the agent cannot silently break. This principle is therefore a precondition for the [M0 self-improvement loop](../../plans/active/2026-07-05-m0-close-the-loop.md), not merely hygiene — the discipline that keeps a human able to swap a component is the same one that lets an agent do it.
+
 ---
 
 ## How this doc evolves

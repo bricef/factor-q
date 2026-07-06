@@ -73,6 +73,33 @@ non-sqlite-vec vector engines (Qdrant/LanceDB); distributed deployment
 `Principal` slot exists). The Memory service (#3), Skill registry (#4), and
 context-window management (#5) are separate pillars that *consume* this.
 
+### Scope discipline (project assessment §2)
+
+Built under [design principle 6](../../design/committed/design-principles.md)
+— the simplest reference implementation behind a verified, swappable seam.
+The [2026-07-05 assessment](../../design/2026-07-05-project-assessment.md) §2
+flagged the opportunity cost of the platform growing ahead of the services it
+serves, and offered three correctives. Disposition (2026-07-05):
+
+- **Hold M4 to reference-implementations-only — adopted, and extended to M3.**
+  Both build the simplest thing that works (UTF-8 passthrough extractor;
+  sqlite-vec, dense-only search) behind the swappable seams in "Out" above.
+- **Resist retrieval sophistication (hybrid, rerankers) — adopted.** Kept in
+  "Out" as seams-only; they arrive later as swaps behind the search pipeline.
+- **Ship Memory's MVP against M4 without waiting for M5 — consciously not
+  taken.** M5 is a few hours of packaging once M3/M4 exist, so there is
+  nothing meaningful to shortcut, and a bespoke Memory-against-M4 path would
+  add a throwaway seam rather than save time. M5 proceeds normally; Memory
+  consumes the packaged service.
+
+This discharges assessment §2 as a recorded posture; the sequencing
+(M3 → M4 → M5) is unchanged. Note the track has meanwhile *accreted* runtime-
+driven scope this session — the CAS crate extraction and archive service
+([ADR-0026](../../adrs/accepted/0026-event-log-system-of-record.md)), the M3
+store-fault trait seam, and the migration-test v1.0.0 gate — which is
+usage-driven (the CAS now has a real internal customer), not the speculative
+platform-growth §2 warned against.
+
 ## The work (milestones)
 
 Each milestone is independently shippable and testable.

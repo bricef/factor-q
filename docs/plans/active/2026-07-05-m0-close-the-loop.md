@@ -45,6 +45,12 @@ agent that reviews and reports" to "an agent that lands a validated change."
 
 ## The loop (the primary deliverable)
 
+This loop is tractable *because* of [design principle 6](../../design/committed/design-principles.md)
+— the codebase's core capabilities sit behind verified, swappable seams, so
+an agent can work on a module with a bounded blast radius and a contract the
+verification net keeps it from silently breaking. The discipline that lets a
+human swap a component is the same one that lets the loop.
+
 A scoped-task change loop:
 
 1. **Intake** — a scoped task (a backlog item, a failing test, a
