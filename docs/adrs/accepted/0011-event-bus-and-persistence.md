@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted
+Accepted. **Partially superseded by
+[ADR-0026](0026-event-log-system-of-record.md) (2026-07-05):** the
+source-of-truth / "primary persistence layer for events" decision below is
+overturned — NATS is demoted to transport and a dedicated CAS-backed
+archive service becomes the event log's system of record, with the SQLite
+projection rebuildable from that archive rather than from NATS. The
+NATS-with-JetStream **event-bus and messaging-backbone** decision (subjects,
+pub/sub, request/reply, replay-within-window) remains in force.
 
 ## Context
 

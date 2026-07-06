@@ -19,7 +19,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0005](accepted/0005-agent-definition-format.md) | Agent definition format — Markdown + YAML frontmatter |
 | [0009](accepted/0009-technology-choices.md) | Technology choices (Rust runtime) |
 | [0010](accepted/0010-agent-execution-isolation.md) | Agent execution isolation (containers by default; nothing-by-default sandbox) |
-| [0011](accepted/0011-event-bus-and-persistence.md) | Event bus and persistence (NATS + JetStream) |
+| [0011](accepted/0011-event-bus-and-persistence.md) | Event bus and persistence (NATS + JetStream) — persistence/source-of-truth role partially superseded by [ADR-0026](accepted/0026-event-log-system-of-record.md); bus role stands |
 | [0012](accepted/0012-graph-definition-format.md) | Execution graph definition format |
 | [0013](accepted/0013-memory-as-mcp-service.md) | Memory as an MCP service |
 | [0014](accepted/0014-agent-harness-as-reducer.md) | Agent harness as a reducer with a runtime-owned loop |
