@@ -48,3 +48,9 @@ Persistent memory (storage, retrieval, search) is implemented as one or more MCP
 - Memory tool calls (store, retrieve, search) are standard tool invocations from the agent's perspective
 - Multiple memory services can coexist — per-agent memory, shared memory, domain-specific memory
 - The runtime does not need a memory subsystem, storage schema, or retrieval logic in its core
+
+Memory as defined here serves as the retrieval layer in the
+[context-management design](../../design/aspirational/context-management.md),
+which uses Memory for retrieving relevant history slices and durable notes —
+the interaction identified as the coupling between context management and
+Memory in the 2026-07-05 project assessment.
