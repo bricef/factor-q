@@ -968,6 +968,29 @@ gap to close before they gain reach. Scope: enforce the declared
 dimensions already are). Until then, treat any agent as
 network-unrestricted regardless of what its definition declares.
 
+### `bus.rs` is a growing typed facade — split transport from per-domain subjects?
+
+Surfaced in human review of PR #3 (the `fq reload` feature the M0 loop
+built, 2026-07-06). `bus.rs` mixes two roles: generic transport
+(`connect`, `publish(&Event)`, `subscribe`) *and* per-domain typed
+pub/sub carrying its own subject constants — `publish_trigger` +
+`ALL_TRIGGERS_SUBJECT`, and now `publish_control_reload` +
+`CONTROL_RELOAD_SUBJECT`. It has been quietly accumulating domain
+knowledge; each new subject family adds another typed method pair.
+
+The reload methods themselves are **correctly placed for the current
+convention** — they mirror `publish_trigger` exactly, and the actual
+dispatch (the listener loop + `reload_agents` registry swap) lives in the
+control plane, not the bus. So this is not a PR-3 defect; the change
+followed the strongest local precedent, and the transport-vs-handling
+split already partly holds. But the review raised the latent question:
+should the typed facade be split into a generic transport plus per-domain
+subject/pub-sub modules (a `subjects` registry, or methods hanging off
+each consumer)? That is a deliberate, codebase-level call to make across
+triggers, events, *and* control at once — not piecemeal on one PR. Low
+priority (tidiness / layering; no functional impact), but the file's
+responsibility is worth bounding before it grows further.
+
 ## Schema-migration testing (flagged 2026-07-05)
 
 **Priority: high — release gate for v1.0.0.** No schema migration
