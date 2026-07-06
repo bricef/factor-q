@@ -932,6 +932,42 @@ by upgrading genai past 0.4.x when convenient; expect API churn
 cache options) and a small bonus (1h-TTL support). Our test's
 accept-both assertion already tolerates the post-upgrade wire shape.
 
+### M0 change-loop: trigger acked on completion caused a redelivery storm
+
+Found on the M0 "close the loop" agent's first run (2026-07-06): one
+trigger produced three back-to-back invocations (three duplicate
+branches). Root cause — the dispatcher acked the trigger only after the
+invocation *completed*, but the consumer's ack-wait is JetStream's 30s
+default, so a ~100s change-and-validate invocation blew the deadline and
+NATS redelivered. Invisible to the fast `doc-drift` agent (seconds,
+under the ack-wait); fatal to slow agents, which are the runtime's whole
+point. **Fixed** (`1efc67a`): ack on dispatch, not completion — the
+reducer WAL owns in-flight durability and recovery; a discriminating
+regression test pins it.
+
+**Follow-up (open): ack-after-durable-start.** Acking on dispatch leaves
+a sub-second window — a crash between the ack and the first WAL write is
+a missed (re-triggerable) run, not corruption. Closing it needs the
+invocation to signal "durably started" out through the `Worker` seam so
+the dispatcher acks at that point. Low priority (tiny, non-corrupting
+window), but the principled close.
+
+### Agent network sandbox is declared but not enforced
+
+Surfaced while wiring the M0 loop's GitHub step (2026-07-06): agent
+definitions carry a `sandbox.network` allowlist, but it is **not
+enforced** — agents have ambient network access (they can reach any
+host, e.g. via `gh`/`git`). This violates
+[design principle 3](../design/committed/design-principles.md)
+("sandbox by construction, not by policy" — capability granted exactly,
+nothing ambient), and it is the exposure
+[assessment §4](../design/2026-07-05-project-assessment.md) flags:
+agents grow more capable and longer-lived, so unrestricted network is a
+gap to close before they gain reach. Scope: enforce the declared
+`network` allowlist at the sandbox boundary (the `fs_*` / `exec_cwd`
+dimensions already are). Until then, treat any agent as
+network-unrestricted regardless of what its definition declares.
+
 ## Schema-migration testing (flagged 2026-07-05)
 
 **Priority: high — release gate for v1.0.0.** No schema migration
