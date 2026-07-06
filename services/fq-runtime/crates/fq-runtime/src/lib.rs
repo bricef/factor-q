@@ -48,7 +48,9 @@ pub use agent::{
 };
 pub use bus::EventBus;
 pub use config::Config;
-pub use control_plane::dispatcher::{DispatcherError, TriggerDispatcher};
+pub use control_plane::dispatcher::{
+    DispatcherError, SharedRegistry, TriggerDispatcher, shared_registry,
+};
 pub use control_plane::projection::{ProjectionConsumer, ProjectionStore};
 pub use control_plane::{
     CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError, CoordinationConsumer,

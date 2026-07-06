@@ -63,6 +63,16 @@ pub const TRIGGER_STREAM_NAME: &str = "fq-triggers";
 /// Subject pattern matching all agent triggers.
 pub const ALL_TRIGGERS_SUBJECT: &str = "fq.trigger.>";
 
+/// Control subject a running `fq run` daemon subscribes to for a
+/// hot-reload of agent definitions. Published by `fq reload`
+/// (fire-and-forget, core NATS — deliberately NOT one of the
+/// JetStream stream subjects, so a reload signal is ephemeral: if
+/// no daemon is listening it is simply a no-op, never a queued
+/// backlog). A reload affects the NEXT trigger only; in-flight
+/// invocations keep the config they snapshotted at trigger time
+/// (ADR-0020 refresh-between-invocations precedent).
+pub const CONTROL_RELOAD_SUBJECT: &str = "fq.control.reload";
+
 /// Default retention for the trigger stream. Triggers are short-lived
 /// — the dispatcher consumes them within seconds under normal
 /// operation. A 24h window is a safety net against a runaway
@@ -479,6 +489,40 @@ impl EventBus {
             })
         });
         Ok(Box::pin(stream))
+    }
+
+    /// Publish a fire-and-forget control message asking any running
+    /// `fq run` daemon to hot-reload its agent definitions. Uses core
+    /// NATS publish (not JetStream): the signal is ephemeral, so if no
+    /// daemon is listening it is silently dropped rather than queued.
+    pub async fn publish_control_reload(&self) -> Result<(), BusError> {
+        debug!(
+            subject = CONTROL_RELOAD_SUBJECT,
+            "publishing control reload"
+        );
+        self.client
+            .publish(CONTROL_RELOAD_SUBJECT, Bytes::new())
+            .await
+            .map_err(|err| BusError::Publish(err.to_string()))?;
+        // Flush so the message actually leaves the client before a
+        // short-lived CLI process exits.
+        self.client
+            .flush()
+            .await
+            .map_err(|err| BusError::Publish(err.to_string()))?;
+        Ok(())
+    }
+
+    /// Subscribe to the daemon control-reload subject. Each item is a
+    /// raw NATS message (the body is unused today); the daemon reacts
+    /// to the arrival of the message, not its contents.
+    pub async fn subscribe_control_reload(&self) -> Result<async_nats::Subscriber, BusError> {
+        debug!(
+            subject = CONTROL_RELOAD_SUBJECT,
+            "subscribing to control reload"
+        );
+        let sub = self.client.subscribe(CONTROL_RELOAD_SUBJECT).await?;
+        Ok(sub)
     }
 }
 
