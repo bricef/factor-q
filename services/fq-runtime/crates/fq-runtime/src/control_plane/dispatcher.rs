@@ -13,10 +13,16 @@
 //! - Durable consumer: if the dispatcher crashes or is restarted,
 //!   JetStream remembers its position and redelivers any unacked
 //!   triggers after the ack deadline.
-//! - At-least-once: a crash mid-execution can lead to redelivery.
-//!   The executor is not transactional; a redelivered trigger will
-//!   run the agent a second time. Idempotency is the caller's
-//!   concern for phase 1.
+//! - Ack-on-dispatch: the trigger is acked as soon as the invocation
+//!   is *dispatched*, not when it *completes*. Holding the ack for the
+//!   invocation's (unbounded) duration caused a redelivery storm — an
+//!   invocation longer than the 30s ack-wait was redelivered and
+//!   re-run (surfaced by the M0 dogfood loop, 2026-07-06). In-flight
+//!   durability is the reducer WAL's job (`recovery::scan_in_flight`),
+//!   so a crash resumes the invocation exactly once from the WAL with
+//!   no redelivered duplicate. Residual gap: a crash between the ack
+//!   and the first WAL write is a missed — re-triggerable — run, not
+//!   corruption.
 //!
 //! # Error handling
 //!
@@ -177,7 +183,30 @@ impl TriggerDispatcher {
             "dispatching trigger"
         );
 
-        let outcome = self
+        // Ack the trigger BEFORE running the invocation. The trigger's
+        // job ends once the invocation is accepted for execution; the
+        // reducer's three-state WAL owns in-flight durability and crash
+        // recovery (`recovery::scan_in_flight` → `categorise` → resume),
+        // so the trigger must not stay unacked for the invocation's
+        // (unbounded) duration.
+        //
+        // Holding the ack until completion caused a redelivery storm: an
+        // invocation longer than the consumer's 30s ack-wait was
+        // redelivered by JetStream and re-run — one trigger produced N
+        // invocations (found by the M0 dogfood loop, 2026-07-06, at
+        // ~100s/run → 3 runs). Acking up front also *removes* a second
+        // bug: with ack-on-completion, a crash mid-invocation left the
+        // trigger unacked → redelivered → a fresh invocation *while* WAL
+        // recovery also resumed the original — a duplicate. Acking here
+        // means a crash resumes exactly once from the WAL, no redelivery.
+        //
+        // Residual: a crash between this ack and the first WAL write is a
+        // missed (re-triggerable) run, not corruption; closing that
+        // window needs an ack-after-durable-start signal through the
+        // Worker seam — a noted follow-up.
+        self.ack(msg, "dispatched").await;
+
+        if let Err(err) = self
             .worker
             .run_invocation(
                 &loaded.agent,
@@ -186,25 +215,17 @@ impl TriggerDispatcher {
                 Some(msg.subject.to_string()),
                 payload,
             )
-            .await;
-
-        match outcome {
-            Ok(_) => {
-                self.ack(msg, "completed").await;
-            }
-            Err(err) => {
-                // The executor has already emitted a Failed event
-                // on the event stream. Ack the trigger so we don't
-                // loop on what is almost certainly a permanent
-                // problem.
-                warn!(
-                    agent_id = %agent_id,
-                    error = %err,
-                    "executor returned an error for NATS-triggered run"
-                );
-                self.log_executor_error(&err);
-                self.ack(msg, "executor error").await;
-            }
+            .await
+        {
+            // The executor already emitted a Failed event; the trigger is
+            // acked and the WAL owns recovery, so there is nothing to
+            // redeliver.
+            warn!(
+                agent_id = %agent_id,
+                error = %err,
+                "executor returned an error for NATS-triggered run"
+            );
+            self.log_executor_error(&err);
         }
     }
 
@@ -523,5 +544,136 @@ You are a test agent."#
     #[allow(dead_code)]
     fn _suppress_unused() {
         let _ = sample_agent("x");
+    }
+
+    /// Regression (M0 dogfood loop, 2026-07-06): the trigger is acked as
+    /// soon as the invocation is *dispatched*, not when it *completes* —
+    /// so an invocation longer than the consumer's 30s ack-wait is not
+    /// redelivered and re-run. A worker that blocks the invocation
+    /// in-flight lets us assert the trigger has already been acked
+    /// (`num_ack_pending` → 0) without waiting real seconds. With the old
+    /// ack-on-completion behaviour this times out (the message stays
+    /// unacked while the invocation runs).
+    #[tokio::test]
+    async fn trigger_is_acked_before_the_invocation_finishes() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        struct BlockingWorker {
+            started: Arc<AtomicUsize>,
+            release: Arc<Notify>,
+        }
+        #[async_trait::async_trait]
+        impl Worker for BlockingWorker {
+            async fn run_invocation(
+                &self,
+                _agent: &Agent,
+                _llm: &dyn crate::llm::LlmClient,
+                _source: TriggerSource,
+                _subject: Option<String>,
+                _payload: serde_json::Value,
+            ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+                self.started.fetch_add(1, Ordering::SeqCst);
+                self.release.notified().await;
+                Ok(crate::worker::InvocationOutcome::Completed {
+                    invocation_id: Uuid::now_v7(),
+                    response: canned_response(),
+                    cost: 0.0,
+                    duration_ms: 0,
+                })
+            }
+        }
+
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("ack-before-run");
+
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join(format!("{agent_id_str}.md"));
+        std::fs::write(
+            &agent_path,
+            format!(
+                "---\nname: {agent_id_str}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nTest agent."
+            ),
+        )
+        .unwrap();
+        let mut registry = AgentRegistry::new();
+        registry.load_file(&agent_path);
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let worker: Arc<dyn Worker> = Arc::new(BlockingWorker {
+            started: started.clone(),
+            release: release.clone(),
+        });
+        let dispatcher = Arc::new(TriggerDispatcher::new(
+            bus.clone(),
+            Arc::new(registry),
+            worker,
+            Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
+        ));
+
+        let mut consumer = bus
+            .trigger_consumer_with_filter(
+                &unique_consumer_name(),
+                &crate::bus::trigger_subject(&agent_id_str),
+            )
+            .await
+            .expect("consumer");
+
+        bus.publish_trigger(&agent_id_str, &json!({"input": "hi"}))
+            .await
+            .expect("publish");
+        let msg = {
+            let mut stream = consumer.messages().await.expect("messages");
+            tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("a message within 5s")
+                .expect("stream open")
+                .expect("message ok")
+        };
+
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle(&msg).await });
+
+        // Wait until the invocation has actually entered (and blocked).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while started.load(Ordering::SeqCst) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "invocation never started"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "invocation ran more than once"
+        );
+
+        // The invocation is blocked in-flight; the trigger must already
+        // be acked (num_ack_pending drops to 0). Poll to absorb ack
+        // propagation; a stuck 1 is the redelivery-storm regression.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let pending = consumer.info().await.expect("info").num_ack_pending;
+            if pending == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "trigger not acked while the invocation is still in-flight \
+                 (num_ack_pending={pending}) — the redelivery-storm regression"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        release.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 }
