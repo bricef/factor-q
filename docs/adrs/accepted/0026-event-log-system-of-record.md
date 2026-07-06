@@ -94,10 +94,27 @@ persistent system of record.** Concretely:
    shared crate underneath keeps each binary's surface minimal.
 
 6. **The projection is demoted to a rebuildable read-model whose rebuild
-   source is the archive, not NATS.** With that, NATS exits the durability
+   source is the archive, not NATS.** With that, NATS exits the *durability*
    story entirely: it transports, the archive is authoritative, the
    projection is a fast queryable view rebuildable from the archive. "The
-   projection is rebuildable" becomes true again — and permanent.
+   projection is rebuildable" becomes true again — and permanent. (The
+   projection's *live* source stays NATS — see decision 7.)
+
+7. **The archive is off every critical path (invariant).** "System of
+   record" is a *durability* role, not an availability or hot-path one, and
+   the design keeps them apart. The write path rides NATS + the worker WAL —
+   both already able to proceed with the archive down — so the archive is
+   never on the write path. Live reads are served by **read models, never
+   the raw archive**: concretely, the metadata projection tails **NATS live**
+   for its hot path and touches the archive only for **cold rebuild /
+   backfill**, and the archive's own read surface serves only cold rebuild
+   and on-demand payload fetch (both rare, both latency-insensitive). The
+   standing rule: any critical-path read is served by a replaceable,
+   rebuildable read model — never by the archive directly. This is what
+   keeps the archive's single-node availability from ever becoming the
+   system's, and it forecloses the obvious future temptation (e.g. Memory
+   reading invocation history *during* an invocation) from silently
+   coupling live execution to the archive.
 
 ## Rationale
 
@@ -141,6 +158,21 @@ persistent system of record.** Concretely:
   consumer / one instance carries the total order. Scaling the archive out
   later must preserve per-partition order — a problem for a load we do not
   have.
+- **The archive's HA need is durability, not consensus — so we never
+  rebuild NATS's hard half.** NATS already owns the distributed,
+  high-throughput write path; the archive must not try to re-earn that. It
+  doesn't have to: because it is append-only and immutable, it is made
+  durable by *replicating immutable data* (CAS objects to a second disk /
+  object store; the index via streaming replication), not by distributed
+  consensus over mutable state. The single active writer is a *feature* — it
+  mints the canonical `seq` order — so the archive is deliberately not
+  multi-master (a multi-master archive would reintroduce the ordering
+  problem decision 2 removed). If read availability or ingest throughput
+  ever demand more, the shape is a warm-standby-promotable writer plus read
+  replicas, and — for throughput — sharding by agent/subject (per-shard
+  order preserved, global order relaxed). All categorically simpler than
+  NATS clustering, and deferred until real load demands it; content-dedup
+  also *lowers* archive write volume below the raw event rate.
 - **Reconcile in implementation:** the projection stops being
   authoritative-by-nobody, and the archive-retention doc/code drift (7 vs
   30 days) is retired — the archive no longer expires at all.
@@ -156,8 +188,17 @@ persistent system of record.** Concretely:
    encryption with key-shredding (crypto-shred). **Noted and deferred**: a
    known consequence of the dedup substrate, to be decided when a real
    erasure requirement lands.
-2. **The projection rebuild API surface** (archive → projection). To be
-   designed once this ADR lands.
+2. **The projection rebuild API surface** (archive → projection). Topology
+   now settled (decision 7): the projection tails NATS live and pulls from
+   the archive only for cold rebuild/backfill, keeping the archive off the
+   live path. The leading design is a cursor read over the archive's dense
+   append position — `read_from(after_seq, limit) -> {rows, next_seq,
+   caught_up}` (exclusive-after; the cursor is the archive's `seq`, not the
+   producer-assigned `event_id`), which makes rebuild resumable in segments
+   and, with idempotent apply on `event_id`, crash-safe — plus an on-demand
+   `get_payload(cid)` for the rare full-fidelity consumers. Remaining
+   mechanics (transport, batching, whether NATS also serves as a pull
+   wake-up) to be finalized when the archive is built.
 3. **Worker-side durable outbox** (event durable locally *before* NATS,
    surviving even total NATS loss). Not adopted now: it would trade away the
    clean single global order for stronger delivery. Filed as "later, if the
