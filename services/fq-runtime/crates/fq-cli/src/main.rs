@@ -14,7 +14,7 @@ use fq_runtime::llm::{GenAiClient, LlmClient};
 use fq_runtime::worker::InvocationOutcome;
 use fq_runtime::{
     Config, EventBus, McpClientManager, McpServerConfig, PricingTable, ProjectionConsumer,
-    ProjectionStore, ToolRegistry, TriggerDispatcher,
+    ProjectionStore, SharedRegistry, ToolRegistry, TriggerDispatcher,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -90,6 +90,14 @@ enum Commands {
     },
     /// Run the runtime in the foreground
     Run,
+    /// Ask a running `fq run` daemon to hot-reload its agent
+    /// definitions from disk, without a restart. Publishes a
+    /// control message on `fq.control.reload`; the daemon re-reads
+    /// the agents directory and atomically swaps the registry the
+    /// dispatcher reads. The reload affects the NEXT trigger only
+    /// — in-flight invocations keep the config they snapshotted at
+    /// trigger time (ADR-0020 refresh-between-invocations).
+    Reload,
     /// Trigger an agent manually
     Trigger {
         /// Agent name
@@ -293,6 +301,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { force } => init_project(force)?,
         Commands::Run => run_daemon(&cli.global).await?,
+        Commands::Reload => reload_daemon(&cli.global).await?,
         Commands::Trigger {
             agent,
             payload,
@@ -1588,15 +1597,62 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let mut retention_handle =
         tokio::spawn(async move { retention_sweeper.run(retention_shutdown_rx).await });
 
+    // Build the swappable registry handle the dispatcher reads. The
+    // dispatcher reads it per-trigger, so `fq reload` can hot-swap the
+    // inner Arc for a freshly-loaded registry and have the *next*
+    // trigger pick it up. In-flight invocations snapshot their config
+    // at trigger time and are undisturbed by a swap (ADR-0020
+    // refresh-between-invocations precedent).
+    let shared_registry: SharedRegistry = Arc::new(tokio::sync::RwLock::new(registry));
+
+    // Spawn the control-reload listener. On each `fq.control.reload`
+    // message it re-reads the agents directory and atomically swaps
+    // the shared registry handle. Load failures (missing dir, all
+    // agents invalid) are logged and the current registry is kept, so
+    // a bad edit can never leave the daemon with no agents. Best-effort
+    // core-NATS subscription: reload signals are ephemeral.
+    let (reload_shutdown_tx, mut reload_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let reload_bus = bus.clone();
+    let reload_registry = shared_registry.clone();
+    let reload_dir = config.agents.directory.clone();
+    let mut reload_handle = tokio::spawn(async move {
+        let mut sub = match reload_bus.subscribe_control_reload().await {
+            Ok(sub) => sub,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to subscribe to control reload");
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut reload_shutdown_rx => {
+                    tracing::info!("control-reload listener received shutdown signal");
+                    break;
+                }
+                msg = sub.next() => {
+                    match msg {
+                        Some(_) => reload_agents(&reload_registry, &reload_dir).await,
+                        None => {
+                            tracing::warn!("control-reload subscription ended");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // Spawn the trigger dispatcher.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
-    let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker, llm);
+    let dispatcher = TriggerDispatcher::new(bus.clone(), shared_registry, worker, llm);
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
 
     println!();
     println!("Runtime ready. Press Ctrl-C to stop.");
     println!("  - projection consumer is materialising events into SQLite");
     println!("  - trigger dispatcher is listening on fq.trigger.*");
+    println!("  - control-reload listener is listening on fq.control.reload");
 
     // Wait for either a Ctrl-C or one of the hosted tasks exiting
     // prematurely. We watch the task handles in the same select so
@@ -1675,6 +1731,22 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             let err_msg = describe_task_result("trigger dispatcher", result);
             ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
         }
+        result = &mut reload_handle => {
+            // The control-reload listener returns () — a panic
+            // shows up as Err(JoinError).
+            match result {
+                Ok(()) => (
+                    "task_failed",
+                    false,
+                    Some(("control_reload_listener", "exited cleanly".to_string())),
+                ),
+                Err(err) => (
+                    "task_failed",
+                    false,
+                    Some(("control_reload_listener", format!("task panicked: {err}"))),
+                ),
+            }
+        }
     };
 
     // If a task failed, publish a system.task_failed event with
@@ -1709,6 +1781,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = archive_retry_shutdown_tx.send(());
     let _ = retention_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
+    let _ = reload_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
         Ok(Ok(Ok(()))) => println!("  projection consumer stopped cleanly."),
@@ -1767,6 +1840,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Ok(Err(err)) => tracing::error!(error = %err, "trigger dispatcher task panicked"),
         Err(_) => tracing::warn!("trigger dispatcher did not shut down within 5s"),
     }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), reload_handle).await {
+        Ok(Ok(())) => println!("  control-reload listener stopped cleanly."),
+        Ok(Err(err)) => tracing::error!(error = %err, "control-reload listener task panicked"),
+        Err(_) => tracing::warn!("control-reload listener did not shut down within 5s"),
+    }
 
     // Shut down MCP server processes.
     mcp_manager.shutdown().await;
@@ -1791,6 +1869,43 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Re-read the agents directory and atomically swap the shared
+/// registry the dispatcher reads. Invoked by the daemon's
+/// control-reload listener on each `fq.control.reload` message.
+///
+/// Failure policy: a reload never leaves the daemon worse off. A
+/// missing directory or a load error is logged and the *current*
+/// registry is kept — a bad edit can't knock out a running daemon.
+/// Per-file parse errors are logged but the successfully-parsed
+/// agents are still installed (matching `AgentRegistry`'s
+/// partial-success semantics). The swap only affects the NEXT
+/// trigger; in-flight invocations keep the config they snapshotted
+/// at trigger time (ADR-0020 refresh-between-invocations).
+async fn reload_agents(shared: &SharedRegistry, agents_dir: &Path) {
+    match AgentRegistry::load_from_directory(agents_dir) {
+        Ok(registry) => {
+            let count = registry.len();
+            let error_count = registry.errors().len();
+            for err in registry.errors() {
+                tracing::warn!(error = %err, "agent load error during reload");
+            }
+            *shared.write().await = Arc::new(registry);
+            tracing::info!(
+                agents = count,
+                errors = error_count,
+                "reloaded agent definitions from disk"
+            );
+        }
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                dir = %agents_dir.display(),
+                "agent reload failed; keeping the current registry"
+            );
+        }
+    }
+}
+
 /// Convert a joined task result into a short error message. A
 /// clean early-exit (task returned Ok(())) is reported as a
 /// descriptive string so operators see *something* explaining
@@ -1804,6 +1919,32 @@ fn describe_task_result<E: std::fmt::Display>(
         Ok(Err(err)) => format!("{name} failed: {err}"),
         Err(join_err) => format!("{name} task panicked: {join_err}"),
     }
+}
+
+/// Publish a `fq.control.reload` control message so a running
+/// `fq run` daemon hot-reloads its agent definitions. Fire-and-
+/// forget: the message is ephemeral core-NATS, so if no daemon is
+/// listening it is a silent no-op (this command still reports
+/// success — it confirms the signal was published, not that a
+/// daemon acted on it). Watch `fq events tail` or the daemon logs
+/// to confirm the reload took effect.
+async fn reload_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    bus.publish_control_reload()
+        .await
+        .context("failed to publish control reload")?;
+    println!(
+        "Published reload signal on {}.",
+        fq_runtime::bus::CONTROL_RELOAD_SUBJECT
+    );
+    println!(
+        "A running `fq run` daemon will re-read {} and swap its registry for the next trigger.",
+        config.agents.directory.display()
+    );
+    Ok(())
 }
 
 /// Publish a trigger to NATS instead of running the executor
@@ -2710,5 +2851,61 @@ mod workers_tests {
         assert_eq!(v["last_heartbeat_ms"], 1_700_000_000_000_i64);
         assert_eq!(v["heartbeat_age_ms"], 1_500);
         assert_eq!(v["in_flight_count"], 3);
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_agent(dir: &Path, name: &str) {
+        std::fs::write(
+            dir.join(format!("{name}.md")),
+            format!("---\nname: {name}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nTest agent."),
+        )
+        .unwrap();
+    }
+
+    /// A reload re-reads the agents directory and swaps the shared
+    /// handle in place: the same `SharedRegistry` the dispatcher
+    /// holds now points at the freshly-loaded registry, so the next
+    /// trigger sees the new agent set.
+    #[tokio::test]
+    async fn reload_agents_swaps_in_new_definitions() {
+        let dir = tempdir().unwrap();
+        write_agent(dir.path(), "first");
+
+        let initial = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        assert_eq!(initial.len(), 1);
+        let shared: SharedRegistry = Arc::new(tokio::sync::RwLock::new(Arc::new(initial)));
+
+        // Add a second agent on disk, then reload.
+        write_agent(dir.path(), "second");
+        reload_agents(&shared, dir.path()).await;
+
+        let after = shared.read().await.clone();
+        assert_eq!(after.len(), 2, "reload should pick up the new agent");
+        assert!(after.get(&AgentId::new("second").unwrap()).is_some());
+    }
+
+    /// A reload against a directory that has gone missing keeps the
+    /// current registry rather than blanking it — a bad edit can't
+    /// knock out a running daemon.
+    #[tokio::test]
+    async fn reload_agents_keeps_current_registry_on_load_error() {
+        let dir = tempdir().unwrap();
+        write_agent(dir.path(), "keep");
+        let initial = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        assert_eq!(initial.len(), 1);
+        let shared: SharedRegistry = Arc::new(tokio::sync::RwLock::new(Arc::new(initial)));
+
+        // Point the reload at a directory that does not exist.
+        let missing = dir.path().join("does-not-exist");
+        reload_agents(&shared, &missing).await;
+
+        let after = shared.read().await.clone();
+        assert_eq!(after.len(), 1, "failed reload must keep the old registry");
+        assert!(after.get(&AgentId::new("keep").unwrap()).is_some());
     }
 }

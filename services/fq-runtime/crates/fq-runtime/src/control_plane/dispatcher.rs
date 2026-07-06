@@ -40,7 +40,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use tokio::sync::oneshot;
+use tokio::sync::{RwLock, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
@@ -52,6 +52,25 @@ use crate::worker::{ExecutorError, Worker};
 /// Name of the durable JetStream consumer the dispatcher creates.
 pub const CONSUMER_NAME: &str = "fq-dispatcher";
 
+/// A swappable handle to the agent registry the dispatcher reads.
+///
+/// The dispatcher reads the registry through this handle on every
+/// trigger, so a hot-reload (`fq reload`) can atomically swap the
+/// inner `Arc<AgentRegistry>` for a freshly-loaded one and have the
+/// *next* trigger pick it up. There is no `arc-swap` dependency in
+/// the tree, so we use a `tokio::sync::RwLock<Arc<_>>`: reads clone
+/// the `Arc` under a short read lock (cheap, no contention with other
+/// readers), and a reload takes the write lock only to swap the
+/// pointer. In-flight invocations already hold their own `Agent`
+/// clone (snapshotted at trigger time), so a swap never disturbs
+/// them — matching the ADR-0020 refresh-between-invocations precedent.
+pub type SharedRegistry = Arc<RwLock<Arc<AgentRegistry>>>;
+
+/// Wrap an owned registry in a fresh [`SharedRegistry`] handle.
+pub fn shared_registry(registry: AgentRegistry) -> SharedRegistry {
+    Arc::new(RwLock::new(Arc::new(registry)))
+}
+
 /// NATS-triggered dispatcher. Owns references to the pieces of the
 /// runtime it needs — call [`TriggerDispatcher::run`] to drive it.
 ///
@@ -62,7 +81,7 @@ pub const CONSUMER_NAME: &str = "fq-dispatcher";
 /// remote-worker adapter that proxies over NATS.
 pub struct TriggerDispatcher {
     bus: EventBus,
-    registry: Arc<AgentRegistry>,
+    registry: SharedRegistry,
     worker: Arc<dyn Worker>,
     llm: Arc<dyn LlmClient>,
 }
@@ -70,7 +89,7 @@ pub struct TriggerDispatcher {
 impl TriggerDispatcher {
     pub fn new(
         bus: EventBus,
-        registry: Arc<AgentRegistry>,
+        registry: SharedRegistry,
         worker: Arc<dyn Worker>,
         llm: Arc<dyn LlmClient>,
     ) -> Self {
@@ -147,7 +166,13 @@ impl TriggerDispatcher {
                 return;
             }
         };
-        let loaded = match self.registry.get_loaded(&agent_id) {
+        // Read the registry through the swappable handle. Cloning the
+        // inner Arc under a short read lock gives this invocation a
+        // stable snapshot for its whole lifetime: a concurrent reload
+        // that swaps in a new Arc does not disturb an in-flight run
+        // (ADR-0020 refresh-between-invocations).
+        let registry = self.registry.read().await.clone();
+        let loaded = match registry.get_loaded(&agent_id) {
             Some(loaded) => loaded,
             None => {
                 warn!(
@@ -337,7 +362,7 @@ mod tests {
     /// trigger stream.
     struct TestDispatcher {
         bus: EventBus,
-        registry: Arc<AgentRegistry>,
+        registry: SharedRegistry,
         worker: Arc<dyn Worker>,
         llm: Arc<dyn LlmClient>,
         consumer_name: String,
@@ -436,7 +461,7 @@ You are a test agent."#
             "registry errors: {:?}",
             registry.errors()
         );
-        let registry = Arc::new(registry);
+        let registry = shared_registry(registry);
 
         // Fake LLM: always returns the canned response.
         let llm = Arc::new({
@@ -613,7 +638,7 @@ You are a test agent."#
         });
         let dispatcher = Arc::new(TriggerDispatcher::new(
             bus.clone(),
-            Arc::new(registry),
+            shared_registry(registry),
             worker,
             Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
         ));
