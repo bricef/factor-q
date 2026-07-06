@@ -33,6 +33,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0022](accepted/0022-binary-distribution-and-licensing.md) | Binary distribution (musl/Apple Silicon release matrix, install.sh, cargo-binstall) and BSL 1.1 licensing |
 | [0023](accepted/0023-storage-and-vector-foundation.md) | Storage, extraction, and vector index foundation (Phase 2 pillar #2) |
 | [0024](accepted/0024-separate-databases-storage-foundation.md) | Separate databases for the storage foundation's three stores (refines ADR-0023 F9) |
+| [0026](accepted/0026-event-log-system-of-record.md) | A dedicated CAS-backed archive service is the event log's system of record (supersedes ADR-0011's source-of-truth half; NATS becomes transport) |
 
 ## Draft
 
@@ -41,6 +42,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0006](draft/0006-api-design.md) | Runtime API design |
 | [0007](draft/0007-inter-agent-communication.md) | Inter-agent communication patterns |
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
+| [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
 
 ## Related guides
 
