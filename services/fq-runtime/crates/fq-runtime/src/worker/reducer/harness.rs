@@ -18,8 +18,16 @@ use super::types::{
 };
 use crate::events::{Message, MessageRole, MessageToolCall, RequestParams, StopReason};
 
-/// Default maximum LLM turns. Mirrors `executor::MAX_ITERATIONS`.
-pub const DEFAULT_MAX_ITERATIONS: u32 = 20;
+/// Default cap on LLM turns per invocation — a backstop against a
+/// wedged agent, distinct from and well below the host's
+/// `HOST_STEP_BUDGET` (1000). Raised from 20 (2026-07-06): 20 turns is
+/// too few for a complex autonomous task — the M0 loop's first code task
+/// (`fq reload`) exhausted it mid-implementation, before it could commit.
+/// A per-agent override at the definition boundary is the tracked
+/// refinement (backlog §1.5.1.1); until then this default applies to
+/// every agent, bounded in the large by the dollar budget and the host
+/// step budget.
+pub const DEFAULT_MAX_ITERATIONS: u32 = 100;
 
 /// Native, synchronous, stateless reducer. All state lives in
 /// the opaque blob carried in [`StepInput::state`]; this struct
