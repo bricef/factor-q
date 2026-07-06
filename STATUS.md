@@ -55,7 +55,11 @@ by it; `just soak` scales the lifecycle driver for deep local runs).
 The v0 dogfood loop is **live**: a `doc-drift` agent reviews this repo's
 commits daily on the local runtime (project at `~/fq-dogfood`, outside
 the repo) — its findings feed the
-[backlog](docs/plans/backlog.md). Open strategic questions
+[backlog](docs/plans/backlog.md). That loop is read-and-report; the
+loop-first [M0 "close the loop" plan](docs/plans/active/2026-07-05-m0-close-the-loop.md)
+drives the next step — an agent that lands validated PRs against this
+repo — with a crude proxy-metric set (read relative to an expert+frontier
+baseline) to keep the Q ladder honest. Open strategic questions
 (security sequencing, the API layer) are in the
 [2026-07-05 project assessment](docs/design/2026-07-05-project-assessment.md).
 
