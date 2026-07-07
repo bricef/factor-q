@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft (2026-07-07). Prompted by the M0 flywheel: merged improvements to
+Accepted (2026-07-07). Prompted by the M0 flywheel: merged improvements to
 factor-q's own runtime currently require a manual rebuild + `pkill` +
 restart, which will bottleneck the loop as it accelerates and is itself a
 human step that breaks the autonomy goal. This ADR scopes the **deploy

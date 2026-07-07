@@ -85,6 +85,14 @@ Where the runtime knows a limit its environment imposes — a transport's maximu
 
 **What this demands in practice.** Read the constraint where the environment advertises it (NATS reports `max_payload` in the server INFO at connect; providers advertise context windows and rate limits; stores declare their bounds), carry it in the runtime, and check against it at the single seam every caller passes through — so one guard protects every path and turns a silent cliff into a diagnosable error. This is the transport-and-environment cousin of Principle 3: both enforce against what is known at the boundary rather than finding out by crashing.
 
+### 8. Tunable parameters are configuration, not code
+
+A value tuned to adjust behaviour — an iteration cap, a cost floor, a timeout, a retry interval, a budget — belongs in configuration, changeable without editing, rebuilding, and redeploying code. A parameter you would ever want to *try a different value for* is a knob; a knob hardcoded as a constant is a defect, because every adjustment becomes a code change, a build, and a deploy when it should be an edit and a reload.
+
+**What this rules out.** Hardcoding a tunable as a `const` and changing it by editing source — as `DEFAULT_MAX_ITERATIONS` was, bumped `20 → 100` through a code change, build, and restart. Burying a threshold, timeout, or floor where only a rebuild can reach it. And conflating a *tuning knob* (no single correct value; you set it to the workload) with a *structural invariant* (a subject scheme, a schema version, a wire format — correct-or-wrong, not tunable): the first is configuration, the second is code.
+
+**What this demands in practice.** Tunables live in configuration with sensible defaults, overridable at the right scope — a daemon default (e.g. in `fq.toml`), a per-agent override in the [agent definition](../../adrs/accepted/0005-agent-definition-format.md) (so `fq reload` applies it with no restart), a per-invocation value where that fits. New tunables — the graph's ε cost floor and hop-ceiling, any budget floors — are configuration *from the start*, not retrofitted. The test is simple: if you would ever run the system with a different value to see what happens, it is configuration.
+
 ---
 
 ## How this doc evolves
