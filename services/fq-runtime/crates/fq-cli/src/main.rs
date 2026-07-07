@@ -1379,10 +1379,16 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     }
 
     let tools = Arc::new(tools);
-    let llm: Arc<dyn LlmClient> = Arc::new(match &config.providers.anthropic {
-        Some(anthropic) => GenAiClient::from_anthropic_config(anthropic),
-        None => GenAiClient::new(),
-    });
+    // Retry transient LLM errors (rate limits, transport failures) with
+    // backoff instead of failing the whole invocation (issue #10). This is
+    // the daemon path — the one the fleet actually runs on.
+    let llm: Arc<dyn LlmClient> = Arc::new(fq_runtime::llm::RetryingLlmClient::new(
+        match &config.providers.anthropic {
+            Some(anthropic) => GenAiClient::from_anthropic_config(anthropic),
+            None => GenAiClient::new(),
+        },
+        config.worker.llm_retry.clone(),
+    ));
     // One ReducerRunner serves two roles: the dispatcher uses
     // it as the Worker for new triggers, and the recovery path
     // uses it directly (via the concrete type) for auto-resume
