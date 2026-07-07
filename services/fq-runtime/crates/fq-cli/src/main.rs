@@ -697,6 +697,7 @@ async fn trigger_agent(
                 .pricing(pricing)
                 .store(worker_store)
                 .worker_id(cli_worker_id)
+                .max_iterations(config.max_iterations)
                 .build(),
         ),
         fq_runtime::Harness::new(),
@@ -1409,6 +1410,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                     .pricing(pricing)
                     .store(worker_store.clone())
                     .worker_id(worker_id.clone())
+                    .max_iterations(config.max_iterations)
                     .build(),
             ),
             fq_runtime::Harness::new(),

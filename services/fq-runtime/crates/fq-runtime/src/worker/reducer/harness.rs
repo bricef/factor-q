@@ -18,15 +18,19 @@ use super::types::{
 };
 use crate::events::{Message, MessageRole, MessageToolCall, RequestParams, StopReason};
 
-/// Default cap on LLM turns per invocation — a backstop against a
-/// wedged agent, distinct from and well below the host's
+/// Built-in fallback cap on LLM turns per invocation — a backstop
+/// against a wedged agent, distinct from and well below the host's
 /// `HOST_STEP_BUDGET` (1000). Raised from 20 (2026-07-06): 20 turns is
 /// too few for a complex autonomous task — the M0 loop's first code task
 /// (`fq reload`) exhausted it mid-implementation, before it could commit.
-/// A per-agent override at the definition boundary is the tracked
-/// refinement (backlog §1.5.1.1); until then this default applies to
-/// every agent, bounded in the large by the dollar budget and the host
-/// step budget.
+///
+/// Since issue #9, `max_iterations` is configuration (Design Principle
+/// 8): the effective cap is a per-agent definition override, else the
+/// daemon config default ([`crate::config::Config::max_iterations`]),
+/// else this constant — which is what the config default falls back to
+/// when `fq.toml` says nothing. It stays here so a runner built with no
+/// explicit default (most tests) still gets a sane bound, itself
+/// bounded in the large by the dollar budget and the host step budget.
 pub const DEFAULT_MAX_ITERATIONS: u32 = 100;
 
 /// Native, synchronous, stateless reducer. All state lives in
