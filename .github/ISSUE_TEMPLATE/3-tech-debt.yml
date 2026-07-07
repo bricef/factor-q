@@ -1,0 +1,82 @@
+name: 🏗️ Technical debt
+description: A shortcut, suboptimal design, or accrued mess that taxes ongoing work.
+title: "debt: "
+labels: ["tech-debt"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Debt is worth its own type because the framing is different: the point isn't that something is ugly, it's that it charges **interest** — it actively slows, risks, or destabilizes ongoing work. If you can't articulate the cost, it may not be worth paying down yet. Fields marked optional may be left as `N/A`.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line — the debt.
+      placeholder: "max_iterations is a hardcoded const; changing it needs a rebuild + deploy"
+    validations:
+      required: true
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: What and where — code pointers (files, symbols, modules).
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: The cost (interest)
+      description: The defining field. What does this debt actively *tax*? What does it slow, risk, or make fragile — and for whom? Not "it's ugly"; the ongoing charge.
+      placeholder: "Every cap change is a code change + rebuild + restart, so tuning is slow and can't be done live; violates Principle 8."
+    validations:
+      required: true
+  - type: textarea
+    id: origin
+    attributes:
+      label: How it got here (optional)
+      description: A deliberate shortcut? Evolved into it? Useful so the remediation doesn't re-introduce it.
+    validations:
+      required: false
+  - type: textarea
+    id: remediation
+    attributes:
+      label: Proposed remediation
+      description: The direction to pay it down, and the seam it touches.
+    validations:
+      required: true
+  - type: textarea
+    id: blast-radius
+    attributes:
+      label: Blast radius / risk
+      description: What changing this touches, and how safe the refactor is. Small and local, or wide and load-bearing?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Debt fixes should not change behaviour — assert that, with tests to prove it.
+      value: |
+        - [ ] The debt is retired (the shortcut/mess is gone).
+        - [ ] Behaviour is unchanged, and existing tests prove it.
+        - [ ] `just ci` is green.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Bound the paydown. Debt fixes tempt "while I'm here" sprawl.
+      value: |
+        **In scope:**
+
+        **Out of scope:**
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References (optional)
+      description: Design docs, ADRs, principles, related issues.
+    validations:
+      required: false
