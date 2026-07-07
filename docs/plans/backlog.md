@@ -991,6 +991,23 @@ triggers, events, *and* control at once — not piecemeal on one PR. Low
 priority (tidiness / layering; no functional impact), but the file's
 responsibility is worth bounding before it grows further.
 
+### Missing cost-control layer for external / automatic triggers
+
+Surfaced designing the GitHub issue-watcher (2026-07-07). Once a trigger
+fires from an external event — an issue labelled `ready` — rather than an
+operator command, the *triggering action becomes a money-spending action*,
+with no cost-control layer between it and the agent fleet. A labelling
+spree, a buggy watcher, or (later) a less-trusted actor could spawn many
+Opus invocations and burn budget unchecked. Fine for the current
+single-dev private project — the operator controls the labels — but a real
+gap for any multi-actor or higher-autonomy setting. **To review later:** a
+cost-control layer at the trigger boundary — per-source rate limits, a
+concurrency ceiling, and an aggregate spend cap / authorization — so that
+"who or what may trigger" is bounded in *cost*, not only in identity. Ties
+to [Principle 4](../design/committed/design-principles.md) (cost is a
+first-order safety concern) and the trigger-authz question in the
+[identity design](../design/aspirational/agent-identity-and-attestation.md).
+
 ## Schema-migration testing (flagged 2026-07-05)
 
 **Priority: high — release gate for v1.0.0.** No schema migration
