@@ -57,11 +57,20 @@ rust-ci:
     cd {{runtime_dir}} && just ci
     cd {{store_dir}} && just ci
 
-# CI runs the two halves as separate jobs that each invoke a just target
+# The Go trigger adapters — standalone binaries that talk to factor-q only
+# through the trigger wire contract, never fq-runtime code. gofmt + vet +
+# test + build.
+go-ci:
+    cd adapters/github-watcher && test -z "$(gofmt -l .)"
+    cd adapters/github-watcher && go vet ./...
+    cd adapters/github-watcher && go test ./...
+    cd adapters/github-watcher && go build ./...
+
+# CI runs the halves as separate jobs that each invoke a just target
 # (see .github/workflows/ci.yml).
-# Run all quality checks — docs lint + link check + the Rust gate (the
-# full local gate).
-ci: lint-docs check-links rust-ci
+# Run all quality checks — docs lint + link check + the Rust gate + the Go
+# adapters (the full local gate).
+ci: lint-docs check-links rust-ci go-ci
 
 # Build container images for all services
 docker-build:

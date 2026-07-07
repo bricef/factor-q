@@ -57,3 +57,14 @@ jobs:
       - run: just rust-ci
       - run: just infra-down
         if: always()
+
+  go-ci:
+    name: Go adapters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: adapters/github-watcher/go.mod
+      - uses: extractions/setup-just@v3
+      - run: just go-ci
