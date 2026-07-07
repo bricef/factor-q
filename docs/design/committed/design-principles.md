@@ -77,6 +77,14 @@ Every core capability is the simplest implementation that works, behind a well-d
 
 **Why this compounds — it is what makes fq-work-on-fq tractable.** A module behind a stable, tested seam is exactly what an autonomous agent can safely improve: the interface bounds the blast radius, and the verification net makes the change checkable against a contract the agent cannot silently break. This principle is therefore a precondition for the [M0 self-improvement loop](../../plans/active/2026-07-05-m0-close-the-loop.md), not merely hygiene — the discipline that keeps a human able to swap a component is the same one that lets an agent do it.
 
+### 7. Respect known constraints proactively
+
+Where the runtime knows a limit its environment imposes — a transport's maximum payload, a rate ceiling, a schema, a quota — it enforces against that limit at the boundary *before* acting, not by discovering it through failure. A constraint the system can read is a constraint the system is responsible for honouring; learning it from a runtime error is a defect, not bad luck.
+
+**What this rules out.** Firing data at a transport that will reject it when the size was knowable; issuing a call that will be throttled when the budget was in hand; emitting output that violates a schema the system holds. Discovering a ceiling by crashing into it — especially when the crash is worse than the pre-empted error would have been, as when an oversized publish trips a NATS "maximum payload" violation and poisons a retry loop instead of returning a clean, attributable rejection at the publish seam.
+
+**What this demands in practice.** Read the constraint where the environment advertises it (NATS reports `max_payload` in the server INFO at connect; providers advertise context windows and rate limits; stores declare their bounds), carry it in the runtime, and check against it at the single seam every caller passes through — so one guard protects every path and turns a silent cliff into a diagnosable error. This is the transport-and-environment cousin of Principle 3: both enforce against what is known at the boundary rather than finding out by crashing.
+
 ---
 
 ## How this doc evolves
