@@ -12,11 +12,40 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read # paths-filter reads the PR's changed-file list
 
 # Every job drives its checks through a `just` target, so CI stays
 # isomorphic with the local dev workflow. Setup steps (toolchains) are the
-# only non-just glue, since they must exist before `just` can run.
+# only non-just glue.
+#
+# `changes` path-filters so the expensive Rust and Go builds run their
+# steps only when their code (or the build recipe / this workflow) actually
+# changes — a docs-only change skips them. The build jobs still *run* and
+# still report their required status check (they just do nothing when there
+# is nothing to build), so branch protection is never left waiting on a
+# check that never arrives — the reason we gate steps, not the whole job.
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      go: ${{ steps.filter.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'services/**'
+              - 'justfile'
+              - '.github/workflows/**'
+            go:
+              - 'adapters/**'
+              - 'justfile'
+              - '.github/workflows/**'
+
   docs-lint:
     name: Docs lint
     runs-on: ubuntu-latest
@@ -35,36 +64,54 @@ jobs:
 
   rust-ci:
     name: Rust CI
+    needs: changes
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - if: needs.changes.outputs.rust != 'true'
+        run: echo "No Rust-relevant changes — skipping the build."
+      - if: needs.changes.outputs.rust == 'true'
+        uses: actions/checkout@v4
+      - if: needs.changes.outputs.rust == 'true'
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - if: needs.changes.outputs.rust == 'true'
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: services/fq-runtime
       # The MCP integration tests spawn the reference server via npx.
-      - uses: actions/setup-node@v4
+      - if: needs.changes.outputs.rust == 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - uses: extractions/setup-just@v3
+      - if: needs.changes.outputs.rust == 'true'
+        uses: extractions/setup-just@v3
       # Bring up NATS exactly as dev does (JetStream via
       # infrastructure/nats.conf), then wait for it before the
       # bus/integration tests run.
-      - run: just infra-up
-      - run: just infra-wait
-      - run: just rust-ci
-      - run: just infra-down
-        if: always()
+      - if: needs.changes.outputs.rust == 'true'
+        run: just infra-up
+      - if: needs.changes.outputs.rust == 'true'
+        run: just infra-wait
+      - if: needs.changes.outputs.rust == 'true'
+        run: just rust-ci
+      - if: always() && needs.changes.outputs.rust == 'true'
+        run: just infra-down
 
   go-ci:
     name: Go adapters
+    needs: changes
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - if: needs.changes.outputs.go != 'true'
+        run: echo "No Go-relevant changes — skipping the build."
+      - if: needs.changes.outputs.go == 'true'
+        uses: actions/checkout@v4
+      - if: needs.changes.outputs.go == 'true'
+        uses: actions/setup-go@v5
         with:
           go-version-file: adapters/github-watcher/go.mod
-      - uses: extractions/setup-just@v3
-      - run: just go-ci
+      - if: needs.changes.outputs.go == 'true'
+        uses: extractions/setup-just@v3
+      - if: needs.changes.outputs.go == 'true'
+        run: just go-ci
