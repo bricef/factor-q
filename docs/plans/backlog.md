@@ -1008,6 +1008,16 @@ to [Principle 4](../design/committed/design-principles.md) (cost is a
 first-order safety concern) and the trigger-authz question in the
 [identity design](../design/aspirational/agent-identity-and-attestation.md).
 
+
+### 
+
+- [ ] Graph Exec
+- [ ] GUI observability over running invocations
+- [ ] Crypto verification for topic triggers (so only validated processes can emit to NATS
+- [ ] Cost tracking at provider
+- [ ] Redundant models and model fallback policies
+ 
+
 ## Schema-migration testing (flagged 2026-07-05)
 
 **Priority: high — release gate for v1.0.0.** No schema migration
@@ -1019,7 +1029,7 @@ databases in CI first.
 **What exists today.** Two stores carry versioned schemas — the
 worker store (`WORKER_SCHEMA_VERSION`, currently v5) and the
 control-plane store (`CONTROL_PLANE_SCHEMA_VERSION`, v1) — with a
-shared mechanism: `check_compatibility` decides
+ shared mechanism: `check_compatibility` decides
 FreshInstall / Current / NeedsUpgrade / BinaryTooOld, and
 `run_migrations(from, to)` applies additive SQL steps. fq-store
 (M3, the Layer-2 extraction) will add a third.

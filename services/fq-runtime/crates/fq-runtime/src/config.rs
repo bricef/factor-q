@@ -86,6 +86,12 @@ pub struct WorkerConfig {
     /// not acknowledging in a reasonable time.
     #[serde(default = "default_archive_warn_after_ms")]
     pub archive_warn_after_ms: i64,
+    /// Retry policy for transient LLM API errors (rate limits, transport
+    /// failures). Retrying is safe — a model call is idempotent — and does
+    /// not consume a reducer iteration. Tuning knobs, so configuration
+    /// (design principle 8), overridable in `fq.toml`.
+    #[serde(default)]
+    pub llm_retry: crate::llm::RetryConfig,
 }
 
 fn default_archive_retry_interval_ms() -> u64 {
@@ -101,6 +107,7 @@ impl Default for WorkerConfig {
         Self {
             archive_retry_interval_ms: default_archive_retry_interval_ms(),
             archive_warn_after_ms: default_archive_warn_after_ms(),
+            llm_retry: crate::llm::RetryConfig::default(),
         }
     }
 }
