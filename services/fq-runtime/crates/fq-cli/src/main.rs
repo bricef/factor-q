@@ -615,6 +615,9 @@ async fn trigger_agent(
         Some(anthropic) => GenAiClient::from_anthropic_config(anthropic),
         None => GenAiClient::new(),
     };
+    // Retry transient LLM errors (rate limits, transport failures) with
+    // backoff instead of failing the whole invocation (issue #10).
+    let llm = fq_runtime::llm::RetryingLlmClient::new(llm, config.worker.llm_retry.clone());
 
     // Parse trigger payload: try JSON first, fall back to string literal.
     let trigger_payload: Value = match payload {
