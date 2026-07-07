@@ -27,6 +27,7 @@ pub mod pricing;
 pub mod prompt;
 pub mod tools;
 pub mod validation;
+pub mod watcher;
 
 // Role modules. Both stay `pub` so that downstream code (fq-cli,
 // integration tests) can reach typed APIs that haven't been
@@ -47,7 +48,7 @@ pub use agent::{
     McpServerDeclaration, RootsGrant, SamplingGrant, Sandbox,
 };
 pub use bus::EventBus;
-pub use config::Config;
+pub use config::{Config, WatcherConfig};
 pub use control_plane::dispatcher::{
     DispatcherError, SharedRegistry, TriggerDispatcher, shared_registry,
 };
@@ -63,6 +64,9 @@ pub use mcp::{
 };
 pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;
+pub use watcher::{
+    GhCliIssueSource, Issue, IssueSource, PlannedTrigger, Watcher, WatcherError, plan_triggers,
+};
 pub use worker::{
     ArchiveAckConsumer, ArchiveAckError, ArchiveRetryError, ArchiveRetrySweeper, ExecutorError,
     Harness, InvocationOutcome, Reducer, ReducerContext, ReducerContextBuilder, ReducerRunner,

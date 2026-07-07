@@ -14,7 +14,9 @@ milestone boundaries — **last: 2026-07-05** (M2 access control merged,
   `self_inspect`). Full [MCP client](docs/guide/mcp.md) (spec 2025-11-25):
   stdio + Streamable HTTP transports; tools, resources, prompts, and the
   server-initiated capabilities (sampling, elicitation, roots). Operator
-  surface: `fq init / run / trigger / agent / events / costs / status`.
+  surface: `fq init / run / trigger / watch / agent / events / costs / status`
+  (`fq watch` polls GitHub issues and triggers on a `ready` label — the
+  first external trigger source).
 - **Store (`fq-cas`)** — [content-addressed storage](services/fq-store/README.md)
   (BLAKE3, FastCDC dedup) + named objects with version history + verified
   online GC + [access control](docs/guide/access-control.md) (event-sourced

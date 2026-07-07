@@ -29,6 +29,8 @@ pub struct Config {
     pub worker: WorkerConfig,
     #[serde(default)]
     pub state: StateConfig,
+    #[serde(default)]
+    pub watcher: WatcherConfig,
 }
 
 /// Control-plane state-retention knobs. Drives the
@@ -62,6 +64,95 @@ impl Default for StateConfig {
             retention_days: default_retention_days(),
             sweep_interval_seconds: default_sweep_interval_seconds(),
         }
+    }
+}
+
+/// GitHub issue-watcher knobs (issue #6). The watcher polls a
+/// GitHub repo's open issues and, for each one labelled `ready`,
+/// relabels it `ready`->`in-progress` and publishes a trigger for
+/// the target agent. The relabel is the idempotency mechanism —
+/// a re-seen issue is no longer `ready`, so it cannot double-fire.
+///
+/// The watcher is opt-in: it only runs when `fq watch` is invoked
+/// (and `repo` is set). Nothing here affects the daemon otherwise.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatcherConfig {
+    /// `owner/name` of the GitHub repo to poll. Required for the
+    /// watcher to run; `None` means "not configured".
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Poll interval in seconds. Default 60s, which the issue
+    /// mandates as a floor to stay well within GitHub's rate limits.
+    /// Values below the floor are clamped up by
+    /// [`WatcherConfig::effective_poll_interval_secs`].
+    #[serde(default = "default_watch_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Label that marks an issue as ready to be picked up. Default
+    /// `ready`.
+    #[serde(default = "default_ready_label")]
+    pub ready_label: String,
+    /// Label the watcher moves a picked-up issue to. Default
+    /// `in-progress`. An issue already carrying this label is
+    /// skipped (belt-and-suspenders dedup).
+    #[serde(default = "default_in_progress_label")]
+    pub in_progress_label: String,
+    /// Agent the watcher triggers for each picked-up issue. Default
+    /// `m0-issue-fix`.
+    #[serde(default = "default_watch_target_agent")]
+    pub target_agent: String,
+    /// Concurrency guard: the maximum number of issues the watcher
+    /// will pick up in a single poll. A labelling spree cannot spawn
+    /// an unbounded fleet. Default 1. This is deliberately minimal —
+    /// the full cost-control layer is a separate concern.
+    #[serde(default = "default_max_triggers_per_poll")]
+    pub max_triggers_per_poll: usize,
+}
+
+/// The lowest poll interval the watcher will honour, in seconds.
+/// The issue mandates a default of >=60s to respect GitHub's rate
+/// limits; we treat 60s as a hard floor and clamp anything lower
+/// up to it rather than trusting an operator typo to hammer the API.
+pub const MIN_WATCH_POLL_INTERVAL_SECS: u64 = 60;
+
+fn default_watch_poll_interval_secs() -> u64 {
+    60
+}
+
+fn default_ready_label() -> String {
+    "ready".to_string()
+}
+
+fn default_in_progress_label() -> String {
+    "in-progress".to_string()
+}
+
+fn default_watch_target_agent() -> String {
+    "m0-issue-fix".to_string()
+}
+
+fn default_max_triggers_per_poll() -> usize {
+    1
+}
+
+impl Default for WatcherConfig {
+    fn default() -> Self {
+        Self {
+            repo: None,
+            poll_interval_secs: default_watch_poll_interval_secs(),
+            ready_label: default_ready_label(),
+            in_progress_label: default_in_progress_label(),
+            target_agent: default_watch_target_agent(),
+            max_triggers_per_poll: default_max_triggers_per_poll(),
+        }
+    }
+}
+
+impl WatcherConfig {
+    /// The poll interval actually used, clamped up to the
+    /// [`MIN_WATCH_POLL_INTERVAL_SECS`] floor. A misconfigured tiny
+    /// value can never make the watcher poll faster than the floor.
+    pub fn effective_poll_interval_secs(&self) -> u64 {
+        self.poll_interval_secs.max(MIN_WATCH_POLL_INTERVAL_SECS)
     }
 }
 
@@ -203,6 +294,7 @@ impl Default for Config {
             cache: CacheConfig::default(),
             worker: WorkerConfig::default(),
             state: StateConfig::default(),
+            watcher: WatcherConfig::default(),
         }
     }
 }
@@ -521,5 +613,54 @@ api_key_env = "{env_var}"
         let config = Config::from_toml_str(&toml).unwrap();
         let err = config.resolve_anthropic_api_key().unwrap_err();
         assert!(matches!(err, ConfigError::SecretNotSet { .. }));
+    }
+
+    #[test]
+    fn watcher_config_defaults_when_absent() {
+        let config = Config::from_toml_str("").unwrap();
+        assert!(config.watcher.repo.is_none());
+        assert_eq!(config.watcher.poll_interval_secs, 60);
+        assert_eq!(config.watcher.ready_label, "ready");
+        assert_eq!(config.watcher.in_progress_label, "in-progress");
+        assert_eq!(config.watcher.target_agent, "m0-issue-fix");
+        assert_eq!(config.watcher.max_triggers_per_poll, 1);
+    }
+
+    #[test]
+    fn watcher_config_parses_overrides() {
+        let toml = r#"
+[watcher]
+repo = "bricef/factor-q"
+poll_interval_secs = 120
+ready_label = "go"
+in_progress_label = "wip"
+target_agent = "my-agent"
+max_triggers_per_poll = 3
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.watcher.repo.as_deref(), Some("bricef/factor-q"));
+        assert_eq!(config.watcher.poll_interval_secs, 120);
+        assert_eq!(config.watcher.ready_label, "go");
+        assert_eq!(config.watcher.in_progress_label, "wip");
+        assert_eq!(config.watcher.target_agent, "my-agent");
+        assert_eq!(config.watcher.max_triggers_per_poll, 3);
+    }
+
+    #[test]
+    fn watcher_poll_interval_is_clamped_to_floor() {
+        // A sub-floor value is honoured in config but clamped up
+        // to the 60s floor at use time — an operator typo can never
+        // make the watcher poll faster than the rate-limit floor.
+        let toml = "[watcher]\npoll_interval_secs = 5\n";
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.watcher.poll_interval_secs, 5);
+        assert_eq!(config.watcher.effective_poll_interval_secs(), 60);
+    }
+
+    #[test]
+    fn watcher_poll_interval_above_floor_is_unchanged() {
+        let toml = "[watcher]\npoll_interval_secs = 300\n";
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.watcher.effective_poll_interval_secs(), 300);
     }
 }

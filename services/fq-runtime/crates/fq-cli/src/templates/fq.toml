@@ -70,3 +70,33 @@ api_key_env = "ANTHROPIC_API_KEY"
 # proportional to the number of rows past the cutoff each tick,
 # so a shorter interval just means smaller per-tick batches.
 # sweep_interval_seconds = 3600
+
+[watcher]
+# GitHub issue watcher (issue #6). Run with `fq watch`. Polls the
+# repo's open issues and, for each one labelled `ready`, relabels it
+# `ready`->`in-progress` and publishes a trigger for `target_agent`,
+# carrying the issue number. The relabel is the idempotency mechanism:
+# a re-seen issue is no longer `ready`, so it cannot double-fire.
+#
+# The watcher is opt-in — it only runs when you invoke `fq watch`,
+# and only if `repo` is set (or passed via `--repo`). GitHub access
+# is via the `gh` CLI, so `gh auth` (or GH_TOKEN) must be configured.
+#
+# owner/name of the repo to poll. Required for the watcher to run.
+# repo = "owner/name"
+#
+# Poll interval in seconds. Default 60; clamped up to a 60s floor to
+# stay well within GitHub's rate limits.
+# poll_interval_secs = 60
+#
+# Label names for the two-step state machine.
+# ready_label = "ready"
+# in_progress_label = "in-progress"
+#
+# Agent triggered for each picked-up issue.
+# target_agent = "m0-issue-fix"
+#
+# Concurrency guard: max issues picked up per poll, so a labelling
+# spree cannot spawn an unbounded fleet. The full cost-control layer
+# is a separate concern.
+# max_triggers_per_poll = 1

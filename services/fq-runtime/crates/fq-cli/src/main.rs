@@ -98,6 +98,25 @@ enum Commands {
     /// — in-flight invocations keep the config they snapshotted at
     /// trigger time (ADR-0020 refresh-between-invocations).
     Reload,
+    /// Poll a GitHub repo's open issues and, for each one labelled
+    /// `ready`, relabel it `ready`->`in-progress` and publish a
+    /// trigger for the target agent (issue #6). The relabel is the
+    /// idempotency mechanism — a re-seen issue is no longer `ready`,
+    /// so it cannot double-fire. Runs a slow poll loop (default 60s)
+    /// until Ctrl-C. Configure via `[watcher]` in fq.toml; the CLI
+    /// flags below override the config.
+    Watch {
+        /// `owner/name` of the repo to poll (overrides `[watcher] repo`).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Poll interval in seconds (clamped up to a 60s floor).
+        #[arg(long)]
+        interval: Option<u64>,
+        /// Run a single poll and exit, instead of looping. Useful for
+        /// a cron-driven deployment or a smoke check.
+        #[arg(long)]
+        once: bool,
+    },
     /// Trigger an agent manually
     Trigger {
         /// Agent name
@@ -281,7 +300,10 @@ async fn main() -> ExitCode {
     // closed stdout, and the shell tool's child processes inherit
     // whatever disposition is in effect at spawn time.
     #[cfg(unix)]
-    if !matches!(cli.command, Commands::Run | Commands::Trigger { .. }) {
+    if !matches!(
+        cli.command,
+        Commands::Run | Commands::Trigger { .. } | Commands::Watch { .. }
+    ) {
         // SAFETY: changing a process signal disposition before any
         // output has been written; no handler is installed, only the
         // kernel default is restored.
@@ -302,6 +324,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Init { force } => init_project(force)?,
         Commands::Run => run_daemon(&cli.global).await?,
         Commands::Reload => reload_daemon(&cli.global).await?,
+        Commands::Watch {
+            repo,
+            interval,
+            once,
+        } => run_watcher(&cli.global, repo.as_deref(), interval, once).await?,
         Commands::Trigger {
             agent,
             payload,
@@ -2002,6 +2029,98 @@ async fn publish_trigger(
         fq_runtime::bus::trigger_subject(agent_name)
     );
     println!("A running `fq run` daemon will pick this up and dispatch it.");
+    Ok(())
+}
+
+/// Run the GitHub issue watcher (`fq watch`, issue #6). Resolves the
+/// `[watcher]` config with CLI overrides, connects to NATS, and either
+/// runs one poll (`--once`) or the slow poll loop until Ctrl-C.
+///
+/// The watcher relabels each `ready` issue to `in-progress` *before*
+/// publishing its trigger, which is what makes it fire exactly once.
+async fn run_watcher(
+    global: &GlobalArgs,
+    repo_override: Option<&str>,
+    interval_override: Option<u64>,
+    once: bool,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let mut watcher_config = config.watcher.clone();
+    if let Some(repo) = repo_override {
+        watcher_config.repo = Some(repo.to_string());
+    }
+    if let Some(interval) = interval_override {
+        watcher_config.poll_interval_secs = interval;
+    }
+
+    let repo = watcher_config.repo.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no repo configured for the watcher. Set `[watcher] repo = \"owner/name\"` \
+             in fq.toml or pass `--repo owner/name`."
+        )
+    })?;
+
+    // Validate the target agent id early so a typo fails before we
+    // connect to anything.
+    fq_runtime::AgentId::new(&watcher_config.target_agent)
+        .with_context(|| format!("invalid target_agent '{}'", watcher_config.target_agent))?;
+
+    println!("factor-q issue watcher");
+    println!("  repo:             {repo}");
+    println!("  ready label:      {}", watcher_config.ready_label);
+    println!("  in-progress:      {}", watcher_config.in_progress_label);
+    println!("  target agent:     {}", watcher_config.target_agent);
+    println!(
+        "  poll interval:    {}s",
+        watcher_config.effective_poll_interval_secs()
+    );
+    println!(
+        "  max per poll:     {}",
+        watcher_config.max_triggers_per_poll
+    );
+
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+
+    let source = fq_runtime::GhCliIssueSource::new(repo, watcher_config.ready_label.clone());
+    let watcher = fq_runtime::Watcher::new(source, bus, watcher_config);
+
+    if once {
+        let triggered = watcher.poll_once().await?;
+        println!("Polled once: triggered {triggered} issue(s).");
+        return Ok(());
+    }
+
+    println!();
+    println!("Watching. Press Ctrl-C to stop.");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let mut handle = tokio::spawn(async move { watcher.run(shutdown_rx).await });
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    tokio::select! {
+        res = &mut ctrl_c => {
+            if let Err(err) = res {
+                tracing::error!(error = %err, "failed to listen for Ctrl-C");
+            }
+            println!();
+            println!("Received Ctrl-C, stopping watcher...");
+            let _ = shutdown_tx.send(());
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(Ok(Ok(()))) => println!("  watcher stopped cleanly."),
+                Ok(Ok(Err(err))) => tracing::error!(error = %err, "watcher exited with error"),
+                Ok(Err(err)) => tracing::error!(error = %err, "watcher task panicked"),
+                Err(_) => tracing::warn!("watcher did not shut down within 5s"),
+            }
+        }
+        result = &mut handle => {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => return Err(err.into()),
+                Err(err) => return Err(anyhow::anyhow!("watcher task panicked: {err}")),
+            }
+        }
+    }
     Ok(())
 }
 

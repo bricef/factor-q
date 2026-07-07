@@ -238,6 +238,29 @@ registry, parses the JSON payload, and runs the executor. Errors
 are acked (not NAK'd) because the executor already emits
 `Failed` events for executor-level errors.
 
+### GitHub issue watcher (`fq-runtime/src/watcher.rs`)
+
+The first external trigger source (issue
+[#6](https://github.com/bricef/factor-q/issues/6)). Run via `fq watch`,
+it polls a repo's open issues on a slow interval (default 60s, floored
+at 60s to respect GitHub rate limits) and, for each issue labelled
+`ready`, runs a two-step label state machine:
+
+1. Relabel the issue `ready` -> `in-progress`.
+2. Then publish `fq.trigger.<target_agent>` (default `m0-issue-fix`)
+   carrying the issue number.
+
+Relabelling *out of* `ready` before triggering is the idempotency
+mechanism — a re-seen issue is no longer `ready`, so edits, re-polls,
+and watcher restarts cannot double-trigger (an issue already
+`in-progress` is skipped as belt-and-suspenders). A minimal
+`max_triggers_per_poll` guard bounds how many issues are picked up per
+poll so a labelling spree cannot spawn an unbounded fleet; the full
+cost-control layer is a separate concern (backlog). GitHub access is
+behind the `IssueSource` seam (`GhCliIssueSource` shells out to `gh` in
+production) so the label-transition + dedup logic is unit-testable
+without the network. Configure via `[watcher]` in fq.toml.
+
 ### Pricing (`fq-runtime/src/pricing.rs`)
 
 `PricingTable` loads the LiteLLM pricing JSON at startup (fetched
@@ -265,6 +288,7 @@ non-zero.
 | `fq init` | Scaffold a project from embedded templates |
 | `fq run` | Long-running daemon (projection + dispatcher) |
 | `fq trigger` | In-process execution or `--via-nats` publish |
+| `fq watch` | Poll GitHub issues; trigger on the `ready` label |
 | `fq agent list/validate` | Registry inspection |
 | `fq events tail` | Live event stream |
 | `fq events query` | Historical query via SQLite |

@@ -76,6 +76,7 @@ fn fq_help_lists_expected_subcommands() {
         "init",
         "run",
         "trigger",
+        "watch",
         "agent",
     ] {
         assert!(
