@@ -305,6 +305,11 @@ pub struct Agent {
     tools: Vec<String>,
     sandbox: Sandbox,
     budget: Option<f64>,
+    /// Optional per-agent override for the per-invocation LLM-turn cap.
+    /// When `None`, the daemon config default (else the built-in
+    /// fallback) applies. Overriding here means `fq reload` picks up a
+    /// change with no restart (Design Principle 8 / backlog §1.5.1.1).
+    max_iterations: Option<u32>,
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
     static_resources: Vec<StaticResourcePin>,
@@ -343,6 +348,13 @@ impl Agent {
 
     pub fn budget(&self) -> Option<f64> {
         self.budget
+    }
+
+    /// The agent's per-invocation `max_iterations` override, if the
+    /// definition sets one. `None` means "use the daemon config
+    /// default" (see [`crate::config::Config::max_iterations`]).
+    pub fn max_iterations(&self) -> Option<u32> {
+        self.max_iterations
     }
 
     pub fn trigger(&self) -> Option<&str> {
@@ -631,6 +643,7 @@ pub struct AgentBuilder {
     tools: Vec<String>,
     sandbox: Sandbox,
     budget: Option<f64>,
+    max_iterations: Option<u32>,
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
     static_resources: Vec<StaticResourcePin>,
@@ -682,6 +695,14 @@ impl AgentBuilder {
 
     pub fn budget(mut self, budget: f64) -> Self {
         self.budget = Some(budget);
+        self
+    }
+
+    /// Override the per-invocation `max_iterations` cap for this agent.
+    /// Absent by default — the daemon config default (else the built-in
+    /// fallback) applies.
+    pub fn max_iterations(mut self, max_iterations: u32) -> Self {
+        self.max_iterations = Some(max_iterations);
         self
     }
 
@@ -761,6 +782,7 @@ impl AgentBuilder {
             tools: self.tools,
             sandbox: self.sandbox,
             budget: self.budget,
+            max_iterations: self.max_iterations,
             trigger: self.trigger,
             mcp_servers: self.mcp_servers,
             static_resources: self.static_resources,
@@ -964,6 +986,18 @@ mod tests {
         // string is statically known to be NATS-subject-safe.
         let id = AgentId::system();
         assert_eq!(id.as_str(), "system");
+    }
+
+    #[test]
+    fn max_iterations_defaults_to_none() {
+        let agent = valid_builder().build().unwrap();
+        assert!(agent.max_iterations().is_none());
+    }
+
+    #[test]
+    fn max_iterations_override_is_stored() {
+        let agent = valid_builder().max_iterations(250).build().unwrap();
+        assert_eq!(agent.max_iterations(), Some(250));
     }
 
     #[test]

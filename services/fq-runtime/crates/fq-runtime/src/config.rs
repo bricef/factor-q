@@ -29,6 +29,14 @@ pub struct Config {
     pub worker: WorkerConfig,
     #[serde(default)]
     pub state: StateConfig,
+    /// Daemon default cap on LLM turns per invocation. A per-agent
+    /// `max_iterations` in an agent definition overrides this; when
+    /// neither is set the built-in fallback
+    /// ([`crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS`])
+    /// applies (Design Principle 8 — tunable parameters are
+    /// configuration, not code).
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: u32,
 }
 
 /// Control-plane state-retention knobs. Drives the
@@ -162,6 +170,10 @@ fn default_agents_directory() -> PathBuf {
     PathBuf::from("agents")
 }
 
+fn default_max_iterations() -> u32 {
+    crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS
+}
+
 fn default_anthropic_api_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
 }
@@ -210,6 +222,7 @@ impl Default for Config {
             cache: CacheConfig::default(),
             worker: WorkerConfig::default(),
             state: StateConfig::default(),
+            max_iterations: default_max_iterations(),
         }
     }
 }
@@ -415,6 +428,24 @@ retention_days = -1
         assert_eq!(config.state.retention_days, -1);
         // sweep_interval_seconds still defaults.
         assert_eq!(config.state.sweep_interval_seconds, 3_600);
+    }
+
+    #[test]
+    fn max_iterations_defaults_when_absent() {
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(
+            config.max_iterations,
+            crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS
+        );
+    }
+
+    #[test]
+    fn max_iterations_parses_override() {
+        let toml = r#"
+max_iterations = 250
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.max_iterations, 250);
     }
 
     #[test]

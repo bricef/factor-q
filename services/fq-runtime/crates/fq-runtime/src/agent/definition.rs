@@ -108,6 +108,9 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
     if let Some(budget) = frontmatter.budget {
         builder = builder.budget(budget);
     }
+    if let Some(max_iterations) = frontmatter.max_iterations {
+        builder = builder.max_iterations(max_iterations);
+    }
     if let Some(trigger) = frontmatter.trigger {
         builder = builder.trigger(trigger);
     }
@@ -206,6 +209,9 @@ struct Frontmatter {
     #[serde(default)]
     sandbox: SandboxFrontmatter,
     budget: Option<f64>,
+    /// Optional per-agent override for the per-invocation LLM-turn cap.
+    /// Absent = fall back to the daemon config default.
+    max_iterations: Option<u32>,
     trigger: Option<String>,
     #[serde(default)]
     mcp: Vec<McpFrontmatter>,
@@ -334,6 +340,33 @@ Prompt body.
         assert_eq!(agent.id().as_str(), "minimal");
         assert!(agent.tools().is_empty());
         assert!(agent.budget().is_none());
+    }
+
+    #[test]
+    fn parses_max_iterations_override_from_frontmatter() {
+        let content = r#"---
+name: bounded
+model: claude-haiku
+max_iterations: 250
+---
+
+Prompt body.
+"#;
+        let agent = parse_agent(content).unwrap();
+        assert_eq!(agent.max_iterations(), Some(250));
+    }
+
+    #[test]
+    fn max_iterations_absent_falls_back_to_none() {
+        let content = r#"---
+name: unbounded
+model: claude-haiku
+---
+
+Prompt body.
+"#;
+        let agent = parse_agent(content).unwrap();
+        assert!(agent.max_iterations().is_none());
     }
 
     #[test]

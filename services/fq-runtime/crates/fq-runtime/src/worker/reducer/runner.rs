@@ -309,6 +309,12 @@ pub struct RunnerConfig {
     /// Time + entropy source. [`SystemClock`] in production; the sim
     /// injects a deterministic one.
     clock: Arc<dyn Clock>,
+    /// Daemon default cap on LLM turns per invocation. Used when an
+    /// agent definition does not set its own `max_iterations` override
+    /// (Design Principle 8 — tunable parameters are configuration,
+    /// not code). Defaults to
+    /// [`crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS`].
+    max_iterations: u32,
 }
 
 impl RunnerConfig {
@@ -329,6 +335,7 @@ pub struct RunnerConfigBuilder {
     store: Option<Arc<WorkerStore>>,
     worker_id: Option<WorkerId>,
     clock: Option<Arc<dyn Clock>>,
+    max_iterations: Option<u32>,
 }
 
 impl RunnerConfigBuilder {
@@ -369,6 +376,16 @@ impl RunnerConfigBuilder {
         self
     }
 
+    /// Daemon default cap on LLM turns per invocation. Optional;
+    /// defaults to
+    /// [`crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS`]
+    /// when unset. A per-agent override in the definition takes
+    /// precedence over this value.
+    pub fn max_iterations(mut self, max_iterations: u32) -> Self {
+        self.max_iterations = Some(max_iterations);
+        self
+    }
+
     /// Finalise the config. Panics if any required field was not set
     /// (`clock` is optional and defaults to [`SystemClock`]).
     pub fn build(self) -> RunnerConfig {
@@ -386,6 +403,9 @@ impl RunnerConfigBuilder {
                 .worker_id
                 .expect("RunnerConfig::builder() requires .worker_id(..)"),
             clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
+            max_iterations: self
+                .max_iterations
+                .unwrap_or(crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS),
         }
     }
 }
@@ -598,7 +618,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             system_prompt: agent.system_prompt().to_string(),
             tools_available: tool_schemas.clone(),
             allowed_tool_names: agent.tools().to_vec(),
-            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+            // Precedence: per-agent override (definition) -> daemon
+            // config default -> built-in fallback (baked into the
+            // config default). Issue #9 / Design Principle 8.
+            max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
         };
 
         let trigger = TriggerPayload {
@@ -797,7 +820,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             system_prompt: agent.system_prompt().to_string(),
             tools_available: tool_schemas,
             allowed_tool_names: agent.tools().to_vec(),
-            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+            // Precedence: per-agent override (definition) -> daemon
+            // config default -> built-in fallback (baked into the
+            // config default). Issue #9 / Design Principle 8.
+            max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
         };
         // Reconstruct the original trigger from the state row (v5).
         // Replay starts at step 0, and step 0 seeds the conversation
@@ -1537,11 +1563,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             model: agent.model(),
             allowed_tool_names: agent.tools(),
             budget: agent.budget(),
-            // The reducer harness uses its `DEFAULT_MAX_ITERATIONS`
-            // when AgentConfig.max_iterations is 0. Mirror that so
-            // self_inspect's reported value matches what actually
-            // bounds the agent.
-            max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+            // Report the *effective* cap that bounds this agent, using
+            // the same precedence the runner applies when building
+            // AgentConfig: per-agent override -> daemon config default
+            // -> built-in fallback (issue #9).
+            max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
             totals: *totals,
             elapsed_ms: start.elapsed().as_millis() as u64,
         };
@@ -3242,6 +3268,68 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    /// Issue #9 precedence, checked at the boundary the runner uses to
+    /// fill `AgentConfig.max_iterations`: per-agent override (if the
+    /// definition sets one) wins; otherwise the daemon config default
+    /// applies. This mirrors `agent.max_iterations().unwrap_or(cfg)`
+    /// exactly — the single expression both `run` and `resume` use.
+    #[test]
+    fn max_iterations_precedence_prefers_agent_override_then_config_default() {
+        let config_default = 100u32;
+
+        // Definition without max_iterations -> falls back to the config default.
+        let plain = Agent::builder()
+            .id("plain")
+            .model("claude-haiku")
+            .system_prompt("be brief")
+            .build()
+            .unwrap();
+        assert_eq!(
+            plain.max_iterations().unwrap_or(config_default),
+            config_default,
+            "no override -> daemon config default"
+        );
+
+        // Definition with max_iterations -> overrides the config default.
+        let overridden = Agent::builder()
+            .id("overridden")
+            .model("claude-haiku")
+            .system_prompt("be brief")
+            .max_iterations(7)
+            .build()
+            .unwrap();
+        assert_eq!(
+            overridden.max_iterations().unwrap_or(config_default),
+            7,
+            "override wins over the daemon config default"
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_config_max_iterations_defaults_to_the_builtin_fallback() {
+        // A RunnerConfig built without .max_iterations() carries the
+        // built-in fallback, so a runner constructed with no explicit
+        // daemon default still bounds every agent.
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("events.db"))
+                .await
+                .unwrap(),
+        );
+        let cfg = RunnerConfig::builder()
+            .event_sink(
+                Arc::new(crate::test_support::sim::RecordingSink::new()) as Arc<dyn EventSink>
+            )
+            .pricing(test_pricing())
+            .store(store)
+            .worker_id(test_worker_id())
+            .build();
+        assert_eq!(
+            cfg.max_iterations,
+            crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS
+        );
+    }
 
     #[test]
     fn evaluator_verdict_maps_outcomes() {

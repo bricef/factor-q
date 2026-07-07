@@ -7,6 +7,14 @@
 #
 # Full documentation: https://github.com/bricef/factor-q
 
+# Daemon default cap on LLM turns per invocation — a backstop against a
+# wedged agent, well below the host step budget. An agent definition may
+# override this with its own `max_iterations:` in frontmatter, applied on
+# `fq reload` with no restart. When neither is set, a built-in default
+# (100) applies. Raise it for workloads that legitimately need more
+# turns; lower it to fail runaway agents sooner.
+# max_iterations = 100
+
 [nats]
 # URL of the NATS server. JetStream must be enabled on the server.
 # The token in the userinfo must match the broker's (see
