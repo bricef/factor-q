@@ -1,0 +1,59 @@
+name: 🔧 Task / chore
+description: Mechanical or well-defined work — deps, renames, config, docs, cleanup.
+title: "chore: "
+labels: ["task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For work that's clear and bounded and doesn't need the depth of a feature or the diagnosis of a bug. Lighter on purpose. The **complexity** hint is a routing signal — a `trivial` chore can go to a cheaper model.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line — what needs doing.
+      placeholder: "Bump the nats.go dependency to the latest minor"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What needs doing
+      description: The concrete change. Be exact — a chore should leave little to interpret.
+    validations:
+      required: true
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Complexity (routing hint)
+      description: Rough effort, used to route the work to an appropriately-sized model. When unsure, pick higher.
+      options:
+        - "trivial — mechanical, hard to get wrong (rename, bump, format)"
+        - "simple — a small, well-understood change"
+        - "moderate — needs some judgement or touches a few places"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What "done" looks like.
+      value: |
+        - [ ]
+        - [ ] `just ci` is green.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope (optional)
+      description: Note anything explicitly out of scope, if the chore risks sprawl.
+    validations:
+      required: false
+  - type: textarea
+    id: references
+    attributes:
+      label: References (optional)
+      description: Related issues, docs, or the source of the request.
+    validations:
+      required: false

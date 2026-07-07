@@ -1,0 +1,8 @@
+# Blank issues are disabled so every issue is templated — a consistent,
+# schema-shaped body that a human or an autonomous agent can rely on.
+# Use a discussion for open-ended questions that aren't yet a unit of work.
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Question / discussion
+    url: https://github.com/bricef/factor-q/discussions
+    about: For open-ended questions or ideas that aren't yet a bug, feature, debt item, or task.

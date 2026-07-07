@@ -1,0 +1,105 @@
+name: 🐛 Bug report
+description: Something is behaving incorrectly.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        An issue here may be picked up and implemented by an autonomous agent as well as a human, so **be specific**. The clearer the evidence, acceptance criteria, and scope, the better either can fix it. Fields marked optional may be left as `N/A`.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line — what is wrong.
+      placeholder: "fq reload panics when the agents directory is empty"
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - "critical — data loss, corruption, or unrecoverable / fleet-blocking"
+        - "major — blocks a workflow, no workaround"
+        - "minor — degraded but usable / has a workaround"
+        - "cosmetic — wrong but harmless"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: The exact steps or the trigger. If it can't be reproduced on demand, describe precisely what was observed and when.
+      placeholder: |
+        1. `fq trigger m0-loop "..."`
+        2. ...
+        3. observe ...
+    validations:
+      required: true
+  - type: dropdown
+    id: reliability
+    attributes:
+      label: Reliability
+      options: ["always", "intermittent", "seen once"]
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs. actual
+      description: What should happen, and what actually happens.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Logs, error text, and the `invocation_id` / event IDs — the event log is the system of record, so an ID lets anyone replay it. **Redact secrets.**
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Commit/version, relevant config, and where it ran (dogfood daemon, CI, local).
+      placeholder: "main @ e8fb0b8, dogfood daemon, claude-opus-4-8"
+    validations:
+      required: true
+  - type: textarea
+    id: suspected-seam
+    attributes:
+      label: Suspected cause / seam (optional)
+      description: A code pointer, if you have a hunch where it lives.
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What "done" means, testably. A regression test that fails without the fix is the bar.
+      value: |
+        - [ ] The bug no longer reproduces.
+        - [ ] A regression test fails without the fix and passes with it.
+        - [ ] `just ci` is green.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Bound the fix. Name anything deliberately left for a follow-up.
+      value: |
+        **In scope:**
+
+        **Out of scope:**
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References (optional)
+      description: Design docs, ADRs, principles, related issues.
+    validations:
+      required: false

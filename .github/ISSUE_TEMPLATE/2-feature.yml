@@ -1,0 +1,74 @@
+name: ✨ Feature / improvement
+description: A new capability or an improvement to an existing one.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        An issue here may be implemented by an autonomous agent as well as a human. The **motivation** tells the implementer *why* (and you *whether* to prioritize); the **approach** and **scope** are what let it be built safely and know when it's done. Fields marked optional may be left as `N/A`.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line — the capability.
+      placeholder: "Retry transient LLM API errors with exponential backoff"
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation / value
+      description: The *why*. What problem it solves, who benefits, and why now. Ground it — a concrete scenario beats an abstraction.
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: Sketch the design and **point at the seam** where it lives (e.g. "a decorator at the `LlmClient` seam"). A direction the implementer can run with — not a full spec.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)
+      description: Other approaches, and why not.
+    validations:
+      required: false
+  - type: textarea
+    id: interlocks
+    attributes:
+      label: Interlocks / dependencies (optional)
+      description: Related ADRs, design principles, or issues this depends on or affects.
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What "done" looks like, testably.
+      value: |
+        - [ ]
+        - [ ] A test covers the new behaviour.
+        - [ ] `just ci` is green.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Features sprawl — this is the most important field. State explicitly what is deferred to a follow-up.
+      value: |
+        **In scope:**
+
+        **Out of scope:**
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References (optional)
+      description: Design docs, ADRs, principles, related issues.
+    validations:
+      required: false
