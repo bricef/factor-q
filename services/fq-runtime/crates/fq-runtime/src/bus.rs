@@ -106,6 +106,14 @@ pub enum BusError {
 
     #[error("failed to serialise event: {0}")]
     Serialise(#[from] serde_json::Error),
+
+    /// The serialised event exceeds the NATS server's advertised
+    /// `max_payload`. Returned by the pre-flight guard in
+    /// [`EventBus::publish`] *before* any bytes reach the wire, so an
+    /// oversized event never trips a NATS "Maximum Payload Violation"
+    /// nor poisons the archive-retry sweep. See issue #4.
+    #[error("event payload of {size} bytes exceeds NATS max_payload of {limit} bytes")]
+    PayloadTooLarge { size: usize, limit: usize },
 }
 
 impl From<async_nats::jetstream::context::CreateStreamError> for BusError {
@@ -131,6 +139,13 @@ impl From<async_nats::SubscribeError> for BusError {
 pub struct EventBus {
     client: async_nats::Client,
     jetstream: jetstream::Context,
+    /// The server's advertised `max_payload`, read from the NATS
+    /// server INFO at connect time. Every publish is size-checked
+    /// against this at the shared seam ([`Self::publish`]) so a
+    /// known limit is enforced at the boundary rather than
+    /// discovered through a runtime protocol violation (Design
+    /// Principle 7; issue #4).
+    max_payload: usize,
 }
 
 /// Extract auth credentials from a NATS URL's userinfo.
@@ -165,15 +180,36 @@ pub async fn connect_with_url_credentials(
     options.connect(url).await
 }
 
+/// Pre-flight payload size check: the pure heart of the publish
+/// guard, factored out so it can be tested without a live NATS
+/// server. Returns [`BusError::PayloadTooLarge`] when the serialised
+/// event would exceed the server's advertised `max_payload`.
+///
+/// NATS rejects a publish whose body is strictly greater than
+/// `max_payload`; a body exactly equal to the limit is accepted, so
+/// the guard uses a strict `>` comparison to mirror the server.
+fn check_payload_size(size: usize, limit: usize) -> Result<(), BusError> {
+    if size > limit {
+        return Err(BusError::PayloadTooLarge { size, limit });
+    }
+    Ok(())
+}
+
 impl EventBus {
     /// Connect to a NATS server and ensure both the event and
     /// trigger streams exist.
     pub async fn connect(url: &str) -> Result<Self, BusError> {
         info!(nats_url = url, "connecting to NATS");
         let client = connect_with_url_credentials(url).await?;
+        let max_payload = client.server_info().max_payload;
+        info!(max_payload, "NATS server max_payload");
         let jetstream = jetstream::new(client.clone());
 
-        let bus = Self { client, jetstream };
+        let bus = Self {
+            client,
+            jetstream,
+            max_payload,
+        };
         bus.ensure_event_stream().await?;
         bus.ensure_trigger_stream().await?;
         Ok(bus)
@@ -264,6 +300,16 @@ impl EventBus {
         let subject = event.subject();
         let payload = serde_json::to_vec(event)?;
         debug!(subject = %subject, event_id = %event.envelope.event_id, "publishing event");
+
+        // Pre-flight payload guard (issue #4). This is the single
+        // seam every event publish passes through — the live
+        // invocation path and the archive-retry sweeper (which
+        // republishes through `EventSink::publish` -> here) both hit
+        // it. Reject an oversized event with a clear, attributable
+        // error *before* the bytes reach NATS, rather than tripping a
+        // "Maximum Payload Violation" that errors the invocation and
+        // poisons the retry loop.
+        check_payload_size(payload.len(), self.max_payload)?;
 
         self.jetstream
             .publish(subject, Bytes::from(payload))
@@ -577,6 +623,54 @@ mod tests {
 
         assert_eq!(received.envelope.event_id, expected_id);
         assert_eq!(received.envelope.agent_id.as_str(), agent_id);
+    }
+
+    /// The pre-flight guard (issue #4) rejects a payload larger than
+    /// the server's advertised `max_payload` with a clear, attributable
+    /// error, and never reaches NATS. Exercised against the pure seam
+    /// so it needs no live server.
+    #[test]
+    fn payload_guard_rejects_oversized_and_accepts_within_limit() {
+        // Strictly over the limit -> rejected with size and limit.
+        match check_payload_size(1_048_577, 1_048_576) {
+            Err(BusError::PayloadTooLarge { size, limit }) => {
+                assert_eq!(size, 1_048_577);
+                assert_eq!(limit, 1_048_576);
+            }
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
+        // Exactly at the limit and below are accepted (NATS accepts a
+        // body equal to max_payload; only strictly-greater is a
+        // violation).
+        assert!(check_payload_size(1_048_576, 1_048_576).is_ok());
+        assert!(check_payload_size(0, 1_048_576).is_ok());
+    }
+
+    /// End-to-end at the serialisation boundary: a real oversized
+    /// event (a system prompt padded past a small limit) serialises
+    /// to more bytes than the limit, and the guard rejects it cleanly
+    /// with the actual serialised size — no NATS round-trip.
+    #[test]
+    fn oversized_event_is_rejected_by_the_guard() {
+        let limit = 1_024usize;
+        let mut event = sample_event("guard-test");
+        if let EventPayload::Triggered(ref mut p) = event.payload {
+            p.config_snapshot.system_prompt = "x".repeat(4_096);
+        } else {
+            panic!("sample_event should be a Triggered payload");
+        }
+        let payload = serde_json::to_vec(&event).expect("serialise event");
+        assert!(
+            payload.len() > limit,
+            "test event must exceed the limit to be meaningful"
+        );
+        match check_payload_size(payload.len(), limit) {
+            Err(BusError::PayloadTooLarge { size, limit: l }) => {
+                assert_eq!(size, payload.len());
+                assert_eq!(l, limit);
+            }
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
     }
 
     /// Annotations live on the wire — the barrier (envelope-refactor
