@@ -758,6 +758,15 @@ async fn trigger_agent(
             println!("✗ Budget exceeded: cost ${cost:.6}");
             println!("  invocation: {invocation_id}");
         }
+        InvocationOutcome::Suspended { invocation_id } => {
+            // A drain suspended the run at a step boundary; the row
+            // stays in-flight for recovery to resume under the next
+            // binary. An in-process `fq trigger` has no drain source, so
+            // this is effectively unreachable here — but the match is
+            // total.
+            println!("⏸ Suspended at a step boundary (drained); recovery will resume it");
+            println!("  invocation: {invocation_id}");
+        }
     }
 
     Ok(())

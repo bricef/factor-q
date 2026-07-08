@@ -33,7 +33,7 @@ use crate::worker::reducer::runner::{
     Clock, EventSink, ReducerContext, ReducerRunner, RunnerConfig,
 };
 use crate::worker::store::WorkerStore;
-use crate::worker::{ExecutorError, InvocationOutcome, WorkerId};
+use crate::worker::{DrainSignal, ExecutorError, InvocationOutcome, WorkerId};
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
 
 /// Deterministic time + entropy: a strictly monotonic millisecond
@@ -80,6 +80,11 @@ impl Clock for SimClock {
 pub struct RecordingSink {
     events: Mutex<Vec<Event>>,
     fail_at: AtomicUsize,
+    /// Armed graceful drain (ADR-0027): when the publish count first
+    /// reaches the index, request the `DrainSignal` once, then disarm.
+    /// Distinct from `fail_at` — the publish still succeeds; the drain
+    /// takes effect at the reducer's next step-boundary poll.
+    drain_arm: Mutex<Option<(usize, DrainSignal)>>,
 }
 
 impl RecordingSink {
@@ -87,6 +92,7 @@ impl RecordingSink {
         Self {
             events: Mutex::new(Vec::new()),
             fail_at: AtomicUsize::new(usize::MAX),
+            drain_arm: Mutex::new(None),
         }
     }
 
@@ -102,6 +108,20 @@ impl RecordingSink {
         self.fail_at.store(usize::MAX, Ordering::SeqCst);
     }
 
+    /// Arm a graceful drain (ADR-0027): when the publish count first
+    /// reaches `index`, request `signal` once and disarm. Unlike
+    /// [`Self::fail_publish_at`] that publish still *succeeds* — the
+    /// drain is observed at the reducer loop's next step-boundary poll,
+    /// suspending the invocation there.
+    pub fn drain_at_publish(&self, index: usize, signal: DrainSignal) {
+        *self.drain_arm.lock().unwrap() = Some((index, signal));
+    }
+
+    /// Disarm any pending drain injection.
+    pub fn clear_drain(&self) {
+        *self.drain_arm.lock().unwrap() = None;
+    }
+
     /// Everything successfully published so far.
     pub fn events(&self) -> Vec<Event> {
         self.events.lock().unwrap().clone()
@@ -115,6 +135,17 @@ impl EventSink for RecordingSink {
         if events.len() >= self.fail_at.load(Ordering::SeqCst) {
             return Err(BusError::Publish("sim: injected publish fault".to_string()));
         }
+        // Graceful-drain injection (ADR-0027): at the armed publish
+        // index request the drain once (the publish still succeeds); the
+        // reducer loop suspends at its next step-boundary poll.
+        let mut arm = self.drain_arm.lock().unwrap();
+        let ready = arm
+            .as_ref()
+            .is_some_and(|(index, _)| events.len() >= *index);
+        if ready && let Some((_, signal)) = arm.take() {
+            signal.request();
+        }
+        drop(arm);
         events.push(event.clone());
         Ok(())
     }
@@ -300,6 +331,44 @@ impl SimWorld {
             .parse()
             .expect("invocation id parses");
         self.runner.resume(&self.agent, llm, invocation_id).await
+    }
+
+    /// Resume the single in-flight invocation on a **fresh runner** —
+    /// the next-binary handoff a graceful drain relies on (ADR-0027).
+    /// A `DrainSignal` is monotonic, so resuming on the original runner
+    /// (whose flag is still set) would re-suspend immediately with no
+    /// progress; the new runner starts `Running` over the same
+    /// store/sink/clock. Clears any drain arming first — the drain is
+    /// over.
+    pub async fn resume_on_fresh_binary(
+        &self,
+        llm: &FixtureClient,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        self.sink.clear_drain();
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::clone(&self.tool) as Arc<dyn Tool>);
+        let fresh = Self::build_runner(
+            &self.clock,
+            &self.sink,
+            &registry,
+            &self.store,
+            Arc::new(PricingTable::empty()),
+        );
+        let in_flight = self
+            .store
+            .find_in_flight_invocations()
+            .await
+            .expect("query in-flight");
+        assert_eq!(
+            in_flight.len(),
+            1,
+            "expected exactly one suspended invocation"
+        );
+        let invocation_id = in_flight[0]
+            .invocation_id
+            .parse()
+            .expect("invocation id parses");
+        fresh.resume(&self.agent, llm, invocation_id).await
     }
 
     /// The invocation id of the (single) trace captured so far.
@@ -565,7 +634,7 @@ mod resume_equivalence {
         }
     }
 
-    fn assert_equivalent(reference: &RunResult, resumed: &RunResult, label: &str) {
+    pub(super) fn assert_equivalent(reference: &RunResult, resumed: &RunResult, label: &str) {
         for (i, (a, b)) in reference
             .observed
             .iter()
@@ -737,7 +806,7 @@ mod crash_dst {
         categorise(&state, &tools, &llms)
     }
 
-    async fn completed_llm_turns(world: &SimWorld, inv: &str) -> usize {
+    pub(super) async fn completed_llm_turns(world: &SimWorld, inv: &str) -> usize {
         world
             .store
             .list_llm_dispatches_for_invocation(inv)
@@ -1205,6 +1274,9 @@ mod budget_properties {
                             panic!("trace not canonical: {violations:?}");
                         }
                     }
+                    InvocationOutcome::Suspended { .. } => {
+                        panic!("unexpected drain-suspend in budget-accounting run");
+                    }
                 }
             });
         }
@@ -1537,6 +1609,9 @@ mod soak {
                             assert!((cost - wal_sum).abs() < 1e-9, "seed {seed}");
                             label = "budget_exceeded";
                         }
+                        InvocationOutcome::Suspended { .. } => {
+                            panic!("unexpected drain-suspend at seed {seed}");
+                        }
                     }
                     break;
                 }
@@ -1699,5 +1774,92 @@ mod soak {
         // classes; deep runs (just soak) cover the rest by volume.
         assert!(coverage.get("completed").copied().unwrap_or(0) > 0);
         assert!(coverage.len() >= 3, "coverage collapsed: {coverage:?}");
+    }
+}
+
+#[cfg(test)]
+mod drain_equivalence {
+    //! ADR-0027 PR-1: a drain requested at a step boundary suspends the
+    //! invocation with its state already checkpointed, and the next
+    //! binary's recovery resumes it. The suspended-then-resumed run is
+    //! observationally identical to the uninterrupted reference — the
+    //! same property `resume_equivalence` proves for a publish-fault
+    //! *crash*, now via the cooperative `Suspended` return.
+    //!
+    //! The drain rides the same shared-sink publish counter the crash
+    //! tests use, but gracefully: `drain_at_publish` lets the publish
+    //! succeed and the loop suspends at its next step boundary. The
+    //! resume leg runs on a *fresh* runner — the "next binary" — because
+    //! a `DrainSignal` is monotonic.
+
+    use super::crash_dst::completed_llm_turns;
+    use super::resume_equivalence::{
+        RunResult, assert_equivalent, load_fixture, queue_tool_outputs, run_reference, script,
+        summary_of,
+    };
+    use super::*;
+    use crate::test_support::oracle::observational_trace;
+
+    /// Drain at the first publish of `boundary_span` (the same geometry
+    /// `run_interrupted` crashes at), then resume on a fresh binary with
+    /// exactly the LLM turns the WAL says are still outstanding.
+    async fn run_drained(seed: u64, turns: usize, boundary_span: usize) -> RunResult {
+        let world = SimWorld::new(seed, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        let responses = script(turns);
+
+        // Graceful drain at the span boundary: the publish still
+        // succeeds (unlike a crash) and the loop suspends at the next
+        // step boundary.
+        world
+            .sink
+            .drain_at_publish(1 + 3 * boundary_span, world.runner.drain_signal());
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &responses);
+        let outcome = world.run(&llm).await.expect("drained run returns Ok");
+        assert!(
+            matches!(outcome, InvocationOutcome::Suspended { .. }),
+            "expected Suspended at span {boundary_span}, got {outcome:?}"
+        );
+        // Non-terminal: the row stays in-flight for recovery to resume.
+        let in_flight = world.store.find_in_flight_invocations().await.unwrap();
+        assert_eq!(
+            in_flight.len(),
+            1,
+            "a suspended invocation must stay in-flight (span {boundary_span})"
+        );
+
+        // Resume on a fresh binary with the not-yet-consumed turns — the
+        // WAL is the source of truth for how many LLM turns completed.
+        let inv = world.invocation_id().to_string();
+        let consumed = completed_llm_turns(&world, &inv).await;
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &responses[consumed..]);
+        let outcome = world
+            .resume_on_fresh_binary(&resume_llm)
+            .await
+            .expect("fresh-binary resume completes");
+
+        RunResult {
+            observed: observational_trace(&world.sink.events()),
+            summary: summary_of(&outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        }
+    }
+
+    /// Every interior step boundary of a fixed two-tool-turn script:
+    /// drain there, resume on a fresh binary, and match the
+    /// uninterrupted reference under the observational mask (trace +
+    /// outcome + tool dispatches).
+    #[tokio::test]
+    async fn drain_suspend_then_resume_is_equivalent_to_uninterrupted() {
+        let turns = 2;
+        let reference = run_reference(1234, turns).await;
+        // Interior boundaries only: draining during the *final* step
+        // lets it complete rather than suspend, so stop before it.
+        for boundary_span in 0..(2 * turns) {
+            let drained = run_drained(1234, turns, boundary_span).await;
+            assert_equivalent(&reference, &drained, &format!("drain span {boundary_span}"));
+        }
     }
 }
