@@ -1881,6 +1881,18 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // Shut down MCP server processes.
     mcp_manager.shutdown().await;
 
+    // On a clean, signal-driven shutdown, deregister the worker so its
+    // coordination row reflects a graceful exit (`shutdown`) instead of
+    // being left `alive` to age into `stale` — the accumulation this
+    // fixes. Symmetric with the startup `register_worker`; best-effort,
+    // a failure here must never block the shutdown. A crash / task-
+    // failure exit (`clean_exit == false`) is deliberately left to the
+    // stale sweep, which is the honest signal that it did not exit
+    // cleanly.
+    if clean_exit && let Err(err) = cp_store.mark_worker_shutdown(worker_id.as_str()).await {
+        tracing::warn!(error = %err, "failed to mark worker as gracefully shut down");
+    }
+
     // Publish a system.shutdown event on the way out. Best-effort —
     // if NATS is already unreachable we just log and continue.
     let shutdown_event = Event::system(
