@@ -786,7 +786,7 @@ mod crash_dst {
     }
 
     /// Categorise the (single) in-flight invocation's WAL directly.
-    async fn wal_category(world: &SimWorld, inv: &str) -> RecoveryCategory {
+    pub(super) async fn wal_category(world: &SimWorld, inv: &str) -> RecoveryCategory {
         let state = world
             .store
             .get_invocation_state(inv)
@@ -1781,10 +1781,16 @@ mod soak {
 mod drain_equivalence {
     //! ADR-0027 PR-1: a drain requested at a step boundary suspends the
     //! invocation with its state already checkpointed, and the next
-    //! binary's recovery resumes it. The suspended-then-resumed run is
-    //! observationally identical to the uninterrupted reference — the
-    //! same property `resume_equivalence` proves for a publish-fault
-    //! *crash*, now via the cooperative `Suspended` return.
+    //! binary's recovery resumes it. Held to the same bar as the crash
+    //! DST (`crash_dst`) / `resume_equivalence`: at every drain point we
+    //! assert (a) the suspend prefix is a canonical trace prefix, (b) the
+    //! WAL categorises the suspend as cleanly resumable — **never
+    //! `Ambiguous`** (the load-bearing safety property: a drain always
+    //! lands at a resumable boundary), (c) the resume leg is a valid
+    //! headless resume, (d) the tool runs at most once per logical call
+    //! across drain+resume, and (e) the suspended-then-resumed run is
+    //! observationally identical to the uninterrupted reference. Proven
+    //! for a fixed script exhaustively and over random seeds/scripts.
     //!
     //! The drain rides the same shared-sink publish counter the crash
     //! tests use, but gracefully: `drain_at_publish` lets the publish
@@ -1792,17 +1798,21 @@ mod drain_equivalence {
     //! resume leg runs on a *fresh* runner — the "next binary" — because
     //! a `DrainSignal` is monotonic.
 
-    use super::crash_dst::completed_llm_turns;
+    use super::crash_dst::{completed_llm_turns, wal_category};
     use super::resume_equivalence::{
         RunResult, assert_equivalent, load_fixture, queue_tool_outputs, run_reference, script,
         summary_of,
     };
     use super::*;
-    use crate::test_support::oracle::observational_trace;
+    use crate::test_support::oracle::{
+        check_invocation_trace_prefix, check_resume_trace, observational_trace,
+    };
+    use crate::worker::recovery::RecoveryCategory;
 
-    /// Drain at the first publish of `boundary_span` (the same geometry
-    /// `run_interrupted` crashes at), then resume on a fresh binary with
-    /// exactly the LLM turns the WAL says are still outstanding.
+    /// Drain at the first publish of `boundary_span`, assert the full
+    /// suspend/resume invariant stack, then resume on a fresh binary with
+    /// exactly the LLM turns the WAL says are still outstanding. Returns
+    /// the combined-run result for the observational-equivalence check.
     async fn run_drained(seed: u64, turns: usize, boundary_span: usize) -> RunResult {
         let world = SimWorld::new(seed, 5.0).await;
         queue_tool_outputs(&world, turns);
@@ -1821,6 +1831,13 @@ mod drain_equivalence {
             matches!(outcome, InvocationOutcome::Suspended { .. }),
             "expected Suspended at span {boundary_span}, got {outcome:?}"
         );
+
+        // (a) The captured prefix is a canonical trace prefix — the run
+        // did nothing illegal before suspending.
+        let prefix = world.sink.events();
+        if let Err(violations) = check_invocation_trace_prefix(&prefix) {
+            panic!("suspend prefix not canonical (span {boundary_span}): {violations:?}");
+        }
         // Non-terminal: the row stays in-flight for recovery to resume.
         let in_flight = world.store.find_in_flight_invocations().await.unwrap();
         assert_eq!(
@@ -1828,10 +1845,22 @@ mod drain_equivalence {
             1,
             "a suspended invocation must stay in-flight (span {boundary_span})"
         );
+        // (b) The load-bearing safety property: a drain suspends at a
+        // cleanly-resumable boundary, never `Ambiguous`.
+        let inv = world.invocation_id().to_string();
+        let category = wal_category(&world, &inv).await;
+        assert!(
+            matches!(
+                category,
+                RecoveryCategory::SafeResume | RecoveryCategory::SafeReplay
+            ),
+            "a drain-suspend must categorise SafeResume/SafeReplay, got {category:?} \
+             (span {boundary_span})"
+        );
+        let prefix_len = prefix.len();
 
         // Resume on a fresh binary with the not-yet-consumed turns — the
         // WAL is the source of truth for how many LLM turns completed.
-        let inv = world.invocation_id().to_string();
         let consumed = completed_llm_turns(&world, &inv).await;
         let resume_llm = FixtureClient::new();
         load_fixture(&resume_llm, &responses[consumed..]);
@@ -1840,19 +1869,31 @@ mod drain_equivalence {
             .await
             .expect("fresh-binary resume completes");
 
+        // (c) The resume leg is a valid headless resume: starts mid-
+        // stream (no re-`triggered`) and runs to one terminal + archived.
+        let all_events = world.sink.events();
+        if let Err(violations) = check_resume_trace(&all_events[prefix_len..]) {
+            panic!("resume leg not a valid headless resume (span {boundary_span}): {violations:?}");
+        }
+        // (d) At most once per logical tool call across drain+resume.
+        assert_eq!(
+            world.tool.dispatches().lock().unwrap().len(),
+            turns,
+            "each logical tool call must run exactly once across drain+resume (span {boundary_span})"
+        );
+
         RunResult {
-            observed: observational_trace(&world.sink.events()),
+            observed: observational_trace(&all_events),
             summary: summary_of(&outcome),
             dispatches: world.tool.dispatches().lock().unwrap().clone(),
         }
     }
 
-    /// Every interior step boundary of a fixed two-tool-turn script:
-    /// drain there, resume on a fresh binary, and match the
-    /// uninterrupted reference under the observational mask (trace +
-    /// outcome + tool dispatches).
+    /// Every interior step boundary of a fixed two-tool-turn script,
+    /// exhaustively: drain there and match the uninterrupted reference
+    /// (plus the invariant stack asserted inside `run_drained`).
     #[tokio::test]
-    async fn drain_suspend_then_resume_is_equivalent_to_uninterrupted() {
+    async fn every_drain_boundary_of_a_fixed_script_is_equivalent() {
         let turns = 2;
         let reference = run_reference(1234, turns).await;
         // Interior boundaries only: draining during the *final* step
@@ -1860,6 +1901,39 @@ mod drain_equivalence {
         for boundary_span in 0..(2 * turns) {
             let drained = run_drained(1234, turns, boundary_span).await;
             assert_equivalent(&reference, &drained, &format!("drain span {boundary_span}"));
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 24, ..Default::default()
+        })]
+
+        /// Random scripts × random interior boundaries × random seeds:
+        /// the drained-and-resumed run holds the full invariant stack
+        /// (asserted in `run_drained`) and is observationally identical
+        /// to the uninterrupted one.
+        #[test]
+        fn drained_runs_are_observationally_equivalent(
+            seed: u64,
+            turns in 1usize..=3,
+            boundary_span in 0usize..6,
+        ) {
+            // Interior boundaries only (draining the final step completes).
+            proptest::prop_assume!(boundary_span < 2 * turns);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("sim runtime");
+            runtime.block_on(async {
+                let reference = run_reference(seed, turns).await;
+                let drained = run_drained(seed, turns, boundary_span).await;
+                assert_equivalent(
+                    &reference,
+                    &drained,
+                    &format!("seed {seed}, turns {turns}, drain span {boundary_span}"),
+                );
+            });
         }
     }
 }
