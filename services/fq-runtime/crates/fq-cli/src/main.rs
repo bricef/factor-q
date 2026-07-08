@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use fq_runtime::agent::{AgentId, AgentRegistry, definition::parse_agent};
 use fq_runtime::control_plane::projection::store::EventFilter;
 use fq_runtime::events::{
@@ -39,6 +39,15 @@ struct Cli {
     command: Commands,
 }
 
+/// How the tracing subscriber renders log lines. `Text` is the
+/// human-readable ANSI default; `Json` emits one structured JSON
+/// object per line for machine parsing (issue #36).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
 /// Global arguments available on every subcommand. Each flag has a
 /// corresponding environment variable, and together they override values
 /// loaded from the config file.
@@ -61,6 +70,12 @@ struct GlobalArgs {
     /// Override the cache directory from config
     #[arg(long, env = "FQ_CACHE_DIR", global = true)]
     cache_dir: Option<PathBuf>,
+
+    /// Log output format for the tracing subscriber. `text` (the
+    /// default) is human-readable ANSI; `json` emits one JSON object
+    /// per log line for machine parsing by a log aggregator.
+    #[arg(long, env = "FQ_LOG_FORMAT", value_enum, default_value_t = LogFormat::Text, global = true)]
+    log_format: LogFormat,
 }
 
 impl GlobalArgs {
@@ -270,15 +285,32 @@ enum EventCommands {
     },
 }
 
+/// Initialise the global tracing subscriber. Both branches share the
+/// same `EnvFilter` wiring — `RUST_LOG` (or `info` by default) governs
+/// levels identically — and differ only in how each event is rendered:
+///
+/// - [`LogFormat::Text`] keeps the human-readable ANSI output (the
+///   default, so existing behaviour is unchanged).
+/// - [`LogFormat::Json`] emits one JSON object per log line so a log
+///   aggregator (ELK, Loki, Datadog) can query the structured fields
+///   directly instead of regex-scraping (issue #36).
+fn init_tracing(format: LogFormat) {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    match format {
+        LogFormat::Text => fmt().with_env_filter(env_filter).init(),
+        LogFormat::Json => fmt().with_env_filter(env_filter).json().init(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // Initialise the tracing subscriber now that args are parsed, so
+    // `--log-format` / FQ_LOG_FORMAT can pick the renderer. Nothing logs
+    // before this point. EnvFilter / RUST_LOG wiring is identical in both
+    // modes (issue #36).
+    init_tracing(cli.global.log_format);
 
     // Restore the default SIGPIPE disposition for query-style commands
     // so `fq status | head` dies silently like any Unix filter instead
@@ -3201,5 +3233,109 @@ mod reload_tests {
         let after = shared.read().await.clone();
         assert_eq!(after.len(), 1, "failed reload must keep the old registry");
         assert!(after.get(&AgentId::new("keep").unwrap()).is_some());
+    }
+}
+
+#[cfg(test)]
+mod log_format_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// The default (no flag, no env) is `text`, preserving the
+    /// existing human-readable output.
+    #[test]
+    fn log_format_defaults_to_text() {
+        let cli = Cli::parse_from(["fq", "run"]);
+        assert_eq!(cli.global.log_format, LogFormat::Text);
+    }
+
+    /// `--log-format json` parses to the JSON renderer.
+    #[test]
+    fn log_format_json_flag_parses() {
+        let cli = Cli::parse_from(["fq", "--log-format", "json", "run"]);
+        assert_eq!(cli.global.log_format, LogFormat::Json);
+    }
+
+    /// `--log-format text` parses to the text renderer.
+    #[test]
+    fn log_format_text_flag_parses() {
+        let cli = Cli::parse_from(["fq", "--log-format", "text", "run"]);
+        assert_eq!(cli.global.log_format, LogFormat::Text);
+    }
+
+    /// The flag is global — it can follow the subcommand too.
+    #[test]
+    fn log_format_flag_is_global() {
+        let cli = Cli::parse_from(["fq", "status", "--log-format", "json"]);
+        assert_eq!(cli.global.log_format, LogFormat::Json);
+    }
+
+    /// An unknown value is rejected rather than silently defaulting.
+    #[test]
+    fn log_format_rejects_unknown_value() {
+        let result = Cli::try_parse_from(["fq", "--log-format", "yaml", "run"]);
+        let err = match result {
+            Ok(_) => panic!("unknown log-format value should be rejected"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("yaml") || msg.contains("possible values"),
+            "got: {msg}"
+        );
+    }
+
+    /// The JSON formatter layer builds and renders a structured event
+    /// as parseable JSON with the fields intact. Uses a
+    /// `tracing_subscriber::fmt` layer with a captured writer rather
+    /// than the process-global subscriber (which can only be set once),
+    /// but exercises the same `.json()` renderer `init_tracing` wires up.
+    #[test]
+    fn json_layer_emits_parseable_json_with_fields() {
+        use std::sync::{Arc, Mutex};
+        use tracing::subscriber;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for SharedBuf {
+            type Writer = SharedBuf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = SharedBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new("info"))
+            .json()
+            .with_writer(buf.clone())
+            .finish();
+
+        subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                invocation_id = "inv-42",
+                worker_id = "w-1",
+                "structured event"
+            );
+        });
+
+        let raw = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let line = raw.lines().next().expect("expected at least one log line");
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("each log line must be a JSON object");
+        assert_eq!(parsed["level"], "WARN");
+        assert_eq!(parsed["fields"]["message"], "structured event");
+        assert_eq!(parsed["fields"]["invocation_id"], "inv-42");
+        assert_eq!(parsed["fields"]["worker_id"], "w-1");
     }
 }
