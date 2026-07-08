@@ -11,7 +11,7 @@ use fq_runtime::events::{
     TriggerSource,
 };
 use fq_runtime::llm::{GenAiClient, LlmClient};
-use fq_runtime::worker::InvocationOutcome;
+use fq_runtime::worker::{DrainReason, DrainRequest, InvocationOutcome};
 use fq_runtime::{
     Config, EventBus, McpClientManager, McpServerConfig, PricingTable, ProjectionConsumer,
     ProjectionStore, SharedRegistry, ToolRegistry, TriggerDispatcher,
@@ -98,6 +98,14 @@ enum Commands {
     /// — in-flight invocations keep the config they snapshotted at
     /// trigger time (ADR-0020 refresh-between-invocations).
     Reload,
+    /// Ask a running `fq run` daemon to drain gracefully and exit
+    /// (ADR-0027). Publishes a control message on `fq.control.drain`;
+    /// the daemon stops consuming new triggers and lets each in-flight
+    /// invocation suspend at its next step boundary — state already on
+    /// the WAL — then exits, so the next binary's recovery resumes them
+    /// with no lost or re-run work. Bounded by `drain_deadline_ms`; past
+    /// it the stragglers are hard-stopped and recovery picks them up.
+    Drain,
     /// Trigger an agent manually
     Trigger {
         /// Agent name
@@ -302,6 +310,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Init { force } => init_project(force)?,
         Commands::Run => run_daemon(&cli.global).await?,
         Commands::Reload => reload_daemon(&cli.global).await?,
+        Commands::Drain => drain_daemon(&cli.global).await?,
         Commands::Trigger {
             agent,
             payload,
@@ -1470,6 +1479,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // continue. The resume-runner shares the same NATS bus and
     // tool registry as new triggers.
     let resume_count = recoverable.len();
+    // Track the resume tasks' handles so a graceful drain (ADR-0027) can
+    // wait for them to suspend at a step boundary before exiting. On a
+    // signal-driven shutdown they stay detached (abandoned, as before).
+    let mut resume_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(resume_count);
     for inv in recoverable {
         let inv_id = match uuid::Uuid::parse_str(&inv.state.invocation_id) {
             Ok(id) => id,
@@ -1506,7 +1519,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         let agent = loaded.agent.clone();
         let runner = resume_runner.clone();
         let llm_arc = llm.clone();
-        tokio::spawn(async move {
+        resume_handles.push(tokio::spawn(async move {
             match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
                 Ok(outcome) => tracing::info!(
                     invocation_id = %inv_id,
@@ -1519,7 +1532,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                     "resume failed"
                 ),
             }
-        });
+        }));
     }
     if resume_count > 0 {
         println!("  resume tasks:     {resume_count} spawned");
@@ -1693,6 +1706,65 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     });
 
+    // Spawn the control-drain listener (ADR-0027). On a `fq.control.drain`
+    // message it flips the shared drain signal — suspending in-flight
+    // invocations at their next step boundary and stopping the dispatcher
+    // from consuming new triggers — then signals the main select to run
+    // the bounded drain and exit. Best-effort core-NATS like reload;
+    // non-fatal, so its handle is not watched in the select. `drain_probe`
+    // is a separate handle kept here to let the select classify a
+    // dispatcher-exit-while-draining as a clean drain.
+    let drain_probe: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
+    let (drain_requested_tx, mut drain_requested_rx) = tokio::sync::oneshot::channel::<()>();
+    let (drain_listener_shutdown_tx, mut drain_listener_shutdown_rx) =
+        tokio::sync::oneshot::channel::<()>();
+    let drain_bus = bus.clone();
+    let drain_worker: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
+    let drain_handle = tokio::spawn(async move {
+        let mut drain_requested_tx = Some(drain_requested_tx);
+        'resubscribe: loop {
+            let mut sub = match drain_bus.subscribe_control_drain().await {
+                Ok(sub) => sub,
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "failed to subscribe to control drain; retrying in 5s"
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = &mut drain_listener_shutdown_rx => break 'resubscribe,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
+                    }
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = &mut drain_listener_shutdown_rx => break 'resubscribe,
+                msg = sub.next() => {
+                    match msg {
+                        Some(_) => {
+                            tracing::info!(
+                                "drain requested; suspending in-flight invocations at their \
+                                 next step boundary and no longer consuming new triggers"
+                            );
+                            drain_worker
+                                .request_drain(DrainRequest::new(DrainReason::Deploy))
+                                .await;
+                            if let Some(tx) = drain_requested_tx.take() {
+                                let _ = tx.send(());
+                            }
+                            break 'resubscribe;
+                        }
+                        None => {
+                            tracing::warn!("control-drain subscription ended; resubscribing");
+                            continue 'resubscribe;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // Spawn the trigger dispatcher.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
     let dispatcher = TriggerDispatcher::new(bus.clone(), shared_registry, worker, llm);
@@ -1703,6 +1775,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("  - projection consumer is materialising events into SQLite");
     println!("  - trigger dispatcher is listening on fq.trigger.*");
     println!("  - control-reload listener is listening on fq.control.reload");
+    println!("  - control-drain listener is listening on fq.control.drain");
 
     // Wait for either a shutdown signal (Ctrl-C / SIGTERM) or one of
     // the hosted tasks exiting prematurely. We watch the task handles
@@ -1730,6 +1803,12 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 other => (other, false, None),
             }
         }
+        // A `fq drain` control message asked for a graceful drain
+        // (ADR-0027). The listener has already flipped the shared drain
+        // signal — in-flight invocations are suspending and the dispatcher
+        // has stopped consuming — so exit the select and run the bounded
+        // drain in the teardown below.
+        _ = &mut drain_requested_rx => ("drain", true, None),
         result = &mut projection_handle => {
             let err_msg = describe_task_result("projection consumer", result);
             ("task_failed", false, Some(("projection_consumer", err_msg)))
@@ -1779,8 +1858,18 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             }
         }
         result = &mut dispatcher_handle => {
-            let err_msg = describe_task_result("trigger dispatcher", result);
-            ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
+            // The dispatcher normally exits only on a fatal error. But a
+            // graceful drain makes it stop consuming on its own once the
+            // drain signal is set (PR-2), so if we're draining, its exit
+            // is the clean drain path — not a task failure. (This also
+            // covers the race where the dispatcher finishes draining
+            // before the listener's `drain_requested` signal is polled.)
+            if drain_probe.drain_status() == fq_runtime::worker::DrainState::Draining {
+                ("drain", true, None)
+            } else {
+                let err_msg = describe_task_result("trigger dispatcher", result);
+                ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
+            }
         }
     };
     // NOTE: the control-reload listener handle is intentionally NOT
@@ -1811,6 +1900,24 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     }
 
+    // On a graceful drain (ADR-0027), wait — bounded by `drain_deadline_ms`
+    // — for the invocation-bearing tasks (the dispatcher's in-flight run
+    // and the recovery-resume tasks) to suspend at a step boundary. They
+    // stop on their own because the drain signal is already set; past the
+    // deadline the stragglers are hard-stopped and the next binary's
+    // recovery resumes them.
+    let drained = shutdown_reason == "drain";
+    let drain_deadline = drained.then(|| {
+        tokio::time::Instant::now() + std::time::Duration::from_millis(config.drain_deadline_ms)
+    });
+    if drained {
+        println!();
+        println!(
+            "Draining — waiting up to {}ms for in-flight invocations to suspend...",
+            config.drain_deadline_ms
+        );
+    }
+
     // Signal all tasks to shut down. Any one may already be done
     // (the one that returned from the select), but sending on a
     // oneshot whose receiver was dropped is a no-op.
@@ -1823,6 +1930,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = retention_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
     let _ = reload_shutdown_tx.send(());
+    let _ = drain_listener_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
         Ok(Ok(Ok(()))) => println!("  projection consumer stopped cleanly."),
@@ -1875,16 +1983,52 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Ok(Err(err)) => tracing::error!(error = %err, "retention sweep task panicked"),
         Err(_) => tracing::warn!("retention sweep did not shut down within 5s"),
     }
-    match tokio::time::timeout(std::time::Duration::from_secs(5), dispatcher_handle).await {
+    // Dispatcher: on a drain, wait up to the shared drain deadline for it
+    // to stop consuming and its in-flight invocation to suspend; on a
+    // signal shutdown, the usual 5s.
+    let dispatcher_join_deadline = drain_deadline
+        .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(5));
+    match tokio::time::timeout_at(dispatcher_join_deadline, dispatcher_handle).await {
         Ok(Ok(Ok(()))) => println!("  trigger dispatcher stopped cleanly."),
         Ok(Ok(Err(err))) => tracing::error!(error = %err, "trigger dispatcher exited with error"),
         Ok(Err(err)) => tracing::error!(error = %err, "trigger dispatcher task panicked"),
-        Err(_) => tracing::warn!("trigger dispatcher did not shut down within 5s"),
+        Err(_) => tracing::warn!("trigger dispatcher did not shut down in time"),
     }
+
+    // Recovery-resume tasks are joined only on a drain: wait (up to the
+    // same shared deadline) for each to suspend at a step boundary. Past
+    // the deadline they are abandoned — the next binary's recovery resumes
+    // them (as ambiguous, via ordinary crash-recovery). On a signal
+    // shutdown they stay detached, unchanged.
+    if let Some(deadline) = drain_deadline {
+        let (mut suspended, mut hard_stopped) = (0usize, 0usize);
+        for handle in resume_handles {
+            match tokio::time::timeout_at(deadline, handle).await {
+                Ok(_) => suspended += 1,
+                Err(_) => hard_stopped += 1,
+            }
+        }
+        if hard_stopped > 0 {
+            tracing::warn!(
+                suspended,
+                hard_stopped,
+                "drain deadline elapsed; hard-stopped invocations will be resumed by \
+                 recovery on the next start"
+            );
+        } else if suspended > 0 {
+            println!("  drained {suspended} in-flight invocation(s) cleanly.");
+        }
+    }
+
     match tokio::time::timeout(std::time::Duration::from_secs(5), reload_handle).await {
         Ok(Ok(())) => println!("  control-reload listener stopped cleanly."),
         Ok(Err(err)) => tracing::error!(error = %err, "control-reload listener task panicked"),
         Err(_) => tracing::warn!("control-reload listener did not shut down within 5s"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), drain_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(error = %err, "control-drain listener task panicked"),
+        Err(_) => tracing::warn!("control-drain listener did not shut down within 5s"),
     }
 
     // Shut down MCP server processes.
@@ -2041,6 +2185,25 @@ fn describe_task_result<E: std::fmt::Display>(
 /// success — it confirms the signal was published, not that a
 /// daemon acted on it). Watch `fq events tail` or the daemon logs
 /// to confirm the reload took effect.
+async fn drain_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    bus.publish_control_drain()
+        .await
+        .context("failed to publish control drain")?;
+    println!(
+        "Published drain signal on {}.",
+        fq_runtime::bus::CONTROL_DRAIN_SUBJECT
+    );
+    println!(
+        "A running `fq run` daemon will stop consuming triggers, suspend in-flight \
+         invocations at a step boundary, and exit; recovery resumes them on the next start."
+    );
+    Ok(())
+}
+
 async fn reload_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
     let bus = EventBus::connect(&config.nats.url)

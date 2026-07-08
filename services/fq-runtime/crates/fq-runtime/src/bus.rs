@@ -73,6 +73,10 @@ pub const ALL_TRIGGERS_SUBJECT: &str = "fq.trigger.>";
 /// (ADR-0020 refresh-between-invocations precedent).
 pub const CONTROL_RELOAD_SUBJECT: &str = "fq.control.reload";
 
+/// Core-NATS subject a graceful drain is requested on (ADR-0027).
+/// Ephemeral like reload — no daemon listening is a silent no-op.
+pub const CONTROL_DRAIN_SUBJECT: &str = "fq.control.drain";
+
 /// Default retention for the trigger stream. Triggers are short-lived
 /// — the dispatcher consumes them within seconds under normal
 /// operation. A 24h window is a safety net against a runaway
@@ -568,6 +572,36 @@ impl EventBus {
             "subscribing to control reload"
         );
         let sub = self.client.subscribe(CONTROL_RELOAD_SUBJECT).await?;
+        Ok(sub)
+    }
+
+    /// Request a graceful drain of a running daemon (ADR-0027). Publishes
+    /// on the core-NATS control-drain subject and flushes; a running
+    /// `fq run` daemon suspends its in-flight invocations at a step
+    /// boundary and exits. No daemon listening is a silent no-op.
+    pub async fn publish_control_drain(&self) -> Result<(), BusError> {
+        debug!(subject = CONTROL_DRAIN_SUBJECT, "publishing control drain");
+        self.client
+            .publish(CONTROL_DRAIN_SUBJECT, Bytes::new())
+            .await
+            .map_err(|err| BusError::Publish(err.to_string()))?;
+        // Flush so the message leaves the client before the short-lived
+        // CLI process exits.
+        self.client
+            .flush()
+            .await
+            .map_err(|err| BusError::Publish(err.to_string()))?;
+        Ok(())
+    }
+
+    /// Subscribe to the daemon control-drain subject. The daemon reacts
+    /// to the arrival of a message, not its contents.
+    pub async fn subscribe_control_drain(&self) -> Result<async_nats::Subscriber, BusError> {
+        debug!(
+            subject = CONTROL_DRAIN_SUBJECT,
+            "subscribing to control drain"
+        );
+        let sub = self.client.subscribe(CONTROL_DRAIN_SUBJECT).await?;
         Ok(sub)
     }
 }
