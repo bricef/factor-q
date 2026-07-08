@@ -305,13 +305,32 @@ impl TriggerDispatcher {
             }
         };
 
-        // If the invocation returned before the durable-start signal
-        // fired (permanent error before the first WAL write, or a worker
-        // that never signals), ack now: the trigger's work is done and
-        // retrying would not help.
+        // The invocation returned before the durable-start signal fired,
+        // so the run left nothing durable behind. Decide the trigger's
+        // fate from the result:
+        //
+        // - **Transient** error (bus/store unavailable, a transient LLM
+        //   error) — the run could succeed on a retry, so NAK: JetStream
+        //   redelivers the trigger, recovering the otherwise-lost run.
+        // - **Permanent** error (a terminal `failed` outcome / poison
+        //   payload) or a clean `Ok` return — nothing to retry, so ACK.
+        //   The `Failed` event already recorded why, and redelivering a
+        //   poison trigger would loop under the consumer's unbounded
+        //   redelivery.
+        //
+        // Redelivery is unbounded today; bounding it (`max_deliver`) and
+        // dead-lettering exhausted triggers is tracked in #49.
         if !acked {
-            self.ack(msg, "invocation returned before durable start")
-                .await;
+            match &result {
+                Err(err) if err.is_transient() => {
+                    self.nak(msg, "transient failure before first WAL write")
+                        .await;
+                }
+                _ => {
+                    self.ack(msg, "invocation returned before durable start (permanent)")
+                        .await;
+                }
+            }
         }
 
         if let Err(err) = result {
@@ -334,6 +353,25 @@ impl TriggerDispatcher {
                 context,
                 "failed to ack trigger message"
             );
+        }
+    }
+
+    /// NAK a trigger so JetStream redelivers it after the ack-wait — used
+    /// when an invocation fails *before its first WAL write* with a
+    /// transient error, so the otherwise-lost run is retried. Redelivery
+    /// is unbounded today; bounding it + dead-lettering is tracked in #49.
+    async fn nak(&self, msg: &async_nats::jetstream::Message, context: &str) {
+        if let Err(err) = msg
+            .ack_with(async_nats::jetstream::AckKind::Nak(None))
+            .await
+        {
+            error!(
+                error = %err,
+                context,
+                "failed to NAK trigger message"
+            );
+        } else {
+            warn!(context, "NAK'd trigger for redelivery");
         }
     }
 
@@ -922,6 +960,146 @@ You are a test agent."#
         // Let it finish so the spawned task and consumer tear down.
         release.notify_one();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    /// A worker that returns an error *before* firing `durable_start` —
+    /// models a failure before the first WAL write. `transient` picks
+    /// whether that error is retryable, exercising the dispatcher's
+    /// ACK (permanent) / NAK (transient) split (#41 / #46).
+    struct FailsBeforeWalWorker {
+        transient: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Worker for FailsBeforeWalWorker {
+        async fn run_invocation(
+            &self,
+            _agent: &Agent,
+            _llm: &dyn crate::llm::LlmClient,
+            _source: TriggerSource,
+            _subject: Option<String>,
+            _payload: serde_json::Value,
+            _durable_start: crate::worker::DurableStart,
+        ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+            // Return without firing durable_start (i.e. before any WAL
+            // write). A transient error should be NAK'd for redelivery, a
+            // permanent one ACK'd.
+            if self.transient {
+                Err(ExecutorError::WorkerStore(
+                    "simulated transient store outage".to_string(),
+                ))
+            } else {
+                Err(ExecutorError::InvocationFailed {
+                    kind: crate::events::FailureKind::RuntimeError,
+                    message: "permanent poison payload".to_string(),
+                })
+            }
+        }
+
+        async fn request_drain(&self, _req: crate::worker::DrainRequest) {}
+
+        fn drain_status(&self) -> crate::worker::DrainState {
+            crate::worker::DrainState::Running
+        }
+    }
+
+    /// Dispatch a trigger whose invocation fails before the first WAL
+    /// write, and report whether the trigger was **redelivered** (NAK)
+    /// rather than consumed (ACK). Requires a live broker.
+    async fn dispatched_pre_wal_failure_is_redelivered(transient: bool) -> bool {
+        use std::sync::Arc;
+        let url = std::env::var("FQ_NATS_URL").expect("FQ_NATS_URL");
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let label = if transient {
+            "pre-wal-transient"
+        } else {
+            "pre-wal-permanent"
+        };
+        let agent_id_str = unique_agent_id(label);
+
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join(format!("{agent_id_str}.md"));
+        std::fs::write(
+            &agent_path,
+            format!(
+                "---\nname: {agent_id_str}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nTest agent."
+            ),
+        )
+        .unwrap();
+        let mut registry = AgentRegistry::new();
+        registry.load_file(&agent_path);
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+
+        let worker: Arc<dyn Worker> = Arc::new(FailsBeforeWalWorker { transient });
+        let dispatcher = Arc::new(TriggerDispatcher::new(
+            bus.clone(),
+            shared_registry(registry),
+            worker,
+            Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
+        ));
+
+        let consumer = bus
+            .trigger_consumer_with_filter(
+                &unique_consumer_name(),
+                &crate::bus::trigger_subject(&agent_id_str),
+            )
+            .await
+            .expect("consumer");
+
+        bus.publish_trigger(&agent_id_str, &json!({"input": "hi"}))
+            .await
+            .expect("publish");
+        let mut stream = consumer.messages().await.expect("messages");
+        let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("a message within 5s")
+            .expect("stream open")
+            .expect("message ok");
+
+        // The worker returns its error before any WAL write; `handle`
+        // classifies it and ACKs (permanent) or NAKs (transient).
+        dispatcher.handle(&msg).await;
+
+        // A NAK redelivers the trigger; an ACK consumes it. Re-poll the
+        // same stream: a redelivered message means it was NAK'd.
+        match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
+            Ok(Some(Ok(redelivered))) => {
+                // Ack the redelivery so it doesn't churn after the test.
+                let _ = redelivered.ack().await;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// #41 / #46: a *transient* failure before the first WAL write NAKs
+    /// the trigger so JetStream redelivers it — the otherwise-lost run is
+    /// retried, not dropped.
+    #[tokio::test]
+    async fn transient_failure_before_first_wal_write_naks_for_redelivery() {
+        if std::env::var("FQ_NATS_URL").is_err() {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        }
+        assert!(
+            dispatched_pre_wal_failure_is_redelivered(true).await,
+            "a transient pre-WAL failure must NAK (redeliver) the trigger"
+        );
+    }
+
+    /// #41 / #46: a *permanent* failure before the first WAL write ACKs
+    /// the trigger — retrying a poison run would loop under the unbounded
+    /// consumer, and the Failed event already recorded why.
+    #[tokio::test]
+    async fn permanent_failure_before_first_wal_write_acks() {
+        if std::env::var("FQ_NATS_URL").is_err() {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        }
+        assert!(
+            !dispatched_pre_wal_failure_is_redelivered(false).await,
+            "a permanent pre-WAL failure must ACK (consume) the trigger"
+        );
     }
 
     /// ADR-0027: once the worker is draining, the dispatcher stops

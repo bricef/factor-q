@@ -150,6 +150,33 @@ pub enum ExecutorError {
     },
 }
 
+impl ExecutorError {
+    /// Whether retrying the invocation *from scratch* could plausibly
+    /// succeed — i.e. the failure is an infrastructure hiccup, not a
+    /// permanent (poison) condition.
+    ///
+    /// The trigger dispatcher uses this for a failure *before the first
+    /// WAL write*, where the run left nothing durable to recover: a
+    /// transient error NAKs the trigger so JetStream redelivers and
+    /// retries it, a permanent one ACKs it (redelivering a poison trigger
+    /// would loop under the consumer's unbounded redelivery — see #49).
+    /// Mirrors the heartbeat/projection/coordination consumers, which NAK
+    /// store/bus errors to redeliver.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            // Bus / store unavailability is a momentary infra condition —
+            // retryable once JetStream redelivers.
+            ExecutorError::Bus(_) | ExecutorError::WorkerStore(_) => true,
+            // Defer to the LLM client's own transient/permanent split.
+            ExecutorError::Llm(err) => err.is_transient(),
+            // A terminal `failed` event is a permanent agent-level outcome
+            // (budget, max-iterations, validation, …); retrying the same
+            // trigger just reproduces it.
+            ExecutorError::InvocationFailed { .. } => false,
+        }
+    }
+}
+
 /// What the control-plane asks of a worker.
 ///
 /// In v1 this is implemented by [`ReducerRunner`]; v2 will add a
