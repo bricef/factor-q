@@ -149,9 +149,15 @@ shared object spanning the boundary.
   one); bounded wait on the deadline _T_; `system.shutdown` with
   `reason="drain"`. In v1 the listener calls `request_drain` in-process; the
   NATS-to-worker hop is deferred until the worker actually splits.
-- **PR-4 — the manual deploy script.** `just deploy`: `fq drain` → await clean
-  exit → rebuild → restart → health probe. Closes the flywheel's last manual
-  step; the ADR's own suggested first milestone (§Open questions, build order).
+- **PR-4 — manual deploy script: deferred, not planned (2026-07-08).** A
+  `just deploy` (`fq drain` → await exit → rebuild → restart → health probe)
+  was the ADR's suggested first milestone, but any such script — even a
+  parameterised, instance-agnostic one — would be superseded the moment the CD
+  pipeline below lands. So we skip the stopgap and go straight to automated
+  Continuous Deployment. In the meantime `fq drain` is usable by hand: drain,
+  rebuild, then re-launch via the instance's own launch script (e.g. the
+  dogfood `~/fq-dogfood/run.sh`, which owns that instance's cwd/secrets/NATS).
+  This makes the **CD companion below the immediate next maturity step.**
 - **Deferred to a companion ADR** (ADR-0027 §Consequences flags these as
   separate): a versioned container image, an auto-deploy watcher (separate
   adapter vs. integrated), and the **health-check + rollback safety layer** — a
