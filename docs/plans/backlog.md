@@ -959,7 +959,7 @@ definitions carry a `sandbox.network` allowlist, but it is **not
 enforced** — agents have ambient network access (they can reach any
 host, e.g. via `gh`/`git`). This violates
 [design principle 3](../design/committed/design-principles.md)
-("sandbox by construction, not by policy" — capability granted exactly,
+("safe by construction, not by restriction" — capability granted exactly,
 nothing ambient), and it is the exposure
 [assessment §4](../design/2026-07-05-project-assessment.md) flags:
 agents grow more capable and longer-lived, so unrestricted network is a
