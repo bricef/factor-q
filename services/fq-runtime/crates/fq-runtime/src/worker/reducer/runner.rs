@@ -1024,8 +1024,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // `phase` and `terminal_at` are derived from the
             // step's `next_action` — Complete/Failed mark the
             // row terminal, everything else leaves it open.
-            let (phase_label, terminal_at) =
-                phase_and_terminal_from(&output.next_action, self.config.clock.unix_now_ms());
+            // One clock read for both fields: the terminal update *is* the
+            // last update, so `terminal_at` and `updated_at` must be the same
+            // instant (as the failed path via `ensure_terminal` already does).
+            // Two separate reads let `updated_at` (read second) land a
+            // millisecond later under load — `updated_at > terminal_at`, a real
+            // ordering violation that surfaced as a flaky test.
+            let now_ms = self.config.clock.unix_now_ms();
+            let (phase_label, terminal_at) = phase_and_terminal_from(&output.next_action, now_ms);
             self.config
                 .store
                 .upsert_invocation_state(&InvocationStateRow {
@@ -1036,7 +1042,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     state_blob: output.state.clone(),
                     iteration: step_index,
                     started_at: started_at_ms,
-                    updated_at: self.config.clock.unix_now_ms(),
+                    updated_at: now_ms,
                     terminal_at,
                     workspace_ref: None,
                     archive_status: None,
