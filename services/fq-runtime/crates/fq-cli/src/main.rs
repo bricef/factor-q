@@ -1794,8 +1794,19 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                     ("ctrl_c", true, None)
                 }
                 "sigterm" => {
+                    // SIGTERM means "terminate gracefully", so treat it as a
+                    // graceful drain (ADR-0027): flip the shared drain signal
+                    // — in-flight invocations suspend at their next step
+                    // boundary, the dispatcher stops consuming — then run the
+                    // bounded-wait teardown below, exactly like `fq drain`. A
+                    // second SIGTERM restores the default disposition and
+                    // hard-stops (the force-abort escape). Ctrl-C stays a fast
+                    // stop for interactive use.
                     println!();
-                    println!("Received SIGTERM, shutting down...");
+                    println!("Received SIGTERM, draining...");
+                    drain_probe
+                        .request_drain(DrainRequest::new(DrainReason::Deploy))
+                        .await;
                     ("sigterm", true, None)
                 }
                 // Listener could not be installed/received; the helper
@@ -1906,7 +1917,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // stop on their own because the drain signal is already set; past the
     // deadline the stragglers are hard-stopped and the next binary's
     // recovery resumes them.
-    let drained = shutdown_reason == "drain";
+    // Both `fq drain` and SIGTERM run the bounded drain (SIGTERM flipped the
+    // drain signal in the select above); a signal-error or task failure does
+    // not.
+    let drained = matches!(shutdown_reason, "drain" | "sigterm");
     let drain_deadline = drained.then(|| {
         tokio::time::Instant::now() + std::time::Duration::from_millis(config.drain_deadline_ms)
     });
@@ -2068,17 +2082,21 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
 
 /// Wait for an OS shutdown signal and report which one fired.
 ///
-/// SIGINT (Ctrl-C) and — on Unix — SIGTERM both request a graceful
-/// stop. SIGTERM is the signal process managers, `docker stop`, and
-/// deploy scripts send by default; without handling it the daemon dies
-/// abruptly, orphaning its worker registration and any in-flight
-/// invocation (the "ambiguous invocation" recovery cruft). Both map to
-/// the same clean shutdown here.
+/// The caller maps the two signals to different shutdown paths (ADR-0027):
 ///
-/// This is deliberately just *signal capture*, not a drain: ADR-0027's
-/// `fq drain` is the graceful-drain path that additionally suspends
-/// in-flight invocations to a step boundary. Catching SIGTERM is the
-/// precondition that lets a supervised stop / deploy be graceful at all.
+/// - **SIGTERM** — what process managers, `docker stop`, systemd, and
+///   orchestrators send to stop a service — triggers a **graceful drain**:
+///   in-flight invocations suspend at a step boundary and the daemon exits,
+///   bounded by `drain_deadline_ms`. The orchestrator's own SIGKILL grace
+///   period must be ≥ that deadline or it truncates the drain; a second
+///   SIGTERM restores the default disposition and hard-stops. See the
+///   deploy plan for per-orchestrator grace settings.
+/// - **SIGINT (Ctrl-C)** — interactive stop — is a fast clean shutdown that
+///   does not wait out in-flight work (crash-recovery resumes it).
+///
+/// Either way the daemon exits cleanly (worker deregistered), unlike the
+/// abrupt default SIGTERM disposition that orphans the worker + in-flight
+/// invocations as recovery cruft.
 ///
 /// Returns a static reason string for the `system.shutdown` event:
 /// `"ctrl_c"`, `"sigterm"`, or `"signal_error"` when a listener could
