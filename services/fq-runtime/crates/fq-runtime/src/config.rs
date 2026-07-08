@@ -37,6 +37,12 @@ pub struct Config {
     /// configuration, not code).
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
+    /// How long `fq drain` (ADR-0027) waits for in-flight invocations to
+    /// suspend at a step boundary before hard-stopping the stragglers and
+    /// letting the next binary's recovery resume them. A bounded wait,
+    /// never block-forever. Config, not code (Design Principle 8).
+    #[serde(default = "default_drain_deadline_ms")]
+    pub drain_deadline_ms: u64,
 }
 
 /// Control-plane state-retention knobs. Drives the
@@ -174,6 +180,13 @@ fn default_max_iterations() -> u32 {
     crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS
 }
 
+/// Default graceful-drain deadline: 120s. Long enough for a typical
+/// model/tool step to finish so the invocation suspends at the next
+/// boundary; past it, `fq drain` hard-stops and recovery takes over.
+fn default_drain_deadline_ms() -> u64 {
+    120_000
+}
+
 fn default_anthropic_api_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
 }
@@ -223,6 +236,7 @@ impl Default for Config {
             worker: WorkerConfig::default(),
             state: StateConfig::default(),
             max_iterations: default_max_iterations(),
+            drain_deadline_ms: default_drain_deadline_ms(),
         }
     }
 }
