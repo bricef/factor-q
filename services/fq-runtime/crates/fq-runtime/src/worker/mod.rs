@@ -24,6 +24,7 @@
 
 pub mod archive_ack;
 pub mod archive_retry;
+pub mod drain;
 pub mod heartbeat;
 pub mod id;
 pub mod introspection;
@@ -33,6 +34,7 @@ pub mod store;
 
 pub use archive_ack::{ArchiveAckConsumer, ArchiveAckError};
 pub use archive_retry::{ArchiveRetryError, ArchiveRetrySweeper};
+pub use drain::{DrainReason, DrainRequest, DrainSignal, DrainState};
 pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, HeartbeatProducer};
 pub use id::WorkerId;
 pub use recovery::{
@@ -68,6 +70,15 @@ pub enum InvocationOutcome {
     BudgetExceeded {
         invocation_id: Uuid,
         cost: f64,
+    },
+    /// The invocation suspended at a step boundary in response to a
+    /// drain (ADR-0027). **Not a terminal outcome:** its state is
+    /// already checkpointed to the WAL and the row stays in-flight, so
+    /// the next binary's recovery resumes it. No `Completed`/`Failed`
+    /// event is emitted — the durable state is bit-identical to a crash
+    /// at that boundary, which recovery already handles.
+    Suspended {
+        invocation_id: Uuid,
     },
 }
 
@@ -122,6 +133,14 @@ pub trait Worker: Send + Sync {
         trigger_subject: Option<String>,
         trigger_payload: Value,
     ) -> Result<InvocationOutcome, ExecutorError>;
+
+    /// Request that the worker drain: stop starting new steps and let
+    /// each in-flight invocation suspend at its next step boundary,
+    /// checkpointed to the WAL, to be resumed by the next binary's
+    /// recovery (ADR-0027). This is the only handle the control-plane
+    /// has on in-flight work — in v1 an in-process flag flip, in v2 an
+    /// RPC to the worker node. Idempotent; a worker does not un-drain.
+    async fn request_drain(&self, req: DrainRequest);
 }
 
 #[async_trait]
@@ -141,5 +160,12 @@ impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for Redu
     ) -> Result<InvocationOutcome, ExecutorError> {
         self.run(agent, llm, trigger_source, trigger_subject, trigger_payload)
             .await
+    }
+
+    async fn request_drain(&self, _req: DrainRequest) {
+        // v1: flip the worker-local flag the reducer loop polls. The
+        // reason will feed the drain audit event once `fq drain` lands
+        // (PR-3); the suspend primitive itself only needs the flag.
+        self.drain_signal().request();
     }
 }

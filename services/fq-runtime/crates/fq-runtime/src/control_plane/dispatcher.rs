@@ -621,6 +621,8 @@ You are a test agent."#
                     duration_ms: 0,
                 })
             }
+
+            async fn request_drain(&self, _req: crate::worker::DrainRequest) {}
         }
 
         let bus = EventBus::connect(&url).await.expect("connect NATS");

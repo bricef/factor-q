@@ -57,7 +57,7 @@ use crate::validation::ValidatorChain;
 use crate::worker::store::{
     DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow, WorkerStore,
 };
-use crate::worker::{ExecutorError, InvocationOutcome, WorkerId};
+use crate::worker::{DrainSignal, ExecutorError, InvocationOutcome, WorkerId};
 
 pub use crate::bus::EventSink;
 
@@ -429,6 +429,11 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     /// The reducer driven by every `run`/`resume`. Held as a
     /// field so callers don't have to pass it on every call.
     reducer: R,
+    /// Graceful-drain flag (ADR-0027), polled at each step boundary by
+    /// the loop. Shared across every in-flight invocation on this
+    /// worker; flipped via [`Worker::request_drain`](crate::Worker) or
+    /// [`Self::drain_signal`].
+    drain: DrainSignal,
 }
 
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
@@ -437,7 +442,16 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             context,
             config,
             reducer,
+            drain: DrainSignal::new(),
         }
+    }
+
+    /// A cloneable handle to this runner's drain flag. Cloning shares
+    /// the same underlying flag (see [`DrainSignal`]): requesting a
+    /// drain on any handle suspends every in-flight invocation on this
+    /// worker at its next step boundary.
+    pub fn drain_signal(&self) -> DrainSignal {
+        self.drain.clone()
     }
 
     /// Run a single invocation of `agent` through this runner's
@@ -978,6 +992,24 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         cursor: &mut Option<Uuid>,
     ) -> Result<InvocationOutcome, ExecutorError> {
         for step_index in step_index_start..HOST_STEP_BUDGET {
+            // ADR-0027 graceful drain: suspend at this step boundary if
+            // a drain has been requested. The previous iteration's
+            // checkpoint — or, for `step_index_start`, the `Triggered`
+            // event written before the loop — is already durable, so the
+            // WAL state here is a clean between-steps point, bit-identical
+            // to a crash at this boundary, which recovery resumes. The row
+            // stays in-flight and no terminal event is emitted; the next
+            // binary picks it up.
+            if self.drain.is_draining() {
+                info!(
+                    agent_id = %agent_id,
+                    invocation_id = %invocation_id,
+                    step_index,
+                    "draining — suspending invocation at step boundary"
+                );
+                return Ok(InvocationOutcome::Suspended { invocation_id });
+            }
+
             let input = StepInput {
                 config: agent_config.clone(),
                 trigger: trigger.clone(),
