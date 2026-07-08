@@ -141,6 +141,12 @@ pub trait Worker: Send + Sync {
     /// has on in-flight work — in v1 an in-process flag flip, in v2 an
     /// RPC to the worker node. Idempotent; a worker does not un-drain.
     async fn request_drain(&self, req: DrainRequest);
+
+    /// The worker's current [`DrainState`]. Lets the trigger dispatcher
+    /// (and, later, a drain orchestrator) observe through this one seam
+    /// whether a drain is in progress — e.g. to stop pulling new
+    /// triggers — without a second handle on worker internals.
+    fn drain_status(&self) -> DrainState;
 }
 
 #[async_trait]
@@ -167,5 +173,9 @@ impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for Redu
         // reason will feed the drain audit event once `fq drain` lands
         // (PR-3); the suspend primitive itself only needs the flag.
         self.drain_signal().request();
+    }
+
+    fn drain_status(&self) -> DrainState {
+        self.drain_signal().state()
     }
 }
