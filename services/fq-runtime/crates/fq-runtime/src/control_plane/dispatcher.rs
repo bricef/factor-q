@@ -13,16 +13,21 @@
 //! - Durable consumer: if the dispatcher crashes or is restarted,
 //!   JetStream remembers its position and redelivers any unacked
 //!   triggers after the ack deadline.
-//! - Ack-on-dispatch: the trigger is acked as soon as the invocation
-//!   is *dispatched*, not when it *completes*. Holding the ack for the
-//!   invocation's (unbounded) duration caused a redelivery storm — an
-//!   invocation longer than the 30s ack-wait was redelivered and
-//!   re-run (surfaced by the M0 dogfood loop, 2026-07-06). In-flight
-//!   durability is the reducer WAL's job (`recovery::scan_in_flight`),
-//!   so a crash resumes the invocation exactly once from the WAL with
-//!   no redelivered duplicate. Residual gap: a crash between the ack
-//!   and the first WAL write is a missed — re-triggerable — run, not
-//!   corruption.
+//! - Ack-after-durable-start: the trigger is acked once the
+//!   invocation has *durably started* — signalled through the
+//!   [`Worker`] seam after its first WAL write — not at dispatch and
+//!   not at completion (issue #41). From the first WAL write on,
+//!   in-flight durability is the reducer WAL's job
+//!   (`recovery::scan_in_flight`), so a crash resumes the invocation
+//!   exactly once from the WAL with no redelivered duplicate. This
+//!   closes both failure windows: a crash *before* the first WAL write
+//!   leaves the trigger unacked, so JetStream redelivers it and the
+//!   otherwise-missed run recovers; and the ack still fires at the
+//!   first WAL write (seconds in), *well before* completion, so a
+//!   long-running invocation is not redelivered and re-run past the
+//!   30s ack-wait — the redelivery storm the M0 dogfood loop found
+//!   (2026-07-06), where an invocation longer than the ack-wait was
+//!   re-run, stays fixed.
 //!
 //! # Error handling
 //!
@@ -47,7 +52,7 @@ use crate::agent::{AgentId, AgentRegistry};
 use crate::bus::{BusError, EventBus, agent_id_from_trigger_subject};
 use crate::events::TriggerSource;
 use crate::llm::LlmClient;
-use crate::worker::{DrainState, ExecutorError, Worker};
+use crate::worker::{DrainState, DurableStart, ExecutorError, Worker};
 
 /// Name of the durable JetStream consumer the dispatcher creates.
 pub const CONSUMER_NAME: &str = "fq-dispatcher";
@@ -242,40 +247,74 @@ impl TriggerDispatcher {
             "dispatching trigger"
         );
 
-        // Ack the trigger BEFORE running the invocation. The trigger's
-        // job ends once the invocation is accepted for execution; the
+        // Ack the trigger once the invocation has *durably started* —
+        // signalled through the Worker seam after its first WAL write —
+        // rather than at dispatch (issue #41). The trigger's job ends
+        // once the run is recoverable: from the first WAL write on, the
         // reducer's three-state WAL owns in-flight durability and crash
         // recovery (`recovery::scan_in_flight` → `categorise` → resume),
-        // so the trigger must not stay unacked for the invocation's
-        // (unbounded) duration.
+        // so a crash resumes the invocation exactly once from the WAL
+        // with no redelivered duplicate.
         //
-        // Holding the ack until completion caused a redelivery storm: an
-        // invocation longer than the consumer's 30s ack-wait was
-        // redelivered by JetStream and re-run — one trigger produced N
-        // invocations (found by the M0 dogfood loop, 2026-07-06, at
-        // ~100s/run → 3 runs). Acking up front also *removes* a second
-        // bug: with ack-on-completion, a crash mid-invocation left the
-        // trigger unacked → redelivered → a fresh invocation *while* WAL
-        // recovery also resumed the original — a duplicate. Acking here
-        // means a crash resumes exactly once from the WAL, no redelivery.
+        // Two failure windows this closes / preserves:
         //
-        // Residual: a crash between this ack and the first WAL write is a
-        // missed (re-triggerable) run, not corruption; closing that
-        // window needs an ack-after-durable-start signal through the
-        // Worker seam — a noted follow-up.
-        self.ack(msg, "dispatched").await;
+        // - **Before durable start** — a crash here leaves the trigger
+        //   unacked, so JetStream redelivers it after the ack-wait,
+        //   recovering the otherwise-missed run. (This is the gap the
+        //   old ack-on-dispatch left: a crash between dispatch and the
+        //   first WAL write was a missed, re-triggerable run.)
+        //
+        // - **After durable start, before completion** — the ack fires
+        //   at the first WAL write (seconds in), *well before* the
+        //   invocation completes, so a long-running invocation is not
+        //   redelivered and re-run past the 30s ack-wait. This preserves
+        //   the redelivery-storm fix (M0 dogfood loop, 2026-07-06):
+        //   holding the ack until completion re-ran invocations longer
+        //   than the ack-wait — one trigger produced N invocations.
+        //
+        // The signal is fired at most once; if the invocation returns
+        // before firing it (a permanent error before any WAL write, or a
+        // worker that never signals), we ack on return — retrying a
+        // permanent error would not help, and the run already happened.
+        let (durable_start, mut durably_started) = DurableStart::channel();
+        let mut invocation = std::pin::pin!(self.worker.run_invocation(
+            &loaded.agent,
+            self.llm.as_ref(),
+            TriggerSource::Subject,
+            Some(msg.subject.to_string()),
+            payload,
+            durable_start,
+        ));
 
-        if let Err(err) = self
-            .worker
-            .run_invocation(
-                &loaded.agent,
-                self.llm.as_ref(),
-                TriggerSource::Subject,
-                Some(msg.subject.to_string()),
-                payload,
-            )
-            .await
-        {
+        let mut acked = false;
+        let result = loop {
+            tokio::select! {
+                biased;
+                signal = &mut durably_started, if !acked => {
+                    // `Ok` = fired (first WAL write landed); `Err` = the
+                    // sender was dropped without firing (the invocation
+                    // returned before its first WAL write). Either way,
+                    // stop waiting on this branch; the ack below (on
+                    // return) covers the drop case.
+                    if signal.is_ok() {
+                        self.ack(msg, "durably started").await;
+                        acked = true;
+                    }
+                }
+                outcome = &mut invocation => break outcome,
+            }
+        };
+
+        // If the invocation returned before the durable-start signal
+        // fired (permanent error before the first WAL write, or a worker
+        // that never signals), ack now: the trigger's work is done and
+        // retrying would not help.
+        if !acked {
+            self.ack(msg, "invocation returned before durable start")
+                .await;
+        }
+
+        if let Err(err) = result {
             // The executor already emitted a Failed event; the trigger is
             // acked and the WAL owns recovery, so there is nothing to
             // redeliver.
@@ -640,8 +679,13 @@ You are a test agent."#
                 _source: TriggerSource,
                 _subject: Option<String>,
                 _payload: serde_json::Value,
+                mut durable_start: crate::worker::DurableStart,
             ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
                 self.started.fetch_add(1, Ordering::SeqCst);
+                // Simulate the first WAL write landing: this is what lets
+                // the dispatcher ack while the invocation is still
+                // in-flight (issue #41).
+                durable_start.fire();
                 self.release.notified().await;
                 Ok(crate::worker::InvocationOutcome::Completed {
                     invocation_id: Uuid::now_v7(),
@@ -746,6 +790,140 @@ You are a test agent."#
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
+    /// Issue #41: the trigger is acked only *after* the invocation's
+    /// first durable (WAL) write, signalled through the `Worker` seam.
+    /// A worker that blocks in-flight *without* firing the durable-start
+    /// signal models a crash in the ack->first-WAL-write window: the
+    /// trigger must stay unacked (`num_ack_pending` stuck at 1) so
+    /// JetStream can redeliver it. With the old ack-on-dispatch
+    /// behaviour this would drop to 0 immediately — the missed-run gap.
+    #[tokio::test]
+    async fn trigger_is_not_acked_before_the_first_wal_write() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        // Enters the invocation and blocks, but never fires
+        // durable_start — i.e. it dies before its first WAL write.
+        struct NeverSignalsWorker {
+            started: Arc<AtomicUsize>,
+            release: Arc<Notify>,
+        }
+        #[async_trait::async_trait]
+        impl Worker for NeverSignalsWorker {
+            async fn run_invocation(
+                &self,
+                _agent: &Agent,
+                _llm: &dyn crate::llm::LlmClient,
+                _source: TriggerSource,
+                _subject: Option<String>,
+                _payload: serde_json::Value,
+                _durable_start: crate::worker::DurableStart,
+            ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+                self.started.fetch_add(1, Ordering::SeqCst);
+                // Never fire the signal; just block. Dropping
+                // `_durable_start` here (on return) would signal nothing.
+                self.release.notified().await;
+                Ok(crate::worker::InvocationOutcome::Completed {
+                    invocation_id: Uuid::now_v7(),
+                    response: canned_response(),
+                    cost: 0.0,
+                    duration_ms: 0,
+                })
+            }
+
+            async fn request_drain(&self, _req: crate::worker::DrainRequest) {}
+
+            fn drain_status(&self) -> crate::worker::DrainState {
+                crate::worker::DrainState::Running
+            }
+        }
+
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("no-ack-before-wal");
+
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join(format!("{agent_id_str}.md"));
+        std::fs::write(
+            &agent_path,
+            format!(
+                "---\nname: {agent_id_str}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nTest agent."
+            ),
+        )
+        .unwrap();
+        let mut registry = AgentRegistry::new();
+        registry.load_file(&agent_path);
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let worker: Arc<dyn Worker> = Arc::new(NeverSignalsWorker {
+            started: started.clone(),
+            release: release.clone(),
+        });
+        let dispatcher = Arc::new(TriggerDispatcher::new(
+            bus.clone(),
+            shared_registry(registry),
+            worker,
+            Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
+        ));
+
+        let mut consumer = bus
+            .trigger_consumer_with_filter(
+                &unique_consumer_name(),
+                &crate::bus::trigger_subject(&agent_id_str),
+            )
+            .await
+            .expect("consumer");
+
+        bus.publish_trigger(&agent_id_str, &json!({"input": "hi"}))
+            .await
+            .expect("publish");
+        let msg = {
+            let mut stream = consumer.messages().await.expect("messages");
+            tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("a message within 5s")
+                .expect("stream open")
+                .expect("message ok")
+        };
+
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle(&msg).await });
+
+        // Wait until the invocation is in-flight (and blocked).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while started.load(Ordering::SeqCst) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "invocation never started"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // The invocation is blocked before any WAL write and never fired
+        // the durable-start signal: the trigger must remain unacked. Poll
+        // for a stretch to absorb ack propagation; it must stay at 1.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(750);
+        while tokio::time::Instant::now() < deadline {
+            let pending = consumer.info().await.expect("info").num_ack_pending;
+            assert_eq!(
+                pending, 1,
+                "trigger must stay unacked before the first WAL write \
+                 (redeliverable) — got num_ack_pending={pending}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Let it finish so the spawned task and consumer tear down.
+        release.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
     /// ADR-0027: once the worker is draining, the dispatcher stops
     /// consuming — it exits its consume loop on its own (no shutdown
     /// signal needed) and never dispatches an already-available trigger.
@@ -774,6 +952,7 @@ You are a test agent."#
                 _source: TriggerSource,
                 _subject: Option<String>,
                 _payload: serde_json::Value,
+                _durable_start: crate::worker::DurableStart,
             ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Ok(crate::worker::InvocationOutcome::Completed {
