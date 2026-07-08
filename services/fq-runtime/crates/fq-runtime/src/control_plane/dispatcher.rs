@@ -47,7 +47,7 @@ use crate::agent::{AgentId, AgentRegistry};
 use crate::bus::{BusError, EventBus, agent_id_from_trigger_subject};
 use crate::events::TriggerSource;
 use crate::llm::LlmClient;
-use crate::worker::{ExecutorError, Worker};
+use crate::worker::{DrainState, ExecutorError, Worker};
 
 /// Name of the durable JetStream consumer the dispatcher creates.
 pub const CONSUMER_NAME: &str = "fq-dispatcher";
@@ -120,6 +120,17 @@ impl TriggerDispatcher {
             .map_err(|err| DispatcherError::Stream(err.to_string()))?;
 
         loop {
+            // ADR-0027 graceful drain: once the worker is draining, stop
+            // pulling new triggers. In-flight invocations suspend at their
+            // next step boundary via the shared drain signal (the reducer
+            // polls it); un-pulled triggers stay queued on the durable
+            // work-queue consumer for the next binary. Final teardown
+            // still arrives through `shutdown`.
+            if self.worker.drain_status() == DrainState::Draining {
+                info!("trigger dispatcher draining — no longer consuming new triggers");
+                break;
+            }
+
             tokio::select! {
                 biased;
                 _ = &mut shutdown => {
@@ -148,6 +159,20 @@ impl TriggerDispatcher {
     }
 
     async fn handle(&self, msg: &async_nats::jetstream::Message) {
+        // A drain requested after this trigger was pulled but before it
+        // was dispatched: leave it un-acked so it redelivers to the next
+        // binary rather than starting an invocation that would only
+        // suspend at step 0. The common case — a drain between
+        // invocations — is caught by the consume loop's top-of-loop
+        // check; this closes the pulled-just-as-drain-lands race.
+        if self.worker.drain_status() == DrainState::Draining {
+            debug!(
+                subject = %msg.subject,
+                "draining — leaving trigger queued for the next binary"
+            );
+            return;
+        }
+
         // Parse the agent id out of the subject. Invalid format →
         // ack and drop (redelivery won't help).
         let agent_id_str = match agent_id_from_trigger_subject(&msg.subject) {
@@ -397,6 +422,10 @@ mod tests {
             );
 
             loop {
+                // Mirror `TriggerDispatcher::run`: stop consuming on drain.
+                if self.worker.drain_status() == DrainState::Draining {
+                    break;
+                }
                 tokio::select! {
                     biased;
                     _ = &mut shutdown => break,
@@ -623,6 +652,10 @@ You are a test agent."#
             }
 
             async fn request_drain(&self, _req: crate::worker::DrainRequest) {}
+
+            fn drain_status(&self) -> crate::worker::DrainState {
+                crate::worker::DrainState::Running
+            }
         }
 
         let bus = EventBus::connect(&url).await.expect("connect NATS");
@@ -711,5 +744,115 @@ You are a test agent."#
 
         release.notify_one();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    /// ADR-0027: once the worker is draining, the dispatcher stops
+    /// consuming — it exits its consume loop on its own (no shutdown
+    /// signal needed) and never dispatches an already-available trigger.
+    /// The trigger is left un-acked on the durable work-queue consumer,
+    /// so JetStream retains it for the next binary.
+    #[tokio::test]
+    async fn a_draining_dispatcher_stops_consuming_triggers() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        use crate::bus::EventBus;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        // Counts dispatches; reports drain state from a flag we control.
+        struct CountingWorker {
+            calls: Arc<AtomicUsize>,
+            draining: Arc<AtomicBool>,
+        }
+        #[async_trait::async_trait]
+        impl Worker for CountingWorker {
+            async fn run_invocation(
+                &self,
+                _agent: &Agent,
+                _llm: &dyn crate::llm::LlmClient,
+                _source: TriggerSource,
+                _subject: Option<String>,
+                _payload: serde_json::Value,
+            ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(crate::worker::InvocationOutcome::Completed {
+                    invocation_id: Uuid::now_v7(),
+                    response: canned_response(),
+                    cost: 0.0,
+                    duration_ms: 0,
+                })
+            }
+            async fn request_drain(&self, _req: crate::worker::DrainRequest) {
+                self.draining.store(true, Ordering::SeqCst);
+            }
+            fn drain_status(&self) -> crate::worker::DrainState {
+                if self.draining.load(Ordering::SeqCst) {
+                    crate::worker::DrainState::Draining
+                } else {
+                    crate::worker::DrainState::Running
+                }
+            }
+        }
+
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("drain-stop");
+
+        let mut registry = AgentRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join(format!("{agent_id_str}.md"));
+        std::fs::write(
+            &agent_path,
+            format!(
+                "---\nname: {agent_id_str}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nTest agent."
+            ),
+        )
+        .unwrap();
+        registry.load_file(&agent_path);
+        let registry = shared_registry(registry);
+
+        let llm: Arc<dyn LlmClient> = Arc::new({
+            let c = FixtureClient::new();
+            for _ in 0..5 {
+                c.push_response(canned_response());
+            }
+            c
+        });
+
+        // A trigger is waiting on the stream before the dispatcher runs.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker: Arc<dyn Worker> = Arc::new(CountingWorker {
+            calls: calls.clone(),
+            draining: Arc::new(AtomicBool::new(true)), // draining from the start
+        });
+        let dispatcher = TestDispatcher {
+            bus: bus.clone(),
+            registry,
+            worker,
+            llm,
+            consumer_name: unique_consumer_name(),
+            filter_subject: crate::bus::trigger_subject(&agent_id_str),
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move { dispatcher.run(shutdown_rx).await });
+
+        bus.publish_trigger(&agent_id_str, &json!({ "input": "hi" }))
+            .await
+            .expect("publish trigger");
+
+        // The draining dispatcher must exit on its own — without us ever
+        // sending `shutdown` — and without dispatching the waiting trigger.
+        let joined = tokio::time::timeout(Duration::from_secs(3), handle).await;
+        assert!(
+            joined.is_ok(),
+            "a draining dispatcher must exit on its own (top-of-loop drain break), \
+             not block waiting for triggers"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a draining dispatcher must not dispatch an available trigger"
+        );
+        drop(shutdown_tx);
     }
 }
