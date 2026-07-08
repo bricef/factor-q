@@ -50,6 +50,11 @@ func (p *NatsTriggerPublisher) Publish(ctx context.Context, agentID, payload str
 	return nil
 }
 
+// Conn returns the underlying NATS connection so the outcome observer can
+// share it (one connection for both publishing triggers and subscribing to
+// outcomes).
+func (p *NatsTriggerPublisher) Conn() *nats.Conn { return p.nc }
+
 // Close closes the NATS connection.
 func (p *NatsTriggerPublisher) Close() {
 	if p.nc != nil {
