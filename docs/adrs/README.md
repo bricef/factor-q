@@ -44,6 +44,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0006](draft/0006-api-design.md) | Runtime API design |
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
+| [0028](draft/0028-tool-scoped-isolation-and-workspace.md) | Tool-scoped isolation + a harness-owned virtual filesystem (safe by construction); supersedes ADR-0010's agent-scoped unit of isolation |
 
 ## Related guides
 
