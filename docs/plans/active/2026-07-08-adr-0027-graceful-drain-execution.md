@@ -174,6 +174,15 @@ shared object spanning the boundary.
   _T_, `fq drain` falls back to the **existing abort → crash-recovery** path
   (those invocations become "ambiguous") — never a mid-tool-call force-kill,
   never a block-forever.
+- **SIGTERM triggers the bounded drain (2026-07-08).** SIGTERM — what every
+  process manager / `docker stop` / orchestrator sends to stop a service — now
+  runs the same graceful drain as `fq drain`. This makes any signal-based
+  deploy drain-safe with **no pre-stop _command_ hook** — just a long enough
+  stop-grace period (see below). **Ctrl-C (SIGINT)** stays a fast interactive
+  stop that abandons in-flight work to crash-recovery; a **second SIGTERM**
+  restores the default disposition and hard-stops (the force-abort escape).
+  `fq drain` remains the NATS-transport equivalent for the cross-node /
+  can't-signal case.
 - **Config on resume (for now): naive resume-with-new-config.** A drained
   invocation resumes with the agent definition from the _current_ (new binary's)
   registry; step-0's config is already baked into the replayed `state_blob`, so
@@ -181,6 +190,43 @@ shared object spanning the boundary.
   (`runner.rs` resume path; the refresh-between-invocations precedent,
   [ADR-0020](../../adrs/accepted/0020-mcp-notification-handling.md)). This is
   acceptable for single-agent invocations today.
+
+## Operating the drain: SIGTERM and orchestrator grace periods
+
+A drain waits up to **`drain_deadline_ms`** (_T_, default 120s) for in-flight
+invocations to suspend, then hard-stops the stragglers. Every process
+supervisor also imposes its own **SIGKILL grace period**: it sends SIGTERM,
+waits, then SIGKILLs whatever is still alive. So the load-bearing rule for a
+drain-safe deploy is:
+
+> **Set the supervisor's stop-grace period ≥ `drain_deadline_ms` + a small
+> margin (~15s for the post-drain infra teardown).** Otherwise SIGKILL
+> truncates the drain and the not-yet-suspended work is abandoned to
+> crash-recovery — still safe, but the whole point of draining is lost.
+
+Most tools default to **well under 120s**, so this must be set explicitly
+(examples use 135s = 120s _T_ + 15s margin):
+
+| Supervisor | Default grace | Set it with |
+|---|---|---|
+| `docker run` / `docker stop` | 10s | `docker run --stop-timeout 135`, or `docker stop -t 135` |
+| Docker Compose | 10s | `stop_grace_period: 135s` on the service |
+| Docker Swarm | 10s | `--stop-grace-period 135s` (or `stop_grace_period:` in the stack file) |
+| **Watchtower** | 10s | `WATCHTOWER_TIMEOUT=135s` (or `--stop-timeout 135s`) — then a Watchtower auto-update drains gracefully, no pre-update hook needed |
+| systemd | 90s (`DefaultTimeoutStopSec`) | `TimeoutStopSec=135` in the unit (`KillSignal=SIGTERM` is the default) |
+| Kubernetes | 30s | `terminationGracePeriodSeconds: 135` on the pod spec |
+| Nomad | 5s, **SIGINT** by default | `kill_signal = "SIGTERM"` **and** `kill_timeout = "135s"` on the task |
+
+Notes:
+
+- Keep _T_ and the grace **in sync**: lower `drain_deadline_ms` and the grace
+  can come down with it, and vice versa.
+- **Nomad is the gotcha** — its default kill signal is SIGINT (our *fast*
+  stop), so it must be set to SIGTERM to drain at all.
+- The margin covers the daemon's post-drain teardown (joining the infra
+  consumers, MCP shutdown, the `system.shutdown` event) — a few seconds.
+- A **second SIGTERM** (or SIGKILL) aborts a drain immediately; the abandoned
+  in-flight work is resumed by recovery on the next start.
 
 ## Deferred / open questions
 

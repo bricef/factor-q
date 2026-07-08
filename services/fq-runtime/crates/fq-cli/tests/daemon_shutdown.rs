@@ -1,16 +1,18 @@
 //! Subprocess tests for the daemon's shutdown paths — a signal
 //! (SIGINT/SIGTERM) and a graceful `fq drain` (ADR-0027).
 //!
-//! **SIGTERM:** `run_daemon`'s `wait_for_shutdown_signal` maps SIGTERM —
-//! the signal a process manager / `docker stop` / a deploy script sends —
-//! onto the same clean shutdown path as Ctrl-C, rather than the abrupt
-//! default disposition (exit-by-signal 143) that orphans the worker and
-//! any in-flight invocation.
+//! **SIGTERM:** what a process manager / `docker stop` / an orchestrator
+//! sends to stop a service — now triggers a **graceful drain** (ADR-0027),
+//! not just a clean infra shutdown: in-flight invocations suspend at a step
+//! boundary and the daemon exits cleanly, rather than the abrupt default
+//! disposition (exit-by-signal 143) that orphans the worker and abandons
+//! in-flight work. (Ctrl-C stays a fast stop.)
 //!
 //! **Drain:** `fq drain` publishes on `fq.control.drain`; the daemon's
-//! control-drain listener flips the shared drain signal (in-flight
-//! invocations suspend at a step boundary, the dispatcher stops
-//! consuming), waits up to `drain_deadline_ms`, then exits cleanly.
+//! control-drain listener flips the same shared drain signal (in-flight
+//! invocations suspend at a step boundary, the dispatcher stops consuming),
+//! waits up to `drain_deadline_ms`, then exits cleanly — the NATS-transport
+//! equivalent of the SIGTERM path.
 //!
 //! These tests are **serialized** by a shared lock: each spawns a full
 //! `fq run` daemon that subscribes to the *global* `fq.control.drain`
@@ -116,8 +118,12 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
         status.signal(),
     );
     assert!(
-        log.contains("Received SIGTERM, shutting down..."),
-        "graceful-shutdown message missing — SIGTERM may not have driven the clean path\n--- log ---\n{log}",
+        log.contains("Received SIGTERM, draining..."),
+        "SIGTERM did not take the drain path\n--- log ---\n{log}",
+    );
+    assert!(
+        log.contains("Draining"),
+        "SIGTERM did not run the bounded drain wait (ADR-0027)\n--- log ---\n{log}",
     );
 
     // A graceful shutdown must also *deregister* the worker: its
