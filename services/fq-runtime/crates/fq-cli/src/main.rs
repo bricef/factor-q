@@ -1695,29 +1695,30 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("  - trigger dispatcher is listening on fq.trigger.*");
     println!("  - control-reload listener is listening on fq.control.reload");
 
-    // Wait for either a Ctrl-C or one of the hosted tasks exiting
-    // prematurely. We watch the task handles in the same select so
-    // a silent-failing task is caught immediately instead of at
-    // shutdown time.
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
-
+    // Wait for either a shutdown signal (Ctrl-C / SIGTERM) or one of
+    // the hosted tasks exiting prematurely. We watch the task handles
+    // in the same select so a silent-failing task is caught
+    // immediately instead of at shutdown time.
     let (shutdown_reason, clean_exit, failed_task): (
         &'static str,
         bool,
         Option<(&'static str, String)>,
     ) = tokio::select! {
-        res = &mut ctrl_c => {
-            match res {
-                Ok(()) => {
+        reason = wait_for_shutdown_signal() => {
+            match reason {
+                "ctrl_c" => {
                     println!();
                     println!("Received Ctrl-C, shutting down...");
                     ("ctrl_c", true, None)
                 }
-                Err(err) => {
-                    tracing::error!(error = %err, "failed to listen for Ctrl-C");
-                    ("ctrl_c_error", false, None)
+                "sigterm" => {
+                    println!();
+                    println!("Received SIGTERM, shutting down...");
+                    ("sigterm", true, None)
                 }
+                // Listener could not be installed/received; the helper
+                // already logged the cause. Treat as an unclean exit.
+                other => (other, false, None),
             }
         }
         result = &mut projection_handle => {
@@ -1898,6 +1899,66 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         anyhow::bail!("runtime exited because a hosted task failed");
     }
     Ok(())
+}
+
+/// Wait for an OS shutdown signal and report which one fired.
+///
+/// SIGINT (Ctrl-C) and — on Unix — SIGTERM both request a graceful
+/// stop. SIGTERM is the signal process managers, `docker stop`, and
+/// deploy scripts send by default; without handling it the daemon dies
+/// abruptly, orphaning its worker registration and any in-flight
+/// invocation (the "ambiguous invocation" recovery cruft). Both map to
+/// the same clean shutdown here.
+///
+/// This is deliberately just *signal capture*, not a drain: ADR-0027's
+/// `fq drain` is the graceful-drain path that additionally suspends
+/// in-flight invocations to a step boundary. Catching SIGTERM is the
+/// precondition that lets a supervised stop / deploy be graceful at all.
+///
+/// Returns a static reason string for the `system.shutdown` event:
+/// `"ctrl_c"`, `"sigterm"`, or `"signal_error"` when a listener could
+/// not be installed or errored.
+async fn wait_for_shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to install SIGTERM handler; listening for Ctrl-C only"
+                );
+                return match tokio::signal::ctrl_c().await {
+                    Ok(()) => "ctrl_c",
+                    Err(err) => {
+                        tracing::error!(error = %err, "failed to listen for Ctrl-C");
+                        "signal_error"
+                    }
+                };
+            }
+        };
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => match res {
+                Ok(()) => "ctrl_c",
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to listen for Ctrl-C");
+                    "signal_error"
+                }
+            },
+            _ = sigterm.recv() => "sigterm",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => "ctrl_c",
+            Err(err) => {
+                tracing::error!(error = %err, "failed to listen for Ctrl-C");
+                "signal_error"
+            }
+        }
+    }
 }
 
 /// Re-read the agents directory and atomically swap the shared
