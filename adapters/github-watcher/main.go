@@ -33,15 +33,30 @@ func run(args []string) error {
 	}
 	defer pub.Close()
 
+	source := &GhCliIssueSource{Repo: cfg.Repo}
 	w := &Watcher{
-		Source:    &GhCliIssueSource{Repo: cfg.Repo},
+		Source:    source,
 		Publisher: pub,
+		Reviewer:  source,
 		Config:    cfg,
 		Log:       log,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Observe the outcomes of what we trigger: subscribe to the agent's
+	// lifecycle events and drive the issue off `in-progress` on
+	// completion/failure. Runs alongside the poll loop; a subscription
+	// error ends its goroutine but does not stop polling (the review
+	// sweep is the backstop for missed events).
+	reactor := NewOutcomeReactor(source, cfg, log)
+	outcomes := NewNatsOutcomeSource(pub.Conn(), cfg.TaskTemplate)
+	go func() {
+		if err := reactor.Run(ctx, outcomes); err != nil && ctx.Err() == nil {
+			log.Error("outcome observer stopped", "err", err)
+		}
+	}()
 
 	// A cancelled context is a clean stop, not an error.
 	if err := w.Run(ctx); err != nil && ctx.Err() == nil {
@@ -59,8 +74,12 @@ func configFromArgs(args []string) (Config, string, error) {
 	natsURL := fs.String("nats-url", envOr("GHW_NATS_URL", "nats://127.0.0.1:4222"), "NATS URL (env GHW_NATS_URL)")
 	ready := fs.String("ready-label", envOr("GHW_READY_LABEL", "ready"), "label that triggers (env GHW_READY_LABEL)")
 	inProgress := fs.String("in-progress-label", envOr("GHW_IN_PROGRESS_LABEL", "in-progress"), "label applied on trigger (env GHW_IN_PROGRESS_LABEL)")
+	inReview := fs.String("in-review-label", envOr("GHW_IN_REVIEW_LABEL", "in-review"), "label applied when the agent completes / opens its PR (env GHW_IN_REVIEW_LABEL)")
+	failed := fs.String("failed-label", envOr("GHW_FAILED_LABEL", "failed"), "label applied when retries are exhausted or the failure is terminal (env GHW_FAILED_LABEL)")
+	done := fs.String("done-label", envOr("GHW_DONE_LABEL", "done"), "label applied when the proposed PR merges (env GHW_DONE_LABEL)")
 	poll := fs.Duration("poll", envDurationOr("GHW_POLL", 60*time.Second), "poll interval, >= 60s (env GHW_POLL)")
 	maxPerPoll := fs.Int("max-per-poll", envIntOr("GHW_MAX_PER_POLL", 3), "max triggers per poll, 0 = unbounded (env GHW_MAX_PER_POLL)")
+	maxRetries := fs.Int("max-retries", envIntOr("GHW_MAX_RETRIES", 2), "bounded auto-retry budget for a transiently-failed issue (env GHW_MAX_RETRIES)")
 	template := fs.String("task-template", envOr("GHW_TASK_TEMPLATE", "Implement the fix described in GitHub issue #%d."), "trigger payload template; %d is the issue number (env GHW_TASK_TEMPLATE)")
 
 	if err := fs.Parse(args); err != nil {
@@ -75,6 +94,9 @@ func configFromArgs(args []string) (Config, string, error) {
 	if *poll < MinPollInterval {
 		return Config{}, "", fmt.Errorf("--poll must be >= %s to respect GitHub rate limits, got %s", MinPollInterval, *poll)
 	}
+	if *maxRetries < 0 {
+		return Config{}, "", fmt.Errorf("--max-retries must be >= 0, got %d", *maxRetries)
+	}
 	if !strings.Contains(*template, "%d") {
 		return Config{}, "", fmt.Errorf("--task-template must contain %%d for the issue number, got %q", *template)
 	}
@@ -83,8 +105,12 @@ func configFromArgs(args []string) (Config, string, error) {
 		TargetAgent:        *agent,
 		ReadyLabel:         *ready,
 		InProgressLabel:    *inProgress,
+		InReviewLabel:      *inReview,
+		FailedLabel:        *failed,
+		DoneLabel:          *done,
 		PollInterval:       *poll,
 		MaxTriggersPerPoll: *maxPerPoll,
+		MaxRetries:         *maxRetries,
 		TaskTemplate:       *template,
 	}, *natsURL, nil
 }

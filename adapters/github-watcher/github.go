@@ -9,9 +9,9 @@ import (
 	"strconv"
 )
 
-// GhCliIssueSource implements IssueSource by shelling out to the `gh` CLI,
-// reusing the operator's existing GitHub auth. `gh` must be on PATH and
-// authenticated (e.g. via GH_TOKEN).
+// GhCliIssueSource implements IssueSource and ReviewSource by shelling out
+// to the `gh` CLI, reusing the operator's existing GitHub auth. `gh` must
+// be on PATH and authenticated (e.g. via GH_TOKEN).
 type GhCliIssueSource struct {
 	Repo string // "owner/name"
 }
@@ -29,9 +29,14 @@ type ghIssue struct {
 
 // ListReady returns open issues carrying readyLabel.
 func (g *GhCliIssueSource) ListReady(ctx context.Context, readyLabel string) ([]Issue, error) {
+	return g.ListByLabel(ctx, readyLabel)
+}
+
+// ListByLabel returns open issues carrying label.
+func (g *GhCliIssueSource) ListByLabel(ctx context.Context, label string) ([]Issue, error) {
 	cmd := exec.CommandContext(ctx, "gh", "issue", "list",
 		"--repo", g.Repo,
-		"--label", readyLabel,
+		"--label", label,
 		"--state", "open",
 		"--json", "number,labels",
 		"--limit", "100",
@@ -72,6 +77,80 @@ func (g *GhCliIssueSource) Relabel(ctx context.Context, number int, remove, add 
 		return fmt.Errorf("gh issue edit #%d: %w", number, ghError(err))
 	}
 	return nil
+}
+
+// mergedPRQuery asks the GitHub GraphQL API for the merge state of the PRs
+// that close an issue. `closedByPullRequestsReferences` is the authoritative
+// "this PR closes this issue" link (a PR with `Closes #N`), so a merged one
+// means the proposed fix landed.
+const mergedPRQuery = `query($owner:String!,$repo:String!,$number:Int!){
+  repository(owner:$owner,name:$repo){
+    issue(number:$number){
+      closedByPullRequestsReferences(first:20,includeClosedPrs:true){
+        nodes{ merged }
+      }
+    }
+  }
+}`
+
+// ghMergedPRResponse mirrors the GraphQL response for mergedPRQuery.
+type ghMergedPRResponse struct {
+	Data struct {
+		Repository struct {
+			Issue struct {
+				ClosedByPullRequestsReferences struct {
+					Nodes []struct {
+						Merged bool `json:"merged"`
+					} `json:"nodes"`
+				} `json:"closedByPullRequestsReferences"`
+			} `json:"issue"`
+		} `json:"repository"`
+	} `json:"data"`
+}
+
+// HasMergedPR reports whether a merged PR closes the issue, via the GitHub
+// GraphQL API.
+func (g *GhCliIssueSource) HasMergedPR(ctx context.Context, number int) (bool, error) {
+	owner, repo, err := splitRepo(g.Repo)
+	if err != nil {
+		return false, err
+	}
+	cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
+		"-f", "query="+mergedPRQuery,
+		"-F", "owner="+owner,
+		"-F", "repo="+repo,
+		"-F", "number="+strconv.Itoa(number),
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("gh api graphql (issue #%d): %w", number, ghError(err))
+	}
+	return parseMergedPRResponse(out)
+}
+
+// parseMergedPRResponse reports whether any closing PR in the GraphQL
+// response has merged. Split out so it is unit-testable without invoking gh.
+func parseMergedPRResponse(stdout []byte) (bool, error) {
+	var resp ghMergedPRResponse
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		return false, fmt.Errorf("parse gh api graphql output: %w", err)
+	}
+	for _, n := range resp.Data.Repository.Issue.ClosedByPullRequestsReferences.Nodes {
+		if n.Merged {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// splitRepo splits "owner/name" into its parts.
+func splitRepo(repo string) (owner, name string, err error) {
+	for i := 0; i < len(repo); i++ {
+		if repo[i] == '/' {
+			return repo[:i], repo[i+1:], nil
+		}
+	}
+	return "", "", fmt.Errorf("repo must be owner/name, got %q", repo)
 }
 
 // ghError enriches an exec error with gh's stderr when available.

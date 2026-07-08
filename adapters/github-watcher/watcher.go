@@ -11,9 +11,17 @@
 // mechanism: a re-seen issue is no longer `ready`, so edits, re-polls, and
 // watcher restarts cannot double-trigger.
 //
-// The adapter depends on factor-q only through the trigger wire contract
-// (a NATS subject + a JSON payload) — never on fq-runtime's code. That is
-// the point: the boundary is a construction, not a convention.
+// The adapter also *observes the outcome* of what it triggered, closing the
+// gap that stranded issue #9: a failed invocation is relabelled off
+// `in-progress` (retried, bounded, or escalated to `failed`) rather than
+// left claimed forever, a completed one moves to `in-review`, and a merged
+// PR moves the issue to `done`. Outcome observation lives in OutcomeReactor
+// (event stream) and the review sweep below (merged PRs).
+//
+// The adapter depends on factor-q only through the documented wire
+// contracts — the trigger wire contract and the event schema — never on
+// fq-runtime's code. That is the point: the boundary is a construction, not
+// a convention.
 package main
 
 import (
@@ -56,6 +64,18 @@ type IssueSource interface {
 	Relabel(ctx context.Context, number int, remove, add string) error
 }
 
+// ReviewSource is the seam over GitHub for the review sweep: listing issues
+// in review and asking whether an issue's linked PR has merged. It is
+// separate from IssueSource so the trigger path keeps its minimal contract;
+// a Watcher without one simply skips the merged-PR → done transition.
+type ReviewSource interface {
+	// ListByLabel returns open issues carrying label.
+	ListByLabel(ctx context.Context, label string) ([]Issue, error)
+	// HasMergedPR reports whether the issue has a merged PR linked to it
+	// (i.e. the proposed fix landed).
+	HasMergedPR(ctx context.Context, number int) (bool, error)
+}
+
 // TriggerPublisher publishes a trigger to a factor-q agent per the trigger
 // wire contract. payload is the opaque string handed to the agent; the
 // implementation JSON-encodes it as the message body.
@@ -69,8 +89,12 @@ type Config struct {
 	TargetAgent        string        // the agent to trigger, e.g. "m0-issue-fix"
 	ReadyLabel         string        // the label that means "go", e.g. "ready"
 	InProgressLabel    string        // the label applied on trigger, e.g. "in-progress"
+	InReviewLabel      string        // applied when the agent completes (PR open), e.g. "in-review"
+	FailedLabel        string        // applied when retries are exhausted / a terminal failure, e.g. "failed"
+	DoneLabel          string        // applied when the proposed PR merges, e.g. "done"
 	PollInterval       time.Duration // >= MinPollInterval
 	MaxTriggersPerPoll int           // concurrency guard: at most N triggers per poll (0 = unbounded)
+	MaxRetries         int           // bounded auto-retry budget for a transiently-failed issue
 	TaskTemplate       string        // payload template; a single %d is the issue number
 }
 
@@ -106,10 +130,13 @@ func planTriggers(issues []Issue, cfg Config) []PlannedTrigger {
 	return planned
 }
 
-// Watcher polls an IssueSource and triggers via a TriggerPublisher.
+// Watcher polls an IssueSource and triggers via a TriggerPublisher. If
+// Reviewer is set, each poll also sweeps `in-review` issues and moves those
+// whose PR has merged to `done`.
 type Watcher struct {
 	Source    IssueSource
 	Publisher TriggerPublisher
+	Reviewer  ReviewSource // optional; nil disables the merged-PR → done sweep
 	Config    Config
 	Log       *slog.Logger
 }
@@ -120,6 +147,8 @@ type Watcher struct {
 // ready. If the publish fails after the relabel, the claim is reverted
 // (in-progress -> ready) so the next poll retries, rather than stranding
 // the issue. Per-issue errors are logged and do not stop the others.
+//
+// After the trigger pass it runs the review sweep (merged PR → done).
 func (w *Watcher) pollOnce(ctx context.Context) error {
 	issues, err := w.Source.ListReady(ctx, w.Config.ReadyLabel)
 	if err != nil {
@@ -146,7 +175,37 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 		}
 		w.Log.Info("triggered agent for issue", "issue", pt.Issue, "agent", w.Config.TargetAgent)
 	}
+	w.sweepReview(ctx)
 	return nil
+}
+
+// sweepReview moves `in-review` issues whose proposed PR has merged to
+// `done`. It is best-effort: per-issue errors are logged and do not stop
+// the others, and a missing Reviewer disables the sweep entirely.
+func (w *Watcher) sweepReview(ctx context.Context) {
+	if w.Reviewer == nil {
+		return
+	}
+	inReview, err := w.Reviewer.ListByLabel(ctx, w.Config.InReviewLabel)
+	if err != nil {
+		w.Log.Error("list in-review issues failed; skipping review sweep this poll", "err", err)
+		return
+	}
+	for _, iss := range inReview {
+		merged, err := w.Reviewer.HasMergedPR(ctx, iss.Number)
+		if err != nil {
+			w.Log.Error("checking merged PR failed; leaving issue in review", "issue", iss.Number, "err", err)
+			continue
+		}
+		if !merged {
+			continue
+		}
+		if err := w.Source.Relabel(ctx, iss.Number, w.Config.InReviewLabel, w.Config.DoneLabel); err != nil {
+			w.Log.Error("relabel to done failed; issue left in review", "issue", iss.Number, "err", err)
+			continue
+		}
+		w.Log.Info("proposed PR merged; issue done", "issue", iss.Number)
+	}
 }
 
 // Run polls immediately, then on Config.PollInterval, until ctx is
