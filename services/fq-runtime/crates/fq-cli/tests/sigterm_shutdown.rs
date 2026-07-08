@@ -97,7 +97,6 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
         .expect("daemon did not exit within 15s of SIGTERM (graceful shutdown hung?)");
 
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&scratch);
 
     assert!(
         status.success(),
@@ -108,6 +107,33 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
     assert!(
         log.contains("Received SIGTERM, shutting down..."),
         "graceful-shutdown message missing — SIGTERM may not have driven the clean path\n--- log ---\n{log}",
+    );
+
+    // A graceful shutdown must also *deregister* the worker: its
+    // coordination row should read `shutdown`, not linger `alive` for
+    // the sweep to flip to `stale`. Checked through the product's own
+    // read-only view over the same cache DB (no NATS needed).
+    let workers = Command::new(fq_binary())
+        .args(["workers", "list", "--json"])
+        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_NATS_URL", &nats_url)
+        .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .output()
+        .expect("run fq workers list");
+    let workers_out = String::from_utf8_lossy(&workers.stdout).into_owned();
+
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert!(
+        workers.status.success(),
+        "`fq workers list --json` failed: {}\n{workers_out}",
+        String::from_utf8_lossy(&workers.stderr),
+    );
+    assert!(
+        workers_out.contains("shutdown"),
+        "worker was not deregistered on graceful shutdown — \
+         expected a `shutdown` status in `fq workers list`:\n{workers_out}",
     );
 }
 
