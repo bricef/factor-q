@@ -2195,3 +2195,62 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
         requests.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #25 — MCP stdio teardown must not crash the process with EPIPE.
+//
+// The stdio integration tests above tear an `npx` server down while it
+// may still be mid-write. If `shutdown` lets the child be killed
+// abruptly (rather than closing its stdin for a graceful EOF exit), the
+// server's SDK stdio transport hits `write EPIPE`, Node throws on the
+// unhandled `'error'` event, and the process exits 101 — reddening CI as
+// pure teardown noise. This regression guard reproduces the exact seam:
+// it holds a tool `Arc` across `shutdown()` (so the manager can't
+// `close().await` and must fall back to the graceful cancel+await path),
+// on a server that has just been driven to produce output, and asserts
+// teardown completes. A passing run *is* the proof — an EPIPE crash on
+// teardown would exit the test process 101 and fail this test.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn stdio_shutdown_with_outstanding_tool_arc_is_graceful() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    // Run a few teardown cycles to give the mid-write race chances to
+    // fire; each previously had a minority chance of the EPIPE crash.
+    for _ in 0..3 {
+        let mut manager = McpClientManager::new();
+        let tools = manager
+            .start_server(everything_config())
+            .await
+            .expect("start server-everything");
+
+        // Drive the server so it is actively producing output (and thus
+        // liable to be mid-write at teardown): call the echo tool.
+        let echo: Arc<dyn Tool> = tools
+            .iter()
+            .find(|t| t.name() == "echo")
+            .expect("echo tool should exist")
+            .clone();
+        let sandbox = ToolSandbox::new();
+        let ctx = ToolContext::new(&sandbox);
+        echo.execute(&ctx, serde_json::json!({"message": "teardown race"}))
+            .await
+            .expect("echo should succeed");
+
+        // Keep tool `Arc`s alive across shutdown: this is the condition
+        // under which the manager cannot take `&mut` to `close().await`
+        // and must instead cancel + await the graceful child exit.
+        let _held = tools;
+
+        // Bounded so a hang (rather than a crash) is still a failure.
+        tokio::time::timeout(std::time::Duration::from_secs(20), manager.shutdown())
+            .await
+            .expect("shutdown should complete gracefully, not hang");
+
+        drop(_held);
+    }
+}
