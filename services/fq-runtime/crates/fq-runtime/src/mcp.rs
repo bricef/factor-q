@@ -1403,7 +1403,43 @@ impl McpClientManager {
             })
     }
 
+    /// How long [`shutdown`](Self::shutdown) waits for a stdio child to
+    /// exit gracefully after we've cancelled the service (which sends
+    /// the child EOF on stdin) but can't `close().await` it directly
+    /// because tool `Arc`s are still outstanding. rmcp's child-process
+    /// transport itself waits up to 3s for the child before force-killing;
+    /// we give it a little more headroom so the *graceful* path (EOF →
+    /// the server tears its stdio down and exits) wins the race against
+    /// the abrupt drop-guard kill, which is what causes the flaky
+    /// teardown `EPIPE` on the Node stdio servers (see issue #25).
+    const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
+
     /// Gracefully shut down all managed MCP server processes.
+    ///
+    /// Teardown ordering matters for stdio (child-process) servers: an
+    /// MCP server mid-write when its stdin/stdout pipe is closed abruptly
+    /// hits `EPIPE`, and the `@modelcontextprotocol/sdk` stdio transport
+    /// installs no socket `error` handler, so Node throws on the
+    /// unhandled `'error'` event and the whole process exits 101 — even
+    /// though every request already completed. That reddens CI as pure
+    /// teardown noise (issue #25).
+    ///
+    /// The fix is to always tear the server down *gracefully*: cancel the
+    /// service so rmcp closes the transport (which sends the child EOF on
+    /// stdin and waits for it to exit) rather than letting the child be
+    /// abruptly killed mid-write.
+    ///
+    /// - When no tool `Arc`s are outstanding we can take `&mut` and
+    ///   `close().await`, which cancels *and* awaits the background task's
+    ///   graceful transport close to completion — the cleanest path.
+    /// - Otherwise (tool wrappers still hold client `Arc`s) we can't get
+    ///   `&mut`, so we cancel the service via its cancellation token —
+    ///   which drives the same graceful transport close on the background
+    ///   task — and then give the child a bounded window to receive EOF
+    ///   and exit before we drop our handle. Without this wait, dropping
+    ///   the `RunningService` here lets its drop guard cancel and the
+    ///   child-process transport kill the child *abruptly*, racing the
+    ///   server's final writes → the flaky `EPIPE` crash.
     pub async fn shutdown(&mut self) {
         for server in &mut self.servers {
             info!(
@@ -1411,27 +1447,59 @@ impl McpClientManager {
                 tools = ?server.tool_names,
                 "shutting down MCP server"
             );
-            // RunningService is behind Arc — we need to get a mutable
-            // reference. If other Arcs still exist (McpTool instances),
-            // we can't call close(), but the drop guard on the
-            // RunningService will cancel the child process anyway.
-            if let Some(client) = Arc::get_mut(&mut server.client) {
-                if let Err(err) = client.close().await {
-                    warn!(
-                        server = %server.name,
-                        error = %err,
-                        "error during MCP server shutdown"
-                    );
+            match Arc::get_mut(&mut server.client) {
+                // Sole owner: cancel and await the graceful transport
+                // close to completion.
+                Some(client) => {
+                    if let Err(err) = client.close().await {
+                        warn!(
+                            server = %server.name,
+                            error = %err,
+                            "error during MCP server shutdown"
+                        );
+                    }
                 }
-            } else {
-                debug!(
-                    server = %server.name,
-                    "MCP client has outstanding references, relying on drop guard"
-                );
+                // Tool wrappers still hold client Arcs, so we can't take
+                // `&mut` to `close().await`. Cancel the service anyway —
+                // that drives the same graceful transport close (EOF to
+                // the child, wait for it to exit) on the background task —
+                // then wait for the child to exit before we drop, so it
+                // isn't killed mid-write (issue #25).
+                None => {
+                    debug!(
+                        server = %server.name,
+                        "MCP client has outstanding references; cancelling and \
+                         awaiting graceful child exit before drop"
+                    );
+                    server.client.cancellation_token().cancel();
+                    Self::await_graceful_close(&server.client, Self::SHUTDOWN_GRACE).await;
+                }
             }
         }
         self.servers.clear();
         self.started.clear();
+    }
+
+    /// After cancelling a service we can't `close().await` (outstanding
+    /// tool `Arc`s), wait — up to `grace` — for its background task to
+    /// finish the graceful transport close so the stdio child exits on
+    /// EOF instead of being killed mid-write. Polls the service's
+    /// closed/transport-closed state, which flips once the background
+    /// loop has run its `transport.close()` (the EOF + child-exit path).
+    /// Bounded so a wedged child can't hang shutdown — the drop guard
+    /// force-kills it after we return.
+    async fn await_graceful_close(client: &Arc<McpClient>, grace: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            if client.is_transport_closed() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                debug!("timed out awaiting graceful MCP child exit; drop guard will force-kill");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 }
 
@@ -1927,5 +1995,43 @@ mod tests {
             .await
             .expect("drain exits when channels close")
             .expect("drain task");
+    }
+
+    /// Regression guard for issue #25 (teardown seam, deterministic
+    /// variant): after cancelling a service whose client `Arc` is still
+    /// held elsewhere (the condition under which `shutdown` can't
+    /// `close().await`), `await_graceful_close` observes the background
+    /// task finish its graceful transport close and returns *well within*
+    /// the grace window — it does not block for the full timeout and does
+    /// not require a force-kill. The stdio (child-process) EPIPE crash the
+    /// issue describes is exercised end to end by the `require_npx`-gated
+    /// `stdio_shutdown_with_outstanding_tool_arc_is_graceful` integration
+    /// test; this one pins the wait logic without needing a child process.
+    #[tokio::test]
+    async fn await_graceful_close_returns_once_the_service_tears_down() {
+        let tools = Arc::new(Mutex::new(vec![mock_tool("only")]));
+        let client = serve_mock(tools, 10).await;
+
+        // A second Arc, standing in for a tool wrapper still holding the
+        // client — exactly the case where `Arc::get_mut` fails and
+        // `shutdown` must fall back to cancel + await.
+        let held = Arc::clone(&client);
+
+        client.cancellation_token().cancel();
+        // Generous grace; the mock tears down in milliseconds, so this
+        // must return well before the deadline (proving it waited for the
+        // teardown rather than timing out or force-killing).
+        let start = std::time::Instant::now();
+        McpClientManager::await_graceful_close(&client, std::time::Duration::from_secs(5)).await;
+        assert!(
+            client.is_transport_closed(),
+            "the service transport should be closed after cancellation"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "await_graceful_close should return on teardown, not time out (took {:?})",
+            start.elapsed()
+        );
+        drop(held);
     }
 }
