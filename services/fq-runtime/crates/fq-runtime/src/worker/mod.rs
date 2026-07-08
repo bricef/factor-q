@@ -51,12 +51,57 @@ pub use store::{
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::bus::BusError;
 use crate::events::TriggerSource;
 use crate::llm::{ChatResponse, LlmClient, LlmError};
+
+/// A one-shot "durably started" signal the control-plane hands a
+/// worker through [`Worker::run_invocation`].
+///
+/// The worker [`fire`](DurableStart::fire)s it exactly once, right
+/// after the invocation's first durable (WAL) write — the point past
+/// which a crash is recoverable from the WAL rather than lost. The
+/// trigger dispatcher waits on the paired receiver and only *then*
+/// acks the JetStream trigger, closing the ack→first-WAL-write window
+/// (a crash before the first WAL write leaves the trigger unacked, so
+/// JetStream redelivers it). See `control_plane::dispatcher`.
+///
+/// [`noop`](DurableStart::noop) is the "nobody is waiting" variant —
+/// used by the direct `ReducerRunner::run` paths (CLI, tests, sim)
+/// that ack nothing. Firing a noop signal is a no-op.
+#[derive(Debug, Default)]
+pub struct DurableStart {
+    tx: Option<oneshot::Sender<()>>,
+}
+
+impl DurableStart {
+    /// A signal whose fire notifies `rx`. Returns the signal to hand
+    /// to the worker and the receiver the caller awaits.
+    pub fn channel() -> (Self, oneshot::Receiver<()>) {
+        let (tx, rx) = oneshot::channel();
+        (Self { tx: Some(tx) }, rx)
+    }
+
+    /// A signal nobody is listening on — firing it does nothing. For
+    /// the direct-run paths that do not ack a trigger.
+    pub fn noop() -> Self {
+        Self { tx: None }
+    }
+
+    /// Signal that the invocation has durably started. Idempotent: the
+    /// first call notifies the waiter; later calls (and a `noop`) are
+    /// no-ops. A dropped receiver (the dispatcher already acked and
+    /// moved on) is ignored.
+    pub fn fire(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
 
 /// Outcome of a successful call to [`Worker::run_invocation`].
 #[derive(Debug)]
@@ -125,6 +170,13 @@ pub trait Worker: Send + Sync {
     /// error during a turn, max iterations reached) come back
     /// as `InvocationOutcome::*` variants and as `Failed` events
     /// on the bus, not as errors here.
+    ///
+    /// `durable_start` is [`fire`](DurableStart::fire)d exactly once,
+    /// right after the invocation's first durable (WAL) write — the
+    /// control-plane waits on it to ack the trigger only after the run
+    /// is recoverable from the WAL (closing the ack→first-WAL-write
+    /// window). Direct callers that ack nothing pass
+    /// [`DurableStart::noop`].
     async fn run_invocation(
         &self,
         agent: &Agent,
@@ -132,6 +184,7 @@ pub trait Worker: Send + Sync {
         trigger_source: TriggerSource,
         trigger_subject: Option<String>,
         trigger_payload: Value,
+        durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError>;
 
     /// Request that the worker drain: stop starting new steps and let
@@ -151,7 +204,7 @@ pub trait Worker: Send + Sync {
 
 #[async_trait]
 impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for ReducerRunner<R> {
-    /// Defers to [`ReducerRunner::run`] with the reducer
+    /// Defers to [`ReducerRunner::run_signalling`] with the reducer
     /// the runner was constructed with. The trait doesn't
     /// have to expose the `R: Reducer` generic — production
     /// wires `ReducerRunner<Harness>`; tests pick whichever
@@ -163,9 +216,17 @@ impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for Redu
         trigger_source: TriggerSource,
         trigger_subject: Option<String>,
         trigger_payload: Value,
+        durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        self.run(agent, llm, trigger_source, trigger_subject, trigger_payload)
-            .await
+        self.run_signalling(
+            agent,
+            llm,
+            trigger_source,
+            trigger_subject,
+            trigger_payload,
+            durable_start,
+        )
+        .await
     }
 
     async fn request_drain(&self, _req: DrainRequest) {

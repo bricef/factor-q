@@ -57,7 +57,7 @@ use crate::validation::ValidatorChain;
 use crate::worker::store::{
     DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow, WorkerStore,
 };
-use crate::worker::{DrainSignal, ExecutorError, InvocationOutcome, WorkerId};
+use crate::worker::{DrainSignal, DurableStart, ExecutorError, InvocationOutcome, WorkerId};
 
 pub use crate::bus::EventSink;
 
@@ -476,6 +476,34 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger_subject: Option<String>,
         trigger_payload: Value,
     ) -> Result<InvocationOutcome, ExecutorError> {
+        // Direct callers (CLI `fq trigger`, tests, sim) ack nothing, so
+        // the durable-start signal has no waiter.
+        self.run_signalling(
+            agent,
+            llm,
+            trigger_source,
+            trigger_subject,
+            trigger_payload,
+            DurableStart::noop(),
+        )
+        .await
+    }
+
+    /// Like [`run`](Self::run) but fires `durable_start` once the
+    /// invocation's first WAL write lands. The trigger dispatcher uses
+    /// this (through the [`Worker`](crate::Worker) seam) to ack a
+    /// trigger only after the run is recoverable from the WAL, closing
+    /// the ack->first-WAL-write window (issue #41).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_signalling(
+        &self,
+        agent: &Agent,
+        llm: &dyn LlmClient,
+        trigger_source: TriggerSource,
+        trigger_subject: Option<String>,
+        trigger_payload: Value,
+        durable_start: DurableStart,
+    ) -> Result<InvocationOutcome, ExecutorError> {
         // Every grant-bearing server runs per-invocation (ADR-0018): we
         // start each, layer its tools onto the base registry, and merge
         // their server-initiated request streams into one channel keyed
@@ -496,6 +524,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     trigger_payload,
                     &self.context.tools(),
                     None,
+                    durable_start,
                 )
                 .await;
         }
@@ -563,6 +592,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 trigger_payload,
                 &tools,
                 sampling,
+                durable_start,
             )
             .await;
         manager.shutdown().await;
@@ -593,6 +623,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             trigger_payload,
             &self.context.tools(),
             sampling,
+            DurableStart::noop(),
         )
         .await
     }
@@ -611,6 +642,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger_payload: Value,
         tools: &ToolRegistry,
         sampling: Option<SamplingChannel>,
+        durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
         let invocation_id = Uuid::now_v7();
         let start = Instant::now();
@@ -698,6 +730,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             started_at_ms,
             static_context,
             sampling,
+            durable_start,
             &mut cursor,
         )
         .await
@@ -961,6 +994,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // cannot service (or replay) sampling (ADR-0018 §5). Any
             // in-flight sampling is surfaced via `fq recover`.
             None,
+            // Resume acks nothing — the trigger was acked on the
+            // original attempt (issue #41).
+            DurableStart::noop(),
             &mut cursor,
         )
         .await
@@ -989,6 +1025,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         started_at_ms: i64,
         static_context: Option<String>,
         mut sampling: Option<SamplingChannel>,
+        mut durable_start: DurableStart,
         cursor: &mut Option<Uuid>,
     ) -> Result<InvocationOutcome, ExecutorError> {
         for step_index in step_index_start..HOST_STEP_BUDGET {
@@ -1086,6 +1123,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 .await
                 .map_err(map_store_err)?;
             state = output.state;
+
+            // First durable (WAL) write for this invocation has landed:
+            // the run is now recoverable from the WAL, so the trigger
+            // dispatcher may ack (issue #41). Idempotent — only the
+            // first step fires; every later call is a no-op.
+            durable_start.fire();
 
             match output.next_action {
                 NextAction::Complete(text) => {
