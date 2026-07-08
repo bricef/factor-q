@@ -1009,13 +1009,6 @@ first-order safety concern) and the trigger-authz question in the
 [identity design](../design/aspirational/agent-identity-and-attestation.md).
 
 
-### 
-
-- [ ] Graph Exec
-- [ ] GUI observability over running invocations
-- [ ] Crypto verification for topic triggers (so only validated processes can emit to NATS
-- [ ] Cost tracking at provider
-- [ ] Redundant models and model fallback policies
  
 
 ## Schema-migration testing (flagged 2026-07-05)
@@ -1078,3 +1071,12 @@ suite when M3 lands (that suite's proptest style is the natural
 home for a randomised variant). Cross-refs: the reducer
 verification plan's sim harness (slice 3) provides the data
 generator; the v5 migration commit is the motivating example.
+
+## Brice's Grab bag of ideas.
+
+- [ ] Graph Exec
+- [ ] GUI observability over running invocations
+- [ ] Crypto verification for topic triggers (so only validated processes can emit to NATS
+- [ ] Cost tracking at provider
+- [ ] Redundant models and model fallback policies
+- [x] Issue template
