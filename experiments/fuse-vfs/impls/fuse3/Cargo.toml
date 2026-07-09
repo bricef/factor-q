@@ -1,0 +1,28 @@
+# Blind bake-off implementation for the `fuse3` crate.
+# Spec: docs/plans/active/2026-07-09-fuse-vfs-bakeoff.md
+#
+# Dependency posture: the spec allows "the assigned FUSE crate, plus libc/std".
+# fuse3's API is async-native — its Filesystem trait is an async trait and its
+# MountHandle is a Future — so a runtime is not optional. `tokio` (rt only) and
+# `futures-util` (its readdir replies are Streams) are the crate's own runtime
+# surface, not extra VFS/store crates. Recorded in NOTES.md.
+[package]
+name = "fuse-vfs-fuse3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "fuse-vfs-fuse3"
+path = "src/main.rs"
+
+[dependencies]
+fuse3 = { version = "0.9.0", features = ["tokio-runtime", "unprivileged"] }
+libc = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+futures-util = "0.3"
+
+[profile.release]
+debug = false
+
+[workspace]
