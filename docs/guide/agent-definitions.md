@@ -34,6 +34,30 @@ fq agent validate agents/greeter.md
 fq trigger greeter "Hello!"
 ```
 
+## Choosing the model
+
+`model:` names a model the deployment makes available. Different agents
+can run on different models — expensive ones for hard reasoning, cheaper
+ones for simple triage/classify steps (ADR-0003) — and non-Anthropic
+models (via any OpenAI-compatible provider) are available by
+configuration alone.
+
+- **`model:` is optional.** When omitted, the agent inherits the
+  deployment's `agents.default_model`. A definition with neither an
+  explicit `model:` nor a configured default fails to load.
+- **A model must be declared to be usable.** Every model an agent names
+  must appear in some provider's `models = [...]` list in `fq.toml`. An
+  agent that names an undeclared model fails to load — a typo can't
+  silently reach the wire.
+- **Every declared model must be priced.** The daemon refuses to start
+  unless each declared model resolves to a price (the LiteLLM table or a
+  `[providers.<name>.pricing]` override). This guarantees cost controls
+  (ADR-0004) can't be defeated by an unpriced model tracking as $0.
+
+Declaring providers, the default model, and price overrides is a
+deployment (`fq.toml`) concern — see the generated config's `[providers]`
+and `[agents]` sections (`fq init`).
+
 ## Adding tools
 
 Tools give the agent capabilities beyond text generation. factor-q

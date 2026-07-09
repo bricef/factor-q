@@ -59,6 +59,13 @@ pub enum LlmError {
 
     #[error("request failed: {0}")]
     RequestFailed(String),
+
+    /// The runtime refused to dispatch because the model has no pricing
+    /// (ADR-0004 guarantee — refusing beats untracked spend). Permanent;
+    /// never retried. Unreachable when the startup pricing guarantee is
+    /// enforced, so this is defence in depth.
+    #[error("no pricing for model '{0}'; refusing to dispatch (would be untracked spend)")]
+    UnpricedModel(String),
 }
 
 impl LlmError {

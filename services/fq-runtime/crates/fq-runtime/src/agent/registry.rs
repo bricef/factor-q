@@ -10,13 +10,16 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use super::{Agent, AgentId, definition::ParseError, definition::parse_agent};
+use super::{Agent, AgentId, definition::ParseError, definition::parse_agent_with_default};
 
 /// Result of scanning a directory for agent definitions.
 #[derive(Debug, Default)]
 pub struct AgentRegistry {
     agents: HashMap<AgentId, LoadedAgent>,
     errors: Vec<LoadError>,
+    /// Fallback model applied to definitions that omit `model:`
+    /// (`agents.default_model`). `None` = no fallback.
+    default_model: Option<String>,
 }
 
 /// A loaded agent with its source file path, for diagnostics and
@@ -39,7 +42,10 @@ impl AgentRegistry {
     /// are recorded as errors in the registry but do not cause this
     /// function to return an error. An `Err` is returned only for I/O
     /// problems accessing the directory itself.
-    pub fn load_from_directory(dir: &Path) -> Result<Self, RegistryError> {
+    pub fn load_from_directory(
+        dir: &Path,
+        default_model: Option<&str>,
+    ) -> Result<Self, RegistryError> {
         if !dir.exists() {
             return Err(RegistryError::DirectoryNotFound(dir.to_path_buf()));
         }
@@ -48,6 +54,7 @@ impl AgentRegistry {
         }
 
         let mut registry = Self::new();
+        registry.default_model = default_model.map(String::from);
 
         for entry in WalkDir::new(dir).follow_links(false) {
             let entry = match entry {
@@ -86,7 +93,7 @@ impl AgentRegistry {
             }
         };
 
-        let agent = match parse_agent(&content) {
+        let agent = match parse_agent_with_default(&content, self.default_model.as_deref()) {
             Ok(agent) => agent,
             Err(err) => {
                 self.errors.push(LoadError::Parse {
@@ -219,7 +226,7 @@ You are an agent.
         let dir = tempdir().unwrap();
         write(dir.path(), "researcher.md", &minimal_agent("researcher"));
 
-        let registry = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
         assert_eq!(registry.len(), 1);
         assert!(registry.errors().is_empty());
 
@@ -234,7 +241,7 @@ You are an agent.
         write(dir.path(), "ops/responder.md", &minimal_agent("responder"));
         write(dir.path(), "planner.md", &minimal_agent("planner"));
 
-        let registry = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
         assert_eq!(registry.len(), 3);
         assert!(registry.errors().is_empty());
 
@@ -251,7 +258,7 @@ You are an agent.
         write(dir.path(), "notes.txt", "ignored");
         write(dir.path(), "config.yaml", "ignored: true");
 
-        let registry = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
         assert_eq!(registry.len(), 1);
         assert!(registry.errors().is_empty());
     }
@@ -263,7 +270,7 @@ You are an agent.
         write(dir.path(), "broken.md", "not a valid definition");
         write(dir.path(), "also_good.md", &minimal_agent("other"));
 
-        let registry = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
         assert_eq!(registry.len(), 2);
         assert_eq!(registry.errors().len(), 1);
         assert!(matches!(registry.errors()[0], LoadError::Parse { .. }));
@@ -275,7 +282,7 @@ You are an agent.
         write(dir.path(), "a/agent.md", &minimal_agent("same"));
         write(dir.path(), "b/agent.md", &minimal_agent("same"));
 
-        let registry = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
         assert_eq!(registry.len(), 1);
         assert_eq!(registry.errors().len(), 1);
         assert!(matches!(
@@ -286,16 +293,18 @@ You are an agent.
 
     #[test]
     fn missing_directory_is_error() {
-        let err =
-            AgentRegistry::load_from_directory(Path::new("/tmp/factor-q-test-does-not-exist-xyz"))
-                .unwrap_err();
+        let err = AgentRegistry::load_from_directory(
+            Path::new("/tmp/factor-q-test-does-not-exist-xyz"),
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, RegistryError::DirectoryNotFound(_)));
     }
 
     #[test]
     fn empty_directory_returns_empty_registry() {
         let dir = tempdir().unwrap();
-        let registry = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
         assert!(registry.is_empty());
         assert!(registry.errors().is_empty());
     }
@@ -328,7 +337,8 @@ You are an agent.
             return;
         }
 
-        let registry = AgentRegistry::load_from_directory(&examples_dir).expect("load examples");
+        let registry =
+            AgentRegistry::load_from_directory(&examples_dir, None).expect("load examples");
 
         assert!(
             registry.errors().is_empty(),
@@ -378,7 +388,7 @@ You are an agent.
             );
             return;
         }
-        let registry = AgentRegistry::load_from_directory(&examples_dir).expect("load");
+        let registry = AgentRegistry::load_from_directory(&examples_dir, None).expect("load");
         let id = AgentId::new("shell-runner").unwrap();
         let agent = registry.get(&id).expect("shell-runner example");
         assert!(

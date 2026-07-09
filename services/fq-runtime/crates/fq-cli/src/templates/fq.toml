@@ -26,6 +26,12 @@ url = "nats://fq-dev-token@localhost:4222"
 # Directory containing agent definition files (.md with YAML frontmatter).
 # Relative paths are resolved against this config file's directory.
 directory = "agents"
+#
+# Fallback model for definitions that omit `model:` in their frontmatter.
+# When set, an agent with no explicit model inherits this; when unset,
+# every agent must name its own model. Must itself be a declared, priced
+# model (see the pricing guarantee under [providers.anthropic]).
+# default_model = "claude-haiku-4-5"
 
 [cache]
 # Directory for runtime cache files (LiteLLM pricing JSON, etc).
@@ -38,11 +44,40 @@ directory = "agents"
 # the variable at call time; nothing is written back to this file.
 api_key_env = "ANTHROPIC_API_KEY"
 #
+# The model registry (ADR-0003/0004): list every model an agent may use.
+# An agent whose `model:` names an id not declared under some provider
+# fails to load, and the daemon refuses to start unless every declared
+# model is priced (below). This makes the models the fleet can spend on
+# explicit in one place — a config typo can't silently run an expensive
+# model, and an unpriced model can't silently defeat budget enforcement.
+models = ["claude-haiku-4-5"]
+#
 # Optional override for the Anthropic API base URL. When unset, the
 # runtime uses Anthropic's public endpoint. Use cases: pointing at a
 # local mock during integration tests, an internal LLM proxy, or a
 # Bedrock-compatible endpoint.
 # base_url = "http://127.0.0.1:8080"
+
+# --- Additional providers (optional) --------------------------------------
+# Any OpenAI-compatible provider (OpenRouter, Groq, Together, a local
+# vLLM, …) is available by configuration alone — no code. Declare its
+# shape, endpoint, key env var, and the model ids it serves. Agents then
+# select one of its models via their `model:` frontmatter.
+#
+# [providers.openrouter]
+# api_shape   = "openai-compatible"   # anthropic | openai | gemini | ollama | openai-compatible
+# base_url    = "https://openrouter.ai/api/v1"
+# api_key_env = "OPENROUTER_API_KEY"
+# models      = ["openai/gpt-4o-mini"]
+#
+# Per-model price override, USD per MILLION tokens. Required for any model
+# the LiteLLM pricing table doesn't list (e.g. OpenRouter-namespaced ids)
+# — without it the daemon refuses to start, since an unpriced model would
+# track its cost as $0 and silently escape budget enforcement (ADR-0004).
+# [providers.openrouter.pricing."openai/gpt-4o-mini"]
+# input_per_mtok  = 0.15
+# output_per_mtok = 0.60
+# # optional: cache_read_per_mtok, cache_write_per_mtok (default: input rate)
 
 [worker]
 # Worker-side knobs for the archive hand-off retry sweeper. The

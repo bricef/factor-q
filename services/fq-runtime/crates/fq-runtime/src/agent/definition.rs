@@ -18,6 +18,17 @@ use super::{
 /// The content must begin with a YAML frontmatter block delimited by `---`
 /// lines, followed by the system prompt in Markdown.
 pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
+    parse_agent_with_default(content, None)
+}
+
+/// Parse an agent definition, falling back to `default_model` when the
+/// frontmatter omits `model:` (the worker default, ADR-0003). An agent
+/// with neither an explicit model nor a default fails to build
+/// (`BuildError::MissingField("model")`).
+pub fn parse_agent_with_default(
+    content: &str,
+    default_model: Option<&str>,
+) -> Result<Agent, ParseError> {
     let (frontmatter_str, body) = split_frontmatter(content)?;
     let frontmatter: Frontmatter = serde_yaml::from_str(frontmatter_str)?;
 
@@ -98,12 +109,20 @@ pub fn parse_agent(content: &str) -> Result<Agent, ParseError> {
 
     let mut builder = Agent::builder()
         .id(frontmatter.name)
-        .model(frontmatter.model)
         .system_prompt(body)
         .tools(frontmatter.tools)
         .sandbox(sandbox)
         .mcp_servers(mcp_servers)
         .static_resources(static_resources);
+
+    // Explicit `model:` wins; otherwise fall back to the worker default.
+    // If neither is present, `build()` fails with a missing-model error.
+    if let Some(model) = frontmatter
+        .model
+        .or_else(|| default_model.map(str::to_string))
+    {
+        builder = builder.model(model);
+    }
 
     if let Some(budget) = frontmatter.budget {
         builder = builder.budget(budget);
@@ -203,7 +222,10 @@ impl<'de> Deserialize<'de> for CapabilityGrant {
 #[derive(Debug, Deserialize)]
 struct Frontmatter {
     name: String,
-    model: String,
+    /// Optional: falls back to `agents.default_model` when omitted. A
+    /// definition with neither fails to load.
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     tools: Vec<String>,
     #[serde(default)]
@@ -290,6 +312,31 @@ pub enum ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_model_falls_back_to_worker_default() {
+        let content = "---\nname: triage\n---\n\nYou are an agent.\n";
+        let agent = parse_agent_with_default(content, Some("claude-haiku-4-5"))
+            .expect("should parse with the default applied");
+        assert_eq!(agent.model(), "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn explicit_model_beats_the_worker_default() {
+        let content = "---\nname: fixer\nmodel: claude-opus-4-8\n---\n\nYou are an agent.\n";
+        let agent =
+            parse_agent_with_default(content, Some("claude-haiku-4-5")).expect("should parse");
+        assert_eq!(agent.model(), "claude-opus-4-8");
+    }
+
+    #[test]
+    fn omitted_model_and_no_default_is_an_error() {
+        let content = "---\nname: triage\n---\n\nYou are an agent.\n";
+        assert!(
+            parse_agent(content).is_err(),
+            "a definition with no model and no default must fail to build"
+        );
+    }
 
     #[test]
     fn parses_full_definition() {

@@ -136,6 +136,13 @@ pub struct NatsConfig {
 pub struct AgentsConfig {
     #[serde(default = "default_agents_directory")]
     pub directory: PathBuf,
+    /// Fallback model for definitions that omit `model:` in their
+    /// frontmatter — the worker default (ADR-0003). When set, an agent
+    /// with no explicit model inherits this; when `None`, every agent
+    /// must name its own model or fail to load. Must itself be a
+    /// declared, priced model (see [`validate_model_registry`]).
+    #[serde(default)]
+    pub default_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -147,6 +154,98 @@ pub struct ProvidersConfig {
     /// models become available by configuration (ADR-0003).
     #[serde(flatten)]
     pub extra: std::collections::BTreeMap<String, ProviderConfig>,
+}
+
+impl ProvidersConfig {
+    /// Every model id declared across all providers (anthropic + extra) —
+    /// the registry. An agent may only name a model in this set.
+    pub fn declared_models(&self) -> impl Iterator<Item = &str> {
+        self.anthropic
+            .iter()
+            .flat_map(|a| a.models.iter())
+            .chain(self.extra.values().flat_map(|p| p.models.iter()))
+            .map(String::as_str)
+    }
+
+    /// Every per-model price override across all providers, as
+    /// `(model_id, override)`.
+    pub fn pricing_overrides(&self) -> impl Iterator<Item = (&str, &ModelPriceOverride)> {
+        self.anthropic
+            .iter()
+            .flat_map(|a| a.pricing.iter())
+            .chain(self.extra.values().flat_map(|p| p.pricing.iter()))
+            .map(|(k, v)| (k.as_str(), v))
+    }
+}
+
+/// Error listing every model-registry / pricing-coverage violation found
+/// at startup. Fail-fast: the daemon refuses to run rather than let an
+/// undeclared or unpriced model silently defeat budget enforcement
+/// (ADR-0004) by tracking its cost as $0.
+#[derive(Debug, thiserror::Error)]
+#[error("model registry validation failed:\n  - {}", .problems.join("\n  - "))]
+pub struct ModelRegistryError {
+    problems: Vec<String>,
+}
+
+impl ModelRegistryError {
+    /// The individual violation messages.
+    pub fn problems(&self) -> &[String] {
+        &self.problems
+    }
+}
+
+/// Validate the model registry and pricing coverage at startup — the
+/// ADR-0004 invariant *"a model is available iff it is declared,
+/// routable, and priced."*
+///
+/// 1. every agent's resolved model is **declared** (in some provider's
+///    `models = [...]`);
+/// 2. the `default_model`, if set, is declared;
+/// 3. every declared model resolves to a **price** (the LiteLLM table or
+///    a `[providers.<name>.pricing]` override merged into `pricing`).
+///
+/// All violations are collected so the operator sees the full list at
+/// once. `agent_models` is `(agent_id, model)` for readable errors.
+pub fn validate_model_registry(
+    providers: &ProvidersConfig,
+    default_model: Option<&str>,
+    agent_models: &[(String, String)],
+    pricing: &crate::pricing::PricingTable,
+) -> Result<(), ModelRegistryError> {
+    use std::collections::BTreeSet;
+    let declared: BTreeSet<&str> = providers.declared_models().collect();
+    let mut problems = Vec::new();
+
+    if let Some(dm) = default_model
+        && !declared.contains(dm)
+    {
+        problems.push(format!(
+            "agents.default_model = \"{dm}\" is not declared under any [providers.<name>] models = [...]"
+        ));
+    }
+
+    for (id, model) in agent_models {
+        if !declared.contains(model.as_str()) {
+            problems.push(format!(
+                "agent \"{id}\" uses model \"{model}\", not declared under any [providers.<name>] models = [...]"
+            ));
+        }
+    }
+
+    for &model in &declared {
+        if pricing.lookup(model).is_none() {
+            problems.push(format!(
+                "model \"{model}\" is declared but has no pricing — add [providers.<name>.pricing.\"{model}\"] or ensure the LiteLLM table lists it"
+            ));
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(ModelRegistryError { problems })
+    }
 }
 
 /// API wire shape for a provider — which genai adapter format it speaks.
@@ -173,9 +272,48 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     /// Env var holding this provider's API key.
     pub api_key_env: String,
-    /// Model ids routed to this provider's endpoint + auth.
+    /// Model ids routed to this provider's endpoint + auth. Also the
+    /// provider's slice of the model **registry**: an agent may only
+    /// name a model that some provider declares here.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Per-model price overrides — `[providers.<name>.pricing."<model>"]`.
+    /// Merged over the LiteLLM table so models the table doesn't list
+    /// (custom endpoints, OpenRouter-namespaced ids) are still priced,
+    /// which the startup pricing guarantee requires (ADR-0004).
+    #[serde(default)]
+    pub pricing: std::collections::BTreeMap<String, ModelPriceOverride>,
+}
+
+/// A per-model price override in USD per **million** tokens. Merged into
+/// the [`crate::pricing::PricingTable`] at startup so an operator can
+/// guarantee coverage for a model the LiteLLM table doesn't list.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct ModelPriceOverride {
+    /// Input (prompt) price, USD per million tokens.
+    pub input_per_mtok: f64,
+    /// Output (completion) price, USD per million tokens.
+    pub output_per_mtok: f64,
+    /// Cache-read price; `None` charges cache reads at the input rate.
+    #[serde(default)]
+    pub cache_read_per_mtok: Option<f64>,
+    /// Cache-write price; `None` charges cache writes at the input rate.
+    #[serde(default)]
+    pub cache_write_per_mtok: Option<f64>,
+}
+
+impl ModelPriceOverride {
+    /// Convert to a [`crate::pricing::ModelPricing`] entry. The units
+    /// already match — the pricing table is keyed in USD per million
+    /// tokens — so this is a field copy.
+    pub fn to_pricing(&self) -> crate::pricing::ModelPricing {
+        crate::pricing::ModelPricing {
+            input_per_million: self.input_per_mtok,
+            output_per_million: self.output_per_mtok,
+            cache_read_per_million: self.cache_read_per_mtok,
+            cache_write_per_million: self.cache_write_per_mtok,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -188,6 +326,18 @@ pub struct AnthropicConfig {
     /// Bedrock-compatible endpoint.
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Anthropic's slice of the model **registry**. Routing for
+    /// `claude-*` stays native (genai resolves it), so this list is
+    /// purely the declaration that makes those models usable and
+    /// subject to the pricing guarantee — list every `claude-*` id the
+    /// fleet uses.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Per-model price overrides — `[providers.anthropic.pricing."<model>"]`.
+    /// Rarely needed (LiteLLM lists Anthropic models), but available for
+    /// parity with other providers.
+    #[serde(default)]
+    pub pricing: std::collections::BTreeMap<String, ModelPriceOverride>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -238,6 +388,7 @@ impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             directory: default_agents_directory(),
+            default_model: None,
         }
     }
 }
@@ -247,6 +398,8 @@ impl Default for AnthropicConfig {
         Self {
             api_key_env: default_anthropic_api_key_env(),
             base_url: None,
+            models: Vec::new(),
+            pricing: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -455,6 +608,113 @@ models = ["llama-3.1-8b-instant"]
             groq.base_url.as_deref(),
             Some("https://api.groq.com/openai/v1")
         );
+    }
+
+    fn priced(input: f64, output: f64) -> crate::pricing::ModelPricing {
+        crate::pricing::ModelPricing {
+            input_per_million: input,
+            output_per_million: output,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        }
+    }
+
+    #[test]
+    fn validate_model_registry_flags_undeclared_and_unpriced() {
+        let toml = r#"
+[providers.anthropic]
+api_key_env = "ANTHROPIC_API_KEY"
+models = ["claude-haiku-4-5"]
+
+[providers.openrouter]
+api_shape = "openai-compatible"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+models = ["openai/gpt-4o-mini"]
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        // claude priced; openai/gpt-4o-mini deliberately left unpriced.
+        let mut pricing = crate::pricing::PricingTable::empty();
+        pricing.insert("claude-haiku-4-5", priced(1.0, 2.0));
+
+        let agents = vec![("triage".to_string(), "undeclared-model".to_string())];
+        let err = validate_model_registry(
+            &config.providers,
+            Some("also-undeclared"),
+            &agents,
+            &pricing,
+        )
+        .expect_err("expected registry violations");
+        let problems = err.problems();
+
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("default_model") && p.contains("also-undeclared")),
+            "missing default_model violation: {problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("triage") && p.contains("undeclared-model")),
+            "missing agent-model violation: {problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("openai/gpt-4o-mini") && p.contains("no pricing")),
+            "missing unpriced violation: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn validate_model_registry_passes_when_declared_and_priced() {
+        let toml = r#"
+[providers.anthropic]
+api_key_env = "ANTHROPIC_API_KEY"
+models = ["claude-haiku-4-5"]
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        let mut pricing = crate::pricing::PricingTable::empty();
+        pricing.insert("claude-haiku-4-5", priced(1.0, 2.0));
+        let agents = vec![("triage".to_string(), "claude-haiku-4-5".to_string())];
+        validate_model_registry(
+            &config.providers,
+            Some("claude-haiku-4-5"),
+            &agents,
+            &pricing,
+        )
+        .expect("declared + priced should validate");
+    }
+
+    #[test]
+    fn pricing_override_from_toml_makes_a_model_priced() {
+        // Exercises the `[providers.<name>.pricing."<model>"]` shape and
+        // the override -> table merge, then validation over it.
+        let toml = r#"
+[providers.groq]
+api_shape = "openai-compatible"
+base_url = "https://api.groq.com/openai/v1"
+api_key_env = "GROQ_API_KEY"
+models = ["llama-3.1-8b-instant"]
+[providers.groq.pricing."llama-3.1-8b-instant"]
+input_per_mtok = 0.05
+output_per_mtok = 0.08
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        let mut pricing = crate::pricing::PricingTable::empty();
+        for (model, ov) in config.providers.pricing_overrides() {
+            pricing.insert(model.to_string(), ov.to_pricing());
+        }
+        let entry = pricing
+            .lookup("llama-3.1-8b-instant")
+            .expect("override merged into the table");
+        assert_eq!(entry.input_per_million, 0.05);
+        assert_eq!(entry.output_per_million, 0.08);
+
+        let agents = vec![("t".to_string(), "llama-3.1-8b-instant".to_string())];
+        validate_model_registry(&config.providers, None, &agents, &pricing)
+            .expect("override should satisfy the pricing guarantee");
     }
 
     #[test]

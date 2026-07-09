@@ -24,6 +24,44 @@ use uuid::Uuid;
 
 const DEFAULT_CONFIG_PATH: &str = "fq.toml";
 
+/// Merge `[providers.<name>.pricing]` overrides over the loaded LiteLLM
+/// table, then enforce the ADR-0004 coverage guarantee: every declared
+/// model is priced, and every agent model + `agents.default_model` is
+/// declared. Fail-fast — the daemon refuses to run rather than let an
+/// undeclared or unpriced model silently track its cost as $0 and defeat
+/// budget enforcement. Returns the merged table on success.
+fn build_validated_pricing(
+    config: &Config,
+    registry: &AgentRegistry,
+    base: PricingTable,
+) -> anyhow::Result<PricingTable> {
+    let mut pricing = base;
+    let mut overrides = 0usize;
+    for (model, ov) in config.providers.pricing_overrides() {
+        pricing.insert(model.to_string(), ov.to_pricing());
+        overrides += 1;
+    }
+    if overrides > 0 {
+        println!("Applied {overrides} model pricing override(s) from config");
+    }
+    let agent_models: Vec<(String, String)> = registry
+        .iter()
+        .map(|l| {
+            (
+                l.agent.id().as_str().to_string(),
+                l.agent.model().to_string(),
+            )
+        })
+        .collect();
+    fq_runtime::config::validate_model_registry(
+        &config.providers,
+        config.agents.default_model.as_deref(),
+        &agent_models,
+        &pricing,
+    )?;
+    Ok(pricing)
+}
+
 #[derive(Parser)]
 #[command(
     name = "fq",
@@ -550,7 +588,7 @@ fn list_agents(global: &GlobalArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let registry = AgentRegistry::load_from_directory(dir)?;
+    let registry = AgentRegistry::load_from_directory(dir, config.agents.default_model.as_deref())?;
 
     if registry.is_empty() && registry.errors().is_empty() {
         println!("No agents found in {}", dir.display());
@@ -613,8 +651,11 @@ async fn trigger_agent(
     let config = global.resolve_config()?;
 
     // Resolve and load the registry.
-    let registry = AgentRegistry::load_from_directory(&config.agents.directory)
-        .context("failed to load agent registry")?;
+    let registry = AgentRegistry::load_from_directory(
+        &config.agents.directory,
+        config.agents.default_model.as_deref(),
+    )
+    .context("failed to load agent registry")?;
     let agent_id =
         AgentId::new(agent_name).with_context(|| format!("invalid agent name '{agent_name}'"))?;
     let loaded = registry.get_loaded(&agent_id).ok_or_else(|| {
@@ -644,9 +685,12 @@ async fn trigger_agent(
         .await
         .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
 
-    // Load pricing (cached path on disk, fetches on startup).
+    // Load pricing (cached path on disk, fetches on startup), merge
+    // config overrides, and enforce the coverage guarantee (ADR-0004).
     let cache_path = config.cache.directory.join("pricing.json");
-    let pricing = Arc::new(PricingTable::load(&cache_path).await);
+    let pricing =
+        build_validated_pricing(&config, &registry, PricingTable::load(&cache_path).await)?;
+    let pricing = Arc::new(pricing);
     println!("Loaded {} pricing entries", pricing.len());
 
     // Real LLM client — genai resolves API keys from provider-specific
@@ -737,6 +781,7 @@ async fn trigger_agent(
                 .store(worker_store)
                 .worker_id(cli_worker_id)
                 .max_iterations(config.max_iterations)
+                .enforce_pricing(true)
                 .build(),
         ),
         fq_runtime::Harness::new(),
@@ -1196,8 +1241,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             agents_dir.display()
         );
     }
-    let registry = fq_runtime::AgentRegistry::load_from_directory(agents_dir)
-        .with_context(|| format!("failed to load agents from {}", agents_dir.display()))?;
+    let registry = fq_runtime::AgentRegistry::load_from_directory(
+        agents_dir,
+        config.agents.default_model.as_deref(),
+    )
+    .with_context(|| format!("failed to load agents from {}", agents_dir.display()))?;
     if !registry.errors().is_empty() {
         for err in registry.errors() {
             tracing::warn!(error = %err, "agent load error");
@@ -1378,9 +1426,14 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         })
         .collect();
 
-    // Load pricing.
+    // Load pricing, merge config overrides, and enforce the coverage
+    // guarantee (ADR-0004) — fail-fast before serving any trigger.
     let pricing_cache = config.cache.directory.join("pricing.json");
-    let pricing = Arc::new(PricingTable::load(&pricing_cache).await);
+    let pricing = Arc::new(build_validated_pricing(
+        &config,
+        &registry,
+        PricingTable::load(&pricing_cache).await,
+    )?);
     let pricing_entries = pricing.len() as u32;
     println!(
         "  pricing entries:  {} (cache: {})",
@@ -1456,6 +1509,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                     .store(worker_store.clone())
                     .worker_id(worker_id.clone())
                     .max_iterations(config.max_iterations)
+                    .enforce_pricing(true)
                     .build(),
             ),
             fq_runtime::Harness::new(),
@@ -1683,6 +1737,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let reload_bus = bus.clone();
     let reload_registry = shared_registry.clone();
     let reload_dir = config.agents.directory.clone();
+    let reload_default_model = config.agents.default_model.clone();
     let reload_handle = tokio::spawn(async move {
         'resubscribe: loop {
             let mut sub = match reload_bus.subscribe_control_reload().await {
@@ -1715,7 +1770,14 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                     }
                     msg = sub.next() => {
                         match msg {
-                            Some(_) => reload_agents(&reload_registry, &reload_dir).await,
+                            Some(_) => {
+                            reload_agents(
+                                &reload_registry,
+                                &reload_dir,
+                                reload_default_model.as_deref(),
+                            )
+                            .await
+                        }
                             None => {
                                 // Subscription dropped. This is not a
                                 // daemon-fatal condition — resubscribe
@@ -2183,8 +2245,8 @@ async fn wait_for_shutdown_signal() -> &'static str {
 /// partial-success semantics). The swap only affects the NEXT
 /// trigger; in-flight invocations keep the config they snapshotted
 /// at trigger time (ADR-0020 refresh-between-invocations).
-async fn reload_agents(shared: &SharedRegistry, agents_dir: &Path) {
-    match AgentRegistry::load_from_directory(agents_dir) {
+async fn reload_agents(shared: &SharedRegistry, agents_dir: &Path, default_model: Option<&str>) {
+    match AgentRegistry::load_from_directory(agents_dir, default_model) {
         Ok(registry) => {
             let count = registry.len();
             let error_count = registry.errors().len();
@@ -3197,13 +3259,13 @@ mod reload_tests {
         let dir = tempdir().unwrap();
         write_agent(dir.path(), "first");
 
-        let initial = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        let initial = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
         assert_eq!(initial.len(), 1);
         let shared: SharedRegistry = Arc::new(tokio::sync::RwLock::new(Arc::new(initial)));
 
         // Add a second agent on disk, then reload.
         write_agent(dir.path(), "second");
-        reload_agents(&shared, dir.path()).await;
+        reload_agents(&shared, dir.path(), None).await;
 
         let after = shared.read().await.clone();
         assert_eq!(after.len(), 2, "reload should pick up the new agent");
@@ -3217,13 +3279,13 @@ mod reload_tests {
     async fn reload_agents_keeps_current_registry_on_load_error() {
         let dir = tempdir().unwrap();
         write_agent(dir.path(), "keep");
-        let initial = AgentRegistry::load_from_directory(dir.path()).unwrap();
+        let initial = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
         assert_eq!(initial.len(), 1);
         let shared: SharedRegistry = Arc::new(tokio::sync::RwLock::new(Arc::new(initial)));
 
         // Point the reload at a directory that does not exist.
         let missing = dir.path().join("does-not-exist");
-        reload_agents(&shared, &missing).await;
+        reload_agents(&shared, &missing, None).await;
 
         let after = shared.read().await.clone();
         assert_eq!(after.len(), 1, "failed reload must keep the old registry");
