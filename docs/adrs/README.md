@@ -36,6 +36,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0007](accepted/0007-inter-agent-communication.md) | Inter-agent communication — agents never touch the transport; one graph executor with two authoring surfaces (declared graphs + spawn as sugar); per-traversal budget with an ε cost floor; graduated from the April draft |
 | [0026](accepted/0026-event-log-system-of-record.md) | A dedicated CAS-backed archive service is the event log's system of record (supersedes ADR-0011's source-of-truth half; NATS becomes transport) |
 | [0027](accepted/0027-graceful-drain-deploys.md) | Deploys are a graceful drain — a `fq drain` control command suspends in-flight invocations to a step boundary; the new binary resumes via recovery (not kill-and-replace) |
+| [0028](accepted/0028-tool-scoped-isolation-and-workspace.md) | Tool-scoped isolation + a harness-owned virtual filesystem (safe by construction); supersedes ADR-0010's agent-scoped unit of isolation |
 
 ## Draft
 
