@@ -1,0 +1,19 @@
+# Blind bake-off implementation: crate `fuser`.
+# Spec: docs/plans/active/2026-07-09-fuse-vfs-bakeoff.md
+[package]
+name = "fuse-vfs-fuser"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone: not part of any parent workspace.
+[workspace]
+
+[dependencies]
+# default-features = false: mount via the fusermount3 binary instead of
+# linking libfuse (libfuse3-dev is not installed; see spec step-0 findings).
+fuser = { version = "0.15", default-features = false }
+libc = "0.2"
+
+[profile.release]
+debug = false
