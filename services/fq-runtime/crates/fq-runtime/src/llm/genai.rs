@@ -78,6 +78,134 @@ impl GenAiClient {
             .build();
         Self { client }
     }
+
+    /// Build a client from the whole `[providers]` config — a single
+    /// genai client whose `ServiceTargetResolver` routes each request to
+    /// the provider that declares the requested model.
+    ///
+    /// Routing is **model-id keyed**: every extra provider lists the ids
+    /// it serves (`models = [...]`), and a request for one of those ids
+    /// is redirected to that provider's `base_url` (when set) with auth
+    /// taken from its `api_key_env` (an env lookup, so the key lives
+    /// neither in the config nor anywhere agent-visible — ADR-0028) and
+    /// tagged with the adapter kind for its `api_shape`. Requests for
+    /// unlisted models fall through to genai's default resolution
+    /// (`claude-*`, `gpt-*`, … via their standard env vars), so the
+    /// Anthropic path is unchanged.
+    ///
+    /// `anthropic.base_url`, when set, keeps its historical meaning:
+    /// redirect every Anthropic-adapter request to that endpoint (the
+    /// mock server, or a Bedrock-style proxy) — no `models` list needed.
+    ///
+    /// When nothing needs overriding this is exactly [`Self::new`].
+    pub fn from_providers(config: &crate::config::ProvidersConfig) -> Self {
+        use ::std::collections::HashMap;
+        use ::std::sync::Arc;
+        use provider::ServiceTarget;
+        use provider::adapter::AdapterKind;
+        use provider::resolver::{AuthData, Endpoint, ServiceTargetResolver};
+
+        struct Route {
+            base_url: Option<Arc<str>>,
+            api_key_env: String,
+            adapter_kind: AdapterKind,
+        }
+
+        // model id -> route, from every extra provider's `models` list.
+        let mut by_model: HashMap<String, Route> = HashMap::new();
+        for provider_cfg in config.extra.values() {
+            for model in &provider_cfg.models {
+                by_model.insert(
+                    model.clone(),
+                    Route {
+                        base_url: provider_cfg
+                            .base_url
+                            .clone()
+                            .map(ensure_trailing_slash)
+                            .map(Arc::from),
+                        api_key_env: provider_cfg.api_key_env.clone(),
+                        adapter_kind: adapter_kind_for(provider_cfg.api_shape),
+                    },
+                );
+            }
+        }
+
+        // anthropic: adapter-keyed base_url override (mock / proxy).
+        let anthropic_base_url: Option<Arc<str>> = config
+            .anthropic
+            .as_ref()
+            .and_then(|a| a.base_url.clone())
+            .map(Arc::from);
+
+        // Nothing to override -> genai default (identical to `new()`).
+        if by_model.is_empty() && anthropic_base_url.is_none() {
+            return Self::new();
+        }
+
+        let by_model = Arc::new(by_model);
+        let resolver = ServiceTargetResolver::from_resolver_fn(
+            move |target: ServiceTarget| -> Result<ServiceTarget, provider::resolver::Error> {
+                let model_name = target.model.model_name.to_string();
+                if let Some(route) = by_model.get(&model_name) {
+                    let endpoint = match &route.base_url {
+                        Some(url) => Endpoint::from_owned(url.clone()),
+                        None => target.endpoint,
+                    };
+                    return Ok(ServiceTarget {
+                        endpoint,
+                        auth: AuthData::from_env(route.api_key_env.clone()),
+                        model: provider::ModelIden::new(
+                            route.adapter_kind,
+                            target.model.model_name,
+                        ),
+                    });
+                }
+                if let Some(url) = &anthropic_base_url
+                    && target.model.adapter_kind == AdapterKind::Anthropic
+                {
+                    return Ok(ServiceTarget {
+                        endpoint: Endpoint::from_owned(url.clone()),
+                        ..target
+                    });
+                }
+                Ok(target)
+            },
+        );
+        let client = provider::Client::builder()
+            .with_service_target_resolver(resolver)
+            .build();
+        Self { client }
+    }
+}
+
+/// Map the config's `api_shape` onto a genai adapter kind. Every
+/// OpenAI-compatible provider (Groq, Together, OpenRouter, local vLLM,
+/// …) uses the OpenAI adapter — genai formats the request identically
+/// and only the endpoint + key differ.
+fn adapter_kind_for(shape: crate::config::ApiShape) -> provider::adapter::AdapterKind {
+    use crate::config::ApiShape;
+    use provider::adapter::AdapterKind;
+    match shape {
+        ApiShape::Anthropic => AdapterKind::Anthropic,
+        ApiShape::Openai | ApiShape::OpenaiCompatible => AdapterKind::OpenAI,
+        ApiShape::Gemini => AdapterKind::Gemini,
+        ApiShape::Ollama => AdapterKind::Ollama,
+    }
+}
+
+/// genai builds each request URL by `Url::join`-ing the adapter's path
+/// (e.g. `chat/completions`) onto the endpoint base — and RFC-3986 join
+/// drops the base's final path segment unless it ends in `/` (so
+/// `.../v1` + `chat/completions` becomes `.../chat/completions`, losing
+/// `v1`, and 404s). Provider docs routinely show base URLs without the
+/// trailing slash, so normalise it here: config-first should just work,
+/// not fail cryptically on a silently mangled path.
+fn ensure_trailing_slash(url: String) -> String {
+    if url.ends_with('/') {
+        url
+    } else {
+        format!("{url}/")
+    }
 }
 
 impl Default for GenAiClient {
@@ -621,5 +749,117 @@ mod tests {
             .await
             .expect("resolve service target");
         assert_eq!(target.endpoint.base_url(), "http://127.0.0.1:54321");
+    }
+
+    /// The core multi-provider claim: a model declared under
+    /// `[providers.<name>]` resolves to that provider's endpoint, adapter
+    /// (from `api_shape`) and key env var — with the full model id
+    /// preserved on the wire — while an unlisted model still falls
+    /// through to genai's default resolution. Verified against genai's
+    /// own `resolve_service_target`, so it exercises the real resolver
+    /// chain without a network round-trip.
+    #[tokio::test]
+    async fn from_providers_routes_declared_model_and_falls_through_otherwise() {
+        use crate::config::{AnthropicConfig, ApiShape, ProviderConfig, ProvidersConfig};
+        use provider::adapter::AdapterKind;
+
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                api_shape: ApiShape::OpenaiCompatible,
+                // Deliberately no trailing slash — from_providers must add
+                // one so genai's Url::join keeps the `/api/v1` segment.
+                base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                api_key_env: "FQ_TEST_OPENROUTER_KEY".to_string(),
+                models: vec!["openai/gpt-4o-mini".to_string()],
+            },
+        );
+        let cfg = ProvidersConfig {
+            anthropic: Some(AnthropicConfig::default()),
+            extra,
+        };
+        let client = GenAiClient::from_providers(&cfg);
+
+        // Declared model -> provider endpoint + OpenAI adapter, and the
+        // namespaced id survives intact (OpenRouter needs the full name).
+        let routed = client
+            .client
+            .resolve_service_target("openai/gpt-4o-mini")
+            .await
+            .expect("resolve declared model");
+        assert_eq!(routed.endpoint.base_url(), "https://openrouter.ai/api/v1/");
+        assert_eq!(routed.model.adapter_kind, AdapterKind::OpenAI);
+        assert_eq!(&*routed.model.model_name, "openai/gpt-4o-mini");
+
+        // Auth is sourced from the provider's configured env var.
+        unsafe { std::env::set_var("FQ_TEST_OPENROUTER_KEY", "sk-or-test-value") };
+        assert_eq!(
+            routed.auth.single_key_value().expect("key from env"),
+            "sk-or-test-value"
+        );
+
+        // An unlisted claude model is untouched: default Anthropic path.
+        let fallthrough = client
+            .client
+            .resolve_service_target("claude-haiku-4-5")
+            .await
+            .expect("resolve unlisted model");
+        assert_eq!(fallthrough.model.adapter_kind, AdapterKind::Anthropic);
+        assert!(
+            fallthrough.endpoint.base_url().contains("anthropic.com"),
+            "unlisted model should keep the Anthropic default, got {}",
+            fallthrough.endpoint.base_url()
+        );
+    }
+
+    /// End-to-end against a real OpenAI-compatible provider (OpenRouter),
+    /// routed purely by `[providers.<name>]` config. Opt-in: skipped
+    /// unless `OPENROUTER_API_KEY` is set (needs a live key + network).
+    /// This is the ADR-0003 acceptance proof — a non-Anthropic `model:`
+    /// runs a real invocation and reports usage.
+    #[tokio::test]
+    async fn openrouter_end_to_end_when_key_present() {
+        if std::env::var("OPENROUTER_API_KEY").is_err() {
+            eprintln!("skipping openrouter_end_to_end: OPENROUTER_API_KEY not set");
+            return;
+        }
+
+        use crate::config::{ApiShape, ProviderConfig, ProvidersConfig};
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                api_shape: ApiShape::OpenaiCompatible,
+                base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                api_key_env: "OPENROUTER_API_KEY".to_string(),
+                models: vec!["openai/gpt-4o-mini".to_string()],
+            },
+        );
+        let cfg = ProvidersConfig {
+            anthropic: None,
+            extra,
+        };
+        let client = GenAiClient::from_providers(&cfg);
+
+        let response = client
+            .chat(request_with_system_and_user("openai/gpt-4o-mini"))
+            .await
+            .expect("live OpenRouter chat");
+
+        assert!(
+            response.content.as_deref().is_some_and(|c| !c.is_empty()),
+            "expected non-empty content from OpenRouter, got {:?}",
+            response.content
+        );
+        assert!(
+            response.usage.output_tokens > 0,
+            "expected non-zero output tokens, got {:?}",
+            response.usage
+        );
+        eprintln!(
+            "OpenRouter ok: {} in / {} out tokens",
+            response.usage.input_tokens, response.usage.output_tokens
+        );
     }
 }

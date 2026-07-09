@@ -651,11 +651,9 @@ async fn trigger_agent(
 
     // Real LLM client — genai resolves API keys from provider-specific
     // environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc).
-    // Honours [providers.anthropic] base_url when set.
-    let llm = match &config.providers.anthropic {
-        Some(anthropic) => GenAiClient::from_anthropic_config(anthropic),
-        None => GenAiClient::new(),
-    };
+    // Routes each model to the [providers.<name>] that declares it,
+    // honouring per-provider base_url/api_key_env (ADR-0003).
+    let llm = GenAiClient::from_providers(&config.providers);
     // Retry transient LLM errors (rate limits, transport failures) with
     // backoff instead of failing the whole invocation (issue #10).
     let llm = fq_runtime::llm::RetryingLlmClient::new(llm, config.worker.llm_retry.clone());
@@ -1434,10 +1432,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // backoff instead of failing the whole invocation (issue #10). This is
     // the daemon path — the one the fleet actually runs on.
     let llm: Arc<dyn LlmClient> = Arc::new(fq_runtime::llm::RetryingLlmClient::new(
-        match &config.providers.anthropic {
-            Some(anthropic) => GenAiClient::from_anthropic_config(anthropic),
-            None => GenAiClient::new(),
-        },
+        GenAiClient::from_providers(&config.providers),
         config.worker.llm_retry.clone(),
     ));
     // One ReducerRunner serves two roles: the dispatcher uses

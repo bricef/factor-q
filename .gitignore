@@ -3,3 +3,8 @@
 
 # TLA+ / TLC model-checker scratch output (docs/design/storage_gc.tla).
 docs/design/states/
+
+# Local secrets — provider API keys for end-to-end LLM testing (never commit).
+.env
+.env.*
+!.env.example

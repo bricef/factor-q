@@ -141,6 +141,41 @@ pub struct AgentsConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProvidersConfig {
     pub anthropic: Option<AnthropicConfig>,
+    /// Additional named providers — `[providers.<name>]` for any name
+    /// other than `anthropic`. Each declares an API shape, endpoint,
+    /// auth env var, and the model ids it serves, so non-Anthropic
+    /// models become available by configuration (ADR-0003).
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, ProviderConfig>,
+}
+
+/// API wire shape for a provider — which genai adapter format it speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApiShape {
+    #[default]
+    Anthropic,
+    Openai,
+    Gemini,
+    Ollama,
+    OpenaiCompatible,
+}
+
+/// A configurable LLM provider: an API shape, an optional endpoint
+/// override, an auth env var, and the model ids routed to it.
+/// `[providers.<name>]` in `fq.toml`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderConfig {
+    #[serde(default)]
+    pub api_shape: ApiShape,
+    /// Endpoint override; `None` uses genai's default for the shape.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Env var holding this provider's API key.
+    pub api_key_env: String,
+    /// Model ids routed to this provider's endpoint + auth.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -231,6 +266,7 @@ impl Default for Config {
             agents: AgentsConfig::default(),
             providers: ProvidersConfig {
                 anthropic: Some(AnthropicConfig::default()),
+                extra: Default::default(),
             },
             cache: CacheConfig::default(),
             worker: WorkerConfig::default(),
@@ -379,6 +415,46 @@ api_key_env = "MY_ANTHROPIC_KEY"
         let config = Config::from_toml_str("").unwrap();
         assert_eq!(config.nats.url, "nats://localhost:4222");
         assert_eq!(config.agents.directory, PathBuf::from("agents"));
+    }
+
+    #[test]
+    fn extra_providers_parse_as_a_flattened_map() {
+        let toml = r#"
+[providers.anthropic]
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.openai]
+api_shape = "openai"
+api_key_env = "OPENAI_API_KEY"
+models = ["gpt-4o-mini"]
+
+[providers.groq]
+api_shape = "openai-compatible"
+base_url = "https://api.groq.com/openai/v1"
+api_key_env = "GROQ_API_KEY"
+models = ["llama-3.1-8b-instant"]
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        // anthropic stays on its own named field (back-compat)
+        assert!(config.providers.anthropic.is_some());
+        // the rest land in the flattened `extra` map, keyed by name
+        let extra = &config.providers.extra;
+        assert_eq!(
+            extra.len(),
+            2,
+            "keys: {:?}",
+            extra.keys().collect::<Vec<_>>()
+        );
+        let openai = extra.get("openai").expect("openai provider");
+        assert_eq!(openai.api_shape, ApiShape::Openai);
+        assert_eq!(openai.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(openai.models, vec!["gpt-4o-mini".to_string()]);
+        let groq = extra.get("groq").expect("groq provider");
+        assert_eq!(groq.api_shape, ApiShape::OpenaiCompatible);
+        assert_eq!(
+            groq.base_url.as_deref(),
+            Some("https://api.groq.com/openai/v1")
+        );
     }
 
     #[test]
