@@ -741,6 +741,8 @@ mod tests {
         let cfg = crate::config::AnthropicConfig {
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             base_url: Some("http://127.0.0.1:54321".to_string()),
+            models: Vec::new(),
+            pricing: Default::default(),
         };
         let client = GenAiClient::from_anthropic_config(&cfg);
         let target = client
@@ -773,6 +775,7 @@ mod tests {
                 base_url: Some("https://openrouter.ai/api/v1".to_string()),
                 api_key_env: "FQ_TEST_OPENROUTER_KEY".to_string(),
                 models: vec!["openai/gpt-4o-mini".to_string()],
+                pricing: Default::default(),
             },
         );
         let cfg = ProvidersConfig {
@@ -834,6 +837,7 @@ mod tests {
                 base_url: Some("https://openrouter.ai/api/v1".to_string()),
                 api_key_env: "OPENROUTER_API_KEY".to_string(),
                 models: vec!["openai/gpt-4o-mini".to_string()],
+                pricing: Default::default(),
             },
         );
         let cfg = ProvidersConfig {

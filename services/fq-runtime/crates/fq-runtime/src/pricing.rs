@@ -109,6 +109,14 @@ impl PricingTable {
         self.entries.get(model)
     }
 
+    /// Insert or replace a model's pricing. Used to merge config
+    /// `[providers.<name>.pricing]` overrides over the LiteLLM table at
+    /// startup, so operators can guarantee coverage for models the table
+    /// doesn't list (ADR-0004 pricing guarantee).
+    pub fn insert(&mut self, model: impl Into<String>, pricing: ModelPricing) {
+        self.entries.insert(model.into(), pricing);
+    }
+
     /// Parse a LiteLLM-format pricing JSON string into a table.
     ///
     /// Unknown or malformed entries are skipped rather than failing the
@@ -180,10 +188,19 @@ impl PricingTable {
         match fs::read_to_string(cache_path) {
             Ok(json) => match Self::from_litellm_json(&json) {
                 Ok(table) => {
-                    info!(
+                    // Serving from disk means the fresh fetch didn't
+                    // land — surface it loudly with the cache age so
+                    // reliance on possibly-stale prices is visible. The
+                    // startup pricing guarantee still ensures declared
+                    // models are *priced*; this flags that they may be
+                    // *out of date* (runtime refresh is future work —
+                    // docs/plans/backlog.md, "Scheduled refresh of
+                    // pricing data").
+                    warn!(
                         entries = table.len(),
                         path = %cache_path.display(),
-                        "loaded pricing from cache"
+                        cache_age = %cache_age(cache_path),
+                        "using cached LiteLLM pricing (fresh fetch unavailable); prices may be stale"
                     );
                     table
                 }
@@ -234,6 +251,29 @@ fn write_cache(path: &Path, contents: &str) -> std::io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, contents)
+}
+
+/// Best-effort human-readable age of the pricing cache file, for the
+/// cold-cache warning. Returns `"unknown age"` if the mtime can't be read
+/// and `"just now"` if the clock appears to have moved backwards.
+fn cache_age(path: &Path) -> String {
+    use std::time::SystemTime;
+    let Ok(modified) = fs::metadata(path).and_then(|m| m.modified()) else {
+        return "unknown age".to_string();
+    };
+    match SystemTime::now().duration_since(modified) {
+        Ok(elapsed) => {
+            let secs = elapsed.as_secs();
+            if secs < 3_600 {
+                format!("{}m", secs / 60)
+            } else if secs < 86_400 {
+                format!("{}h", secs / 3_600)
+            } else {
+                format!("{}d", secs / 86_400)
+            }
+        }
+        Err(_) => "just now".to_string(),
+    }
 }
 
 /// Return the default cache directory for factor-q.
@@ -394,6 +434,38 @@ mod tests {
         let table = PricingTable::load_from_cache_or_empty(&path);
         assert_eq!(table.len(), 2);
         assert!(table.lookup("claude-haiku-test").is_some());
+    }
+
+    #[test]
+    fn insert_overrides_a_model_price() {
+        let mut table = PricingTable::empty();
+        table.insert(
+            "custom/model",
+            ModelPricing {
+                input_per_million: 0.5,
+                output_per_million: 1.5,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+            },
+        );
+        let p = table.lookup("custom/model").expect("inserted entry");
+        assert_eq!(p.input_per_million, 0.5);
+        assert_eq!(p.output_per_million, 1.5);
+    }
+
+    #[test]
+    fn cache_age_of_a_fresh_file_is_small() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pricing.json");
+        std::fs::write(&path, "{}").unwrap();
+        let age = cache_age(&path);
+        assert!(age == "0m" || age == "just now", "unexpected age: {age}");
+    }
+
+    #[test]
+    fn cache_age_of_a_missing_file_is_unknown() {
+        let age = cache_age(Path::new("/tmp/factor-q-nonexistent-cache-xyz.json"));
+        assert_eq!(age, "unknown age");
     }
 
     #[test]

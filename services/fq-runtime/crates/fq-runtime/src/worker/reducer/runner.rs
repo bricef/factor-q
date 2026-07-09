@@ -315,6 +315,12 @@ pub struct RunnerConfig {
     /// not code). Defaults to
     /// [`crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS`].
     max_iterations: u32,
+    /// When true, refuse to dispatch a model with no pricing entry
+    /// (ADR-0004 at-use backstop) instead of tracking its cost as $0.
+    /// The daemon sets this after its startup pricing guarantee has
+    /// validated coverage; defaults to false so tests can run with an
+    /// empty pricing table.
+    enforce_pricing: bool,
 }
 
 impl RunnerConfig {
@@ -336,6 +342,7 @@ pub struct RunnerConfigBuilder {
     worker_id: Option<WorkerId>,
     clock: Option<Arc<dyn Clock>>,
     max_iterations: Option<u32>,
+    enforce_pricing: Option<bool>,
 }
 
 impl RunnerConfigBuilder {
@@ -386,6 +393,15 @@ impl RunnerConfigBuilder {
         self
     }
 
+    /// Enable the at-use pricing backstop: refuse to dispatch a model
+    /// with no pricing rather than track its cost as $0 (ADR-0004).
+    /// Optional; defaults to false. The daemon sets it true once its
+    /// startup pricing guarantee has validated coverage.
+    pub fn enforce_pricing(mut self, enforce_pricing: bool) -> Self {
+        self.enforce_pricing = Some(enforce_pricing);
+        self
+    }
+
     /// Finalise the config. Panics if any required field was not set
     /// (`clock` is optional and defaults to [`SystemClock`]).
     pub fn build(self) -> RunnerConfig {
@@ -406,6 +422,7 @@ impl RunnerConfigBuilder {
             max_iterations: self
                 .max_iterations
                 .unwrap_or(crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS),
+            enforce_pricing: self.enforce_pricing.unwrap_or(false),
         }
     }
 }
@@ -2119,6 +2136,21 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             params: request.params.clone(),
         };
 
+        // At-use pricing backstop (ADR-0004): when enabled, refuse a
+        // model with no pricing rather than dispatch and track its cost
+        // as $0 — which would silently defeat the budget check. Runs
+        // before any WAL write, so a refused call leaves no trace. Both
+        // agent turns and sampling flow through here; each applies its
+        // own semantics to the returned inner `Err` (a turn fails the
+        // invocation, a sampling request declines). Unreachable when the
+        // startup pricing guarantee holds — this is defence in depth.
+        if self.config.enforce_pricing && self.config.pricing.lookup(&chat_request.model).is_none()
+        {
+            return Ok(Err(crate::llm::LlmError::UnpricedModel(
+                chat_request.model.clone(),
+            )));
+        }
+
         // §5.5 write order applied to LLM calls: SQL first, then
         // NATS publish, then the LLM call, then dispatched, then
         // completed, then response/cost events.
@@ -3410,6 +3442,65 @@ mod tests {
             cfg.max_iterations,
             crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS
         );
+    }
+
+    #[tokio::test]
+    async fn enforce_pricing_refuses_to_dispatch_an_unpriced_model() {
+        // ADR-0004 at-use backstop: with enforce_pricing on and no price
+        // for the model, the runner refuses to dispatch — a typed failure
+        // — rather than call the model and track its cost as $0.
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("events.db"))
+                .await
+                .unwrap(),
+        );
+        let agent = Agent::builder()
+            .id(unique_agent_id("unpriced"))
+            .model("model-with-no-price")
+            .system_prompt("be brief")
+            .budget(1.0)
+            .build()
+            .unwrap();
+        // Queued but must never be consumed — the gate fires first.
+        let llm = FixtureClient::new();
+        llm.push_response(canned("should not be used", 10, 5));
+
+        let runner = ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .event_sink(Arc::new(crate::test_support::sim::RecordingSink::new())
+                        as Arc<dyn EventSink>)
+                    .pricing(Arc::new(PricingTable::empty()))
+                    .store(store)
+                    .worker_id(test_worker_id())
+                    .enforce_pricing(true)
+                    .build(),
+            ),
+            Harness::new(),
+        );
+
+        let outcome = runner
+            .run(
+                &agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                json!({"input": "go"}),
+            )
+            .await;
+
+        match outcome {
+            Err(ExecutorError::Llm(crate::llm::LlmError::UnpricedModel(model))) => {
+                assert_eq!(model, "model-with-no-price");
+            }
+            other => panic!("expected an UnpricedModel failure, got {other:?}"),
+        }
     }
 
     #[test]

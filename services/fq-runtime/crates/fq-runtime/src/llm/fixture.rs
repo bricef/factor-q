@@ -70,6 +70,7 @@ fn clone_error(err: &LlmError) -> LlmError {
         LlmError::RateLimited => LlmError::RateLimited,
         LlmError::InvalidResponse(s) => LlmError::InvalidResponse(s.clone()),
         LlmError::RequestFailed(s) => LlmError::RequestFailed(s.clone()),
+        LlmError::UnpricedModel(s) => LlmError::UnpricedModel(s.clone()),
     }
 }
 
