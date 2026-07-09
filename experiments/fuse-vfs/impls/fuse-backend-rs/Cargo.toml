@@ -1,0 +1,17 @@
+[package]
+name = "fuse-vfs-fuse-backend-rs"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+[[bin]]
+name = "fuse-vfs-fuse-backend-rs"
+path = "src/main.rs"
+
+[dependencies]
+fuse-backend-rs = { version = "0.14", default-features = false, features = ["fusedev"] }
+libc = "0.2"
+
+[profile.release]
+debug = false
