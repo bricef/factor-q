@@ -219,3 +219,106 @@ Current understanding (the experiment confirms/corrects it):
   fit on the simple case is a valid signal.
 - **Outcome.** The result feeds back into ADR-0028 (the FUSE-binding choice)
   and, if a crate is clearly best, promotes from draft to a recorded decision.
+
+## Results & verdict (2026-07-09)
+
+Four blind Fable-5 (xhigh) runs, one per crate, each on its own branch
+(`experiment/fuse-vfs-<crate>`), no reference implementation, no cross-talk
+(worktree-isolated). **All four built, mounted, and passed the full default
+ladder** (`smoke` → `many_small` → `large_file` → `git` → `cargo`) on the first
+scored harness run, and **none needed `libfuse3-dev`** — every crate mounts via
+the setuid `fusermount3` path in-sandbox. So the feasibility question the
+bake-off existed to answer is settled four times over; the choice is about
+*fit*, not *whether*.
+
+### Performance — one controlled pass, all four back-to-back
+
+Per-crate numbers from the blind runs are **not comparable** (different
+worktrees, different machine load). Re-run here in a single controlled sweep,
+FUSE-vs-real-FS ratio (lower is better), medians of 3 on the two rungs that
+carry signal — the sub-100 ms rungs (`smoke`, `git`) are startup-dominated
+noise and omitted:
+
+| Rung (ratio vs real FS) | fuser | fuse3 | easy_fuser | fuse-backend-rs |
+|---|---|---|---|---|
+| `many_small` (500-file metadata) | 1.5× | 1.3× | 1.6× | **1.0×** |
+| `large_file` (64 MB throughput)  | 1.7× | 1.6× | 1.6× | **1.2×** |
+
+All four sit within ~2× of a real in-memory FS — excellent for FUSE, and
+**performance is not the differentiator**. `fuse-backend-rs` leads on both,
+occasionally beating the real FS on metadata, because it dispatches requests
+across several channel threads; the other three cluster in the noise.
+
+### Scorecard (8 axes, `Best` / `Good` / `OK` / `Weak`)
+
+| Axis | fuser | fuse3 | easy_fuser | fuse-backend-rs |
+|---|---|---|---|---|
+| 1. Async / tokio fit | Weak — sync single-thread loop, bridge + 1-in-flight | **Best** — tokio-native async trait, callbacks `.await` directly | OK — own threadpool / own runtime, not unified | Good — sync but drives N channel threads (concurrent) |
+| 2. Backend / CAS ergonomics | OK — you own the inode↔object table | Good — raw-inode or path trait | Good — least boilerplate (~130-line store), but unlinked-open identity loss in PathBuf mode | **Best** — inode+handle addressing maps straight onto CAS objects |
+| 3. Operation surface / defaults | OK — `fsync` ENOSYS trap; forgotten reply = hang | Good — safe ENOSYS defaults; must do `readdir`+`readdirplus` | OK — most ops required, ENOSYS preset + macro | **Best** — full surface + INIT capability negotiation |
+| 4. Performance | Good (1.5–1.7×) | Good (1.3–1.6×) | Good (1.6×) | **Best** (1.0–1.2×) |
+| 5. Build / dep footprint | **Best** — 17 crates, ~23 s | Weak — 44 crates, ~2 min (tokio+futures) | OK — 25–40 crates, ~41 s, build-time codegen | Good — 24 crates, ~26 s |
+| 6. Maturity / maintenance / licence | **Best** — canonical crate, MIT | OK — active, async niche | Weak — v0.5.0, API churn, codegen internals | **Best** — crosvm/virtiofsd production pedigree, Apache-2.0+BSD-3 |
+| 7. Portability | **Best** — macFUSE support | OK — Linux-first | OK — wraps fuser | OK — Linux-first (virtiofs-oriented) |
+| 8. Subjective ergonomics | Honest, predictable, known warts | Clean async, but undocumented `readdir` offset footgun | Magical but opaque (jump-to-def lands in `OUT_DIR`) | Powerful but low-level; read the source |
+
+### Recommendation — primary: **fuse-backend-rs**; fallback: **fuse3**
+
+The two factor-q-specific facts that decide it:
+
+1. **The VFS backs onto fq-store's async, concurrent CAS** (ADR-0026/0028) — the
+   FUSE layer calls *async* code, and the store is already `Send+Sync`. The
+   "zero-locking" upside of a single-threaded sync loop (fuser) is therefore
+   moot for our backend.
+2. **The flagship workload is a parallel build** — an agent running `cargo
+   build`/`rustc` in its workspace issues many concurrent file reads. A
+   one-request-in-flight session loop serialises exactly that. Concurrent
+   dispatch is worth real wall-clock here.
+
+**`fuse-backend-rs`** checks the most boxes for *this* backend and *this*
+workload: inode+handle addressing that maps directly to content-addressed
+objects (axis 2), the best measured performance via concurrent channel threads
+(axis 4), full wire-protocol handling incl. INIT capability negotiation (axis
+3), and a production pedigree (it powers virtiofsd / Cloud-Hypervisor / Kata /
+ChromeOS). It also positions us for a virtiofs/VM-isolation future without
+switching FUSE stacks. Costs, all one-time: a lower-level integration (drive a
+~25-line channel-thread loop yourself; `block_on` into the async CAS store), the
+`set_allow_other(false)` mount gotcha, and 24 transitive crates. Licence
+(Apache-2.0 + BSD-3) is BSL-1.1 compatible.
+
+**`fuse3`** is the fallback: if we'd rather the FUSE layer speak async
+*natively* — callbacks `.await` the CAS store with no `block_on`, task-per-
+request concurrency for free, zero manual thread management — at the price of a
+heavier dep tree (~2-min cold build) and two footguns to pin down once (the
+undocumented `readdir` offset-resumption contract and the `i64`/`u64` offset
+split between `readdir`/`readdirplus`). It becomes primary if the `block_on`
+bridge proves awkward in practice.
+
+**Not recommended as primary:**
+
+- **`fuser`** — the canonical, leanest, most-portable (macFUSE), best-documented
+  crate, and the *right* choice for a **sync** backend. But its single-threaded,
+  one-in-flight session loop serialises the concurrent I/O our flagship workload
+  depends on, and every callback still bridges to the async store. Keep it as
+  the macOS/portability reference and for any sync-backed mount.
+- **`easy_fuser`** — genuinely the least boilerplate (path-addressed; its
+  `PathResolver` owns all inode bookkeeping; ~130-line store), but v0.5.0 API
+  churn, proc-macro + Jinja-codegen driver internals, and unlinked-open-file
+  identity loss in PathBuf mode are too much risk under a load-bearing
+  foundation. Revisit if it matures.
+
+**The hinge (state it plainly):** this ranking puts *concurrent-I/O throughput
++ CAS-native addressing* above *raw maturity + leanness*, because the backend is
+an async content-addressed store and the workload is parallel builds. **If the
+VFS backend turns out sync + single-consumer, `fuser` wins instead** on maturity
+and footprint.
+
+### Follow-ups
+
+- Promote the FUSE-binding choice into **ADR-0028** (currently accepted, but the
+  binding crate was left open) once the primary is confirmed.
+- The four implementation branches + per-crate `NOTES.md` are preserved as the
+  evidence trail: `experiment/fuse-vfs-{fuser,fuse3,easy_fuser,fuse-backend-rs}`.
+- The blind runs used a *trivial in-memory* store; the real integration wires the
+  chosen crate's trait to fq-store's CAS behind the `FileSystem` trait — where
+  `fuse-backend-rs`'s inode+handle model and INIT negotiation earn their keep.
