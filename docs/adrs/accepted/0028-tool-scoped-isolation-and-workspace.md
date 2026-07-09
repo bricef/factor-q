@@ -2,7 +2,9 @@
 
 ## Status
 
-Draft. Supersedes the agent-scoped framing of
+Accepted 2026-07-09 by Brice.
+
+Supersedes the agent-scoped framing of
 [ADR-0010](../accepted/0010-agent-execution-isolation.md); ratifies the
 committed [tool-isolation model](../../design/committed/tool-isolation-model.md)
 and extends it with a harness-owned virtual filesystem. It is a single
