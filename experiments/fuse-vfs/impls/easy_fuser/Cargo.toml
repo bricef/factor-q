@@ -1,0 +1,16 @@
+[package]
+name = "fuse-vfs-easy_fuser"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "fuse-vfs-easy_fuser"
+path = "src/main.rs"
+
+[dependencies]
+easy_fuser = { version = "0.5.0", default-features = false, features = ["parallel"] }
+libc = "0.2"
+
+[profile.release]
+debug = false
