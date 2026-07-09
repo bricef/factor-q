@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
-SKIP_PARTS = {".git", "target", "node_modules", "dist"}
+SKIP_PARTS = {".git", "target", "node_modules", "dist", ".claude"}
 SKIP_SCHEMES = ("http://", "https://", "mailto:")
 
 
