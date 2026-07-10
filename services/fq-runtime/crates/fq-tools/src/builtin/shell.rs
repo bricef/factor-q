@@ -36,6 +36,14 @@
 //! - **Non-zero exit codes are errors** — the tool reports
 //!   `is_error: true` when the exit code is non-zero, but still
 //!   returns stdout/stderr so the LLM can understand what happened.
+//! - **Shell operators are refused, not run** — a standalone `|`, `||`,
+//!   `&&`, `;`, `<`, `>`, or `>>` element in argv is a transplanted
+//!   shell idiom, but there is no shell to interpret it. Rather than
+//!   hand the operator to the program verbatim (a baffling failure),
+//!   the tool rejects the call with a teaching error pointing back at
+//!   the safe-by-construction path: plain argv, separate calls to
+//!   combine, `file_write` for `>` (#92). Operator characters *inside*
+//!   an argument (a `grep` pattern `a|b`) are untouched.
 //!
 //! ## Known gaps
 //!
@@ -190,6 +198,15 @@ impl Tool for ShellTool {
             ));
         }
 
+        // Reject transplanted shell idioms before spawning. There is no
+        // shell here, so a standalone `|`/`>`/`&&`/… element would be
+        // handed to the program verbatim (or fail to spawn as the
+        // program) with a baffling error. The error message is the
+        // agent's next prompt, so it teaches instead (#92).
+        if let Some(op) = standalone_shell_operator(&params.command) {
+            return Err(ToolError::InvalidParameters(shell_operator_help(op)));
+        }
+
         // Enforce cwd sandbox.
         let cwd_path = PathBuf::from(&params.cwd);
         let canonical_cwd = ctx.sandbox.check_exec_cwd(&cwd_path)?;
@@ -324,6 +341,46 @@ impl Tool for ShellTool {
             is_error,
         })
     }
+}
+
+/// Shell operators that, as a *standalone* argv element, are almost
+/// always a transplanted shell idiom rather than a real argument. The
+/// tool runs one program with no shell, so these are never interpreted.
+/// Matched by whole-element equality only — an operator character
+/// *inside* an argument (a `grep` pattern `a|b`) is a legitimate value
+/// and is left alone.
+const SHELL_OPERATORS: &[&str] = &["|", "||", "&&", ";", "<", ">", ">>"];
+
+/// The first standalone shell-operator element in `argv`, if any.
+fn standalone_shell_operator(argv: &[String]) -> Option<&'static str> {
+    argv.iter().find_map(|arg| {
+        SHELL_OPERATORS
+            .iter()
+            .copied()
+            .find(|&op| op == arg.as_str())
+    })
+}
+
+/// Teaching error shown when argv carries a standalone shell operator.
+/// This text is agent-facing prompt copy (#92): it explains there is no
+/// shell and points at the safe path rather than just failing. Note the
+/// deliberate wording on output limits — the tool size-caps stdout/stderr
+/// as a *safety* limit, which is not a substitute for `head`, so the copy
+/// says "narrow the command" rather than claiming the cap makes `| head`
+/// unnecessary.
+fn shell_operator_help(op: &str) -> String {
+    format!(
+        "`{op}` is a shell operator, but the `shell` tool does not run a \
+         shell — it executes one program directly from the argv array, so \
+         `|`, `>`, `&&`, and similar operators are not interpreted. Pass a \
+         plain argv array (e.g. [\"grep\", \"-n\", \"foo\", \"file.txt\"]). \
+         To chain or pipe commands, make separate `shell` calls and combine \
+         the results yourself. To limit output, narrow the command's own \
+         arguments (a count/`-n` flag, a more specific path) rather than \
+         piping to `head` — stdout and stderr are already size-capped as a \
+         safety limit. To write output to a file, use the `file_write` tool \
+         instead of `>`."
+    )
 }
 
 fn classify_spawn_error(program: &str, err: std::io::Error) -> ToolError {
@@ -832,5 +889,131 @@ mod tests {
         assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
         assert_eq!(env.get("HOME"), Some(&"/home/user".to_string()));
         assert!(!env.contains_key("SECRET"));
+    }
+
+    // --- standalone shell-operator detection (#92) -------------------
+
+    #[tokio::test]
+    async fn standalone_pipe_is_rejected_with_teaching_error() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let err = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["grep", "-r", "foo", ".", "|", "head"],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidParameters(msg) => {
+                assert!(msg.contains("does not run a shell"), "copy: {msg}");
+                assert!(
+                    msg.contains("file_write"),
+                    "copy should point at file_write: {msg}"
+                );
+            }
+            other => panic!("expected InvalidParameters, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_redirect_is_rejected_before_spawning() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let err = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["echo", "hi", ">", "out.txt"],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters(_)));
+        // Rejected before any process ran: nothing was created.
+        assert!(!dir.path().join("out.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn standalone_and_chain_is_rejected() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let err = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["make", "&&", "make", "test"],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters(_)));
+    }
+
+    #[tokio::test]
+    async fn operator_char_inside_argument_is_allowed() {
+        // Operator *characters* embedded in real arguments are
+        // legitimate values, not standalone operators: echo must run
+        // and print them unchanged.
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["echo", ">out", "a|b", "x&&y"],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "output: {}", result.output);
+        assert!(result.output.contains(">out"));
+        assert!(result.output.contains("a|b"));
+        assert!(result.output.contains("x&&y"));
+    }
+
+    #[test]
+    fn standalone_shell_operator_matches_whole_elements_only() {
+        // Standalone operators are detected, anywhere in argv...
+        assert_eq!(
+            standalone_shell_operator(&["grep".into(), "|".into(), "wc".into()]),
+            Some("|")
+        );
+        assert_eq!(
+            standalone_shell_operator(&["a".into(), ">>".into()]),
+            Some(">>")
+        );
+        assert_eq!(
+            standalone_shell_operator(&["|".into()]),
+            Some("|"),
+            "an operator as the program itself is still caught"
+        );
+        // ...but operator characters inside an argument are not.
+        assert_eq!(
+            standalone_shell_operator(&["echo".into(), "a|b".into()]),
+            None
+        );
+        assert_eq!(
+            standalone_shell_operator(&["echo".into(), ">out".into()]),
+            None
+        );
+        assert_eq!(
+            standalone_shell_operator(&["echo".into(), "hello".into()]),
+            None
+        );
     }
 }
