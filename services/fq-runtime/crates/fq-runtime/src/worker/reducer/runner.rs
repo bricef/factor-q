@@ -701,6 +701,24 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .to_tool_sandbox(workspace.as_deref())
             .map_err(WorkspaceError::from)?;
         let tool_schemas = tools.build_schemas(agent.tools());
+        // A tool the agent declares but the registry has no
+        // implementation for is dropped silently by `build_schemas` —
+        // the model is simply never offered it, with no other signal.
+        // This is exactly how a renamed/removed built-in (e.g. the
+        // `shell`→`exec` rename) silently degrades an agent. Warn so the
+        // capability loss is visible. `tools` here is the effective
+        // registry for this invocation (base + any per-invocation MCP
+        // tools), so a name missing at this point is genuinely
+        // unavailable, not merely unresolved.
+        let missing = tools.missing_tools(agent.tools());
+        if !missing.is_empty() {
+            warn!(
+                agent_id = %agent_id,
+                missing_tools = ?missing,
+                "agent declares tool(s) with no registered implementation; \
+                 they are unavailable to the model"
+            );
+        }
 
         let agent_config = AgentConfig {
             agent_id: agent_id.clone(),
