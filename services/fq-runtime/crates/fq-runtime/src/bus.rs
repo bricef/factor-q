@@ -353,8 +353,12 @@ impl EventBus {
 
     /// Create (or open) a durable JetStream pull consumer on the
     /// trigger stream, filtered to all trigger subjects.
-    pub async fn trigger_consumer(&self, name: &str) -> Result<consumer::PullConsumer, BusError> {
-        self.trigger_consumer_with_filter(name, ALL_TRIGGERS_SUBJECT)
+    pub async fn trigger_consumer(
+        &self,
+        name: &str,
+        max_ack_pending: i64,
+    ) -> Result<consumer::PullConsumer, BusError> {
+        self.trigger_consumer_with_filter(name, ALL_TRIGGERS_SUBJECT, max_ack_pending)
             .await
     }
 
@@ -374,10 +378,12 @@ impl EventBus {
         &self,
         name: &str,
         filter_subject: &str,
+        max_ack_pending: i64,
     ) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,
             filter = filter_subject,
+            max_ack_pending,
             "getting/creating durable trigger consumer"
         );
         let stream = self
@@ -392,6 +398,11 @@ impl EventBus {
                     durable_name: Some(name.to_string()),
                     ack_policy: consumer::AckPolicy::Explicit,
                     filter_subject: filter_subject.to_string(),
+                    // Explicit ack window (previously the server default,
+                    // 1000). Sized by the caller from its concurrency
+                    // bound; note `get_or_create` does not rewrite an
+                    // existing durable consumer's config.
+                    max_ack_pending,
                     ..Default::default()
                 },
             )

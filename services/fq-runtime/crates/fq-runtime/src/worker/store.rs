@@ -304,6 +304,18 @@ impl WorkerStore {
     /// file's recorded schema version is *higher* than this
     /// binary's [`WORKER_SCHEMA_VERSION`].
     pub async fn open(path: &Path) -> Result<Self, WorkerStoreError> {
+        Self::open_with_pool(path, 4).await
+    }
+
+    /// Open with an explicit connection-pool ceiling. The daemon sizes
+    /// this from `worker.max_concurrent_invocations` plus headroom for
+    /// the sweepers (#70) — under WAL, SQLite still serialises the
+    /// actual writes, so the pool bounds *waiting* connections, not
+    /// write parallelism.
+    pub async fn open_with_pool(
+        path: &Path,
+        max_connections: u32,
+    ) -> Result<Self, WorkerStoreError> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -313,9 +325,14 @@ impl WorkerStore {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal);
+            .journal_mode(SqliteJournalMode::Wal)
+            // Explicit (this is also sqlx's default): a writer blocked
+            // on the WAL write lock waits up to this long before
+            // surfacing SQLITE_BUSY, so concurrent invocations contend
+            // on latency rather than erroring.
+            .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
-            .max_connections(4)
+            .max_connections(max_connections)
             .connect_with(options)
             .await?;
 
@@ -1120,6 +1137,35 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+
+    /// Guard for the parallel-workers concurrency invariant (H4):
+    /// concurrent invocations may interleave WAL writes only because
+    /// every row is keyed by `invocation_id`. A new table or a PK
+    /// change that drops the key from the front must fail here loudly
+    /// before it can cross-contaminate invocations.
+    #[tokio::test]
+    async fn wal_tables_are_keyed_by_invocation_id() {
+        let dir = tempdir().unwrap();
+        let store = WorkerStore::open(&dir.path().join("keyed.db"))
+            .await
+            .unwrap();
+        for table in ["invocation_state", "tool_dispatch", "llm_dispatch"] {
+            let columns: Vec<(String, i64)> = sqlx::query_as(&format!(
+                "SELECT name, pk FROM pragma_table_info('{table}')"
+            ))
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+            let first_pk = columns
+                .iter()
+                .find(|(_, pk)| *pk == 1)
+                .unwrap_or_else(|| panic!("{table} has no primary key"));
+            assert_eq!(
+                first_pk.0, "invocation_id",
+                "{table}'s primary key must lead with invocation_id"
+            );
+        }
+    }
 
     // ----- Unit -----
 

@@ -45,7 +45,8 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use tokio::sync::{RwLock, oneshot};
+use tokio::sync::{RwLock, Semaphore, oneshot};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
@@ -98,6 +99,9 @@ pub struct TriggerDispatcher {
     registry: SharedRegistry,
     worker: Arc<dyn Worker>,
     llm: Arc<dyn LlmClient>,
+    /// In-executor fan-out bound (#70): how many invocations this
+    /// dispatcher runs concurrently. `1` is the serial behavior.
+    max_concurrent: usize,
 }
 
 impl TriggerDispatcher {
@@ -106,57 +110,147 @@ impl TriggerDispatcher {
         registry: SharedRegistry,
         worker: Arc<dyn Worker>,
         llm: Arc<dyn LlmClient>,
+        max_concurrent: usize,
     ) -> Self {
         Self {
             bus,
             registry,
             worker,
             llm,
+            max_concurrent: max_concurrent.max(1),
         }
     }
 
     /// Run the dispatcher loop until `shutdown` fires.
-    pub async fn run(self, mut shutdown: oneshot::Receiver<()>) -> Result<(), DispatcherError> {
-        info!("trigger dispatcher starting");
-        let consumer = self.bus.trigger_consumer(CONSUMER_NAME).await?;
+    pub async fn run(self, shutdown: oneshot::Receiver<()>) -> Result<(), DispatcherError> {
+        self.run_on_consumer(CONSUMER_NAME, None, shutdown).await
+    }
+
+    /// The dispatch loop on an explicit consumer identity. Production
+    /// enters through [`Self::run`]; tests pass a unique durable name
+    /// and a narrow filter so parallel runs don't compete for each
+    /// other's messages on the work-queue stream.
+    pub(crate) async fn run_on_consumer(
+        self,
+        consumer_name: &str,
+        filter_subject: Option<&str>,
+        mut shutdown: oneshot::Receiver<()>,
+    ) -> Result<(), DispatcherError> {
+        info!(
+            max_concurrent = self.max_concurrent,
+            "trigger dispatcher starting"
+        );
+        // Ack-window sizing: ack-on-durable-start frees a slot early,
+        // so unacked stays around the in-dispatch window, well under
+        // `max_concurrent + 1`. Never set it *below* the server default
+        // (1000): running deployments' durable consumers already carry
+        // that effective value, and `get_or_create` won't rewrite an
+        // existing consumer's config.
+        let max_ack_pending = (self.max_concurrent as i64 * 2).max(1000);
+        let consumer = match filter_subject {
+            Some(filter) => {
+                self.bus
+                    .trigger_consumer_with_filter(consumer_name, filter, max_ack_pending)
+                    .await?
+            }
+            None => {
+                self.bus
+                    .trigger_consumer(consumer_name, max_ack_pending)
+                    .await?
+            }
+        };
         let mut messages = consumer
             .messages()
             .await
             .map_err(|err| DispatcherError::Stream(err.to_string()))?;
 
-        loop {
+        // In-executor fan-out (#70): up to `max_concurrent` invocations
+        // run at once, each on its own spawned task. A permit is
+        // acquired *before* pulling the next trigger, so excess triggers
+        // stay queued on the durable consumer (and survive a drain for
+        // the next binary). The JoinSet makes in-flight invocations
+        // explicit so drain and shutdown wait for them — before fan-out
+        // the single inline `handle().await` was covered implicitly by
+        // awaiting `run` itself, and spawning without tracking would
+        // silently regress that drain coverage.
+        let this = Arc::new(self);
+        let semaphore = Arc::new(Semaphore::new(this.max_concurrent));
+        let mut in_flight: JoinSet<()> = JoinSet::new();
+
+        'consume: loop {
+            // Reap finished invocations so the set doesn't accumulate
+            // join results over the daemon's lifetime.
+            while let Some(joined) = in_flight.try_join_next() {
+                log_invocation_task(joined);
+            }
+
             // ADR-0027 graceful drain: once the worker is draining, stop
             // pulling new triggers. In-flight invocations suspend at their
             // next step boundary via the shared drain signal (the reducer
             // polls it); un-pulled triggers stay queued on the durable
             // work-queue consumer for the next binary. Final teardown
             // still arrives through `shutdown`.
-            if self.worker.drain_status() == DrainState::Draining {
+            if this.worker.drain_status() == DrainState::Draining {
                 info!("trigger dispatcher draining — no longer consuming new triggers");
-                break;
+                break 'consume;
+            }
+
+            // Capacity before consumption: never pull a trigger there is
+            // no slot to run. With `max_concurrent = 1` this reproduces
+            // the old serial loop — the next trigger is pulled only
+            // after the previous invocation finished.
+            let permit = tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    info!("trigger dispatcher received shutdown signal");
+                    break 'consume;
+                }
+                permit = Arc::clone(&semaphore).acquire_owned() => {
+                    permit.expect("dispatcher semaphore is never closed")
+                }
+            };
+
+            // A drain may have landed while waiting for capacity.
+            if this.worker.drain_status() == DrainState::Draining {
+                info!("trigger dispatcher draining — no longer consuming new triggers");
+                break 'consume;
             }
 
             tokio::select! {
                 biased;
                 _ = &mut shutdown => {
                     info!("trigger dispatcher received shutdown signal");
-                    break;
+                    break 'consume;
                 }
                 msg = messages.next() => {
                     match msg {
                         Some(Ok(msg)) => {
-                            self.handle(&msg).await;
+                            let dispatcher = Arc::clone(&this);
+                            in_flight.spawn(async move {
+                                dispatcher.handle(&msg).await;
+                                drop(permit);
+                            });
                         }
                         Some(Err(err)) => {
                             warn!(error = %err, "error reading next JetStream trigger");
                         }
                         None => {
                             warn!("trigger stream ended unexpectedly");
-                            break;
+                            break 'consume;
                         }
                     }
                 }
             }
+        }
+
+        // Wait for every spawned invocation before returning. On drain
+        // they suspend at their next step boundary (the reducer polls
+        // the shared signal), so this completes promptly; on shutdown it
+        // mirrors the pre-fan-out behavior, where `run` never returned
+        // mid-invocation. The daemon awaits `run` through its
+        // dispatcher handle, so teardown ordering is unchanged.
+        while let Some(joined) = in_flight.join_next().await {
+            log_invocation_task(joined);
         }
 
         info!("trigger dispatcher stopped");
@@ -392,6 +486,17 @@ impl TriggerDispatcher {
     }
 }
 
+/// Surface a spawned invocation task that failed to join. `handle`
+/// never returns an error (failures are logged and acked/NAK'd
+/// inside), so a join error means the task panicked or was cancelled —
+/// loud, because a silently-vanished invocation is exactly the failure
+/// mode #64 exists for.
+fn log_invocation_task(joined: Result<(), tokio::task::JoinError>) {
+    if let Err(err) = joined {
+        error!(error = %err, "spawned invocation task did not complete cleanly");
+    }
+}
+
 /// Errors that prevent the dispatcher from starting or progressing.
 #[derive(Debug, thiserror::Error)]
 pub enum DispatcherError {
@@ -473,7 +578,9 @@ mod tests {
     /// A variant of TriggerDispatcher that uses a custom consumer
     /// name AND a narrow filter subject so parallel test runs do
     /// not compete for each other's messages on the work-queue
-    /// trigger stream.
+    /// trigger stream. Drives the *production* loop via
+    /// `run_on_consumer`, so every run-based test exercises the
+    /// fan-out path (#70).
     struct TestDispatcher {
         bus: EventBus,
         registry: SharedRegistry,
@@ -481,43 +588,23 @@ mod tests {
         llm: Arc<dyn LlmClient>,
         consumer_name: String,
         filter_subject: String,
+        max_concurrent: usize,
     }
 
     impl TestDispatcher {
-        async fn run(self, mut shutdown: oneshot::Receiver<()>) -> Result<(), DispatcherError> {
-            let consumer = self
-                .bus
-                .trigger_consumer_with_filter(&self.consumer_name, &self.filter_subject)
-                .await?;
-            let mut messages = consumer
-                .messages()
+        async fn run(self, shutdown: oneshot::Receiver<()>) -> Result<(), DispatcherError> {
+            let TestDispatcher {
+                bus,
+                registry,
+                worker,
+                llm,
+                consumer_name,
+                filter_subject,
+                max_concurrent,
+            } = self;
+            TriggerDispatcher::new(bus, registry, worker, llm, max_concurrent)
+                .run_on_consumer(&consumer_name, Some(&filter_subject), shutdown)
                 .await
-                .map_err(|err| DispatcherError::Stream(err.to_string()))?;
-
-            let dispatcher = TriggerDispatcher::new(
-                self.bus.clone(),
-                self.registry.clone(),
-                self.worker.clone(),
-                self.llm.clone(),
-            );
-
-            loop {
-                // Mirror `TriggerDispatcher::run`: stop consuming on drain.
-                if self.worker.drain_status() == DrainState::Draining {
-                    break;
-                }
-                tokio::select! {
-                    biased;
-                    _ = &mut shutdown => break,
-                    msg = messages.next() => {
-                        match msg {
-                            Some(Ok(msg)) => dispatcher.handle(&msg).await,
-                            Some(Err(_)) | None => break,
-                        }
-                    }
-                }
-            }
-            Ok(())
         }
     }
 
@@ -634,6 +721,7 @@ You are a test agent."#
             llm: llm.clone(),
             consumer_name: unique_consumer_name(),
             filter_subject: crate::bus::trigger_subject(&agent_id_str),
+            max_concurrent: 1,
         };
         let (disp_tx, disp_rx) = oneshot::channel();
         let disp_handle = tokio::spawn(async move { dispatcher.run(disp_rx).await });
@@ -770,12 +858,14 @@ You are a test agent."#
             shared_registry(registry),
             worker,
             Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
+            1,
         ));
 
         let mut consumer = bus
             .trigger_consumer_with_filter(
                 &unique_consumer_name(),
                 &crate::bus::trigger_subject(&agent_id_str),
+                1000,
             )
             .await
             .expect("consumer");
@@ -911,12 +1001,14 @@ You are a test agent."#
             shared_registry(registry),
             worker,
             Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
+            1,
         ));
 
         let mut consumer = bus
             .trigger_consumer_with_filter(
                 &unique_consumer_name(),
                 &crate::bus::trigger_subject(&agent_id_str),
+                1000,
             )
             .await
             .expect("consumer");
@@ -1039,12 +1131,14 @@ You are a test agent."#
             shared_registry(registry),
             worker,
             Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
+            1,
         ));
 
         let consumer = bus
             .trigger_consumer_with_filter(
                 &unique_consumer_name(),
                 &crate::bus::trigger_subject(&agent_id_str),
+                1000,
             )
             .await
             .expect("consumer");
@@ -1192,6 +1286,7 @@ You are a test agent."#
             llm,
             consumer_name: unique_consumer_name(),
             filter_subject: crate::bus::trigger_subject(&agent_id_str),
+            max_concurrent: 1,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move { dispatcher.run(shutdown_rx).await });
@@ -1214,5 +1309,174 @@ You are a test agent."#
             "a draining dispatcher must not dispatch an available trigger"
         );
         drop(shutdown_tx);
+    }
+
+    /// A worker double whose invocations block on a semaphore gate, so
+    /// the test controls exactly when each in-flight invocation ends.
+    struct GatedWorker {
+        started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        gate: Arc<tokio::sync::Semaphore>,
+    }
+    #[async_trait::async_trait]
+    impl Worker for GatedWorker {
+        async fn run_invocation(
+            &self,
+            _agent: &Agent,
+            _llm: &dyn crate::llm::LlmClient,
+            _source: TriggerSource,
+            _subject: Option<String>,
+            _payload: serde_json::Value,
+            mut durable_start: crate::worker::DurableStart,
+        ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            durable_start.fire();
+            self.gate.acquire().await.expect("gate open").forget();
+            Ok(crate::worker::InvocationOutcome::Completed {
+                invocation_id: Uuid::now_v7(),
+                response: canned_response(),
+                cost: 0.0,
+                duration_ms: 0,
+            })
+        }
+        async fn request_drain(&self, _req: crate::worker::DrainRequest) {}
+        fn drain_status(&self) -> crate::worker::DrainState {
+            crate::worker::DrainState::Running
+        }
+    }
+
+    /// Shared scaffolding for the fan-out tests: a registry with one
+    /// unique agent, a gated worker, and a TestDispatcher running the
+    /// production loop at the given concurrency bound. Returns the
+    /// pieces the test drives.
+    async fn gated_fanout_world(
+        url: &str,
+        prefix: &str,
+        max_concurrent: usize,
+    ) -> (
+        EventBus,
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        Arc<tokio::sync::Semaphore>,
+        tokio::task::JoinHandle<Result<(), DispatcherError>>,
+        oneshot::Sender<()>,
+    ) {
+        let bus = EventBus::connect(url).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id(prefix);
+
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join(format!("{agent_id_str}.md"));
+        std::fs::write(
+            &agent_path,
+            format!(
+                "---\nname: {agent_id_str}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nTest agent."
+            ),
+        )
+        .unwrap();
+        let mut registry = AgentRegistry::new();
+        registry.load_file(&agent_path);
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let worker: Arc<dyn Worker> = Arc::new(GatedWorker {
+            started: started.clone(),
+            gate: gate.clone(),
+        });
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let dispatcher = TestDispatcher {
+            bus: bus.clone(),
+            registry: shared_registry(registry),
+            worker,
+            llm: Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
+            consumer_name: unique_consumer_name(),
+            filter_subject: crate::bus::trigger_subject(&agent_id_str),
+            max_concurrent,
+        };
+        let run = tokio::spawn(dispatcher.run(shutdown_rx));
+        (bus, agent_id_str, started, gate, run, shutdown_tx)
+    }
+
+    async fn wait_for_started(started: &std::sync::atomic::AtomicUsize, want: usize, note: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while started.load(std::sync::atomic::Ordering::SeqCst) < want {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {want} started invocations ({note})"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// #70: with `max_concurrent = 2`, two triggers overlap — the
+    /// second invocation *starts* while the first is still blocked.
+    /// Releasing both and shutting down exercises the join phase.
+    #[tokio::test]
+    async fn fan_out_runs_invocations_concurrently() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        let (bus, agent_id, started, gate, run, shutdown_tx) =
+            gated_fanout_world(&url, "fanout-two", 2).await;
+
+        bus.publish_trigger(&agent_id, &json!({"input": "a"}))
+            .await
+            .expect("publish 1");
+        bus.publish_trigger(&agent_id, &json!({"input": "b"}))
+            .await
+            .expect("publish 2");
+
+        // Both invocations enter while neither has finished (the gate
+        // holds zero permits) — genuine overlap inside one dispatcher.
+        wait_for_started(&started, 2, "concurrent fan-out").await;
+
+        gate.add_permits(2);
+        let _ = shutdown_tx.send(());
+        let result = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("dispatcher joins in-flight work and exits")
+            .expect("task joins");
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// #70: the default bound of 1 reproduces the serial behavior —
+    /// the second trigger is not pulled until the first invocation
+    /// finished.
+    #[tokio::test]
+    async fn serial_bound_runs_one_invocation_at_a_time() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        let (bus, agent_id, started, gate, run, shutdown_tx) =
+            gated_fanout_world(&url, "fanout-serial", 1).await;
+
+        bus.publish_trigger(&agent_id, &json!({"input": "a"}))
+            .await
+            .expect("publish 1");
+        bus.publish_trigger(&agent_id, &json!({"input": "b"}))
+            .await
+            .expect("publish 2");
+
+        wait_for_started(&started, 1, "first invocation").await;
+        // The second must NOT start while the first is blocked.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            started.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "bound of 1 must not overlap invocations"
+        );
+
+        gate.add_permits(1);
+        wait_for_started(&started, 2, "second invocation after release").await;
+        gate.add_permits(1);
+        let _ = shutdown_tx.send(());
+        let result = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("dispatcher joins in-flight work and exits")
+            .expect("task joins");
+        assert!(result.is_ok(), "{result:?}");
     }
 }

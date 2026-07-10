@@ -108,6 +108,17 @@ pub struct WorkerConfig {
     /// (design principle 8), overridable in `fq.toml`.
     #[serde(default)]
     pub llm_retry: crate::llm::RetryConfig,
+    /// How many invocations one daemon runs concurrently (#70, the
+    /// parallel-workers plan). Default 1 — the serial behavior — until
+    /// the Phase-2 concurrent recovery/drain/shutdown gate is green.
+    /// The bound is also the only concurrency-side spend guardrail
+    /// until a fleet-level cost cap lands (#42), so raise deliberately.
+    #[serde(default = "default_max_concurrent_invocations")]
+    pub max_concurrent_invocations: usize,
+}
+
+fn default_max_concurrent_invocations() -> usize {
+    1
 }
 
 fn default_archive_retry_interval_ms() -> u64 {
@@ -124,6 +135,7 @@ impl Default for WorkerConfig {
             archive_retry_interval_ms: default_archive_retry_interval_ms(),
             archive_warn_after_ms: default_archive_warn_after_ms(),
             llm_retry: crate::llm::RetryConfig::default(),
+            max_concurrent_invocations: default_max_concurrent_invocations(),
         }
     }
 }

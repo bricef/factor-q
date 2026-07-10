@@ -103,6 +103,14 @@ models = ["claude-haiku-4-5"]
 # # optional: cache_read_per_mtok, cache_write_per_mtok (default: input rate)
 
 [worker]
+# How many invocations one daemon runs concurrently (#70). Default 1
+# (serial). Each in-flight invocation spends budget in parallel and the
+# bound is the only concurrency-side spend guardrail until a fleet-level
+# cost cap lands (#42) — raise deliberately, and only with per-invocation
+# workspaces enabled ([workspace] per_invocation = true) so concurrent
+# invocations cannot clobber each other's files.
+# max_concurrent_invocations = 1
+#
 # Worker-side knobs for the archive hand-off retry sweeper. The
 # sweeper republishes `invocation.archived` for any terminal row
 # whose control-plane ack hasn't arrived yet.
