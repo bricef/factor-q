@@ -352,9 +352,7 @@ pub fn dedup_key(entry: &TranscriptEntry) -> Option<String> {
         TranscriptEntry::Assistant { tool_calls, .. } => tool_calls
             .first()
             .map(|tc| format!("call:{}", tc.tool_call_id)),
-        TranscriptEntry::ToolResult { tool_call_id, .. } => {
-            Some(format!("tool:{tool_call_id}"))
-        }
+        TranscriptEntry::ToolResult { tool_call_id, .. } => Some(format!("tool:{tool_call_id}")),
     }
 }
 
@@ -523,7 +521,13 @@ mod tests {
         // tool dispatched at intent 150. By intent_at the assistant comes
         // first; a completed_at sort would wrongly flip them (assistant
         // 300 after tool 160).
-        let llm = vec![llm_row(100, 300, FIRST_REQUEST, &response_with_tool_call(), 0.01)];
+        let llm = vec![llm_row(
+            100,
+            300,
+            FIRST_REQUEST,
+            &response_with_tool_call(),
+            0.01,
+        )];
         let tools = vec![tool_row(150, 160, "shell", r#"{"cmd":"ls"}"#, "ok")];
         let entries = collect_transcript(&llm, &tools);
         assert_eq!(entries.len(), 3);
@@ -677,8 +681,14 @@ mod tests {
         let tools = vec![tool_row(100, 100, "shell", r#"{"cmd":"ls"}"#, "ok")];
         let entries = collect_transcript(&llm, &tools);
         let keys = snapshot_keys(&entries);
-        assert!(keys.contains("call:tc-100"), "assistant key missing: {keys:?}");
-        assert!(keys.contains("tool:tc-100"), "tool-result key missing: {keys:?}");
+        assert!(
+            keys.contains("call:tc-100"),
+            "assistant key missing: {keys:?}"
+        );
+        assert!(
+            keys.contains("tool:tc-100"),
+            "tool-result key missing: {keys:?}"
+        );
     }
     #[tokio::test]
     async fn store_round_trip_transcript_ordering_and_payloads() {
