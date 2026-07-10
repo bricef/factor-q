@@ -334,3 +334,20 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   and `fq down` on a scratch daemon with N real invocations in flight —
   and a decision on whether the D2/D3 dispatcher loop invariants need
   property-level coverage beyond the gated overlap/serial tests.
+
+
+- **2026-07-10 — the live drill is scripted and green: the Phase-2 gate
+  is complete.** `just drill` (tests/smoke/drain-drill.sh) runs the
+  plan's live leg reproducibly against a scratch daemon, real broker,
+  and real LLM: the startup guard refuses `max_concurrent > 1` without
+  per-invocation workspaces; 3 invocations run concurrently in their
+  own workspaces; `fq drain` suspends all 3 at step boundaries and the
+  daemon exits only after joining them (the JoinSet coverage, observed
+  live); restart recovery resumes each exactly once and reclaims;
+  SIGTERM drains identically; SIGKILL loses nothing across a restart.
+  15/15 checks. One semantic pinned along the way: Ctrl-C is a fast
+  stop (crash-equivalent, recovery's job) — SIGTERM/`fq drain` are the
+  graceful path, which the drill asserts. **The gate before raising the
+  dogfood bound is now fully green; what remains is Phase 3 itself:**
+  ops `fq.toml` (per_invocation + the bound) and the m0 agent-def
+  migration to `${workspace}` with clone-first prompts.

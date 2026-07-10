@@ -103,6 +103,13 @@ test-shell-sandbox:
 smoke: build
     {{justfile_directory()}}/tests/smoke/smoke.sh
 
+# The parallel-workers live drill: N concurrent invocations through
+# drain / clean-shutdown / crash-recovery on a scratch daemon (plan §3,
+# the Phase-2 gate's live leg). Needs ANTHROPIC_API_KEY and a running
+# broker (`just infra-up`) with no other fq daemon on it.
+drill: build
+    {{justfile_directory()}}/tests/smoke/drain-drill.sh
+
 # Run the fq CLI (e.g. `just fq --agents-dir ./agents agent list`)
 #
 # Preserves the user's invocation directory so relative paths in
