@@ -3170,8 +3170,13 @@ async fn invocation_transcript(
             .agent_id_for_invocation(id)
             .await?
             .ok_or_else(|| {
+                let hint = if id.len() != 36 {
+                    " (not a full invocation id — see `fq invocation list --json`)"
+                } else {
+                    ""
+                };
                 anyhow::anyhow!(
-                    "cannot follow invocation {id}: no agent recorded for it in the projection"
+                    "cannot follow invocation {id}: no agent recorded for it in the projection{hint}"
                 )
             })?;
         let bus = EventBus::connect(&config.nats.url)
@@ -3208,6 +3213,15 @@ async fn invocation_transcript(
         eprintln!(
             "no transcript found for invocation id={id} (no LLM or tool dispatches recorded)"
         );
+        // A full invocation id is 36 chars; `fq invocation list` shows an
+        // abbreviated one, so a copied id often won't match. Point at the
+        // machine-readable form that carries the full id.
+        if id.len() != 36 {
+            eprintln!(
+                "note: `{id}` is not a full invocation id — `fq invocation list` abbreviates it; \
+                 use `fq invocation list --json` to get the full id."
+            );
+        }
         std::process::exit(1);
     }
 
