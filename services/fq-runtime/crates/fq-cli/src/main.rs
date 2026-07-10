@@ -2757,7 +2757,36 @@ async fn invocation_transcript(
     let config = global.resolve_config()?;
     let db_path = projection_path(&config);
 
-    // Worker WAL, read-only. A missing DB is the actionable
+    // For --follow, subscribe to the invocation's agent subject BEFORE
+    // reading the WAL snapshot, so a turn that completes in the gap
+    // between the read and the subscription is not lost: anything
+    // published in that window is caught by both the snapshot and the
+    // live stream, then deduped at the seam. Snapshot-only mode needs no
+    // NATS. The returned stream owns its connection, so `bus` may drop.
+    let follow_stream = if follow {
+        let proj_store = ProjectionStore::open_read_only(&db_path).await?;
+        let agent_id = proj_store
+            .agent_id_for_invocation(id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot follow invocation {id}: no agent recorded for it in the projection"
+                )
+            })?;
+        let bus = EventBus::connect(&config.nats.url)
+            .await
+            .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+        let subject = format!("fq.agent.{agent_id}.>");
+        let stream = bus
+            .subscribe(subject.clone())
+            .await
+            .with_context(|| format!("failed to subscribe to {subject}"))?;
+        Some((subject, stream))
+    } else {
+        None
+    };
+
+    // Worker WAL snapshot, read-only. A missing DB is the actionable
     // NotInitialised error, never a panic.
     let worker_store = fq_runtime::WorkerStore::open_read_only(&db_path)
         .await
@@ -2771,7 +2800,10 @@ async fn invocation_transcript(
     let llm_rows = worker_store.list_llm_dispatches_for_invocation(id).await?;
     let tool_rows = worker_store.list_tool_dispatches_for_invocation(id).await?;
 
-    if llm_rows.is_empty() && tool_rows.is_empty() {
+    // An empty snapshot is a hard error only for the one-shot view; under
+    // --follow it is valid (tailing an invocation that has not dispatched
+    // anything yet), so fall through to the live loop.
+    if llm_rows.is_empty() && tool_rows.is_empty() && !follow {
         eprintln!(
             "no transcript found for invocation id={id} (no LLM or tool dispatches recorded)"
         );
@@ -2787,31 +2819,11 @@ async fn invocation_transcript(
 
     print!("{}", render_pretty(&entries, truncate_bytes));
 
-    if !follow {
+    // Snapshot-only mode: done. Otherwise take the live stream that was
+    // subscribed above (before the snapshot) and tail it.
+    let Some((subject, mut stream)) = follow_stream else {
         return Ok(());
-    }
-
-    // Live follow. Resolve the agent to build the subject, subscribe
-    // before the backfill dedupe, and append new turns filtered to this
-    // invocation. Requires a reachable NATS + a running daemon.
-    let proj_store = ProjectionStore::open_read_only(&db_path).await?;
-    let agent_id = proj_store
-        .agent_id_for_invocation(id)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "cannot follow invocation {id}: no agent recorded for it in the projection"
-            )
-        })?;
-
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
-    let subject = format!("fq.agent.{agent_id}.>");
-    let mut stream = bus
-        .subscribe(subject.clone())
-        .await
-        .with_context(|| format!("failed to subscribe to {subject}"))?;
+    };
 
     println!();
     println!("── following {subject} (invocation {id}); Ctrl-C to exit ──");
