@@ -93,7 +93,7 @@ fn fq_invocation_help_lists_subcommands() {
         Some(0),
         "fq invocation --help should exit 0; stderr: {stderr}"
     );
-    for needle in ["list", "show", "drop"] {
+    for needle in ["list", "show", "drop", "transcript"] {
         assert!(
             stdout.contains(needle),
             "expected `{needle}` in `fq invocation --help`; got: {stdout}"
@@ -154,5 +154,49 @@ fn fq_status_against_bogus_nats_fails_gracefully() {
     assert!(
         code == Some(0) || code == Some(1),
         "fq status exited with unexpected code {code:?}"
+    );
+}
+
+#[test]
+fn fq_invocation_transcript_help_parses() {
+    let (exit, stdout, stderr) = run_fq(
+        &["invocation", "transcript", "--help"],
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq invocation transcript --help should exit 0; stderr: {stderr}"
+    );
+    // The flags the operator surface depends on are documented.
+    for needle in ["--follow", "--format", "--full"] {
+        assert!(
+            stdout.contains(needle),
+            "expected `{needle}` in transcript --help; got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn fq_invocation_transcript_missing_db_exits_nonzero_without_panic() {
+    // FQ_CACHE_DIR points at a nonexistent path, so events.db is
+    // absent. The command must exit non-zero with an actionable
+    // error, not panic.
+    let (exit, _stdout, stderr) = run_fq(
+        &[
+            "invocation",
+            "transcript",
+            "00000000-0000-0000-0000-000000000000",
+        ],
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        exit,
+        Some(1),
+        "missing-db transcript should exit 1; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "must not panic; stderr: {stderr}"
     );
 }

@@ -22,6 +22,8 @@ use tracing::error;
 use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
+mod transcript;
+
 const DEFAULT_CONFIG_PATH: &str = "fq.toml";
 
 #[derive(Parser)]
@@ -242,6 +244,26 @@ enum InvocationCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Show the full conversation transcript for an invocation: the
+    /// LLM turns and tool calls WITH their payloads (assistant text,
+    /// tool parameters, tool results), reconstructed from the worker
+    /// WAL. Unlike `show`/`events query`, which print headers only.
+    /// Read-only; snapshot mode needs no NATS. `--follow` appends new
+    /// turns live from the event bus until Ctrl-C.
+    Transcript {
+        /// Invocation id to inspect.
+        id: String,
+        /// After printing the snapshot, block and append new turns
+        /// live from `fq.agent.<agent_id>.>` until Ctrl-C.
+        #[arg(long, short = 'f')]
+        follow: bool,
+        /// Output format: `pretty` (default) or `json`.
+        #[arg(long, default_value = "pretty")]
+        format: String,
+        /// Do not truncate large payloads (alias: --no-truncate).
+        #[arg(long, visible_alias = "no-truncate")]
+        full: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -370,6 +392,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             InvocationCommands::Drop { id, reason, json } => {
                 invocation_drop(&cli.global, &id, reason.as_deref(), json).await?
             }
+            InvocationCommands::Transcript {
+                id,
+                follow,
+                format,
+                full,
+            } => invocation_transcript(&cli.global, &id, follow, &format, full).await?,
         },
         Commands::Workers { command } => match command {
             WorkerCommands::List {
@@ -2691,6 +2719,161 @@ async fn invocation_drop(
         println!("Follow with `fq invocation show {id}` to confirm the archive row.");
     }
     Ok(())
+}
+
+/// Render the full payload-bearing transcript for one invocation.
+///
+/// Snapshot mode (default): open the worker WAL read-only against
+/// `events.db`, collect the ordered `llm_dispatch` + `tool_dispatch`
+/// rows for the invocation, and render them with payloads. Read-only
+/// and NATS-free. `--follow` additionally subscribes to the invocation's
+/// agent subject and appends new turns live until Ctrl-C.
+async fn invocation_transcript(
+    global: &GlobalArgs,
+    id: &str,
+    follow: bool,
+    format: &str,
+    full: bool,
+) -> anyhow::Result<()> {
+    use transcript::{
+        DEFAULT_TRUNCATE_BYTES, assistant_entry, collect_transcript, dedup_key, render_pretty,
+        snapshot_keys, tool_result_entry,
+    };
+
+    let as_json = match format {
+        "pretty" => false,
+        "json" => true,
+        other => anyhow::bail!("unknown --format `{other}` — try pretty | json"),
+    };
+    if follow && as_json {
+        anyhow::bail!("--follow is not supported with --format json (json emits a snapshot array)");
+    }
+    let truncate_bytes = if full {
+        None
+    } else {
+        Some(DEFAULT_TRUNCATE_BYTES)
+    };
+
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+
+    // Worker WAL, read-only. A missing DB is the actionable
+    // NotInitialised error, never a panic.
+    let worker_store = fq_runtime::WorkerStore::open_read_only(&db_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open worker store at {}: has `fq run`/`fq trigger` been run?",
+                db_path.display()
+            )
+        })?;
+
+    let llm_rows = worker_store.list_llm_dispatches_for_invocation(id).await?;
+    let tool_rows = worker_store.list_tool_dispatches_for_invocation(id).await?;
+
+    if llm_rows.is_empty() && tool_rows.is_empty() {
+        eprintln!(
+            "no transcript found for invocation id={id} (no LLM or tool dispatches recorded)"
+        );
+        std::process::exit(1);
+    }
+
+    let entries = collect_transcript(&llm_rows, &tool_rows);
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    print!("{}", render_pretty(&entries, truncate_bytes));
+
+    if !follow {
+        return Ok(());
+    }
+
+    // Live follow. Resolve the agent to build the subject, subscribe
+    // before the backfill dedupe, and append new turns filtered to this
+    // invocation. Requires a reachable NATS + a running daemon.
+    let proj_store = ProjectionStore::open_read_only(&db_path).await?;
+    let agent_id = proj_store
+        .agent_id_for_invocation(id)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot follow invocation {id}: no agent recorded for it in the projection"
+            )
+        })?;
+
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    let subject = format!("fq.agent.{agent_id}.>");
+    let mut stream = bus
+        .subscribe(subject.clone())
+        .await
+        .with_context(|| format!("failed to subscribe to {subject}"))?;
+
+    println!();
+    println!("── following {subject} (invocation {id}); Ctrl-C to exit ──");
+
+    let mut seen = snapshot_keys(&entries);
+    while let Some(result) = stream.next().await {
+        let event = match result {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("deserialise error: {err}");
+                continue;
+            }
+        };
+        if event.envelope.invocation_id.to_string() != id {
+            continue;
+        }
+        let ts_ms = event.envelope.timestamp.timestamp_millis();
+        let entry = match &event.payload {
+            EventPayload::LlmResponse(p) => {
+                let cost = event.envelope.cost.as_ref().map(|c| c.total_cost);
+                Some(assistant_entry(ts_ms, p_model(&event), cost, p))
+            }
+            EventPayload::ToolResult(p) => {
+                // The live event carries the result; tool name/params
+                // rode the earlier tool.call. Best-effort: label by the
+                // correlation id when we can't recover the name.
+                Some(tool_result_entry(
+                    ts_ms,
+                    format!("(tool_call {})", p.tool_call_id),
+                    serde_json::Value::Null,
+                    p,
+                ))
+            }
+            _ => None,
+        };
+        if let Some(entry) = entry {
+            if let Some(key) = dedup_key(&entry)
+                && !seen.insert(key)
+            {
+                continue;
+            }
+            print!(
+                "{}",
+                render_pretty(std::slice::from_ref(&entry), truncate_bytes)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// The model string for a live event, if the payload carries one.
+fn p_model(event: &Event) -> String {
+    match &event.payload {
+        EventPayload::LlmResponse(_) => event
+            .envelope
+            .cost
+            .as_ref()
+            .map(|c| c.model.clone())
+            .unwrap_or_else(|| "?".to_string()),
+        _ => "?".to_string(),
+    }
 }
 
 #[cfg(test)]
