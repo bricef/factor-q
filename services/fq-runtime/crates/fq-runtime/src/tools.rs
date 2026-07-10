@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fq_tools::Tool;
-use fq_tools::builtin::{FileReadTool, FileWriteTool, SelfInspectTool, ShellTool};
+use fq_tools::builtin::{ExecTool, FileReadTool, FileWriteTool, SelfInspectTool};
 
 /// Number of tools registered by [`ToolRegistry::with_builtins`].
 /// Useful for callers that report "MCP tools = total - builtins".
@@ -40,7 +40,7 @@ impl ToolRegistry {
         let mut registry = Self::new();
         registry.register(Arc::new(FileReadTool::new()));
         registry.register(Arc::new(FileWriteTool::new()));
-        registry.register(Arc::new(ShellTool::new()));
+        registry.register(Arc::new(ExecTool::new()));
         registry.register(Arc::new(SelfInspectTool::new()));
         registry
     }
@@ -89,11 +89,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn with_builtins_has_file_and_shell_tools() {
+    fn with_builtins_has_file_and_exec_tools() {
         let reg = ToolRegistry::with_builtins();
         assert!(reg.get("file_read").is_some());
         assert!(reg.get("file_write").is_some());
-        assert!(reg.get("shell").is_some());
+        assert!(reg.get("exec").is_some());
         assert!(reg.get("self_inspect").is_some());
         assert_eq!(reg.len(), BUILTIN_TOOL_COUNT);
     }

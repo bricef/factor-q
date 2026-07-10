@@ -67,7 +67,7 @@ ships four built-in tools:
 |---|---|---|
 | `file_read` | Read a file's contents | `fs_read` |
 | `file_write` | Write/overwrite a file | `fs_write` |
-| `shell` | Run a command (argv, no shell) | `exec_cwd` |
+| `exec` | Run a single program (argv, no shell) | `exec_cwd` |
 | `self_inspect` | Ask the runtime about this invocation's own state — budget, iteration count, model, available tools. | none — host-fulfilled |
 
 To grant a tool, list it in `tools:` and declare the corresponding
@@ -118,9 +118,9 @@ You can read files anywhere under /data/project and write output
 files to /data/project/output.
 ```
 
-### Shell runner
+### Command runner
 
-The shell tool takes an **argv array** (`["ls", "-la"]`), not a
+The `exec` tool takes an **argv array** (`["ls", "-la"]`), not a
 shell string. No shell is invoked — there is no opportunity for
 shell injection. Pipes, redirects, and glob expansion are not
 supported.
@@ -130,14 +130,14 @@ supported.
 name: inspector
 model: claude-haiku-4-5
 tools:
-  - shell
+  - exec
 sandbox:
   exec_cwd:
     - /data/project
 budget: 0.10
 ---
 
-You can run commands in /data/project using the shell tool. Pass
+You can run commands in /data/project using the `exec` tool. Pass
 the command as an argv array, e.g. `["ls", "-la"]`.
 ```
 
@@ -154,7 +154,7 @@ model: claude-haiku-4-5
 tools:
   - file_read
   - file_write
-  - shell
+  - exec
 sandbox:
   fs_read:
     - /data/project
@@ -183,8 +183,8 @@ clear error message that the LLM sees and can adapt to.
 |---|---|---|
 | `fs_read` | Directories the agent can read from | `file_read` |
 | `fs_write` | Directories the agent can write to | `file_write` |
-| `exec_cwd` | Directories the agent can run commands in | `shell` |
-| `env` | Environment variables visible to child processes | `shell` |
+| `exec_cwd` | Directories the agent can run commands in | `exec` |
+| `env` | Environment variables visible to child processes | `exec` |
 | `network` | Network access patterns (reserved for future use) | — |
 
 ### Path handling

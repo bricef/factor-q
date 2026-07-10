@@ -50,7 +50,7 @@ This produces:
 | File | What it does |
 |---|---|
 | `fq.toml` | Runtime configuration — NATS URL, agents directory, provider env vars. |
-| `agents/sample-agent.md` | A starter agent with `file_read` and `shell` tools and a `$0.10` budget. |
+| `agents/sample-agent.md` | A starter agent with `file_read` and `exec` tools and a `$0.10` budget. |
 | `README.md` | A pointer back to factor-q docs. |
 
 Open `agents/sample-agent.md` to see the format: YAML frontmatter declaring model, tools, sandbox, and budget; Markdown body containing the system prompt. Full reference in the [agent authoring guide](docs/guide/agent-definitions.md).

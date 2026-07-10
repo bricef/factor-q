@@ -444,10 +444,10 @@ Prompt.
     #[test]
     fn parses_exec_cwd_from_frontmatter() {
         let content = r#"---
-name: shell-agent
+name: exec-agent
 model: claude-haiku-4-5
 tools:
-  - shell
+  - exec
 sandbox:
   exec_cwd:
     - /tmp/fq-workspace
@@ -469,10 +469,10 @@ Prompt.
     #[test]
     fn round_trips_exec_cwd_into_tool_sandbox() {
         let content = r#"---
-name: shell-agent
+name: exec-agent
 model: claude-haiku-4-5
 tools:
-  - shell
+  - exec
 sandbox:
   exec_cwd:
     - /tmp/fq-workspace
@@ -546,7 +546,7 @@ model: claude-haiku-4-5
 tools:
   - file_read
   - file_write
-  - shell
+  - exec
 sandbox:
   fs_read:
     - /tmp/readable
@@ -582,10 +582,10 @@ Prompt.
     #[test]
     fn config_snapshot_includes_exec_cwd() {
         let content = r#"---
-name: shell-agent
+name: exec-agent
 model: claude-haiku-4-5
 tools:
-  - shell
+  - exec
 sandbox:
   exec_cwd:
     - /tmp/work

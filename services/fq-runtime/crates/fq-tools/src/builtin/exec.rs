@@ -1,5 +1,9 @@
-//! `shell` built-in tool: run a command as a child process with the
-//! agent's sandbox as the enforcement boundary.
+//! `exec` built-in tool: run a single program as a child process with
+//! the agent's sandbox as the enforcement boundary.
+//!
+//! Named `exec` (not `shell`) on purpose: it runs one program directly,
+//! it does not interpret a shell. The name matches its sandbox
+//! dimension, `exec_cwd`.
 //!
 //! This tool takes an **argv array**, not a shell string. No shell is
 //! invoked anywhere in this module — we use
@@ -59,7 +63,7 @@
 //!   it can do.
 //!
 //! Container-level isolation (ADR-0010) is the path to closing these.
-//! Until then, the shell tool should be granted only to agents you
+//! Until then, the exec tool should be granted only to agents you
 //! trust with these capabilities, and tests for the tool itself
 //! should be run in a disposable container
 //! (see `services/fq-runtime/Dockerfile.shell-test` and
@@ -80,9 +84,9 @@ use tracing::{debug, warn};
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
-/// Runtime-configurable parameters for the shell tool.
+/// Runtime-configurable parameters for the exec tool.
 #[derive(Debug, Clone)]
-pub struct ShellConfig {
+pub struct ExecConfig {
     /// Timeout applied when the caller does not specify one.
     pub default_timeout: Duration,
     /// Hard upper bound on any single call's timeout. Caller-supplied
@@ -98,7 +102,7 @@ pub struct ShellConfig {
     pub default_path: String,
 }
 
-impl Default for ShellConfig {
+impl Default for ExecConfig {
     fn default() -> Self {
         Self {
             default_timeout: Duration::from_secs(30),
@@ -109,34 +113,34 @@ impl Default for ShellConfig {
     }
 }
 
-/// Built-in `shell` tool.
+/// Built-in `exec` tool.
 #[derive(Debug, Clone)]
-pub struct ShellTool {
-    config: ShellConfig,
+pub struct ExecTool {
+    config: ExecConfig,
 }
 
-impl ShellTool {
-    /// Construct a shell tool with default configuration.
+impl ExecTool {
+    /// Construct an exec tool with default configuration.
     pub fn new() -> Self {
         Self {
-            config: ShellConfig::default(),
+            config: ExecConfig::default(),
         }
     }
 
-    /// Construct a shell tool with an explicit configuration.
-    pub fn with_config(config: ShellConfig) -> Self {
+    /// Construct an exec tool with an explicit configuration.
+    pub fn with_config(config: ExecConfig) -> Self {
         Self { config }
     }
 }
 
-impl Default for ShellTool {
+impl Default for ExecTool {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct ShellParams {
+struct ExecParams {
     command: Vec<String>,
     cwd: String,
     #[serde(default)]
@@ -144,9 +148,9 @@ struct ShellParams {
 }
 
 #[async_trait]
-impl Tool for ShellTool {
+impl Tool for ExecTool {
     fn name(&self) -> &str {
-        "shell"
+        "exec"
     }
 
     fn description(&self) -> &str {
@@ -183,7 +187,7 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, ctx: &ToolContext<'_>, params: Value) -> Result<ToolResult, ToolError> {
-        let params: ShellParams = serde_json::from_value(params)
+        let params: ExecParams = serde_json::from_value(params)
             .map_err(|err| ToolError::InvalidParameters(err.to_string()))?;
 
         if params.command.is_empty() {
@@ -247,7 +251,7 @@ impl Tool for ShellTool {
             program = %program,
             cwd = %canonical_cwd.display(),
             timeout_ms = timeout_duration.as_millis() as u64,
-            "spawning shell command"
+            "spawning child process"
         );
 
         let mut cmd = Command::new(program);
@@ -295,7 +299,7 @@ impl Tool for ShellTool {
                 // captured output tasks finish promptly.
                 warn!(
                     timeout_ms = timeout_duration.as_millis() as u64,
-                    "shell timeout fired — killing child"
+                    "exec timeout fired — killing child"
                 );
                 if let Err(err) = child.start_kill() {
                     warn!(error = %err, "failed to start_kill after timeout");
@@ -370,11 +374,11 @@ fn standalone_shell_operator(argv: &[String]) -> Option<&'static str> {
 /// unnecessary.
 fn shell_operator_help(op: &str) -> String {
     format!(
-        "`{op}` is a shell operator, but the `shell` tool does not run a \
+        "`{op}` is a shell operator, but the `exec` tool does not run a \
          shell — it executes one program directly from the argv array, so \
          `|`, `>`, `&&`, and similar operators are not interpreted. Pass a \
          plain argv array (e.g. [\"grep\", \"-n\", \"foo\", \"file.txt\"]). \
-         To chain or pipe commands, make separate `shell` calls and combine \
+         To chain or pipe commands, make separate `exec` calls and combine \
          the results yourself. To limit output, narrow the command's own \
          arguments (a count/`-n` flag, a more specific path) rather than \
          piping to `head` — stdout and stderr are already size-capped as a \
@@ -476,9 +480,9 @@ fn allowed_env_vars() -> &'static [&'static str] {
     // Phase 1 default: no additional env vars pass through. Tests
     // that need specific variables set them via std::env::set_var
     // before running the tool and include them in the allowlist via
-    // the ShellConfig-driven path below (not yet implemented).
+    // the ExecConfig-driven path below (not yet implemented).
     //
-    // This deliberately limits what the shell tool exposes until we
+    // This deliberately limits what the exec tool exposes until we
     // plumb an explicit allowlist through ToolSandbox.
     &[]
 }
@@ -518,8 +522,8 @@ mod tests {
         ToolContext::new(sandbox)
     }
 
-    fn make_tool_fast() -> ShellTool {
-        ShellTool::with_config(ShellConfig {
+    fn make_tool_fast() -> ExecTool {
+        ExecTool::with_config(ExecConfig {
             default_timeout: Duration::from_secs(5),
             max_timeout: Duration::from_secs(10),
             max_output_bytes: 4 * 1024, // Small to make truncation tests fast
@@ -722,7 +726,7 @@ mod tests {
         let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
         let ctx = make_exec_ctx(&sandbox);
         // Sleep 30s, timeout after 1s.
-        let tool = ShellTool::with_config(ShellConfig {
+        let tool = ExecTool::with_config(ExecConfig {
             default_timeout: Duration::from_secs(1),
             max_timeout: Duration::from_secs(10),
             max_output_bytes: 4 * 1024,
@@ -755,7 +759,7 @@ mod tests {
         let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
         let ctx = make_exec_ctx(&sandbox);
         // User asks for 9999s, max is 2s. Sleep 5s should get killed.
-        let tool = ShellTool::with_config(ShellConfig {
+        let tool = ExecTool::with_config(ExecConfig {
             default_timeout: Duration::from_secs(30),
             max_timeout: Duration::from_secs(2),
             max_output_bytes: 4 * 1024,

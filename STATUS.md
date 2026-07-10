@@ -10,7 +10,7 @@ milestone boundaries — **last: 2026-07-05** (M2 access control merged,
   trigger dispatcher over NATS/JetStream). Agents are Markdown definitions
   executed through the suspend/resume [reducer harness](docs/guide/reducer-harness.md);
   per-agent model selection, budget enforcement after every LLM call,
-  sandboxed built-in tools (`file_read`, `file_write`, `shell`,
+  sandboxed built-in tools (`file_read`, `file_write`, `exec`,
   `self_inspect`). Full [MCP client](docs/guide/mcp.md) (spec 2025-11-25):
   stdio + Streamable HTTP transports; tools, resources, prompts, and the
   server-initiated capabilities (sampling, elicitation, roots). Operator

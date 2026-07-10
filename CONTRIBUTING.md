@@ -83,20 +83,20 @@ just smoke
 
 Costs roughly $0.005-0.01 per run. Tests are in `tests/smoke/smoke.sh`.
 
-### Tier 3: Containerised shell sandbox tests
+### Tier 3: Containerised sandbox tests
 
-The shell tool spawns child processes. Even though the test
+The exec tool spawns child processes. Even though the test
 battery uses only safe commands (`echo`, `true`, `sleep`, etc.),
 we provide a disposable container runner that mounts the workspace
 read-only and disables networking. Use this when iterating on the
-shell tool's sandbox logic.
+exec tool's sandbox logic.
 
 ```sh
 just test-shell-sandbox
 ```
 
 This builds a `rust:1.85-slim` Docker image with the cargo
-registry pre-populated, then runs the shell tests offline inside
+registry pre-populated, then runs the exec tests offline inside
 the container. Takes ~30s on the first run (image build), ~5s on
 subsequent runs.
 
@@ -191,7 +191,7 @@ has a detailed inventory of what shipped and what was deferred.
 
 1. Create `services/fq-runtime/crates/fq-tools/src/builtin/<name>.rs`
 2. Implement `Tool` for your struct (see `file_read.rs` for a
-   minimal example, `shell.rs` for a complex one)
+   minimal example, `exec.rs` for a complex one)
 3. Register it in `ToolRegistry::with_builtins()` in
    `services/fq-runtime/crates/fq-runtime/src/tools.rs`
 4. Add sandbox tests proving the tool respects sandbox boundaries
