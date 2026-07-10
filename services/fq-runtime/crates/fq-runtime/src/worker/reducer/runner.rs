@@ -963,6 +963,20 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
         completed.sort_by_key(|x| x.0);
 
+        // Regroup each model turn's tool results into the single
+        // capability the live loop produced. A turn with >1 tool call is
+        // answered by one `CallToolsParallel` / `ParallelToolResults`;
+        // replaying one `ToolResult` per row instead desyncs the harness
+        // — it consumes the first result, returns to `AwaitingModel`,
+        // then rejects the second with "expected ModelResult after
+        // CallModel", leaving the invocation an unrecoverable zombie.
+        // Consecutive tool results (in completion order) belong to one
+        // turn: the next model call only starts once the turn's results
+        // are integrated. Sequential dispatch runs a batch in request
+        // order (see `NextAction::CallToolsParallel`), so completion
+        // order matches what the live loop persisted.
+        let replay = coalesce_tool_results(completed);
+
         // Re-associate the invocation with its persisted workspace
         // (plan §3): a suspended invocation's workspace survives the
         // restart, and the state row's `workspace_ref` is the binding.
@@ -1013,7 +1027,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let mut state: Vec<u8> = Vec::new();
         let mut last_result: Option<CapabilityResult> = None;
         let mut step_index: u32 = 0;
-        for (_, capability) in &completed {
+        for capability in &replay {
             let input = StepInput {
                 config: agent_config.clone(),
                 trigger: trigger.clone(),
@@ -3403,6 +3417,49 @@ fn tool_row_to_capability(row: &ToolDispatchRow) -> CapabilityResult {
         error_kind: None,
         duration_ms: 0,
     })
+}
+
+/// Regroup a chronologically-ordered capability stream so each model
+/// turn's tool results collapse into the single capability the live
+/// loop emitted: a lone [`CapabilityResult::ToolResult`] for a
+/// one-call turn, a [`CapabilityResult::ParallelToolResults`] for a
+/// multi-call turn (mirroring the harness's `CallTool` /
+/// `CallToolsParallel` split). Recovery persists one `tool_dispatch`
+/// row per call, but the harness answers a parallel turn with a single
+/// capability; feeding the rows individually desyncs replay at the
+/// second result ("expected ModelResult after CallModel"). A maximal
+/// run of consecutive tool results belongs to one turn — the next
+/// model call only starts once the turn's results are integrated — so
+/// each run becomes one capability. Non-tool capabilities pass through
+/// in place.
+fn coalesce_tool_results(ordered: Vec<(i64, CapabilityResult)>) -> Vec<CapabilityResult> {
+    let mut out: Vec<CapabilityResult> = Vec::with_capacity(ordered.len());
+    let mut batch: Vec<ToolCallResult> = Vec::new();
+    for (_, capability) in ordered {
+        match capability {
+            CapabilityResult::ToolResult(result) => batch.push(result),
+            other => {
+                flush_tool_batch(&mut batch, &mut out);
+                out.push(other);
+            }
+        }
+    }
+    flush_tool_batch(&mut batch, &mut out);
+    out
+}
+
+/// Emit an accumulated run of tool results as the one capability the
+/// live loop produced — a bare `ToolResult` for a single call,
+/// `ParallelToolResults` for several — then clear the batch. An empty
+/// batch emits nothing.
+fn flush_tool_batch(batch: &mut Vec<ToolCallResult>, out: &mut Vec<CapabilityResult>) {
+    match batch.len() {
+        0 => {}
+        1 => out.push(CapabilityResult::ToolResult(
+            batch.pop().expect("len checked == 1"),
+        )),
+        _ => out.push(CapabilityResult::ParallelToolResults(std::mem::take(batch))),
+    }
 }
 
 /// Reconstruct a [`CapabilityResult::ModelResult`] from a
