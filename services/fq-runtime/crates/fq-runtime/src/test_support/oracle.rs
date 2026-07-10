@@ -291,6 +291,126 @@ pub fn assert_valid_trace(events: &[Event]) {
     }
 }
 
+/// Concurrent-trace oracle (parallel-workers Phase 2): partition the
+/// interleaved sink by invocation id and validate each arc with the
+/// **unchanged** single-invocation grammar, plus the cross-invocation
+/// invariants:
+///
+/// - every arc has a `Triggered` root (no orphan events — E3);
+/// - at no point are more than `bound` invocations simultaneously in
+///   flight (D1). The sim clock is a global monotonic counter, so sink
+///   order *is* the interleaving record: an invocation is "in flight"
+///   between its first and last event, and the gauge is the maximum
+///   number of open intervals at any event index.
+///
+/// `check_arc` is the per-arc grammar: [`check_invocation_trace`] when
+/// every invocation ran to a terminal, [`check_invocation_trace_prefix`]
+/// when some are suspended/crashed mid-trace.
+fn check_concurrent_with(
+    events: &[Event],
+    bound: usize,
+    check_arc: fn(&[Event]) -> Result<(), Vec<TraceViolation>>,
+) -> Result<(), Vec<TraceViolation>> {
+    let mut violations: Vec<TraceViolation> = Vec::new();
+    if events.is_empty() {
+        violations.push(TraceViolation {
+            index: usize::MAX,
+            message: "empty concurrent trace".to_string(),
+        });
+        return Err(violations);
+    }
+
+    // Partition by invocation id, preserving global order within each
+    // arc and remembering each arc's first/last global index.
+    let mut arcs: Vec<(Uuid, Vec<Event>, usize, usize)> = Vec::new();
+    for (i, event) in events.iter().enumerate() {
+        let id = event.envelope.invocation_id;
+        match arcs.iter_mut().find(|(arc_id, ..)| *arc_id == id) {
+            Some((_, arc, _, last)) => {
+                arc.push(event.clone());
+                *last = i;
+            }
+            None => arcs.push((id, vec![event.clone()], i, i)),
+        }
+    }
+
+    for (id, arc, ..) in &arcs {
+        if !matches!(arc[0].payload, EventPayload::Triggered(_)) {
+            violations.push(TraceViolation {
+                index: usize::MAX,
+                message: format!("invocation {id}: arc does not start with Triggered"),
+            });
+        }
+        if let Err(arc_violations) = check_arc(arc) {
+            violations.extend(arc_violations.into_iter().map(|v| TraceViolation {
+                index: v.index,
+                message: format!("invocation {id}: {}", v.message),
+            }));
+        }
+    }
+
+    // D1: the overlap gauge, computed from the trace itself.
+    let mut max_overlap = 0usize;
+    for i in 0..events.len() {
+        let open = arcs
+            .iter()
+            .filter(|(_, _, first, last)| *first <= i && i <= *last)
+            .count();
+        max_overlap = max_overlap.max(open);
+    }
+    if max_overlap > bound {
+        violations.push(TraceViolation {
+            index: usize::MAX,
+            message: format!(
+                "{max_overlap} invocations were in flight at once; the bound is {bound}"
+            ),
+        });
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
+}
+
+/// Every arc ran to a terminal — the happy-path concurrent oracle.
+pub fn check_concurrent_trace(events: &[Event], bound: usize) -> Result<(), Vec<TraceViolation>> {
+    check_concurrent_with(events, bound, check_invocation_trace)
+}
+
+/// Arcs may be prefixes — for traces captured mid-drain or mid-crash.
+pub fn check_concurrent_trace_prefix(
+    events: &[Event],
+    bound: usize,
+) -> Result<(), Vec<TraceViolation>> {
+    check_concurrent_with(events, bound, check_invocation_trace_prefix)
+}
+
+/// Panic-with-details wrapper for [`check_concurrent_trace`].
+pub fn assert_valid_concurrent_trace(events: &[Event], bound: usize) {
+    if let Err(violations) = check_concurrent_trace(events, bound) {
+        let lines: Vec<String> = violations.iter().map(|v| format!("  - {v}")).collect();
+        panic!(
+            "concurrent trace violates the canonical sequence ({} violation(s)):\n{}",
+            lines.len(),
+            lines.join("\n")
+        );
+    }
+}
+
+/// Panic-with-details wrapper for [`check_concurrent_trace_prefix`].
+pub fn assert_valid_concurrent_trace_prefix(events: &[Event], bound: usize) {
+    if let Err(violations) = check_concurrent_trace_prefix(events, bound) {
+        let lines: Vec<String> = violations.iter().map(|v| format!("  - {v}")).collect();
+        panic!(
+            "concurrent trace (prefix mode) violates the canonical sequence ({} violation(s)):\n{}",
+            lines.len(),
+            lines.join("\n")
+        );
+    }
+}
+
 fn kind(payload: &EventPayload) -> &'static str {
     super::events::event_kind_of(payload)
 }

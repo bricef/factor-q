@@ -36,11 +36,31 @@ use crate::worker::store::WorkerStore;
 use crate::worker::{DrainSignal, ExecutorError, InvocationOutcome, WorkerId};
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
 
+tokio::task_local! {
+    /// The invocation ordinal a sim task runs under (parallel-workers
+    /// Phase 2, audit H1). [`SimWorld::run_many`] scopes each spawned
+    /// invocation with its ordinal so [`SimClock::rand_u64`] draws from
+    /// a per-invocation stream derived from `(seed, ordinal)` — an
+    /// invocation's entropy sequence is then independent of how the
+    /// scheduler interleaves its siblings, so its per-invocation trace
+    /// signature reproduces even when the global interleaving doesn't.
+    static SIM_INVOCATION_ORDINAL: usize;
+}
+
 /// Deterministic time + entropy: a strictly monotonic millisecond
 /// counter and a seeded xorshift stream.
 pub struct SimClock {
+    /// Global monotonic milliseconds. Deliberately shared across
+    /// concurrent invocations: the draw *order* is the interleaving
+    /// record the concurrent oracle's overlap gauge reads.
     ms: AtomicU64,
+    /// The un-scoped entropy stream — serial tests draw from here,
+    /// bit-identical to the pre-Phase-2 behavior.
     rng: AtomicU64,
+    seed: u64,
+    /// Per-invocation xorshift states, keyed by ordinal, derived
+    /// lazily from `(seed, ordinal)`.
+    streams: Mutex<std::collections::HashMap<usize, u64>>,
 }
 
 impl SimClock {
@@ -49,7 +69,22 @@ impl SimClock {
             ms: AtomicU64::new(1_000_000),
             // Xorshift must not start at zero.
             rng: AtomicU64::new(seed.max(1)),
+            seed,
+            streams: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    fn derive_stream(seed: u64, ordinal: usize) -> u64 {
+        // SplitMix-style spread so adjacent ordinals land far apart;
+        // xorshift must not start at zero.
+        (seed ^ (ordinal as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)).max(1)
+    }
+
+    fn step_xorshift(x: &mut u64) -> u64 {
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x
     }
 }
 
@@ -63,12 +98,19 @@ impl Clock for SimClock {
     }
 
     fn rand_u64(&self) -> u64 {
+        // Inside a `run_many` invocation task: draw from that
+        // invocation's own stream. Outside (every serial test): the
+        // shared stream, unchanged.
+        if let Ok(ordinal) = SIM_INVOCATION_ORDINAL.try_with(|o| *o) {
+            let mut streams = self.streams.lock().unwrap();
+            let state = streams
+                .entry(ordinal)
+                .or_insert_with(|| Self::derive_stream(self.seed, ordinal));
+            return Self::step_xorshift(state);
+        }
         self.rng
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |mut x| {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                Some(x)
+                Some(Self::step_xorshift(&mut x))
             })
             .expect("fetch_update with Some never fails")
     }
@@ -80,6 +122,11 @@ impl Clock for SimClock {
 pub struct RecordingSink {
     events: Mutex<Vec<Event>>,
     fail_at: AtomicUsize,
+    /// One-shot fault keyed by per-invocation publish count (see
+    /// [`Self::fail_publish_at_invocation_count`]); the per-invocation
+    /// counts live in `per_invocation_published`.
+    fail_at_invocation_count: Mutex<Option<usize>>,
+    per_invocation_published: Mutex<std::collections::HashMap<uuid::Uuid, usize>>,
     /// Armed graceful drain (ADR-0027): when the publish count first
     /// reaches the index, request the `DrainSignal` once, then disarm.
     /// Distinct from `fail_at` — the publish still succeeds; the drain
@@ -92,6 +139,8 @@ impl RecordingSink {
         Self {
             events: Mutex::new(Vec::new()),
             fail_at: AtomicUsize::new(usize::MAX),
+            fail_at_invocation_count: Mutex::new(None),
+            per_invocation_published: Mutex::new(std::collections::HashMap::new()),
             drain_arm: Mutex::new(None),
         }
     }
@@ -103,9 +152,21 @@ impl RecordingSink {
         self.fail_at.store(index, Ordering::SeqCst);
     }
 
+    /// Inject a fault keyed by *per-invocation* publish count
+    /// (parallel-workers Phase 2): the first invocation to attempt its
+    /// `nth` (zero-based) publish fails that one publish, exactly once.
+    /// Under concurrency a global publish index lands on a
+    /// nondeterministic invocation; a per-invocation count pins the
+    /// crash to a well-defined point in *some* invocation's own arc,
+    /// which is what the per-invocation recovery invariants need.
+    pub fn fail_publish_at_invocation_count(&self, nth: usize) {
+        *self.fail_at_invocation_count.lock().unwrap() = Some(nth);
+    }
+
     /// Clear the fault so a resumed run can publish normally.
     pub fn clear_fault(&self) {
         self.fail_at.store(usize::MAX, Ordering::SeqCst);
+        *self.fail_at_invocation_count.lock().unwrap() = None;
     }
 
     /// Arm a graceful drain (ADR-0027): when the publish count first
@@ -134,6 +195,22 @@ impl EventSink for RecordingSink {
         let mut events = self.events.lock().unwrap();
         if events.len() >= self.fail_at.load(Ordering::SeqCst) {
             return Err(BusError::Publish("sim: injected publish fault".to_string()));
+        }
+        // Per-invocation-count fault (Phase 2): fire once, on the first
+        // invocation whose own publish count reaches the armed value.
+        {
+            let mut count_arm = self.fail_at_invocation_count.lock().unwrap();
+            if let Some(nth) = *count_arm {
+                let mut counts = self.per_invocation_published.lock().unwrap();
+                let count = counts.entry(event.envelope.invocation_id).or_insert(0);
+                if *count >= nth {
+                    *count_arm = None;
+                    return Err(BusError::Publish(
+                        "sim: injected per-invocation publish fault".to_string(),
+                    ));
+                }
+                *count += 1;
+            }
         }
         // Graceful-drain injection (ADR-0027): at the armed publish
         // index request the drain once (the publish still succeeds); the
@@ -228,7 +305,9 @@ pub struct SimWorld {
     pub tool: Arc<ScriptedTool>,
     store: Arc<WorkerStore>,
     agent: Agent,
-    runner: ReducerRunner,
+    // Arc'd for the same reason as production: `run_many` spawns N
+    // concurrent invocations through the one shared runner.
+    runner: Arc<ReducerRunner>,
     // The `${workspace}` binding, if any — the fresh-binary resume path
     // re-wires it so re-association is exercised across the handoff.
     workspace: Option<Arc<dyn crate::worker::workspace::WorkspaceProvider>>,
@@ -299,8 +378,14 @@ impl SimWorld {
             .build()
             .expect("sim agent");
 
-        let runner =
-            Self::build_runner(&clock, &sink, &registry, &store, pricing, workspace.clone());
+        let runner = Arc::new(Self::build_runner(
+            &clock,
+            &sink,
+            &registry,
+            &store,
+            pricing,
+            workspace.clone(),
+        ));
 
         Self {
             clock,
@@ -414,6 +499,101 @@ impl SimWorld {
             .parse()
             .expect("invocation id parses");
         fresh.resume(&self.agent, llm, invocation_id).await
+    }
+
+    /// Run N invocations **concurrently** through the one shared
+    /// runner (parallel-workers Phase 2), each with its own scripted
+    /// LLM, its own entropy stream (scoped by ordinal — see
+    /// [`SIM_INVOCATION_ORDINAL`]), and a trigger payload
+    /// `{"sim": ordinal}` so tests can map invocation ids back to
+    /// scripts through the `Triggered` event. Returns outcomes in
+    /// ordinal order.
+    pub async fn run_many(
+        &self,
+        scripts: Vec<FixtureClient>,
+    ) -> Vec<Result<InvocationOutcome, ExecutorError>> {
+        let mut set = tokio::task::JoinSet::new();
+        for (ordinal, llm) in scripts.into_iter().enumerate() {
+            let runner = Arc::clone(&self.runner);
+            let agent = self.agent.clone();
+            set.spawn(SIM_INVOCATION_ORDINAL.scope(ordinal, async move {
+                let outcome = runner
+                    .run(
+                        &agent,
+                        &llm,
+                        TriggerSource::Manual,
+                        None,
+                        json!({"sim": ordinal}),
+                    )
+                    .await;
+                (ordinal, outcome)
+            }));
+        }
+        let mut outcomes: Vec<Option<Result<InvocationOutcome, ExecutorError>>> = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            let (ordinal, outcome) = joined.expect("sim invocation task panicked");
+            if outcomes.len() <= ordinal {
+                outcomes.resize_with(ordinal + 1, || None);
+            }
+            outcomes[ordinal] = Some(outcome);
+        }
+        outcomes
+            .into_iter()
+            .map(|o| o.expect("every ordinal reports an outcome"))
+            .collect()
+    }
+
+    /// Resume **every** in-flight invocation concurrently on a fresh
+    /// runner — the next-binary handoff with N suspended (plan §3).
+    /// `scripts` maps invocation id → continuation script. Clears any
+    /// armed drain/fault first. Returns `(invocation_id, outcome)`
+    /// pairs, one per in-flight invocation.
+    pub async fn resume_all_on_fresh_binary(
+        &self,
+        mut scripts: std::collections::HashMap<uuid::Uuid, FixtureClient>,
+    ) -> Vec<(uuid::Uuid, Result<InvocationOutcome, ExecutorError>)> {
+        self.sink.clear_drain();
+        self.sink.clear_fault();
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::clone(&self.tool) as Arc<dyn Tool>);
+        let fresh = Arc::new(Self::build_runner(
+            &self.clock,
+            &self.sink,
+            &registry,
+            &self.store,
+            Arc::new(PricingTable::empty()),
+            self.workspace.clone(),
+        ));
+        let mut in_flight: Vec<uuid::Uuid> = self
+            .store
+            .find_in_flight_invocations()
+            .await
+            .expect("query in-flight")
+            .iter()
+            .map(|row| row.invocation_id.parse().expect("invocation id parses"))
+            .collect();
+        // Deterministic resume order (and ordinal scoping) regardless
+        // of map iteration order.
+        in_flight.sort();
+
+        let mut set = tokio::task::JoinSet::new();
+        for (ordinal, invocation_id) in in_flight.into_iter().enumerate() {
+            let llm = scripts
+                .remove(&invocation_id)
+                .unwrap_or_else(|| panic!("no continuation script for {invocation_id}"));
+            let runner = Arc::clone(&fresh);
+            let agent = self.agent.clone();
+            set.spawn(SIM_INVOCATION_ORDINAL.scope(ordinal, async move {
+                let outcome = runner.resume(&agent, &llm, invocation_id).await;
+                (invocation_id, outcome)
+            }));
+        }
+        let mut results = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            results.push(joined.expect("sim resume task panicked"));
+        }
+        results.sort_by_key(|(id, _)| *id);
+        results
     }
 
     /// The invocation id of the (single) trace captured so far.
@@ -2057,6 +2237,426 @@ mod drain_equivalence {
                     &format!("seed {seed}, turns {turns}, drain span {boundary_span}"),
                 );
             });
+        }
+    }
+}
+
+/// Parallel-workers Phase 2: N invocations concurrently through the
+/// one shared runner, validated by the partitioned oracle
+/// (per-invocation grammar + Triggered roots + the D1 overlap gauge)
+/// and the cross-invocation conservation/isolation invariants
+/// (E2/E3/E4) from the plan's verification design.
+#[cfg(test)]
+mod concurrency {
+    use std::collections::HashMap;
+
+    use super::tests::{end_turn, sim_tool_call_with};
+    use super::*;
+    use crate::events::EventPayload;
+    use crate::test_support::oracle;
+    use crate::worker::workspace::PerInvocationWorkspace;
+
+    /// Script for ordinal `i`: `len` tool spans whose `path` parameter
+    /// targets `${workspace}` (so recorded dispatches attribute to the
+    /// invocation's own directory), then an end turn. `from` offsets
+    /// the call ids so a continuation script never collides with the
+    /// WAL rows of already-completed spans.
+    fn script_for(i: usize, from: usize, len: usize) -> FixtureClient {
+        let llm = FixtureClient::new();
+        for k in from..from + len {
+            llm.push_response(sim_tool_call_with(
+                &format!("i{i}c{k}"),
+                json!({
+                    "step": format!("{i}-{k}"),
+                    "path": format!("${{workspace}}/out-{k}.txt"),
+                }),
+            ));
+        }
+        llm.push_response(end_turn(&format!("done-{i}")));
+        llm
+    }
+
+    /// Map invocation id → ordinal via the `{"sim": ordinal}` trigger
+    /// payload each `run_many` invocation carries in its Triggered root.
+    fn ordinals_by_invocation(events: &[Event]) -> HashMap<uuid::Uuid, usize> {
+        events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::Triggered(t) => Some((
+                    e.envelope.invocation_id,
+                    t.trigger_payload["sim"].as_u64().expect("sim ordinal") as usize,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Happy path: N invocations with distinct script lengths, each in
+    /// its own provisioned workspace. Every arc passes the unchanged
+    /// grammar; dispatches conserve per invocation and never touch a
+    /// sibling's directory; terminal workspaces are reclaimed.
+    #[tokio::test]
+    async fn concurrent_happy_path_passes_the_partitioned_oracle() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let provider = Arc::new(PerInvocationWorkspace::new(root.path().to_path_buf()));
+        let world = SimWorld::with_workspace(11, 50.0, provider).await;
+
+        let lens = [1usize, 2, 3];
+        let scripts = lens
+            .iter()
+            .enumerate()
+            .map(|(i, &len)| script_for(i, 0, len))
+            .collect();
+        let outcomes = world.run_many(scripts).await;
+        for outcome in &outcomes {
+            assert!(
+                matches!(outcome, Ok(InvocationOutcome::Completed { .. })),
+                "expected Completed, got {outcome:?}"
+            );
+        }
+
+        let events = world.sink.events();
+        oracle::assert_valid_concurrent_trace(&events, lens.len());
+
+        let ordinals = ordinals_by_invocation(&events);
+        assert_eq!(ordinals.len(), lens.len(), "one arc per invocation");
+
+        let dispatches = world.tool.dispatches().lock().unwrap().clone();
+        assert_eq!(
+            dispatches.len(),
+            lens.iter().sum::<usize>(),
+            "global tool-dispatch conservation"
+        );
+        for (id, ordinal) in &ordinals {
+            let row = world
+                .store
+                .get_invocation_state(&id.to_string())
+                .await
+                .expect("state row query")
+                .expect("state row");
+            let ws = row.workspace_ref.expect("workspace_ref persisted");
+            assert!(
+                ws.ends_with(&id.to_string()),
+                "workspace dir is named by the invocation id"
+            );
+            let own = dispatches
+                .iter()
+                .filter(|p| p["path"].as_str().unwrap_or("").starts_with(&ws))
+                .count();
+            assert_eq!(
+                own, lens[*ordinal],
+                "invocation {id}: every dispatch lands in its own workspace, \
+                 and exactly as many as its script issued"
+            );
+            assert!(
+                !std::path::Path::new(&ws).exists(),
+                "terminal invocation's workspace is reclaimed"
+            );
+        }
+    }
+
+    /// Graceful drain with N in flight: every invocation suspends at a
+    /// step boundary (or had already completed), suspended workspaces
+    /// survive, and a fresh binary resumes each exactly once to
+    /// completion with per-invocation continuation scripts sized from
+    /// the WAL.
+    #[tokio::test]
+    async fn concurrent_drain_suspends_all_and_resume_completes_each() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let provider = Arc::new(PerInvocationWorkspace::new(root.path().to_path_buf()));
+        let world = SimWorld::with_workspace(13, 50.0, provider).await;
+
+        let len = 3usize;
+        // Arm the drain early: the publish still succeeds, and every
+        // in-flight invocation observes the (global) signal at its own
+        // next step boundary.
+        world.sink.drain_at_publish(4, world.runner.drain_signal());
+
+        let scripts = (0..3).map(|i| script_for(i, 0, len)).collect();
+        let outcomes = world.run_many(scripts).await;
+        let mut suspended: Vec<uuid::Uuid> = Vec::new();
+        for outcome in &outcomes {
+            match outcome {
+                Ok(InvocationOutcome::Suspended { invocation_id }) => {
+                    suspended.push(*invocation_id)
+                }
+                Ok(InvocationOutcome::Completed { .. }) => {}
+                other => panic!("expected Suspended or Completed, got {other:?}"),
+            }
+        }
+        assert!(
+            !suspended.is_empty(),
+            "an early drain must suspend at least one invocation"
+        );
+
+        // Mid-drain the trace is a set of canonical prefixes.
+        oracle::assert_valid_concurrent_trace_prefix(&world.sink.events(), 3);
+
+        // Suspended workspaces persist across the "restart".
+        let ordinals = ordinals_by_invocation(&world.sink.events());
+        let mut refs: HashMap<uuid::Uuid, String> = HashMap::new();
+        for id in &suspended {
+            let row = world
+                .store
+                .get_invocation_state(&id.to_string())
+                .await
+                .expect("state row query")
+                .expect("state row");
+            let ws = row.workspace_ref.expect("workspace_ref persisted");
+            assert!(
+                std::path::Path::new(&ws).exists(),
+                "suspended invocation keeps its workspace"
+            );
+            refs.insert(*id, ws);
+        }
+
+        // Continuation scripts sized from each invocation's own WAL.
+        let mut continuations: HashMap<uuid::Uuid, FixtureClient> = HashMap::new();
+        for id in &suspended {
+            let done = super::crash_dst::completed_llm_turns(&world, &id.to_string()).await;
+            let ordinal = ordinals[id];
+            // `done` counts completed LLM turns; each tool span is one
+            // turn, the end turn is one more. Remaining spans resume
+            // at call-id offset `done`.
+            let remaining = len.saturating_sub(done);
+            continuations.insert(*id, script_for(ordinal, done, remaining));
+        }
+        let resumed = world.resume_all_on_fresh_binary(continuations).await;
+        assert_eq!(
+            resumed.len(),
+            suspended.len(),
+            "each suspended invocation resumes once"
+        );
+        for (id, outcome) in &resumed {
+            assert!(
+                matches!(outcome, Ok(InvocationOutcome::Completed { .. })),
+                "invocation {id}: expected Completed after resume, got {outcome:?}"
+            );
+            assert!(
+                !std::path::Path::new(&refs[id]).exists(),
+                "invocation {id}: workspace reclaimed after terminal resume"
+            );
+        }
+
+        // The combined pre-drain + post-resume trace: every arc is a
+        // full canonical trace again.
+        oracle::assert_valid_concurrent_trace(&world.sink.events(), 3);
+    }
+
+    /// A publish fault pinned to one invocation's own publish count:
+    /// exactly one invocation crashes, its siblings complete
+    /// untouched, and resume brings the crashed one to completion.
+    #[tokio::test]
+    async fn concurrent_crash_isolates_to_one_invocation() {
+        let world = SimWorld::new(17, 50.0).await;
+        let len = 2usize;
+        world.sink.fail_publish_at_invocation_count(3);
+
+        let scripts = (0..2).map(|i| script_for(i, 0, len)).collect();
+        let outcomes = world.run_many(scripts).await;
+        let crashed: Vec<usize> = outcomes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| o.is_err().then_some(i))
+            .collect();
+        assert_eq!(
+            crashed.len(),
+            1,
+            "the per-invocation fault crashes exactly one invocation: {outcomes:?}"
+        );
+
+        let events_at_crash = world.sink.events().len();
+        oracle::assert_valid_concurrent_trace_prefix(&world.sink.events(), 2);
+
+        let in_flight = world
+            .store
+            .find_in_flight_invocations()
+            .await
+            .expect("query in-flight");
+        assert_eq!(in_flight.len(), 1, "one crashed invocation to recover");
+        let id: uuid::Uuid = in_flight[0].invocation_id.parse().expect("id parses");
+        let ordinal = ordinals_by_invocation(&world.sink.events())[&id];
+
+        let done = super::crash_dst::completed_llm_turns(&world, &id.to_string()).await;
+        let remaining = len.saturating_sub(done);
+        let mut continuation = HashMap::new();
+        continuation.insert(id, script_for(ordinal, done, remaining));
+        let resumed = world.resume_all_on_fresh_binary(continuation).await;
+        assert_eq!(resumed.len(), 1);
+        assert!(
+            matches!(resumed[0].1, Ok(InvocationOutcome::Completed { .. })),
+            "crashed invocation completes on resume: {:?}",
+            resumed[0].1
+        );
+
+        // A crash can land mid-triple, so the crashed arc's combined
+        // trace is validated in two segments — pre-crash as a prefix,
+        // the continuation with the resume grammar (headless, runs to
+        // terminal) — exactly as the single-invocation crash DST does.
+        // The untouched sibling must still be one full canonical arc.
+        let events = world.sink.events();
+        let crashed_pre: Vec<Event> = events[..events_at_crash]
+            .iter()
+            .filter(|e| e.envelope.invocation_id == id)
+            .cloned()
+            .collect();
+        let crashed_post: Vec<Event> = events[events_at_crash..]
+            .iter()
+            .filter(|e| e.envelope.invocation_id == id)
+            .cloned()
+            .collect();
+        if let Err(violations) = oracle::check_invocation_trace_prefix(&crashed_pre) {
+            panic!("crashed arc's pre-crash segment not a canonical prefix: {violations:?}");
+        }
+        if let Err(violations) = oracle::check_resume_trace(&crashed_post) {
+            panic!("crashed arc's resumed segment not a canonical resume trace: {violations:?}");
+        }
+        for (sibling, _) in ordinals_by_invocation(&events)
+            .iter()
+            .filter(|(other, _)| **other != id)
+        {
+            let arc: Vec<Event> = events
+                .iter()
+                .filter(|e| e.envelope.invocation_id == *sibling)
+                .cloned()
+                .collect();
+            oracle::assert_valid_trace(&arc);
+        }
+    }
+
+    /// E2's sharpest case: one invocation blowing its budget never
+    /// touches a concurrent sibling's spend.
+    #[tokio::test]
+    async fn concurrent_budgets_do_not_cross_contaminate() {
+        let mut entries = std::collections::HashMap::new();
+        entries.insert(
+            "claude-sim".to_string(),
+            crate::pricing::ModelPricing {
+                // Each scripted turn reads 100 input tokens → $1.00.
+                input_per_million: 10_000.0,
+                output_per_million: 0.0,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+            },
+        );
+        let pricing = Arc::new(PricingTable::from_map(entries));
+        let world = SimWorld::with_pricing(19, 5.0, pricing).await;
+
+        // Ordinal 0: six $1 turns — crosses the $5 budget mid-run.
+        // Ordinal 1: one turn plus the end turn — comfortably under.
+        let scripts = vec![script_for(0, 0, 6), script_for(1, 0, 1)];
+        let outcomes = world.run_many(scripts).await;
+
+        let ordinals = ordinals_by_invocation(&world.sink.events());
+        for (id, ordinal) in &ordinals {
+            let outcome = &outcomes[*ordinal];
+            match ordinal {
+                0 => assert!(
+                    matches!(outcome, Ok(InvocationOutcome::BudgetExceeded { .. })),
+                    "invocation {id} (big spender): expected BudgetExceeded, got {outcome:?}"
+                ),
+                _ => assert!(
+                    matches!(outcome, Ok(InvocationOutcome::Completed { .. })),
+                    "invocation {id} (frugal): its sibling's overspend must not \
+                     trip this budget; got {outcome:?}"
+                ),
+            }
+        }
+    }
+}
+
+/// The seeded-random-interleaving sweep from the plan's Phase 2
+/// verification design: many (seed, N, script-shape) combinations, each
+/// run concurrently and held to the partitioned oracle plus
+/// conservation. Per-invocation entropy is ordinal-derived, so a
+/// failure's per-invocation signature reproduces even where the global
+/// interleaving doesn't.
+#[cfg(test)]
+mod concurrency_properties {
+    use proptest::prelude::*;
+
+    use super::tests::{end_turn, sim_tool_call_with};
+    use super::*;
+    use crate::events::EventPayload;
+    use crate::test_support::oracle;
+
+    fn script_for(i: usize, len: usize) -> FixtureClient {
+        let llm = FixtureClient::new();
+        for k in 0..len {
+            llm.push_response(sim_tool_call_with(
+                &format!("i{i}c{k}"),
+                json!({"step": format!("{i}-{k}")}),
+            ));
+        }
+        llm.push_response(end_turn(&format!("done-{i}")));
+        llm
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 16,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn concurrent_happy_sweep(
+            seed in 1u64..=u64::MAX / 2,
+            lens in proptest::collection::vec(1usize..=3, 2..=4),
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let world = SimWorld::new(seed, 500.0).await;
+                let scripts = lens
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &len)| script_for(i, len))
+                    .collect();
+                let outcomes = world.run_many(scripts).await;
+                for outcome in &outcomes {
+                    prop_assert!(
+                        matches!(outcome, Ok(InvocationOutcome::Completed { .. })),
+                        "expected Completed, got {:?}",
+                        outcome
+                    );
+                }
+
+                let events = world.sink.events();
+                if let Err(violations) =
+                    oracle::check_concurrent_trace(&events, lens.len())
+                {
+                    let lines: Vec<String> =
+                        violations.iter().map(|v| format!("  - {v}")).collect();
+                    prop_assert!(false, "oracle violations:\n{}", lines.join("\n"));
+                }
+
+                // Conservation: per-invocation LLM turns match each
+                // script exactly (len tool turns + 1 end turn).
+                let mut seen = 0usize;
+                for event in &events {
+                    if let EventPayload::Triggered(t) = &event.payload {
+                        let ordinal =
+                            t.trigger_payload["sim"].as_u64().expect("ordinal") as usize;
+                        let turns = super::crash_dst::completed_llm_turns(
+                            &world,
+                            &event.envelope.invocation_id.to_string(),
+                        )
+                        .await;
+                        prop_assert_eq!(
+                            turns,
+                            lens[ordinal] + 1,
+                            "invocation {} (ordinal {}) LLM-turn conservation",
+                            event.envelope.invocation_id,
+                            ordinal
+                        );
+                        seen += 1;
+                    }
+                }
+                prop_assert_eq!(seen, lens.len(), "one Triggered root per script");
+                Ok(())
+            })?;
         }
     }
 }

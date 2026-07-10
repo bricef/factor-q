@@ -314,3 +314,23 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   test locking in "every WAL row leads with invocation_id". The shared
   base-MCP-connection concurrent-read smoke (H3) and per-invocation
   sim-clock seeding (H1) move to Phase 2, where the harness work lives.
+
+
+- **2026-07-10 — Phase 2 shipped: the multi-invocation harness and the
+  concurrent gate are green.** Delivered per the verification design:
+  per-invocation entropy streams (ordinal-scoped task-locals over the
+  sim clock — H1), `run_many`/`resume_all_on_fresh_binary` drivers, a
+  per-invocation-count publish fault (crashes pin to one invocation's
+  own arc), and the partitioned oracle (`check_concurrent_trace[_prefix]`
+  — unchanged per-arc grammar + Triggered roots + the D1 overlap gauge
+  computed from sink order). Scenarios green: N-happy (E1–E4 incl.
+  workspace isolation and reclaim), N-drain with resume-each-exactly-once
+  across a fresh binary, single-invocation crash isolation + resume
+  (pre/post segments validated with the prefix/resume grammars), budget
+  cross-contamination (E2), and a 16-case seeded sweep over (seed, N,
+  script shapes). The shared-base-MCP concurrent-read smoke (H3) runs
+  hermetically over the mock duplex transport. **Remaining before
+  raising the dogfood bound (Phase 3):** the live drill — `fq drain`
+  and `fq down` on a scratch daemon with N real invocations in flight —
+  and a decision on whether the D2/D3 dispatcher loop invariants need
+  property-level coverage beyond the gated overlap/serial tests.
