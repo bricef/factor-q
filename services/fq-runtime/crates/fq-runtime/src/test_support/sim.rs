@@ -192,7 +192,18 @@ impl Tool for ScriptedTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({"type": "object"})
+        // `cwd`/`path` declare `format: path` so sim tests exercise the
+        // declared-path-only `${workspace}` substitution; every other
+        // property is deliberately un-annotated (passed verbatim).
+        json!({
+            "type": "object",
+            "properties": {
+                "cwd":  { "type": "string", "format": "path" },
+                "path": { "type": "string", "format": "path" },
+                "step": { "type": "string" },
+                "content": { "type": "string" }
+            }
+        })
     }
 
     async fn execute(
@@ -523,12 +534,15 @@ mod tests {
     }
 
     /// Phase 0 of the parallel-workers plan: with a workspace provider
-    /// wired, `${workspace}` in tool parameters is substituted before
-    /// the tool executes (and before the intent is persisted), and the
-    /// binding lands in the state row's `workspace_ref` so recovery can
-    /// re-associate.
+    /// wired, `${workspace}` is substituted in the tool call's
+    /// *declared path parameters only* (before the intent is
+    /// persisted); non-path parameters — file contents, arbitrary
+    /// strings — pass through **verbatim**, because silently rewriting
+    /// agent output is undebuggable. The binding lands in the state
+    /// row's `workspace_ref` so recovery can re-associate, and the
+    /// step-0 preamble tells the agent where `${workspace}` points.
     #[tokio::test]
-    async fn workspace_binding_substitutes_params_and_persists_ref() {
+    async fn workspace_binding_substitutes_path_params_only_and_persists_ref() {
         let ws_dir = tempfile::tempdir().expect("workspace dir");
         let ws_path = ws_dir.path().to_path_buf();
         let provider = Arc::new(crate::worker::workspace::StaticWorkspace::new(
@@ -539,7 +553,12 @@ mod tests {
         let llm = FixtureClient::new();
         llm.push_response(sim_tool_call_with(
             "c1",
-            json!({"cwd": "${workspace}", "path": "${workspace}/notes.md"}),
+            json!({
+                "cwd": "${workspace}",
+                "path": "${workspace}/notes.md",
+                "content": "I am writing ${workspace} into a file",
+                "step": "echo ${workspace}"
+            }),
         ));
         llm.push_response(end_turn("done"));
         let outcome = world.run(&llm).await.expect("sim run");
@@ -549,6 +568,16 @@ mod tests {
         let ws = ws_path.to_string_lossy();
         assert_eq!(dispatches[0]["cwd"], json!(ws));
         assert_eq!(dispatches[0]["path"], json!(format!("{ws}/notes.md")));
+        assert_eq!(
+            dispatches[0]["content"],
+            json!("I am writing ${workspace} into a file"),
+            "non-path parameters must never be rewritten"
+        );
+        assert_eq!(
+            dispatches[0]["step"],
+            json!("echo ${workspace}"),
+            "non-path parameters must never be rewritten"
+        );
 
         let row = world
             .store
@@ -560,6 +589,21 @@ mod tests {
             row.workspace_ref.as_deref(),
             Some(ws.as_ref()),
             "the workspace binding must be persisted for resume re-association"
+        );
+
+        // The step-0 preamble tells the agent authoritatively where
+        // `${workspace}` points — first user message of the first
+        // request, ahead of the trigger payload.
+        let requests = llm.requests();
+        let first_user = requests[0]
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, crate::events::MessageRole::User))
+            .expect("a user message");
+        let preamble = first_user.content.as_deref().unwrap_or_default();
+        assert!(
+            preamble.contains(ws.as_ref()) && preamble.contains("${workspace}"),
+            "preamble must name the real path and the token; got: {preamble}"
         );
     }
 

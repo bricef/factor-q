@@ -47,6 +47,7 @@ impl Tool for FileReadTool {
             "properties": {
                 "path": {
                     "type": "string",
+                    "format": "path",
                     "description": "Absolute or relative filesystem path to the file to read."
                 }
             },

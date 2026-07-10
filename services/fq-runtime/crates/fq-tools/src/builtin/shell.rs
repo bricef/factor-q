@@ -161,6 +161,7 @@ impl Tool for ShellTool {
                 },
                 "cwd": {
                     "type": "string",
+                    "format": "path",
                     "description": "Working directory for the child process. Must be within the agent's exec_cwd sandbox."
                 },
                 "timeout_secs": {
