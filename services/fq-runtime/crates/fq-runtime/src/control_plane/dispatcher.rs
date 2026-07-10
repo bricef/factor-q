@@ -382,6 +382,9 @@ impl TriggerDispatcher {
             ExecutorError::WorkerStore(msg) => {
                 error!(error = %msg, "worker store error during dispatch")
             }
+            ExecutorError::Workspace(e) => {
+                error!(error = %e, "workspace error during dispatch")
+            }
             ExecutorError::InvocationFailed { kind, message } => {
                 error!(kind = ?kind, error = %message, "invocation failed during dispatch")
             }

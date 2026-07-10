@@ -481,10 +481,61 @@ sandbox:
 Prompt.
 "#;
         let agent = parse_agent(content).unwrap();
-        let tool_sandbox = agent.sandbox().to_tool_sandbox();
+        let tool_sandbox = agent.sandbox().to_tool_sandbox(None).unwrap();
         let prefixes = tool_sandbox.exec_cwd_prefixes();
         assert_eq!(prefixes.len(), 1);
         assert_eq!(prefixes[0], std::path::PathBuf::from("/tmp/fq-workspace"));
+    }
+
+    #[test]
+    fn workspace_token_binds_in_sandbox_paths() {
+        let content = r#"---
+name: bound
+model: claude-haiku-4-5
+tools:
+  - shell
+sandbox:
+  fs_read:
+    - ${workspace}
+  fs_write:
+    - ${workspace}/out
+  exec_cwd:
+    - ${workspace}
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        let ws = std::path::Path::new("/wt/0198");
+        let ts = agent.sandbox().to_tool_sandbox(Some(ws)).unwrap();
+        assert_eq!(ts.read_prefixes(), &[std::path::PathBuf::from("/wt/0198")]);
+        assert_eq!(
+            ts.write_prefixes(),
+            &[std::path::PathBuf::from("/wt/0198/out")]
+        );
+        assert_eq!(
+            ts.exec_cwd_prefixes(),
+            &[std::path::PathBuf::from("/wt/0198")]
+        );
+    }
+
+    #[test]
+    fn workspace_token_without_binding_fails_loud() {
+        let content = r#"---
+name: unbound
+model: claude-haiku-4-5
+tools:
+  - shell
+sandbox:
+  exec_cwd:
+    - ${workspace}
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        let err = agent.sandbox().to_tool_sandbox(None).unwrap_err();
+        assert!(err.to_string().contains("${workspace}"));
     }
 
     #[test]
@@ -522,7 +573,7 @@ Prompt.
 
         // And the round-trip to ToolSandbox preserves each
         // dimension separately.
-        let ts = sb.to_tool_sandbox();
+        let ts = sb.to_tool_sandbox(None).unwrap();
         assert_eq!(ts.read_prefixes().len(), 1);
         assert_eq!(ts.write_prefixes().len(), 1);
         assert_eq!(ts.exec_cwd_prefixes().len(), 1);

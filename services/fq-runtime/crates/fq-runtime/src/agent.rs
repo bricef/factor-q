@@ -611,21 +611,58 @@ impl Sandbox {
     }
 
     /// Materialise this declarative sandbox into a runtime
-    /// [`fq_tools::ToolSandbox`] that tools can check against. Each
-    /// string path is converted to a `PathBuf` as-is; canonicalisation
-    /// happens at tool-check time.
-    pub fn to_tool_sandbox(&self) -> fq_tools::ToolSandbox {
+    /// [`fq_tools::ToolSandbox`] that tools can check against, binding
+    /// `${workspace}` to the invocation's workspace path. Each string
+    /// path is converted to a `PathBuf` as-is beyond the substitution;
+    /// canonicalisation happens at tool-check time.
+    ///
+    /// Fails loud when a path uses the token and no workspace is bound
+    /// (design principle 7 — an unresolvable grant must not silently
+    /// narrow or widen).
+    pub fn to_tool_sandbox(
+        &self,
+        workspace: Option<&std::path::Path>,
+    ) -> Result<fq_tools::ToolSandbox, UnboundWorkspace> {
         let mut sb = fq_tools::ToolSandbox::new();
         for path in &self.fs_read {
-            sb = sb.allow_read(std::path::PathBuf::from(path));
+            sb = sb.allow_read(bind_workspace_path(path, workspace)?);
         }
         for path in &self.fs_write {
-            sb = sb.allow_write(std::path::PathBuf::from(path));
+            sb = sb.allow_write(bind_workspace_path(path, workspace)?);
         }
         for path in &self.exec_cwd {
-            sb = sb.allow_exec_cwd(std::path::PathBuf::from(path));
+            sb = sb.allow_exec_cwd(bind_workspace_path(path, workspace)?);
         }
-        sb
+        Ok(sb)
+    }
+}
+
+/// A sandbox path used `${workspace}` but the invocation has no
+/// workspace binding — the daemon has no `[workspace]` configured.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "sandbox path {path:?} uses ${{workspace}} but no workspace is bound \
+     (set [workspace] repo in fq.toml)"
+)]
+pub struct UnboundWorkspace {
+    pub path: String,
+}
+
+fn bind_workspace_path(
+    raw: &str,
+    workspace: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, UnboundWorkspace> {
+    use crate::worker::workspace::WORKSPACE_TOKEN;
+    if !raw.contains(WORKSPACE_TOKEN) {
+        return Ok(std::path::PathBuf::from(raw));
+    }
+    match workspace {
+        Some(ws) => Ok(std::path::PathBuf::from(
+            raw.replace(WORKSPACE_TOKEN, &ws.to_string_lossy()),
+        )),
+        None => Err(UnboundWorkspace {
+            path: raw.to_string(),
+        }),
     }
 }
 

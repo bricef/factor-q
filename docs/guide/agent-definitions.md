@@ -197,6 +197,38 @@ clear error message that the LLM sees and can adapt to.
 - The sandbox is enforced at the **process level**, not the OS
   level. For stronger isolation see [ADR-0010](../adrs/accepted/0010-agent-execution-isolation.md).
 
+
+### The `${workspace}` token
+
+Instead of hardcoding an absolute workspace path, an agent can reference
+its working directory as `${workspace}` — in any sandbox dimension and in
+tool parameters (`cwd`, `path`, …). The runtime binds the token per
+invocation, driven by `[workspace]` in `fq.toml`:
+
+```yaml
+sandbox:
+  fs_read:
+    - ${workspace}
+  fs_write:
+    - ${workspace}
+  exec_cwd:
+    - ${workspace}
+```
+
+- With `worktrees = false` (default), every invocation binds to the
+  shared `repo` checkout — identical to naming the path directly.
+- With `worktrees = true`, each invocation gets a fresh detached git
+  worktree off `base_ref`, so concurrent invocations cannot clobber each
+  other's checkout. A suspended invocation keeps its worktree across
+  daemon restarts; terminal invocations are reclaimed.
+- If no `[workspace]` is configured, an agent that uses the token fails
+  loudly at invocation start rather than running with an unresolved
+  grant.
+
+Prefer the token in prompts too ("work in `${workspace}`") — the runtime
+substitutes tool parameters, so the model never needs to know the real
+path.
+
 ## Budget
 
 The `budget` field sets a hard ceiling in USD for a single

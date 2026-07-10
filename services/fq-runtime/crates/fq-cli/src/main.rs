@@ -556,6 +556,33 @@ fn print_version(json: bool) {
 /// Template files embedded in the binary. Each entry is `(destination,
 /// contents)` and is written verbatim when `fq init` runs.
 const FQ_TOML_TEMPLATE: &str = include_str!("templates/fq.toml");
+
+/// Build the `${workspace}` provider from `[workspace]` (parallel-workers
+/// Phase 0): with `worktrees = true` each invocation gets a fresh git
+/// worktree off `base_ref`; otherwise every invocation binds to the
+/// shared `repo` checkout. No `repo` configured → no binding, and agents
+/// that use the token fail loudly at invocation start.
+fn workspace_provider(
+    config: &fq_runtime::Config,
+) -> Option<std::sync::Arc<dyn fq_runtime::worker::workspace::WorkspaceProvider>> {
+    use fq_runtime::worker::workspace::{GitWorktreeProvider, StaticWorkspace};
+    let ws = &config.workspace;
+    let repo = ws.repo.clone()?;
+    if ws.worktrees {
+        let worktrees_dir = ws.worktrees_dir.clone().unwrap_or_else(|| {
+            repo.parent()
+                .map(|parent| parent.join("wt"))
+                .unwrap_or_else(|| repo.join(".fq-worktrees"))
+        });
+        Some(std::sync::Arc::new(GitWorktreeProvider::new(
+            repo,
+            worktrees_dir,
+            ws.base_ref.clone(),
+        )))
+    } else {
+        Some(std::sync::Arc::new(StaticWorkspace::new(repo)))
+    }
+}
 const README_TEMPLATE: &str = include_str!("templates/README.md");
 const SAMPLE_AGENT_TEMPLATE: &str = include_str!("templates/sample-agent.md");
 const DOCKER_COMPOSE_TEMPLATE: &str = include_str!("templates/docker-compose.yml");
@@ -851,6 +878,7 @@ async fn trigger_agent(
                 .worker_id(cli_worker_id)
                 .max_iterations(config.max_iterations)
                 .enforce_pricing(true)
+                .workspace(workspace_provider(&config))
                 .build(),
         ),
         fq_runtime::Harness::new(),
@@ -1767,6 +1795,15 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Every in-flight invocation — resumable *or* ambiguous — keeps its
+    // workspace: resume continues from it, and `fq recover` triage may
+    // need to inspect it. The startup prune below sweeps worktrees of
+    // everything else (terminal or unknown).
+    let in_flight_ids: std::collections::HashSet<String> = classified
+        .iter()
+        .map(|c| c.state.invocation_id.clone())
+        .collect();
+
     // Stash the recoverable invocations for resume after the
     // runner is constructed below.
     let recoverable: Vec<_> = classified
@@ -1853,6 +1890,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             .resources(mcp_manager.resource_reader())
             .build(),
     );
+    // The `${workspace}` binding (parallel-workers Phase 0): worktrees
+    // per invocation when enabled, the shared checkout otherwise.
+    let workspace = workspace_provider(&config);
     let resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> =
         Arc::new(fq_runtime::ReducerRunner::new(
             context.clone(),
@@ -1864,6 +1904,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                     .worker_id(worker_id.clone())
                     .max_iterations(config.max_iterations)
                     .enforce_pricing(true)
+                    .workspace(workspace.clone())
                     .build(),
             ),
             fq_runtime::Harness::new(),
@@ -1971,6 +2012,16 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     }
     if resume_count > 0 {
         println!("  resume tasks:     {resume_count} spawned");
+    }
+
+    // Sweep worktrees whose invocation is no longer in flight (plan §1:
+    // the prune belongs with the recovery scan). Safe to run while the
+    // resume tasks are starting — their ids are in the keep set. A
+    // failing sweep is a warning, never a startup blocker.
+    if let Some(provider) = &workspace
+        && let Err(err) = provider.prune(&in_flight_ids).await
+    {
+        tracing::warn!(error = %err, "workspace prune failed at startup");
     }
 
     // Publish a system.startup event before spawning any tasks.

@@ -22,6 +22,8 @@ pub struct Config {
     #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
+    pub workspace: WorkspaceConfig,
+    #[serde(default)]
     pub providers: ProvidersConfig,
     #[serde(default)]
     pub cache: CacheConfig,
@@ -143,6 +145,49 @@ pub struct AgentsConfig {
     /// declared, priced model (see [`validate_model_registry`]).
     #[serde(default)]
     pub default_model: Option<String>,
+}
+
+/// Per-invocation workspace binding (parallel-workers plan, Phase 0 —
+/// #14/#70). Agents reference their working directory as `${workspace}`;
+/// this section says what the token binds to.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkspaceConfig {
+    /// The source git repository. With `worktrees = false` this path
+    /// itself is the `${workspace}` binding (one shared checkout —
+    /// today's behavior); with `worktrees = true` each invocation gets
+    /// a fresh detached worktree provisioned from it. When unset,
+    /// `${workspace}` is unbound and any agent that uses the token
+    /// fails loudly at invocation start.
+    #[serde(default)]
+    pub repo: Option<PathBuf>,
+    /// Provision a fresh git worktree per invocation. Default off —
+    /// the rollback switch back to the single-shared-checkout behavior.
+    #[serde(default)]
+    pub worktrees: bool,
+    /// Where per-invocation worktrees live. Default: `wt/` next to
+    /// `repo` (i.e. `<repo>/../wt`).
+    #[serde(default)]
+    pub worktrees_dir: Option<PathBuf>,
+    /// The ref each worktree starts from. Remote-tracking refs
+    /// (`origin/main`) are fetched first so the base is the *latest*
+    /// upstream state, not a stale local tracking ref (#14).
+    #[serde(default = "default_base_ref")]
+    pub base_ref: String,
+}
+
+fn default_base_ref() -> String {
+    "origin/main".to_string()
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            repo: None,
+            worktrees: false,
+            worktrees_dir: None,
+            base_ref: default_base_ref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -417,6 +462,7 @@ impl Default for Config {
         Self {
             nats: NatsConfig::default(),
             agents: AgentsConfig::default(),
+            workspace: WorkspaceConfig::default(),
             providers: ProvidersConfig {
                 anthropic: Some(AnthropicConfig::default()),
                 extra: Default::default(),

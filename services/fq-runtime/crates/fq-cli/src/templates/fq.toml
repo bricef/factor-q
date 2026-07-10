@@ -33,6 +33,31 @@ directory = "agents"
 # model (see the pricing guarantee under [providers.anthropic]).
 # default_model = "claude-haiku-4-5"
 
+# [workspace]
+# Per-invocation workspace binding. Agents reference their working
+# directory as `${workspace}` (in sandbox.exec_cwd/fs_read/fs_write and
+# in tool parameters); this section says what the token binds to. When
+# the section is omitted the token is unbound, and any agent that uses
+# it fails loudly at invocation start.
+#
+# The source git repository. With `worktrees = false` this path itself
+# is the binding (one shared checkout); with `worktrees = true` each
+# invocation gets a fresh detached git worktree provisioned from it.
+# repo = "/path/to/workspace/repo"
+#
+# Provision a fresh git worktree per invocation (#14/#70). Default off.
+# A suspended invocation keeps its worktree across restarts; terminal
+# invocations are reclaimed, and orphans are swept at daemon startup.
+# worktrees = false
+#
+# Where per-invocation worktrees live. Default: `wt/` next to `repo`.
+# worktrees_dir = "/path/to/workspace/wt"
+#
+# The ref each worktree starts from. Remote-tracking refs (the default,
+# `origin/main`) are fetched first so the base is the latest upstream
+# state, not a stale local tracking ref.
+# base_ref = "origin/main"
+
 [cache]
 # Directory for runtime cache files (LiteLLM pricing JSON, etc).
 # If omitted, defaults to $XDG_CACHE_HOME/factor-q, then
