@@ -212,6 +212,7 @@ func (w *Watcher) sweepReview(ctx context.Context) {
 // cancelled.
 func (w *Watcher) Run(ctx context.Context) error {
 	w.Log.Info("github-watcher starting",
+		"version", buildVersion(),
 		"repo", w.Config.Repo, "agent", w.Config.TargetAgent,
 		"poll", w.Config.PollInterval.String(), "ready", w.Config.ReadyLabel)
 	ticker := time.NewTicker(w.Config.PollInterval)

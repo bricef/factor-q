@@ -458,6 +458,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 const FQ_GIT_SHA: &str = env!("FQ_GIT_SHA");
 const FQ_BUILD_EPOCH: &str = env!("FQ_BUILD_EPOCH");
 const FQ_TARGET: &str = env!("FQ_TARGET");
+/// Semver + commit (valid semver build metadata), so the **running**
+/// daemon reports which build it is — the `system.startup` event and
+/// banner carry the SHA, not just the semver. Lets a deploy check
+/// confirm the live process is on the expected commit.
+const FQ_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("FQ_GIT_SHA"));
 
 /// Print version + build information: semver, commit, build date, target.
 fn print_version(json: bool) {
@@ -1222,7 +1227,9 @@ fn human_bytes(bytes: u64) -> String {
 /// limping along with a broken dispatcher or projector.
 async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let runtime_id = Uuid::now_v7();
-    let version = env!("CARGO_PKG_VERSION");
+    // Includes the commit (FQ_VERSION = semver+sha), so the running
+    // daemon's startup event/banner identifies its exact build.
+    let version = FQ_VERSION;
 
     let config = global.resolve_config()?;
     println!("factor-q runtime starting");
