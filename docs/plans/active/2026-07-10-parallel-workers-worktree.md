@@ -67,7 +67,12 @@ shutdown, and crash-recovery proven correct with *N* in flight.
 
 ## Design — three coupled pieces
 
-### 1. Workspace indirection + worktree provider (the enabling change)
+### 1. Workspace indirection + workspace provider (the enabling change)
+
+> **Superseded in part** — see *Decisions taken while building* below:
+> the provider provisions plain per-invocation directories; agents
+> clone the upstream themselves. The git-worktree mechanics in this
+> section are retained for the record but were not built.
 
 Make the workspace path **per-invocation**. Agents stop naming an absolute path;
 they reference the workspace through a token the runtime resolves.
@@ -206,3 +211,26 @@ Extend the existing budget-across-resume property test to the N-invocation case.
   concurrency by Phase 2.
 - **ADR-0028** — the safe-by-construction successor; this plan is the interim
   bridge and should be retired when the VFS lands.
+
+
+## Decisions taken while building
+
+- **2026-07-10 — git is out of the runtime; worktrees dropped for
+  per-invocation directories.** Building Phase 0 surfaced that a
+  `GitWorktreeProvider` makes the runtime shell out to a host binary and
+  bakes git vocabulary (`base_ref`, `worktrees_dir`) into the operator
+  config — the wrong shape, and a red line. Decision: the runtime
+  provisions **directories only** (`[workspace] path` +
+  `per_invocation`), pure `std::fs`; **agents clone the upstream into
+  `${workspace}` themselves** through their granted tools, which is
+  where the M0 loop already does its git (branch, commit, push). A
+  fresh clone starts from the latest upstream by construction, which
+  fixes #14's stale-base bug more directly than fetch-then-worktree —
+  and per-invocation clones share no `.git`, so the worktree-lock
+  contention risk in §Risks disappears. The `WorkspaceProvider`
+  seam, the `workspace_ref` re-association, and the suspend-keeps /
+  terminal-reclaims / startup-prunes lifecycle are unchanged; ADR-0028's
+  VFS remains the successor behind the same seam. Cost: a clone per
+  invocation instead of a shared object store — acceptable at dogfood
+  scale, and shallow clones are available to the agent if it ever
+  matters.

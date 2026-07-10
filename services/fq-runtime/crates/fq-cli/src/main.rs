@@ -558,29 +558,21 @@ fn print_version(json: bool) {
 const FQ_TOML_TEMPLATE: &str = include_str!("templates/fq.toml");
 
 /// Build the `${workspace}` provider from `[workspace]` (parallel-workers
-/// Phase 0): with `worktrees = true` each invocation gets a fresh git
-/// worktree off `base_ref`; otherwise every invocation binds to the
-/// shared `repo` checkout. No `repo` configured → no binding, and agents
-/// that use the token fail loudly at invocation start.
+/// Phase 0): with `per_invocation = true` each invocation gets a fresh
+/// empty directory under `path`; otherwise every invocation binds to
+/// `path` itself. No `path` configured → no binding, and agents that use
+/// the token fail loudly at invocation start. Pure filesystem either way
+/// — what goes into a workspace is the agent's business.
 fn workspace_provider(
     config: &fq_runtime::Config,
 ) -> Option<std::sync::Arc<dyn fq_runtime::worker::workspace::WorkspaceProvider>> {
-    use fq_runtime::worker::workspace::{GitWorktreeProvider, StaticWorkspace};
+    use fq_runtime::worker::workspace::{PerInvocationWorkspace, StaticWorkspace};
     let ws = &config.workspace;
-    let repo = ws.repo.clone()?;
-    if ws.worktrees {
-        let worktrees_dir = ws.worktrees_dir.clone().unwrap_or_else(|| {
-            repo.parent()
-                .map(|parent| parent.join("wt"))
-                .unwrap_or_else(|| repo.join(".fq-worktrees"))
-        });
-        Some(std::sync::Arc::new(GitWorktreeProvider::new(
-            repo,
-            worktrees_dir,
-            ws.base_ref.clone(),
-        )))
+    let path = ws.path.clone()?;
+    if ws.per_invocation {
+        Some(std::sync::Arc::new(PerInvocationWorkspace::new(path)))
     } else {
-        Some(std::sync::Arc::new(StaticWorkspace::new(repo)))
+        Some(std::sync::Arc::new(StaticWorkspace::new(path)))
     }
 }
 const README_TEMPLATE: &str = include_str!("templates/README.md");
@@ -1797,7 +1789,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
 
     // Every in-flight invocation — resumable *or* ambiguous — keeps its
     // workspace: resume continues from it, and `fq recover` triage may
-    // need to inspect it. The startup prune below sweeps worktrees of
+    // need to inspect it. The startup prune below sweeps workspaces of
     // everything else (terminal or unknown).
     let in_flight_ids: std::collections::HashSet<String> = classified
         .iter()
@@ -1890,8 +1882,8 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             .resources(mcp_manager.resource_reader())
             .build(),
     );
-    // The `${workspace}` binding (parallel-workers Phase 0): worktrees
-    // per invocation when enabled, the shared checkout otherwise.
+    // The `${workspace}` binding (parallel-workers Phase 0): a fresh
+    // directory per invocation when enabled, the shared one otherwise.
     let workspace = workspace_provider(&config);
     let resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> =
         Arc::new(fq_runtime::ReducerRunner::new(
@@ -2014,7 +2006,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         println!("  resume tasks:     {resume_count} spawned");
     }
 
-    // Sweep worktrees whose invocation is no longer in flight (plan §1:
+    // Sweep workspaces whose invocation is no longer in flight (plan §1:
     // the prune belongs with the recovery scan). Safe to run while the
     // resume tasks are starting — their ids are in the keep set. A
     // failing sweep is a warning, never a startup blocker.

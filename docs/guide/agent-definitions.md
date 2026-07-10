@@ -215,19 +215,24 @@ sandbox:
     - ${workspace}
 ```
 
-- With `worktrees = false` (default), every invocation binds to the
-  shared `repo` checkout — identical to naming the path directly.
-- With `worktrees = true`, each invocation gets a fresh detached git
-  worktree off `base_ref`, so concurrent invocations cannot clobber each
-  other's checkout. A suspended invocation keeps its worktree across
-  daemon restarts; terminal invocations are reclaimed.
+- With `per_invocation = false` (default), every invocation binds to the
+  shared `path` directory — identical to naming the path directly.
+- With `per_invocation = true`, each invocation gets a fresh **empty**
+  directory, so concurrent invocations cannot touch each other's files.
+  A suspended invocation keeps its directory across daemon restarts;
+  terminal invocations are reclaimed.
 - If no `[workspace]` is configured, an agent that uses the token fails
   loudly at invocation start rather than running with an unresolved
   grant.
 
-Prefer the token in prompts too ("work in `${workspace}`") — the runtime
-substitutes tool parameters, so the model never needs to know the real
-path.
+The runtime provisions *directories* and nothing more. Populating the
+workspace is the agent's job through its granted tools — a code agent's
+first step is typically `git clone <upstream> ${workspace}`, which also
+guarantees it starts from the latest upstream state.
+
+Prefer the token in prompts too ("clone the repo into `${workspace}`") —
+the runtime substitutes tool parameters, so the model never needs to
+know the real path.
 
 ## Budget
 

@@ -786,7 +786,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     }
 
     /// Release the invocation's workspace on a *terminal* outcome only.
-    /// Suspension keeps the worktree — the row is still in-flight and
+    /// Suspension keeps the workspace — the row is still in-flight and
     /// resume continues from it (plan §3); infrastructure errors also
     /// keep it, conservatively, because the row may still be recoverable.
     /// Startup prune sweeps whatever recovery no longer claims. A reclaim
@@ -940,12 +940,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         completed.sort_by_key(|x| x.0);
 
         // Re-associate the invocation with its persisted workspace
-        // (plan §3): a suspended invocation's worktree survives the
+        // (plan §3): a suspended invocation's workspace survives the
         // restart, and the state row's `workspace_ref` is the binding.
         // A row with no ref (pre-Phase-0, or the provider was enabled
         // mid-flight) provisions fresh — for the static provider that
-        // is the same shared checkout; for worktrees it is a fresh
-        // base, acceptable only because such rows predate worktrees.
+        // is the same shared directory; per-invocation it is a fresh
+        // empty one, acceptable only because such rows predate the
+        // feature.
         let workspace = match (&self.config.workspace, state_row.workspace_ref.as_deref()) {
             (Some(provider), Some(persisted)) => {
                 Some(provider.reattach(invocation_id, persisted).await?)
@@ -1222,7 +1223,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     terminal_at,
                     // The invocation's `${workspace}` binding, persisted
                     // so recovery re-associates a resumed invocation with
-                    // its worktree (plan §3).
+                    // its workspace (plan §3).
                     workspace_ref: workspace.map(|p| p.to_string_lossy().into_owned()),
                     archive_status: None,
                     archive_published_at: None,
