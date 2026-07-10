@@ -55,10 +55,19 @@ type failedPayload struct {
 	ErrorKind string `json:"error_kind"`
 }
 
-// wireEvent is the on-the-wire three-layer event shape.
+// wireEvent is the on-the-wire event: an envelope plus an
+// adjacently-tagged payload. The runtime serializes its EventPayload enum
+// with serde `#[serde(tag = "event_type", content = "payload")]`, so the
+// concrete payload (trigger_payload, error_kind, …) is nested one level
+// deeper — under `payload.payload` — NOT at the top of the payload object.
+// Decoding must go through the wrapper's Content, or every payload field
+// reads as null (which silently breaks the invocation→issue binding).
 type wireEvent struct {
-	Envelope eventEnvelope   `json:"envelope"`
-	Payload  json.RawMessage `json:"payload"`
+	Envelope eventEnvelope `json:"envelope"`
+	Payload  struct {
+		EventType string          `json:"event_type"`
+		Content   json.RawMessage `json:"payload"`
+	} `json:"payload"`
 }
 
 // Outcomes subscribes to the agent's lifecycle subjects and invokes handle
@@ -111,12 +120,12 @@ func (s *NatsOutcomeSource) decode(msg *nats.Msg) (OutcomeEvent, bool) {
 	switch kind {
 	case OutcomeTriggered:
 		var tp triggeredPayload
-		if err := json.Unmarshal(we.Payload, &tp); err == nil {
+		if err := json.Unmarshal(we.Payload.Content, &tp); err == nil {
 			ev.Issue = issueFromTriggerPayload(s.taskTemplate, tp.TriggerPayload)
 		}
 	case OutcomeFailed:
 		var fp failedPayload
-		if err := json.Unmarshal(we.Payload, &fp); err == nil {
+		if err := json.Unmarshal(we.Payload.Content, &fp); err == nil {
 			ev.ErrorKind = fp.ErrorKind
 		}
 	}
