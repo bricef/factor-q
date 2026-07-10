@@ -650,6 +650,28 @@ mod tests {
         }
     }
 
+    /// A single model turn that emits *two* tool calls. The harness
+    /// answers this with `CallToolsParallel`, so it drives the
+    /// parallel-batch path — and, once persisted, its resume/replay.
+    pub(super) fn sim_two_tool_calls(first: &str, second: &str) -> ChatResponse {
+        let call = |id: &str| MessageToolCall {
+            tool_call_id: ToolCallId::new(id).unwrap(),
+            tool_name: SIM_TOOL.to_string(),
+            parameters: json!({ "step": id }),
+        };
+        ChatResponse {
+            content: None,
+            tool_calls: vec![call(first), call(second)],
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        }
+    }
+
     fn kinds(events: &[Event]) -> Vec<&'static str> {
         events
             .iter()
@@ -836,6 +858,75 @@ mod tests {
             .await
             .expect("query");
         assert!(in_flight.is_empty(), "no invocation left in flight");
+    }
+
+    /// Regression (durable-execution replay): a model turn that fires
+    /// **parallel** tool calls must survive suspend + resume. Recovery
+    /// records one `tool_dispatch` row per call, but the harness answers
+    /// the turn with a single `CallToolsParallel` / `ParallelToolResults`.
+    /// Replaying the rows individually desynced the reducer — it consumed
+    /// the first result, returned to `AwaitingModel`, then rejected the
+    /// second ("expected ModelResult after CallModel, got ToolResult") —
+    /// so *any* invocation that batched tool calls was unrecoverable and
+    /// boot-looped forever on each restart.
+    #[tokio::test]
+    async fn parallel_tool_batch_survives_suspend_and_resume() {
+        let world = SimWorld::new(11, 5.0).await;
+        world.tool.push_output(ToolResult::ok("out-a"));
+        world.tool.push_output(ToolResult::ok("out-b"));
+
+        // Turn 0 fires two tool calls; turn 1 ends. Crash at turn 1's
+        // first publish (publish 10): triggered(0) + llm turn 0 (1-3) +
+        // tool c0a (4-6) + tool c0b (7-9). Both tool results are durable
+        // by then, so resume must *replay* the batch, not re-run it.
+        let llm = FixtureClient::new();
+        llm.push_response(sim_two_tool_calls("c0a", "c0b"));
+        llm.push_response(end_turn("done"));
+        world.sink.fail_publish_at(10);
+
+        let err = world
+            .run(&llm)
+            .await
+            .expect_err("must crash after the parallel batch is recorded");
+        assert!(
+            matches!(err, ExecutorError::Bus(_)),
+            "expected the injected publish fault, got {err:?}"
+        );
+        assert_eq!(
+            world.tool.dispatches().lock().unwrap().len(),
+            2,
+            "both parallel tools ran before the crash"
+        );
+
+        // Resume drives the same `runner.resume` replay path a
+        // fresh-binary handoff uses. Before the fix this returned Err at
+        // the second tool result ("expected ModelResult after
+        // CallModel"); now the batch replays as one `ParallelToolResults`
+        // and the invocation completes.
+        let resume_llm = FixtureClient::new();
+        resume_llm.push_response(end_turn("done"));
+        let outcome = world
+            .resume(&resume_llm)
+            .await
+            .expect("resume must replay the parallel tool batch");
+        assert!(
+            matches!(outcome, InvocationOutcome::Completed { .. }),
+            "got {outcome:?}"
+        );
+
+        // Tools were replayed, not re-run (still 2 total), and nothing
+        // is left in flight to boot-loop on the next start.
+        assert_eq!(
+            world.tool.dispatches().lock().unwrap().len(),
+            2,
+            "resume replays the recorded tools; it must not re-run them"
+        );
+        let in_flight = world
+            .store
+            .find_in_flight_invocations()
+            .await
+            .expect("query");
+        assert!(in_flight.is_empty(), "no zombie invocation left in flight");
     }
 }
 
