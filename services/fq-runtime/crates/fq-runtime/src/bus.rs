@@ -63,6 +63,14 @@ pub const TRIGGER_STREAM_NAME: &str = "fq-triggers";
 /// Subject pattern matching all agent triggers.
 pub const ALL_TRIGGERS_SUBJECT: &str = "fq.trigger.>";
 
+/// The NATS server's default `max_ack_pending` for explicit-ack
+/// consumers. The dispatcher never sizes its ack window *below* this:
+/// running deployments' durable consumers already carry it as their
+/// effective value, and `get_or_create` won't rewrite an existing
+/// consumer's config — going lower would mean a config the server
+/// silently ignores on existing deployments.
+pub const NATS_DEFAULT_MAX_ACK_PENDING: i64 = 1000;
+
 /// Control subject a running `fq run` daemon subscribes to for a
 /// hot-reload of agent definitions. Published by `fq reload`
 /// (fire-and-forget, core NATS — deliberately NOT one of the
@@ -398,10 +406,9 @@ impl EventBus {
                     durable_name: Some(name.to_string()),
                     ack_policy: consumer::AckPolicy::Explicit,
                     filter_subject: filter_subject.to_string(),
-                    // Explicit ack window (previously the server default,
-                    // 1000). Sized by the caller from its concurrency
-                    // bound; note `get_or_create` does not rewrite an
-                    // existing durable consumer's config.
+                    // Explicit ack window, sized by the caller from its
+                    // concurrency bound (see NATS_DEFAULT_MAX_ACK_PENDING
+                    // for the floor rationale).
                     max_ack_pending,
                     ..Default::default()
                 },

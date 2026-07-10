@@ -1140,16 +1140,38 @@ mod tests {
 
     /// Guard for the parallel-workers concurrency invariant (H4):
     /// concurrent invocations may interleave WAL writes only because
-    /// every row is keyed by `invocation_id`. A new table or a PK
-    /// change that drops the key from the front must fail here loudly
-    /// before it can cross-contaminate invocations.
+    /// every row is keyed by `invocation_id`. Tables are enumerated
+    /// from `sqlite_master`, not hardcoded, so a *new* table added
+    /// without either an invocation-id-led PK or an explicit exemption
+    /// below fails here loudly before it can cross-contaminate
+    /// invocations.
     #[tokio::test]
     async fn wal_tables_are_keyed_by_invocation_id() {
+        // Tables that hold no per-invocation rows. Adding a table here
+        // is an explicit classification decision — the point of the
+        // test is that it cannot happen by omission.
+        const NOT_PER_INVOCATION: &[&str] = &["schema_meta"];
+
         let dir = tempdir().unwrap();
         let store = WorkerStore::open(&dir.path().join("keyed.db"))
             .await
             .unwrap();
-        for table in ["invocation_state", "tool_dispatch", "llm_dispatch"] {
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert!(
+            tables.len() > NOT_PER_INVOCATION.len(),
+            "expected per-invocation tables beyond the exemptions; got {tables:?}"
+        );
+
+        for table in tables {
+            if NOT_PER_INVOCATION.contains(&table.as_str()) {
+                continue;
+            }
             let columns: Vec<(String, i64)> = sqlx::query_as(&format!(
                 "SELECT name, pk FROM pragma_table_info('{table}')"
             ))
@@ -1162,7 +1184,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{table} has no primary key"));
             assert_eq!(
                 first_pk.0, "invocation_id",
-                "{table}'s primary key must lead with invocation_id"
+                "{table}'s primary key must lead with invocation_id \
+                 (or be explicitly exempted as not per-invocation)"
             );
         }
     }

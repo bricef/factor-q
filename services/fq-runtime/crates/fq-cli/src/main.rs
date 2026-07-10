@@ -1599,6 +1599,25 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let version = FQ_VERSION;
 
     let config = global.resolve_config()?;
+
+    // Fail loud on the unsafe combination (parallel-workers Phase 1):
+    // concurrent invocations sharing one workspace directory clobber
+    // each other's files silently. The precondition must hold in
+    // config, not live only as a template comment existing deployments
+    // never see (principle 7 — an unenforced declared boundary is a
+    // silent success with wider-than-intended reach).
+    if config.worker.max_concurrent_invocations > 1
+        && !(config.workspace.per_invocation && config.workspace.path.is_some())
+    {
+        anyhow::bail!(
+            "worker.max_concurrent_invocations = {} requires per-invocation \
+             workspaces: set [workspace] path and per_invocation = true, or \
+             drop the bound back to 1. Concurrent invocations sharing one \
+             workspace directory would overwrite each other's files.",
+            config.worker.max_concurrent_invocations
+        );
+    }
+
     println!("factor-q runtime starting");
     println!("  runtime id:       {runtime_id}");
     println!("  version:          {version}");
@@ -1660,9 +1679,13 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 )
             })?,
     );
-    // Pool ceiling scales with the fan-out bound (#70): each in-flight
-    // invocation is WAL-chatty, plus headroom for the sweepers. SQLite
-    // serialises the writes regardless; this only bounds waiting.
+    // Pool ceiling scales with the fan-out bound (#70): each
+    // dispatcher-run invocation is WAL-chatty, plus headroom for the
+    // sweepers. Startup recovery is NOT covered — it spawns one resume
+    // per recoverable invocation, unbounded, sharing this pool — so a
+    // large post-crash backlog queues on pool acquisition (sqlx queues
+    // rather than errors up to its acquire timeout). SQLite serialises
+    // the writes regardless; the ceiling only bounds waiting.
     let pool_ceiling = (config.worker.max_concurrent_invocations as u32 + 3).max(4);
     let worker_store = Arc::new(
         fq_runtime::WorkerStore::open_with_pool(&db_path, pool_ceiling)

@@ -223,12 +223,15 @@ per-invocation `FixtureClient` routing; per-invocation clock/RNG
 derivation; re-keyed fault injection; the shared base-MCP concurrent
 read smoke (audit H3).
 
-**CI gap (tracked separately).** The fan-out loop's tests are
-NATS-gated and CI runs the hermetic tier only — the new concurrency
-logic has no continuous coverage. Fix: seam the dispatch loop off the
-JetStream consumer type so a hermetic mock-stream test drives
-drain/shutdown/permit interleavings (and D2/D3 as fast property tests)
-in CI, leaving thin JetStream glue to the gated tier.
+**CI coverage (correction, 2026-07-10).** An earlier revision of this
+section claimed CI runs the hermetic tier only. Wrong: the `runtime-ci`
+job brings up NATS (`just infra-up` / `infra-wait`) and the runtime
+justfile exports a default `FQ_NATS_URL`, so the NATS-gated tier — the
+fan-out tests included — runs on every Rust-relevant PR (#98, filed on
+that false premise, is closed). A hermetic mock-stream seam for the
+dispatch loop remains an optional flake/speed improvement, not a
+coverage gap; take it only if the gated dispatcher tests prove flaky in
+CI (the backlog already tracks broker-sharing flakiness locally).
 
 ## Phasing (a focused sprint; each phase verifiable + shippable behind the flag)
 
