@@ -73,6 +73,7 @@ fn fq_help_lists_expected_subcommands() {
         "invocation",
         "workers",
         "status",
+        "doctor",
         "init",
         "run",
         "trigger",
@@ -194,6 +195,40 @@ fn fq_invocation_transcript_missing_db_exits_nonzero_without_panic() {
         exit,
         Some(1),
         "missing-db transcript should exit 1; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "must not panic; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn fq_doctor_help_lists_flags() {
+    let (exit, stdout, stderr) = run_fq(&["doctor", "--help"], Duration::from_secs(5));
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq doctor --help should exit 0; stderr: {stderr}"
+    );
+    for needle in ["--json", "--fail-on-issues"] {
+        assert!(
+            stdout.contains(needle),
+            "expected `{needle}` in `fq doctor --help`; got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn fq_doctor_missing_db_exits_nonzero_without_panic() {
+    // FQ_CACHE_DIR points at a nonexistent path, so the projection
+    // events.db is absent. `fq doctor` is DB-backed and needs no
+    // NATS; with no DB it must exit non-zero with an actionable
+    // error rather than panic or hang.
+    let (exit, _stdout, stderr) = run_fq(&["doctor"], Duration::from_secs(5));
+    assert_eq!(
+        exit,
+        Some(1),
+        "missing-db doctor should exit 1; stderr: {stderr}"
     );
     assert!(
         !stderr.contains("panicked"),
