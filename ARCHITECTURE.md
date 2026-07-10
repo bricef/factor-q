@@ -43,7 +43,7 @@ Agents need memory that outlasts a single invocation. Three layers:
 Persistent memory (long-term and collective) is delivered as independent MCP services rather than built into the core runtime (see ADR-0013). Agents access memory through standard tool calls (`memory.store`, `memory.retrieve`, `memory.search`). Different memory backends (KV, RAG, vector search) can be different MCP servers behind the same interface. Working memory and context window management remain executor concerns.
 
 ### Tool and skill system
-Tools are the capabilities available to agents — file operations, shell execution, HTTP requests, database queries, or any custom action. Skills are higher-level, reusable bundles of prompt instructions and tool configurations that encode domain expertise (e.g. "code reviewer", "incident responder").
+Tools are the capabilities available to agents — file operations, command execution, HTTP requests, database queries, or any custom action. Skills are higher-level, reusable bundles of prompt instructions and tool configurations that encode domain expertise (e.g. "code reviewer", "incident responder").
 
 The system must support:
 - A registry of available tools and skills
@@ -191,8 +191,8 @@ for the consolidation that landed in 2026-05.
 before comparison:
 - `fs_read` — file_read tool
 - `fs_write` — file_write tool
-- `exec_cwd` — shell tool (working directory)
-- `env` — (declared in agent defs, plumbing to shell tool deferred)
+- `exec_cwd` — exec tool (working directory)
+- `env` — (declared in agent defs, plumbing to exec tool deferred)
 
 Path traversal (`..`) and symlinks are resolved to their real
 filesystem location before the containment check. Sandbox
@@ -205,10 +205,10 @@ violations are reported as `tool.result` events with
 |---|---|---|
 | `file_read` | `file_read.rs` | `check_read` |
 | `file_write` | `file_write.rs` | `check_write` |
-| `shell` | `shell.rs` | `check_exec_cwd` |
+| `exec` | `exec.rs` | `check_exec_cwd` |
 | `self_inspect` | `self_inspect.rs` | none — host-fulfilled (see [guide](docs/guide/reducer-harness.md#host-fulfilled-tools)) |
 
-The shell tool uses argv (no shell invocation), mandatory timeout,
+The exec tool uses argv (no shell invocation), mandatory timeout,
 output cap, and a fresh child env with only a pinned PATH.
 
 ### MCP client (`fq-runtime/src/mcp.rs`)

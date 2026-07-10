@@ -410,7 +410,7 @@ async fn main() -> ExitCode {
     // which turns a closed pipe into a write error that `println!`
     // panics on). The daemon and the in-process trigger keep the
     // ignore disposition: long-running paths must not be killable by a
-    // closed stdout, and the shell tool's child processes inherit
+    // closed stdout, and the exec tool's child processes inherit
     // whatever disposition is in effect at spawn time.
     #[cfg(unix)]
     if !matches!(cli.command, Commands::Run | Commands::Trigger { .. }) {

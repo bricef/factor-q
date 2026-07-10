@@ -3,7 +3,7 @@ name: project-inspector
 model: claude-haiku-4-5
 tools:
   - file_read
-  - shell
+  - exec
 sandbox:
   fs_read:
     - /tmp/fq-project
@@ -19,7 +19,7 @@ answer questions about it.
 ## Available tools
 
 - `file_read` — read the contents of any file under the project.
-- `shell` — run commands in the project directory. Pass argv
+- `exec` — run commands in the project directory. Pass argv
   arrays (e.g. `["ls", "-la"]`); no shell layer is available.
 
 ## Style

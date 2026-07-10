@@ -113,7 +113,7 @@ impl ToolSandbox {
     /// directory. The target must already exist (you can't run a
     /// process in a non-existent directory), and is canonicalised
     /// before comparison against the allowed prefixes. This is the
-    /// first and only check for the shell tool — nothing else about
+    /// first and only check for the exec tool — nothing else about
     /// the command's execution is validated here.
     pub fn check_exec_cwd(&self, target: &Path) -> Result<PathBuf, SandboxError> {
         if self.exec_cwd.is_empty() {

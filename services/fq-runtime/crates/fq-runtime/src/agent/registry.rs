@@ -356,7 +356,7 @@ You are an agent.
             "sample-agent",
             "simple-responder",
             "file-reader",
-            "shell-runner",
+            "exec-runner",
             "project-inspector",
         ] {
             let id = AgentId::new(name).unwrap();
@@ -367,12 +367,12 @@ You are an agent.
         }
     }
 
-    /// Verify the real shell-runner example declares an exec_cwd
+    /// Verify the real exec-runner example declares an exec_cwd
     /// sandbox — this is the key feature we added in this slice
     /// and it should be reflected in the example that advertises
-    /// the shell tool.
+    /// the exec tool.
     #[test]
-    fn shell_runner_example_declares_exec_cwd() {
+    fn exec_runner_example_declares_exec_cwd() {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let examples_dir = manifest
             .join("..")
@@ -389,15 +389,15 @@ You are an agent.
             return;
         }
         let registry = AgentRegistry::load_from_directory(&examples_dir, None).expect("load");
-        let id = AgentId::new("shell-runner").unwrap();
-        let agent = registry.get(&id).expect("shell-runner example");
+        let id = AgentId::new("exec-runner").unwrap();
+        let agent = registry.get(&id).expect("exec-runner example");
         assert!(
-            agent.tools().iter().any(|t| t == "shell"),
-            "shell-runner should list shell tool"
+            agent.tools().iter().any(|t| t == "exec"),
+            "exec-runner should list exec tool"
         );
         assert!(
             !agent.sandbox().exec_cwd_paths().is_empty(),
-            "shell-runner should declare exec_cwd"
+            "exec-runner should declare exec_cwd"
         );
     }
 }
