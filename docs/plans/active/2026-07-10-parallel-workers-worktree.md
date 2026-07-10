@@ -170,6 +170,66 @@ invocations and assert, for each independently:
    no orphaned worktrees for terminal invocations.
 Extend the existing budget-across-resume property test to the N-invocation case.
 
+
+### Phase 2 verification design (2026-07-10)
+
+Refines the sweep above into invariants, an oracle, and a fuzz layer,
+sized against the existing machinery (`oracle.rs`, `SimWorld`, the
+budget proptest).
+
+**Invariants.** Dispatcher: (D1) never more than `max_concurrent`
+in-flight; (D2) permits conserve — after quiescence, available permits
+== the bound; (D3) `run()` returns only after every spawned invocation
+joined; (D4) trigger conservation — each published trigger ends
+terminal, suspended-recoverable, or still-queued, never lost or doubly
+live; (D5) serial equivalence — at bound 1 no two invocation lifespans
+ever overlap. Executor: (E1) each invocation's arc, extracted from the
+interleaved sink, passes the existing single-invocation grammar; (E2)
+no cross-contamination — WAL rows, events, cost, budget trips, and
+`workspace_ref` attribute to exactly one invocation; (E3) conservation
+— per-invocation totals sum to exactly what the fixtures served, and no
+event carries an unknown invocation id; (E4) workspace × lifecycle
+under N — terminal ⇒ reclaimed, suspended ⇒ persisted, and no tool
+dispatch ever touched a sibling's directory; (E5) resume-exactly-once
+per invocation after crash/drain with N in flight, at-most-once tool
+execution across incarnations.
+
+**Oracle: partition, then reuse.** `check_concurrent_trace(events,
+bound)`: group by `envelope.invocation_id`; run the *unchanged*
+`check_invocation_trace` per group; assert every group has a
+`Triggered` root; check E3 conservation across groups; and compute the
+overlap gauge from the trace itself — the sim clock is a global
+monotonic counter, so sink order *is* the interleaving record, and
+walking Triggered/terminal events yields max-overlap for D1/D5 with no
+new instrumentation.
+
+**Fuzz / parameterised layer.** Proptest over `(seed, N ∈ 1..=8,
+per-invocation script shapes, fault points, budgets)` driving the four
+scenarios (happy / drain / crash / shutdown) through the partitioned
+oracle. Per-invocation determinism comes from deriving each
+invocation's clock/RNG stream from `(base_seed, ordinal)` (audit H1)
+and per-invocation fixture routing — a failure's per-invocation
+signature reproduces even where global interleaving doesn't. Try
+`tokio_unstable`'s `Builder::rng_seed` (pins `select!` polling order on
+current_thread) before reaching for heavier deterministic-scheduler
+machinery; sqlx's background threads keep full replay out of scope.
+Fault injection must be re-keyed from global publish counts to
+`(invocation ordinal, publish ordinal within it)` — global counts land
+on nondeterministic invocations under concurrency.
+
+**Harness work list.** Multi-invocation `SimWorld` driver; relax the
+single-in-flight asserts in `resume`/`resume_on_fresh_binary`;
+per-invocation `FixtureClient` routing; per-invocation clock/RNG
+derivation; re-keyed fault injection; the shared base-MCP concurrent
+read smoke (audit H3).
+
+**CI gap (tracked separately).** The fan-out loop's tests are
+NATS-gated and CI runs the hermetic tier only — the new concurrency
+logic has no continuous coverage. Fix: seam the dispatch loop off the
+JetStream consumer type so a hermetic mock-stream test drives
+drain/shutdown/permit interleavings (and D2/D3 as fast property tests)
+in CI, leaving thin JetStream glue to the gated tier.
+
 ## Phasing (a focused sprint; each phase verifiable + shippable behind the flag)
 
 - **Phase 0 — worktree provider + workspace indirection.** `${workspace}`
