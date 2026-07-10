@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use fq_runtime::agent::{AgentId, AgentRegistry, definition::parse_agent};
-use fq_runtime::control_plane::projection::store::EventFilter;
+use fq_runtime::control_plane::projection::store::{EventFilter, FailureSummary};
 use fq_runtime::events::{
     Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
     TriggerSource,
@@ -193,6 +193,24 @@ enum Commands {
     /// Show a health overview of the runtime (NATS, streams,
     /// consumers, projection)
     Status,
+    /// Aggregate the runtime's durable-execution health signals
+    /// into one operator-readable report: worker liveness,
+    /// in-flight/stuck work, ambiguous invocations, and permanent
+    /// failures grouped by kind. Read-only against the SQLite
+    /// projection DB — no NATS round-trip, so it works with
+    /// `fq run` stopped. Composes (does not duplicate) `fq status`,
+    /// `fq workers list`, and `fq invocation list`.
+    Doctor {
+        /// Emit the structured `DoctorReport` as JSON instead of
+        /// the human-readable report.
+        #[arg(long)]
+        json: bool,
+        /// Exit non-zero when any check reports a problem, for use
+        /// in `&&` health-gates and cron/monitoring. Off by default
+        /// so existing scripts keep their exit-0 behaviour.
+        #[arg(long)]
+        fail_on_issues: bool,
+    },
     /// Invocation triage commands
     Invocation {
         #[command(subcommand)]
@@ -418,6 +436,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             show_costs(&cli.global, agent.as_deref(), since.as_deref()).await?
         }
         Commands::Status => show_status(&cli.global).await?,
+        Commands::Doctor {
+            json,
+            fail_on_issues,
+        } => doctor(&cli.global, json, fail_on_issues).await?,
         Commands::Invocation { command } => match command {
             InvocationCommands::List {
                 status,
@@ -1131,6 +1153,289 @@ fn render_recovery_guidance(ambiguous_count: i64, stale_worker_count: i64) -> St
         ));
     }
     out
+}
+
+// ============================================================
+// fq doctor — one-shot durable-execution health report
+// ============================================================
+
+/// Stuck-work threshold: an in-flight invocation whose
+/// `invocation_state.updated_at` is older than this many ms is
+/// flagged "stuck" by `fq doctor`. Reuses the control-plane's
+/// stale-worker value (`DEFAULT_STALE_THRESHOLD_MS = 30_000`,
+/// `coordination_consumer.rs:66`) rather than inventing a third
+/// hard-coded constant — an invocation that has not touched its
+/// WAL row in as long as a worker has not heartbeated is the same
+/// order of "not making progress" signal.
+const DOCTOR_STUCK_THRESHOLD_MS: i64 = 30_000;
+
+/// Worker liveness counts plus the ids of any stale workers so
+/// the operator can act without a second `fq workers list` call.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
+struct DoctorWorkers {
+    alive: i64,
+    stale: i64,
+    shutdown: i64,
+    /// Worker ids currently past the stale threshold.
+    stale_ids: Vec<String>,
+}
+
+/// In-flight / current-execution view, read from the worker-local
+/// `invocation_state` table (the reliable live view — the CP owner
+/// table's `in_flight` status is not populated by trigger dispatch
+/// yet; see issue #50).
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
+struct DoctorExecutions {
+    in_flight: i64,
+    /// In-flight invocations whose `updated_at` is older than
+    /// [`DOCTOR_STUCK_THRESHOLD_MS`].
+    stuck: i64,
+    /// Short ids of the stuck invocations, for triage.
+    stuck_ids: Vec<String>,
+}
+
+/// Availability of the dead-letter section. Gated on issue #49:
+/// the trigger consumer sets no `max_deliver` and has no DLQ /
+/// advisory source, so there is nothing to query yet. `doctor`
+/// renders this honestly rather than fabricating a count.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state")]
+enum DoctorDeadLetters {
+    /// Not yet available; blocked on the named issue.
+    PendingIssue { issue: u32 },
+}
+
+/// The full doctor report. Serialisable for `--json`; built by the
+/// pure [`build_doctor_report`] so the checks are unit-testable
+/// without a live DB.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+struct DoctorReport {
+    workers: DoctorWorkers,
+    executions: DoctorExecutions,
+    /// Ambiguous invocations needing operator triage (CP owner
+    /// table, `status='ambiguous'`).
+    ambiguous: i64,
+    /// Terminal failures grouped by `FailureKind` (from the
+    /// projection `events` table, `event_type='failed'`).
+    failures: Vec<DoctorFailure>,
+    dead_letters: DoctorDeadLetters,
+}
+
+/// One failure-kind bucket in the report. Mirrors
+/// [`FailureSummary`] but owns its data so the report is a
+/// self-contained serialisable value.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+struct DoctorFailure {
+    error_kind: String,
+    count: i64,
+}
+
+impl DoctorReport {
+    /// Total terminal failures across all kinds.
+    fn failure_total(&self) -> i64 {
+        self.failures.iter().map(|f| f.count).sum()
+    }
+
+    /// True when any check reports a problem worth an operator's
+    /// attention: stale workers, stuck in-flight work, ambiguous
+    /// invocations, or permanent failures. In-flight work that is
+    /// merely running (not stuck) is healthy, not an issue.
+    fn has_issues(&self) -> bool {
+        self.workers.stale > 0
+            || self.executions.stuck > 0
+            || self.ambiguous > 0
+            || self.failure_total() > 0
+    }
+}
+
+/// Pure: assemble a [`DoctorReport`] from the raw store reads. Takes
+/// already-fetched worker rows, in-flight invocation rows, the
+/// ambiguous count, and the failure summary so it can be unit-tested
+/// without a database. `now_ms` and `stuck_threshold_ms` are passed
+/// in for deterministic tests.
+fn build_doctor_report(
+    workers: &[fq_runtime::control_plane::store::WorkerRow],
+    in_flight: &[fq_runtime::worker::InvocationStateRow],
+    ambiguous: i64,
+    failures: &[FailureSummary],
+    now_ms: i64,
+    stuck_threshold_ms: i64,
+) -> DoctorReport {
+    use fq_runtime::control_plane::store::WorkerStatus;
+
+    let mut w = DoctorWorkers::default();
+    for row in workers {
+        match row.status {
+            WorkerStatus::Alive => w.alive += 1,
+            WorkerStatus::Stale => {
+                w.stale += 1;
+                w.stale_ids.push(row.worker_id.clone());
+            }
+            WorkerStatus::Shutdown => w.shutdown += 1,
+        }
+    }
+
+    let mut ex = DoctorExecutions {
+        in_flight: in_flight.len() as i64,
+        ..Default::default()
+    };
+    for row in in_flight {
+        // Clock skew (a future updated_at) is not "stuck"; only a
+        // row that has genuinely not advanced past the threshold is.
+        if now_ms.saturating_sub(row.updated_at) > stuck_threshold_ms {
+            ex.stuck += 1;
+            ex.stuck_ids
+                .push(row.invocation_id.chars().take(8).collect());
+        }
+    }
+
+    let failures = failures
+        .iter()
+        .map(|f| DoctorFailure {
+            error_kind: f.error_kind.clone(),
+            count: f.count,
+        })
+        .collect();
+
+    DoctorReport {
+        workers: w,
+        executions: ex,
+        ambiguous,
+        failures,
+        // Gated: the dead-letter source does not exist until #49.
+        dead_letters: DoctorDeadLetters::PendingIssue { issue: 49 },
+    }
+}
+
+/// Pure: render the human-readable `fq doctor` report, mirroring
+/// `render_recovery_guidance` — an overall verdict, then per-failing-
+/// check the count plus the copy-paste next-step command. Returns
+/// `All clear.` when every check is green (the dead-letter line is
+/// always shown as pending #49 — it is informational, not a problem).
+fn render_doctor_report_human(report: &DoctorReport) -> String {
+    let mut out = String::new();
+    out.push_str("factor-q doctor\n\n");
+
+    // Verdict line.
+    if report.has_issues() {
+        out.push_str("Verdict: issues found — see below.\n\n");
+    } else {
+        out.push_str("Verdict: All clear.\n\n");
+    }
+
+    // Workers.
+    out.push_str(&format!(
+        "Workers: {} alive, {} stale, {} shutdown\n",
+        report.workers.alive, report.workers.stale, report.workers.shutdown
+    ));
+    if report.workers.stale > 0 {
+        out.push_str("  -> `fq workers list --stale-only` to inspect\n");
+    }
+
+    // Executions.
+    out.push_str(&format!(
+        "Current executions: {} in-flight ({} stuck)\n",
+        report.executions.in_flight, report.executions.stuck
+    ));
+    if report.executions.stuck > 0 {
+        out.push_str(&format!(
+            "  -> {} not advanced in >{}s: {}\n",
+            report.executions.stuck,
+            DOCTOR_STUCK_THRESHOLD_MS / 1000,
+            report.executions.stuck_ids.join(", ")
+        ));
+        out.push_str(
+            "  -> `fq invocation show <id>` to inspect, `fq invocation drop <id>` to triage\n",
+        );
+    }
+
+    // Ambiguous.
+    out.push_str(&format!("Ambiguous invocations: {}\n", report.ambiguous));
+    if report.ambiguous > 0 {
+        out.push_str("  -> `fq invocation list --status=ambiguous` to inspect\n");
+        out.push_str("  -> `fq invocation drop <id>` to triage individually\n");
+    }
+
+    // Permanent failures.
+    let failure_total = report.failure_total();
+    out.push_str(&format!("Permanent failures: {failure_total}\n"));
+    if failure_total > 0 {
+        for f in &report.failures {
+            out.push_str(&format!("  {}: {}\n", f.error_kind, f.count));
+        }
+        out.push_str("  -> `fq invocation list --status=failed` to inspect\n");
+    }
+
+    // Dead-letters — gated on #49; never a fabricated count.
+    match report.dead_letters {
+        DoctorDeadLetters::PendingIssue { issue } => {
+            out.push_str(&format!(
+                "Dead-letters: n/a (not yet available, pending #{issue})\n"
+            ));
+        }
+    }
+
+    out
+}
+
+/// `fq doctor`: aggregate the DB-backed durable-execution health
+/// signals into one report. Read-only against the SQLite projection
+/// DB — no NATS round-trip — so it works with `fq run` stopped.
+///
+/// Opens the three read-only stores against the single projection DB
+/// file, reads each check's source, then hands the raw rows to the
+/// pure [`build_doctor_report`] / [`render_doctor_report_human`] so
+/// the aggregation and formatting stay testable.
+async fn doctor(global: &GlobalArgs, json: bool, fail_on_issues: bool) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+
+    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open control-plane store at {}: has `fq run` been started?",
+                db_path.display()
+            )
+        })?;
+    let worker_store = fq_runtime::WorkerStore::open_read_only(&db_path)
+        .await
+        .with_context(|| format!("failed to open worker store at {}", db_path.display()))?;
+    let proj_store = ProjectionStore::open_read_only(&db_path)
+        .await
+        .with_context(|| format!("failed to open projection at {}", db_path.display()))?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let workers = cp_store.list_workers().await?;
+    let in_flight = worker_store.find_in_flight_invocations().await?;
+    let ambiguous = cp_store
+        .list_invocations_with_status(fq_runtime::control_plane::store::OwnerStatus::Ambiguous)
+        .await?
+        .len() as i64;
+    let failures = proj_store.failure_summary().await?;
+
+    let report = build_doctor_report(
+        &workers,
+        &in_flight,
+        ambiguous,
+        &failures,
+        now_ms,
+        DOCTOR_STUCK_THRESHOLD_MS,
+    );
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", render_doctor_report_human(&report));
+    }
+
+    if fail_on_issues && report.has_issues() {
+        // Opt-in non-zero exit for `&&` health-gates and cron. The
+        // anyhow error path already maps to ExitCode::FAILURE in main.
+        anyhow::bail!("doctor found issues (see report above)");
+    }
+    Ok(())
 }
 
 /// Report the state of a single JetStream stream and one of its
@@ -3401,5 +3706,201 @@ mod log_format_tests {
         assert_eq!(parsed["fields"]["message"], "structured event");
         assert_eq!(parsed["fields"]["invocation_id"], "inv-42");
         assert_eq!(parsed["fields"]["worker_id"], "w-1");
+    }
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+    use fq_runtime::control_plane::store::{WorkerRow, WorkerStatus};
+    use fq_runtime::worker::InvocationStateRow;
+
+    fn worker(id: &str, status: WorkerStatus, last_heartbeat: i64) -> WorkerRow {
+        WorkerRow {
+            worker_id: id.to_string(),
+            host: "h".to_string(),
+            registered_at: 0,
+            last_heartbeat,
+            status,
+        }
+    }
+
+    fn in_flight_row(id: &str, updated_at: i64) -> InvocationStateRow {
+        InvocationStateRow {
+            invocation_id: id.to_string(),
+            agent_id: "a".to_string(),
+            schema_version: 1,
+            phase: "awaiting_model".to_string(),
+            state_blob: vec![],
+            iteration: 0,
+            started_at: 0,
+            updated_at,
+            terminal_at: None,
+            workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
+        }
+    }
+
+    const NOW: i64 = 1_000_000;
+    const THRESHOLD: i64 = 30_000;
+
+    #[test]
+    fn all_clear_when_everything_healthy() {
+        let workers = vec![worker("w1", WorkerStatus::Alive, NOW)];
+        let in_flight: Vec<InvocationStateRow> = vec![];
+        let report = build_doctor_report(&workers, &in_flight, 0, &[], NOW, THRESHOLD);
+
+        assert!(!report.has_issues());
+        assert_eq!(report.workers.alive, 1);
+        assert_eq!(report.workers.stale, 0);
+        assert_eq!(report.executions.in_flight, 0);
+        assert_eq!(report.failure_total(), 0);
+        assert_eq!(
+            report.dead_letters,
+            DoctorDeadLetters::PendingIssue { issue: 49 }
+        );
+
+        let out = render_doctor_report_human(&report);
+        assert!(out.contains("All clear."), "got: {out}");
+        // Dead-letter section is always shown, gated on #49.
+        assert!(out.contains("pending #49"), "got: {out}");
+    }
+
+    #[test]
+    fn running_in_flight_work_is_not_an_issue() {
+        // In-flight but fresh (updated just now) is healthy.
+        let in_flight = vec![in_flight_row("inv-fresh", NOW)];
+        let report = build_doctor_report(&[], &in_flight, 0, &[], NOW, THRESHOLD);
+        assert_eq!(report.executions.in_flight, 1);
+        assert_eq!(report.executions.stuck, 0);
+        assert!(!report.has_issues());
+    }
+
+    #[test]
+    fn stale_workers_flagged_with_ids() {
+        let workers = vec![
+            worker("alive-1", WorkerStatus::Alive, NOW),
+            worker("stale-1", WorkerStatus::Stale, NOW - 60_000),
+            worker("gone-1", WorkerStatus::Shutdown, 0),
+        ];
+        let report = build_doctor_report(&workers, &[], 0, &[], NOW, THRESHOLD);
+
+        assert_eq!(report.workers.alive, 1);
+        assert_eq!(report.workers.stale, 1);
+        assert_eq!(report.workers.shutdown, 1);
+        assert_eq!(report.workers.stale_ids, vec!["stale-1".to_string()]);
+        assert!(report.has_issues());
+
+        let out = render_doctor_report_human(&report);
+        assert!(out.contains("1 alive, 1 stale, 1 shutdown"), "got: {out}");
+        assert!(out.contains("fq workers list --stale-only"), "got: {out}");
+        assert!(!out.contains("All clear."), "got: {out}");
+    }
+
+    #[test]
+    fn stuck_in_flight_flagged() {
+        let in_flight = vec![
+            in_flight_row("fresh", NOW - 1_000),
+            // updated_at well past the threshold → stuck.
+            in_flight_row("stuck-abcdef01", NOW - 120_000),
+        ];
+        let report = build_doctor_report(&[], &in_flight, 0, &[], NOW, THRESHOLD);
+
+        assert_eq!(report.executions.in_flight, 2);
+        assert_eq!(report.executions.stuck, 1);
+        // Short id (8 chars) recorded for triage.
+        assert_eq!(report.executions.stuck_ids, vec!["stuck-ab".to_string()]);
+        assert!(report.has_issues());
+
+        let out = render_doctor_report_human(&report);
+        assert!(out.contains("2 in-flight (1 stuck)"), "got: {out}");
+        assert!(out.contains("fq invocation drop"), "got: {out}");
+    }
+
+    #[test]
+    fn stuck_ignores_clock_skew() {
+        // A future updated_at (worker clock ahead) is not stuck.
+        let in_flight = vec![in_flight_row("future", NOW + 60_000)];
+        let report = build_doctor_report(&[], &in_flight, 0, &[], NOW, THRESHOLD);
+        assert_eq!(report.executions.stuck, 0);
+        assert!(!report.has_issues());
+    }
+
+    #[test]
+    fn ambiguous_flagged() {
+        let report = build_doctor_report(&[], &[], 3, &[], NOW, THRESHOLD);
+        assert_eq!(report.ambiguous, 3);
+        assert!(report.has_issues());
+
+        let out = render_doctor_report_human(&report);
+        assert!(out.contains("Ambiguous invocations: 3"), "got: {out}");
+        assert!(
+            out.contains("fq invocation list --status=ambiguous"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn permanent_failures_grouped_by_kind() {
+        let failures = vec![
+            FailureSummary {
+                error_kind: "budgetexceeded".to_string(),
+                count: 2,
+            },
+            FailureSummary {
+                error_kind: "toolerror".to_string(),
+                count: 1,
+            },
+        ];
+        let report = build_doctor_report(&[], &[], 0, &failures, NOW, THRESHOLD);
+
+        assert_eq!(report.failure_total(), 3);
+        assert!(report.has_issues());
+
+        let out = render_doctor_report_human(&report);
+        assert!(out.contains("Permanent failures: 3"), "got: {out}");
+        assert!(out.contains("budgetexceeded: 2"), "got: {out}");
+        assert!(out.contains("toolerror: 1"), "got: {out}");
+        assert!(
+            out.contains("fq invocation list --status=failed"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn report_serialises_to_stable_json_shape() {
+        let report = build_doctor_report(
+            &[worker("w1", WorkerStatus::Alive, NOW)],
+            &[in_flight_row("inv1", NOW)],
+            1,
+            &[FailureSummary {
+                error_kind: "runtimeerror".to_string(),
+                count: 4,
+            }],
+            NOW,
+            THRESHOLD,
+        );
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["workers"]["alive"], 1);
+        assert_eq!(v["executions"]["in_flight"], 1);
+        assert_eq!(v["ambiguous"], 1);
+        assert_eq!(v["failures"][0]["error_kind"], "runtimeerror");
+        assert_eq!(v["failures"][0]["count"], 4);
+        assert_eq!(v["dead_letters"]["state"], "pending_issue");
+        assert_eq!(v["dead_letters"]["issue"], 49);
+    }
+
+    #[test]
+    fn dead_letters_never_fabricates_a_count() {
+        let report = build_doctor_report(&[], &[], 0, &[], NOW, THRESHOLD);
+        // The gated variant carries no count field at all.
+        let v = serde_json::to_value(&report).unwrap();
+        assert!(v["dead_letters"].get("count").is_none());
+        let out = render_doctor_report_human(&report);
+        assert!(out.contains("n/a"), "got: {out}");
     }
 }
