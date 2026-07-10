@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 
+use fq_runtime::ChatResponse;
 use fq_runtime::events::{LlmResponsePayload, Message, MessageRole, ToolResultPayload};
 use fq_runtime::worker::{LlmDispatchRow, ToolDispatchRow};
 use serde::Serialize;
@@ -171,11 +172,16 @@ struct LlmRequestLike {
     messages: Vec<Message>,
 }
 
-/// Parse a serialised `LlmResponsePayload` into (content, tool_calls,
-/// is_error). Lenient: a payload that does not match is rendered as raw
-/// text rather than dropped, so a schema drift never blanks the turn.
+/// Parse a serialised `ChatResponse` — the shape the worker WAL persists
+/// for `llm_dispatch.response` (`write_llm_completed` stores
+/// `serde_json::to_string(&ChatResponse)`) — into (content, tool_calls,
+/// is_error). NOT `LlmResponsePayload`: that event-payload type also
+/// requires a `call_id`, so parsing a stored `ChatResponse` into it
+/// always fails and falls back to raw JSON. Lenient: a payload that does
+/// not match is rendered as raw text rather than dropped, so a schema
+/// drift never blanks the turn.
 fn parse_llm_response(raw: &str) -> (Option<String>, Vec<AssistantToolCall>, Option<bool>) {
-    match serde_json::from_str::<LlmResponsePayload>(raw) {
+    match serde_json::from_str::<ChatResponse>(raw) {
         Ok(resp) => {
             let calls = resp
                 .tool_calls
@@ -434,9 +440,12 @@ mod tests {
         {"role":"user","content":"List the files."}
     ]}"#;
 
+    // These mirror the *real* wire shape the WAL persists: a serialised
+    // `ChatResponse` (content + tool_calls + stop_reason + usage) — NO
+    // `call_id`. A fixture that adds `call_id` would spuriously parse as
+    // an `LlmResponsePayload` and hide the response-type mismatch.
     fn response_with_tool_call() -> String {
         serde_json::json!({
-            "call_id": "00000000-0000-0000-0000-000000000001",
             "content": "Let me list the files.",
             "tool_calls": [{
                 "tool_call_id": "tc-100",
@@ -451,7 +460,6 @@ mod tests {
 
     fn response_final() -> String {
         serde_json::json!({
-            "call_id": "00000000-0000-0000-0000-000000000002",
             "content": "Done — there are two files.",
             "tool_calls": [],
             "stop_reason": "end_turn",
