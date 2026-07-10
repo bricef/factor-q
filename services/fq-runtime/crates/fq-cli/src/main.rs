@@ -321,6 +321,10 @@ enum InvocationCommands {
     /// WAL. Unlike `show`/`events query`, which print headers only.
     /// Read-only; snapshot mode needs no NATS. `--follow` appends new
     /// turns live from the event bus until Ctrl-C.
+    ///
+    /// NOTE: tool output is shown verbatim and is NOT redacted — a
+    /// transcript may contain secrets that appeared in a tool result
+    /// (e.g. a command that printed a credential). Treat it as sensitive.
     Transcript {
         /// Invocation id to inspect.
         id: String,
