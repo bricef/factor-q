@@ -234,3 +234,20 @@ Extend the existing budget-across-resume property test to the N-invocation case.
   invocation instead of a shared object store — acceptable at dogfood
   scale, and shallow clones are available to the agent if it ever
   matters.
+
+
+- **2026-07-10 — Phase 1 audit came back bounded; H3 deferred to Phase 2.**
+  The §2 concurrency-safety audit found the executor already clean for
+  N-concurrent `run_invocation`: recovery has always spawned N
+  concurrent `resume()` calls on the same shared runner, every per-run
+  accumulator is stack-local, WAL rows/events are invocation-keyed, and
+  the ADR-0020 tool registry snapshots per invocation. The enumerable
+  residue shipped with the fan-out PR: JoinSet-tracked spawns so
+  drain/shutdown wait on dispatcher-run invocations (the silent
+  drain-coverage regression spawning would otherwise cause), explicit
+  `max_ack_pending` (never below the server default 1000 — get_or_create
+  won't rewrite an existing durable's config), worker-store pool ceiling
+  scaled to the bound plus an explicit `busy_timeout`, and a PK-invariant
+  test locking in "every WAL row leads with invocation_id". The shared
+  base-MCP-connection concurrent-read smoke (H3) and per-invocation
+  sim-clock seeding (H1) move to Phase 2, where the harness work lives.

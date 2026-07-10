@@ -1660,8 +1660,12 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 )
             })?,
     );
+    // Pool ceiling scales with the fan-out bound (#70): each in-flight
+    // invocation is WAL-chatty, plus headroom for the sweepers. SQLite
+    // serialises the writes regardless; this only bounds waiting.
+    let pool_ceiling = (config.worker.max_concurrent_invocations as u32 + 3).max(4);
     let worker_store = Arc::new(
-        fq_runtime::WorkerStore::open(&db_path)
+        fq_runtime::WorkerStore::open_with_pool(&db_path, pool_ceiling)
             .await
             .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
     );
@@ -2251,9 +2255,16 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     });
 
-    // Spawn the trigger dispatcher.
+    // Spawn the trigger dispatcher. Its concurrency bound (#70) is
+    // config, default 1 (serial) until the Phase-2 concurrency gate.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
-    let dispatcher = TriggerDispatcher::new(bus.clone(), shared_registry, worker, llm);
+    let dispatcher = TriggerDispatcher::new(
+        bus.clone(),
+        shared_registry,
+        worker,
+        llm,
+        config.worker.max_concurrent_invocations,
+    );
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
 
     println!();
