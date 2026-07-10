@@ -28,9 +28,12 @@
 //!   clamped to the runtime-configured maximum. On timeout the child
 //!   is killed and the tool returns with `is_error: true` plus
 //!   whatever output was captured up to that point.
-//! - **Output cap** — stdout and stderr are each truncated to a
-//!   configurable byte limit. Beyond the cap the captured streams
-//!   carry a marker showing how much was dropped.
+//! - **Output cap & line limits** — stdout and stderr are each bounded
+//!   by a configurable byte cap (a safety backstop). When bytes are
+//!   dropped the returned text carries a marker showing how much (kept
+//!   vs produced). Callers can also bound output by lines — `max_lines`
+//!   (first N, like `head`) or `tail_lines` (last N, like `tail`) — the
+//!   argv-native replacement for `| head` / `| tail`.
 //! - **Environment is a fresh map** — the child does NOT inherit the
 //!   parent's environment. A small safe baseline is set (most
 //!   importantly a pinned `PATH`), then the agent's declared env
@@ -145,6 +148,12 @@ struct ExecParams {
     cwd: String,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// Keep only the first N lines of each stream (like `head`).
+    #[serde(default)]
+    max_lines: Option<u64>,
+    /// Keep only the last N lines of each stream (like `tail`).
+    #[serde(default)]
+    tail_lines: Option<u64>,
 }
 
 #[async_trait]
@@ -154,11 +163,13 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Run a command as a child process. Takes an argv array (NOT a \
-         shell string) plus a working directory that must be within \
-         the agent's exec_cwd sandbox. Every call has a timeout and \
-         output size cap. Non-zero exit codes are returned as errors \
-         but still include stdout/stderr."
+        "Run a single program as a child process. Takes an argv array \
+         (NOT a shell string) plus a working directory that must be \
+         within the agent's exec_cwd sandbox. Every call has a timeout \
+         and an output byte cap; set max_lines or tail_lines to keep \
+         only the first or last N lines instead of piping to head/tail. \
+         Non-zero exit codes are returned as errors but still include \
+         stdout/stderr."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -179,6 +190,16 @@ impl Tool for ExecTool {
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Optional timeout in seconds. Clamped to the runtime's configured maximum."
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional. Return only the first N lines of stdout/stderr — the argv-native replacement for piping to `head`. Mutually exclusive with tail_lines."
+                },
+                "tail_lines": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional. Return only the last N lines of stdout/stderr — the argv-native replacement for piping to `tail`. Mutually exclusive with max_lines."
                 }
             },
             "required": ["command", "cwd"],
@@ -210,6 +231,26 @@ impl Tool for ExecTool {
         if let Some(op) = standalone_shell_operator(&params.command) {
             return Err(ToolError::InvalidParameters(shell_operator_help(op)));
         }
+
+        // Resolve the optional output line-limit — the argv-native
+        // replacement for `| head` / `| tail`. At most one may be set.
+        let limit = match (params.max_lines, params.tail_lines) {
+            (Some(_), Some(_)) => {
+                return Err(ToolError::InvalidParameters(
+                    "set at most one of `max_lines` (first N lines) or \
+                     `tail_lines` (last N lines), not both"
+                        .to_string(),
+                ));
+            }
+            (Some(0), _) | (_, Some(0)) => {
+                return Err(ToolError::InvalidParameters(
+                    "`max_lines` / `tail_lines` must be greater than 0".to_string(),
+                ));
+            }
+            (Some(n), None) => LineLimit::Head(n as usize),
+            (None, Some(n)) => LineLimit::Tail(n as usize),
+            (None, None) => LineLimit::None,
+        };
 
         // Enforce cwd sandbox.
         let cwd_path = PathBuf::from(&params.cwd);
@@ -271,17 +312,20 @@ impl Tool for ExecTool {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let max_output_bytes = self.config.max_output_bytes;
+        // A tail limit needs the end of the stream, so capture the tail
+        // window; every other mode keeps the head up to the byte cap.
+        let capture_tail = matches!(limit, LineLimit::Tail(_));
 
         let stdout_task = tokio::spawn(async move {
             match stdout {
-                Some(stream) => read_capped(stream, max_output_bytes).await,
-                None => (Vec::new(), false),
+                Some(stream) => capture_stream(stream, max_output_bytes, capture_tail).await,
+                None => (Vec::new(), 0),
             }
         });
         let stderr_task = tokio::spawn(async move {
             match stderr {
-                Some(stream) => read_capped(stream, max_output_bytes).await,
-                None => (Vec::new(), false),
+                Some(stream) => capture_stream(stream, max_output_bytes, capture_tail).await,
+                None => (Vec::new(), 0),
             }
         });
 
@@ -309,18 +353,21 @@ impl Tool for ExecTool {
             }
         };
 
-        let (stdout_bytes, stdout_truncated) = stdout_task
+        let (stdout_bytes, stdout_total) = stdout_task
             .await
             .map_err(|err| ToolError::ExecutionFailed(format!("stdout task panicked: {err}")))?;
-        let (stderr_bytes, stderr_truncated) = stderr_task
+        let (stderr_bytes, stderr_total) = stderr_task
             .await
             .map_err(|err| ToolError::ExecutionFailed(format!("stderr task panicked: {err}")))?;
 
-        let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-        let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-
         if timed_out {
-            let body = format_output(&stdout, stdout_truncated, &stderr, stderr_truncated);
+            let body = format_output(
+                &stdout_bytes,
+                stdout_total,
+                &stderr_bytes,
+                stderr_total,
+                limit,
+            );
             return Ok(ToolResult {
                 output: format!(
                     "Command timed out after {}s.\n\n{body}",
@@ -338,7 +385,13 @@ impl Tool for ExecTool {
             Some(code) => format!("Exit code: {code}"),
             None => "Command was terminated by a signal.".to_string(),
         };
-        let body = format_output(&stdout, stdout_truncated, &stderr, stderr_truncated);
+        let body = format_output(
+            &stdout_bytes,
+            stdout_total,
+            &stderr_bytes,
+            stderr_total,
+            limit,
+        );
 
         Ok(ToolResult {
             output: format!("{header}\n\n{body}"),
@@ -367,11 +420,9 @@ fn standalone_shell_operator(argv: &[String]) -> Option<&'static str> {
 
 /// Teaching error shown when argv carries a standalone shell operator.
 /// This text is agent-facing prompt copy (#92): it explains there is no
-/// shell and points at the safe path rather than just failing. Note the
-/// deliberate wording on output limits — the tool size-caps stdout/stderr
-/// as a *safety* limit, which is not a substitute for `head`, so the copy
-/// says "narrow the command" rather than claiming the cap makes `| head`
-/// unnecessary.
+/// shell and points at the safe path — plain argv, separate calls, the
+/// `max_lines`/`tail_lines` params in place of `| head`/`| tail`, and
+/// `file_write` in place of `>`.
 fn shell_operator_help(op: &str) -> String {
     format!(
         "`{op}` is a shell operator, but the `exec` tool does not run a \
@@ -379,11 +430,10 @@ fn shell_operator_help(op: &str) -> String {
          `|`, `>`, `&&`, and similar operators are not interpreted. Pass a \
          plain argv array (e.g. [\"grep\", \"-n\", \"foo\", \"file.txt\"]). \
          To chain or pipe commands, make separate `exec` calls and combine \
-         the results yourself. To limit output, narrow the command's own \
-         arguments (a count/`-n` flag, a more specific path) rather than \
-         piping to `head` — stdout and stderr are already size-capped as a \
-         safety limit. To write output to a file, use the `file_write` tool \
-         instead of `>`."
+         the results yourself. To limit output, use the `max_lines` (first \
+         N lines, like `head`) or `tail_lines` (last N lines) parameters \
+         instead of piping. To write output to a file, use the `file_write` \
+         tool instead of `>`."
     )
 }
 
@@ -399,76 +449,188 @@ fn classify_spawn_error(program: &str, err: std::io::Error) -> ToolError {
     }
 }
 
-/// Read at most `max_bytes` from a stream. Returns the captured
-/// bytes plus a flag indicating whether the stream was truncated.
-async fn read_capped<R>(stream: R, max_bytes: usize) -> (Vec<u8>, bool)
+/// How to bound returned output beyond the byte cap.
+#[derive(Debug, Clone, Copy)]
+enum LineLimit {
+    /// No line limit — keep the head up to the byte cap.
+    None,
+    /// Keep only the first N lines (still byte-capped).
+    Head(usize),
+    /// Keep only the last N lines (still byte-capped).
+    Tail(usize),
+}
+
+/// Capture a child stream, keeping either the head (default) or the tail
+/// (`tail = true`) up to `max_bytes`. Returns the kept bytes and the total
+/// number of bytes the stream produced (so the caller can report drops).
+async fn capture_stream<R>(stream: R, max_bytes: usize, tail: bool) -> (Vec<u8>, usize)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    if tail {
+        read_capped_tail(stream, max_bytes).await
+    } else {
+        read_capped(stream, max_bytes).await
+    }
+}
+
+/// Keep at most `max_bytes` from the **front** of a stream, draining and
+/// counting the rest (so the child never blocks on a full pipe and the
+/// caller learns the true size). Returns `(kept, total_produced)`.
+async fn read_capped<R>(stream: R, max_bytes: usize) -> (Vec<u8>, usize)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut reader = BufReader::new(stream);
     let mut buf = Vec::with_capacity(max_bytes.min(8 * 1024));
     let mut scratch = [0u8; 8 * 1024];
-    let mut truncated = false;
+    let mut total = 0usize;
     loop {
         match reader.read(&mut scratch).await {
             Ok(0) => break,
             Ok(n) => {
-                let remaining = max_bytes.saturating_sub(buf.len());
-                if remaining == 0 {
-                    // Drain the rest of the stream so the child
-                    // doesn't deadlock on a full pipe, then return
-                    // the capped buffer with the truncated flag set.
-                    loop {
-                        match reader.read(&mut scratch).await {
-                            Ok(0) | Err(_) => return (buf, true),
-                            Ok(_) => continue,
-                        }
-                    }
-                }
-                let take = remaining.min(n);
-                buf.extend_from_slice(&scratch[..take]);
-                if take < n {
-                    truncated = true;
+                total += n;
+                if buf.len() < max_bytes {
+                    let take = (max_bytes - buf.len()).min(n);
+                    buf.extend_from_slice(&scratch[..take]);
                 }
             }
             Err(_) => break,
         }
     }
-    (buf, truncated)
+    (buf, total)
+}
+
+/// Keep at most `max_bytes` from the **end** of a stream, reading the whole
+/// thing but trimming the retained window so memory stays bounded. Returns
+/// `(kept_tail, total_produced)`.
+async fn read_capped_tail<R>(stream: R, max_bytes: usize) -> (Vec<u8>, usize)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut reader = BufReader::new(stream);
+    let mut buf: Vec<u8> = Vec::new();
+    let mut scratch = [0u8; 8 * 1024];
+    let mut total = 0usize;
+    loop {
+        match reader.read(&mut scratch).await {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                buf.extend_from_slice(&scratch[..n]);
+                // Amortised trim: only memmove once the window doubles.
+                if buf.len() > 2 * max_bytes {
+                    let excess = buf.len() - max_bytes;
+                    buf.drain(..excess);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if buf.len() > max_bytes {
+        let excess = buf.len() - max_bytes;
+        buf.drain(..excess);
+    }
+    (buf, total)
+}
+
+/// Human-readable byte size, e.g. `3.4 MiB`, `100.0 KiB`, `512 B`.
+fn human_bytes(n: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * 1024;
+    if n >= MIB {
+        format!("{}.{} MiB", n / MIB, (n % MIB) * 10 / MIB)
+    } else if n >= KIB {
+        format!("{}.{} KiB", n / KIB, (n % KIB) * 10 / KIB)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// The first `n` lines of `s`, plus whether more lines followed.
+fn first_lines(s: &str, n: usize) -> (String, bool) {
+    let mut lines = s.lines();
+    let head: Vec<&str> = lines.by_ref().take(n).collect();
+    let more = lines.next().is_some();
+    (head.join("\n"), more)
+}
+
+/// The last `n` lines of `s`, plus whether earlier lines were dropped.
+fn last_lines(s: &str, n: usize) -> (String, bool) {
+    let all: Vec<&str> = s.lines().collect();
+    let dropped = all.len() > n;
+    let start = all.len().saturating_sub(n);
+    (all[start..].join("\n"), dropped)
+}
+
+/// Render one captured stream to display text plus an optional truncation
+/// note. `bytes` is what was kept (already byte-capped); `total` is how
+/// many bytes the stream actually produced.
+fn render_stream(bytes: &[u8], total: usize, limit: LineLimit) -> (String, Option<String>) {
+    let text = String::from_utf8_lossy(bytes);
+    let byte_truncated = total > bytes.len();
+    match limit {
+        LineLimit::None => {
+            let note = byte_truncated.then(|| {
+                format!(
+                    "truncated at the byte cap: kept {} of {} — use max_lines / \
+                     tail_lines to choose what you keep",
+                    human_bytes(bytes.len()),
+                    human_bytes(total),
+                )
+            });
+            (text.into_owned(), note)
+        }
+        LineLimit::Head(n) => {
+            let (shown, more) = first_lines(&text, n);
+            let note = (more || byte_truncated)
+                .then(|| format!("showing the first {n} line(s); more output followed"));
+            (shown, note)
+        }
+        LineLimit::Tail(n) => {
+            let (shown, more) = last_lines(&text, n);
+            let note = (more || byte_truncated)
+                .then(|| format!("showing the last {n} line(s); earlier output omitted"));
+            (shown, note)
+        }
+    }
 }
 
 fn format_output(
-    stdout: &str,
-    stdout_truncated: bool,
-    stderr: &str,
-    stderr_truncated: bool,
+    stdout: &[u8],
+    stdout_total: usize,
+    stderr: &[u8],
+    stderr_total: usize,
+    limit: LineLimit,
 ) -> String {
+    let (out_text, out_note) = render_stream(stdout, stdout_total, limit);
+    let (err_text, err_note) = render_stream(stderr, stderr_total, limit);
+
     let mut out = String::new();
-    out.push_str("--- stdout ---\n");
-    if stdout.is_empty() {
-        out.push_str("(empty)\n");
-    } else {
-        out.push_str(stdout);
-        if !stdout.ends_with('\n') {
-            out.push('\n');
-        }
-    }
-    if stdout_truncated {
-        out.push_str("(stdout truncated)\n");
-    }
-    out.push_str("\n--- stderr ---\n");
-    if stderr.is_empty() {
-        out.push_str("(empty)\n");
-    } else {
-        out.push_str(stderr);
-        if !stderr.ends_with('\n') {
-            out.push('\n');
-        }
-    }
-    if stderr_truncated {
-        out.push_str("(stderr truncated)\n");
-    }
+    push_stream(&mut out, "stdout", &out_text, out_note);
+    out.push('\n');
+    push_stream(&mut out, "stderr", &err_text, err_note);
     out
+}
+
+/// Append one `--- <name> ---` section with its optional truncation note.
+fn push_stream(out: &mut String, name: &str, text: &str, note: Option<String>) {
+    out.push_str("--- ");
+    out.push_str(name);
+    out.push_str(" ---\n");
+    if text.is_empty() {
+        out.push_str("(empty)\n");
+    } else {
+        out.push_str(text);
+        if !text.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    if let Some(note) = note {
+        out.push('(');
+        out.push_str(&note);
+        out.push_str(")\n");
+    }
 }
 
 /// Env vars the agent has allowlisted. This is a module-local
@@ -784,11 +946,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_is_truncated_at_cap() {
+    async fn output_is_truncated_at_cap_with_honest_report() {
         let dir = tempdir().unwrap();
         let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
         let ctx = make_exec_ctx(&sandbox);
-        // 4 KB cap, print ~80 KB (20k lines of 4 chars).
+        // 4 KB cap, print ~100 KB (20k lines).
         let tool = make_tool_fast();
         let result = tool
             .execute(
@@ -801,11 +963,181 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_error);
+        // The marker names the byte cap AND how much was kept vs produced,
+        // and points at the line-limit params — not a bare "(truncated)".
         assert!(
-            result.output.contains("(stdout truncated)"),
-            "expected truncation marker, got output:\n{}",
+            result.output.contains("truncated at the byte cap"),
+            "output:\n{}",
             result.output
         );
+        assert!(
+            result.output.contains("kept 4.0 KiB of"),
+            "output:\n{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("max_lines"),
+            "output:\n{}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn max_lines_keeps_only_the_first_n_lines() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["seq", "1", "100"],
+                    "cwd": dir.path().to_string_lossy(),
+                    "max_lines": 5,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "output:\n{}", result.output);
+        assert!(
+            result.output.contains("1\n2\n3\n4\n5"),
+            "output:\n{}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("\n6\n"),
+            "line 6 should be dropped:\n{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("showing the first 5 line(s)"),
+            "output:\n{}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn tail_lines_keeps_only_the_last_n_lines() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["seq", "1", "100"],
+                    "cwd": dir.path().to_string_lossy(),
+                    "tail_lines": 3,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "output:\n{}", result.output);
+        assert!(
+            result.output.contains("98\n99\n100"),
+            "output:\n{}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("\n1\n"),
+            "line 1 should be dropped:\n{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("showing the last 3 line(s)"),
+            "output:\n{}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn tail_lines_returns_true_tail_even_past_the_byte_cap() {
+        // The tail must be the real end of the stream, not the last lines
+        // of a byte-capped head: with a 4 KB cap and ~100 KB of output, a
+        // head capture could never reach the final lines.
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast(); // 4 KB cap
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["seq", "1", "20000"],
+                    "cwd": dir.path().to_string_lossy(),
+                    "tail_lines": 2,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "output:\n{}", result.output);
+        assert!(
+            result.output.contains("19999\n20000"),
+            "tail must reach the true final lines:\n{}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn max_lines_and_tail_lines_together_is_rejected() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let err = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["seq", "1", "10"],
+                    "cwd": dir.path().to_string_lossy(),
+                    "max_lines": 3,
+                    "tail_lines": 3,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters(_)));
+    }
+
+    #[tokio::test]
+    async fn zero_line_limit_is_rejected() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let err = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["seq", "1", "10"],
+                    "cwd": dir.path().to_string_lossy(),
+                    "max_lines": 0,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParameters(_)));
+    }
+
+    #[test]
+    fn human_bytes_formats_sizes() {
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2048), "2.0 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
+    }
+
+    #[test]
+    fn first_lines_takes_head_and_flags_more() {
+        assert_eq!(first_lines("a\nb\nc\nd", 2), ("a\nb".to_string(), true));
+        assert_eq!(first_lines("a\nb", 5), ("a\nb".to_string(), false));
+    }
+
+    #[test]
+    fn last_lines_takes_tail_and_flags_dropped() {
+        assert_eq!(last_lines("a\nb\nc\nd", 2), ("c\nd".to_string(), true));
+        assert_eq!(last_lines("a\nb", 5), ("a\nb".to_string(), false));
     }
 
     #[tokio::test]

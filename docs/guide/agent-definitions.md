@@ -125,6 +125,12 @@ shell string. No shell is invoked — there is no opportunity for
 shell injection. Pipes, redirects, and glob expansion are not
 supported.
 
+Because there is no shell, there is no `| head` / `| tail` either —
+pass `max_lines` (keep the first N lines) or `tail_lines` (keep the
+last N) in the tool call to bound large output. Each stream is also
+capped at a byte limit as a safety backstop, and the result says
+when — and by how much — it truncated.
+
 ```markdown
 ---
 name: inspector
