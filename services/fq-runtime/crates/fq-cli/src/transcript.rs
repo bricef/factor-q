@@ -44,6 +44,11 @@ pub enum TranscriptEntry {
     /// from a `tool_dispatch` row.
     ToolResult {
         timestamp_ms: i64,
+        /// Correlation id linking this result to the assistant tool call
+        /// that requested it. Present in both the WAL row and the live
+        /// `tool.result` event, so it is the reliable dedup key at the
+        /// snapshot→live seam.
+        tool_call_id: String,
         tool_name: String,
         parameters: Value,
         output: Option<String>,
@@ -125,6 +130,7 @@ pub fn collect_transcript(
     for row in tool_rows {
         entries.push(TranscriptEntry::ToolResult {
             timestamp_ms: row.completed_at.unwrap_or(row.intent_at),
+            tool_call_id: row.tool_call_id.clone(),
             tool_name: row.tool_name.clone(),
             parameters: parse_json_lenient(&row.parameters),
             output: row.result.clone(),
@@ -326,13 +332,24 @@ fn indent(s: &str) -> String {
 
 /// Dedup key for the snapshot→live seam: identifies an already-rendered
 /// entry so a live event carrying the same call is not printed twice.
+///
+/// - Tool results key on their `tool_call_id` (carried by both the WAL
+///   row and the live event).
+/// - Tool-requesting assistant turns key on their first tool call id.
+/// - A text-only assistant turn has no id shared between the stored
+///   `ChatResponse` and the live event, so it returns `None` (best
+///   effort). This is low-risk: such a turn is either the final answer
+///   (no live event follows a completed invocation) or a rare mid-run
+///   text turn, and the seam window is a single WAL read.
 pub fn dedup_key(entry: &TranscriptEntry) -> Option<String> {
     match entry {
         TranscriptEntry::Prompt { .. } => None,
         TranscriptEntry::Assistant { tool_calls, .. } => tool_calls
             .first()
             .map(|tc| format!("call:{}", tc.tool_call_id)),
-        TranscriptEntry::ToolResult { .. } => None,
+        TranscriptEntry::ToolResult { tool_call_id, .. } => {
+            Some(format!("tool:{tool_call_id}"))
+        }
     }
 }
 
@@ -354,6 +371,7 @@ pub fn tool_result_entry(
 ) -> TranscriptEntry {
     TranscriptEntry::ToolResult {
         timestamp_ms,
+        tool_call_id: payload.tool_call_id.to_string(),
         tool_name,
         parameters,
         output: Some(payload.output.clone()),
@@ -623,7 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_keys_capture_tool_call_ids() {
+    fn snapshot_keys_capture_tool_call_and_result_ids() {
+        // Both the requesting assistant turn and the tool result must be
+        // deduped at the --follow seam, under distinct prefixes.
         let llm = vec![llm_row(
             100,
             100,
@@ -631,9 +651,11 @@ mod tests {
             &response_with_tool_call(),
             0.01,
         )];
-        let entries = collect_transcript(&llm, &[]);
+        let tools = vec![tool_row(100, 100, "shell", r#"{"cmd":"ls"}"#, "ok")];
+        let entries = collect_transcript(&llm, &tools);
         let keys = snapshot_keys(&entries);
-        assert!(keys.contains("call:tc-100"));
+        assert!(keys.contains("call:tc-100"), "assistant key missing: {keys:?}");
+        assert!(keys.contains("tool:tc-100"), "tool-result key missing: {keys:?}");
     }
     #[tokio::test]
     async fn store_round_trip_transcript_ordering_and_payloads() {
