@@ -650,18 +650,20 @@ mod tests {
         }
     }
 
-    /// A single model turn that emits *two* tool calls. The harness
-    /// answers this with `CallToolsParallel`, so it drives the
-    /// parallel-batch path — and, once persisted, its resume/replay.
-    pub(super) fn sim_two_tool_calls(first: &str, second: &str) -> ChatResponse {
-        let call = |id: &str| MessageToolCall {
-            tool_call_id: ToolCallId::new(id).unwrap(),
-            tool_name: SIM_TOOL.to_string(),
-            parameters: json!({ "step": id }),
-        };
+    /// A single model turn that emits `ids.len()` tool calls. With more
+    /// than one the harness answers with `CallToolsParallel`, driving
+    /// the parallel-batch path — and, once persisted, its resume/replay.
+    pub(super) fn sim_tool_calls(ids: &[&str]) -> ChatResponse {
         ChatResponse {
             content: None,
-            tool_calls: vec![call(first), call(second)],
+            tool_calls: ids
+                .iter()
+                .map(|id| MessageToolCall {
+                    tool_call_id: ToolCallId::new(*id).unwrap(),
+                    tool_name: SIM_TOOL.to_string(),
+                    parameters: json!({ "step": id }),
+                })
+                .collect(),
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage {
                 input_tokens: 100,
@@ -670,6 +672,11 @@ mod tests {
                 cache_write_tokens: 0,
             },
         }
+    }
+
+    /// A single model turn that emits *two* tool calls.
+    pub(super) fn sim_two_tool_calls(first: &str, second: &str) -> ChatResponse {
+        sim_tool_calls(&[first, second])
     }
 
     fn kinds(events: &[Event]) -> Vec<&'static str> {
@@ -944,7 +951,7 @@ mod resume_equivalence {
     //! re-runs the interrupted span in full: the combined trace must
     //! equal the reference under the observational mask.
 
-    use super::tests::{end_turn, sim_tool_call};
+    use super::tests::{end_turn, sim_tool_call, sim_tool_calls};
     use super::*;
     use crate::llm::ChatResponse;
     use crate::test_support::oracle::observational_trace;
@@ -1063,6 +1070,105 @@ mod resume_equivalence {
         }
     }
 
+    // ---- Parallel-turn extension (guards the #103 batched-tool path) ----
+
+    /// A script shaped by per-turn tool-call counts: turn `i` fires
+    /// `calls[i]` tool calls — a *parallel* batch when >1 — then a
+    /// terminating end turn. Call ids are `c0..` in execution order so
+    /// the observational trace pins per-result ordering (an intra-batch
+    /// reorder on replay would diverge).
+    fn shaped_script(calls: &[usize]) -> Vec<ChatResponse> {
+        let mut responses = Vec::new();
+        let mut next = 0usize;
+        for &k in calls {
+            let ids: Vec<String> = (0..k)
+                .map(|_| {
+                    let id = format!("c{next}");
+                    next += 1;
+                    id
+                })
+                .collect();
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            responses.push(sim_tool_calls(&refs));
+        }
+        responses.push(end_turn("all-done"));
+        responses
+    }
+
+    /// Span kinds for a shaped script: each turn is one llm span then
+    /// `calls[i]` tool spans; the end turn is a final llm span. `true`
+    /// = llm span. Counting llm spans before a boundary yields the
+    /// number of model responses already consumed at the crash.
+    fn span_is_llm(calls: &[usize]) -> Vec<bool> {
+        let mut spans = Vec::new();
+        for &k in calls {
+            spans.push(true);
+            spans.extend(std::iter::repeat_n(false, k));
+        }
+        spans.push(true);
+        spans
+    }
+
+    async fn run_reference_shaped(seed: u64, calls: &[usize]) -> RunResult {
+        let world = SimWorld::new(seed, 5.0).await;
+        queue_tool_outputs(&world, calls.iter().sum());
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &shaped_script(calls));
+        let outcome = world.run(&llm).await.expect("reference run");
+        RunResult {
+            observed: observational_trace(&world.sink.events()),
+            summary: summary_of(&outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        }
+    }
+
+    async fn run_interrupted_shaped(seed: u64, calls: &[usize], boundary_span: usize) -> RunResult {
+        let world = SimWorld::new(seed, 5.0).await;
+        queue_tool_outputs(&world, calls.iter().sum());
+        let responses = shaped_script(calls);
+
+        world.sink.fail_publish_at(1 + 3 * boundary_span);
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &responses);
+        let err = world
+            .run(&llm)
+            .await
+            .expect_err("must crash at the boundary");
+        assert!(
+            matches!(err, ExecutorError::Bus(_)),
+            "expected the injected fault, got {err:?}"
+        );
+
+        let consumed = span_is_llm(calls)[..boundary_span]
+            .iter()
+            .filter(|&&is_llm| is_llm)
+            .count();
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &responses[consumed..]);
+        let outcome = world.resume(&resume_llm).await.expect("resume");
+
+        RunResult {
+            observed: observational_trace(&world.sink.events()),
+            summary: summary_of(&outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        }
+    }
+
+    /// Every boundary of a fixed script with a parallel batch
+    /// (`[1, 2, 1]` — turn 1 fires two tool calls), exhaustively. Covers
+    /// replaying a whole batch (guarding #103) and crashing *inside* it,
+    /// where resume re-runs only the un-recorded call.
+    #[tokio::test]
+    async fn every_boundary_of_a_parallel_script_is_equivalent() {
+        let calls = [1usize, 2, 1];
+        let spans = span_is_llm(&calls).len();
+        let reference = run_reference_shaped(4242, &calls).await;
+        for boundary in 0..spans {
+            let resumed = run_interrupted_shaped(4242, &calls, boundary).await;
+            assert_equivalent(&reference, &resumed, &format!("boundary {boundary}"));
+        }
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig {
             cases: 24, ..Default::default()
@@ -1089,6 +1195,35 @@ mod resume_equivalence {
                     &reference,
                     &resumed,
                     &format!("seed {seed}, turns {turns}, boundary {boundary}"),
+                );
+            });
+        }
+
+        /// Random shapes (turns fire 1..=3 tool calls, so some are
+        /// parallel batches) × random crash boundaries × random seeds:
+        /// the interrupted-and-resumed run is observationally identical
+        /// to the uninterrupted one — including a crash *inside* a batch,
+        /// which re-runs only the un-recorded calls.
+        #[test]
+        fn parallel_interrupted_runs_are_observationally_equivalent(
+            seed: u64,
+            calls in proptest::collection::vec(1usize..=3, 1..=3),
+            boundary in 0usize..13,
+        ) {
+            // Boundaries index spans: one llm span per turn, `calls[i]`
+            // tool spans, and a final end-turn llm span.
+            proptest::prop_assume!(boundary < span_is_llm(&calls).len());
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("sim runtime");
+            runtime.block_on(async {
+                let reference = run_reference_shaped(seed, &calls).await;
+                let resumed = run_interrupted_shaped(seed, &calls, boundary).await;
+                assert_equivalent(
+                    &reference,
+                    &resumed,
+                    &format!("seed {seed}, calls {calls:?}, boundary {boundary}"),
                 );
             });
         }
