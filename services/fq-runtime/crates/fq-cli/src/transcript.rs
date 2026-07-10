@@ -118,7 +118,12 @@ pub fn collect_transcript(
             None => (None, Vec::new(), row.is_error),
         };
         entries.push(TranscriptEntry::Assistant {
-            timestamp_ms: row.completed_at.unwrap_or(row.intent_at),
+            // `intent_at` (when the turn started) is the sort key for
+            // every entry — it matches the store's `ORDER BY intent_at`,
+            // is causally monotonic under the serial worker, and (unlike
+            // `completed_at`) is always present, so an in-flight dispatch
+            // is not mis-slotted by a fallback to a different clock.
+            timestamp_ms: row.intent_at,
             model: row.model.clone(),
             content,
             tool_calls,
@@ -129,7 +134,7 @@ pub fn collect_transcript(
 
     for row in tool_rows {
         entries.push(TranscriptEntry::ToolResult {
-            timestamp_ms: row.completed_at.unwrap_or(row.intent_at),
+            timestamp_ms: row.intent_at,
             tool_call_id: row.tool_call_id.clone(),
             tool_name: row.tool_name.clone(),
             parameters: parse_json_lenient(&row.parameters),
@@ -510,6 +515,24 @@ mod tests {
         assert!(matches!(entries[1], TranscriptEntry::Assistant { .. }));
         assert!(matches!(entries[2], TranscriptEntry::ToolResult { .. }));
         assert!(matches!(entries[3], TranscriptEntry::Assistant { .. }));
+    }
+
+    #[test]
+    fn orders_by_intent_at_not_completion() {
+        // A slow assistant turn (intent 100, completes 300) precedes a
+        // tool dispatched at intent 150. By intent_at the assistant comes
+        // first; a completed_at sort would wrongly flip them (assistant
+        // 300 after tool 160).
+        let llm = vec![llm_row(100, 300, FIRST_REQUEST, &response_with_tool_call(), 0.01)];
+        let tools = vec![tool_row(150, 160, "shell", r#"{"cmd":"ls"}"#, "ok")];
+        let entries = collect_transcript(&llm, &tools);
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(entries[0], TranscriptEntry::Prompt { .. }));
+        assert!(
+            matches!(entries[1], TranscriptEntry::Assistant { .. }),
+            "assistant must precede the later-intent tool"
+        );
+        assert!(matches!(entries[2], TranscriptEntry::ToolResult { .. }));
     }
 
     #[test]
