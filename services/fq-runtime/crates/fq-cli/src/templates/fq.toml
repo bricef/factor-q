@@ -104,11 +104,18 @@ models = ["claude-haiku-4-5"]
 
 [worker]
 # How many invocations one daemon runs concurrently (#70). Default 1
-# (serial). Each in-flight invocation spends budget in parallel and the
-# bound is the only concurrency-side spend guardrail until a fleet-level
-# cost cap lands (#42) — raise deliberately, and only with per-invocation
-# workspaces enabled ([workspace] per_invocation = true) so concurrent
-# invocations cannot clobber each other's files.
+# (serial). Raise only once ALL of the following hold:
+#   - per-invocation workspaces are enabled ([workspace]
+#     per_invocation = true) so concurrent invocations cannot clobber
+#     each other's files — the daemon refuses to start otherwise;
+#   - the parallel-workers Phase-2 verification gate is green
+#     (concurrent recovery/drain/shutdown, and the shared base-MCP
+#     connection proven safe under concurrent reads — see
+#     docs/plans/active/2026-07-10-parallel-workers-worktree.md);
+#   - you accept the spend profile: each in-flight invocation spends
+#     budget in parallel, and this bound only gates dispatcher-run
+#     invocations (startup recovery resumes all recoverable invocations
+#     concurrently regardless); a fleet-level cost cap is #42.
 # max_concurrent_invocations = 1
 #
 # Worker-side knobs for the archive hand-off retry sweeper. The

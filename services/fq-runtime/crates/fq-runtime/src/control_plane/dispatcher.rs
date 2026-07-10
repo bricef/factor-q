@@ -140,13 +140,14 @@ impl TriggerDispatcher {
             max_concurrent = self.max_concurrent,
             "trigger dispatcher starting"
         );
-        // Ack-window sizing: ack-on-durable-start frees a slot early,
-        // so unacked stays around the in-dispatch window, well under
-        // `max_concurrent + 1`. Never set it *below* the server default
-        // (1000): running deployments' durable consumers already carry
-        // that effective value, and `get_or_create` won't rewrite an
-        // existing consumer's config.
-        let max_ack_pending = (self.max_concurrent as i64 * 2).max(1000);
+        // Ack-window sizing: with the one-message pull batch below,
+        // unacked genuinely stays around the in-dispatch window
+        // (ack-on-durable-start fires seconds into a run). The window is
+        // never set *below* the server default: running deployments'
+        // durable consumers already carry that effective value, and
+        // `get_or_create` won't rewrite an existing consumer's config.
+        let max_ack_pending =
+            (self.max_concurrent as i64 * 2).max(crate::bus::NATS_DEFAULT_MAX_ACK_PENDING);
         let consumer = match filter_subject {
             Some(filter) => {
                 self.bus
@@ -159,7 +160,21 @@ impl TriggerDispatcher {
                     .await?
             }
         };
+        // One message per pull: without this, async-nats prefetches up
+        // to a 200-message batch into the client buffer, where triggers
+        // sit delivered-and-unacked with the ack_wait ticking while the
+        // loop waits on a permit — a saturated dispatcher would then see
+        // every buffered trigger redelivered and run twice (the
+        // one-trigger-to-N-invocations storm the ack-on-durable-start
+        // fix exists to prevent). With batch = 1, a pull is issued only
+        // when a permit is already held, so excess triggers truly stay
+        // *queued on the server* — and immediately reach the next binary
+        // on drain rather than after ack_wait expiry. The extra
+        // round-trip per trigger is noise against minutes-long
+        // invocations.
         let mut messages = consumer
+            .stream()
+            .max_messages_per_batch(1)
             .messages()
             .await
             .map_err(|err| DispatcherError::Stream(err.to_string()))?;
@@ -190,8 +205,7 @@ impl TriggerDispatcher {
             // polls it); un-pulled triggers stay queued on the durable
             // work-queue consumer for the next binary. Final teardown
             // still arrives through `shutdown`.
-            if this.worker.drain_status() == DrainState::Draining {
-                info!("trigger dispatcher draining — no longer consuming new triggers");
+            if this.draining("at loop top") {
                 break 'consume;
             }
 
@@ -211,8 +225,7 @@ impl TriggerDispatcher {
             };
 
             // A drain may have landed while waiting for capacity.
-            if this.worker.drain_status() == DrainState::Draining {
-                info!("trigger dispatcher draining — no longer consuming new triggers");
+            if this.draining("after capacity wait") {
                 break 'consume;
             }
 
@@ -232,7 +245,12 @@ impl TriggerDispatcher {
                             });
                         }
                         Some(Err(err)) => {
+                            // Warn-and-continue (pre-fan-out behavior),
+                            // but with a pause: permits are instant when
+                            // slots are free, so a persistently erroring
+                            // consumer would otherwise hot-spin the loop.
                             warn!(error = %err, "error reading next JetStream trigger");
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         }
                         None => {
                             warn!("trigger stream ended unexpectedly");
@@ -255,6 +273,22 @@ impl TriggerDispatcher {
 
         info!("trigger dispatcher stopped");
         Ok(())
+    }
+
+    /// Drain check with a call-site label, so the log line says *where*
+    /// in the loop the drain was observed (at loop top vs. after
+    /// waiting for capacity) instead of emitting one indistinguishable
+    /// message from two places.
+    fn draining(&self, at: &str) -> bool {
+        if self.worker.drain_status() == DrainState::Draining {
+            info!(
+                at,
+                "trigger dispatcher draining — no longer consuming new triggers"
+            );
+            true
+        } else {
+            false
+        }
     }
 
     async fn handle(&self, msg: &async_nats::jetstream::Message) {
@@ -865,7 +899,7 @@ You are a test agent."#
             .trigger_consumer_with_filter(
                 &unique_consumer_name(),
                 &crate::bus::trigger_subject(&agent_id_str),
-                1000,
+                crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
             )
             .await
             .expect("consumer");
@@ -1008,7 +1042,7 @@ You are a test agent."#
             .trigger_consumer_with_filter(
                 &unique_consumer_name(),
                 &crate::bus::trigger_subject(&agent_id_str),
-                1000,
+                crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
             )
             .await
             .expect("consumer");
@@ -1138,7 +1172,7 @@ You are a test agent."#
             .trigger_consumer_with_filter(
                 &unique_consumer_name(),
                 &crate::bus::trigger_subject(&agent_id_str),
-                1000,
+                crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
             )
             .await
             .expect("consumer");
@@ -1314,7 +1348,7 @@ You are a test agent."#
     /// A worker double whose invocations block on a semaphore gate, so
     /// the test controls exactly when each in-flight invocation ends.
     struct GatedWorker {
-        started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        started: Arc<std::sync::atomic::AtomicUsize>,
         gate: Arc<tokio::sync::Semaphore>,
     }
     #[async_trait::async_trait]
@@ -1356,7 +1390,7 @@ You are a test agent."#
     ) -> (
         EventBus,
         String,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
         Arc<tokio::sync::Semaphore>,
         tokio::task::JoinHandle<Result<(), DispatcherError>>,
         oneshot::Sender<()>,
@@ -1377,7 +1411,7 @@ You are a test agent."#
         registry.load_file(&agent_path);
         assert!(registry.errors().is_empty(), "{:?}", registry.errors());
 
-        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let worker: Arc<dyn Worker> = Arc::new(GatedWorker {
             started: started.clone(),
