@@ -1904,6 +1904,45 @@ mod tests {
         assert_eq!(names.len(), 5, "all pages should be walked");
     }
 
+    /// Parallel-workers Phase 2 (audit H3): concurrent invocations
+    /// share the base MCP connections, a load pattern serial dispatch
+    /// never produced. N concurrent callers over ONE shared client each
+    /// walk a full multi-page discovery — if rmcp's multiplexing
+    /// cross-routed or wedged concurrent requests on the one
+    /// connection, an interleaved cursor walk would come back short,
+    /// wrong, or not at all.
+    #[tokio::test]
+    async fn concurrent_callers_multiplex_over_one_shared_client() {
+        let tools = Arc::new(Mutex::new(
+            (0..7)
+                .map(|i| mock_tool(&format!("t{i}")))
+                .collect::<Vec<_>>(),
+        ));
+        // Page size 2 → four pages per discovery, so concurrent walks
+        // genuinely interleave requests on the shared connection.
+        let client = serve_mock(tools, 2).await;
+
+        let mut set = tokio::task::JoinSet::new();
+        for caller in 0..4 {
+            let client = Arc::clone(&client);
+            set.spawn(async move {
+                let (_, names) = McpClientManager::discover_tools(&client, "mock")
+                    .await
+                    .expect("concurrent discover");
+                (caller, names)
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            let (caller, names) = joined.expect("caller task");
+            assert_eq!(
+                names.len(),
+                7,
+                "caller {caller} must see the complete tool set despite \
+                 interleaving with its siblings"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn rediscovery_reflects_a_mutated_tool_list() {
         let tools = Arc::new(Mutex::new(vec![mock_tool("a"), mock_tool("b")]));
