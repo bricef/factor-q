@@ -493,7 +493,7 @@ Prompt.
 name: bound
 model: claude-haiku-4-5
 tools:
-  - shell
+  - exec
 sandbox:
   fs_read:
     - ${workspace}
@@ -525,7 +525,7 @@ Prompt.
 name: unbound
 model: claude-haiku-4-5
 tools:
-  - shell
+  - exec
 sandbox:
   exec_cwd:
     - ${workspace}
