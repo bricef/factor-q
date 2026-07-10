@@ -31,6 +31,7 @@ pub mod introspection;
 pub mod recovery;
 pub mod reducer;
 pub mod store;
+pub mod workspace;
 
 pub use archive_ack::{ArchiveAckConsumer, ArchiveAckError};
 pub use archive_retry::{ArchiveRetryError, ArchiveRetrySweeper};
@@ -139,6 +140,13 @@ pub enum ExecutorError {
     #[error("worker store error: {0}")]
     WorkerStore(String),
 
+    /// Workspace provisioning/re-association failed (parallel-workers
+    /// Phase 0). On the fresh path this happens before the first WAL
+    /// write, so the trigger dispatcher's transient/permanent split
+    /// decides redelivery.
+    #[error("workspace error: {0}")]
+    Workspace(#[from] workspace::WorkspaceError),
+
     /// The invocation reached a terminal `failed` event. Carries the
     /// same [`FailureKind`](crate::events::FailureKind) as that event
     /// — the error returned to the caller and the event trail never
@@ -169,6 +177,10 @@ impl ExecutorError {
             ExecutorError::Bus(_) | ExecutorError::WorkerStore(_) => true,
             // Defer to the LLM client's own transient/permanent split.
             ExecutorError::Llm(err) => err.is_transient(),
+            // Only the fetch leg is transient — a bad base_ref or a
+            // missing persisted worktree must not redeliver forever
+            // (#49's consumer has no max_deliver bound yet).
+            ExecutorError::Workspace(err) => err.is_transient(),
             // A terminal `failed` event is a permanent agent-level outcome
             // (budget, max-iterations, validation, …); retrying the same
             // trigger just reproduces it.

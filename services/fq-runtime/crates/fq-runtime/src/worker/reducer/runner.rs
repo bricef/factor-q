@@ -16,6 +16,7 @@
 //! This is the host side of the reducer/host boundary. The
 //! reducer decides what to do next; the runner makes it happen.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -57,6 +58,7 @@ use crate::validation::ValidatorChain;
 use crate::worker::store::{
     DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow, WorkerStore,
 };
+use crate::worker::workspace::{WORKSPACE_TOKEN, WorkspaceError, WorkspaceProvider};
 use crate::worker::{DrainSignal, DurableStart, ExecutorError, InvocationOutcome, WorkerId};
 
 pub use crate::bus::EventSink;
@@ -321,6 +323,10 @@ pub struct RunnerConfig {
     /// validated coverage; defaults to false so tests can run with an
     /// empty pricing table.
     enforce_pricing: bool,
+    /// Binds `${workspace}` per invocation (parallel-workers Phase 0).
+    /// `None` (the default) leaves the token unbound: agents that don't
+    /// use it are unaffected, agents that do fail loud at start.
+    workspace: Option<Arc<dyn WorkspaceProvider>>,
 }
 
 impl RunnerConfig {
@@ -343,6 +349,7 @@ pub struct RunnerConfigBuilder {
     clock: Option<Arc<dyn Clock>>,
     max_iterations: Option<u32>,
     enforce_pricing: Option<bool>,
+    workspace: Option<Arc<dyn WorkspaceProvider>>,
 }
 
 impl RunnerConfigBuilder {
@@ -402,6 +409,14 @@ impl RunnerConfigBuilder {
         self
     }
 
+    /// Bind `${workspace}` through a [`WorkspaceProvider`]. Optional;
+    /// with `None` the token is unbound and any agent that uses it
+    /// fails loudly at invocation start.
+    pub fn workspace(mut self, workspace: Option<Arc<dyn WorkspaceProvider>>) -> Self {
+        self.workspace = workspace;
+        self
+    }
+
     /// Finalise the config. Panics if any required field was not set
     /// (`clock` is optional and defaults to [`SystemClock`]).
     pub fn build(self) -> RunnerConfig {
@@ -423,6 +438,7 @@ impl RunnerConfigBuilder {
                 .max_iterations
                 .unwrap_or(crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS),
             enforce_pricing: self.enforce_pricing.unwrap_or(false),
+            workspace: self.workspace,
         }
     }
 }
@@ -672,7 +688,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             "starting reducer invocation"
         );
 
-        let sandbox = agent.sandbox().to_tool_sandbox();
+        // Bind `${workspace}` for this invocation (parallel-workers
+        // Phase 0). Provisioning precedes the Triggered event: a failure
+        // here leaves nothing durable, so the dispatcher's pre-WAL
+        // transient/permanent split decides redelivery.
+        let workspace = match &self.config.workspace {
+            Some(provider) => Some(provider.provision(invocation_id).await?),
+            None => None,
+        };
+        let sandbox = agent
+            .sandbox()
+            .to_tool_sandbox(workspace.as_deref())
+            .map_err(WorkspaceError::from)?;
         let tool_schemas = tools.build_schemas(agent.tools());
 
         let agent_config = AgentConfig {
@@ -730,27 +757,66 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // the persisted conversation history (see `resume`).
         let static_context = self.read_static_resources(agent).await;
 
-        self.run_loop_inner(
-            agent,
-            llm,
-            invocation_id,
-            &agent_id,
-            &agent_config,
-            &trigger,
-            &sandbox,
-            tools,
-            state,
-            last_result,
-            step_index_start,
-            totals,
-            start,
-            started_at_ms,
-            static_context,
-            sampling,
-            durable_start,
-            &mut cursor,
-        )
-        .await
+        let outcome = self
+            .run_loop_inner(
+                agent,
+                llm,
+                invocation_id,
+                &agent_id,
+                &agent_config,
+                &trigger,
+                &sandbox,
+                tools,
+                workspace.as_deref(),
+                state,
+                last_result,
+                step_index_start,
+                totals,
+                start,
+                started_at_ms,
+                static_context,
+                sampling,
+                durable_start,
+                &mut cursor,
+            )
+            .await;
+        self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
+            .await;
+        outcome
+    }
+
+    /// Release the invocation's workspace on a *terminal* outcome only.
+    /// Suspension keeps the worktree — the row is still in-flight and
+    /// resume continues from it (plan §3); infrastructure errors also
+    /// keep it, conservatively, because the row may still be recoverable.
+    /// Startup prune sweeps whatever recovery no longer claims. A reclaim
+    /// failure is logged and never overrides the invocation's outcome.
+    async fn reclaim_if_terminal(
+        &self,
+        invocation_id: Uuid,
+        workspace: Option<&Path>,
+        outcome: &Result<InvocationOutcome, ExecutorError>,
+    ) {
+        let (Some(provider), Some(path)) = (&self.config.workspace, workspace) else {
+            return;
+        };
+        let terminal = match outcome {
+            Ok(InvocationOutcome::Completed { .. })
+            | Ok(InvocationOutcome::BudgetExceeded { .. })
+            | Err(ExecutorError::InvocationFailed { .. }) => true,
+            Ok(InvocationOutcome::Suspended { .. }) | Err(_) => false,
+        };
+        if !terminal {
+            return;
+        }
+        if let Err(err) = provider.reclaim(invocation_id, path).await {
+            warn!(
+                invocation_id = %invocation_id,
+                workspace = %path.display(),
+                error = %err,
+                "workspace reclaim failed; the startup prune will sweep it"
+            );
+        }
     }
 
     /// Resume an in-flight invocation that was persisted but
@@ -873,9 +939,27 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
         completed.sort_by_key(|x| x.0);
 
+        // Re-associate the invocation with its persisted workspace
+        // (plan §3): a suspended invocation's worktree survives the
+        // restart, and the state row's `workspace_ref` is the binding.
+        // A row with no ref (pre-Phase-0, or the provider was enabled
+        // mid-flight) provisions fresh — for the static provider that
+        // is the same shared checkout; for worktrees it is a fresh
+        // base, acceptable only because such rows predate worktrees.
+        let workspace = match (&self.config.workspace, state_row.workspace_ref.as_deref()) {
+            (Some(provider), Some(persisted)) => {
+                Some(provider.reattach(invocation_id, persisted).await?)
+            }
+            (Some(provider), None) => Some(provider.provision(invocation_id).await?),
+            (None, _) => None,
+        };
+
         // Set up agent context (mirrors run()). One registry snapshot
         // serves both the schemas and the loop (ADR-0020 consistency).
-        let sandbox = agent.sandbox().to_tool_sandbox();
+        let sandbox = agent
+            .sandbox()
+            .to_tool_sandbox(workspace.as_deref())
+            .map_err(WorkspaceError::from)?;
         let base_tools = self.context.tools();
         let tool_schemas = base_tools.build_schemas(agent.tools());
         let agent_config = AgentConfig {
@@ -985,38 +1069,43 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 cost: totals.total_cost,
             });
         }
-        self.run_loop_inner(
-            agent,
-            llm,
-            invocation_id,
-            &agent_id,
-            &agent_config,
-            &trigger,
-            &sandbox,
-            // Resume uses the base registry: grant-bearing servers are
-            // not restarted on resume (ADR-0018 §5).
-            &base_tools,
-            state,
-            last_result,
-            step_index,
-            totals,
-            start,
-            state_row.started_at,
-            // Resume never re-injects static_resources: the pins'
-            // content is already in the replayed conversation
-            // history persisted on the original step 0.
-            None,
-            // No inbound server channel on resume: the per-invocation
-            // server connection died with the crash, so a resumed run
-            // cannot service (or replay) sampling (ADR-0018 §5). Any
-            // in-flight sampling is surfaced via `fq recover`.
-            None,
-            // Resume acks nothing — the trigger was acked on the
-            // original attempt (issue #41).
-            DurableStart::noop(),
-            &mut cursor,
-        )
-        .await
+        let outcome = self
+            .run_loop_inner(
+                agent,
+                llm,
+                invocation_id,
+                &agent_id,
+                &agent_config,
+                &trigger,
+                &sandbox,
+                // Resume uses the base registry: grant-bearing servers are
+                // not restarted on resume (ADR-0018 §5).
+                &base_tools,
+                workspace.as_deref(),
+                state,
+                last_result,
+                step_index,
+                totals,
+                start,
+                state_row.started_at,
+                // Resume never re-injects static_resources: the pins'
+                // content is already in the replayed conversation
+                // history persisted on the original step 0.
+                None,
+                // No inbound server channel on resume: the per-invocation
+                // server connection died with the crash, so a resumed run
+                // cannot service (or replay) sampling (ADR-0018 §5). Any
+                // in-flight sampling is surfaced via `fq recover`.
+                None,
+                // Resume acks nothing — the trigger was acked on the
+                // original attempt (issue #41).
+                DurableStart::noop(),
+                &mut cursor,
+            )
+            .await;
+        self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
+            .await;
+        outcome
     }
 
     /// The reducer-loop body extracted so `run` and `resume`
@@ -1034,6 +1123,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger: &TriggerPayload,
         sandbox: &ToolSandbox,
         tools: &ToolRegistry,
+        workspace: Option<&Path>,
         mut state: Vec<u8>,
         mut last_result: Option<CapabilityResult>,
         step_index_start: u32,
@@ -1130,7 +1220,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     started_at: started_at_ms,
                     updated_at: now_ms,
                     terminal_at,
-                    workspace_ref: None,
+                    // The invocation's `${workspace}` binding, persisted
+                    // so recovery re-associates a resumed invocation with
+                    // its worktree (plan §3).
+                    workspace_ref: workspace.map(|p| p.to_string_lossy().into_owned()),
                     archive_status: None,
                     archive_published_at: None,
                     trigger_source: Some(trigger_source_label(&trigger.source).to_string()),
@@ -1249,6 +1342,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             llm,
                             agent_id,
                             invocation_id,
+                            workspace,
                             req,
                             &mut totals,
                             start,
@@ -1276,6 +1370,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                                 llm,
                                 agent_id,
                                 invocation_id,
+                                workspace,
                                 req,
                                 &mut totals,
                                 start,
@@ -1376,12 +1471,22 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         llm: &dyn LlmClient,
         agent_id: &AgentId,
         invocation_id: Uuid,
+        workspace: Option<&Path>,
         req: ToolCallRequest,
         totals: &mut InvocationTotals,
         start: Instant,
         sampling: Option<&mut SamplingChannel>,
         cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
+        // Bind `${workspace}` in tool parameters before the intent is
+        // persisted, so the WAL and the event trail record the path
+        // that actually executed (replay-stable). The ConfigSnapshot
+        // keeps the unresolved token — that layer records config, not
+        // runtime state.
+        let req = match workspace {
+            Some(ws) => bind_workspace_params(req, ws),
+            None => req,
+        };
         if !agent.tools().iter().any(|name| name == &req.tool_name) {
             return self
                 .emit_synthetic_tool_error(
@@ -2810,6 +2915,26 @@ const EVALUATOR_SYSTEM_PREAMBLE: &str = "You are a safety evaluator gating an au
 /// Build the judge request for an LLM evaluator: the preamble + action
 /// context as the system message, the subject as the user turn. Run on
 /// the configured (or agent) model; no tools.
+/// Substitute the invocation's workspace path for [`WORKSPACE_TOKEN`]
+/// in every string leaf of a tool call's parameters. Values that don't
+/// carry the token pass through untouched.
+fn bind_workspace_params(mut req: ToolCallRequest, workspace: &Path) -> ToolCallRequest {
+    let ws = workspace.to_string_lossy();
+    bind_workspace_value(&mut req.parameters, &ws);
+    req
+}
+
+fn bind_workspace_value(value: &mut Value, ws: &str) {
+    match value {
+        Value::String(s) if s.contains(WORKSPACE_TOKEN) => {
+            *s = s.replace(WORKSPACE_TOKEN, ws);
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| bind_workspace_value(v, ws)),
+        Value::Object(map) => map.values_mut().for_each(|v| bind_workspace_value(v, ws)),
+        _ => {}
+    }
+}
+
 fn evaluator_to_model_request(model: &str, context: &str, subject: &str) -> ModelRequest {
     ModelRequest {
         model: model.to_string(),

@@ -218,6 +218,9 @@ pub struct SimWorld {
     store: Arc<WorkerStore>,
     agent: Agent,
     runner: ReducerRunner,
+    // The `${workspace}` binding, if any — the fresh-binary resume path
+    // re-wires it so re-association is exercised across the handoff.
+    workspace: Option<Arc<dyn crate::worker::workspace::WorkspaceProvider>>,
     // Keeps the store directory alive for the world's lifetime.
     _store_dir: TempDir,
 }
@@ -233,9 +236,35 @@ impl SimWorld {
         Self::with_pricing(seed, budget, Arc::new(PricingTable::empty())).await
     }
 
+    /// Build a world with a `${workspace}` binding (parallel-workers
+    /// Phase 0): zero-cost pricing, the given provider wired into the
+    /// runner.
+    pub async fn with_workspace(
+        seed: u64,
+        budget: f64,
+        workspace: Arc<dyn crate::worker::workspace::WorkspaceProvider>,
+    ) -> Self {
+        Self::build(
+            seed,
+            budget,
+            Arc::new(PricingTable::empty()),
+            Some(workspace),
+        )
+        .await
+    }
+
     /// Build a world with real pricing, for the budget properties
     /// (reducer verification, slice 6).
     pub async fn with_pricing(seed: u64, budget: f64, pricing: Arc<PricingTable>) -> Self {
+        Self::build(seed, budget, pricing, None).await
+    }
+
+    async fn build(
+        seed: u64,
+        budget: f64,
+        pricing: Arc<PricingTable>,
+        workspace: Option<Arc<dyn crate::worker::workspace::WorkspaceProvider>>,
+    ) -> Self {
         let clock = Arc::new(SimClock::new(seed));
         let sink = Arc::new(RecordingSink::new());
         let tool = Arc::new(ScriptedTool::new(SIM_TOOL));
@@ -259,7 +288,8 @@ impl SimWorld {
             .build()
             .expect("sim agent");
 
-        let runner = Self::build_runner(&clock, &sink, &registry, &store, pricing);
+        let runner =
+            Self::build_runner(&clock, &sink, &registry, &store, pricing, workspace.clone());
 
         Self {
             clock,
@@ -268,6 +298,7 @@ impl SimWorld {
             store,
             agent,
             runner,
+            workspace,
             _store_dir: store_dir,
         }
     }
@@ -278,6 +309,7 @@ impl SimWorld {
         registry: &ToolRegistry,
         store: &Arc<WorkerStore>,
         pricing: Arc<PricingTable>,
+        workspace: Option<Arc<dyn crate::worker::workspace::WorkspaceProvider>>,
     ) -> ReducerRunner {
         ReducerRunner::new(
             Arc::new(
@@ -292,6 +324,7 @@ impl SimWorld {
                     .pricing(pricing)
                     .store(Arc::clone(store))
                     .worker_id(WorkerId::new("sim-worker").expect("worker id"))
+                    .workspace(workspace)
                     .build(),
             ),
             crate::worker::reducer::Harness::new(),
@@ -353,6 +386,7 @@ impl SimWorld {
             &registry,
             &self.store,
             Arc::new(PricingTable::empty()),
+            self.workspace.clone(),
         );
         let in_flight = self
             .store
@@ -390,12 +424,16 @@ mod tests {
     use crate::test_support::oracle;
 
     pub(super) fn sim_tool_call(call_id: &str) -> ChatResponse {
+        sim_tool_call_with(call_id, json!({"step": call_id}))
+    }
+
+    pub(super) fn sim_tool_call_with(call_id: &str, parameters: Value) -> ChatResponse {
         ChatResponse {
             content: None,
             tool_calls: vec![MessageToolCall {
                 tool_call_id: ToolCallId::new(call_id).unwrap(),
                 tool_name: SIM_TOOL.to_string(),
-                parameters: json!({"step": call_id}),
+                parameters,
             }],
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage {
@@ -482,6 +520,47 @@ mod tests {
         assert_eq!(kinds_a, kinds_b);
         assert_eq!(dispatches_a, dispatches_b);
         assert_eq!(blob_a, blob_b, "final reducer state must be deterministic");
+    }
+
+    /// Phase 0 of the parallel-workers plan: with a workspace provider
+    /// wired, `${workspace}` in tool parameters is substituted before
+    /// the tool executes (and before the intent is persisted), and the
+    /// binding lands in the state row's `workspace_ref` so recovery can
+    /// re-associate.
+    #[tokio::test]
+    async fn workspace_binding_substitutes_params_and_persists_ref() {
+        let ws_dir = tempfile::tempdir().expect("workspace dir");
+        let ws_path = ws_dir.path().to_path_buf();
+        let provider = Arc::new(crate::worker::workspace::StaticWorkspace::new(
+            ws_path.clone(),
+        ));
+        let world = SimWorld::with_workspace(7, 5.0, provider).await;
+
+        let llm = FixtureClient::new();
+        llm.push_response(sim_tool_call_with(
+            "c1",
+            json!({"cwd": "${workspace}", "path": "${workspace}/notes.md"}),
+        ));
+        llm.push_response(end_turn("done"));
+        let outcome = world.run(&llm).await.expect("sim run");
+        assert!(matches!(outcome, InvocationOutcome::Completed { .. }));
+
+        let dispatches = world.tool.dispatches().lock().unwrap().clone();
+        let ws = ws_path.to_string_lossy();
+        assert_eq!(dispatches[0]["cwd"], json!(ws));
+        assert_eq!(dispatches[0]["path"], json!(format!("{ws}/notes.md")));
+
+        let row = world
+            .store
+            .get_invocation_state(&world.invocation_id().to_string())
+            .await
+            .expect("state row query")
+            .expect("state row");
+        assert_eq!(
+            row.workspace_ref.as_deref(),
+            Some(ws.as_ref()),
+            "the workspace binding must be persisted for resume re-association"
+        );
     }
 
     /// Crash at the `llm.response` publish (the LLM's WAL row is
