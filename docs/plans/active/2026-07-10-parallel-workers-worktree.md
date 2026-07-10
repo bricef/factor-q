@@ -1,24 +1,28 @@
-# Parallel workers — the fast route (per-invocation worktrees + bounded fan-out)
+# In-executor parallelism — the fast route (fan-out + per-invocation worktrees)
 
 Status: **active plan** (2026-07-10). The interim, "Route A" path to running
-agent invocations concurrently on the dogfood fleet — deliberately **not** the
-ADR-0028 VFS (that is the safe-by-construction successor). This delivers
-*functional* parallelism for our own (trusted) agents on a single-tenant box,
-and bakes the concurrent-recovery/drain/shutdown correctness in as a first-class
-gate rather than a follow-up.
-
-Implements the worktree half of **#14** and the fan-out half of **#70**.
+agent invocations concurrently on the dogfood fleet. The concurrency lives
+**inside a single `fq run` executor** — one daemon runs N jobs in parallel — not
+across multiple `fq run` processes. That in-executor concurrency is issue
+**#70**; per-invocation git worktrees (**#14**) are the isolation that makes it
+safe to do. Deliberately **not** the ADR-0028 VFS (the safe-by-construction
+successor); this delivers *functional* parallelism for our own (trusted) agents
+on a single-tenant box, and bakes concurrent recovery/drain/shutdown correctness
+in as a first-class gate, not a follow-up.
 
 ## Goal & scope
 
-Run up to *N* invocations at once in one `fq run` daemon, each in its own git
-worktree, without corrupting each other's checkout — and prove that drain,
-shutdown, and crash-recovery stay correct with *N* invocations in flight.
+A single `fq run` executor runs up to *N* invocations **concurrently within the
+one process** — jobs running in parallel inside the daemon, not N daemons — each
+in its own git worktree so they don't corrupt each other's checkout, with drain,
+shutdown, and crash-recovery proven correct with *N* in flight.
 
 **In scope**
+- **In-executor concurrent execution (#70):** semaphore-bounded fan-out so one
+  `fq run` runs N invocations at once, *including* making the executor
+  (`ReducerRunner`) safe for concurrent `run_invocation` calls. Default off.
 - Per-invocation git-worktree isolation of the workspace (closes the shared
   `~/fq-dogfood/workspace/factor-q` clobber — #14).
-- Single-process, semaphore-bounded dispatcher fan-out (#70), default off.
 - **Concurrent recovery / drain / shutdown correctness** — baked in as Phase 2,
   the gate before concurrency is enabled (per the plan's own requirement).
 
@@ -90,25 +94,42 @@ they reference the workspace through a token the runtime resolves.
   path. A `--no-worktree` / disabled mode keeps today's single-shared-workspace
   behavior for a clean rollback.
 
-### 2. Dispatcher fan-out (bounded)
+### 2. In-executor fan-out (this is #70)
+
+The concurrency lives in the one daemon's executor, not in extra processes. The
+executor is already *shaped* for it: `Worker::run_invocation` is `&self`
+(`worker/mod.rs:207`) and the dispatcher holds the runner as `Arc<dyn Worker>`
+(`dispatcher.rs:99`), so N concurrent calls are structurally possible today —
+only the serial dispatch loop and unaudited shared state stand in the way.
 
 - Add `worker.max_concurrent_invocations` (Design Principle 8), **default 1** —
   bit-identical to today's serial behavior until Phase 2 proves the concurrent
   paths.
-- In `run()`: acquire a semaphore permit, then `tokio::spawn` the `handle()`
-  work instead of awaiting it inline, and continue the loop to pull the next
-  trigger. Bound in-flight to the permit count.
+- In the dispatcher `run()` loop: acquire a semaphore permit, then
+  `tokio::spawn` the `handle()` work instead of awaiting it inline
+  (`dispatcher.rs:280`/`:304`), and continue the loop to pull the next trigger.
+  The permit count bounds in-flight invocations.
+- **Make the executor concurrency-safe — the core of this work.**
+  `run_invocation` will run N times at once through the one shared
+  `ReducerRunner`; audit and harden it for concurrency: per-invocation state
+  must be local (never mutated on `&self`), the `WorkerStore` connection/pool
+  must tolerate concurrent WAL writes across invocations (SQLite write
+  serialization / a pool), the event sink must be concurrent-safe, and per-run
+  accumulators (`totals`, budget) must stay per-invocation. Two invocations
+  interleaving must never cross-contaminate WAL rows, events, or cost.
 - **JetStream consumer:** raise `max_ack_pending` to ≥ `max_concurrent` so the
-  work-queue consumer will deliver up to N un-acked triggers. (Ack-on-durable-
-  start already frees a slot before completion — `dispatcher.rs:300`.)
+  work-queue consumer delivers up to N un-acked triggers. (Ack-on-durable-start
+  already frees a slot before completion — `dispatcher.rs:300`.)
 - **Track the spawned tasks** in a join set the daemon owns, so drain/shutdown
-  can wait on them (see §3) — the inline-await today is what makes drain
-  tracking implicit; fan-out must make it explicit.
-- Single-process, not multi-process, on purpose: one daemon to deploy
-  (`redeploy.sh`), drain (`fq drain`), and observe (`fq status`); it's the model
-  the graph executor will reuse; and it is the model that actually exercises the
-  N-in-flight recovery/drain the plan requires (N worker *processes* would each
-  stay serial and never test it).
+  can wait on them (§3) — inline-await today makes drain tracking implicit;
+  fan-out must make it explicit.
+
+**Non-goal — multiple processes.** We are *not* running N `fq run` instances.
+One executor with in-process concurrency means one thing to deploy
+(`redeploy.sh`), drain (`fq drain`), and observe (`fq status`); it is the
+concurrency primitive the graph executor reuses; and it is the only shape that
+actually exercises the N-in-flight recovery/drain this plan gates on (N serial
+processes never would).
 
 ### 3. Concurrent recovery / drain / shutdown — the correctness gate (baked in)
 
@@ -151,9 +172,11 @@ Extend the existing budget-across-resume property test to the N-invocation case.
   invocation runs entirely inside a fresh worktree off `origin/main`; the shell
   `cwd` resolves; `git status` clean at start (fixes #14's stale-PR bug on its
   own). Ship with `max_concurrent = 1` — already an improvement (stale-PR fix).
-- **Phase 1 — fan-out.** Semaphore + spawn + `max_ack_pending`, `max_concurrent`
-  config. *Verify:* two triggers published back-to-back run concurrently (no
-  `lag 1` wait) and neither clobbers the other; `fq status` shows both in-flight.
+- **Phase 1 — in-executor fan-out (#70).** Executor concurrency-safety audit +
+  hardening (§2), then semaphore + spawn + `max_ack_pending` + `max_concurrent`.
+  *Verify:* two triggers published back-to-back run concurrently in **one
+  daemon** (no `lag 1` wait), neither clobbers the other, and their WAL rows /
+  events / costs stay separate; `fq status` shows both in-flight.
 - **Phase 2 — concurrent recovery/drain/shutdown (the gate).** The §3 DST sweep +
   live `fq drain` / `fq down` with N in-flight on a scratch daemon. **Do not**
   raise the dogfood `max_concurrent` until this is green.
@@ -176,8 +199,8 @@ Extend the existing budget-across-resume property test to the N-invocation case.
 
 - **#14** — this *is* its preferred (worktree) fix; supersedes its "minimal"
   sync-before-run.
-- **#70** — this *is* its single-process fan-out; keep the ticket for the
-  cross-cutting notes (cost, ordering).
+- **#70** — this *is* its in-executor concurrent execution (one instance, N
+  jobs); keep the ticket for the cross-cutting notes (cost, ordering).
 - **ADR-0027** — reuses `fq drain`; extends its wait to N in-flight.
 - **#63 (`fq down`)**, **#64 (loud non-terminal exits)** — exercised under
   concurrency by Phase 2.
