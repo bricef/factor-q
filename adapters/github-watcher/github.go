@@ -73,7 +73,11 @@ func (g *GhCliIssueSource) Relabel(ctx context.Context, number int, remove, add 
 		"--remove-label", remove,
 		"--add-label", add,
 	)
-	if err := cmd.Run(); err != nil {
+	// cmd.Output() (not cmd.Run()) so a non-zero exit populates
+	// ExitError.Stderr, which ghError surfaces — otherwise a failed
+	// relabel logs a bare "exit status 1" with no reason (e.g. a
+	// missing target label). stdout is discarded.
+	if _, err := cmd.Output(); err != nil {
 		return fmt.Errorf("gh issue edit #%d: %w", number, ghError(err))
 	}
 	return nil
