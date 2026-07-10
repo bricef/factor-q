@@ -177,9 +177,9 @@ impl ExecutorError {
             ExecutorError::Bus(_) | ExecutorError::WorkerStore(_) => true,
             // Defer to the LLM client's own transient/permanent split.
             ExecutorError::Llm(err) => err.is_transient(),
-            // Only the fetch leg is transient — a bad base_ref or a
-            // missing persisted worktree must not redeliver forever
-            // (#49's consumer has no max_deliver bound yet).
+            // Workspace provisioning is pure filesystem work, so no
+            // failure heals on redelivery — and #49's consumer has no
+            // max_deliver bound yet. The provider decides.
             ExecutorError::Workspace(err) => err.is_transient(),
             // A terminal `failed` event is a permanent agent-level outcome
             // (budget, max-iterations, validation, …); retrying the same

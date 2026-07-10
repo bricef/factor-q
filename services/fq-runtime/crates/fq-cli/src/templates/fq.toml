@@ -40,23 +40,21 @@ directory = "agents"
 # the section is omitted the token is unbound, and any agent that uses
 # it fails loudly at invocation start.
 #
-# The source git repository. With `worktrees = false` this path itself
-# is the binding (one shared checkout); with `worktrees = true` each
-# invocation gets a fresh detached git worktree provisioned from it.
-# repo = "/path/to/workspace/repo"
+# The runtime only provisions *directories* — what goes into a
+# workspace (cloning an upstream repo, branching, pushing) is the
+# agent's job through its granted tools.
 #
-# Provision a fresh git worktree per invocation (#14/#70). Default off.
-# A suspended invocation keeps its worktree across restarts; terminal
-# invocations are reclaimed, and orphans are swept at daemon startup.
-# worktrees = false
+# The workspace path. With `per_invocation = false` this directory
+# itself is the binding, shared by every invocation; with
+# `per_invocation = true` it is the root under which each invocation
+# gets a fresh empty directory named by its invocation id.
+# path = "/path/to/workspace"
 #
-# Where per-invocation worktrees live. Default: `wt/` next to `repo`.
-# worktrees_dir = "/path/to/workspace/wt"
-#
-# The ref each worktree starts from. Remote-tracking refs (the default,
-# `origin/main`) are fetched first so the base is the latest upstream
-# state, not a stale local tracking ref.
-# base_ref = "origin/main"
+# Provision a fresh empty directory per invocation (#14/#70). Default
+# off. A suspended invocation keeps its directory across restarts;
+# terminal invocations are reclaimed, and orphans are swept at daemon
+# startup.
+# per_invocation = false
 
 [cache]
 # Directory for runtime cache files (LiteLLM pricing JSON, etc).
