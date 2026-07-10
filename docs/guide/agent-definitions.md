@@ -232,9 +232,9 @@ sandbox:
 
 **Where the token resolves.** Sandbox paths always bind. In tool calls,
 substitution happens **only in declared path parameters** — properties
-whose JSON schema carries `format: "path"` (`cwd` on `shell`, `path` on
+whose JSON schema carries `format: "path"` (`cwd` on `exec`, `path` on
 `file_read`/`file_write`). Everything else is passed through verbatim:
-file *contents*, shell *arguments*, and any other string reach the tool
+file *contents*, command *arguments*, and any other string reach the tool
 exactly as the agent wrote them, so writing the literal text
 `${workspace}` into a file works and nothing silently rewrites agent
 output.
