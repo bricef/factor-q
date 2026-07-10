@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,7 +21,44 @@ func main() {
 	}
 }
 
+// buildVersion returns the git revision this binary was built from,
+// read from the VCS info Go embeds by default when building inside a
+// git tree (`-buildvcs`). Degrades to "unknown" when unavailable (e.g.
+// a build outside version control). A "-dirty" suffix marks an
+// uncommitted working tree — the same convention as `fq`.
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	rev, modified := "", ""
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if rev == "" {
+		return "unknown"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if modified == "true" {
+		rev += "-dirty"
+	}
+	return rev
+}
+
 func run(args []string) error {
+	for _, a := range args {
+		if a == "-version" || a == "--version" {
+			fmt.Println("github-watcher", buildVersion())
+			return nil
+		}
+	}
 	cfg, natsURL, err := configFromArgs(args)
 	if err != nil {
 		return err
