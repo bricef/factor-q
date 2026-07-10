@@ -68,8 +68,8 @@ impl ToolRegistry {
 
     /// Build the [`ToolSchema`] list to send to the LLM for a given
     /// subset of tool names. Names that aren't in the registry are
-    /// silently dropped — the caller is responsible for warning or
-    /// failing if that matters.
+    /// silently dropped; pair this with [`missing_tools`](Self::missing_tools)
+    /// to surface the dropped names instead of losing them silently.
     pub fn build_schemas(&self, names: &[String]) -> Vec<ToolSchema> {
         names
             .iter()
@@ -80,6 +80,20 @@ impl ToolRegistry {
                     parameters_schema: t.parameters_schema(),
                 })
             })
+            .collect()
+    }
+
+    /// The declared tool names this registry has no implementation for.
+    /// [`build_schemas`](Self::build_schemas) drops these silently — the
+    /// model is never offered them — so callers warn to make a typo'd or
+    /// renamed tool in an agent definition visible rather than a silent
+    /// capability loss. Names are returned in declared order; an empty
+    /// vec is the healthy case.
+    pub fn missing_tools(&self, names: &[String]) -> Vec<String> {
+        names
+            .iter()
+            .filter(|name| !self.tools.contains_key(name.as_str()))
+            .cloned()
             .collect()
     }
 }
@@ -125,5 +139,25 @@ mod tests {
         assert_eq!(schema.name, "file_read");
         assert!(!schema.description.is_empty());
         assert!(schema.parameters_schema.is_object());
+    }
+
+    #[test]
+    fn missing_tools_reports_unregistered_declarations() {
+        let reg = ToolRegistry::with_builtins();
+        // `shell` was renamed to `exec`; an agent still declaring the
+        // old name must be reported, not silently dropped.
+        let missing = reg.missing_tools(&[
+            "file_read".to_string(),
+            "shell".to_string(),
+            "exec".to_string(),
+        ]);
+        assert_eq!(missing, vec!["shell".to_string()]);
+    }
+
+    #[test]
+    fn missing_tools_empty_when_all_declared_tools_exist() {
+        let reg = ToolRegistry::with_builtins();
+        let missing = reg.missing_tools(&["file_read".to_string(), "exec".to_string()]);
+        assert!(missing.is_empty());
     }
 }
