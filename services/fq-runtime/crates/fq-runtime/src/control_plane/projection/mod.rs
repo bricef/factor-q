@@ -25,4 +25,4 @@ pub mod consumer;
 pub mod store;
 
 pub use consumer::{ConsumerError, ProjectionConsumer};
-pub use store::{CostSummary, EventRow, ProjectionStore, StoreError};
+pub use store::{CostSummary, EventRow, FailureSummary, ProjectionStore, StoreError};

@@ -260,6 +260,30 @@ impl ProjectionStore {
             })
             .collect())
     }
+
+    /// Aggregate terminal `failed` events into per-`FailureKind`
+    /// counts. Symmetric with [`Self::cost_summary`]: the DB stores
+    /// the failure kind in the denormalised `error_kind` column
+    /// (lowercased `Debug` of the `FailureKind`, e.g. `budgetexceeded`),
+    /// so this groups by that column for a stable typed-ish shape the
+    /// `fq doctor` command can render without re-reading payloads.
+    pub async fn failure_summary(&self) -> Result<Vec<FailureSummary>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT COALESCE(error_kind, 'unknown') AS kind, COUNT(*) AS n \
+             FROM events \
+             WHERE event_type = 'failed' \
+             GROUP BY kind ORDER BY n DESC, kind",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| FailureSummary {
+                error_kind: row.get::<String, _>(0),
+                count: row.get::<i64, _>(1),
+            })
+            .collect())
+    }
 }
 
 /// One row from a [`ProjectionStore::query_events`] call.
@@ -284,6 +308,19 @@ pub struct CostSummary {
     pub total_cost: f64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+}
+
+/// One row of a failure summary: a terminal `FailureKind` and the
+/// number of `failed` events carrying it. Produced by
+/// [`ProjectionStore::failure_summary`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureSummary {
+    /// Lowercased failure kind as stored in the projection
+    /// (`budgetexceeded`, `llmerror`, `maxiterations`, `toolerror`,
+    /// `sandboxviolation`, `runtimeerror`), or `unknown` for a
+    /// `failed` row with no recorded kind.
+    pub error_kind: String,
+    pub count: i64,
 }
 
 /// Filter options for [`ProjectionStore::query_events`].
@@ -739,6 +776,77 @@ mod tests {
         let summary = store.cost_summary(Some("alpha"), None).await.unwrap();
         assert_eq!(summary.len(), 1);
         assert_eq!(summary[0].agent_id, "alpha");
+    }
+
+    fn sample_failed_kind(agent: &str, inv: Uuid, kind: FailureKind) -> Event {
+        Event::new(
+            aid(agent),
+            inv,
+            EventPayload::Failed(FailedPayload {
+                error_kind: kind,
+                error_message: "boom".to_string(),
+                phase: FailurePhase::LlmResponse,
+                partial_totals: InvocationTotals::default(),
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn failure_summary_groups_by_kind() {
+        let (store, _dir) = open_store().await;
+        store
+            .insert_event(&sample_failed_kind(
+                "a",
+                Uuid::now_v7(),
+                FailureKind::BudgetExceeded,
+            ))
+            .await
+            .unwrap();
+        store
+            .insert_event(&sample_failed_kind(
+                "a",
+                Uuid::now_v7(),
+                FailureKind::BudgetExceeded,
+            ))
+            .await
+            .unwrap();
+        store
+            .insert_event(&sample_failed_kind(
+                "b",
+                Uuid::now_v7(),
+                FailureKind::ToolError,
+            ))
+            .await
+            .unwrap();
+        // A non-failed event must not be counted.
+        store
+            .insert_event(&sample_completed("a", Uuid::now_v7()))
+            .await
+            .unwrap();
+
+        let summary = store.failure_summary().await.unwrap();
+        let total: i64 = summary.iter().map(|s| s.count).sum();
+        assert_eq!(total, 3);
+        let budget = summary
+            .iter()
+            .find(|s| s.error_kind == "budgetexceeded")
+            .unwrap();
+        assert_eq!(budget.count, 2);
+        let tool = summary
+            .iter()
+            .find(|s| s.error_kind == "toolerror")
+            .unwrap();
+        assert_eq!(tool.count, 1);
+    }
+
+    #[tokio::test]
+    async fn failure_summary_empty_when_no_failures() {
+        let (store, _dir) = open_store().await;
+        store
+            .insert_event(&sample_completed("a", Uuid::now_v7()))
+            .await
+            .unwrap();
+        assert!(store.failure_summary().await.unwrap().is_empty());
     }
 
     #[tokio::test]
