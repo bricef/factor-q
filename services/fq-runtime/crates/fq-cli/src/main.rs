@@ -332,13 +332,23 @@ enum InvocationCommands {
         /// live from `fq.agent.<agent_id>.>` until Ctrl-C.
         #[arg(long, short = 'f')]
         follow: bool,
-        /// Output format: `pretty` (default) or `json`.
-        #[arg(long, default_value = "pretty")]
-        format: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "pretty")]
+        format: TranscriptFormat,
         /// Do not truncate large payloads (alias: --no-truncate).
         #[arg(long, visible_alias = "no-truncate")]
         full: bool,
     },
+}
+
+/// Output format for `fq invocation transcript`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
+enum TranscriptFormat {
+    /// Human-readable text (default).
+    Pretty,
+    /// Machine-readable ordered JSON array (never truncated).
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -493,7 +503,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 follow,
                 format,
                 full,
-            } => invocation_transcript(&cli.global, &id, follow, &format, full).await?,
+            } => invocation_transcript(&cli.global, &id, follow, format, full).await?,
         },
         Commands::Workers { command } => match command {
             WorkerCommands::List {
@@ -3137,7 +3147,7 @@ async fn invocation_transcript(
     global: &GlobalArgs,
     id: &str,
     follow: bool,
-    format: &str,
+    format: TranscriptFormat,
     full: bool,
 ) -> anyhow::Result<()> {
     use transcript::{
@@ -3145,11 +3155,7 @@ async fn invocation_transcript(
         snapshot_keys, tool_result_entry,
     };
 
-    let as_json = match format {
-        "pretty" => false,
-        "json" => true,
-        other => anyhow::bail!("unknown --format `{other}` — try pretty | json"),
-    };
+    let as_json = matches!(format, TranscriptFormat::Json);
     if follow && as_json {
         anyhow::bail!("--follow is not supported with --format json (json emits a snapshot array)");
     }
