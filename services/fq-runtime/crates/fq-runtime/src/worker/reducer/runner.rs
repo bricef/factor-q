@@ -975,6 +975,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // are integrated. Sequential dispatch runs a batch in request
         // order (see `NextAction::CallToolsParallel`), so completion
         // order matches what the live loop persisted.
+        //
+        // If the crash fell *inside* the final batch (fewer completed
+        // tool rows than that model turn requested), drop the recorded
+        // partial results so replay ends at the model turn and
+        // `run_loop_inner` re-runs the batch: `run_tool` reuses the
+        // already-completed calls and executes only the missing ones,
+        // completing the batch exactly once instead of silently
+        // dropping the un-run calls.
+        let resumed_partial_batch = truncate_incomplete_final_batch(&mut completed);
         let replay = coalesce_tool_results(completed);
 
         // Re-associate the invocation with its persisted workspace
@@ -1072,10 +1081,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 totals.total_cost += r.cost_usd.unwrap_or(0.0);
             }
         }
-        totals.total_tool_calls = tools
+        // A re-run partial final batch re-counts its already-completed
+        // calls in `run_loop_inner`, so exclude them from the seed.
+        totals.total_tool_calls = (tools
             .iter()
             .filter(|r| r.status == DispatchStatus::Completed)
-            .count() as u32;
+            .count()
+            - resumed_partial_batch) as u32;
         let start = Instant::now();
         let mut cursor: Option<Uuid> = None;
 
@@ -1517,6 +1529,25 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         sampling: Option<&mut SamplingChannel>,
         cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
+        // Idempotent recovery: a completed WAL row for this exact call
+        // means a prior incarnation already ran it. Reuse the recorded
+        // result rather than re-executing (at-most-once) — and without
+        // re-publishing, so a resumed run's observational trace matches
+        // the original. This is how re-running a partially-completed
+        // parallel batch on resume skips its already-done calls. Live
+        // execution always has a fresh id, so the cheap point lookup
+        // never hits outside recovery.
+        if let Some(row) = self
+            .config
+            .store
+            .get_tool_dispatch(&invocation_id.to_string(), req.tool_call_id.as_str())
+            .await
+            .map_err(map_store_err)?
+            && row.status == DispatchStatus::Completed
+        {
+            return Ok(tool_row_to_result(&row));
+        }
+
         // Bind `${workspace}` in the tool call's *declared path
         // parameters* before the intent is persisted, so the WAL and
         // the event trail record the path that actually executed
@@ -3400,6 +3431,13 @@ fn enum_allowed_values(schema: &EnumSchema) -> Vec<String> {
 /// the result of a previously-completed action back into the
 /// reducer.
 fn tool_row_to_capability(row: &ToolDispatchRow) -> CapabilityResult {
+    CapabilityResult::ToolResult(tool_row_to_result(row))
+}
+
+/// The [`ToolCallResult`] recorded in a completed `tool_dispatch` row —
+/// fed back into the reducer on replay, or returned directly when
+/// `run_tool` reuses an already-completed call during recovery.
+fn tool_row_to_result(row: &ToolDispatchRow) -> ToolCallResult {
     // The WAL row's `tool_call_id` was written through `ToolCallId`
     // so non-empty is structurally guaranteed. If the row is
     // corrupt (empty string), the resume path surfaces it as an
@@ -3410,13 +3448,13 @@ fn tool_row_to_capability(row: &ToolDispatchRow) -> CapabilityResult {
             crate::events::ToolCallId::new("corrupt-empty-tool-call-id".to_string())
                 .expect("sentinel is non-empty")
         });
-    CapabilityResult::ToolResult(ToolCallResult {
+    ToolCallResult {
         tool_call_id,
         output: row.result.clone().unwrap_or_default(),
         is_error: row.is_error.unwrap_or(false),
         error_kind: None,
         duration_ms: 0,
-    })
+    }
 }
 
 /// Regroup a chronologically-ordered capability stream so each model
@@ -3459,6 +3497,37 @@ fn flush_tool_batch(batch: &mut Vec<ToolCallResult>, out: &mut Vec<CapabilityRes
             batch.pop().expect("len checked == 1"),
         )),
         _ => out.push(CapabilityResult::ParallelToolResults(std::mem::take(batch))),
+    }
+}
+
+/// If the last model turn in `completed` dispatched more tool calls
+/// than have completed rows, the crash fell inside that batch. Drop the
+/// recorded partial results (the trailing tool capabilities) so replay
+/// stops at the model turn and `run_loop_inner` re-runs the batch to
+/// completion — `run_tool` reuses the already-completed calls and runs
+/// only the missing ones. Returns the number of results dropped (0 when
+/// the final batch is whole, or there is no pending batch). Only the
+/// final batch can be partial: earlier batches are whole, or the
+/// invocation could not have progressed past them.
+fn truncate_incomplete_final_batch(completed: &mut Vec<(i64, CapabilityResult)>) -> usize {
+    let Some(last_model) = completed
+        .iter()
+        .rposition(|(_, c)| matches!(c, CapabilityResult::ModelResult(_)))
+    else {
+        return 0;
+    };
+    let requested = match &completed[last_model].1 {
+        CapabilityResult::ModelResult(response) => response.tool_calls.len(),
+        _ => unreachable!("rposition matched a ModelResult"),
+    };
+    // Everything after the last model turn is that turn's tool results —
+    // nothing else runs before the next (never-reached) model call.
+    let recorded = completed.len() - last_model - 1;
+    if requested > 0 && recorded < requested {
+        completed.truncate(last_model + 1);
+        recorded
+    } else {
+        0
     }
 }
 
