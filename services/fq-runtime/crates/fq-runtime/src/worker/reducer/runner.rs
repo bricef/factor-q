@@ -751,11 +751,17 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let started_at_ms = self.config.clock.unix_now_ms();
         let step_index_start: u32 = 0;
 
-        // Read the agent's `static_resources` pins once, before the
-        // step loop, and hand the rendered content to step 0 only.
-        // Resume does *not* re-inject — the content is already in
-        // the persisted conversation history (see `resume`).
-        let static_context = self.read_static_resources(agent).await;
+        // Step-0 context: the workspace preamble (the agent is *told*
+        // where `${workspace}` points, not left to infer it from tool
+        // output) followed by the agent's `static_resources` pins.
+        // Injected once; resume does *not* re-inject — the content is
+        // already in the persisted conversation history, and the
+        // binding is stable across resume (workspace_ref
+        // re-association).
+        let static_context = merge_step0_context(
+            workspace.as_deref().map(workspace_preamble),
+            self.read_static_resources(agent).await,
+        );
 
         let outcome = self
             .run_loop_inner(
@@ -1479,14 +1485,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         sampling: Option<&mut SamplingChannel>,
         cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
-        // Bind `${workspace}` in tool parameters before the intent is
-        // persisted, so the WAL and the event trail record the path
-        // that actually executed (replay-stable). The ConfigSnapshot
-        // keeps the unresolved token — that layer records config, not
-        // runtime state.
-        let req = match workspace {
-            Some(ws) => bind_workspace_params(req, ws),
-            None => req,
+        // Bind `${workspace}` in the tool call's *declared path
+        // parameters* before the intent is persisted, so the WAL and
+        // the event trail record the path that actually executed
+        // (replay-stable). The ConfigSnapshot keeps the unresolved
+        // token — that layer records config, not runtime state.
+        let req = match (workspace, tools.get(&req.tool_name)) {
+            (Some(ws), Some(tool)) => bind_workspace_params(req, ws, &tool.parameters_schema()),
+            _ => req,
         };
         if !agent.tools().iter().any(|name| name == &req.tool_name) {
             return self
@@ -2913,29 +2919,81 @@ const EVALUATOR_SYSTEM_PREAMBLE: &str = "You are a safety evaluator gating an au
      appropriate for the stated action. Respond with ONLY a single JSON object \
      {\"approved\": <true|false>, \"reason\": <string>} — no prose, no code fences.";
 
-/// Build the judge request for an LLM evaluator: the preamble + action
-/// context as the system message, the subject as the user turn. Run on
-/// the configured (or agent) model; no tools.
-/// Substitute the invocation's workspace path for [`WORKSPACE_TOKEN`]
-/// in every string leaf of a tool call's parameters. Values that don't
-/// carry the token pass through untouched.
-fn bind_workspace_params(mut req: ToolCallRequest, workspace: &Path) -> ToolCallRequest {
-    let ws = workspace.to_string_lossy();
-    bind_workspace_value(&mut req.parameters, &ws);
-    req
+/// The step-0 environment line telling the agent authoritatively where
+/// `${workspace}` points, instead of leaving it to infer the path from
+/// tool output (a `pwd` round-trip — or worse, confabulation).
+fn workspace_preamble(path: &Path) -> String {
+    format!(
+        "Environment: your workspace for this invocation is `{}`. In path \
+         parameters of your tools (`cwd`, `path`) you may write \
+         `${{workspace}}` and the runtime resolves it to that directory; \
+         everywhere else — file contents, command arguments — your text is \
+         passed through verbatim.",
+        path.display()
+    )
 }
 
-fn bind_workspace_value(value: &mut Value, ws: &str) {
-    match value {
-        Value::String(s) if s.contains(WORKSPACE_TOKEN) => {
-            *s = s.replace(WORKSPACE_TOKEN, ws);
-        }
-        Value::Array(items) => items.iter_mut().for_each(|v| bind_workspace_value(v, ws)),
-        Value::Object(map) => map.values_mut().for_each(|v| bind_workspace_value(v, ws)),
-        _ => {}
+/// Compose the step-0 injected context: workspace preamble first, then
+/// the agent's `static_resources` pins.
+fn merge_step0_context(preamble: Option<String>, pins: Option<String>) -> Option<String> {
+    match (preamble, pins) {
+        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+        (a, None) => a,
+        (None, b) => b,
     }
 }
 
+/// Substitute the invocation's workspace path for [`WORKSPACE_TOKEN`] in
+/// the tool call's **declared path parameters** — top-level properties
+/// whose JSON schema carries `"format": "path"` (a string, or an array
+/// whose items do). Every other parameter passes through verbatim:
+/// silently rewriting arbitrary agent output (file contents, argv
+/// elements, messages) would be undebuggable, so a tool must declare
+/// which of its parameters are paths to opt in.
+fn bind_workspace_params(
+    mut req: ToolCallRequest,
+    workspace: &Path,
+    schema: &Value,
+) -> ToolCallRequest {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return req;
+    };
+    let Some(params) = req.parameters.as_object_mut() else {
+        return req;
+    };
+    let ws = workspace.to_string_lossy();
+    for (name, prop) in properties {
+        let Some(value) = params.get_mut(name) else {
+            continue;
+        };
+        if is_path_schema(prop) {
+            bind_workspace_string(value, &ws);
+        } else if prop.get("items").is_some_and(is_path_schema)
+            && let Value::Array(items) = value
+        {
+            items
+                .iter_mut()
+                .for_each(|item| bind_workspace_string(item, &ws));
+        }
+    }
+    req
+}
+
+fn is_path_schema(prop: &Value) -> bool {
+    prop.get("format").and_then(Value::as_str) == Some("path")
+}
+
+fn bind_workspace_string(value: &mut Value, ws: &str) {
+    if let Value::String(s) = value
+        && s.contains(WORKSPACE_TOKEN)
+    {
+        *s = s.replace(WORKSPACE_TOKEN, ws);
+    }
+}
+
+/// Build the judge request for an LLM evaluator: the preamble + action
+/// context as the system message, the subject as the user turn. Run on
+/// the configured (or agent) model; no tools.
 fn evaluator_to_model_request(model: &str, context: &str, subject: &str) -> ModelRequest {
     ModelRequest {
         model: model.to_string(),

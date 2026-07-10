@@ -50,6 +50,7 @@ impl Tool for FileWriteTool {
             "properties": {
                 "path": {
                     "type": "string",
+                    "format": "path",
                     "description": "Filesystem path to write to."
                 },
                 "content": {

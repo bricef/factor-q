@@ -201,8 +201,7 @@ clear error message that the LLM sees and can adapt to.
 ### The `${workspace}` token
 
 Instead of hardcoding an absolute workspace path, an agent can reference
-its working directory as `${workspace}` — in any sandbox dimension and in
-tool parameters (`cwd`, `path`, …). The runtime binds the token per
+its working directory as `${workspace}`. The runtime binds the token per
 invocation, driven by `[workspace]` in `fq.toml`:
 
 ```yaml
@@ -225,14 +224,25 @@ sandbox:
   loudly at invocation start rather than running with an unresolved
   grant.
 
+**Where the token resolves.** Sandbox paths always bind. In tool calls,
+substitution happens **only in declared path parameters** — properties
+whose JSON schema carries `format: "path"` (`cwd` on `shell`, `path` on
+`file_read`/`file_write`). Everything else is passed through verbatim:
+file *contents*, shell *arguments*, and any other string reach the tool
+exactly as the agent wrote them, so writing the literal text
+`${workspace}` into a file works and nothing silently rewrites agent
+output.
+
+**How the agent knows the real path.** The runtime injects a step-0
+environment preamble stating the workspace's absolute path and the token
+convention, ahead of the trigger message. For anything outside a path
+parameter (an argv element, a config file it generates), the agent uses
+that real path — or paths relative to `cwd: ${workspace}`.
+
 The runtime provisions *directories* and nothing more. Populating the
 workspace is the agent's job through its granted tools — a code agent's
-first step is typically `git clone <upstream> ${workspace}`, which also
-guarantees it starts from the latest upstream state.
-
-Prefer the token in prompts too ("clone the repo into `${workspace}`") —
-the runtime substitutes tool parameters, so the model never needs to
-know the real path.
+first step is typically cloning the upstream into `${workspace}`, which
+also guarantees it starts from the latest upstream state.
 
 ## Budget
 
