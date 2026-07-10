@@ -14,7 +14,7 @@ permissions:
   contents: read
   pull-requests: read # paths-filter reads the PR's changed-file list
 
-# Every job drives its checks through a `just` target, so CI stays
+# Every build job drives its checks through a `just` target, so CI stays
 # isomorphic with the local dev workflow. Setup steps (toolchains) are the
 # only non-just glue.
 #
@@ -24,6 +24,12 @@ permissions:
 # still report their required status check (they just do nothing when there
 # is nothing to build), so branch protection is never left waiting on a
 # check that never arrives — the reason we gate steps, not the whole job.
+#
+# The Rust gate is two independent jobs — `runtime-ci` (needs NATS + Node
+# for the bus/MCP integration tests) and `store-ci` (hermetic) — so a red
+# in one never masks the other's results (#38). `rust-ci` is a thin
+# aggregate that fails iff either half fails; it keeps the "Rust CI"
+# required-status-check name, so the split needs no branch-protection edit.
 jobs:
   changes:
     name: Detect changes
@@ -62,13 +68,13 @@ jobs:
       # preinstalled on the runner).
       - run: just check-links
 
-  rust-ci:
-    name: Rust CI
+  runtime-ci:
+    name: Runtime CI
     needs: changes
     runs-on: ubuntu-latest
     steps:
       - if: needs.changes.outputs.rust != 'true'
-        run: echo "No Rust-relevant changes — skipping the build."
+        run: echo "No Rust-relevant changes — skipping the runtime build."
       - if: needs.changes.outputs.rust == 'true'
         uses: actions/checkout@v4
       - if: needs.changes.outputs.rust == 'true'
@@ -94,9 +100,49 @@ jobs:
       - if: needs.changes.outputs.rust == 'true'
         run: just infra-wait
       - if: needs.changes.outputs.rust == 'true'
-        run: just rust-ci
+        run: just runtime-ci
       - if: always() && needs.changes.outputs.rust == 'true'
         run: just infra-down
+
+  store-ci:
+    name: Store CI
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.changes.outputs.rust != 'true'
+        run: echo "No Rust-relevant changes — skipping the store build."
+      - if: needs.changes.outputs.rust == 'true'
+        uses: actions/checkout@v4
+      - if: needs.changes.outputs.rust == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - if: needs.changes.outputs.rust == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/fq-store
+      - if: needs.changes.outputs.rust == 'true'
+        uses: extractions/setup-just@v3
+      # Hermetic suite — no NATS broker, no Node toolchain needed.
+      - if: needs.changes.outputs.rust == 'true'
+        run: just store-ci
+
+  # Aggregate gate: keeps the "Rust CI" required-status-check name so the
+  # runtime/store split needs no branch-protection change. Green iff both
+  # halves are green; the Actions UI still shows which half failed.
+  rust-ci:
+    name: Rust CI
+    needs: [runtime-ci, store-ci]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "runtime-ci: ${{ needs.runtime-ci.result }}"
+          echo "store-ci:   ${{ needs.store-ci.result }}"
+          if [ "${{ needs.runtime-ci.result }}" != "success" ] || [ "${{ needs.store-ci.result }}" != "success" ]; then
+            echo "::error::a Rust suite failed — see the Runtime CI / Store CI jobs above"
+            exit 1
+          fi
 
   go-ci:
     name: Go adapters

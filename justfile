@@ -50,12 +50,22 @@ build:
 test *args:
     cd {{runtime_dir}} && just test "$@"
 
-# The bus and MCP integration tests need NATS (`just infra-up`) and
-# Node/npx on PATH.
-# Run the Rust quality gate (fmt-check, clippy, test).
-rust-ci:
+# The two Rust suites run as independent CI jobs (.github/workflows/ci.yml)
+# so a red in one never masks the other (#38); these targets are the local
+# equivalents, and `rust-ci` runs both in one command.
+
+# Bus and MCP integration tests need NATS (`just infra-up`) and Node/npx.
+# Run the runtime Rust gate (fmt-check, clippy, doc, test).
+runtime-ci:
     cd {{runtime_dir}} && just ci
+
+# Hermetic — no NATS, no Node; the grant-bus test is fq-store's `test-bus`.
+# Run the store Rust gate (fmt-check, clippy, doc, test).
+store-ci:
     cd {{store_dir}} && just ci
+
+# Run both Rust quality gates locally (fmt-check, clippy, doc, test).
+rust-ci: runtime-ci store-ci
 
 # The Go trigger adapters — standalone binaries that talk to factor-q only
 # through the trigger wire contract, never fq-runtime code. gofmt + vet +
@@ -66,10 +76,8 @@ go-ci:
     cd adapters/github-watcher && go test ./...
     cd adapters/github-watcher && go build ./...
 
-# CI runs the halves as separate jobs that each invoke a just target
-# (see .github/workflows/ci.yml).
-# Run all quality checks — docs lint + link check + the Rust gate + the Go
-# adapters (the full local gate).
+# Run all quality checks — docs lint + link check + both Rust gates + the
+# Go adapters (the full local gate).
 ci: lint-docs check-links rust-ci go-ci
 
 # Build container images for all services

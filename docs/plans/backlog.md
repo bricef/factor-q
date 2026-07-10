@@ -828,8 +828,9 @@ keep costing CI runs and eroding signal until fixed.
 - Shut the MCP server down gracefully before closing its stdin/pipe (send
   EOF/close and await exit), and/or attach a server-side `error` handler that
   swallows `EPIPE` during shutdown.
-- Consider splitting `just rust-ci` so the runtime and store suites run as
-  independent CI jobs — a runtime flake should not mask the store results.
+- **Done** (https://github.com/bricef/factor-q/issues/38): `just rust-ci` is
+  split into `runtime-ci` and `store-ci` jobs, so a runtime flake no longer
+  masks the store results.
 - If the root cause is upstream, pin/patch or wrap the SDK's stdio transport.
 
 
