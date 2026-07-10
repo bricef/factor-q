@@ -27,6 +27,7 @@ pub mod pricing;
 pub mod prompt;
 pub mod tools;
 pub mod validation;
+pub mod views;
 
 // Role modules. Both stay `pub` so that downstream code (fq-cli,
 // integration tests) can reach typed APIs that haven't been
@@ -63,6 +64,7 @@ pub use mcp::{
 };
 pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;
+pub use views::Views;
 pub use worker::{
     ArchiveAckConsumer, ArchiveAckError, ArchiveRetryError, ArchiveRetrySweeper, ExecutorError,
     Harness, InvocationOutcome, Reducer, ReducerContext, ReducerContextBuilder, ReducerRunner,
