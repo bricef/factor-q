@@ -5,12 +5,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use fq_runtime::agent::{AgentId, AgentRegistry, definition::parse_agent};
-use fq_runtime::control_plane::projection::store::{EventFilter, FailureSummary};
 use fq_runtime::events::{
     Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
     TriggerSource,
 };
 use fq_runtime::llm::{GenAiClient, LlmClient};
+use fq_runtime::views::Views;
 use fq_runtime::worker::{DrainReason, DrainRequest, InvocationOutcome};
 use fq_runtime::{
     Config, EventBus, McpClientManager, McpServerConfig, PricingTable, ProjectionConsumer,
@@ -209,6 +209,9 @@ enum Commands {
         /// Filter by time
         #[arg(long)]
         since: Option<String>,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
     },
     /// Show a health overview of the runtime (NATS, streams,
     /// consumers, projection)
@@ -392,6 +395,9 @@ enum EventCommands {
         /// Maximum number of rows to return
         #[arg(long, default_value_t = 50)]
         limit: i64,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -476,6 +482,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 event_type,
                 since,
                 limit,
+                json,
             } => {
                 query_events(
                     &cli.global,
@@ -483,12 +490,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     event_type.as_deref(),
                     since.as_deref(),
                     limit,
+                    json,
                 )
                 .await?
             }
         },
-        Commands::Costs { agent, since } => {
-            show_costs(&cli.global, agent.as_deref(), since.as_deref()).await?
+        Commands::Costs { agent, since, json } => {
+            show_costs(&cli.global, agent.as_deref(), since.as_deref(), json).await?
         }
         Commands::Status => show_status(&cli.global).await?,
         Commands::Doctor {
@@ -1149,64 +1157,41 @@ async fn show_status(global: &GlobalArgs) -> anyhow::Result<()> {
     report_stream(&js, "fq-events", "fq-projector").await;
     report_stream(&js, "fq-triggers", "fq-dispatcher").await;
 
-    // Projection.
+    // Projection + recovery state, over the read views. (`--json` for
+    // status arrives with the layer-2 probe lift — the stream sections
+    // above print live from the NATS probe today; a status JSON without
+    // them would just duplicate `fq doctor --json`.)
     println!();
     println!("Projection");
     let db_path = projection_path(&config);
     println!("  path:             {}", db_path.display());
     if !db_path.exists() {
         println!("  state:            not initialised (run `fq run` to create)");
-    } else {
-        match ProjectionStore::open_read_only(&db_path).await {
-            Ok(store) => match store.count().await {
-                Ok(count) => {
-                    println!("  rows:             {count}");
-                }
-                Err(err) => {
-                    println!("  rows:             ✗ failed to query: {err}");
-                }
-            },
-            Err(err) => {
-                println!("  state:            ✗ failed to open: {err}");
+        println!();
+        println!("Recovery state");
+        println!("  (no coordination data — `fq run` has not initialised the store)");
+        return Ok(());
+    }
+    match Views::open(&db_path).await {
+        Ok(views) => {
+            match views.event_count().await {
+                Ok(count) => println!("  rows:             {count}"),
+                Err(err) => println!("  rows:             ✗ failed to query: {err}"),
+            }
+
+            // Recovery state (step 9). Points the operator at the
+            // commands they'd need if anything is off; renders
+            // "All clear." otherwise.
+            println!();
+            println!("Recovery state");
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            match views.recovery(now_ms, 30_000).await {
+                Ok(r) => print!("{}", render_recovery_guidance(r.ambiguous, r.stale_workers)),
+                Err(err) => println!("  ✗ failed to read recovery state: {err}"),
             }
         }
-    }
-
-    // Recovery state (step 9). Points the operator at the
-    // commands they'd need if anything is off; renders
-    // "All clear." otherwise.
-    println!();
-    println!("Recovery state");
-    if !db_path.exists() {
-        println!("  (no coordination data — `fq run` has not initialised the store)");
-    } else {
-        match fq_runtime::ControlPlaneStore::open_read_only(&db_path).await {
-            Ok(cp_store) => {
-                let ambiguous = match cp_store
-                    .list_invocations_with_status(
-                        fq_runtime::control_plane::store::OwnerStatus::Ambiguous,
-                    )
-                    .await
-                {
-                    Ok(rows) => rows.len() as i64,
-                    Err(err) => {
-                        println!("  ✗ failed to count ambiguous invocations: {err}");
-                        return Ok(());
-                    }
-                };
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                let stale = match cp_store.list_stale_workers(now_ms, 30_000).await {
-                    Ok(rows) => rows.len() as i64,
-                    Err(err) => {
-                        println!("  ✗ failed to count stale workers: {err}");
-                        return Ok(());
-                    }
-                };
-                print!("{}", render_recovery_guidance(ambiguous, stale));
-            }
-            Err(err) => {
-                println!("  ✗ failed to open control-plane store: {err}");
-            }
+        Err(err) => {
+            println!("  state:            ✗ failed to open: {err}");
         }
     }
     Ok(())
@@ -1303,8 +1288,8 @@ struct DoctorReport {
 }
 
 /// One failure-kind bucket in the report. Mirrors
-/// [`FailureSummary`] but owns its data so the report is a
-/// self-contained serialisable value.
+/// [`fq_runtime::views::FailureView`] but owns its data so the report
+/// is a self-contained serialisable value.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 struct DoctorFailure {
     error_kind: String,
@@ -1329,46 +1314,46 @@ impl DoctorReport {
     }
 }
 
-/// Pure: assemble a [`DoctorReport`] from the raw store reads. Takes
-/// already-fetched worker rows, in-flight invocation rows, the
-/// ambiguous count, and the failure summary so it can be unit-tested
-/// without a database. `now_ms` and `stuck_threshold_ms` are passed
-/// in for deterministic tests.
+/// Pure: assemble a [`DoctorReport`] from the already-fetched read
+/// views, so it can be unit-tested without a database. The stuck
+/// determination (threshold + clock-skew handling) lives in
+/// [`fq_runtime::views::Views::executions`]; this builder only
+/// aggregates and shortens ids for triage.
 fn build_doctor_report(
-    workers: &[fq_runtime::control_plane::store::WorkerRow],
-    in_flight: &[fq_runtime::worker::InvocationStateRow],
+    workers: &[fq_runtime::views::WorkerView],
+    executions: &fq_runtime::views::ExecutionsView,
     ambiguous: i64,
-    failures: &[FailureSummary],
-    now_ms: i64,
-    stuck_threshold_ms: i64,
+    failures: &[fq_runtime::views::FailureView],
 ) -> DoctorReport {
-    use fq_runtime::control_plane::store::WorkerStatus;
-
     let mut w = DoctorWorkers::default();
     for row in workers {
-        match row.status {
-            WorkerStatus::Alive => w.alive += 1,
-            WorkerStatus::Stale => {
+        match row.status.as_str() {
+            "alive" => w.alive += 1,
+            "stale" => {
                 w.stale += 1;
                 w.stale_ids.push(row.worker_id.clone());
             }
-            WorkerStatus::Shutdown => w.shutdown += 1,
+            "shutdown" => w.shutdown += 1,
+            // The control-plane only records the three statuses above;
+            // an unknown value would mean a store/view drift — count it
+            // as stale so it surfaces as an issue rather than vanishing.
+            _ => {
+                w.stale += 1;
+                w.stale_ids.push(row.worker_id.clone());
+            }
         }
     }
 
-    let mut ex = DoctorExecutions {
-        in_flight: in_flight.len() as i64,
-        ..Default::default()
+    let ex = DoctorExecutions {
+        in_flight: executions.in_flight,
+        stuck: executions.stuck,
+        // Short ids (8 chars) for triage, matching the human report.
+        stuck_ids: executions
+            .stuck_ids
+            .iter()
+            .map(|id| id.chars().take(8).collect())
+            .collect(),
     };
-    for row in in_flight {
-        // Clock skew (a future updated_at) is not "stuck"; only a
-        // row that has genuinely not advanced past the threshold is.
-        if now_ms.saturating_sub(row.updated_at) > stuck_threshold_ms {
-            ex.stuck += 1;
-            ex.stuck_ids
-                .push(row.invocation_id.chars().take(8).collect());
-        }
-    }
 
     let failures = failures
         .iter()
@@ -1468,42 +1453,18 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
 /// pure [`build_doctor_report`] / [`render_doctor_report_human`] so
 /// the aggregation and formatting stay testable.
 async fn doctor(global: &GlobalArgs, json: bool, fail_on_issues: bool) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
-
-    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to open control-plane store at {}: has `fq run` been started?",
-                db_path.display()
-            )
-        })?;
-    let worker_store = fq_runtime::WorkerStore::open_read_only(&db_path)
-        .await
-        .with_context(|| format!("failed to open worker store at {}", db_path.display()))?;
-    let proj_store = ProjectionStore::open_read_only(&db_path)
-        .await
-        .with_context(|| format!("failed to open projection at {}", db_path.display()))?;
-
+    let views = open_views(global).await?;
     let now_ms = chrono::Utc::now().timestamp_millis();
 
-    let workers = cp_store.list_workers().await?;
-    let in_flight = worker_store.find_in_flight_invocations().await?;
-    let ambiguous = cp_store
-        .list_invocations_with_status(fq_runtime::control_plane::store::OwnerStatus::Ambiguous)
+    let workers = views.workers().await?;
+    let executions = views.executions(now_ms, DOCTOR_STUCK_THRESHOLD_MS).await?;
+    let ambiguous = views
+        .recovery(now_ms, DOCTOR_STUCK_THRESHOLD_MS)
         .await?
-        .len() as i64;
-    let failures = proj_store.failure_summary().await?;
+        .ambiguous;
+    let failures = views.failures().await?;
 
-    let report = build_doctor_report(
-        &workers,
-        &in_flight,
-        ambiguous,
-        &failures,
-        now_ms,
-        DOCTOR_STUCK_THRESHOLD_MS,
-    );
+    let report = build_doctor_report(&workers, &executions, ambiguous, &failures);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3065,30 +3026,35 @@ async fn publish_trigger(
 /// Query the SQLite projection for events matching the given
 /// filters. Read-only — does not require the projector to be
 /// currently running, only that it has been run at some point.
+/// Open the read-only `Views` handle every CLI read command formats over
+/// (the CLI is a formatter over `fq_runtime::views`, not a read layer of
+/// its own — see the operator-dashboard plan, layer 1).
+async fn open_views(global: &GlobalArgs) -> anyhow::Result<Views> {
+    let config = global.resolve_config()?;
+    let db_path = projection_path(&config);
+    Views::open(&db_path).await.with_context(|| {
+        format!(
+            "failed to open stores at {}: has `fq run` been started?",
+            db_path.display()
+        )
+    })
+}
+
 async fn query_events(
     global: &GlobalArgs,
     agent: Option<&str>,
     event_type: Option<&str>,
     since: Option<&str>,
     limit: i64,
+    json: bool,
 ) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
-    let store = ProjectionStore::open_read_only(&db_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to open projection at {}: has `fq run` been started?",
-                db_path.display()
-            )
-        })?;
+    let views = open_views(global).await?;
+    let rows = views.events(agent, event_type, since, limit).await?;
 
-    let filter = EventFilter {
-        agent,
-        event_type,
-        since,
-    };
-    let rows = store.query_events(&filter, limit).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
 
     if rows.is_empty() {
         println!("No events matched.");
@@ -3119,20 +3085,17 @@ async fn show_costs(
     global: &GlobalArgs,
     agent: Option<&str>,
     since: Option<&str>,
+    json: bool,
 ) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
-    let store = ProjectionStore::open_read_only(&db_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to open projection at {}: has `fq run` been started?",
-                db_path.display()
-            )
-        })?;
+    let views = open_views(global).await?;
+    let report = views.costs(agent, since).await?;
 
-    let summary = store.cost_summary(agent, since).await?;
-    if summary.is_empty() {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if report.agents.is_empty() {
         println!("No cost events recorded.");
         return Ok(());
     }
@@ -3141,8 +3104,7 @@ async fn show_costs(
         "{:<30} {:<10} {:<14} {:<14} total_cost",
         "agent", "events", "input_tokens", "output_tokens"
     );
-    let mut grand_total = 0.0;
-    for row in summary {
+    for row in &report.agents {
         println!(
             "{:<30} {:<10} {:<14} {:<14} ${:.6}",
             row.agent_id,
@@ -3151,10 +3113,9 @@ async fn show_costs(
             row.total_output_tokens,
             row.total_cost
         );
-        grand_total += row.total_cost;
     }
     println!();
-    println!("Total across all agents: ${grand_total:.6}");
+    println!("Total across all agents: ${:.6}", report.total_cost);
     Ok(())
 }
 
@@ -3200,19 +3161,9 @@ fn parse_invocation_status_filter(
     }
 }
 
-#[derive(serde::Serialize, Clone)]
-struct InvocationListItem {
-    invocation_id: String,
-    agent_id: Option<String>,
-    worker_id: String,
-    status: String,
-    assigned_at_ms: i64,
-    archived: bool,
-}
-
 /// One human-readable line for an invocation list row. Pure;
 /// covered by unit tests.
-fn format_invocation_list_row_human(item: &InvocationListItem) -> String {
+fn format_invocation_list_row_human(item: &fq_runtime::views::InvocationSummaryView) -> String {
     let inv_short: String = item.invocation_id.chars().take(8).collect();
     let agent = item.agent_id.as_deref().unwrap_or("?");
     let agent_trim: String = agent.chars().take(22).collect();
@@ -3231,54 +3182,11 @@ async fn invocation_list(
     limit: i64,
     json: bool,
 ) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
-    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to open control-plane store at {}",
-                db_path.display()
-            )
-        })?;
-    let proj_store = ProjectionStore::open_read_only(&db_path)
-        .await
-        .with_context(|| format!("failed to open projection at {}", db_path.display()))?;
-
     let status_filter = status.map(parse_invocation_status_filter).transpose()?;
-    let owners = cp_store.list_invocations(status_filter, limit).await?;
-
-    let mut items: Vec<InvocationListItem> = Vec::with_capacity(owners.len());
-    for owner in &owners {
-        let agent_id = proj_store
-            .agent_id_for_invocation(&owner.invocation_id)
-            .await?;
-        items.push(InvocationListItem {
-            invocation_id: owner.invocation_id.clone(),
-            agent_id,
-            worker_id: owner.worker_id.clone(),
-            status: owner.status.as_str().to_string(),
-            assigned_at_ms: owner.assigned_at,
-            archived: false,
-        });
-    }
-
-    if include_archived {
-        let archives = cp_store.list_archives_recent(limit).await?;
-        for arc in archives {
-            if items.iter().any(|i| i.invocation_id == arc.invocation_id) {
-                continue;
-            }
-            items.push(InvocationListItem {
-                invocation_id: arc.invocation_id,
-                agent_id: Some(arc.agent_id),
-                worker_id: String::new(),
-                status: arc.final_phase,
-                assigned_at_ms: arc.archived_at,
-                archived: true,
-            });
-        }
-    }
+    let views = open_views(global).await?;
+    let items = views
+        .invocation_index(status_filter, include_archived, limit)
+        .await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&items)?);
@@ -3299,87 +3207,11 @@ async fn invocation_list(
     Ok(())
 }
 
-#[derive(serde::Serialize)]
-struct InvocationArchiveSummary {
-    final_phase: String,
-    started_at_ms: i64,
-    terminal_at_ms: i64,
-    archived_at_ms: i64,
-}
-
-#[derive(serde::Serialize)]
-struct EventSummary {
-    timestamp: String,
-    event_type: String,
-}
-
-#[derive(serde::Serialize)]
-struct InvocationDetail {
-    invocation_id: String,
-    agent_id: Option<String>,
-    owner: Option<InvocationListItem>,
-    archive: Option<InvocationArchiveSummary>,
-    recent_events: Vec<EventSummary>,
-}
-
 async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
-    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path).await?;
-    let proj_store = ProjectionStore::open_read_only(&db_path).await?;
-
-    let owner = cp_store.get_invocation_owner(id).await?;
-    let archive = cp_store.get_archive(id).await?;
-    let agent_id = proj_store.agent_id_for_invocation(id).await?;
-
-    if owner.is_none() && archive.is_none() && agent_id.is_none() {
+    let views = open_views(global).await?;
+    let Some(detail) = views.invocation(id).await? else {
         eprintln!("no invocation found with id={id}");
         std::process::exit(1);
-    }
-
-    // Limit recent events to those for this invocation. The
-    // projection has no per-invocation query method today; the
-    // generic query is fast enough for triage volumes.
-    let recent_events: Vec<EventSummary> = proj_store
-        .query_events(
-            &EventFilter {
-                agent: agent_id.as_deref(),
-                event_type: None,
-                since: None,
-            },
-            200,
-        )
-        .await?
-        .into_iter()
-        .filter(|e| e.invocation_id == id)
-        .take(20)
-        .map(|e| EventSummary {
-            timestamp: e.timestamp,
-            event_type: e.event_type,
-        })
-        .collect();
-
-    let owner_item = owner.as_ref().map(|o| InvocationListItem {
-        invocation_id: o.invocation_id.clone(),
-        agent_id: agent_id.clone(),
-        worker_id: o.worker_id.clone(),
-        status: o.status.as_str().to_string(),
-        assigned_at_ms: o.assigned_at,
-        archived: false,
-    });
-    let archive_summary = archive.as_ref().map(|a| InvocationArchiveSummary {
-        final_phase: a.final_phase.clone(),
-        started_at_ms: a.started_at,
-        terminal_at_ms: a.terminal_at,
-        archived_at_ms: a.archived_at,
-    });
-
-    let detail = InvocationDetail {
-        invocation_id: id.to_string(),
-        agent_id: agent_id.clone(),
-        owner: owner_item,
-        archive: archive_summary,
-        recent_events,
     };
 
     if json {
@@ -3400,6 +3232,20 @@ async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::R
                 "  archived: phase={} terminal_at_ms={} archived_at_ms={}",
                 a.final_phase, a.terminal_at_ms, a.archived_at_ms
             );
+        }
+        // The "what is it doing right now" block, from the worker WAL —
+        // present only while the invocation is in flight.
+        if let Some(live) = &detail.live {
+            println!("\nLive execution:");
+            println!("  phase:      {}", live.phase);
+            println!("  step:       {}", live.step_index);
+            println!("  updated_at: {} ms", live.updated_at_ms);
+            for t in live.tools.iter().filter(|t| t.status != "completed") {
+                println!("  tool:       {} [{}]", t.tool_name, t.status);
+            }
+            for l in live.llms.iter().filter(|l| l.status != "completed") {
+                println!("  llm:        {} [{}]", l.model, l.status);
+            }
         }
         if !detail.recent_events.is_empty() {
             println!("\nRecent events:");
@@ -3688,7 +3534,7 @@ mod invocation_tests {
 
     #[test]
     fn format_invocation_list_row_human_renders_short_id_and_truncated_fields() {
-        let item = InvocationListItem {
+        let item = fq_runtime::views::InvocationSummaryView {
             invocation_id: "019e3b328fd47de1aae0bb91bb24528d".to_string(),
             agent_id: Some("a".repeat(40)),
             worker_id: "worker-42".to_string(),
@@ -3708,7 +3554,7 @@ mod invocation_tests {
 
     #[test]
     fn format_invocation_list_row_human_marks_archived() {
-        let item = InvocationListItem {
+        let item = fq_runtime::views::InvocationSummaryView {
             invocation_id: "inv".to_string(),
             agent_id: Some("a".to_string()),
             worker_id: String::new(),
@@ -3827,9 +3673,12 @@ mod invocation_tests {
         assert!(msg.contains("no events found"), "got: {msg}");
     }
 
+    /// The `--json` list shape is an operator contract: the swap from the
+    /// CLI-local struct to `views::InvocationSummaryView` (#105 layer 1)
+    /// must not move these fields.
     #[test]
-    fn invocation_list_item_serialises_to_stable_json_shape() {
-        let item = InvocationListItem {
+    fn invocation_summary_view_serialises_to_stable_json_shape() {
+        let item = fq_runtime::views::InvocationSummaryView {
             invocation_id: "inv-1".to_string(),
             agent_id: Some("agent-1".to_string()),
             worker_id: "worker-1".to_string(),
@@ -3850,16 +3699,6 @@ mod invocation_tests {
 // ============================================================
 // fq workers subcommand
 // ============================================================
-
-#[derive(serde::Serialize, Clone)]
-struct WorkerListItem {
-    worker_id: String,
-    host: String,
-    status: String,
-    last_heartbeat_ms: i64,
-    heartbeat_age_ms: i64,
-    in_flight_count: i64,
-}
 
 /// Human-readable heartbeat age. Stays in step with the
 /// stale-worker sweep threshold so the operator can eyeball
@@ -3883,8 +3722,12 @@ fn format_heartbeat_age_human(age_ms: i64, stale_threshold_ms: i64) -> String {
     }
 }
 
-fn format_worker_list_row_human(item: &WorkerListItem, stale_threshold_ms: i64) -> String {
-    let age = format_heartbeat_age_human(item.heartbeat_age_ms, stale_threshold_ms);
+fn format_worker_list_row_human(
+    item: &fq_runtime::views::WorkerView,
+    now_ms: i64,
+    stale_threshold_ms: i64,
+) -> String {
+    let age = format_heartbeat_age_human(now_ms - item.last_heartbeat_ms, stale_threshold_ms);
     format!(
         "{:<28} {:<8} {:<10} {:<8} {}",
         item.worker_id, item.status, age, item.in_flight_count, item.host
@@ -3897,48 +3740,20 @@ async fn workers_list(
     alive_only: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    use fq_runtime::control_plane::store::WorkerStatus;
-
-    let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
-    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path).await?;
-
     let now_ms = chrono::Utc::now().timestamp_millis();
     // The threshold the CP uses to flip a worker from alive
     // to stale; this is the same DEFAULT_STALE_THRESHOLD_MS
     // used by the coordination consumer.
     let stale_threshold_ms = 30_000_i64;
 
-    let workers = cp_store.list_workers().await?;
-    let mut items: Vec<WorkerListItem> = Vec::with_capacity(workers.len());
-    for w in workers {
-        if stale_only && w.status != WorkerStatus::Stale {
-            continue;
-        }
-        if alive_only && w.status != WorkerStatus::Alive {
-            continue;
-        }
-        let in_flight = cp_store
-            .list_invocations_for_worker(&w.worker_id)
-            .await?
-            .into_iter()
-            .filter(|o| {
-                matches!(
-                    o.status,
-                    fq_runtime::control_plane::store::OwnerStatus::InFlight
-                        | fq_runtime::control_plane::store::OwnerStatus::Ambiguous
-                )
-            })
-            .count() as i64;
-        items.push(WorkerListItem {
-            worker_id: w.worker_id,
-            host: w.host,
-            status: w.status.as_str().to_string(),
-            last_heartbeat_ms: w.last_heartbeat,
-            heartbeat_age_ms: now_ms - w.last_heartbeat,
-            in_flight_count: in_flight,
-        });
-    }
+    let views = open_views(global).await?;
+    let items: Vec<_> = views
+        .workers()
+        .await?
+        .into_iter()
+        .filter(|w| !(stale_only && w.status != "stale"))
+        .filter(|w| !(alive_only && w.status != "alive"))
+        .collect();
 
     if json {
         println!("{}", serde_json::to_string_pretty(&items)?);
@@ -3950,62 +3765,41 @@ async fn workers_list(
             "worker", "status", "hb-age", "in-flight"
         );
         for item in &items {
-            println!("{}", format_worker_list_row_human(item, stale_threshold_ms));
+            println!(
+                "{}",
+                format_worker_list_row_human(item, now_ms, stale_threshold_ms)
+            );
         }
     }
     Ok(())
 }
 
 async fn workers_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
-    let cp_store = fq_runtime::ControlPlaneStore::open_read_only(&db_path).await?;
     let stale_threshold_ms = 30_000_i64;
-
-    let worker = cp_store.get_worker(id).await?;
-    let Some(w) = worker else {
+    let views = open_views(global).await?;
+    let Some(detail) = views.worker(id).await? else {
         eprintln!("no worker found with id={id}");
         std::process::exit(1);
     };
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let owners = cp_store.list_invocations_for_worker(id).await?;
-    let in_flight = owners
-        .iter()
-        .filter(|o| {
-            matches!(
-                o.status,
-                fq_runtime::control_plane::store::OwnerStatus::InFlight
-                    | fq_runtime::control_plane::store::OwnerStatus::Ambiguous
-            )
-        })
-        .count() as i64;
-
-    let item = WorkerListItem {
-        worker_id: w.worker_id.clone(),
-        host: w.host.clone(),
-        status: w.status.as_str().to_string(),
-        last_heartbeat_ms: w.last_heartbeat,
-        heartbeat_age_ms: now_ms - w.last_heartbeat,
-        in_flight_count: in_flight,
-    };
-
     if json {
-        println!("{}", serde_json::to_string_pretty(&item)?);
+        println!("{}", serde_json::to_string_pretty(&detail)?);
     } else {
-        println!("Worker: {}", item.worker_id);
-        println!("  host:      {}", item.host);
-        println!("  status:    {}", item.status);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let w = &detail.worker;
+        println!("Worker: {}", w.worker_id);
+        println!("  host:      {}", w.host);
+        println!("  status:    {}", w.status);
         println!(
             "  hb-age:    {}",
-            format_heartbeat_age_human(item.heartbeat_age_ms, stale_threshold_ms)
+            format_heartbeat_age_human(now_ms - w.last_heartbeat_ms, stale_threshold_ms)
         );
-        println!("  in-flight: {}", item.in_flight_count);
-        if !owners.is_empty() {
+        println!("  in-flight: {}", w.in_flight_count);
+        if !detail.owned.is_empty() {
             println!("\nInvocations owned:");
-            for o in owners.iter().take(20) {
+            for o in detail.owned.iter().take(20) {
                 let inv: String = o.invocation_id.chars().take(11).collect();
-                println!("  {inv}  {}", o.status.as_str());
+                println!("  {inv}  {}", o.status);
             }
         }
     }
@@ -4088,23 +3882,29 @@ mod workers_tests {
         assert!(out.contains("fq workers list --stale-only"));
     }
 
+    /// The `--json` worker shape after the swap to `views::WorkerView`
+    /// (#105 layer 1). Deliberate change from the old CLI-local item:
+    /// gains `registered_at_ms` and `in_flight_count`, drops the
+    /// now-dependent `heartbeat_age_ms` (consumers derive age from
+    /// `last_heartbeat_ms`; the view stays wall-clock-free).
     #[test]
-    fn worker_list_item_serialises_to_stable_json_shape() {
-        let item = WorkerListItem {
+    fn worker_view_serialises_to_stable_json_shape() {
+        let item = fq_runtime::views::WorkerView {
             worker_id: "w-1".to_string(),
             host: "host-1".to_string(),
-            status: "alive".to_string(),
+            registered_at_ms: 1_600_000_000_000,
             last_heartbeat_ms: 1_700_000_000_000,
-            heartbeat_age_ms: 1_500,
+            status: "alive".to_string(),
             in_flight_count: 3,
         };
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["worker_id"], "w-1");
         assert_eq!(v["host"], "host-1");
         assert_eq!(v["status"], "alive");
+        assert_eq!(v["registered_at_ms"], 1_600_000_000_000_i64);
         assert_eq!(v["last_heartbeat_ms"], 1_700_000_000_000_i64);
-        assert_eq!(v["heartbeat_age_ms"], 1_500);
         assert_eq!(v["in_flight_count"], 3);
+        assert!(v.get("heartbeat_age_ms").is_none());
     }
 }
 
@@ -4271,47 +4071,36 @@ mod log_format_tests {
 #[cfg(test)]
 mod doctor_tests {
     use super::*;
-    use fq_runtime::control_plane::store::{WorkerRow, WorkerStatus};
-    use fq_runtime::worker::InvocationStateRow;
+    use fq_runtime::views::{ExecutionsView, FailureView, WorkerView};
 
-    fn worker(id: &str, status: WorkerStatus, last_heartbeat: i64) -> WorkerRow {
-        WorkerRow {
+    fn worker(id: &str, status: &str, last_heartbeat: i64) -> WorkerView {
+        WorkerView {
             worker_id: id.to_string(),
             host: "h".to_string(),
-            registered_at: 0,
-            last_heartbeat,
-            status,
+            registered_at_ms: 0,
+            last_heartbeat_ms: last_heartbeat,
+            status: status.to_string(),
+            in_flight_count: 0,
         }
     }
 
-    fn in_flight_row(id: &str, updated_at: i64) -> InvocationStateRow {
-        InvocationStateRow {
-            invocation_id: id.to_string(),
-            agent_id: "a".to_string(),
-            schema_version: 1,
-            phase: "awaiting_model".to_string(),
-            state_blob: vec![],
-            step_index: 0,
-            started_at: 0,
-            updated_at,
-            terminal_at: None,
-            workspace_ref: None,
-            archive_status: None,
-            archive_published_at: None,
-            trigger_source: None,
-            trigger_subject: None,
-            trigger_payload: None,
+    /// The in-flight/stuck determination itself (threshold, clock skew)
+    /// is `views::Views::executions`' job and is covered by its tests;
+    /// doctor receives the finished counts.
+    fn executions(in_flight: i64, stuck_ids: &[&str]) -> ExecutionsView {
+        ExecutionsView {
+            in_flight,
+            stuck: stuck_ids.len() as i64,
+            stuck_ids: stuck_ids.iter().map(|s| s.to_string()).collect(),
         }
     }
 
     const NOW: i64 = 1_000_000;
-    const THRESHOLD: i64 = 30_000;
 
     #[test]
     fn all_clear_when_everything_healthy() {
-        let workers = vec![worker("w1", WorkerStatus::Alive, NOW)];
-        let in_flight: Vec<InvocationStateRow> = vec![];
-        let report = build_doctor_report(&workers, &in_flight, 0, &[], NOW, THRESHOLD);
+        let workers = vec![worker("w1", "alive", NOW)];
+        let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[]);
 
         assert!(!report.has_issues());
         assert_eq!(report.workers.alive, 1);
@@ -4331,9 +4120,8 @@ mod doctor_tests {
 
     #[test]
     fn running_in_flight_work_is_not_an_issue() {
-        // In-flight but fresh (updated just now) is healthy.
-        let in_flight = vec![in_flight_row("inv-fresh", NOW)];
-        let report = build_doctor_report(&[], &in_flight, 0, &[], NOW, THRESHOLD);
+        // In-flight but not stuck is healthy.
+        let report = build_doctor_report(&[], &executions(1, &[]), 0, &[]);
         assert_eq!(report.executions.in_flight, 1);
         assert_eq!(report.executions.stuck, 0);
         assert!(!report.has_issues());
@@ -4342,11 +4130,11 @@ mod doctor_tests {
     #[test]
     fn stale_workers_flagged_with_ids() {
         let workers = vec![
-            worker("alive-1", WorkerStatus::Alive, NOW),
-            worker("stale-1", WorkerStatus::Stale, NOW - 60_000),
-            worker("gone-1", WorkerStatus::Shutdown, 0),
+            worker("alive-1", "alive", NOW),
+            worker("stale-1", "stale", NOW - 60_000),
+            worker("gone-1", "shutdown", 0),
         ];
-        let report = build_doctor_report(&workers, &[], 0, &[], NOW, THRESHOLD);
+        let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[]);
 
         assert_eq!(report.workers.alive, 1);
         assert_eq!(report.workers.stale, 1);
@@ -4362,12 +4150,7 @@ mod doctor_tests {
 
     #[test]
     fn stuck_in_flight_flagged() {
-        let in_flight = vec![
-            in_flight_row("fresh", NOW - 1_000),
-            // updated_at well past the threshold → stuck.
-            in_flight_row("stuck-abcdef01", NOW - 120_000),
-        ];
-        let report = build_doctor_report(&[], &in_flight, 0, &[], NOW, THRESHOLD);
+        let report = build_doctor_report(&[], &executions(2, &["stuck-abcdef01"]), 0, &[]);
 
         assert_eq!(report.executions.in_flight, 2);
         assert_eq!(report.executions.stuck, 1);
@@ -4381,17 +4164,8 @@ mod doctor_tests {
     }
 
     #[test]
-    fn stuck_ignores_clock_skew() {
-        // A future updated_at (worker clock ahead) is not stuck.
-        let in_flight = vec![in_flight_row("future", NOW + 60_000)];
-        let report = build_doctor_report(&[], &in_flight, 0, &[], NOW, THRESHOLD);
-        assert_eq!(report.executions.stuck, 0);
-        assert!(!report.has_issues());
-    }
-
-    #[test]
     fn ambiguous_flagged() {
-        let report = build_doctor_report(&[], &[], 3, &[], NOW, THRESHOLD);
+        let report = build_doctor_report(&[], &ExecutionsView::default(), 3, &[]);
         assert_eq!(report.ambiguous, 3);
         assert!(report.has_issues());
 
@@ -4406,16 +4180,16 @@ mod doctor_tests {
     #[test]
     fn permanent_failures_grouped_by_kind() {
         let failures = vec![
-            FailureSummary {
+            FailureView {
                 error_kind: "budgetexceeded".to_string(),
                 count: 2,
             },
-            FailureSummary {
+            FailureView {
                 error_kind: "toolerror".to_string(),
                 count: 1,
             },
         ];
-        let report = build_doctor_report(&[], &[], 0, &failures, NOW, THRESHOLD);
+        let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures);
 
         assert_eq!(report.failure_total(), 3);
         assert!(report.has_issues());
@@ -4433,15 +4207,13 @@ mod doctor_tests {
     #[test]
     fn report_serialises_to_stable_json_shape() {
         let report = build_doctor_report(
-            &[worker("w1", WorkerStatus::Alive, NOW)],
-            &[in_flight_row("inv1", NOW)],
+            &[worker("w1", "alive", NOW)],
+            &executions(1, &[]),
             1,
-            &[FailureSummary {
+            &[FailureView {
                 error_kind: "runtimeerror".to_string(),
                 count: 4,
             }],
-            NOW,
-            THRESHOLD,
         );
         let v = serde_json::to_value(&report).unwrap();
         assert_eq!(v["workers"]["alive"], 1);
@@ -4455,7 +4227,7 @@ mod doctor_tests {
 
     #[test]
     fn dead_letters_never_fabricates_a_count() {
-        let report = build_doctor_report(&[], &[], 0, &[], NOW, THRESHOLD);
+        let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &[]);
         // The gated variant carries no count field at all.
         let v = serde_json::to_value(&report).unwrap();
         assert!(v["dead_letters"].get("count").is_none());

@@ -67,6 +67,10 @@ pub struct WorkerView {
     pub last_heartbeat_ms: i64,
     /// `alive` / `stale` / `shutdown`, as recorded by the control-plane.
     pub status: String,
+    /// Invocations this worker currently owns in a non-terminal state
+    /// (`in_flight` or `ambiguous`). Filled by [`Views::workers`] /
+    /// [`Views::worker`]; the bare `From<WorkerRow>` leaves it 0.
+    pub in_flight_count: i64,
 }
 
 impl From<WorkerRow> for WorkerView {
@@ -77,8 +81,19 @@ impl From<WorkerRow> for WorkerView {
             registered_at_ms: r.registered_at,
             last_heartbeat_ms: r.last_heartbeat,
             status: r.status.as_str().to_string(),
+            in_flight_count: 0,
         }
     }
+}
+
+/// One worker plus the invocations it currently owns — the `fq workers
+/// show` / dashboard worker-detail view.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct WorkerDetailView {
+    #[serde(flatten)]
+    pub worker: WorkerView,
+    /// Every ownership row for this worker (any status), newest first.
+    pub owned: Vec<InvocationSummaryView>,
 }
 
 /// Recovery-state counts — the data behind `fq status`'s recovery block and
@@ -106,23 +121,35 @@ pub struct ExecutionsView {
     pub stuck_ids: Vec<String>,
 }
 
-/// One coordination-ownership row in the invocation list.
+/// One row in the invocation list: a coordination-ownership row, or (in
+/// the merged index) an archive-only row flagged `archived`.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct InvocationSummaryView {
     pub invocation_id: String,
+    /// From the projection; `None` when no event for the id has landed.
+    pub agent_id: Option<String>,
+    /// Empty for archive-only rows (the archive keeps no worker).
     pub worker_id: String,
-    /// `in_flight` / `completed` / `failed` / `ambiguous`.
+    /// `in_flight` / `completed` / `failed` / `ambiguous`, or the
+    /// archive's `final_phase` for archive-only rows.
     pub status: String,
+    /// `assigned_at` for ownership rows; `archived_at` for archive-only
+    /// rows.
     pub assigned_at_ms: i64,
+    /// True when the row came from `invocation_archive` (no live
+    /// ownership row remains).
+    pub archived: bool,
 }
 
 impl From<OwnerRow> for InvocationSummaryView {
     fn from(r: OwnerRow) -> Self {
         InvocationSummaryView {
             invocation_id: r.invocation_id,
+            agent_id: None,
             worker_id: r.worker_id,
             status: r.status.as_str().to_string(),
             assigned_at_ms: r.assigned_at,
+            archived: false,
         }
     }
 }
@@ -390,10 +417,50 @@ impl Views {
         Ok(rows.into_iter().map(FailureView::from).collect())
     }
 
-    /// The worker roster.
+    /// The worker roster, each with its current non-terminal ownership
+    /// count.
     pub async fn workers(&self) -> Result<Vec<WorkerView>, ViewsError> {
         let rows = self.control_plane.list_workers().await?;
-        Ok(rows.into_iter().map(WorkerView::from).collect())
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut view = WorkerView::from(row);
+            view.in_flight_count = self.in_flight_count_for(&view.worker_id).await?;
+            out.push(view);
+        }
+        Ok(out)
+    }
+
+    /// One worker's detail — the roster row plus every invocation it
+    /// owns, newest first. `None` when the id is unknown.
+    pub async fn worker(&self, worker_id: &str) -> Result<Option<WorkerDetailView>, ViewsError> {
+        let Some(row) = self.control_plane.get_worker(worker_id).await? else {
+            return Ok(None);
+        };
+        let owned: Vec<InvocationSummaryView> = self
+            .control_plane
+            .list_invocations_for_worker(worker_id)
+            .await?
+            .into_iter()
+            .map(InvocationSummaryView::from)
+            .collect();
+        let mut worker = WorkerView::from(row);
+        worker.in_flight_count = owned
+            .iter()
+            .filter(|o| o.status == "in_flight" || o.status == "ambiguous")
+            .count() as i64;
+        Ok(Some(WorkerDetailView { worker, owned }))
+    }
+
+    /// Non-terminal (`in_flight` | `ambiguous`) ownership count for one
+    /// worker.
+    async fn in_flight_count_for(&self, worker_id: &str) -> Result<i64, ViewsError> {
+        Ok(self
+            .control_plane
+            .list_invocations_for_worker(worker_id)
+            .await?
+            .into_iter()
+            .filter(|o| matches!(o.status, OwnerStatus::InFlight | OwnerStatus::Ambiguous))
+            .count() as i64)
     }
 
     /// Recovery-state counts (ambiguous invocations + stale workers) as of
@@ -445,14 +512,55 @@ impl Views {
     }
 
     /// Coordination-ownership rows, optionally filtered by status, newest
-    /// first, capped at `limit`.
+    /// first, capped at `limit`, each joined with its agent id from the
+    /// projection.
     pub async fn invocations(
         &self,
         status: Option<OwnerStatus>,
         limit: i64,
     ) -> Result<Vec<InvocationSummaryView>, ViewsError> {
         let rows = self.control_plane.list_invocations(status, limit).await?;
-        Ok(rows.into_iter().map(InvocationSummaryView::from).collect())
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut view = InvocationSummaryView::from(row);
+            view.agent_id = self
+                .projection
+                .agent_id_for_invocation(&view.invocation_id)
+                .await?;
+            out.push(view);
+        }
+        Ok(out)
+    }
+
+    /// The merged invocation index: ownership rows first, then (when
+    /// `include_archived`) archive-only rows — terminal invocations whose
+    /// ownership row is gone — flagged `archived`, deduplicated by id.
+    /// This is the invocation *list* surface (`fq invocation list`, the
+    /// dashboard's invocations page); both backing tables are one list to
+    /// an operator.
+    pub async fn invocation_index(
+        &self,
+        status: Option<OwnerStatus>,
+        include_archived: bool,
+        limit: i64,
+    ) -> Result<Vec<InvocationSummaryView>, ViewsError> {
+        let mut items = self.invocations(status, limit).await?;
+        if include_archived {
+            for arc in self.control_plane.list_archives_recent(limit).await? {
+                if items.iter().any(|i| i.invocation_id == arc.invocation_id) {
+                    continue;
+                }
+                items.push(InvocationSummaryView {
+                    invocation_id: arc.invocation_id,
+                    agent_id: Some(arc.agent_id),
+                    worker_id: String::new(),
+                    status: arc.final_phase,
+                    assigned_at_ms: arc.archived_at,
+                    archived: true,
+                });
+            }
+        }
+        Ok(items)
     }
 
     /// The most recently archived invocations, newest first, capped at
@@ -528,8 +636,12 @@ impl Views {
 
         Ok(Some(InvocationDetailView {
             invocation_id: invocation_id.to_string(),
-            agent_id,
-            owner: owner.map(InvocationSummaryView::from),
+            agent_id: agent_id.clone(),
+            owner: owner.map(|o| {
+                let mut v = InvocationSummaryView::from(o);
+                v.agent_id = agent_id;
+                v
+            }),
             archive: archive.map(ArchiveView::from),
             live,
             recent_events,
@@ -629,9 +741,17 @@ mod tests {
         assert!(views.costs(None, None).await.unwrap().agents.is_empty());
         assert!(views.failures().await.unwrap().is_empty());
         assert!(views.invocations(None, 50).await.unwrap().is_empty());
+        assert!(
+            views
+                .invocation_index(None, true, 50)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(views.recovery(1_000, 30_000).await.unwrap().ambiguous, 0);
         assert_eq!(views.executions(1_000, 30_000).await.unwrap().in_flight, 0);
         assert!(views.invocation("no-such-id").await.unwrap().is_none());
+        assert!(views.worker("no-such-worker").await.unwrap().is_none());
     }
 
     /// Seed a worker and an in-flight invocation, then read them back through
@@ -673,6 +793,12 @@ mod tests {
         assert_eq!(workers.len(), 1);
         assert_eq!(workers[0].worker_id, "w1");
         assert_eq!(workers[0].status, "alive");
+        assert_eq!(workers[0].in_flight_count, 0);
+
+        // Worker detail resolves (no ownership rows seeded → owned empty).
+        let detail = views.worker("w1").await.unwrap().expect("w1 exists");
+        assert_eq!(detail.worker.worker_id, "w1");
+        assert!(detail.owned.is_empty());
 
         // In-flight execution shows up in the executions view...
         let execs = views.executions(200, 30_000).await.unwrap();
@@ -690,5 +816,45 @@ mod tests {
         assert_eq!(live.phase, "reducing");
         assert_eq!(live.step_index, 3);
         assert!(live.tools.is_empty());
+    }
+
+    /// An in-flight row whose `updated_at` is in the future (worker clock
+    /// ahead) is not "stuck" — `is_stale`'s saturating age handles skew.
+    /// This guard moved here from `fq doctor`'s tests when the stuck
+    /// determination moved into `executions()` (#105 layer 1).
+    #[tokio::test]
+    async fn executions_ignore_clock_skew() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+
+        const NOW: i64 = 1_000_000;
+        {
+            let ws = WorkerStore::open(&path).await.unwrap();
+            let row = InvocationStateRow {
+                invocation_id: "inv-future".into(),
+                agent_id: "agent-a".into(),
+                schema_version: 1,
+                phase: "reducing".into(),
+                state_blob: vec![],
+                step_index: 1,
+                started_at: NOW,
+                updated_at: NOW + 60_000,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
+            };
+            ws.upsert_invocation_state(&row).await.unwrap();
+            let _cp = ControlPlaneStore::open(&path).await.unwrap();
+            let _proj = ProjectionStore::open(&path).await.unwrap();
+        }
+
+        let views = Views::open(&path).await.unwrap();
+        let execs = views.executions(NOW, 30_000).await.unwrap();
+        assert_eq!(execs.in_flight, 1);
+        assert_eq!(execs.stuck, 0, "future updated_at must not read as stuck");
     }
 }
