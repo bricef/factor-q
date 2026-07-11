@@ -81,6 +81,13 @@ impl ModelPricing {
 #[derive(Debug, Clone, Default)]
 pub struct PricingTable {
     entries: HashMap<String, ModelPricing>,
+    /// Model context-window sizes (`max_input_tokens` from the LiteLLM
+    /// JSON), keyed by model identifier. Kept alongside prices — the
+    /// same source file carries both — but in a separate map so adding
+    /// it did not disturb the many `ModelPricing` construction sites.
+    /// Populated only for models the source lists a window for; absent
+    /// otherwise (looked up as `None`). See [`PricingTable::context_window`].
+    context_windows: HashMap<String, u32>,
 }
 
 impl PricingTable {
@@ -91,7 +98,10 @@ impl PricingTable {
 
     /// Construct a table directly from a map — used in tests.
     pub fn from_map(entries: HashMap<String, ModelPricing>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            context_windows: HashMap::new(),
+        }
     }
 
     /// Number of models in the table.
@@ -107,6 +117,14 @@ impl PricingTable {
     /// Look up pricing for a given model identifier.
     pub fn lookup(&self, model: &str) -> Option<&ModelPricing> {
         self.entries.get(model)
+    }
+
+    /// Look up the context-window size (max input tokens) for a model,
+    /// sourced from the LiteLLM JSON `max_input_tokens` field. `None`
+    /// when the source lists no window for the model — callers must
+    /// treat the window as unknown rather than assume a default.
+    pub fn context_window(&self, model: &str) -> Option<u32> {
+        self.context_windows.get(model).copied()
     }
 
     /// Insert or replace a model's pricing. Used to merge config
@@ -127,11 +145,18 @@ impl PricingTable {
             serde_json::from_str(json).map_err(|err| PricingError::Parse(err.to_string()))?;
 
         let mut entries = HashMap::with_capacity(raw.len());
+        let mut context_windows = HashMap::new();
         for (model, entry) in raw {
             // LiteLLM's file includes a "sample_spec" entry used as a
             // schema template; it has no real pricing.
             if model == "sample_spec" {
                 continue;
+            }
+            // The context window is recorded whenever the source lists
+            // it, independent of whether the entry also carries prices —
+            // a model can have a known window but be skipped for pricing.
+            if let Some(window) = entry.max_input_tokens {
+                context_windows.insert(model.clone(), window);
             }
             let Some(input) = entry.input_cost_per_token else {
                 continue;
@@ -153,7 +178,10 @@ impl PricingTable {
                 },
             );
         }
-        Ok(Self { entries })
+        Ok(Self {
+            entries,
+            context_windows,
+        })
     }
 
     /// Load the pricing table: fetch from LiteLLM, cache to disk, fall
@@ -319,6 +347,8 @@ pub fn default_pricing_cache_path() -> PathBuf {
 #[derive(Debug, Deserialize)]
 struct LiteLlmEntry {
     input_cost_per_token: Option<f64>,
+    #[serde(default)]
+    max_input_tokens: Option<u32>,
     output_cost_per_token: Option<f64>,
     cache_read_input_token_cost: Option<f64>,
     cache_creation_input_token_cost: Option<f64>,
@@ -376,6 +406,21 @@ mod tests {
         assert!((sonnet.output_per_million - 15.0).abs() < 1e-9);
         assert!((sonnet.cache_read_per_million.unwrap() - 0.3).abs() < 1e-9);
         assert!((sonnet.cache_write_per_million.unwrap() - 3.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn context_window_reads_max_input_tokens() {
+        let table = PricingTable::from_litellm_json(LITELLM_SAMPLE).unwrap();
+        // Priced model that also lists a window.
+        assert_eq!(table.context_window("claude-haiku-test"), Some(200_000));
+        // A model skipped for pricing can still contribute a window.
+        assert_eq!(table.context_window("missing-prices"), Some(4096));
+        // A model with no window listed reads as unknown.
+        assert_eq!(table.context_window("claude-sonnet-test"), None);
+        // sample_spec is skipped entirely.
+        assert_eq!(table.context_window("sample_spec"), None);
+        // An unknown model is unknown.
+        assert_eq!(table.context_window("nope"), None);
     }
 
     #[test]

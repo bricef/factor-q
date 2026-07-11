@@ -1186,6 +1186,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         mut durable_start: DurableStart,
         cursor: &mut Option<Uuid>,
     ) -> Result<InvocationOutcome, ExecutorError> {
+        // Invocation-scoped context-pressure tracking (issue #76). The
+        // oldest turn is the invocation start — the first messages are
+        // seeded there. Threaded through the model and self_inspect
+        // paths below.
+        let mut context = ContextTracker {
+            oldest_turn_at_ms: started_at_ms,
+            ..ContextTracker::default()
+        };
         for step_index in step_index_start..HOST_STEP_BUDGET {
             // ADR-0027 graceful drain: suspend at this step boundary if
             // a drain has been requested. The previous iteration's
@@ -1369,6 +1377,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             LlmCallOrigin::AgentTurn,
                             &mut totals,
                             start,
+                            &mut context,
                             cursor,
                         )
                         .await?;
@@ -1398,6 +1407,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             &mut totals,
                             start,
                             sampling.as_mut(),
+                            &mut context,
                             cursor,
                         )
                         .await?;
@@ -1426,6 +1436,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                                 &mut totals,
                                 start,
                                 sampling.as_mut(),
+                                &mut context,
                                 cursor,
                             )
                             .await?;
@@ -1527,6 +1538,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         totals: &mut InvocationTotals,
         start: Instant,
         sampling: Option<&mut SamplingChannel>,
+        context: &mut ContextTracker,
         cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
         // Idempotent recovery: a completed WAL row for this exact call
@@ -1622,6 +1634,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     req,
                     totals,
                     start,
+                    context,
                     &inv_str,
                     cursor,
                 )
@@ -1825,6 +1838,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         req: ToolCallRequest,
         totals: &InvocationTotals,
         start: Instant,
+        context: &ContextTracker,
         inv_str: &str,
         cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
@@ -1843,6 +1857,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
             totals: *totals,
             elapsed_ms: start.elapsed().as_millis() as u64,
+            // Context section (issue #76): the window comes from the
+            // pricing/context-window table; occupancy and history from
+            // the invocation-scoped tracker the model path updates.
+            tokens_in_use: context.tokens_in_use,
+            context_window_size: self.config.pricing.context_window(agent.model()),
+            messages_in_history: context.messages_in_history,
+            oldest_turn_at_ms: Some(context.oldest_turn_at_ms),
         };
         let output = synthesize_self_inspect(&stats, req.parameters.clone());
         let duration_ms = tool_start.elapsed().as_millis() as u64;
@@ -2225,6 +2246,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         origin: LlmCallOrigin,
         totals: &mut InvocationTotals,
         start: Instant,
+        context: &mut ContextTracker,
         cursor: &mut Option<Uuid>,
     ) -> Result<ModelOutcome, ExecutorError> {
         let response = match self
@@ -2235,6 +2257,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 request,
                 origin,
                 totals,
+                Some(context),
                 cursor,
             )
             .await?
@@ -2291,6 +2314,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// request merely declines. The outer `Err` is infrastructure
     /// (store / bus).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_llm(
         &self,
         llm: &dyn LlmClient,
@@ -2299,6 +2323,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         request: ModelRequest,
         origin: LlmCallOrigin,
         totals: &mut InvocationTotals,
+        // Agent turns pass their invocation-scoped context tracker so
+        // occupancy/history are recorded and the one-shot context-
+        // pressure warning can be latched and injected here (issue #76).
+        // Sampling / elicitation / evaluator calls pass `None` — those
+        // are server-initiated and do not drive the agent's own context
+        // signal.
+        context: Option<&mut ContextTracker>,
         cursor: &mut Option<Uuid>,
     ) -> Result<Result<(ModelResponse, f64), crate::llm::LlmError>, ExecutorError> {
         let call_id = Uuid::now_v7();
@@ -2444,36 +2475,73 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .await
             .map_err(map_store_err)?;
 
-        self.publish_chained(
-            cursor,
-            Event::new(
-                agent_id.clone(),
-                invocation_id,
-                EventPayload::LlmResponse(LlmResponsePayload {
-                    call_id,
-                    content: response.content.clone(),
-                    tool_calls: response.tool_calls.clone(),
-                    stop_reason: response.stop_reason,
-                    usage: response.usage,
-                    origin: origin.clone(),
-                }),
+        // Context-pressure tracking + one-shot soft warning (issue
+        // #76). Only agent turns carry a tracker; sampling/elicitation
+        // pass `None`. We record the turn's occupancy and history, and
+        // — the first time occupancy crosses the soft threshold — latch
+        // and annotate this `llm.response` event so the warning is
+        // visible in the event trail exactly once (annotations ride on
+        // the envelope and are stripped only from downstream consumer
+        // prompts, so this does not perturb the canonical trace).
+        let mut context_warning: Option<String> = None;
+        if let Some(tracker) = context {
+            tracker.tokens_in_use = Some(response.usage.input_tokens);
+            tracker.messages_in_history = Some(request.messages.len() as u32);
+            let window = self.config.pricing.context_window(&request.model);
+            if crate::worker::introspection::context_pressure(
+                Some(response.usage.input_tokens),
+                window,
             )
-            .with_cost(events::CostMetadata {
+            .is_some()
+                && !tracker.warning_emitted
+            {
+                tracker.warning_emitted = true;
+                warn!(
+                    agent_id = %agent_id,
+                    invocation_id = %invocation_id,
+                    tokens_in_use = response.usage.input_tokens,
+                    context_window = ?window,
+                    "{}",
+                    crate::worker::introspection::CONTEXT_PRESSURE_WARNING
+                );
+                context_warning =
+                    Some(crate::worker::introspection::CONTEXT_PRESSURE_WARNING.to_string());
+            }
+        }
+
+        let mut response_event = Event::new(
+            agent_id.clone(),
+            invocation_id,
+            EventPayload::LlmResponse(LlmResponsePayload {
                 call_id,
-                model: request.model.clone(),
-                input_tokens: response.usage.input_tokens,
-                output_tokens: response.usage.output_tokens,
-                cache_read_tokens: response.usage.cache_read_tokens,
-                cache_write_tokens: response.usage.cache_write_tokens,
-                input_cost,
-                output_cost,
-                total_cost,
-                cumulative_invocation_cost: totals.total_cost,
-                cumulative_agent_cost: totals.total_cost,
-                origin,
+                content: response.content.clone(),
+                tool_calls: response.tool_calls.clone(),
+                stop_reason: response.stop_reason,
+                usage: response.usage,
+                origin: origin.clone(),
             }),
         )
-        .await?;
+        .with_cost(events::CostMetadata {
+            call_id,
+            model: request.model.clone(),
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+            cache_read_tokens: response.usage.cache_read_tokens,
+            cache_write_tokens: response.usage.cache_write_tokens,
+            input_cost,
+            output_cost,
+            total_cost,
+            cumulative_invocation_cost: totals.total_cost,
+            cumulative_agent_cost: totals.total_cost,
+            origin,
+        });
+        if let Some(message) = context_warning {
+            response_event = response_event.annotate(
+                crate::events::annotation_keys::FLAGS,
+                serde_json::json!({ "context_pressure": message }),
+            );
+        }
+        self.publish_chained(cursor, response_event).await?;
 
         Ok(Ok((
             ModelResponse {
@@ -2523,6 +2591,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     build_request(),
                     origin.clone(),
                     totals,
+                    None,
                     cursor,
                 )
                 .await?
@@ -2696,6 +2765,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 model_request,
                 origin.clone(),
                 totals,
+                None,
                 cursor,
             )
             .await?
@@ -3109,6 +3179,29 @@ fn evaluator_verdict(value: Option<Value>) -> EvaluatorOutcome {
         }
         None => EvaluatorOutcome::Denied("evaluator returned no verdict".to_string()),
     }
+}
+
+/// Invocation-scoped context-pressure tracking (issue #76).
+///
+/// The runner is shared across invocations (`&self`), so the
+/// once-only soft warning cannot latch on the runner; it latches
+/// here, on a value the run loop owns for a single invocation. The
+/// fields mirror the `context` section of `self_inspect`: the most
+/// recent turn's prompt size, the message count the runner last
+/// dispatched, and the timestamp of the oldest turn (invocation
+/// start, when the first messages are seeded).
+#[derive(Debug, Default)]
+struct ContextTracker {
+    /// Prompt tokens on the most recent LLM turn (context occupancy).
+    tokens_in_use: Option<u32>,
+    /// Message count in the most recently dispatched request.
+    messages_in_history: Option<u32>,
+    /// Unix-ms of the oldest turn — the invocation start.
+    oldest_turn_at_ms: i64,
+    /// Whether the one-shot soft warning has already been injected
+    /// past the threshold. Latched so the warning fires exactly once
+    /// per invocation, not on every subsequent over-threshold turn.
+    warning_emitted: bool,
 }
 
 enum ModelOutcome {
@@ -4432,6 +4525,10 @@ mod tests {
                     elicitation_cost: 0.0,
                 },
                 elapsed_ms: 0,
+                tokens_in_use: None,
+                context_window_size: None,
+                messages_in_history: None,
+                oldest_turn_at_ms: None,
             },
             json!({"include": ["budget"]}),
         );
@@ -5766,6 +5863,151 @@ mod tests {
     // sampling gate's budget boundaries, and sampling spend flowing
     // into the invocation accumulator. Hermetic via the sim doubles;
     // handle_sampling is private, hence tested here.
+
+    /// Issue #76: a pricing table carrying a context window, so the
+    /// runner can compute occupancy and fire the soft warning. Uses
+    /// `from_litellm_json` because that is the only constructor that
+    /// records `max_input_tokens`.
+    fn pricing_with_window() -> Arc<PricingTable> {
+        // 100-token window, priced so cost stays trivial.
+        let json = r#"{
+            "tiny-window": {
+                "max_input_tokens": 100,
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000005
+            }
+        }"#;
+        Arc::new(PricingTable::from_litellm_json(json).expect("pricing json"))
+    }
+
+    async fn windowed_runner(
+        sink: &std::sync::Arc<crate::test_support::sim::RecordingSink>,
+        dir: &tempfile::TempDir,
+    ) -> ReducerRunner {
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("events.db"))
+                .await
+                .expect("worker store"),
+        );
+        ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .event_sink(Arc::clone(sink) as Arc<dyn EventSink>)
+                    .pricing(pricing_with_window())
+                    .store(store)
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
+            Harness::new(),
+        )
+    }
+
+    /// The soft context-pressure warning is injected once, past the
+    /// threshold, and is visible in the event trail (issue #76). The
+    /// model reports a prompt of 90 tokens against a 100-token window
+    /// (90% — over the 80% threshold), so the runner annotates the
+    /// `llm.response` event with the one-shot warning.
+    #[tokio::test]
+    async fn context_pressure_warning_injected_once_into_event_trail() {
+        let sink = std::sync::Arc::new(crate::test_support::sim::RecordingSink::new());
+        let dir = tempdir().expect("tempdir");
+        let runner = windowed_runner(&sink, &dir).await;
+
+        let agent = Agent::builder()
+            .id(unique_agent_id("ctx-pressure"))
+            .model("tiny-window")
+            .system_prompt("be brief")
+            .budget(1.0)
+            .build()
+            .unwrap();
+
+        // Two end-turn-shaped turns are not needed: a single response
+        // that is over threshold and ends the turn is enough. 90/100 in.
+        let llm = FixtureClient::new();
+        llm.push_response(canned("done.", 90, 5));
+
+        runner
+            .run(
+                &agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                json!({"input": "go"}),
+            )
+            .await
+            .expect("invocation completes");
+
+        let events = sink.events();
+        let warned: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.annotations
+                    .0
+                    .get(crate::events::annotation_keys::FLAGS)
+                    .and_then(|v| v.get("context_pressure"))
+                    .is_some()
+            })
+            .collect();
+        assert_eq!(
+            warned.len(),
+            1,
+            "the soft warning must be injected exactly once into the event trail"
+        );
+        // And it rides on an llm.response event.
+        assert!(
+            matches!(warned[0].payload, EventPayload::LlmResponse(_)),
+            "warning should annotate the llm.response that crossed the threshold"
+        );
+        assert_eq!(
+            warned[0].annotations.0[crate::events::annotation_keys::FLAGS]["context_pressure"],
+            json!(crate::worker::introspection::CONTEXT_PRESSURE_WARNING)
+        );
+    }
+
+    /// Below the threshold, no warning is injected (issue #76).
+    #[tokio::test]
+    async fn context_pressure_warning_absent_below_threshold() {
+        let sink = std::sync::Arc::new(crate::test_support::sim::RecordingSink::new());
+        let dir = tempdir().expect("tempdir");
+        let runner = windowed_runner(&sink, &dir).await;
+
+        let agent = Agent::builder()
+            .id(unique_agent_id("ctx-ok"))
+            .model("tiny-window")
+            .system_prompt("be brief")
+            .budget(1.0)
+            .build()
+            .unwrap();
+
+        // 10/100 tokens = 10%, well under threshold.
+        let llm = FixtureClient::new();
+        llm.push_response(canned("done.", 10, 5));
+
+        runner
+            .run(
+                &agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                json!({"input": "go"}),
+            )
+            .await
+            .expect("invocation completes");
+
+        let any_warning = sink.events().iter().any(|e| {
+            e.annotations
+                .0
+                .get(crate::events::annotation_keys::FLAGS)
+                .and_then(|v| v.get("context_pressure"))
+                .is_some()
+        });
+        assert!(!any_warning, "no warning below the threshold");
+    }
 
     fn sampling_world() -> (
         std::sync::Arc<crate::test_support::sim::RecordingSink>,

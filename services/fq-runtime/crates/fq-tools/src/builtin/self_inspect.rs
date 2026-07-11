@@ -39,7 +39,7 @@ pub const SELF_INSPECT_TOOL_NAME: &str = "self_inspect";
 
 /// All known include-filter values for `self_inspect`'s
 /// `include` parameter. The host honours these strings.
-pub const SELF_INSPECT_SECTIONS: &[&str] = &["budget", "iterations", "model", "tools"];
+pub const SELF_INSPECT_SECTIONS: &[&str] = &["budget", "context", "iterations", "model", "tools"];
 
 /// Built-in `self_inspect` tool. Schema-only; the actual data
 /// fulfilment happens in the host (see module docs).
@@ -61,9 +61,11 @@ impl Tool for SelfInspectTool {
     fn description(&self) -> &str {
         "Inspect this agent's own invocation-scoped runtime state. \
          Returns budget usage and remaining headroom, iteration count, \
-         the configured model, and the list of available tools. Use \
-         this when asked about your own runtime state instead of \
-         guessing — the runtime tracks the authoritative values."
+         context-window occupancy (tokens in use vs the window size, \
+         message count), the configured model, and the list of \
+         available tools. Use this when asked about your own runtime \
+         state instead of guessing — the runtime tracks the \
+         authoritative values."
     }
 
     fn parameters_schema(&self) -> Value {
