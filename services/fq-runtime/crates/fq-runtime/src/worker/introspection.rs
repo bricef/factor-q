@@ -36,6 +36,24 @@ pub struct HostInvocationStats<'a> {
     /// milliseconds. The runner already tracks this as part of
     /// the failure path; we surface it here for the agent too.
     pub elapsed_ms: u64,
+    /// Prompt tokens the model consumed on the most recent LLM
+    /// turn — the agent's current context occupancy. `None`
+    /// before the first turn has landed (the runner has no usage
+    /// figure to report yet).
+    pub tokens_in_use: Option<u32>,
+    /// The model's context-window size (max input tokens), from
+    /// the pricing/context-window table. `None` when the table
+    /// lists no window for the model — reported as unknown rather
+    /// than guessed.
+    pub context_window_size: Option<u32>,
+    /// Number of messages in the conversation history at dispatch
+    /// time (system + user + assistant + tool). `None` before the
+    /// first turn, when the runner has not yet built a request.
+    pub messages_in_history: Option<u32>,
+    /// Unix-ms timestamp of the oldest turn in history — the
+    /// invocation start, when the first (system/user) messages are
+    /// seeded. `None` if unknown.
+    pub oldest_turn_at_ms: Option<i64>,
 }
 
 /// Parameters accepted by the `self_inspect` tool.
@@ -87,12 +105,62 @@ pub fn synthesize_self_inspect(stats: &HostInvocationStats<'_>, parameters: Valu
         out.insert("budget".to_string(), Value::Object(budget_obj));
     }
 
+    if want.contains(&"context") {
+        let mut context_obj = serde_json::Map::new();
+        context_obj.insert("tokens_in_use".to_string(), json!(stats.tokens_in_use));
+        context_obj.insert(
+            "context_window_size".to_string(),
+            json!(stats.context_window_size),
+        );
+        context_obj.insert(
+            "messages_in_history".to_string(),
+            json!(stats.messages_in_history),
+        );
+        context_obj.insert("oldest_turn_at".to_string(), json!(stats.oldest_turn_at_ms));
+        // Surface the soft-pressure signal in the section itself when
+        // both figures are known and usage has crossed the threshold.
+        // The runner also emits it once to the event trail; here it is
+        // an at-a-glance flag on the read path the agent already reads.
+        if context_pressure(stats.tokens_in_use, stats.context_window_size).is_some() {
+            context_obj.insert("warning".to_string(), json!(CONTEXT_PRESSURE_WARNING));
+        }
+        out.insert("context".to_string(), Value::Object(context_obj));
+    }
+
     if want.contains(&"tools") {
         out.insert("tools".to_string(), json!(stats.allowed_tool_names));
     }
 
     serde_json::to_string(&Value::Object(out))
         .unwrap_or_else(|_| "{\"error\":\"failed to serialise self_inspect output\"}".to_string())
+}
+
+/// Fraction of the context window at which the soft warning fires
+/// (~80%, per the 2026-07-09 review §8 and the ergonomics doc's
+/// self-governance note). Below the threshold there is no signal; at
+/// or above it the runner injects the one-shot warning and
+/// `self_inspect` flags it.
+pub const CONTEXT_PRESSURE_THRESHOLD: f64 = 0.80;
+
+/// The one-shot soft-warning message injected once context occupancy
+/// crosses [`CONTEXT_PRESSURE_THRESHOLD`]. Kept as a constant so the
+/// runner's event-trail injection and the `self_inspect` context flag
+/// carry identical text.
+pub const CONTEXT_PRESSURE_WARNING: &str = "context nearly full — wrap up or summarise.";
+
+/// Whether the current occupancy is at or past the soft threshold.
+/// Returns the occupancy fraction when both figures are known and the
+/// threshold is crossed, `None` otherwise (unknown window, unknown
+/// usage, zero window, or below threshold). The runner uses this to
+/// decide whether to inject the one-shot warning; `synthesize_self_inspect`
+/// uses it to flag the `context` section.
+pub fn context_pressure(tokens_in_use: Option<u32>, window: Option<u32>) -> Option<f64> {
+    let (used, window) = (tokens_in_use?, window?);
+    if window == 0 {
+        return None;
+    }
+    let fraction = used as f64 / window as f64;
+    (fraction >= CONTEXT_PRESSURE_THRESHOLD).then_some(fraction)
 }
 
 /// Resolve the `include` parameter to a static-string filter.
@@ -131,6 +199,10 @@ mod tests {
                 elicitation_cost: 0.0,
             },
             elapsed_ms: 1234,
+            tokens_in_use: Some(1_000),
+            context_window_size: Some(200_000),
+            messages_in_history: Some(4),
+            oldest_turn_at_ms: Some(1_700_000_000_000),
         }
     }
 
@@ -204,5 +276,70 @@ mod tests {
         let raw = synthesize_self_inspect(&stats(), json!({"include": []}));
         let v: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn context_section_reports_window_usage_and_history() {
+        let raw = synthesize_self_inspect(&stats(), json!({"include": ["context"]}));
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        let context = &v["context"];
+        assert_eq!(context["tokens_in_use"], 1_000);
+        assert_eq!(context["context_window_size"], 200_000);
+        assert_eq!(context["messages_in_history"], 4);
+        assert_eq!(context["oldest_turn_at"], 1_700_000_000_000i64);
+        // Well under 80% — no warning flag.
+        assert!(context.get("warning").is_none());
+    }
+
+    #[test]
+    fn context_section_is_part_of_the_default_output() {
+        let raw = synthesize_self_inspect(&stats(), Value::Null);
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert!(v.get("context").is_some(), "context is a default section");
+    }
+
+    #[test]
+    fn context_section_reports_unknowns_as_null() {
+        let s = HostInvocationStats {
+            tokens_in_use: None,
+            context_window_size: None,
+            messages_in_history: None,
+            oldest_turn_at_ms: None,
+            ..stats()
+        };
+        let raw = synthesize_self_inspect(&s, json!({"include": ["context"]}));
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        let context = &v["context"];
+        assert!(context["tokens_in_use"].is_null());
+        assert!(context["context_window_size"].is_null());
+        assert!(context["messages_in_history"].is_null());
+        assert!(context["oldest_turn_at"].is_null());
+        assert!(context.get("warning").is_none());
+    }
+
+    #[test]
+    fn context_section_flags_warning_past_threshold() {
+        let s = HostInvocationStats {
+            tokens_in_use: Some(180_000),
+            context_window_size: Some(200_000),
+            ..stats()
+        };
+        let raw = synthesize_self_inspect(&s, json!({"include": ["context"]}));
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["context"]["warning"], json!(CONTEXT_PRESSURE_WARNING));
+    }
+
+    #[test]
+    fn context_pressure_thresholds() {
+        // Below 80%: no pressure.
+        assert!(context_pressure(Some(159_000), Some(200_000)).is_none());
+        // At/above 80%: pressure, returning the occupancy fraction.
+        assert!(context_pressure(Some(160_000), Some(200_000)).is_some());
+        assert!(context_pressure(Some(200_000), Some(200_000)).is_some());
+        // Unknown usage or window: no pressure signal.
+        assert!(context_pressure(None, Some(200_000)).is_none());
+        assert!(context_pressure(Some(160_000), None).is_none());
+        // Zero window: guarded, no divide-by-zero.
+        assert!(context_pressure(Some(1), Some(0)).is_none());
     }
 }
