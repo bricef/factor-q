@@ -4028,7 +4028,7 @@ mod doctor_tests {
             schema_version: 1,
             phase: "awaiting_model".to_string(),
             state_blob: vec![],
-            iteration: 0,
+            step_index: 0,
             started_at: 0,
             updated_at,
             terminal_at: None,

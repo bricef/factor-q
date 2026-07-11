@@ -181,7 +181,7 @@ mod tests {
             schema_version: 1,
             phase: "completed".to_string(),
             state_blob: vec![],
-            iteration: 0,
+            step_index: 0,
             started_at: 1,
             updated_at: 2,
             terminal_at: Some(2),
