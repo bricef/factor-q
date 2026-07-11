@@ -788,10 +788,6 @@ mod tests {
         assert_eq!(received.envelope.agent_id.as_str(), agent_id);
     }
 
-    /// The pre-flight guard (issue #4) rejects a payload larger than
-    /// the server's advertised `max_payload` with a clear, attributable
-    /// error, and never reaches NATS. Exercised against the pure seam
-    /// so it needs no live server.
     #[test]
     fn down_mode_now_from_body_maps_markers() {
         assert!(down_mode_now_from_body(DOWN_MODE_NOW.as_bytes()));
@@ -801,6 +797,10 @@ mod tests {
         assert!(!down_mode_now_from_body(b"garbage"));
     }
 
+    /// The pre-flight guard (issue #4) rejects a payload larger than
+    /// the server's advertised `max_payload` with a clear, attributable
+    /// error, and never reaches NATS. Exercised against the pure seam
+    /// so it needs no live server.
     #[test]
     fn payload_guard_rejects_oversized_and_accepts_within_limit() {
         // Strictly over the limit -> rejected with size and limit.
