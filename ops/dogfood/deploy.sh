@@ -18,8 +18,12 @@
 #
 # Bring-down is graceful (ADR-0027): `fq drain` suspends in-flight
 # invocations at a step boundary (state on the WAL) and the process exits
-# on its own; recovery resumes them under the new binary. Bounded wait,
-# then a hard-stop fallback. The watcher is a stateless poller: SIGTERM.
+# on its own; recovery resumes them under the new binary. Past the
+# bounded wait the fallback escalates: a *confirmed* stop via
+# `fq down --now` (#63 — clean teardown, worker deregistered, exit
+# observed), then SIGINT as the true last resort for a daemon that
+# predates `fq down` or is too wedged to service control messages.
+# The watcher is a stateless poller: SIGTERM.
 #
 # No health-gate / auto-rollback yet — that is the next slice of #102.
 set -euo pipefail
@@ -121,8 +125,23 @@ if [ -n "$DAEMON_PID" ]; then
         sleep 1
     done
     if kill -0 "$DAEMON_PID" 2>/dev/null; then
-        printf '    drain deadline exceeded — hard-stopping (SIGINT)\n'
-        kill -INT "$DAEMON_PID" 2>/dev/null || true
+        # Escalation 1 — a *confirmed* stop (#63): `--now` skips the
+        # already-attempted drain; the daemon tears down cleanly,
+        # DEREGISTERS its worker (no stale-worker cruft, #64/#65), and
+        # `fq down` exits zero only after observing the daemon's own
+        # system.shutdown event. Against a daemon that predates
+        # `fq down`, or one too wedged to service control messages, it
+        # times out non-zero and we fall through to the signal.
+        printf '    drain deadline exceeded — requesting confirmed stop (fq down --now)\n'
+        if "$REL/fq" --config "$DOGFOOD/fq.toml" down --now; then
+            printf '    confirmed stop\n'
+        else
+            # Escalation 2, last resort: SIGINT is crash-equivalent —
+            # the worker registration goes stale and the next start's
+            # recovery resumes whatever was in flight.
+            printf '    no confirmation from fq down — hard-stopping (SIGINT)\n'
+            kill -INT "$DAEMON_PID" 2>/dev/null || true
+        fi
         for _ in $(seq 1 20); do kill -0 "$DAEMON_PID" 2>/dev/null || break; sleep 1; done
     fi
     kill -0 "$DAEMON_PID" 2>/dev/null && die "daemon PID $DAEMON_PID would not stop"
