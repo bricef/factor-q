@@ -85,6 +85,25 @@ pub const CONTROL_RELOAD_SUBJECT: &str = "fq.control.reload";
 /// Ephemeral like reload — no daemon listening is a silent no-op.
 pub const CONTROL_DRAIN_SUBJECT: &str = "fq.control.drain";
 
+/// Core-NATS subject an operator-initiated clean stop is requested on
+/// (`fq down`, issue #63). Ephemeral like reload/drain — no daemon
+/// listening is a silent no-op. The message body selects the mode:
+/// [`DOWN_MODE_DRAIN`] (drain in-flight work to a step boundary, then
+/// exit) or [`DOWN_MODE_NOW`] (clean infra teardown + deregister + exit
+/// immediately, the `--now` escape hatch). Either way the daemon
+/// deregisters its worker and publishes `fq.system.shutdown` on exit, so
+/// `fq down` can confirm the process actually stopped.
+pub const CONTROL_DOWN_SUBJECT: &str = "fq.control.down";
+
+/// `fq down` mode marker: drain in-flight work to the next step boundary
+/// (bounded by `drain_deadline_ms`), then exit — the default.
+pub const DOWN_MODE_DRAIN: &str = "drain";
+
+/// `fq down --now` mode marker: skip the drain — clean infra teardown,
+/// worker deregister, and immediate exit (equivalent to today's SIGINT,
+/// but as a proper confirmable command).
+pub const DOWN_MODE_NOW: &str = "now";
+
 /// Default retention for the trigger stream. Triggers are short-lived
 /// — the dispatcher consumes them within seconds under normal
 /// operation. A 24h window is a safety net against a runaway
@@ -109,6 +128,15 @@ pub fn agent_id_from_trigger_subject(subject: &str) -> Option<&str> {
         return None;
     }
     Some(third)
+}
+
+/// Parse a control-down message body into "drain now?" — `true` for
+/// [`DOWN_MODE_NOW`], `false` otherwise. Any unrecognised body (including
+/// an empty one) falls back to the safe default: drain to a step boundary
+/// rather than a surprise hard stop. Pure so the daemon's dispatch is
+/// unit-testable without NATS.
+pub fn down_mode_now_from_body(body: &[u8]) -> bool {
+    body == DOWN_MODE_NOW.as_bytes()
 }
 
 /// Errors from the event bus.
@@ -622,6 +650,45 @@ impl EventBus {
         let sub = self.client.subscribe(CONTROL_DRAIN_SUBJECT).await?;
         Ok(sub)
     }
+
+    /// Request an operator-initiated clean stop of a running daemon
+    /// (`fq down`, issue #63). Publishes on the core-NATS control-down
+    /// subject with a body of [`DOWN_MODE_DRAIN`] or [`DOWN_MODE_NOW`] and
+    /// flushes. A running `fq run` daemon tears down cleanly, deregisters
+    /// its worker, and exits; in drain mode it first suspends in-flight
+    /// invocations at a step boundary. No daemon listening is a silent
+    /// no-op.
+    pub async fn publish_control_down(&self, now: bool) -> Result<(), BusError> {
+        let body = if now { DOWN_MODE_NOW } else { DOWN_MODE_DRAIN };
+        debug!(
+            subject = CONTROL_DOWN_SUBJECT,
+            mode = body,
+            "publishing control down"
+        );
+        self.client
+            .publish(CONTROL_DOWN_SUBJECT, Bytes::from_static(body.as_bytes()))
+            .await
+            .map_err(|err| BusError::Publish(err.to_string()))?;
+        // Flush so the message leaves the client before the short-lived
+        // CLI process exits.
+        self.client
+            .flush()
+            .await
+            .map_err(|err| BusError::Publish(err.to_string()))?;
+        Ok(())
+    }
+
+    /// Subscribe to the daemon control-down subject. Unlike reload/drain,
+    /// the daemon reads the message *body* to pick the stop mode (see
+    /// [`down_mode_now_from_body`]).
+    pub async fn subscribe_control_down(&self) -> Result<async_nats::Subscriber, BusError> {
+        debug!(
+            subject = CONTROL_DOWN_SUBJECT,
+            "subscribing to control down"
+        );
+        let sub = self.client.subscribe(CONTROL_DOWN_SUBJECT).await?;
+        Ok(sub)
+    }
 }
 
 #[cfg(test)]
@@ -725,6 +792,15 @@ mod tests {
     /// the server's advertised `max_payload` with a clear, attributable
     /// error, and never reaches NATS. Exercised against the pure seam
     /// so it needs no live server.
+    #[test]
+    fn down_mode_now_from_body_maps_markers() {
+        assert!(down_mode_now_from_body(DOWN_MODE_NOW.as_bytes()));
+        assert!(!down_mode_now_from_body(DOWN_MODE_DRAIN.as_bytes()));
+        // Unknown / empty body defaults to the safe drain path.
+        assert!(!down_mode_now_from_body(b""));
+        assert!(!down_mode_now_from_body(b"garbage"));
+    }
+
     #[test]
     fn payload_guard_rejects_oversized_and_accepts_within_limit() {
         // Strictly over the limit -> rejected with size and limit.

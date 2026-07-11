@@ -264,3 +264,184 @@ fn daemon_drains_and_exits_on_fq_drain() {
         "dispatcher did not stop cleanly on drain\n--- log ---\n{log}"
     );
 }
+
+/// `fq down` makes a running daemon drain in-flight work to a step
+/// boundary, deregister its worker, and exit — and the command
+/// *confirms* the exit by waiting for the daemon's `fq.system.shutdown`
+/// event (issue #63). Idle daemon here, so the bounded drain finds
+/// nothing to suspend and the stop completes at once.
+#[test]
+fn daemon_stops_and_confirms_on_fq_down() {
+    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
+        eprintln!("skipping daemon_stops_and_confirms_on_fq_down: FQ_NATS_URL not set");
+        return;
+    };
+    let _guard = SHUTDOWN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let scratch = unique_scratch();
+    let log_path = scratch.join("daemon.log");
+    let log = std::fs::File::create(&log_path).expect("create daemon log");
+    let log_err = log.try_clone().expect("clone daemon log handle");
+
+    let mut child = Command::new(fq_binary())
+        .arg("run")
+        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_NATS_URL", &nats_url)
+        .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .expect("spawn fq run");
+
+    // Wait for the daemon to reach steady state.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().expect("poll fq run") {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
+        }
+        if std::fs::read_to_string(&log_path)
+            .unwrap_or_default()
+            .contains("Runtime ready")
+        {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(ready, "daemon never reached 'Runtime ready' within 30s");
+
+    // `fq down` should stop the daemon AND confirm the exit itself
+    // (exit 0 only after it observes fq.system.shutdown).
+    let down = Command::new(fq_binary())
+        .arg("down")
+        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_NATS_URL", &nats_url)
+        .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .output()
+        .expect("run fq down");
+    let down_out = String::from_utf8_lossy(&down.stdout).into_owned();
+    let down_err = String::from_utf8_lossy(&down.stderr).into_owned();
+
+    // The daemon must have exited on its own — no signal sent.
+    let status = wait_with_timeout(&mut child, Duration::from_secs(15))
+        .expect("daemon did not exit within 15s of `fq down` (down hung?)");
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+
+    // A clean `fq down` deregisters the worker: its coordination row
+    // must read `shutdown`, not linger `alive`.
+    let workers = Command::new(fq_binary())
+        .args(["workers", "list", "--json"])
+        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_NATS_URL", &nats_url)
+        .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .output()
+        .expect("run fq workers list");
+    let workers_out = String::from_utf8_lossy(&workers.stdout).into_owned();
+
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert!(
+        down.status.success(),
+        "`fq down` failed (should exit 0 after confirming the daemon stopped):          stdout={down_out}\nstderr={down_err}"
+    );
+    assert!(
+        down_out.contains("Daemon stopped"),
+        "`fq down` did not confirm the daemon stopped:\n{down_out}"
+    );
+    assert!(
+        status.success(),
+        "expected clean exit(0) after down, got {status:?}\n--- log ---\n{log}"
+    );
+    assert!(
+        log.contains("down requested"),
+        "daemon did not observe the down control message\n--- log ---\n{log}"
+    );
+    assert!(
+        workers_out.contains("shutdown"),
+        "worker was not deregistered on `fq down` — expected a `shutdown` status:\n{workers_out}"
+    );
+}
+
+/// `fq down --now` stops the daemon without draining — clean teardown +
+/// worker deregister + immediate exit, the proper command replacing
+/// `pkill -INT` (issue #63). Confirmed via the same shutdown-event wait.
+#[test]
+fn daemon_stops_now_on_fq_down_now() {
+    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
+        eprintln!("skipping daemon_stops_now_on_fq_down_now: FQ_NATS_URL not set");
+        return;
+    };
+    let _guard = SHUTDOWN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let scratch = unique_scratch();
+    let log_path = scratch.join("daemon.log");
+    let log = std::fs::File::create(&log_path).expect("create daemon log");
+    let log_err = log.try_clone().expect("clone daemon log handle");
+
+    let mut child = Command::new(fq_binary())
+        .arg("run")
+        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_NATS_URL", &nats_url)
+        .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .expect("spawn fq run");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().expect("poll fq run") {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
+        }
+        if std::fs::read_to_string(&log_path)
+            .unwrap_or_default()
+            .contains("Runtime ready")
+        {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(ready, "daemon never reached 'Runtime ready' within 30s");
+
+    let down = Command::new(fq_binary())
+        .args(["down", "--now"])
+        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_NATS_URL", &nats_url)
+        .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .output()
+        .expect("run fq down --now");
+    let down_out = String::from_utf8_lossy(&down.stdout).into_owned();
+    let down_err = String::from_utf8_lossy(&down.stderr).into_owned();
+
+    let status = wait_with_timeout(&mut child, Duration::from_secs(15))
+        .expect("daemon did not exit within 15s of `fq down --now`");
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert!(
+        down.status.success(),
+        "`fq down --now` failed: stdout={down_out}\nstderr={down_err}"
+    );
+    assert!(
+        down_out.contains("Daemon stopped"),
+        "`fq down --now` did not confirm the daemon stopped:\n{down_out}"
+    );
+    assert!(
+        status.success(),
+        "expected clean exit(0) after down --now, got {status:?}\n--- log ---\n{log}"
+    );
+    assert!(
+        log.contains("down requested (--now)"),
+        "daemon did not take the --now (no-drain) path\n--- log ---\n{log}"
+    );
+}

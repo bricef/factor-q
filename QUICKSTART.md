@@ -134,7 +134,23 @@ In another terminal:
 just fq trigger sample-agent "Hello." --via-nats
 ```
 
-The daemon picks up the trigger, runs the agent, and emits events. The CLI returns immediately because dispatch is asynchronous. Stop the daemon with Ctrl-C — it shuts down cleanly and emits a `system.shutdown` event.
+The daemon picks up the trigger, runs the agent, and emits events. The CLI returns immediately because dispatch is asynchronous.
+
+To stop the daemon cleanly, use `fq down` (not `pkill`):
+
+```sh
+# Drain in-flight work to a step boundary, deregister the worker, exit,
+# and confirm the process stopped.
+just fq down
+
+# Or stop immediately without draining (equivalent to Ctrl-C, but as a
+# confirmable command):
+just fq down --now
+```
+
+Ctrl-C in the daemon's own terminal is still a fast clean stop. For a
+redeploy (suspend in-flight work for the next binary to resume), use
+`fq drain`. See [Operating the daemon](docs/guide/operating-the-daemon.md).
 
 ## What to do next
 
