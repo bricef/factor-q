@@ -22,6 +22,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - [Contributing](CONTRIBUTING.md) — development setup, test tiers, code conventions
 - [Agent authoring guide](docs/guide/agent-definitions.md) — write your first agent
 - [Reducer harness guide](docs/guide/reducer-harness.md) — the suspend/resume-capable execution path that drives every invocation
+- [Operating the daemon](docs/guide/operating-the-daemon.md) — stop (`fq down`), redeploy (`fq drain`), and hot-reload (`fq reload`) a running daemon cleanly
 - [Content storage (fq-cas)](services/fq-store/README.md) — the content-addressed store CLI + library (Phase 2 pillar #2)
 - [Event schema](docs/design/committed/event-schema.md) — the event model everything is built around
 - [Agent orchestration tools](docs/design/aspirational/agent-orchestration-tools.md) — wishlist for primitives to coordinate multi-agent work (graph substrate, handles, sinks, fragment library)
