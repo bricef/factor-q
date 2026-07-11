@@ -1,0 +1,57 @@
+name: Main artifacts
+
+# Hermetic deploy artifacts (#102): every merge to main publishes a
+# checksummed, SHA-stamped bundle (fq, fq-cas, github-watcher — static
+# x86_64 musl — plus the dogfood launchers) to the rolling `main-latest`
+# pre-release. Deploy hosts fetch + verify + swap and never compile
+# (ops/dogfood/deploy.sh). Rollback history lives on the hosts as
+# releases/<sha>/ dirs, so this channel only ever holds the newest build.
+#
+# Like ci.yml/release.yml, every job drives its work through a `just`
+# target so the pipeline stays reproducible locally.
+
+on:
+  push:
+    branches: [main]
+  # Manual re-publish (e.g. after a transient failure) — builds whatever
+  # main currently points at.
+  workflow_dispatch:
+
+# One publisher at a time; a newer merge supersedes an in-flight publish.
+concurrency:
+  group: main-artifacts
+  cancel-in-progress: true
+
+# Needs write access to recreate the main-latest release and its tag.
+permissions:
+  contents: write
+
+jobs:
+  build-publish:
+    name: Build & publish main-latest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in lockstep with rust-toolchain.toml (#102).
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            services/fq-runtime
+            services/fq-store
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: adapters/github-watcher/go.mod
+      - uses: extractions/setup-just@v3
+      # musl needs its C toolchain for the bundled SQLite.
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: just build-release x86_64-unknown-linux-musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+      - run: just build-watcher x86_64-unknown-linux-musl
+      - run: just package-main x86_64-unknown-linux-musl
+      - run: just publish-main "${GITHUB_SHA}"
+        env:
+          GH_TOKEN: ${{ github.token }}

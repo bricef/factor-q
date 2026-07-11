@@ -46,6 +46,7 @@ jobs:
             rust:
               - 'services/**'
               - 'justfile'
+              - 'rust-toolchain.toml'
               - '.github/workflows/**'
             go:
               - 'adapters/**'
@@ -77,8 +78,11 @@ jobs:
         run: echo "No Rust-relevant changes — skipping the runtime build."
       - if: needs.changes.outputs.rust == 'true'
         uses: actions/checkout@v4
+      # Keep the version ref in lockstep with rust-toolchain.toml (#102) —
+      # rustup enforces the pin either way; matching here avoids installing
+      # a second, unused toolchain.
       - if: needs.changes.outputs.rust == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
       - if: needs.changes.outputs.rust == 'true'
@@ -113,8 +117,9 @@ jobs:
         run: echo "No Rust-relevant changes — skipping the store build."
       - if: needs.changes.outputs.rust == 'true'
         uses: actions/checkout@v4
+      # Same lockstep note as runtime-ci: match rust-toolchain.toml.
       - if: needs.changes.outputs.rust == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
       - if: needs.changes.outputs.rust == 'true'

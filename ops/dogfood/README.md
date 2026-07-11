@@ -1,0 +1,77 @@
+# Dogfood deploys — hermetic, versioned, reversible
+
+Deploy tooling for the dogfood instance (issue #102). The contract:
+
+- **CI builds, the host fetches.** Every merge to main,
+  [main-artifacts.yml](../../.github/workflows/main-artifacts.yml) builds
+  static musl binaries (`fq`, `fq-cas`, `github-watcher`) plus the
+  launchers in this directory, packages them with a sha256
+  ([package.sh](../../scripts/package.sh)), and publishes the bundle to
+  the rolling `main-latest` pre-release. The dogfood host never compiles.
+- **Every deployed build is kept; `current` picks the active one.**
+  [deploy.sh](deploy.sh) verifies the checksum and the embedded commit
+  SHA, installs into `releases/<sha>/`, drains the daemon (ADR-0027),
+  atomically flips the `current` symlink, relaunches, and confirms both
+  processes run from the new release dir (`/proc/<pid>/exe`, not log
+  grepping). Exit 0 means you are on the target SHA.
+- **Rollback is local and instant**: `deploy.sh <previous-sha>` — no
+  network, no rebuild, just a symlink flip through the same
+  drain/verify path. `deploy.sh` keeps the newest `KEEP_RELEASES`
+  (default 5) dirs and prunes the rest.
+- **The environment is declared, not ambient.** Both launchers source
+  exactly one file, `.secrets/env` ([template](env.example)) — nothing
+  else reaches the processes' environment.
+
+## Host layout (`~/fq-dogfood`, override with `FQ_DOGFOOD`)
+
+```text
+fq-dogfood/
+├── current -> releases/<sha>/   # the active build (symlink)
+├── releases/<sha>/              # fq, fq-cas, github-watcher, run.sh, watcher.sh
+├── fq.toml                      # instance config — host-side, `fq reload` to apply
+├── agents/                      # agent definitions — host-side
+├── .secrets/env                 # the single declared environment (chmod 600)
+├── infra/                       # NATS compose + config (copied from ./infra)
+├── logs/                        # fq-run.log, watcher.log
+└── workspace/ cache/ reports/   # runtime state
+```
+
+The launchers (`run.sh`, `watcher.sh`) ship *inside* the artifact bundle
+so they are versioned with the binaries they launch and roll back with
+them. `deploy.sh` itself runs from a repo checkout — it is the
+bootstrap, and can't live inside the thing it swaps.
+
+## Bootstrap (one-time per host)
+
+```sh
+mkdir -p ~/fq-dogfood/{releases,logs,agents,.secrets} && chmod 700 ~/fq-dogfood/.secrets
+cp -r ops/dogfood/infra ~/fq-dogfood/
+install -m 600 ops/dogfood/env.example ~/fq-dogfood/.secrets/env  # then edit
+# fq.toml: copy an existing instance config, or generate with `fq init`
+ops/dogfood/deploy.sh
+```
+
+Migrating an existing in-place instance (pre-#102: host-built binary,
+untracked `run.sh`/`watcher.sh`/`redeploy.sh`): fold any local secrets
+into `.secrets/env`, delete the legacy scripts, `bin/`, and `fq.rollback`,
+then run `deploy.sh`. State (`fq.toml`, `agents/`, `cache/`, `workspace/`,
+the NATS volume) is untouched by deploys.
+
+## Routine operations
+
+```sh
+ops/dogfood/deploy.sh              # upgrade to the newest main build
+ops/dogfood/deploy.sh --force      # redeploy/restart the same build (e.g. env change)
+ops/dogfood/deploy.sh 1a2b3c4      # roll back / pin (sha prefix ok)
+ls ~/fq-dogfood/releases           # deploy history on this host
+```
+
+Config and agent-definition changes don't need a deploy at all:
+`fq reload` hot-swaps the registry (Design Principle 8). A new provider
+key is the exception — add it to `.secrets/env` and `deploy.sh --force`,
+since only launch reads the env file.
+
+Not built yet, by design (see #102): health-gate + auto-rollback after
+the flip, and any supervisor (systemd is deliberately out of scope; the
+launchers are detached with `setsid`, NATS restarts via docker's
+`restart: unless-stopped`).
