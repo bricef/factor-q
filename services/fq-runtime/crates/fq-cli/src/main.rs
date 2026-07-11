@@ -2346,7 +2346,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                                      boundary, then exiting"
                                 );
                                 down_worker
-                                    .request_drain(DrainRequest::new(DrainReason::Deploy))
+                                    .request_drain(DrainRequest::new(DrainReason::Operator))
                                     .await;
                             }
                             if let Some(tx) = down_requested_tx.take() {
