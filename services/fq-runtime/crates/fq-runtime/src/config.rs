@@ -45,6 +45,44 @@ pub struct Config {
     /// never block-forever. Config, not code (Design Principle 8).
     #[serde(default = "default_drain_deadline_ms")]
     pub drain_deadline_ms: u64,
+    #[serde(default)]
+    pub read_service: ReadServiceConfig,
+}
+
+/// The in-daemon read-only operator service (#105 layer 2) — the tarpc
+/// surface the CLI's remote reads and `fq-dashboard` poll. Off by
+/// default; the daemon refuses a non-loopback bind because the service
+/// is unauthenticated (same posture as NATS / `fq-cas serve`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadServiceConfig {
+    /// Start the service with `fq run`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Loopback bind address for the tarpc listener.
+    #[serde(default = "default_read_service_bind")]
+    pub bind: String,
+    /// Upper bound on the JetStream health probe inside `health()`, so
+    /// a wedged broker cannot wedge the health surface.
+    #[serde(default = "default_read_service_probe_timeout_ms")]
+    pub probe_timeout_ms: u64,
+}
+
+impl Default for ReadServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_read_service_bind(),
+            probe_timeout_ms: default_read_service_probe_timeout_ms(),
+        }
+    }
+}
+
+fn default_read_service_bind() -> String {
+    "127.0.0.1:9471".to_string()
+}
+
+fn default_read_service_probe_timeout_ms() -> u64 {
+    2_000
 }
 
 /// Control-plane state-retention knobs. Drives the
@@ -466,6 +504,7 @@ impl Default for Config {
             state: StateConfig::default(),
             max_iterations: default_max_iterations(),
             drain_deadline_ms: default_drain_deadline_ms(),
+            read_service: ReadServiceConfig::default(),
         }
     }
 }

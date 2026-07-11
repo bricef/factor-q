@@ -20,6 +20,7 @@ pub mod agent;
 pub mod bus;
 pub mod config;
 pub mod events;
+pub mod health;
 pub mod llm;
 pub mod mcp;
 pub mod policy;
@@ -28,6 +29,11 @@ pub mod prompt;
 pub mod tools;
 pub mod validation;
 pub mod views;
+
+// The read-only operator service (#105 layer 2) — optional so library
+// consumers don't pull tarpc; `fq-cli` turns it on.
+#[cfg(feature = "read-service")]
+pub mod read_service;
 
 // Role modules. Both stay `pub` so that downstream code (fq-cli,
 // integration tests) can reach typed APIs that haven't been

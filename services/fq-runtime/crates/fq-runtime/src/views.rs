@@ -20,7 +20,9 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+// DTOs are Deserialize as well as Serialize so they can travel over the
+// read service's bincode wire (#105 layer 2), not just out as JSON.
+use serde::{Deserialize, Serialize};
 
 use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::projection::store::{
@@ -59,7 +61,7 @@ pub enum ViewsError {
 // ============================================================
 
 /// One worker in the roster.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WorkerView {
     pub worker_id: String,
     pub host: String,
@@ -87,10 +89,11 @@ impl From<WorkerRow> for WorkerView {
 }
 
 /// One worker plus the invocations it currently owns — the `fq workers
-/// show` / dashboard worker-detail view.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+/// show` / dashboard worker-detail view. `worker` is nested (not
+/// serde-flattened): flatten is JSON-only sugar that bincode — the read
+/// service's wire format — cannot serialize.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WorkerDetailView {
-    #[serde(flatten)]
     pub worker: WorkerView,
     /// Every ownership row for this worker (any status), newest first.
     pub owned: Vec<InvocationSummaryView>,
@@ -99,7 +102,7 @@ pub struct WorkerDetailView {
 /// Recovery-state counts — the data behind `fq status`'s recovery block and
 /// the dashboard's health tile. Computed against a caller-supplied `now_ms`
 /// and threshold so the view stays pure (no wall-clock inside).
-#[derive(Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecoveryView {
     /// Ambiguous invocations awaiting operator triage.
     pub ambiguous: i64,
@@ -112,7 +115,7 @@ pub struct RecoveryView {
 /// In-flight / stuck execution counts, read from the worker WAL — the
 /// reliable live view (the CP owner table's `in_flight` is not populated by
 /// trigger dispatch yet; see issue #50).
-#[derive(Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExecutionsView {
     pub in_flight: i64,
     /// In-flight invocations whose WAL row has not advanced within the
@@ -123,7 +126,7 @@ pub struct ExecutionsView {
 
 /// One row in the invocation list: a coordination-ownership row, or (in
 /// the merged index) an archive-only row flagged `archived`.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct InvocationSummaryView {
     pub invocation_id: String,
     /// From the projection; `None` when no event for the id has landed.
@@ -155,7 +158,7 @@ impl From<OwnerRow> for InvocationSummaryView {
 }
 
 /// A finalised invocation's archive record.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveView {
     pub invocation_id: String,
     pub agent_id: String,
@@ -179,7 +182,7 @@ impl From<InvocationArchiveRow> for ArchiveView {
 }
 
 /// One event row from the projection.
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EventView {
     pub event_id: String,
     pub timestamp: String,
@@ -209,7 +212,7 @@ impl From<EventRow> for EventView {
 }
 
 /// Per-agent cost/token aggregate.
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CostView {
     pub agent_id: String,
     pub event_count: i64,
@@ -232,7 +235,7 @@ impl From<CostSummary> for CostView {
 
 /// Per-agent costs plus the grand totals, so a caller renders both without
 /// re-summing.
-#[derive(Serialize, Debug, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct CostReport {
     pub agents: Vec<CostView>,
     pub total_cost: f64,
@@ -241,7 +244,7 @@ pub struct CostReport {
 }
 
 /// One terminal-failure bucket, grouped by kind.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FailureView {
     pub error_kind: String,
     pub count: i64,
@@ -257,7 +260,7 @@ impl From<FailureSummary> for FailureView {
 }
 
 /// One in-flight tool dispatch (worker WAL).
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ToolDispatchView {
     pub tool_call_id: String,
     pub tool_name: String,
@@ -284,7 +287,7 @@ impl From<ToolDispatchRow> for ToolDispatchView {
 }
 
 /// One in-flight LLM dispatch (worker WAL).
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LlmDispatchView {
     pub request_id: String,
     pub model: String,
@@ -315,7 +318,7 @@ impl From<LlmDispatchRow> for LlmDispatchView {
 /// Live execution state of an in-flight invocation, from the worker WAL —
 /// the "what is it doing right now" view. Present only while the invocation
 /// has a WAL row (deleted on archive hand-off).
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LiveExecutionView {
     pub phase: String,
     /// Reducer *step* counter (every model and tool step) — not the
@@ -329,7 +332,7 @@ pub struct LiveExecutionView {
 }
 
 /// Everything known about one invocation, composed across the three stores.
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct InvocationDetailView {
     pub invocation_id: String,
     pub agent_id: Option<String>,

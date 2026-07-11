@@ -215,7 +215,12 @@ enum Commands {
     },
     /// Show a health overview of the runtime (NATS, streams,
     /// consumers, projection)
-    Status,
+    Status {
+        /// Emit the structured report as JSON instead of the
+        /// human-readable overview.
+        #[arg(long)]
+        json: bool,
+    },
     /// Aggregate the runtime's durable-execution health signals
     /// into one operator-readable report: worker liveness,
     /// in-flight/stuck work, ambiguous invocations, and permanent
@@ -498,7 +503,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Costs { agent, since, json } => {
             show_costs(&cli.global, agent.as_deref(), since.as_deref(), json).await?
         }
-        Commands::Status => show_status(&cli.global).await?,
+        Commands::Status { json } => show_status(&cli.global, json).await?,
         Commands::Doctor {
             json,
             fail_on_issues,
@@ -1127,43 +1132,108 @@ fn local_host_label() -> String {
 /// event, both of which are more surface area than a status
 /// command should own. Operators can use `ps`/`systemctl` for
 /// process state.
-async fn show_status(global: &GlobalArgs) -> anyhow::Result<()> {
+/// The `fq status --json` shape: config echoes, the typed stream probe
+/// ([`fq_runtime::health`]), and the DB-backed counts. `nats_connected`
+/// is always true in an emitted report — an unreachable broker fails
+/// the command, exactly like the human path.
+#[derive(serde::Serialize)]
+struct StatusReport {
+    nats_url: String,
+    agents_dir: PathBuf,
+    cache_dir: PathBuf,
+    nats_connected: bool,
+    streams: Vec<fq_runtime::health::StreamHealth>,
+    projection_path: PathBuf,
+    initialised: bool,
+    projection_rows: Option<i64>,
+    recovery: Option<fq_runtime::views::RecoveryView>,
+    /// First store-side failure, when any (rows/recovery unreadable).
+    store_error: Option<String>,
+}
+
+async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Result<()> {
     use async_nats::jetstream;
+    use fq_runtime::health;
 
     let config = global.resolve_config()?;
 
-    println!("factor-q status");
-    println!();
-    println!("Config");
-    println!("  NATS URL:         {}", config.nats.url);
-    println!("  agents dir:       {}", config.agents.directory.display());
-    println!("  cache dir:        {}", config.cache.directory.display());
+    if !json {
+        println!("factor-q status");
+        println!();
+        println!("Config");
+        println!("  NATS URL:         {}", config.nats.url);
+        println!("  agents dir:       {}", config.agents.directory.display());
+        println!("  cache dir:        {}", config.cache.directory.display());
 
-    // NATS.
-    println!();
-    println!("NATS");
+        // NATS.
+        println!();
+        println!("NATS");
+    }
     let client = match fq_runtime::bus::connect_with_url_credentials(&config.nats.url).await {
         Ok(c) => {
-            println!("  connection:       ✓ connected at {}", config.nats.url);
+            if !json {
+                println!("  connection:       ✓ connected at {}", config.nats.url);
+            }
             c
         }
         Err(err) => {
-            println!("  connection:       ✗ failed: {err}");
+            if !json {
+                println!("  connection:       ✗ failed: {err}");
+            }
             anyhow::bail!("cannot reach NATS at {}", config.nats.url);
         }
     };
     let js = jetstream::new(client);
+    let streams = health::probe_core_streams(&js).await;
+    let db_path = projection_path(&config);
 
-    report_stream(&js, "fq-events", "fq-projector").await;
-    report_stream(&js, "fq-triggers", "fq-dispatcher").await;
+    if json {
+        let initialised = db_path.exists();
+        let mut projection_rows = None;
+        let mut recovery = None;
+        let mut store_error = None;
+        if initialised {
+            match Views::open(&db_path).await {
+                Ok(views) => {
+                    match views.event_count().await {
+                        Ok(count) => projection_rows = Some(count),
+                        Err(err) => store_error = Some(format!("failed to query rows: {err}")),
+                    }
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    match views.recovery(now_ms, 30_000).await {
+                        Ok(r) => recovery = Some(r),
+                        Err(err) => {
+                            store_error
+                                .get_or_insert(format!("failed to read recovery state: {err}"));
+                        }
+                    }
+                }
+                Err(err) => store_error = Some(format!("failed to open: {err}")),
+            }
+        }
+        let report = StatusReport {
+            nats_url: config.nats.url.clone(),
+            agents_dir: config.agents.directory.clone(),
+            cache_dir: config.cache.directory.clone(),
+            nats_connected: true,
+            streams,
+            projection_path: db_path,
+            initialised,
+            projection_rows,
+            recovery,
+            store_error,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
 
-    // Projection + recovery state, over the read views. (`--json` for
-    // status arrives with the layer-2 probe lift — the stream sections
-    // above print live from the NATS probe today; a status JSON without
-    // them would just duplicate `fq doctor --json`.)
+    for stream in &streams {
+        render_stream_health_human(stream);
+    }
+
+    // Projection + recovery state, over the read views.
     println!();
     println!("Projection");
-    let db_path = projection_path(&config);
     println!("  path:             {}", db_path.display());
     if !db_path.exists() {
         println!("  state:            not initialised (run `fq run` to create)");
@@ -1195,6 +1265,64 @@ async fn show_status(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Render one probed stream exactly as `fq status` always has — the
+/// probe data is typed now ([`fq_runtime::health`], #105 layer 2) but
+/// the human output is unchanged.
+fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) {
+    use fq_runtime::health::{ConsumerHealth, StreamHealth};
+
+    println!();
+    println!("Stream: {}", health.stream());
+    match health {
+        StreamHealth::Unavailable { error, .. } => {
+            println!("  state:            ✗ {error}");
+        }
+        StreamHealth::Available {
+            messages,
+            bytes,
+            first_seq,
+            last_seq,
+            consumer,
+            ..
+        } => {
+            println!("  messages:         {messages}");
+            println!("  bytes:            {}", human_bytes(*bytes));
+            println!("  first seq:        {first_seq}");
+            println!("  last seq:         {last_seq}");
+            match consumer {
+                ConsumerHealth::Active {
+                    name,
+                    delivered,
+                    lag,
+                    ack_pending,
+                    num_pending,
+                } => {
+                    let status = if *lag == 0 {
+                        "✓ caught up"
+                    } else if *lag < 10 {
+                        "◐ slightly behind"
+                    } else {
+                        "✗ lagging"
+                    };
+                    println!("  consumer {name}: {status} (delivered {delivered}, lag {lag})");
+                    if *ack_pending > 0 {
+                        println!("    ack pending:    {ack_pending}");
+                    }
+                    if *num_pending > 0 {
+                        println!("    num pending:    {num_pending}");
+                    }
+                }
+                ConsumerHealth::Error { name, error } => {
+                    println!("  consumer {name}: ✗ info failed: {error}");
+                }
+                ConsumerHealth::Missing { name } => {
+                    println!("  consumer {name}: not present (no `fq run` has initialised it)");
+                }
+            }
+        }
+    }
 }
 
 /// Pure: render the recovery-guidance block of `fq status`
@@ -1478,72 +1606,6 @@ async fn doctor(global: &GlobalArgs, json: bool, fail_on_issues: bool) -> anyhow
         anyhow::bail!("doctor found issues (see report above)");
     }
     Ok(())
-}
-
-/// Report the state of a single JetStream stream and one of its
-/// durable consumers. Prints lag for the consumer if its
-/// delivered sequence lags the stream's last sequence.
-async fn report_stream(
-    js: &async_nats::jetstream::Context,
-    stream_name: &str,
-    primary_consumer: &str,
-) {
-    println!();
-    println!("Stream: {stream_name}");
-    let mut stream = match js.get_stream(stream_name).await {
-        Ok(s) => s,
-        Err(err) => {
-            println!("  state:            ✗ stream not found: {err}");
-            return;
-        }
-    };
-    let info = match stream.info().await {
-        Ok(info) => info.clone(),
-        Err(err) => {
-            println!("  state:            ✗ failed to fetch info: {err}");
-            return;
-        }
-    };
-    println!("  messages:         {}", info.state.messages);
-    println!("  bytes:            {}", human_bytes(info.state.bytes));
-    println!("  first seq:        {}", info.state.first_sequence);
-    println!("  last seq:         {}", info.state.last_sequence);
-
-    // The primary consumer (fq-projector or fq-dispatcher).
-    match stream
-        .get_consumer::<async_nats::jetstream::consumer::pull::Config>(primary_consumer)
-        .await
-    {
-        Ok(mut consumer) => match consumer.info().await {
-            Ok(cinfo) => {
-                let delivered = cinfo.delivered.stream_sequence;
-                let lag = info.state.last_sequence.saturating_sub(delivered);
-                let status = if lag == 0 {
-                    "✓ caught up"
-                } else if lag < 10 {
-                    "◐ slightly behind"
-                } else {
-                    "✗ lagging"
-                };
-                println!(
-                    "  consumer {primary_consumer}: {status} (delivered {}, lag {})",
-                    delivered, lag
-                );
-                if cinfo.num_ack_pending > 0 {
-                    println!("    ack pending:    {}", cinfo.num_ack_pending);
-                }
-                if cinfo.num_pending > 0 {
-                    println!("    num pending:    {}", cinfo.num_pending);
-                }
-            }
-            Err(err) => {
-                println!("  consumer {primary_consumer}: ✗ info failed: {err}");
-            }
-        },
-        Err(_) => {
-            println!("  consumer {primary_consumer}: not present (no `fq run` has initialised it)");
-        }
-    }
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -2337,6 +2399,34 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     );
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
 
+    // The read-only operator service (#105 layer 2): a localhost tarpc
+    // surface over `views` plus the JetStream probe. Deliberately OUTSIDE
+    // the supervised task set below — an ops read surface dying must not
+    // take the runtime down; it logs and stays down until restart.
+    let read_service_addr = if config.read_service.enabled {
+        let views = Arc::new(
+            fq_runtime::views::Views::open(&projection_path(&config))
+                .await
+                .context("read service: failed to open the read views")?,
+        );
+        let (rs_addr, rs_serving) = fq_runtime::read_service::bind(
+            &config.read_service.bind,
+            views,
+            bus.jetstream(),
+            std::time::Duration::from_millis(config.read_service.probe_timeout_ms),
+            FQ_VERSION.to_string(),
+        )
+        .await
+        .context("read service: failed to bind (check [read_service] in fq.toml)")?;
+        tokio::spawn(async move {
+            rs_serving.await;
+            tracing::warn!("read service exited; reads are down until the daemon restarts");
+        });
+        Some(rs_addr)
+    } else {
+        None
+    };
+
     println!();
     println!("Runtime ready. Press Ctrl-C to stop.");
     println!("  - projection consumer is materialising events into SQLite");
@@ -2344,6 +2434,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("  - control-reload listener is listening on fq.control.reload");
     println!("  - control-drain listener is listening on fq.control.drain");
     println!("  - control-down listener is listening on fq.control.down");
+    if let Some(addr) = read_service_addr {
+        println!("  - read service is listening on {addr}");
+    }
 
     // Wait for either a shutdown signal (Ctrl-C / SIGTERM) or one of
     // the hosted tasks exiting prematurely. We watch the task handles
