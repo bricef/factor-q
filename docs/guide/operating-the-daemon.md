@@ -40,7 +40,8 @@ into `stale`). A timeout is reported as an error pointing you at
 > over NATS. There is no PID/supervisor registry yet — a supervised
 > `fq up` story is future work — so `fq down` confirms *the daemon it
 > reached said it stopped cleanly*, not an OS-level process check. If no
-> daemon is listening, `fq down` is a no-op and times out.
+> daemon is listening (no worker heartbeat appears), `fq down` fast-fails
+> rather than waiting out the full drain deadline.
 
 Ctrl-C (SIGINT) in the daemon's own terminal remains a fast clean stop
 for interactive use; SIGTERM (what `docker stop` / systemd send) runs a

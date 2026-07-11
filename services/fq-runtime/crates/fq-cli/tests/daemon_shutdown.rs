@@ -445,3 +445,51 @@ fn daemon_stops_now_on_fq_down_now() {
         "daemon did not take the --now (no-drain) path\n--- log ---\n{log}"
     );
 }
+
+/// `fq down` with no daemon running must fail *fast*: a live daemon
+/// heartbeats within ~10s, so with no heartbeat at all `fq down` reports
+/// "no daemon" inside its ~20s liveness window instead of blocking out the
+/// full drain-deadline ceiling (~130s). Regression guard for the issue #63
+/// review follow-up.
+#[test]
+fn fq_down_fast_fails_when_no_daemon_running() {
+    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
+        eprintln!("skipping fq_down_fast_fails_when_no_daemon_running: FQ_NATS_URL not set");
+        return;
+    };
+    let _guard = SHUTDOWN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let scratch = unique_scratch();
+
+    // No `fq run` daemon is spawned — nothing is listening on NATS.
+    let started = Instant::now();
+    let down = Command::new(fq_binary())
+        .arg("down")
+        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_NATS_URL", &nats_url)
+        .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .output()
+        .expect("run fq down");
+    let elapsed = started.elapsed();
+    let out = String::from_utf8_lossy(&down.stdout).into_owned();
+    let err = String::from_utf8_lossy(&down.stderr).into_owned();
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert!(
+        !down.status.success(),
+        "`fq down` must fail when no daemon is running:\nstdout={out}\nstderr={err}"
+    );
+    // The CLI logs its error through `tracing` (to stdout, like its other
+    // output), not to stderr — so accept it on either stream.
+    assert!(
+        out.contains("no running `fq run` daemon") || err.contains("no running `fq run` daemon"),
+        "expected a 'no daemon' error, got:\nstdout={out}\nstderr={err}"
+    );
+    // Fast-fail: well inside the ~20s liveness window, nowhere near the
+    // full ~130s drain-deadline ceiling. Generous slack for CI.
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "`fq down` did not fast-fail with no daemon (took {elapsed:?})"
+    );
+}
