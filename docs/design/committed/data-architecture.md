@@ -754,7 +754,7 @@ CREATE TABLE invocation_state (
     schema_version  INTEGER NOT NULL,
     phase           TEXT NOT NULL,              -- reducer phase
     state_blob      BLOB NOT NULL,              -- opaque to runtime
-    iteration       INTEGER NOT NULL DEFAULT 0,
+    step_index      INTEGER NOT NULL DEFAULT 0,  -- reducer step counter (not the model-turn count max_iterations gates)
     started_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     terminal_at     INTEGER,                    -- set on terminal

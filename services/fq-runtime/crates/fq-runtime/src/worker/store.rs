@@ -77,7 +77,13 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   sweeper uses `archive_published_at` to decide when to
 ///   republish. On `invocation.archive_acked` the row is
 ///   deleted outright.
-pub const WORKER_SCHEMA_VERSION: u32 = 5;
+/// - **v6** — renames the `invocation_state.iteration` column to
+///   `step_index`. The column always held the reducer *step*
+///   counter (every model and tool step), not the model-turn
+///   count that `max_iterations` gates; the old name misread as
+///   turn-vs-cap progress (issue #109). Pure rename — the value
+///   written and every recovery/replay path are unchanged.
+pub const WORKER_SCHEMA_VERSION: u32 = 6;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -186,6 +192,16 @@ ALTER TABLE invocation_state ADD COLUMN trigger_subject TEXT;
 ALTER TABLE invocation_state ADD COLUMN trigger_payload TEXT;
 "#;
 
+/// v6 migration: rename `invocation_state.iteration` to
+/// `step_index` (issue #109). Behaviour-preserving — the column
+/// always stored the reducer step counter, never the model-turn
+/// count `max_iterations` gates. `ALTER TABLE ... RENAME COLUMN`
+/// preserves the data; it is gated on the recorded version so it
+/// runs exactly once.
+const WORKER_MIGRATION_V6_SQL: &str = r#"
+ALTER TABLE invocation_state RENAME COLUMN iteration TO step_index;
+"#;
+
 /// One of the three WAL states a dispatch can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchStatus {
@@ -260,7 +276,13 @@ pub struct InvocationStateRow {
     pub schema_version: u32,
     pub phase: String,
     pub state_blob: Vec<u8>,
-    pub iteration: u32,
+    /// Reducer step counter: incremented once per reducer
+    /// `step()` — every model step *and* every tool step — not
+    /// the model-turn count that `max_iterations` gates (that
+    /// lives inside `state_blob`). A normal turn is ~2 steps, so
+    /// this is roughly `2 × model_turns`. Named `step_index` so it
+    /// is not misread as turn-vs-cap progress (issue #109).
+    pub step_index: u32,
     pub started_at: i64,
     pub updated_at: i64,
     pub terminal_at: Option<i64>,
@@ -448,7 +470,12 @@ impl WorkerStore {
                 sqlx::query(&stmt).execute(&self.pool).await?;
             }
         }
-        // Future migrations: 5 → 6, etc.
+        if from < 6 && to >= 6 {
+            for stmt in split_sql(WORKER_MIGRATION_V6_SQL) {
+                sqlx::query(&stmt).execute(&self.pool).await?;
+            }
+        }
+        // Future migrations: 6 → 7, etc.
         Ok(())
     }
 
@@ -780,13 +807,13 @@ impl WorkerStore {
             r#"
             INSERT INTO invocation_state
                 (invocation_id, agent_id, schema_version, phase, state_blob,
-                 iteration, started_at, updated_at, terminal_at, workspace_ref,
+                 step_index, started_at, updated_at, terminal_at, workspace_ref,
                  trigger_source, trigger_subject, trigger_payload)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(invocation_id) DO UPDATE SET
                 phase = excluded.phase,
                 state_blob = excluded.state_blob,
-                iteration = excluded.iteration,
+                step_index = excluded.step_index,
                 updated_at = excluded.updated_at,
                 terminal_at = excluded.terminal_at,
                 workspace_ref = excluded.workspace_ref,
@@ -800,7 +827,7 @@ impl WorkerStore {
         .bind(row.schema_version as i64)
         .bind(&row.phase)
         .bind(&row.state_blob)
-        .bind(row.iteration as i64)
+        .bind(row.step_index as i64)
         .bind(row.started_at)
         .bind(row.updated_at)
         .bind(row.terminal_at)
@@ -855,7 +882,7 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   iteration, started_at, updated_at, terminal_at, workspace_ref,
+                   step_index, started_at, updated_at, terminal_at, workspace_ref,
                    archive_status, archive_published_at,
                    trigger_source, trigger_subject, trigger_payload
             FROM invocation_state
@@ -877,7 +904,7 @@ impl WorkerStore {
         let row = sqlx::query(
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   iteration, started_at, updated_at, terminal_at, workspace_ref,
+                   step_index, started_at, updated_at, terminal_at, workspace_ref,
                    archive_status, archive_published_at,
                    trigger_source, trigger_subject, trigger_payload
             FROM invocation_state
@@ -902,7 +929,7 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   iteration, started_at, updated_at, terminal_at, workspace_ref,
+                   step_index, started_at, updated_at, terminal_at, workspace_ref,
                    archive_status, archive_published_at,
                    trigger_source, trigger_subject, trigger_payload
             FROM invocation_state
@@ -1058,7 +1085,7 @@ fn row_to_invocation_state(
         schema_version: row.get::<i64, _>("schema_version") as u32,
         phase: row.get("phase"),
         state_blob: row.get("state_blob"),
-        iteration: row.get::<i64, _>("iteration") as u32,
+        step_index: row.get::<i64, _>("step_index") as u32,
         started_at: row.get("started_at"),
         updated_at: row.get("updated_at"),
         terminal_at: row.get("terminal_at"),
@@ -1442,7 +1469,7 @@ mod tests {
             schema_version: 1,
             phase: "awaiting_model".to_string(),
             state_blob: b"{\"phase\":\"awaiting_model\"}".to_vec(),
-            iteration: 2,
+            step_index: 2,
             started_at: 1_000,
             updated_at: 1_010,
             terminal_at: None,
@@ -1460,7 +1487,7 @@ mod tests {
         // Update — same key, different phase + updated_at.
         let mut updated = row.clone();
         updated.phase = "dispatching_tools".to_string();
-        updated.iteration = 3;
+        updated.step_index = 3;
         updated.updated_at = 1_050;
         store.upsert_invocation_state(&updated).await.unwrap();
         let back2 = store.get_invocation_state("inv-x").await.unwrap().unwrap();
@@ -1476,7 +1503,7 @@ mod tests {
             schema_version: 1,
             phase: "awaiting_model".to_string(),
             state_blob: vec![],
-            iteration: 0,
+            step_index: 0,
             started_at: 1,
             updated_at: 1,
             terminal_at: None,
@@ -1509,7 +1536,7 @@ mod tests {
             schema_version: 1,
             phase: "awaiting_model".to_string(),
             state_blob: vec![],
-            iteration: 0,
+            step_index: 0,
             started_at: 1,
             updated_at: 1,
             terminal_at: Some(2),
@@ -1539,7 +1566,7 @@ mod tests {
             schema_version: 1,
             phase: "completed".to_string(),
             state_blob: vec![],
-            iteration: 0,
+            step_index: 0,
             started_at: 1,
             updated_at: terminal_at_ms,
             terminal_at: Some(terminal_at_ms),

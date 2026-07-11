@@ -1267,7 +1267,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     schema_version: 1,
                     phase: phase_label.to_string(),
                     state_blob: output.state.clone(),
-                    iteration: step_index,
+                    step_index,
                     started_at: started_at_ms,
                     updated_at: now_ms,
                     terminal_at,
@@ -2061,7 +2061,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// the first observation of terminal.
     ///
     /// Reads the row first to preserve every other column
-    /// (state_blob, iteration, started_at, etc.); the
+    /// (state_blob, step_index, started_at, etc.); the
     /// `upsert_invocation_state` UPDATE arm overwrites them
     /// otherwise. The pattern is "read-modify-write" rather
     /// than a partial UPDATE so the existing row-shaped
@@ -5344,7 +5344,7 @@ mod tests {
         let inv_str = invocation_id.to_string();
 
         // Manually run harness step 0 to produce the state we
-        // would have persisted at iteration=0 (post-step).
+        // would have persisted at step_index=0 (post-step).
         let harness = Harness::new();
         let agent_config = AgentConfig {
             agent_id: AgentId::new(&agent_id_str).unwrap(),
@@ -5378,7 +5378,7 @@ mod tests {
                 schema_version: 1,
                 phase: "awaiting_model".to_string(),
                 state_blob: s0_output.state,
-                iteration: 0,
+                step_index: 0,
                 started_at: 1_000,
                 updated_at: 1_000,
                 terminal_at: None,
@@ -5534,7 +5534,7 @@ mod tests {
                 schema_version: 1,
                 phase: "awaiting_model".to_string(),
                 state_blob: s0_output.state,
-                iteration: 0,
+                step_index: 0,
                 started_at: 1_000,
                 updated_at: 1_000,
                 terminal_at: None,
@@ -5660,7 +5660,7 @@ mod tests {
                 schema_version: 1,
                 phase: "dispatching_tools".to_string(),
                 state_blob: vec![],
-                iteration: 0,
+                step_index: 0,
                 started_at: 1_000,
                 updated_at: 1_000,
                 terminal_at: None,
@@ -5712,14 +5712,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn state_row_iteration_advances_with_each_step() {
+    async fn state_row_step_index_advances_with_each_step() {
         let Ok(url) = std::env::var("FQ_NATS_URL") else {
             eprintln!("skipping: FQ_NATS_URL not set");
             return;
         };
 
         // A two-turn invocation (tool call + final summary) goes
-        // through enough reducer steps that `iteration` should
+        // through enough reducer steps that `step_index` should
         // advance past 0.
         let dir = tempdir().unwrap();
         let target = dir.path().join("hello.md");
@@ -5754,9 +5754,9 @@ mod tests {
             .expect("state row");
         assert_eq!(row.phase, "completed");
         assert!(
-            row.iteration > 0,
-            "iteration must advance past 0 for a multi-step invocation; got {}",
-            row.iteration
+            row.step_index > 0,
+            "step_index must advance past 0 for a multi-step invocation; got {}",
+            row.step_index
         );
         assert!(row.started_at <= row.updated_at);
         assert!(row.terminal_at.unwrap_or(0) >= row.updated_at);

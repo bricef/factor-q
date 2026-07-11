@@ -260,7 +260,7 @@ mod tests {
             schema_version: 1,
             phase: "completed".to_string(),
             state_blob: vec![1, 2, 3],
-            iteration: 0,
+            step_index: 0,
             started_at: 0,
             updated_at: terminal_at_ms,
             terminal_at: Some(terminal_at_ms),
