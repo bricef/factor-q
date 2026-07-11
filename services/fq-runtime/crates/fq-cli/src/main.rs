@@ -2337,11 +2337,13 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                             let now = fq_runtime::bus::down_mode_now_from_body(&msg.payload);
                             if now {
                                 tracing::info!(
-                                    "down requested (--now); tearing down cleanly,                                      deregistering the worker, and exiting without draining"
+                                    "down requested (--now); tearing down cleanly, \
+                                     deregistering the worker, and exiting without draining"
                                 );
                             } else {
                                 tracing::info!(
-                                    "down requested; draining in-flight invocations to a step                                      boundary, then exiting"
+                                    "down requested; draining in-flight invocations to a step \
+                                     boundary, then exiting"
                                 );
                                 down_worker
                                     .request_drain(DrainRequest::new(DrainReason::Deploy))
@@ -2887,7 +2889,9 @@ async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Result<()> {
             fq_runtime::bus::CONTROL_DOWN_SUBJECT
         );
         println!(
-            "A running `fq run` daemon will tear down cleanly, deregister its worker, and exit              immediately; in-flight invocations are resumed by recovery on the next start."
+            "A running `fq run` daemon will tear down cleanly, deregister its worker, \
+             and exit immediately; in-flight invocations are resumed by recovery \
+             on the next start."
         );
     } else {
         println!(
@@ -2895,7 +2899,8 @@ async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Result<()> {
             fq_runtime::bus::CONTROL_DOWN_SUBJECT
         );
         println!(
-            "A running `fq run` daemon will drain in-flight invocations to a step boundary,              deregister its worker, and exit."
+            "A running `fq run` daemon will drain in-flight invocations to a step boundary, \
+             deregister its worker, and exit."
         );
     }
 
@@ -2938,10 +2943,13 @@ async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Result<()> {
             Ok(())
         }
         Ok(None) => anyhow::bail!(
-            "the shutdown event stream closed before the daemon confirmed it stopped;              check `fq status` / `fq workers list` for the daemon's state"
+            "the shutdown event stream closed before the daemon confirmed it stopped; \
+             check `fq status` / `fq workers list` for the daemon's state"
         ),
         Err(_) => anyhow::bail!(
-            "timed out after {}s waiting for the daemon to confirm it stopped. Either no              daemon was running (`fq down` is a no-op then), or it did not exit in time              — check `fq status`, and `fq workers list` for a lingering worker.",
+            "timed out after {}s waiting for the daemon to confirm it stopped. Either no \
+             daemon was running (`fq down` is a no-op then), or it did not exit in time — \
+             check `fq status`, and `fq workers list` for a lingering worker.",
             wait.as_secs()
         ),
     }
