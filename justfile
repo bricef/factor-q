@@ -161,6 +161,43 @@ package target:
 publish-release tag:
     gh release create {{tag}} --draft --generate-notes ./dist/*
 
+# === Main-branch deploy artifacts (#102) ===
+
+# Build the github-watcher for a target triple, into the same
+# target/<triple>/release/ layout the Rust binaries use so
+# scripts/package.sh bundles all three with one spec form. Pure Go with
+# CGO_ENABLED=0 — as static as the musl Rust builds; the git SHA is
+# embedded by Go's default -buildvcs.
+build-watcher target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+        x86_64-unknown-linux-*)  export GOOS=linux  GOARCH=amd64 ;;
+        aarch64-unknown-linux-*) export GOOS=linux  GOARCH=arm64 ;;
+        aarch64-apple-darwin)    export GOOS=darwin GOARCH=arm64 ;;
+        *) echo "no GOOS/GOARCH mapping for target {{target}}" >&2; exit 1 ;;
+    esac
+    cd adapters/github-watcher
+    CGO_ENABLED=0 go build -o "target/{{target}}/release/github-watcher" .
+
+# Package the rolling main-branch bundle: all three deployables plus the
+# dogfood launchers, so a deployed releases/<sha>/ dir is self-contained
+# (ops/dogfood/deploy.sh extracts it verbatim).
+package-main target:
+    bash scripts/package.sh {{target}} {{runtime_dir}}:fq {{store_dir}}:fq-cas adapters/github-watcher:github-watcher ops/dogfood/run.sh ops/dogfood/watcher.sh
+
+# Publish/refresh the rolling `main-latest` pre-release from dist/.
+# Recreates both the release and its tag so tag, assets, and notes always
+# point at the same commit. The channel keeps no history by design —
+# deploy hosts retain their own releases/<sha>/ dirs for rollback (#102).
+publish-main sha:
+    -gh release delete main-latest --yes
+    -git push origin :refs/tags/main-latest
+    gh release create main-latest --prerelease --target {{sha}} \
+        --title "main @ {{sha}}" \
+        --notes "Rolling deploy artifacts from main @ {{sha}} — not a versioned release. Fetched by ops/dogfood/deploy.sh; use the tagged releases for versioned installs." \
+        ./dist/*
+
 # === Full workflows ===
 
 # Start infrastructure and build all services

@@ -1,1 +1,5 @@
 /github-watcher
+
+# Release build output (`just build-watcher <target>`). Must stay ignored:
+# an untracked target/ would make Go's -buildvcs stamp the binary -dirty.
+/target/

@@ -68,7 +68,9 @@ baseline) to keep the Q ladder honest. Open strategic questions
 API layer (ADR-0006, draft) · multi-agent orchestration (ADR-0007, draft) ·
 memory + skills services · context compaction · container isolation
 (ADR-0010, accepted but unbuilt) · scheduled triggers · observability floor
-(JSON logs, metrics, alerting) · NATS auth · binary releases.
+(JSON logs, metrics, alerting) · NATS auth · tagged binary releases (the
+rolling `main-latest` deploy channel is built — see
+[ops/dogfood](ops/dogfood/README.md) — but no `v*` release has shipped).
 
 ## Pointers
 

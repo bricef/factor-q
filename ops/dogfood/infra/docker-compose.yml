@@ -1,0 +1,19 @@
+services:
+  nats:
+    image: nats:latest
+    container_name: fq-dogfood-nats
+    # Survive reboots without a supervisor: docker restarts the broker
+    # whenever the docker daemon comes up.
+    restart: unless-stopped
+    command: ["--config", "/etc/nats/nats.conf"]
+    ports:
+      # Loopback-only: this broker is unauthenticated and must not be
+      # reachable off-box (factor-q assessment critique 4).
+      - "127.0.0.1:4223:4222"
+      - "127.0.0.1:8223:8222"
+    volumes:
+      - ./nats.conf:/etc/nats/nats.conf:ro
+      - nats-data:/data/nats
+
+volumes:
+  nats-data:

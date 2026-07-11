@@ -1,0 +1,10 @@
+# Single pinned Rust toolchain for both workspaces (services/fq-runtime,
+# services/fq-store). rustup discovers this file from any subdirectory, so
+# local builds, CI, and release builds all compile with the same compiler —
+# "same commit" implies "same binary" (#102).
+#
+# Keep the CI/release workflows' `dtolnay/rust-toolchain@<version>` refs in
+# lockstep with this pin when bumping.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

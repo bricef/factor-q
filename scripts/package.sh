@@ -3,9 +3,14 @@
 #   dist/factor-q-<version>-<target>.tar.gz   (+ .sha256)
 # The archive holds every requested binary plus LICENSE/README when present.
 #
-# Usage: scripts/package.sh <target-triple> <crate-dir>:<bin> [<crate-dir>:<bin> ...]
+# Usage: scripts/package.sh <target-triple> <spec> [<spec> ...]
+# where each <spec> is either
+#   <crate-dir>:<bin>   a built binary at <crate-dir>/target/<triple>/release/<bin>
+#   <repo-rel-path>     a plain repo file copied into the bundle as-is
+#                       (e.g. the dogfood launchers, so they travel with
+#                       the binaries they launch — #102)
 #   e.g. scripts/package.sh x86_64-unknown-linux-musl services/fq-runtime:fq services/fq-store:fq-cas
-# (normally invoked via `just package <target>`).
+# (normally invoked via `just package <target>` / `just package-main <target>`).
 set -euo pipefail
 
 target="${1:?usage: package.sh <target> <crate-dir>:<bin> ...}"
@@ -25,6 +30,14 @@ stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 
 for spec in "$@"; do
+    if [[ "$spec" != *:* ]]; then
+        if [ ! -f "$root/$spec" ]; then
+            echo "bundle file not found: $root/$spec" >&2
+            exit 1
+        fi
+        cp "$root/$spec" "$stage/"
+        continue
+    fi
     crate_dir="${spec%%:*}"
     bin="${spec##*:}"
     bin_path="$root/$crate_dir/target/$target/release/$bin"
