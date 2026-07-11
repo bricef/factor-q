@@ -25,6 +25,21 @@ genai = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 strum = { version = "0.27", features = ["derive"] }
+# The read-only operator service (#105 layer 2). Optional so library
+# consumers don't pull tarpc — same shape as fq-store's `service` feature.
+tarpc = { version = "0.37", features = [
+    "tokio1",
+    "serde1",
+    "serde-transport",
+    "serde-transport-bincode",
+    "tcp",
+], optional = true }
+
+[features]
+# The in-daemon read-only tarpc service (wire-mirror of `views` plus the
+# JetStream health probe). `fq-cli` enables it; whether the *listener*
+# starts is a runtime decision (`[read_service]` in fq.toml).
+read-service = ["dep:tarpc"]
 
 [dev-dependencies]
 proptest = "1"

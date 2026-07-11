@@ -19,7 +19,9 @@ pkg-fmt = "tgz"
 bin-dir = "fq"
 
 [dependencies]
-fq-runtime = { path = "../fq-runtime" }
+# read-service: the daemon hosts the read-only tarpc surface (#105
+# layer 2); whether the listener starts is `[read_service]` in fq.toml.
+fq-runtime = { path = "../fq-runtime", features = ["read-service"] }
 anyhow = "1"
 async-nats = "0.38"
 chrono = "0.4"

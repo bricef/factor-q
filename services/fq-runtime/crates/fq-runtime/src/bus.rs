@@ -265,6 +265,13 @@ impl EventBus {
         Ok(bus)
     }
 
+    /// A clone of the bus's JetStream context, so co-resident consumers
+    /// (the read service's health probe) share the daemon's one NATS
+    /// connection instead of opening their own.
+    pub fn jetstream(&self) -> jetstream::Context {
+        self.jetstream.clone()
+    }
+
     /// Ensure the factor-q event stream exists, creating it if necessary.
     ///
     /// S2 compression is enabled on creation. Events are text-heavy
