@@ -2314,7 +2314,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// request merely declines. The outer `Err` is infrastructure
     /// (store / bus).
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     async fn dispatch_llm(
         &self,
         llm: &dyn LlmClient,
