@@ -291,7 +291,9 @@ impl From<LlmDispatchRow> for LlmDispatchView {
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct LiveExecutionView {
     pub phase: String,
-    pub iteration: u32,
+    /// Reducer *step* counter (every model and tool step) — not the
+    /// model-turn count that `max_iterations` gates (issue #109).
+    pub step_index: u32,
     pub started_at_ms: i64,
     pub updated_at_ms: i64,
     pub terminal_at_ms: Option<i64>,
@@ -494,7 +496,7 @@ impl Views {
                     .await?;
                 Some(LiveExecutionView {
                     phase: s.phase,
-                    iteration: s.iteration,
+                    step_index: s.step_index,
                     started_at_ms: s.started_at,
                     updated_at_ms: s.updated_at,
                     terminal_at_ms: s.terminal_at,
@@ -650,7 +652,7 @@ mod tests {
                 schema_version: 1,
                 phase: "reducing".into(),
                 state_blob: vec![],
-                iteration: 3,
+                step_index: 3,
                 started_at: 100,
                 updated_at: 150,
                 terminal_at: None,
@@ -686,7 +688,7 @@ mod tests {
         let detail = views.invocation("inv-1").await.unwrap().unwrap();
         let live = detail.live.expect("in-flight invocation has live state");
         assert_eq!(live.phase, "reducing");
-        assert_eq!(live.iteration, 3);
+        assert_eq!(live.step_index, 3);
         assert!(live.tools.is_empty());
     }
 }

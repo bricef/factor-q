@@ -63,7 +63,7 @@ All of these map onto data that exists today — no new projection columns, no n
 | **Health** | `health() -> HealthReport` | `DoctorReport` + lifted `report_stream`: daemon up, per-stream depth, consumer lag, ack/num-pending, ambiguous-invocation and stale-worker counts |
 | **Workers** | `workers() -> Vec<WorkerRow>` | `coordination_worker` roster + liveness/staleness |
 | **Invocations (list)** | `invocations(filter) -> Vec<InvocationSummary>` | `coordination_invocation_owner` + `invocation_archive` |
-| **Invocation (detail)** | `invocation(id) -> InvocationDetail` | worker WAL: `invocation_state` phase/iteration + `tool_dispatch` + `llm_dispatch` — the "what is it doing right now" view, the standout and free |
+| **Invocation (detail)** | `invocation(id) -> InvocationDetail` | worker WAL: `invocation_state` phase/step_index + `tool_dispatch` + `llm_dispatch` — the "what is it doing right now" view, the standout and free |
 | **Events (recent)** | `events(filter) -> Vec<EventRow>` | projection `events` table (agent / type / since / limit) |
 | **Costs (per-agent)** | `costs(filter) -> Vec<CostSummary>` | projection `cost_summary` — per-agent cost/token aggregate, for operator spend-watch (not Q) |
 
