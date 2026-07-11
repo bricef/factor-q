@@ -10,10 +10,12 @@ Deploy tooling for the dogfood instance (issue #102). The contract:
   the rolling `main-latest` pre-release. The dogfood host never compiles.
 - **Every deployed build is kept; `current` picks the active one.**
   [deploy.sh](deploy.sh) verifies the checksum and the embedded commit
-  SHA, installs into `releases/<sha>/`, drains the daemon (ADR-0027),
-  atomically flips the `current` symlink, relaunches, and confirms both
-  processes run from the new release dir (`/proc/<pid>/exe`, not log
-  grepping). Exit 0 means you are on the target SHA.
+  SHA, installs into `releases/<sha>/`, drains the daemon (ADR-0027 —
+  escalating past the drain deadline to a confirmed `fq down --now`,
+  and only then SIGINT, #63), atomically flips the `current` symlink,
+  relaunches, and confirms both processes run from the new release dir
+  (`/proc/<pid>/exe`, not log grepping). Exit 0 means you are on the
+  target SHA.
 - **Rollback is local and instant**: `deploy.sh <previous-sha>` — no
   network, no rebuild, just a symlink flip through the same
   drain/verify path. `deploy.sh` keeps the newest `KEEP_RELEASES`
