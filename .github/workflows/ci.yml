@@ -56,6 +56,7 @@ jobs:
             dashboard:
               - 'services/fq-runtime/crates/fq-dashboard/**'
               - 'scripts/dashboard-screenshots.sh'
+              - 'scripts/dashboard-pr-comment.sh'
               - '.github/workflows/ci.yml'
 
   docs-lint:
@@ -157,11 +158,19 @@ jobs:
   # Visual artifact, not a required check: when dashboard code changes,
   # render every page from deterministic fixtures and screenshot them
   # (headless chrome over file:// — no daemon, no broker), so the PR run
-  # carries reviewable images of what the dashboard now looks like.
+  # carries reviewable images of what the dashboard now looks like —
+  # both as a run artifact and as a self-renewing gallery comment on
+  # the PR (images hosted on the ci/dashboard-screenshots blob branch).
   dashboard-screenshots:
     name: Dashboard screenshots
     needs: changes
     runs-on: ubuntu-latest
+    # Elevated for this job only: push the ci/dashboard-screenshots
+    # branch + upsert the PR gallery comment. The workflow default
+    # stays read-only.
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - if: needs.changes.outputs.dashboard != 'true'
         run: echo "No dashboard changes — skipping screenshots."
@@ -185,6 +194,18 @@ jobs:
           name: dashboard-screenshots
           path: dist/dashboard-screenshots/*.png
           if-no-files-found: error
+      # The gallery comment: PR context only, and only for same-repo
+      # branches (a fork PR's token is read-only anyway).
+      - if: >-
+          needs.changes.outputs.dashboard == 'true' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: >-
+          bash scripts/dashboard-pr-comment.sh dist/dashboard-screenshots
+          "${{ github.event.pull_request.number }}"
+          "${{ github.event.pull_request.head.sha }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   go-ci:
     name: Go adapters
