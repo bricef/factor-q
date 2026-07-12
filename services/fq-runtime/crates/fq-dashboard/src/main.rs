@@ -28,6 +28,7 @@ use clap::Parser;
 use fq_runtime::read_service::{self, ReadServiceClient};
 use tarpc::context;
 
+mod fixtures;
 mod render;
 
 #[derive(Parser)]
@@ -36,6 +37,8 @@ mod render;
     about = "factor-q operator dashboard (read-only)"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Loopback address to serve the dashboard on. Reached via SSH
     /// tunnel; a non-loopback bind is refused.
     #[arg(long, default_value = "127.0.0.1:9472", env = "FQ_DASHBOARD_BIND")]
@@ -47,6 +50,20 @@ struct Args {
     /// Browser auto-refresh interval, in seconds.
     #[arg(long, default_value_t = 5, env = "FQ_DASHBOARD_REFRESH")]
     refresh: u64,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Render every page from canned, deterministic fixture data into a
+    /// directory of static HTML files — the input for the screenshot
+    /// pipeline (scripts/dashboard-screenshots.sh). Needs no daemon and
+    /// no broker; a visual diff of the output means the rendering
+    /// changed, never the clock.
+    RenderFixtures {
+        /// Output directory for the .html files.
+        #[arg(long, default_value = "dashboard-fixtures")]
+        out: std::path::PathBuf,
+    },
 }
 
 /// Shared per-process state. No connection is held — see module doc —
@@ -219,6 +236,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+
+    if let Some(Command::RenderFixtures { out }) = args.command {
+        for name in fixtures::write_all(&out)? {
+            println!("{}", out.join(format!("{name}.html")).display());
+        }
+        return Ok(());
+    }
 
     // Same posture as the read service it fronts: never off-box.
     let bind: std::net::SocketAddr = args
