@@ -37,6 +37,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       go: ${{ steps.filter.outputs.go }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -52,6 +53,10 @@ jobs:
               - 'adapters/**'
               - 'justfile'
               - '.github/workflows/**'
+            dashboard:
+              - 'services/fq-runtime/crates/fq-dashboard/**'
+              - 'scripts/dashboard-screenshots.sh'
+              - '.github/workflows/ci.yml'
 
   docs-lint:
     name: Docs lint
@@ -148,6 +153,38 @@ jobs:
             echo "::error::a Rust suite failed — see the Runtime CI / Store CI jobs above"
             exit 1
           fi
+
+  # Visual artifact, not a required check: when dashboard code changes,
+  # render every page from deterministic fixtures and screenshot them
+  # (headless chrome over file:// — no daemon, no broker), so the PR run
+  # carries reviewable images of what the dashboard now looks like.
+  dashboard-screenshots:
+    name: Dashboard screenshots
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.changes.outputs.dashboard != 'true'
+        run: echo "No dashboard changes — skipping screenshots."
+      - if: needs.changes.outputs.dashboard == 'true'
+        uses: actions/checkout@v4
+      # Keep in lockstep with rust-toolchain.toml (#102).
+      - if: needs.changes.outputs.dashboard == 'true'
+        uses: dtolnay/rust-toolchain@1.95.0
+      - if: needs.changes.outputs.dashboard == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/fq-runtime
+      - if: needs.changes.outputs.dashboard == 'true'
+        uses: extractions/setup-just@v3
+      # ubuntu-latest ships google-chrome; the script resolves it.
+      - if: needs.changes.outputs.dashboard == 'true'
+        run: just dashboard-screenshots
+      - if: needs.changes.outputs.dashboard == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-screenshots
+          path: dist/dashboard-screenshots/*.png
+          if-no-files-found: error
 
   go-ci:
     name: Go adapters

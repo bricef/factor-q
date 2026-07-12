@@ -122,6 +122,13 @@ drill: build
 fq *args:
     cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- "$@"
 
+# Screenshot every fq-dashboard page from deterministic fixtures into
+# dist/dashboard-screenshots/ (headless chromium over file:// — no
+# daemon, no broker). CI runs this when dashboard code changes and
+# uploads the PNGs as an artifact.
+dashboard-screenshots out="dist/dashboard-screenshots":
+    bash scripts/dashboard-screenshots.sh {{out}}
+
 # === Docs ===
 
 # Uses markdownlint-cli2 (pinned) via npx; rules in .markdownlint.jsonc.
