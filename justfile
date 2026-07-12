@@ -148,9 +148,13 @@ check-version tag:
     fi
     echo "release tag {{tag}} matches Cargo version v${cargo_version}"
 
-# Build the release binaries (fq, fq-cas) for a target triple.
+# Build the release binaries (fq, fq-cas, fq-dashboard) for a target
+# triple. The dashboard shares the runtime workspace, so its release
+# build is incremental on top of fq's; tagged releases still package
+# only fq + fq-cas (`just package`), while the main-branch deploy
+# bundle takes all of them (`just package-main`).
 build-release target:
-    cd {{runtime_dir}} && cargo build --release --target {{target}} --bin fq
+    cd {{runtime_dir}} && cargo build --release --target {{target}} --bin fq --bin fq-dashboard
     cd {{store_dir}} && cargo build --release --target {{target}} --features cli --bin fq-cas
 
 # Package the built binaries into a single bundle in dist/ (.tar.gz + .sha256).
@@ -180,11 +184,11 @@ build-watcher target:
     cd adapters/github-watcher
     CGO_ENABLED=0 go build -o "target/{{target}}/release/github-watcher" .
 
-# Package the rolling main-branch bundle: all three deployables plus the
+# Package the rolling main-branch bundle: every deployable plus the
 # dogfood launchers, so a deployed releases/<sha>/ dir is self-contained
 # (ops/dogfood/deploy.sh extracts it verbatim).
 package-main target:
-    bash scripts/package.sh {{target}} {{runtime_dir}}:fq {{store_dir}}:fq-cas adapters/github-watcher:github-watcher ops/dogfood/run.sh ops/dogfood/watcher.sh
+    bash scripts/package.sh {{target}} {{runtime_dir}}:fq {{runtime_dir}}:fq-dashboard {{store_dir}}:fq-cas adapters/github-watcher:github-watcher ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh
 
 # Publish/refresh the rolling `main-latest` pre-release from dist/.
 # Recreates both the release and its tag so tag, assets, and notes always

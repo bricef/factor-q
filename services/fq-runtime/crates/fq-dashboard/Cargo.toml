@@ -1,0 +1,33 @@
+[package]
+name = "fq-dashboard"
+version.workspace = true
+edition.workspace = true
+description = "factor-q operator dashboard — a read-only web surface over the running daemon"
+repository.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fq-dashboard"
+path = "src/main.rs"
+
+[dependencies]
+# The typed contract: the wire client and the view DTOs come straight
+# from the runtime — a trait change fails this compile instead of
+# drifting silently (#105 layer 3).
+fq-runtime = { path = "../fq-runtime", features = ["read-service"] }
+anyhow = "1"
+axum = "0.7"
+clap = { version = "4", features = ["derive", "env"] }
+tarpc = { version = "0.37", features = ["tokio1", "serde1", "serde-transport", "serde-transport-bincode", "tcp"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+async-nats = "0.38"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true
