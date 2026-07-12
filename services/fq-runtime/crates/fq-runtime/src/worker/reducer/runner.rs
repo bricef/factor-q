@@ -696,10 +696,19 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             Some(provider) => Some(provider.provision(invocation_id).await?),
             None => None,
         };
-        let sandbox = agent
-            .sandbox()
-            .to_tool_sandbox(workspace.as_deref())
-            .map_err(WorkspaceError::from)?;
+        // A `?` would leak the just-provisioned workspace (issue #116):
+        // an unbound-token error is permanent, nothing durable exists,
+        // and the directory is garbage — route it through the reclaim
+        // decision.
+        let sandbox = match agent.sandbox().to_tool_sandbox(workspace.as_deref()) {
+            Ok(sandbox) => sandbox,
+            Err(err) => {
+                let outcome = Err(WorkspaceError::from(err).into());
+                self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
+                    .await;
+                return outcome;
+            }
+        };
         let tool_schemas = tools.build_schemas(agent.tools());
         // A tool the agent declares but the registry has no
         // implementation for is dropped silently by `build_schemas` —
@@ -748,21 +757,32 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // cursor inside publish_chained.
         let mut cursor: Option<Uuid> = None;
 
-        // Emit `triggered` once, mirroring the legacy executor.
-        self.publish_chained(
-            &mut cursor,
-            Event::new(
-                agent_id.clone(),
-                invocation_id,
-                EventPayload::Triggered(TriggeredPayload {
-                    trigger_source,
-                    trigger_subject,
-                    trigger_payload,
-                    config_snapshot: agent.to_snapshot(),
-                }),
-            ),
-        )
-        .await?;
+        // Emit `triggered` once, mirroring the legacy executor. A `?`
+        // here would leak the just-provisioned workspace (issue #116):
+        // this publish failing is the pre-WAL case — nothing durable
+        // exists, the trigger redelivers into a fresh workspace — so
+        // route the error through the reclaim decision instead.
+        if let Err(err) = self
+            .publish_chained(
+                &mut cursor,
+                Event::new(
+                    agent_id.clone(),
+                    invocation_id,
+                    EventPayload::Triggered(TriggeredPayload {
+                        trigger_source,
+                        trigger_subject,
+                        trigger_payload,
+                        config_snapshot: agent.to_snapshot(),
+                    }),
+                ),
+            )
+            .await
+        {
+            let outcome = Err(err);
+            self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
+                .await;
+            return outcome;
+        }
 
         let state: Vec<u8> = Vec::new();
         let last_result: Option<CapabilityResult> = None;
@@ -811,10 +831,22 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
     /// Release the invocation's workspace on a *terminal* outcome only.
     /// Suspension keeps the workspace — the row is still in-flight and
-    /// resume continues from it (plan §3); infrastructure errors also
-    /// keep it, conservatively, because the row may still be recoverable.
-    /// Startup prune sweeps whatever recovery no longer claims. A reclaim
-    /// failure is logged and never overrides the invocation's outcome.
+    /// resume continues from it (plan §3). For errors, the decision
+    /// consults **WAL ground truth** rather than the error variant
+    /// (issue #116): an agent-turn LLM failure emits a terminal `failed`
+    /// event yet surfaces as `Err(Llm)`, so variant-matching leaked one
+    /// workspace per terminal LLM failure (eight orphans in the
+    /// 2026-07-11 credit-exhaustion storm). The row decides:
+    ///
+    /// - `terminal_at` set → reclaim (nothing will resume);
+    /// - row in flight → keep (resume needs the workspace);
+    /// - **no row at all** → reclaim (a pre-WAL failure left nothing
+    ///   durable — the trigger redelivers into a *fresh* workspace, so
+    ///   this one is garbage);
+    /// - store error during the check → keep, conservatively; the
+    ///   startup prune sweeps whatever recovery no longer claims.
+    ///
+    /// A reclaim failure is logged and never overrides the outcome.
     async fn reclaim_if_terminal(
         &self,
         invocation_id: Uuid,
@@ -826,9 +858,25 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         };
         let terminal = match outcome {
             Ok(InvocationOutcome::Completed { .. })
-            | Ok(InvocationOutcome::BudgetExceeded { .. })
-            | Err(ExecutorError::InvocationFailed { .. }) => true,
-            Ok(InvocationOutcome::Suspended { .. }) | Err(_) => false,
+            | Ok(InvocationOutcome::BudgetExceeded { .. }) => true,
+            Ok(InvocationOutcome::Suspended { .. }) => false,
+            Err(_) => match self
+                .config
+                .store
+                .get_invocation_state(&invocation_id.to_string())
+                .await
+            {
+                Ok(Some(row)) => row.terminal_at.is_some(),
+                Ok(None) => true,
+                Err(err) => {
+                    warn!(
+                        invocation_id = %invocation_id,
+                        error = %err,
+                        "could not read state row for reclaim decision; keeping workspace"
+                    );
+                    false
+                }
+            },
         };
         if !terminal {
             return;
@@ -1115,10 +1163,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 &mut cursor,
             )
             .await?;
-            return Ok(InvocationOutcome::BudgetExceeded {
+            // Terminal outcome on the resume path — the early return
+            // must still release the re-attached workspace (issue #116).
+            let outcome = Ok(InvocationOutcome::BudgetExceeded {
                 invocation_id,
                 cost: totals.total_cost,
             });
+            self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
+                .await;
+            return outcome;
         }
         let outcome = self
             .run_loop_inner(

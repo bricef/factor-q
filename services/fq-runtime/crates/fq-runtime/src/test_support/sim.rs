@@ -816,6 +816,110 @@ mod tests {
         );
     }
 
+    /// Issue #116: a terminal LLM failure emits a `failed` event and
+    /// marks the row terminal, yet surfaces as `Err(Llm)` — the reclaim
+    /// decision must consult the WAL row, not the error variant, so the
+    /// workspace is released (the 2026-07-11 credit-exhaustion storm
+    /// orphaned one workspace per failed retry).
+    #[tokio::test]
+    async fn terminal_llm_failure_reclaims_workspace() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let provider = Arc::new(crate::worker::workspace::PerInvocationWorkspace::new(
+            root.path().to_path_buf(),
+        ));
+        let world = SimWorld::with_workspace(23, 5.0, provider).await;
+
+        let llm = FixtureClient::new();
+        llm.push_error(crate::llm::LlmError::RequestFailed(
+            "credit balance too low".to_string(),
+        ));
+        let outcome = world.run(&llm).await;
+        assert!(
+            matches!(outcome, Err(ExecutorError::Llm(_))),
+            "expected an LLM executor error, got {outcome:?}"
+        );
+
+        let id = world.invocation_id();
+        let row = world
+            .store
+            .get_invocation_state(&id.to_string())
+            .await
+            .expect("state row query")
+            .expect("state row");
+        assert!(
+            row.terminal_at.is_some(),
+            "the failed invocation's row must be terminal"
+        );
+        let ws = row.workspace_ref.expect("workspace_ref persisted");
+        assert!(
+            !std::path::Path::new(&ws).exists(),
+            "a terminal failure must reclaim its workspace"
+        );
+    }
+
+    /// The keep side of #116's rule: a crash that leaves the row
+    /// in-flight (recoverable) must keep the workspace for resume.
+    #[tokio::test]
+    async fn recoverable_crash_keeps_workspace() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let provider = Arc::new(crate::worker::workspace::PerInvocationWorkspace::new(
+            root.path().to_path_buf(),
+        ));
+        let world = SimWorld::with_workspace(29, 5.0, provider).await;
+
+        // Crash at the llm.response publish — the row exists and is
+        // non-terminal, exactly the state recovery resumes from.
+        world.sink.fail_publish_at(3);
+        let llm = FixtureClient::new();
+        llm.push_response(sim_tool_call("c1"));
+        let outcome = world.run(&llm).await;
+        assert!(outcome.is_err(), "the injected publish fault must surface");
+
+        let id = world.invocation_id();
+        let row = world
+            .store
+            .get_invocation_state(&id.to_string())
+            .await
+            .expect("state row query")
+            .expect("state row");
+        assert!(row.terminal_at.is_none(), "row must still be in flight");
+        let ws = row.workspace_ref.expect("workspace_ref persisted");
+        assert!(
+            std::path::Path::new(&ws).exists(),
+            "a recoverable crash must keep the workspace for resume"
+        );
+    }
+
+    /// The no-row side of #116's rule: a failure before anything
+    /// durable exists (the `triggered` publish itself faults) leaves
+    /// no row — the trigger redelivers into a *fresh* workspace, so
+    /// this one is garbage and must be reclaimed.
+    #[tokio::test]
+    async fn pre_wal_failure_reclaims_workspace() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let provider = Arc::new(crate::worker::workspace::PerInvocationWorkspace::new(
+            root.path().to_path_buf(),
+        ));
+        let world = SimWorld::with_workspace(31, 5.0, provider).await;
+
+        // Publish index 0 is the `triggered` event — nothing durable
+        // lands.
+        world.sink.fail_publish_at(0);
+        let llm = FixtureClient::new();
+        llm.push_response(end_turn("never reached"));
+        let outcome = world.run(&llm).await;
+        assert!(outcome.is_err(), "the injected publish fault must surface");
+
+        let orphans: Vec<_> = std::fs::read_dir(root.path())
+            .expect("workspace root readable")
+            .flatten()
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "a pre-WAL failure must not leave an orphaned workspace: {orphans:?}"
+        );
+    }
+
     /// Crash at the `llm.response` publish (the LLM's WAL row is
     /// already completed), then resume: recovery replays the stored
     /// result, the tool executes exactly once across both attempts,
