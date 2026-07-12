@@ -789,6 +789,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fq-dashboard"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "axum",
+ "clap",
+ "fq-runtime",
+ "http-body-util",
+ "tarpc",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fq-runtime"
 version = "0.1.0"
 dependencies = [

@@ -28,7 +28,17 @@ E.g. REST for CRUD and administration, WebSocket or SSE for real-time streaming.
 
 ## Decision
 
-Not yet taken.
+Not yet taken in full. The **read half is answered in practice** by the
+operator dashboard
+([plan](../../plans/active/2026-07-10-operator-dashboard.md), #105):
+typed `tarpc`/bincode internally — `fq-runtime::read_service`, a
+wire-mirror of the `views` read model — with a purpose-built adapter at
+each edge (`fq-dashboard` serves the browser HTTP as a BFF; the CLI
+consumes `views` in-process). That shape is proposed for the API
+generally: each edge owns its own protocol over one typed internal
+contract, which dissolves this ADR's one-protocol-for-all-clients
+dilemma and matches headless-first. The **streaming and write/admin
+halves remain open**.
 
 ## Considerations
 

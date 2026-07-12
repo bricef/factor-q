@@ -29,7 +29,7 @@ Deploy tooling for the dogfood instance (issue #102). The contract:
 ```text
 fq-dogfood/
 ├── current -> releases/<sha>/   # the active build (symlink)
-├── releases/<sha>/              # fq, fq-cas, github-watcher, run.sh, watcher.sh
+├── releases/<sha>/              # fq, fq-cas, fq-dashboard, github-watcher + launchers
 ├── fq.toml                      # instance config — host-side, `fq reload` to apply
 ├── agents/                      # agent definitions — host-side
 ├── .secrets/env                 # the single declared environment (chmod 600)
@@ -72,6 +72,12 @@ Config and agent-definition changes don't need a deploy at all:
 `fq reload` hot-swaps the registry (Design Principle 8). A new provider
 key is the exception — add it to `.secrets/env` and `deploy.sh --force`,
 since only launch reads the env file.
+
+The operator dashboard (read-only web view, #105) rides in the bundle:
+enable `[read_service]` in `fq.toml`, restart the daemon, then
+`setsid ./current/dashboard.sh >> logs/dashboard.log 2>&1 </dev/null &`
+and tunnel to `127.0.0.1:9472`. Not yet deploy-managed — restart it
+manually after a deploy.
 
 Not built yet, by design (see #102): health-gate + auto-rollback after
 the flip, and any supervisor (systemd is deliberately out of scope; the
