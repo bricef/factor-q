@@ -520,6 +520,35 @@ Prompt.
     }
 
     #[test]
+    fn sandbox_env_names_flow_through_to_tool_sandbox() {
+        // Issue #34: env-var grants must reach ToolSandbox so the exec
+        // tool can pass them through to a child (they are names, not
+        // paths — no workspace binding).
+        let content = r#"---
+name: env-agent
+model: claude-haiku-4-5
+tools:
+  - exec
+sandbox:
+  exec_cwd:
+    - /work
+  env:
+    - HOME
+    - GH_TOKEN
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        let ts = agent.sandbox().to_tool_sandbox(None).unwrap();
+        assert_eq!(
+            ts.env_allowlist(),
+            &["HOME".to_string(), "GH_TOKEN".to_string()],
+            "sandbox.env names must be carried onto ToolSandbox"
+        );
+    }
+
+    #[test]
     fn workspace_token_without_binding_fails_loud() {
         let content = r#"---
 name: unbound

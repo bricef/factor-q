@@ -42,6 +42,11 @@ pub struct ToolSandbox {
     fs_read: Vec<PathBuf>,
     fs_write: Vec<PathBuf>,
     exec_cwd: Vec<PathBuf>,
+    /// Names of parent-process environment variables a tool may pass
+    /// through to a child it spawns (the exec tool). Nothing but a
+    /// fixed `PATH` baseline is exposed unless a name is granted here
+    /// — an agent opts in per variable (design principle 3).
+    env_allowlist: Vec<String>,
 }
 
 impl ToolSandbox {
@@ -73,6 +78,16 @@ impl ToolSandbox {
         self
     }
 
+    /// Grant an environment variable through to spawned child
+    /// processes: if the named var is set in the parent process, the
+    /// exec tool copies it into the child's env. Distinct from path
+    /// grants — a variable is only passed through if explicitly named
+    /// here (issue #34).
+    pub fn allow_env(mut self, var: impl Into<String>) -> Self {
+        self.env_allowlist.push(var.into());
+        self
+    }
+
     pub fn read_prefixes(&self) -> &[PathBuf] {
         &self.fs_read
     }
@@ -83,6 +98,11 @@ impl ToolSandbox {
 
     pub fn exec_cwd_prefixes(&self) -> &[PathBuf] {
         &self.exec_cwd
+    }
+
+    /// The environment variables a tool may pass through to a child.
+    pub fn env_allowlist(&self) -> &[String] {
+        &self.env_allowlist
     }
 
     /// Check that a target path is allowed for reading.
@@ -363,6 +383,16 @@ mod tests {
         let sb = make_sandbox(&[dir.path()], &[]);
         let err = sb.check_read(&missing).unwrap_err();
         assert!(matches!(err, SandboxError::NotFound(_)));
+    }
+
+    #[test]
+    fn env_allowlist_round_trips_and_defaults_empty() {
+        assert!(ToolSandbox::new().env_allowlist().is_empty());
+        let sb = ToolSandbox::new().allow_env("HOME").allow_env("GH_TOKEN");
+        assert_eq!(
+            sb.env_allowlist(),
+            &["HOME".to_string(), "GH_TOKEN".to_string()]
+        );
     }
 
     #[test]
