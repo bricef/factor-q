@@ -141,17 +141,35 @@ impl PricingTable {
     /// whole parse — one model with a missing price shouldn't prevent
     /// loading the rest.
     pub fn from_litellm_json(json: &str) -> Result<Self, PricingError> {
-        let raw: HashMap<String, LiteLlmEntry> =
+        // Parse the top level into untyped values so one entry whose
+        // shape we don't expect is skipped, not fatal to the whole
+        // document (#120). LiteLLM's live table mixes a descriptive
+        // string `sample_spec`, float `max_input_tokens` (e.g.
+        // 2000000.0), and occasional stray field types that a strict
+        // typed map parse rejects wholesale — bricking every model's
+        // pricing, which then fails the startup pricing guarantee.
+        let raw: HashMap<String, serde_json::Value> =
             serde_json::from_str(json).map_err(|err| PricingError::Parse(err.to_string()))?;
 
         let mut entries = HashMap::with_capacity(raw.len());
         let mut context_windows = HashMap::new();
-        for (model, entry) in raw {
+        let mut skipped = 0usize;
+        for (model, value) in raw {
             // LiteLLM's file includes a "sample_spec" entry used as a
             // schema template; it has no real pricing.
             if model == "sample_spec" {
                 continue;
             }
+            // Per-entry deserialize: a malformed entry is dropped
+            // (its model just goes unpriced/unknown-window), never
+            // fatal to the rest of the table.
+            let entry: LiteLlmEntry = match serde_json::from_value(value) {
+                Ok(entry) => entry,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
             // The context window is recorded whenever the source lists
             // it, independent of whether the entry also carries prices —
             // a model can have a known window but be skipped for pricing.
@@ -176,6 +194,12 @@ impl PricingTable {
                         .cache_creation_input_token_cost
                         .map(|c| c * 1_000_000.0),
                 },
+            );
+        }
+        if skipped > 0 {
+            debug!(
+                skipped,
+                "skipped LiteLLM entries that failed to deserialize"
             );
         }
         Ok(Self {
@@ -347,11 +371,30 @@ pub fn default_pricing_cache_path() -> PathBuf {
 #[derive(Debug, Deserialize)]
 struct LiteLlmEntry {
     input_cost_per_token: Option<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_max_input_tokens")]
     max_input_tokens: Option<u32>,
     output_cost_per_token: Option<f64>,
     cache_read_input_token_cost: Option<f64>,
     cache_creation_input_token_cost: Option<f64>,
+}
+
+/// Deserialize `max_input_tokens` tolerantly (#120). LiteLLM carries
+/// this field as an integer, an integral float (e.g. `2000000.0`), or —
+/// in the `sample_spec` doc entry — a descriptive *string*. Accept a
+/// non-negative number (truncating a float); treat a string, bool, or
+/// null as "window unknown" (`None`) rather than failing the entry.
+fn lenient_max_input_tokens<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        Some(serde_json::Value::Number(n)) => Ok(n.as_u64().map(|v| v as u32).or_else(|| {
+            n.as_f64()
+                .filter(|f| f.is_finite() && *f >= 0.0)
+                .map(|f| f as u32)
+        })),
+        _ => Ok(None),
+    }
 }
 
 /// Errors from loading or parsing pricing data.
@@ -368,9 +411,14 @@ pub enum PricingError {
 mod tests {
     use super::*;
 
+    // Mirrors the shapes in the *live* LiteLLM table that bricked a
+    // strict parse (#120): the real `sample_spec` carries a descriptive
+    // *string* `max_input_tokens`, and some providers (e.g. xai/grok)
+    // carry an integral *float* window. A stray-typed entry
+    // (`broken-prices`) exercises the per-entry skip.
     const LITELLM_SAMPLE: &str = r#"{
         "sample_spec": {
-            "max_tokens": "LEGACY",
+            "max_input_tokens": "max input tokens, if the provider specifies it",
             "input_cost_per_token": 0.0,
             "output_cost_per_token": 0.0
         },
@@ -386,6 +434,21 @@ mod tests {
             "cache_read_input_token_cost": 0.0000003,
             "cache_creation_input_token_cost": 0.00000375
         },
+        "grok-float-window": {
+            "max_input_tokens": 2000000.0,
+            "input_cost_per_token": 0.000002,
+            "output_cost_per_token": 0.00001
+        },
+        "string-window-priced": {
+            "max_input_tokens": "unknown",
+            "input_cost_per_token": 0.000004,
+            "output_cost_per_token": 0.00002
+        },
+        "broken-prices": {
+            "max_input_tokens": 8192,
+            "input_cost_per_token": "not-a-number",
+            "output_cost_per_token": 0.00001
+        },
         "missing-prices": {
             "max_input_tokens": 4096
         }
@@ -394,7 +457,10 @@ mod tests {
     #[test]
     fn parses_litellm_entries() {
         let table = PricingTable::from_litellm_json(LITELLM_SAMPLE).unwrap();
-        assert_eq!(table.len(), 2, "should skip sample_spec and missing-prices");
+        // Priced: haiku, sonnet, grok-float-window, string-window-priced.
+        // Skipped: sample_spec (by name), missing-prices (no prices),
+        // broken-prices (stray input_cost type — per-entry skip).
+        assert_eq!(table.len(), 4);
 
         let haiku = table.lookup("claude-haiku-test").unwrap();
         assert!((haiku.input_per_million - 1.0).abs() < 1e-9);
@@ -421,6 +487,37 @@ mod tests {
         assert_eq!(table.context_window("sample_spec"), None);
         // An unknown model is unknown.
         assert_eq!(table.context_window("nope"), None);
+        // #120: an integral-float window truncates to an integer.
+        assert_eq!(table.context_window("grok-float-window"), Some(2_000_000));
+        // #120: a string window reads as unknown, but the entry still
+        // loads (its prices are intact — see the pricing assertion).
+        assert_eq!(table.context_window("string-window-priced"), None);
+    }
+
+    /// #120 regression: the shapes in the live LiteLLM table that
+    /// bricked a strict whole-document parse (string / float
+    /// `max_input_tokens`, a stray-typed price field) must yield a
+    /// populated table, not a parse error or an empty one.
+    #[test]
+    fn live_table_shapes_do_not_brick_the_parse() {
+        let table = PricingTable::from_litellm_json(LITELLM_SAMPLE)
+            .expect("mixed-shape LiteLLM table must parse, not error");
+        assert!(!table.is_empty(), "the table must not degrade to empty");
+
+        // A float-window entry keeps its (truncated) window and its
+        // prices.
+        let grok = table.lookup("grok-float-window").unwrap();
+        assert!((grok.input_per_million - 2.0).abs() < 1e-9);
+
+        // A string-window entry still prices; only its window is lost.
+        let strwin = table.lookup("string-window-priced").unwrap();
+        assert!((strwin.input_per_million - 4.0).abs() < 1e-9);
+
+        // An entry with a stray-typed price is dropped, not fatal.
+        assert!(table.lookup("broken-prices").is_none());
+
+        // The well-formed neighbours are unaffected.
+        assert!(table.lookup("claude-haiku-test").is_some());
     }
 
     #[test]
@@ -477,7 +574,7 @@ mod tests {
         std::fs::write(&path, LITELLM_SAMPLE).unwrap();
 
         let table = PricingTable::load_from_cache_or_empty(&path);
-        assert_eq!(table.len(), 2);
+        assert_eq!(table.len(), 4);
         assert!(table.lookup("claude-haiku-test").is_some());
     }
 
