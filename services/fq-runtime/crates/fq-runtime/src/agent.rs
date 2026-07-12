@@ -633,6 +633,11 @@ impl Sandbox {
         for path in &self.exec_cwd {
             sb = sb.allow_exec_cwd(bind_workspace_path(path, workspace)?);
         }
+        // Env-var grants pass through by name (issue #34); no workspace
+        // binding — these are variable names, not paths.
+        for var in &self.env {
+            sb = sb.allow_env(var.clone());
+        }
         Ok(sb)
     }
 }

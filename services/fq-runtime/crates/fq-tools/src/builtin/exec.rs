@@ -276,16 +276,12 @@ impl Tool for ExecTool {
 
         // Build the child's environment. Start from a small fixed
         // baseline (just PATH), then copy each variable the agent
-        // explicitly allowlisted from the parent's env.
+        // explicitly allowlisted (`sandbox.env`, carried on the
+        // ToolSandbox — issue #34) from the parent's env.
         let env = build_child_env(
             &self.config.default_path,
-            // We treat the allowlist as "every env var the agent
-            // declared in `sandbox.env`". The executor converts
-            // Agent::Sandbox into ToolSandbox; the env allowlist
-            // isn't currently carried on ToolSandbox, so for phase 1
-            // we expose it through a dedicated helper below.
             std::env::vars(),
-            allowed_env_vars(),
+            ctx.sandbox.env_allowlist(),
         );
 
         debug!(
@@ -633,29 +629,21 @@ fn push_stream(out: &mut String, name: &str, text: &str, note: Option<String>) {
     }
 }
 
-/// Env vars the agent has allowlisted. This is a module-local
-/// constant for phase 1 — in a later slice this will be plumbed
-/// through `ToolSandbox` properly and read from the agent definition.
-/// For now, only PATH is injected from the default, and nothing else
-/// is passed through unless the test infrastructure overrides this.
-fn allowed_env_vars() -> &'static [&'static str] {
-    // Phase 1 default: no additional env vars pass through. Tests
-    // that need specific variables set them via std::env::set_var
-    // before running the tool and include them in the allowlist via
-    // the ExecConfig-driven path below (not yet implemented).
-    //
-    // This deliberately limits what the exec tool exposes until we
-    // plumb an explicit allowlist through ToolSandbox.
-    &[]
-}
-
-fn build_child_env<I>(
+/// Assemble the child's environment: a fixed `PATH` baseline, plus each
+/// allowlisted variable copied from the parent process if it is set
+/// there. `PATH` in the allowlist overrides the baseline with the
+/// parent's value — an agent that grants `PATH` opts into the daemon's
+/// fuller path (e.g. a toolchain on it). Generic over the name type so
+/// both a runtime `&[String]` (the sandbox allowlist) and `&[&str]`
+/// (tests) work.
+fn build_child_env<I, S>(
     default_path: &str,
     parent_env: I,
-    allowlist: &[&'static str],
+    allowlist: &[S],
 ) -> HashMap<String, String>
 where
     I: IntoIterator<Item = (String, String)>,
+    S: AsRef<str>,
 {
     let mut env = HashMap::new();
     env.insert("PATH".to_string(), default_path.to_string());
@@ -665,8 +653,9 @@ where
     }
     let parent: HashMap<String, String> = parent_env.into_iter().collect();
     for name in allowlist {
-        if let Some(value) = parent.get(*name) {
-            env.insert((*name).to_string(), value.clone());
+        let name = name.as_ref();
+        if let Some(value) = parent.get(name) {
+            env.insert(name.to_string(), value.clone());
         }
     }
     env
@@ -1204,7 +1193,7 @@ mod tests {
                 ("HOME".to_string(), "/home/user".to_string()),
                 ("SECRET".to_string(), "no".to_string()),
             ],
-            &[],
+            &[] as &[&str],
         );
         assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
         assert!(!env.contains_key("HOME"));
@@ -1225,6 +1214,96 @@ mod tests {
         assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
         assert_eq!(env.get("HOME"), Some(&"/home/user".to_string()));
         assert!(!env.contains_key("SECRET"));
+    }
+
+    #[test]
+    fn build_child_env_allowlisted_path_overrides_the_baseline() {
+        // Granting PATH opts the child into the parent's fuller PATH
+        // (e.g. a toolchain on it) instead of the fixed baseline.
+        let env = build_child_env(
+            "/usr/bin",
+            vec![("PATH".to_string(), "/opt/tools/bin:/usr/bin".to_string())],
+            &["PATH"],
+        );
+        assert_eq!(
+            env.get("PATH"),
+            Some(&"/opt/tools/bin:/usr/bin".to_string())
+        );
+    }
+
+    #[test]
+    fn build_child_env_accepts_a_runtime_string_allowlist() {
+        // The real call site passes a &[String] (the sandbox
+        // allowlist), not a &[&str] literal — prove the generic binds.
+        let allow = vec!["HOME".to_string()];
+        let env = build_child_env(
+            "/usr/bin",
+            vec![("HOME".to_string(), "/home/user".to_string())],
+            &allow,
+        );
+        assert_eq!(env.get("HOME"), Some(&"/home/user".to_string()));
+    }
+
+    /// End-to-end (issue #34): a var named in `sandbox.env` reaches the
+    /// spawned child; a var not named does not. Uses a uniquely-named
+    /// parent var so no sibling test reads it.
+    #[tokio::test]
+    async fn allowlisted_env_var_reaches_the_child_process() {
+        let dir = tempdir().unwrap();
+        // SAFETY: unique name, single write; mirrors the set_var
+        // precedent in llm/genai.rs's tests.
+        unsafe {
+            std::env::set_var("FQ_TEST_ALLOWED_34", "granted");
+            std::env::set_var("FQ_TEST_DENIED_34", "secret");
+        }
+
+        // Allowlisted → present in the child.
+        let sandbox = ToolSandbox::new()
+            .allow_exec_cwd(dir.path())
+            .allow_env("FQ_TEST_ALLOWED_34");
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["printenv", "FQ_TEST_ALLOWED_34"],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !result.is_error,
+            "printenv of an allowlisted var: {result:?}"
+        );
+        assert!(
+            result.output.contains("granted"),
+            "allowlisted var must reach the child: {}",
+            result.output
+        );
+
+        // Not allowlisted → absent (printenv exits non-zero).
+        let denied = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["printenv", "FQ_TEST_DENIED_34"],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !denied.output.contains("secret"),
+            "a var not in sandbox.env must not reach the child: {}",
+            denied.output
+        );
+
+        unsafe {
+            std::env::remove_var("FQ_TEST_ALLOWED_34");
+            std::env::remove_var("FQ_TEST_DENIED_34");
+        }
     }
 
     // --- standalone shell-operator detection (#92) -------------------
