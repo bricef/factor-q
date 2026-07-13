@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use fq_runtime::agent::{AgentId, AgentRegistry, definition::parse_agent};
+use fq_runtime::control_plane::store::WorkerStatus;
 use fq_runtime::events::{
     Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
     TriggerSource,
@@ -13,8 +14,8 @@ use fq_runtime::llm::{GenAiClient, LlmClient};
 use fq_runtime::views::Views;
 use fq_runtime::worker::{DrainReason, DrainRequest, InvocationOutcome};
 use fq_runtime::{
-    Config, EventBus, McpClientManager, McpServerConfig, PricingTable, ProjectionConsumer,
-    ProjectionStore, SharedRegistry, ToolRegistry, TriggerDispatcher,
+    Config, ControlPlaneStore, EventBus, McpClientManager, McpServerConfig, PricingTable,
+    ProjectionConsumer, ProjectionStore, SharedRegistry, ToolRegistry, TriggerDispatcher,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -1348,7 +1349,8 @@ fn render_recovery_guidance(ambiguous_count: i64, stale_worker_count: i64) -> St
     if stale_worker_count > 0 {
         out.push_str(&format!(
             "  Stale workers: {stale_worker_count}\n\
-             \x20\x20  -> `fq workers list --stale-only` to inspect\n"
+             \x20\x20  -> `fq workers list --stale-only` to inspect\n\
+             \x20\x20  -> `fq workers prune` to remove them (`--dry-run` to preview)\n"
         ));
     }
     out
@@ -1716,16 +1718,12 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             .await
             .with_context(|| format!("failed to open projection at {}", db_path.display()))?,
     );
-    let cp_store = Arc::new(
-        fq_runtime::ControlPlaneStore::open(&db_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to open control-plane store at {}",
-                    db_path.display()
-                )
-            })?,
-    );
+    let cp_store = Arc::new(ControlPlaneStore::open(&db_path).await.with_context(|| {
+        format!(
+            "failed to open control-plane store at {}",
+            db_path.display()
+        )
+    })?);
     // Pool ceiling scales with the fan-out bound (#70): each
     // dispatcher-run invocation is WAL-chatty, plus headroom for the
     // sweepers. Startup recovery is NOT covered — it spawns one resume
@@ -3374,7 +3372,7 @@ struct InvocationDropResult {
 async fn publish_invocation_drop(
     bus: &EventBus,
     proj_store: &ProjectionStore,
-    control_store: &fq_runtime::ControlPlaneStore,
+    control_store: &ControlPlaneStore,
     invocation_id: &str,
     reason: Option<&str>,
 ) -> anyhow::Result<InvocationDropResult> {
@@ -3403,7 +3401,7 @@ async fn invocation_drop(
     let config = global.resolve_config()?;
     let db_path = projection_path(&config);
     let proj_store = ProjectionStore::open_read_only(&db_path).await?;
-    let control_store = fq_runtime::ControlPlaneStore::open(&db_path).await?;
+    let control_store = ControlPlaneStore::open(&db_path).await?;
     let bus = EventBus::connect(&config.nats.url)
         .await
         .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
@@ -3717,7 +3715,7 @@ mod invocation_tests {
         );
         proj_store.insert_event(&seed).await.unwrap();
 
-        let control_store = fq_runtime::ControlPlaneStore::open(&db_path).await.unwrap();
+        let control_store = ControlPlaneStore::open(&db_path).await.unwrap();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let mut sub = bus
             .subscribe(format!(
@@ -3767,7 +3765,7 @@ mod invocation_tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("events.db");
         let proj_store = ProjectionStore::open(&db_path).await.unwrap();
-        let control_store = fq_runtime::ControlPlaneStore::open(&db_path).await.unwrap();
+        let control_store = ControlPlaneStore::open(&db_path).await.unwrap();
         let fake_inv = Uuid::now_v7().to_string();
         control_store
             .register_worker("orphan-worker", "test", 1)
@@ -3790,6 +3788,30 @@ mod invocation_tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn publish_invocation_drop_errors_when_nothing_known() {
+        // No projection event *and* no coordination owner row: a truly
+        // unknown id must still error rather than emit a phantom
+        // operator-recovered event for something that never existed.
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("events.db");
+        let proj_store = ProjectionStore::open(&db_path).await.unwrap();
+        let control_store = ControlPlaneStore::open(&db_path).await.unwrap();
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+
+        let fake_inv = Uuid::now_v7().to_string();
+        let err = publish_invocation_drop(&bus, &proj_store, &control_store, &fake_inv, None)
+            .await
+            .expect_err("unknown invocation should error");
+        assert!(format!("{err}").contains("not found"), "got: {err}");
     }
 
     /// The `--json` list shape is an operator contract: the swap from the
@@ -3897,12 +3919,12 @@ async fn workers_list(
 
 async fn workers_prune(global: &GlobalArgs, dry_run: bool) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
-    let store = fq_runtime::ControlPlaneStore::open(&projection_path(&config)).await?;
+    let store = ControlPlaneStore::open(&projection_path(&config)).await?;
     let stale: Vec<String> = store
         .list_workers()
         .await?
         .into_iter()
-        .filter(|worker| worker.status == fq_runtime::control_plane::store::WorkerStatus::Stale)
+        .filter(|worker| worker.status == WorkerStatus::Stale)
         .map(|worker| worker.worker_id)
         .collect();
     if dry_run {
@@ -4019,6 +4041,7 @@ mod workers_tests {
         let out = render_recovery_guidance(0, 2);
         assert!(out.contains("Stale workers: 2"));
         assert!(out.contains("fq workers list --stale-only"));
+        assert!(out.contains("fq workers prune"));
         assert!(!out.contains("Ambiguous"), "got: {out:?}");
         assert!(!out.contains("All clear"));
     }
@@ -4030,6 +4053,7 @@ mod workers_tests {
         assert!(out.contains("Stale workers: 1"));
         assert!(out.contains("fq invocation drop"));
         assert!(out.contains("fq workers list --stale-only"));
+        assert!(out.contains("fq workers prune"));
     }
 
     /// The `--json` worker shape after the swap to `views::WorkerView`
