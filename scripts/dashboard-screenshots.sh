@@ -38,8 +38,8 @@ if [ -z "$browser" ]; then
 fi
 
 mkdir -p "$html"
-cargo run -q --manifest-path "$root/services/fq-runtime/Cargo.toml" \
-    -p fq-dashboard -- render-fixtures --out "$html" >/dev/null
+cargo run -q --manifest-path "$root/services/fq-dashboard/Cargo.toml" \
+    -- render-fixtures --out "$html" >/dev/null
 
 shot() {
     # --no-sandbox: the devbox chromium cannot create its own sandbox

@@ -54,7 +54,7 @@ jobs:
               - 'justfile'
               - '.github/workflows/**'
             dashboard:
-              - 'services/fq-runtime/crates/fq-dashboard/**'
+              - 'services/fq-dashboard/**'
               - 'scripts/dashboard-screenshots.sh'
               - 'scripts/dashboard-pr-comment.sh'
               - '.github/workflows/ci.yml'
@@ -143,17 +143,43 @@ jobs:
   # halves are green; the Actions UI still shows which half failed.
   rust-ci:
     name: Rust CI
-    needs: [runtime-ci, store-ci]
+    needs: [runtime-ci, store-ci, dashboard-ci]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "runtime-ci: ${{ needs.runtime-ci.result }}"
-          echo "store-ci:   ${{ needs.store-ci.result }}"
-          if [ "${{ needs.runtime-ci.result }}" != "success" ] || [ "${{ needs.store-ci.result }}" != "success" ]; then
+          echo "runtime-ci:   ${{ needs.runtime-ci.result }}"
+          echo "store-ci:     ${{ needs.store-ci.result }}"
+          echo "dashboard-ci: ${{ needs.dashboard-ci.result }}"
+          if [ "${{ needs.runtime-ci.result }}" != "success" ] || [ "${{ needs.store-ci.result }}" != "success" ] || [ "${{ needs.dashboard-ci.result }}" != "success" ]; then
             echo "::error::a Rust suite failed — see the Runtime CI / Store CI jobs above"
             exit 1
           fi
+
+  dashboard-ci:
+    name: Dashboard CI
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.changes.outputs.rust != 'true'
+        run: echo "No Rust-relevant changes — skipping the dashboard build."
+      - if: needs.changes.outputs.rust == 'true'
+        uses: actions/checkout@v4
+      # Keep in lockstep with rust-toolchain.toml (#102).
+      - if: needs.changes.outputs.rust == 'true'
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - if: needs.changes.outputs.rust == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/fq-dashboard
+      - if: needs.changes.outputs.rust == 'true'
+        uses: extractions/setup-just@v3
+      # Hermetic — the router tests spin their own read service over a
+      # temp DB; no broker, no Node.
+      - if: needs.changes.outputs.rust == 'true'
+        run: just dashboard-ci
 
   # Visual artifact, not a required check: when dashboard code changes,
   # render every page from deterministic fixtures and screenshot them
@@ -182,7 +208,9 @@ jobs:
       - if: needs.changes.outputs.dashboard == 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: services/fq-runtime
+          workspaces: |
+            services/fq-dashboard
+            services/fq-runtime
       - if: needs.changes.outputs.dashboard == 'true'
         uses: extractions/setup-just@v3
       # ubuntu-latest ships google-chrome; the script resolves it.

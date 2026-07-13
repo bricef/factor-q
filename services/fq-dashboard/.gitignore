@@ -1,0 +1,3 @@
+# Cargo build output — never tracked (and: an untracked target/ would
+# also make release builds stamp -dirty).
+/target/
