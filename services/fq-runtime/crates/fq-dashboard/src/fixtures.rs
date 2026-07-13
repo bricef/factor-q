@@ -78,6 +78,31 @@ fn health_report() -> HealthReport {
     }
 }
 
+fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
+    vec![
+        fq_runtime::views::ActiveInvocationView {
+            invocation_id: "019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string(),
+            agent_id: "m0-issue-fix".to_string(),
+            phase: "dispatching_tools".to_string(),
+            step_index: 165,
+            started_at_ms: NOW_MS - 600_000,
+            updated_at_ms: NOW_MS - 45_000,
+            open_tools: vec!["exec".to_string()],
+            open_llms: vec![],
+        },
+        fq_runtime::views::ActiveInvocationView {
+            invocation_id: "019f5b3f-31fb-7ae0-b130-3d65ccf40375".to_string(),
+            agent_id: "m0-loop".to_string(),
+            phase: "awaiting_model".to_string(),
+            step_index: 44,
+            started_at_ms: NOW_MS - 300_000,
+            updated_at_ms: NOW_MS - 8_000,
+            open_tools: vec![],
+            open_llms: vec!["claude-opus-4-8".to_string()],
+        },
+    ]
+}
+
 fn invocation_rows() -> Vec<InvocationSummaryView> {
     vec![
         InvocationSummaryView {
@@ -260,7 +285,7 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
             render::page(
                 "invocations",
                 REFRESH_SECS,
-                &render::invocations(&invocation_rows(), true, NOW_MS),
+                &render::invocations_page(&active_rows(), &invocation_rows(), true, NOW_MS),
             ),
         ),
         (
