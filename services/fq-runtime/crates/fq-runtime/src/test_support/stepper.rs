@@ -147,6 +147,7 @@ mod tests {
             }],
             allowed_tool_names: vec!["echo".to_string()],
             max_iterations: 5,
+            effort: None,
         }
     }
 

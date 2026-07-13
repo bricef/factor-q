@@ -337,6 +337,7 @@ mod tests {
             ],
             tools: vec![],
             params: RequestParams {
+                effort: None,
                 temperature: Some(0.0),
                 max_tokens: Some(16),
             },

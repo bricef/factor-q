@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use crate::events::Effort;
+
 use super::{
     Agent, BuildError, CapabilityValidation, ElicitationGrant, McpServerDeclaration, RootsGrant,
     SamplingGrant, Sandbox, StaticResourcePin,
@@ -130,6 +132,9 @@ pub fn parse_agent_with_default(
     if let Some(max_iterations) = frontmatter.max_iterations {
         builder = builder.max_iterations(max_iterations);
     }
+    if let Some(effort) = frontmatter.effort {
+        builder = builder.effort(effort);
+    }
     if let Some(trigger) = frontmatter.trigger {
         builder = builder.trigger(trigger);
     }
@@ -234,6 +239,7 @@ struct Frontmatter {
     /// Optional per-agent override for the per-invocation LLM-turn cap.
     /// Absent = fall back to the daemon config default.
     max_iterations: Option<u32>,
+    effort: Option<Effort>,
     trigger: Option<String>,
     #[serde(default)]
     mcp: Vec<McpFrontmatter>,
@@ -387,6 +393,19 @@ Prompt body.
         assert_eq!(agent.id().as_str(), "minimal");
         assert!(agent.tools().is_empty());
         assert!(agent.budget().is_none());
+    }
+
+    #[test]
+    fn parses_reasoning_effort_from_frontmatter() {
+        let agent =
+            parse_agent("---\nname: test\nmodel: test-model\neffort: xhigh\n---\nprompt").unwrap();
+        assert_eq!(agent.effort(), Some(Effort::XHigh));
+    }
+
+    #[test]
+    fn absent_reasoning_effort_uses_provider_default() {
+        let agent = parse_agent("---\nname: test\nmodel: test-model\n---\nprompt").unwrap();
+        assert_eq!(agent.effort(), None);
     }
 
     #[test]

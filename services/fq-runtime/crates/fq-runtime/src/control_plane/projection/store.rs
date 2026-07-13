@@ -620,6 +620,7 @@ mod tests {
                 }],
                 tools_available: vec![],
                 request_params: RequestParams {
+                    effort: None,
                     temperature: None,
                     max_tokens: Some(1024),
                 },

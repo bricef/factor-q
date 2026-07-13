@@ -25,8 +25,8 @@ use serde_json::Value;
 
 use crate::agent::AgentId;
 use crate::events::{
-    Message, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolCallId, ToolErrorKind,
-    ToolSchema,
+    Effort, Message, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolCallId,
+    ToolErrorKind, ToolSchema,
 };
 
 /// Static-for-the-invocation configuration the host hands to the
@@ -47,6 +47,8 @@ pub struct AgentConfig {
     /// producer site rather than relying on a sentinel here. See
     /// `worker::reducer::harness::DEFAULT_MAX_ITERATIONS`.
     pub max_iterations: u32,
+    /// Optional per-agent reasoning effort; `None` uses the provider default.
+    pub effort: Option<Effort>,
 }
 
 /// Trigger payload, carried unchanged across the boundary.
