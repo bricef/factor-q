@@ -526,6 +526,7 @@ mod tests {
             messages: vec![],
             tools_available: vec![],
             request_params: crate::events::RequestParams {
+                effort: None,
                 temperature: None,
                 max_tokens: None,
             },

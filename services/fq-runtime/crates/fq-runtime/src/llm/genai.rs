@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::events::{
-    Message, MessageRole, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolSchema,
+    Effort, Message, MessageRole, MessageToolCall, RequestParams, StopReason, TokenUsage,
+    ToolSchema,
 };
 
 use super::{ChatRequest, ChatResponse, LlmClient, LlmError};
@@ -362,6 +363,12 @@ fn convert_params(params: RequestParams) -> provider::chat::ChatOptions {
     provider::chat::ChatOptions {
         temperature: params.temperature,
         max_tokens: params.max_tokens,
+        reasoning_effort: params.effort.map(|effort| match effort {
+            Effort::Low => provider::chat::ReasoningEffort::Low,
+            Effort::Medium => provider::chat::ReasoningEffort::Medium,
+            Effort::High => provider::chat::ReasoningEffort::High,
+            Effort::XHigh => provider::chat::ReasoningEffort::XHigh,
+        }),
         ..Default::default()
     }
 }
@@ -448,7 +455,7 @@ fn map_error(err: provider::Error) -> LlmError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{MessageRole, RequestParams};
+    use crate::events::{Effort, MessageRole, RequestParams};
 
     fn request_with_system_and_user(model: &str) -> ChatRequest {
         ChatRequest {
@@ -469,10 +476,31 @@ mod tests {
             ],
             tools: vec![],
             params: RequestParams {
+                effort: None,
                 temperature: Some(0.2),
                 max_tokens: Some(64),
             },
         }
+    }
+
+    #[test]
+    fn maps_reasoning_effort_to_provider_options() {
+        let options = convert_params(RequestParams {
+            effort: Some(Effort::XHigh),
+            temperature: None,
+            max_tokens: None,
+        });
+        assert!(matches!(
+            options.reasoning_effort,
+            Some(provider::chat::ReasoningEffort::XHigh)
+        ));
+
+        let options = convert_params(RequestParams {
+            effort: None,
+            temperature: None,
+            max_tokens: None,
+        });
+        assert!(options.reasoning_effort.is_none());
     }
 
     #[test]
@@ -690,6 +718,7 @@ mod tests {
             ],
             tools: vec![],
             params: RequestParams {
+                effort: None,
                 temperature: Some(0.0),
                 max_tokens: Some(16),
             },

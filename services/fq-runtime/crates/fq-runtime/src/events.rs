@@ -774,8 +774,21 @@ pub struct ToolSchema {
     pub parameters_schema: Value,
 }
 
+/// Per-request model reasoning effort. `None` leaves the provider default.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1841,6 +1854,7 @@ mod tests {
                 messages: vec![],
                 tools_available: vec![],
                 request_params: RequestParams {
+                    effort: None,
                     temperature: None,
                     max_tokens: None,
                 },

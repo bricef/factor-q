@@ -402,6 +402,7 @@ fn build_model_request(config: &AgentConfig, messages: &[Message]) -> ModelReque
         messages: messages.to_vec(),
         tools: config.tools_available.clone(),
         params: RequestParams {
+            effort: config.effort,
             temperature: None,
             max_tokens: Some(4096),
         },
@@ -503,6 +504,7 @@ mod tests {
             }],
             allowed_tool_names: vec!["echo".to_string()],
             max_iterations: 3,
+            effort: None,
         }
     }
 

@@ -32,7 +32,7 @@ pub use registry::{AgentRegistry, LoadError, LoadedAgent, RegistryError};
 
 use serde::{Deserialize, Serialize};
 
-use crate::events::{ConfigSnapshot, SandboxSnapshot};
+use crate::events::{ConfigSnapshot, Effort, SandboxSnapshot};
 
 /// An MCP server declared in an agent definition.
 #[derive(Debug, Clone)]
@@ -310,6 +310,7 @@ pub struct Agent {
     /// fallback) applies. Overriding here means `fq reload` picks up a
     /// change with no restart (Design Principle 8 / backlog §1.5.1.1).
     max_iterations: Option<u32>,
+    effort: Option<Effort>,
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
     static_resources: Vec<StaticResourcePin>,
@@ -355,6 +356,11 @@ impl Agent {
     /// default" (see [`crate::config::Config::max_iterations`]).
     pub fn max_iterations(&self) -> Option<u32> {
         self.max_iterations
+    }
+
+    /// The optional per-agent reasoning effort.
+    pub fn effort(&self) -> Option<Effort> {
+        self.effort
     }
 
     pub fn trigger(&self) -> Option<&str> {
@@ -686,6 +692,7 @@ pub struct AgentBuilder {
     sandbox: Sandbox,
     budget: Option<f64>,
     max_iterations: Option<u32>,
+    effort: Option<Effort>,
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
     static_resources: Vec<StaticResourcePin>,
@@ -745,6 +752,12 @@ impl AgentBuilder {
     /// fallback) applies.
     pub fn max_iterations(mut self, max_iterations: u32) -> Self {
         self.max_iterations = Some(max_iterations);
+        self
+    }
+
+    /// Set the per-agent reasoning effort.
+    pub fn effort(mut self, effort: Effort) -> Self {
+        self.effort = Some(effort);
         self
     }
 
@@ -825,6 +838,7 @@ impl AgentBuilder {
             sandbox: self.sandbox,
             budget: self.budget,
             max_iterations: self.max_iterations,
+            effort: self.effort,
             trigger: self.trigger,
             mcp_servers: self.mcp_servers,
             static_resources: self.static_resources,

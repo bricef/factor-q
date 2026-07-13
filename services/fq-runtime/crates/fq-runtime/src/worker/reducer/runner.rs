@@ -739,6 +739,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // config default -> built-in fallback (baked into the
             // config default). Issue #9 / Design Principle 8.
             max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
+            effort: agent.effort(),
         };
 
         let trigger = TriggerPayload {
@@ -1068,6 +1069,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // config default -> built-in fallback (baked into the
             // config default). Issue #9 / Design Principle 8.
             max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
+            effort: agent.effort(),
         };
         // Reconstruct the original trigger from the state row (v5).
         // Replay starts at step 0, and step 0 seeds the conversation
@@ -3198,6 +3200,7 @@ fn evaluator_to_model_request(model: &str, context: &str, subject: &str) -> Mode
         ],
         tools: Vec::new(),
         params: RequestParams {
+            effort: None,
             temperature: None,
             max_tokens: None,
         },
@@ -3301,6 +3304,7 @@ fn sampling_to_model_request(model: &str, params: &CreateMessageRequestParams) -
         messages,
         tools: Vec::new(),
         params: RequestParams {
+            effort: None,
             temperature: params.temperature.map(|t| t as f64),
             max_tokens: Some(params.max_tokens),
         },
@@ -3389,6 +3393,7 @@ fn elicitation_to_model_request(
         ],
         tools: Vec::new(),
         params: RequestParams {
+            effort: None,
             temperature: None,
             max_tokens: None,
         },
@@ -4340,6 +4345,7 @@ mod tests {
             tools_available: vec![],
             allowed_tool_names: vec![],
             max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+            effort: None,
         };
         let trig = TriggerPayload {
             source: TriggerSourceKind::Manual,
@@ -4503,6 +4509,7 @@ mod tests {
             tools_available: vec![],
             allowed_tool_names: vec!["self_inspect".to_string()],
             max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+            effort: None,
         };
         let trig = TriggerPayload {
             source: TriggerSourceKind::Manual,
@@ -5502,6 +5509,7 @@ mod tests {
             tools_available: vec![],
             allowed_tool_names: vec![],
             max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+            effort: None,
         };
         let trigger = TriggerPayload {
             source: TriggerSourceKind::Manual,
@@ -5657,6 +5665,7 @@ mod tests {
             tools_available: vec![],
             allowed_tool_names: vec![],
             max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+            effort: None,
         };
         let trigger = TriggerPayload {
             source: TriggerSourceKind::Manual,

@@ -85,6 +85,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             params: RequestParams {
+                effort: None,
                 temperature: None,
                 max_tokens: None,
             },
