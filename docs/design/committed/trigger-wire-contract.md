@@ -53,11 +53,29 @@ rules:
 - A body that is **not valid JSON is dropped** (acked and discarded, with a
   warning) — it never reaches an agent.
 
-For agents that take a natural-language task (the M0 fleet), the payload is a
-**JSON string**, e.g. `"Implement the fix described in GitHub issue #6
-(bricef/factor-q). Today is 2026-07-07."`. This mirrors `fq trigger <agent>
-"<task>"`, which parses the argument as JSON if it can and otherwise wraps it
-as a JSON string.
+### Task-oriented payload convention
+
+Task-oriented trigger producers should use a JSON object with these fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `task` | string | The scoped work to perform. |
+| `refs` | array of strings | Relevant URLs or repository paths. |
+| `constraints` | array of strings | Boundaries the work must respect. |
+| `done_criteria` | array of strings | Observable conditions for completion. |
+
+Producers may add source-specific fields (for example, `github: { repo, issue }`)
+without changing the shared fields. Consumers must tolerate unknown extras. The
+[github-watcher](../../../adapters/github-watcher/) emits this shape.
+
+A JSON string remains valid transport payload, including `fq trigger <agent>
+"<task>"`, which parses JSON when possible and otherwise wraps the argument as
+a JSON string. It is suitable for manual, ad-hoc triggering; adapters should use
+the object convention so task semantics do not drift between sources.
+
+This convention is temporary: typed trigger signatures in the graph-executor
+track supersede it. Until then it supplies one interoperable semantic shape above
+the opaque transport contract.
 
 ### Delivery semantics
 
@@ -88,5 +106,6 @@ a NATS client and this document.
 
 This is a committed interface. The subject scheme, the stream name, the
 JetStream transport, and the opaque-JSON-payload rule are stable; changes are
-versioned and announced. The *meaning* of a payload is owned by each agent,
-not by this contract.
+versioned and announced. The task-oriented convention is recommended semantics
+for adapters, pending typed trigger signatures; individual agents still own their
+payload meaning.

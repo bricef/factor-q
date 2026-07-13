@@ -45,8 +45,11 @@ func TestPlanTriggers(t *testing.T) {
 			nums := make([]int, len(got))
 			for i, p := range got {
 				nums[i] = p.Issue
-				if want := fmt.Sprintf("issue #%d", p.Issue); p.Payload != want {
-					t.Errorf("payload = %q, want %q", p.Payload, want)
+				if want := fmt.Sprintf("issue #%d", p.Issue); p.Payload.Task != want {
+					t.Errorf("payload task = %q, want %q", p.Payload.Task, want)
+				}
+				if p.Payload.GitHub.Issue != p.Issue {
+					t.Errorf("payload issue = %d, want %d", p.Payload.GitHub.Issue, p.Issue)
 				}
 			}
 			if !slices.Equal(nums, tc.want) {
@@ -82,11 +85,11 @@ type fakePublisher struct {
 	fail bool
 }
 
-func (f *fakePublisher) Publish(_ context.Context, agentID, payload string) error {
+func (f *fakePublisher) Publish(_ context.Context, agentID string, payload TriggerPayload) error {
 	if f.fail {
 		return errors.New("publish boom")
 	}
-	f.rec.ops = append(f.rec.ops, fmt.Sprintf("publish %s %q", agentID, payload))
+	f.rec.ops = append(f.rec.ops, fmt.Sprintf("publish %s %q", agentID, payload.Task))
 	return nil
 }
 
