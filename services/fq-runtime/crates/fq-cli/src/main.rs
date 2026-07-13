@@ -3633,6 +3633,7 @@ mod invocation_tests {
             worker_id: "worker-42".to_string(),
             status: "ambiguous".to_string(),
             assigned_at_ms: 1_700_000_000_000,
+            started_at_ms: 1_700_000_000_000,
             archived: false,
         };
         let line = format_invocation_list_row_human(&item);
@@ -3653,6 +3654,7 @@ mod invocation_tests {
             worker_id: String::new(),
             status: "completed".to_string(),
             assigned_at_ms: 0,
+            started_at_ms: 0,
             archived: true,
         };
         let line = format_invocation_list_row_human(&item);
@@ -3777,6 +3779,7 @@ mod invocation_tests {
             worker_id: "worker-1".to_string(),
             status: "in_flight".to_string(),
             assigned_at_ms: 42,
+            started_at_ms: 41,
             archived: false,
         };
         let v = serde_json::to_value(&item).unwrap();
@@ -3785,6 +3788,7 @@ mod invocation_tests {
         assert_eq!(v["worker_id"], "worker-1");
         assert_eq!(v["status"], "in_flight");
         assert_eq!(v["assigned_at_ms"], 42);
+        assert_eq!(v["started_at_ms"], 41);
         assert_eq!(v["archived"], false);
     }
 }

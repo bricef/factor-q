@@ -27,8 +27,10 @@ pub fn age(ms: i64, now_ms: i64) -> String {
         format!("{secs}s ago")
     } else if secs < 3600 {
         format!("{}m ago", secs / 60)
-    } else {
+    } else if secs < 86_400 {
         format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
     }
 }
 
@@ -218,7 +220,7 @@ pub fn health(report: &HealthReport, now_ms: i64) -> String {
 }
 
 /// The invocations list body.
-pub fn invocations(items: &[InvocationSummaryView], include_archived: bool) -> String {
+pub fn invocations(items: &[InvocationSummaryView], include_archived: bool, now_ms: i64) -> String {
     let mut b = String::new();
     b.push_str(&format!(
         r#"<p><a href="/invocations{}">{}</a></p>"#,
@@ -234,13 +236,14 @@ pub fn invocations(items: &[InvocationSummaryView], include_archived: bool) -> S
         return b;
     }
     b.push_str(
-        "<table><tr><th>invocation</th><th>status</th><th>agent</th><th>worker</th><th>archived</th></tr>",
+        "<table><tr><th>invocation</th><th>status</th><th>started</th><th>agent</th><th>worker</th><th>archived</th></tr>",
     );
     for i in items {
         b.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             inv_link(&i.invocation_id),
             esc(&i.status),
+            esc(&age(i.started_at_ms, now_ms)),
             esc(i.agent_id.as_deref().unwrap_or("?")),
             short(&i.worker_id),
             if i.archived { "yes" } else { "no" }
@@ -402,6 +405,7 @@ mod tests {
         assert_eq!(age(0, 12_000), "12s ago");
         assert_eq!(age(0, 120_000), "2m ago");
         assert_eq!(age(0, 7_200_000), "2h ago");
+        assert_eq!(age(0, 172_800_000), "2d ago");
     }
 
     #[test]
@@ -421,18 +425,21 @@ mod tests {
     }
 
     #[test]
-    fn invocation_rows_escape_and_link() {
+    fn invocation_rows_escape_link_and_show_start() {
         let items = vec![fq_runtime::views::InvocationSummaryView {
             invocation_id: "0123456789abcdef".into(),
             agent_id: Some("<agent>".into()),
             worker_id: "w".into(),
             status: "in_flight".into(),
-            assigned_at_ms: 0,
+            assigned_at_ms: 600_000,
+            started_at_ms: 600_000,
             archived: false,
         }];
-        let html = invocations(&items, false);
+        let html = invocations(&items, false, 1_200_000);
         assert!(html.contains(r#"<a href="/invocations/0123456789abcdef">01234567</a>"#));
         assert!(html.contains("&lt;agent&gt;"));
         assert!(!html.contains("<agent>"));
+        assert!(html.contains("<th>started</th>"));
+        assert!(html.contains("<td>10m ago</td>"), "got: {html}");
     }
 }

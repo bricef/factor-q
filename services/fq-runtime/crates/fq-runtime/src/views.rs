@@ -139,6 +139,12 @@ pub struct InvocationSummaryView {
     /// `assigned_at` for ownership rows; `archived_at` for archive-only
     /// rows.
     pub assigned_at_ms: i64,
+    /// When the invocation began: `assigned_at` (dispatch time — the
+    /// closest thing to a start the coordination store records) for
+    /// ownership rows, the archive's true `started_at` for archive-only
+    /// rows. Unlike `assigned_at_ms`, this means the same thing on both
+    /// row kinds — the list surface's "started" column.
+    pub started_at_ms: i64,
     /// True when the row came from `invocation_archive` (no live
     /// ownership row remains).
     pub archived: bool,
@@ -152,6 +158,7 @@ impl From<OwnerRow> for InvocationSummaryView {
             worker_id: r.worker_id,
             status: r.status.as_str().to_string(),
             assigned_at_ms: r.assigned_at,
+            started_at_ms: r.assigned_at,
             archived: false,
         }
     }
@@ -559,6 +566,7 @@ impl Views {
                     worker_id: String::new(),
                     status: arc.final_phase,
                     assigned_at_ms: arc.archived_at,
+                    started_at_ms: arc.started_at,
                     archived: true,
                 });
             }

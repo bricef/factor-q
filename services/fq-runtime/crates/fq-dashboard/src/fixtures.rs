@@ -86,6 +86,7 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             worker_id: "019f5339-4d8e-7840-96e0-fd8553d2d171".to_string(),
             status: "in_flight".to_string(),
             assigned_at_ms: NOW_MS - 600_000,
+            started_at_ms: NOW_MS - 600_000,
             archived: false,
         },
         InvocationSummaryView {
@@ -94,6 +95,7 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             worker_id: "019f3840-7c23-7f70-9c01-eb8e377290ee".to_string(),
             status: "completed".to_string(),
             assigned_at_ms: NOW_MS - 7_200_000,
+            started_at_ms: NOW_MS - 7_200_000,
             archived: false,
         },
         InvocationSummaryView {
@@ -101,7 +103,10 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             agent_id: Some("doc-drift".to_string()),
             worker_id: String::new(),
             status: "completed".to_string(),
+            // Archive-only row: assigned_at_ms carries archived_at, the
+            // started column shows the true start (a little earlier).
             assigned_at_ms: NOW_MS - 86_400_000,
+            started_at_ms: NOW_MS - 90_000_000,
             archived: true,
         },
         InvocationSummaryView {
@@ -110,6 +115,7 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             worker_id: "019f33a6-68b6-7670-83b9-07c2fd570bd4".to_string(),
             status: "failed".to_string(),
             assigned_at_ms: NOW_MS - 172_800_000,
+            started_at_ms: NOW_MS - 172_800_000,
             archived: false,
         },
     ]
@@ -254,7 +260,7 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
             render::page(
                 "invocations",
                 REFRESH_SECS,
-                &render::invocations(&invocation_rows(), true),
+                &render::invocations(&invocation_rows(), true, NOW_MS),
             ),
         ),
         (
