@@ -7,9 +7,9 @@
 
 use std::collections::HashSet;
 
-use fq_runtime::ChatResponse;
-use fq_runtime::events::{LlmResponsePayload, Message, MessageRole, ToolResultPayload};
-use fq_runtime::worker::{LlmDispatchRow, ToolDispatchRow};
+use crate::ChatResponse;
+use crate::events::{LlmResponsePayload, Message, MessageRole, ToolResultPayload};
+use crate::worker::{LlmDispatchRow, ToolDispatchRow};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -19,7 +19,7 @@ use serde_json::Value;
 pub const DEFAULT_TRUNCATE_BYTES: usize = 2000;
 
 /// One entry in the ordered transcript timeline.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TranscriptEntry {
     /// The system prompt + initial user message, reconstructed from the
@@ -56,7 +56,7 @@ pub enum TranscriptEntry {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AssistantToolCall {
     pub tool_call_id: String,
     pub tool_name: String,
@@ -245,6 +245,39 @@ fn render_params(params: &Value, max: Option<usize>) -> String {
     truncate(&text, max)
 }
 
+/// Cap every payload-bearing string field of `entries` at `max` bytes
+/// (char-boundary safe, truncation marked — same policy as
+/// `render_pretty`). Applied server-side by the read service so a
+/// multi-megabyte transcript doesn't cross the wire just to render a
+/// summary page; the dashboard's `?full=1` skips it, mirroring `--full`.
+/// Tool-call *parameters* are left whole — they are typically small and
+/// structurally JSON, where mid-string truncation would corrupt them.
+pub fn truncate_entries(entries: &mut [TranscriptEntry], max: usize) {
+    let cap = Some(max);
+    for entry in entries {
+        match entry {
+            TranscriptEntry::Prompt { system, user, .. } => {
+                if let Some(s) = system {
+                    *s = truncate(s, cap);
+                }
+                if let Some(u) = user {
+                    *u = truncate(u, cap);
+                }
+            }
+            TranscriptEntry::Assistant { content, .. } => {
+                if let Some(c) = content {
+                    *c = truncate(c, cap);
+                }
+            }
+            TranscriptEntry::ToolResult { output, .. } => {
+                if let Some(o) = output {
+                    *o = truncate(o, cap);
+                }
+            }
+        }
+    }
+}
+
 /// Render the transcript as human-readable pretty text. `truncate_bytes`
 /// = `None` means no truncation (`--full`).
 pub fn render_pretty(entries: &[TranscriptEntry], truncate_bytes: Option<usize>) -> String {
@@ -411,7 +444,7 @@ pub fn assistant_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fq_runtime::worker::DispatchStatus;
+    use crate::worker::DispatchStatus;
 
     fn llm_row(
         intent_at: i64,
@@ -698,7 +731,7 @@ mod tests {
         // tests), read them back through the same list helpers the
         // CLI uses, and assert the collected transcript's ordering
         // and payload content.
-        use fq_runtime::WorkerStore;
+        use crate::WorkerStore;
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();

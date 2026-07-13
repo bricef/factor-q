@@ -542,6 +542,29 @@ impl Views {
         Ok(view)
     }
 
+    /// The payload-bearing transcript for one invocation, reconstructed
+    /// from the worker WAL (`llm_dispatch` + `tool_dispatch` — the only
+    /// place payloads persist; those rows outlive archival, so this
+    /// works for completed invocations too). `None` when the id has no
+    /// dispatch rows at all.
+    pub async fn transcript(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Option<Vec<crate::transcript::TranscriptEntry>>, ViewsError> {
+        let llm = self
+            .worker
+            .list_llm_dispatches_for_invocation(invocation_id)
+            .await?;
+        let tools = self
+            .worker
+            .list_tool_dispatches_for_invocation(invocation_id)
+            .await?;
+        if llm.is_empty() && tools.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(crate::transcript::collect_transcript(&llm, &tools)))
+    }
+
     /// Every currently-executing invocation as a row (the list behind
     /// [`Views::executions`]' counts), longest-running first, each with
     /// its open tool/LLM dispatches — the "what is running right now"

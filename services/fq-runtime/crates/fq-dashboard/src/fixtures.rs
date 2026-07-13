@@ -236,6 +236,67 @@ fn invocation_detail() -> InvocationDetailView {
     }
 }
 
+fn transcript_entries() -> Vec<fq_runtime::transcript::TranscriptEntry> {
+    use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
+    vec![
+        TranscriptEntry::Prompt {
+            timestamp_ms: NOW_MS - 600_000,
+            system: Some(
+                "You are m0-issue-fix. Fix the referenced issue end-to-end: clone the \
+                 repo, branch, make the minimal change, validate with `just ci`, open \
+                 a PR. Report honestly — never claim work you could not persist."
+                    .to_string(),
+            ),
+            user: Some(r#"{"task":"fix","issue":86,"repo":"bricef/factor-q"}"#.to_string()),
+        },
+        TranscriptEntry::Assistant {
+            timestamp_ms: NOW_MS - 590_000,
+            model: "claude-opus-4-8".to_string(),
+            content: Some("Reading the issue first, then cloning into the workspace.".to_string()),
+            tool_calls: vec![AssistantToolCall {
+                tool_call_id: "tc-1".to_string(),
+                tool_name: "exec".to_string(),
+                parameters: serde_json::json!({
+                    "command": "gh issue view 86 --repo bricef/factor-q",
+                    "cwd": "${workspace}"
+                }),
+            }],
+            cost_usd: Some(0.0214),
+            is_error: Some(false),
+        },
+        TranscriptEntry::ToolResult {
+            timestamp_ms: NOW_MS - 585_000,
+            tool_call_id: "tc-1".to_string(),
+            tool_name: "exec".to_string(),
+            parameters: serde_json::json!({
+                "command": "gh issue view 86 --repo bricef/factor-q"
+            }),
+            // The <script> is deliberate: the screenshot itself proves
+            // payloads render as text, never as markup.
+            output: Some(
+                "title: feat: file_list and file_search built-ins\nstate: OPEN\n\
+                 <script>alert('escaped, not executed')</script>\nlabels: enhancement"
+                    .to_string(),
+            ),
+            is_error: Some(false),
+        },
+        TranscriptEntry::ToolResult {
+            timestamp_ms: NOW_MS - 560_000,
+            tool_call_id: "tc-2".to_string(),
+            tool_name: "file_write".to_string(),
+            parameters: serde_json::json!({"path": "\"${workspace}/notes.md\""}),
+            output: Some(
+                "invalid parameters: the path contains literal quote/backslash \
+                 characters, which usually means the tool-call argument was wrapped \
+                 in an extra layer of quoting — resend the bare path with no embedded \
+                 quotes"
+                    .to_string(),
+            ),
+            is_error: Some(true),
+        },
+    ]
+}
+
 fn cost_report() -> CostReport {
     let agents = vec![
         CostView {
@@ -294,6 +355,19 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
                 "invocation 019f534f",
                 REFRESH_SECS,
                 &render::invocation_detail(&invocation_detail(), NOW_MS),
+            ),
+        ),
+        (
+            "transcript",
+            render::page(
+                "transcript 019f534f",
+                REFRESH_SECS,
+                &render::transcript(
+                    &transcript_entries(),
+                    NOW_MS,
+                    false,
+                    "019f534f-4b3c-7f42-a619-b5e43a64fd38",
+                ),
             ),
         ),
         (

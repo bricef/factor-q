@@ -27,6 +27,7 @@ pub mod policy;
 pub mod pricing;
 pub mod prompt;
 pub mod tools;
+pub mod transcript;
 pub mod validation;
 pub mod views;
 

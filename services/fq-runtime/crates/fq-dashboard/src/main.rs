@@ -183,6 +183,54 @@ async fn invocation_page(State(state): State<Arc<AppState>>, Path(id): Path<Stri
     }
 }
 
+async fn transcript_page(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Page {
+    let full = q.get("full").is_some_and(|v| v == "1");
+    let truncate = if full {
+        None
+    } else {
+        Some(fq_runtime::transcript::DEFAULT_TRUNCATE_BYTES as u64)
+    };
+    let client = match client_or_unreachable(&state, "transcript").await {
+        Ok(c) => c,
+        Err(page) => return page,
+    };
+    match client
+        .transcript(context::current(), id.clone(), truncate)
+        .await
+    {
+        Ok(Ok(Some(json))) => {
+            // The wire carries the canonical JSON shape (see
+            // ReadService::transcript); decode with the shared type.
+            let entries: Vec<fq_runtime::transcript::TranscriptEntry> =
+                match serde_json::from_str(&json) {
+                    Ok(entries) => entries,
+                    Err(err) => {
+                        return unreachable_page(&state, "transcript", &format!("decode: {err}"));
+                    }
+                };
+            ok_page(
+                &state,
+                &format!("transcript {}", &id.chars().take(8).collect::<String>()),
+                &render::transcript(&entries, now_ms(), full, &id),
+            )
+        }
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Html(render::page(
+                "transcript",
+                state.refresh_secs,
+                r#"<p class="muted">no transcript for that id (no dispatch rows recorded).</p>"#,
+            )),
+        ),
+        Ok(Err(err)) => unreachable_page(&state, "transcript", &err.to_string()),
+        Err(err) => unreachable_page(&state, "transcript", &format!("rpc: {err}")),
+    }
+}
+
 async fn events_page(
     State(state): State<Arc<AppState>>,
     Query(q): Query<HashMap<String, String>>,
@@ -226,6 +274,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/", get(health_page))
         .route("/invocations", get(invocations_page))
         .route("/invocations/:id", get(invocation_page))
+        .route("/invocations/:id/transcript", get(transcript_page))
         .route("/events", get(events_page))
         .route("/costs", get(costs_page))
         .with_state(state)
@@ -357,6 +406,18 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get("/invocations/no-such-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Transcript of an unknown id: 404 through the wire's None path.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/invocations/no-such-id/transcript")
                     .body(Body::empty())
                     .unwrap(),
             )
