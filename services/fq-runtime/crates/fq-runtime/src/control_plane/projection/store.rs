@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS events (
     model           TEXT,
     input_tokens    INTEGER,
     output_tokens   INTEGER,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
     total_cost      REAL,
     error_kind      TEXT,
     duration_ms     INTEGER
@@ -98,6 +100,16 @@ impl ProjectionStore {
         {
             sqlx::query(statement).execute(&self.pool).await?;
         }
+        // `CREATE TABLE IF NOT EXISTS` does not add columns to existing
+        // projection databases, so apply these additive migrations separately.
+        for column in ["cache_read_tokens", "cache_write_tokens"] {
+            let statement = format!("ALTER TABLE events ADD COLUMN {column} INTEGER");
+            if let Err(err) = sqlx::query(&statement).execute(&self.pool).await {
+                if !err.to_string().contains("duplicate column name") {
+                    return Err(err.into());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -111,8 +123,8 @@ impl ProjectionStore {
             r#"
             INSERT OR IGNORE INTO events
                 (event_id, timestamp, agent_id, invocation_id, event_type,
-                 model, input_tokens, output_tokens, total_cost, error_kind, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_cost, error_kind, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(event.envelope.event_id.to_string())
@@ -123,6 +135,8 @@ impl ProjectionStore {
         .bind(fields.model)
         .bind(fields.input_tokens)
         .bind(fields.output_tokens)
+        .bind(fields.cache_read_tokens)
+        .bind(fields.cache_write_tokens)
         .bind(fields.total_cost)
         .bind(fields.error_kind)
         .bind(fields.duration_ms)
@@ -229,7 +243,9 @@ impl ProjectionStore {
              COUNT(*) AS event_count, \
              COALESCE(SUM(total_cost), 0.0) AS total_cost, \
              COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
-             COALESCE(SUM(output_tokens), 0) AS total_output_tokens \
+             COALESCE(SUM(output_tokens), 0) AS total_output_tokens, \
+             COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
+             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
              FROM events \
              WHERE event_type = 'llm_response' AND total_cost IS NOT NULL",
         );
@@ -257,6 +273,8 @@ impl ProjectionStore {
                 total_cost: row.get::<f64, _>(2),
                 total_input_tokens: row.get::<i64, _>(3),
                 total_output_tokens: row.get::<i64, _>(4),
+                total_cache_read_tokens: row.get::<i64, _>(5),
+                total_cache_write_tokens: row.get::<i64, _>(6),
             })
             .collect())
     }
@@ -308,6 +326,8 @@ pub struct CostSummary {
     pub total_cost: f64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_write_tokens: i64,
 }
 
 /// One row of a failure summary: a terminal `FailureKind` and the
@@ -362,6 +382,8 @@ struct Fields {
     model: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    cache_write_tokens: Option<i64>,
     total_cost: Option<f64>,
     error_kind: Option<String>,
     duration_ms: Option<i64>,
@@ -385,6 +407,8 @@ fn extract_fields(event: &Event) -> Fields {
             let mut f = Fields {
                 input_tokens: Some(p.usage.input_tokens as i64),
                 output_tokens: Some(p.usage.output_tokens as i64),
+                cache_read_tokens: Some(p.usage.cache_read_tokens as i64),
+                cache_write_tokens: Some(p.usage.cache_write_tokens as i64),
                 ..Default::default()
             };
             if let Some(cost) = &event.envelope.cost {
@@ -511,8 +535,8 @@ mod tests {
                 usage: TokenUsage {
                     input_tokens: 100,
                     output_tokens: 50,
-                    cache_read_tokens: 0,
-                    cache_write_tokens: 0,
+                    cache_read_tokens: 20,
+                    cache_write_tokens: 10,
                 },
             }),
         )
@@ -521,8 +545,8 @@ mod tests {
             model: "claude-haiku-4-5".to_string(),
             input_tokens: 100,
             output_tokens: 50,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
+            cache_read_tokens: 20,
+            cache_write_tokens: 10,
             input_cost: 0.0001,
             output_cost: 0.00025,
             total_cost: cost,
@@ -620,6 +644,39 @@ mod tests {
     async fn opens_and_creates_schema() {
         let (store, _dir) = open_store().await;
         assert_eq!(store.count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn migrates_existing_projection_with_cache_columns() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        std::fs::File::create(&path).unwrap();
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE events (event_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, \
+             agent_id TEXT NOT NULL, invocation_id TEXT NOT NULL, event_type TEXT NOT NULL, \
+             model TEXT, input_tokens INTEGER, output_tokens INTEGER, total_cost REAL, \
+             error_kind TEXT, duration_ms INTEGER)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let store = ProjectionStore::open(&path).await.unwrap();
+        store
+            .insert_event(&sample_llm_response_with_cost(
+                "alpha",
+                Uuid::now_v7(),
+                0.01,
+            ))
+            .await
+            .unwrap();
+        let summary = store.cost_summary(None, None).await.unwrap();
+        assert_eq!(summary[0].total_cache_read_tokens, 20);
+        assert_eq!(summary[0].total_cache_write_tokens, 10);
     }
 
     #[tokio::test]
@@ -755,6 +812,8 @@ mod tests {
         assert_eq!(alpha.event_count, 2);
         assert_eq!(alpha.total_input_tokens, 200);
         assert_eq!(alpha.total_output_tokens, 100);
+        assert_eq!(alpha.total_cache_read_tokens, 40);
+        assert_eq!(alpha.total_cache_write_tokens, 20);
     }
 
     #[tokio::test]

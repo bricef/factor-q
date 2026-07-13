@@ -247,6 +247,8 @@ pub struct CostView {
     pub total_cost: f64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_write_tokens: i64,
 }
 
 impl From<CostSummary> for CostView {
@@ -257,6 +259,8 @@ impl From<CostSummary> for CostView {
             total_cost: r.total_cost,
             total_input_tokens: r.total_input_tokens,
             total_output_tokens: r.total_output_tokens,
+            total_cache_read_tokens: r.total_cache_read_tokens,
+            total_cache_write_tokens: r.total_cache_write_tokens,
         }
     }
 }
@@ -269,6 +273,8 @@ pub struct CostReport {
     pub total_cost: f64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_write_tokens: i64,
 }
 
 /// One terminal-failure bucket, grouped by kind.
@@ -437,6 +443,8 @@ impl Views {
             report.total_cost += r.total_cost;
             report.total_input_tokens += r.total_input_tokens;
             report.total_output_tokens += r.total_output_tokens;
+            report.total_cache_read_tokens += r.total_cache_read_tokens;
+            report.total_cache_write_tokens += r.total_cache_write_tokens;
             report.agents.push(CostView::from(r));
         }
         Ok(report)
@@ -778,6 +786,8 @@ mod tests {
                 total_cost: cost,
                 total_input_tokens: ins,
                 total_output_tokens: outs,
+                total_cache_read_tokens: 0,
+                total_cache_write_tokens: 0,
             });
         }
         assert_eq!(report.agents.len(), 2);
