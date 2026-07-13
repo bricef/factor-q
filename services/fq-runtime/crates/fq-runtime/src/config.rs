@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -47,6 +48,8 @@ pub struct Config {
     pub drain_deadline_ms: u64,
     #[serde(default)]
     pub read_service: ReadServiceConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 /// The in-daemon read-only operator service (#105 layer 2) — the tarpc
@@ -83,6 +86,65 @@ fn default_read_service_bind() -> String {
 
 fn default_read_service_probe_timeout_ms() -> u64 {
     2_000
+}
+
+/// Built-in tool configuration — `[tools]` in `fq.toml`. Today only the
+/// `exec` tool exposes knobs; future built-ins add their own subsections
+/// here.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub exec: ExecToolConfig,
+}
+
+/// Timeouts for the built-in `exec` tool — `[tools.exec]` in `fq.toml`.
+///
+/// The `fq-tools` crate keeps its own conservative defaults (30s default
+/// / 300s max) so the primitive is safe in isolation; the runtime raises
+/// them here (120s / 600s) because a fleet agent running a full `just ci`
+/// legitimately needs headroom the crate-level ceiling would clamp away.
+/// Tunable parameters are configuration, not code (Design Principle 8).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecToolConfig {
+    /// Timeout applied when a caller does not request one, in seconds.
+    #[serde(default = "default_exec_default_timeout_secs")]
+    pub default_timeout_secs: u64,
+    /// Hard ceiling on any single `exec` call, in seconds. A
+    /// caller-supplied `timeout_secs` above this is clamped down, not
+    /// rejected, to avoid trapping an agent in a retry loop.
+    #[serde(default = "default_exec_max_timeout_secs")]
+    pub max_timeout_secs: u64,
+}
+
+fn default_exec_default_timeout_secs() -> u64 {
+    120
+}
+
+fn default_exec_max_timeout_secs() -> u64 {
+    600
+}
+
+impl Default for ExecToolConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_secs: default_exec_default_timeout_secs(),
+            max_timeout_secs: default_exec_max_timeout_secs(),
+        }
+    }
+}
+
+impl ExecToolConfig {
+    /// Convert to the `fq-tools` [`ExecConfig`](fq_tools::builtin::ExecConfig),
+    /// mapping the two configured timeouts and preserving the crate's
+    /// defaults for the fields this section does not expose
+    /// (`max_output_bytes`, `default_path`).
+    pub fn to_exec_config(&self) -> fq_tools::builtin::ExecConfig {
+        fq_tools::builtin::ExecConfig {
+            default_timeout: Duration::from_secs(self.default_timeout_secs),
+            max_timeout: Duration::from_secs(self.max_timeout_secs),
+            ..fq_tools::builtin::ExecConfig::default()
+        }
+    }
 }
 
 /// Control-plane state-retention knobs. Drives the
@@ -505,6 +567,7 @@ impl Default for Config {
             max_iterations: default_max_iterations(),
             drain_deadline_ms: default_drain_deadline_ms(),
             read_service: ReadServiceConfig::default(),
+            tools: ToolsConfig::default(),
         }
     }
 }
@@ -857,6 +920,49 @@ retention_days = -1
         assert_eq!(config.state.retention_days, -1);
         // sweep_interval_seconds still defaults.
         assert_eq!(config.state.sweep_interval_seconds, 3_600);
+    }
+
+    #[test]
+    fn tools_exec_config_defaults_when_absent() {
+        // Absent `[tools.exec]` → the runtime defaults (120s / 600s),
+        // deliberately higher than the fq-tools crate defaults.
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(config.tools.exec.default_timeout_secs, 120);
+        assert_eq!(config.tools.exec.max_timeout_secs, 600);
+        let exec = config.tools.exec.to_exec_config();
+        assert_eq!(exec.default_timeout, Duration::from_secs(120));
+        assert_eq!(exec.max_timeout, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn tools_exec_config_parses_overrides() {
+        let toml = r#"
+[tools.exec]
+default_timeout_secs = 200
+max_timeout_secs = 900
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.tools.exec.default_timeout_secs, 200);
+        assert_eq!(config.tools.exec.max_timeout_secs, 900);
+        let exec = config.tools.exec.to_exec_config();
+        assert_eq!(exec.default_timeout, Duration::from_secs(200));
+        assert_eq!(exec.max_timeout, Duration::from_secs(900));
+        // Fields this section does not expose keep the crate defaults.
+        let crate_default = fq_tools::builtin::ExecConfig::default();
+        assert_eq!(exec.max_output_bytes, crate_default.max_output_bytes);
+        assert_eq!(exec.default_path, crate_default.default_path);
+    }
+
+    #[test]
+    fn tools_exec_config_partial_override_keeps_other_default() {
+        // Only one knob set → the other falls back to its serde default.
+        let toml = r#"
+[tools.exec]
+default_timeout_secs = 45
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.tools.exec.default_timeout_secs, 45);
+        assert_eq!(config.tools.exec.max_timeout_secs, 600);
     }
 
     #[test]

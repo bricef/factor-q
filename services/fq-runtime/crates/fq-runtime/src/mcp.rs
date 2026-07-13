@@ -36,6 +36,8 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use fq_tools::builtin::ExecConfig;
+
 use crate::agent::{RootsGrant, Sandbox};
 use crate::tools::ToolRegistry;
 use crate::validation::ValidatorChain;
@@ -1273,13 +1275,18 @@ impl McpClientManager {
     /// shared registry on `tools/list_changed` (ADR-0020) without
     /// sharing the manager's `&mut` lifecycle (same pattern as
     /// [`resource_reader`](Self::resource_reader)).
-    pub fn tool_refresher(&self) -> McpToolRefresher {
+    ///
+    /// `exec_config` carries the `[tools.exec]` timeouts so a rebuilt
+    /// registry keeps the daemon's configured `exec` limits instead of
+    /// reverting to the crate defaults on the next `tools/list_changed`.
+    pub fn tool_refresher(&self, exec_config: ExecConfig) -> McpToolRefresher {
         McpToolRefresher {
             clients: self
                 .servers
                 .iter()
                 .map(|server| (server.name.clone(), Arc::clone(&server.client)))
                 .collect(),
+            exec_config,
         }
     }
 
@@ -1543,6 +1550,10 @@ impl McpResourceReader {
 #[derive(Clone, Default)]
 pub struct McpToolRefresher {
     clients: Vec<(String, Arc<McpClient>)>,
+    /// The `[tools.exec]` timeouts to re-apply to the `exec` built-in on
+    /// every rebuild, so a refresh never silently reverts to the crate
+    /// defaults.
+    exec_config: ExecConfig,
 }
 
 impl McpToolRefresher {
@@ -1552,7 +1563,7 @@ impl McpToolRefresher {
     /// operation. A server whose re-discovery fails contributes no
     /// tools (its calls would fail anyway) and is logged.
     pub async fn rebuild_registry(&self) -> ToolRegistry {
-        let mut registry = ToolRegistry::with_builtins();
+        let mut registry = ToolRegistry::with_builtins_exec(self.exec_config.clone());
         for (name, client) in &self.clients {
             match McpClientManager::discover_tools(client, name).await {
                 Ok((tools, _)) => {
@@ -1974,6 +1985,7 @@ mod tests {
         let client = serve_mock(tools.clone(), 10).await;
         let refresher = McpToolRefresher {
             clients: vec![("mock".to_string(), client)],
+            exec_config: fq_tools::builtin::ExecConfig::default(),
         };
 
         let (notif_tx, notif_rx) = mpsc::unbounded_channel();

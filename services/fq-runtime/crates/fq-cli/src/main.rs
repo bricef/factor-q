@@ -827,7 +827,7 @@ async fn trigger_agent(
     };
 
     // Build tool registry: built-ins + MCP servers declared by this agent.
-    let mut tools = ToolRegistry::with_builtins();
+    let mut tools = ToolRegistry::with_builtins_exec(config.tools.exec.to_exec_config());
     let mut mcp_manager = McpClientManager::new();
     for decl in loaded.agent.mcp_servers() {
         // A server the agent grants an inbound capability (sampling /
@@ -1892,7 +1892,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     );
 
     // Build tool registry: built-ins + MCP servers from all agents.
-    let mut tools = ToolRegistry::with_builtins();
+    let mut tools = ToolRegistry::with_builtins_exec(config.tools.exec.to_exec_config());
     let mut mcp_manager = McpClientManager::new();
     for loaded in registry.iter() {
         for decl in loaded.agent.mcp_servers() {
@@ -1977,7 +1977,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // its `&mut` lifecycle here for shutdown.
     let notification_channels = mcp_manager.take_notifications().await;
     if !notification_channels.is_empty() {
-        let refresher = mcp_manager.tool_refresher();
+        let refresher = mcp_manager.tool_refresher(config.tools.exec.to_exec_config());
         let drain_context = context.clone();
         let log_bus = bus.clone();
         tokio::spawn(fq_runtime::mcp::drain_server_notifications(
