@@ -118,8 +118,12 @@ pub struct RecoveryView {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExecutionsView {
     pub in_flight: i64,
+    /// In-flight invocations with an open tool dispatch. These may run for
+    /// longer than a reducer step, so they use the dispatch-age threshold.
+    pub working: i64,
+    pub working_ids: Vec<String>,
     /// In-flight invocations whose WAL row has not advanced within the
-    /// caller-supplied stuck threshold.
+    /// caller-supplied stuck threshold and have no open tool dispatch.
     pub stuck: i64,
     pub stuck_ids: Vec<String>,
 }
@@ -387,6 +391,11 @@ pub struct InvocationDetailView {
 /// Read-only handle over the runtime's three SQLite-backed stores (all one
 /// file, opened `?mode=ro`). Cheap to construct relative to the queries it
 /// serves; a caller can hold one for the lifetime of a request loop.
+/// Open tool dispatches may legitimately run for the default exec maximum
+/// (ten minutes). Their own age, rather than the invocation WAL timestamp,
+/// determines when they are suspicious.
+const LONG_RUNNING_TOOL_THRESHOLD_MS: i64 = 600_000;
+
 pub struct Views {
     projection: ProjectionStore,
     control_plane: ControlPlaneStore,
@@ -526,8 +535,9 @@ impl Views {
     }
 
     /// In-flight / stuck execution counts as of `now_ms`, from the worker
-    /// WAL. An in-flight invocation is "stuck" when its WAL row has not
-    /// advanced within `stuck_threshold_ms`.
+    /// WAL. An in-flight invocation with an open tool dispatch is working
+    /// until that dispatch is stale; otherwise it is stuck when its WAL row
+    /// has not advanced within `stuck_threshold_ms`.
     pub async fn executions(
         &self,
         now_ms: i64,
@@ -539,6 +549,26 @@ impl Views {
             ..Default::default()
         };
         for row in in_flight {
+            let open_tool_dispatch_at = self
+                .worker
+                .list_tool_dispatches_for_invocation(&row.invocation_id)
+                .await?
+                .into_iter()
+                .filter(|dispatch| {
+                    !matches!(
+                        dispatch.status,
+                        crate::worker::store::DispatchStatus::Completed
+                    )
+                })
+                .map(|dispatch| dispatch.dispatched_at.unwrap_or(dispatch.intent_at))
+                .max();
+            if let Some(dispatched_at) = open_tool_dispatch_at {
+                if !is_stale(dispatched_at, now_ms, LONG_RUNNING_TOOL_THRESHOLD_MS) {
+                    view.working += 1;
+                    view.working_ids.push(row.invocation_id);
+                    continue;
+                }
+            }
             // Reuse the same staleness predicate the control-plane uses for
             // workers: "has not advanced in as long as the threshold" is the
             // same not-making-progress signal.
@@ -909,6 +939,12 @@ mod tests {
                 trigger_payload: None,
             };
             ws.upsert_invocation_state(&row).await.unwrap();
+            ws.write_tool_intent("inv-1", "call-1", "exec", "{}", 160)
+                .await
+                .unwrap();
+            ws.write_tool_dispatched("inv-1", "call-1", 170)
+                .await
+                .unwrap();
             let _proj = ProjectionStore::open(&path).await.unwrap();
         }
 
@@ -930,8 +966,15 @@ mod tests {
         assert_eq!(execs.in_flight, 1);
         assert_eq!(execs.stuck, 0);
 
-        // ...and it is flagged stuck once `now` is well past the threshold.
+        // An open exec dispatch remains working even though the invocation
+        // WAL has not advanced for longer than the ordinary stuck threshold.
+        let execs_working = views.executions(60_000, 30_000).await.unwrap();
+        assert_eq!(execs_working.working, 1);
+        assert_eq!(execs_working.stuck, 0);
+
+        // ...but is flagged stuck once the dispatch itself is too old.
         let execs_late = views.executions(1_000_000, 30_000).await.unwrap();
+        assert_eq!(execs_late.working, 0);
         assert_eq!(execs_late.stuck, 1);
         assert_eq!(execs_late.stuck_ids, vec!["inv-1".to_string()]);
 
@@ -940,7 +983,8 @@ mod tests {
         let live = detail.live.expect("in-flight invocation has live state");
         assert_eq!(live.phase, "reducing");
         assert_eq!(live.step_index, 3);
-        assert!(live.tools.is_empty());
+        assert_eq!(live.tools.len(), 1);
+        assert_eq!(live.tools[0].tool_name, "exec");
 
         // The active list carries the same WAL row, row-form.
         let active = views.active_invocations().await.unwrap();
@@ -949,7 +993,7 @@ mod tests {
         assert_eq!(active[0].agent_id, "agent-a");
         assert_eq!(active[0].phase, "reducing");
         assert_eq!(active[0].step_index, 3);
-        assert!(active[0].open_tools.is_empty());
+        assert_eq!(active[0].open_tools, vec!["exec"]);
     }
 
     /// A terminal invocation's transcript closes with an Outcome entry —

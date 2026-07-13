@@ -203,9 +203,24 @@ pub fn health(report: &HealthReport, now_ms: i64) -> String {
         "ok"
     };
     b.push_str(&format!(
-        r#"<tr><th>executions</th><td class="{}">{} in-flight ({} stuck{})</td></tr>"#,
+        r#"<tr><th>executions</th><td class="{}">{} in-flight ({} working{}, {} stuck{})</td></tr>"#,
         exec_class,
         report.executions.in_flight,
+        report.executions.working,
+        if report.executions.working > 0 {
+            format!(
+                ": {}",
+                report
+                    .executions
+                    .working_ids
+                    .iter()
+                    .map(|id| inv_link(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            String::new()
+        },
         report.executions.stuck,
         if report.executions.stuck > 0 {
             format!(

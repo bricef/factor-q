@@ -62,6 +62,8 @@ fn health_report() -> HealthReport {
         },
         executions: ExecutionsView {
             in_flight: 2,
+            working: 0,
+            working_ids: vec![],
             stuck: 1,
             stuck_ids: vec!["019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string()],
         },
