@@ -78,6 +78,13 @@ details {{ margin: 0.3rem 0; }} summary {{ cursor: pointer; color: #9aa1ab; }}
 .turn {{ border-left: 3px solid #3a3f47; padding-left: 0.8rem; margin: 1.2rem 0; }}
 .turn h3 {{ font-size: 1rem; margin: 0.2rem 0; }}
 .turn.err {{ border-left-color: #e06c6c; }}
+/* The transcript timeline scrolls inside its own panel and OPENS AT
+   THE BOTTOM: column-reverse anchors scroll to the newest entry with
+   zero JS, and keeps it pinned as the SSE stream adds turns. Contract:
+   the DOM holds entries NEWEST-FIRST (the server renders reversed and
+   the stream prepends); column-reverse flips them back so the visual
+   order stays oldest-at-top. */
+#turns {{ display: flex; flex-direction: column-reverse; overflow-y: auto; max-height: calc(100vh - 16rem); border-top: 1px solid #21252b; border-bottom: 1px solid #21252b; }}
 </style>
 </head><body>
 <nav><a href="/">health</a><a href="/invocations">invocations</a><a href="/events">events</a><a href="/costs">costs</a></nav>
@@ -274,8 +281,11 @@ pub fn transcript(
         esc(invocation_id)
     ));
 
+    // NEWEST-FIRST in the DOM: #turns is a column-reverse scroll panel
+    // (see the shell CSS), so reversed emission renders oldest-at-top
+    // visually while the panel opens — and stays — at the newest turn.
     b.push_str(r#"<div id="turns">"#);
-    for entry in entries {
+    for entry in entries.iter().rev() {
         b.push_str(&transcript_entry_html(entry, now_ms));
     }
     b.push_str("</div>");
@@ -712,6 +722,32 @@ mod tests {
         assert!(
             html.contains("/invocations/inv-1/transcript?full=1"),
             "got: {html}"
+        );
+    }
+
+    /// The scroll-panel contract: DOM order is newest-first (the
+    /// column-reverse panel flips it back visually), so the page opens
+    /// at — and stays pinned to — the latest turn.
+    #[test]
+    fn transcript_dom_holds_entries_newest_first() {
+        use fq_runtime::transcript::TranscriptEntry;
+        let entries = vec![
+            TranscriptEntry::Prompt {
+                timestamp_ms: 0,
+                system: None,
+                user: Some("FIRST".into()),
+            },
+            TranscriptEntry::Outcome {
+                timestamp_ms: 9,
+                phase: "completed".to_string(),
+            },
+        ];
+        let html = transcript(&entries, 10_000, true, "inv-1");
+        let first = html.find("FIRST").expect("prompt rendered");
+        let outcome = html.find("run completed").expect("outcome rendered");
+        assert!(
+            outcome < first,
+            "newest entry must come first in the DOM (column-reverse flips it back)"
         );
     }
 

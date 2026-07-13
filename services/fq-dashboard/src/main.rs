@@ -276,11 +276,15 @@ async fn transcript_stream(
                     s.cursor = next;
                     let entries: Vec<fq_runtime::transcript::TranscriptEntry> =
                         serde_json::from_str(&json).unwrap_or_default();
+                    // #turns is a column-reverse panel (newest-first
+                    // DOM): PREPENDING in chronological order lands
+                    // each newer entry at the visual bottom, and the
+                    // panel's scroll stays pinned there.
                     for entry in &entries {
                         s.queue.push_back(
                             PatchElements::new(render::transcript_entry_html(entry, now_ms()))
                                 .selector("#turns")
-                                .mode(ElementPatchMode::Append)
+                                .mode(ElementPatchMode::Prepend)
                                 .write_as_axum_sse_event(),
                         );
                     }
