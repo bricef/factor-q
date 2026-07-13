@@ -147,7 +147,7 @@ async fn invocations_page(
         Ok(Ok(items)) => ok_page(
             &state,
             "invocations",
-            &render::invocations(&items, include_archived),
+            &render::invocations(&items, include_archived, now_ms()),
         ),
         Ok(Err(err)) => unreachable_page(&state, "invocations", &err.to_string()),
         Err(err) => unreachable_page(&state, "invocations", &format!("rpc: {err}")),
