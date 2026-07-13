@@ -1535,8 +1535,8 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
 
     // Executions.
     out.push_str(&format!(
-        "Current executions: {} in-flight ({} stuck)\n",
-        report.executions.in_flight, report.executions.stuck
+        "Current executions: {} in-flight ({} working, {} stuck)\n",
+        report.executions.in_flight, report.executions.working, report.executions.stuck
     ));
     if report.executions.stuck > 0 {
         out.push_str(&format!(
@@ -4264,6 +4264,8 @@ mod doctor_tests {
     fn executions(in_flight: i64, stuck_ids: &[&str]) -> ExecutionsView {
         ExecutionsView {
             in_flight,
+            working: 0,
+            working_ids: vec![],
             stuck: stuck_ids.len() as i64,
             stuck_ids: stuck_ids.iter().map(|s| s.to_string()).collect(),
         }
