@@ -26,7 +26,7 @@ pub struct DropResult {
 /// Failure modes for [`drop_invocation`].
 #[derive(Debug, thiserror::Error)]
 pub enum DropError {
-    #[error("no events found for invocation {0}; cannot determine agent")]
+    #[error("invocation {0} not found: no projection event and no coordination owner row")]
     UnknownInvocation(String),
     #[error("invalid agent id from projection: {0}")]
     InvalidAgentId(String),
@@ -64,7 +64,15 @@ pub async fn drop_invocation(
     let agent_id_str = match proj_store.agent_id_for_invocation(invocation_id).await? {
         Some(agent_id) => agent_id,
         None => {
-            control_store.delete_invocation_owner(invocation_id).await?;
+            // No projection event names an agent — this is either an
+            // agent-less recovery row or an id that never existed.
+            // `delete_invocation_owner` tells them apart by whether it
+            // actually removed a row: a truly-unknown id must still error
+            // rather than emit a phantom operator-recovered event
+            // (ADR-0026 — the event log is the system of record).
+            if !control_store.delete_invocation_owner(invocation_id).await? {
+                return Err(DropError::UnknownInvocation(invocation_id.to_string()));
+            }
             "operator".to_string()
         }
     };

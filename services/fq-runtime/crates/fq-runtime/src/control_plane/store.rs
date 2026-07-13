@@ -466,9 +466,6 @@ impl ControlPlaneStore {
         rows.into_iter().map(row_to_worker).collect()
     }
 
-    /// Workers whose heartbeat is older than `now_ms - threshold_ms`
-    /// AND not already marked shutdown. Uses the pure
-    /// [`is_stale`] predicate for the cutoff calculation.
     /// Remove rows already classified as stale. Returns their ids so callers
     /// can report exactly what was removed. Alive and shutdown workers are
     /// deliberately untouched; repeating the operation is a no-op.
@@ -491,6 +488,9 @@ impl ControlPlaneStore {
         Ok(ids)
     }
 
+    /// Remove an invocation's coordination owner row. Returns whether a
+    /// row existed — callers use this to tell an agent-less recovery row
+    /// (which they clear) from an id that was never registered.
     pub async fn delete_invocation_owner(
         &self,
         invocation_id: &str,
@@ -505,6 +505,9 @@ impl ControlPlaneStore {
         )
     }
 
+    /// Workers whose heartbeat is older than `now_ms - threshold_ms`
+    /// AND not already marked shutdown. Uses the pure
+    /// [`is_stale`] predicate for the cutoff calculation.
     pub async fn list_stale_workers(
         &self,
         now_ms: i64,
