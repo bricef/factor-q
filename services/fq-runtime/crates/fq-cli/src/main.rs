@@ -3194,16 +3194,18 @@ async fn show_costs(
     }
 
     println!(
-        "{:<30} {:<10} {:<14} {:<14} total_cost",
-        "agent", "events", "input_tokens", "output_tokens"
+        "{:<30} {:<10} {:<14} {:<14} {:<14} {:<14} total_cost",
+        "agent", "events", "input_tokens", "output_tokens", "cache_read", "cache_write"
     );
     for row in &report.agents {
         println!(
-            "{:<30} {:<10} {:<14} {:<14} ${:.6}",
+            "{:<30} {:<10} {:<14} {:<14} {:<14} {:<14} ${:.6}",
             row.agent_id,
             row.event_count,
             row.total_input_tokens,
             row.total_output_tokens,
+            row.total_cache_read_tokens,
+            row.total_cache_write_tokens,
             row.total_cost
         );
     }

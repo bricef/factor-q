@@ -244,6 +244,8 @@ fn cost_report() -> CostReport {
             total_cost: 95.869_869,
             total_input_tokens: 120_411_850,
             total_output_tokens: 663_307,
+            total_cache_read_tokens: 98_000_000,
+            total_cache_write_tokens: 1_200_000,
         },
         CostView {
             agent_id: "m0-loop".to_string(),
@@ -251,6 +253,8 @@ fn cost_report() -> CostReport {
             total_cost: 6.153_685,
             total_input_tokens: 7_409_042,
             total_output_tokens: 58_912,
+            total_cache_read_tokens: 5_900_000,
+            total_cache_write_tokens: 74_000,
         },
         CostView {
             agent_id: "doc-drift".to_string(),
@@ -258,12 +262,16 @@ fn cost_report() -> CostReport {
             total_cost: 1.341_442,
             total_input_tokens: 491_700,
             total_output_tokens: 20_545,
+            total_cache_read_tokens: 380_000,
+            total_cache_write_tokens: 5_000,
         },
     ];
     CostReport {
         total_cost: agents.iter().map(|a| a.total_cost).sum(),
         total_input_tokens: agents.iter().map(|a| a.total_input_tokens).sum(),
         total_output_tokens: agents.iter().map(|a| a.total_output_tokens).sum(),
+        total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
+        total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
         agents,
     }
 }
