@@ -183,6 +183,131 @@ async fn invocation_page(State(state): State<Arc<AppState>>, Path(id): Path<Stri
     }
 }
 
+/// The vendored datastar client (pinned v1.0.0, MIT; sha256 recorded in
+/// the PR that introduced it). Served from the binary so the dashboard
+/// stays fully self-contained behind its auth front — no CDN.
+async fn datastar_js() -> impl axum::response::IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/javascript"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_str!("../assets/datastar.js"),
+    )
+}
+
+/// The transcript's live tail: an SSE stream of datastar element
+/// patches. Polls `transcript_since` (cursor-indexed, microsecond WAL
+/// reads) every second and forwards only NEW entries as appends into
+/// `#turns`; when the run's Outcome arrives it patches `#status` and
+/// closes the stream. tarpc has no server-streaming, so poll-and-forward
+/// is the tarpc-shaped bridge (design discussion on #105).
+async fn transcript_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> axum::response::sse::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use datastar::prelude::{ElementPatchMode, PatchElements};
+
+    fn status_error(msg: &str) -> Event {
+        PatchElements::new(format!(
+            r#"<p id="status" class="bad">stream error — {} (reload to retry)</p>"#,
+            render::esc(msg)
+        ))
+        .write_as_axum_sse_event()
+    }
+
+    struct Poll {
+        client: Option<ReadServiceClient>,
+        addr: String,
+        id: String,
+        cursor: u64,
+        truncate: Option<u64>,
+        queue: std::collections::VecDeque<Event>,
+        done: bool,
+    }
+
+    let full = q.get("full").is_some_and(|v| v == "1");
+    let init = Poll {
+        client: None,
+        addr: state.read_addr.clone(),
+        id,
+        cursor: q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0),
+        truncate: if full {
+            None
+        } else {
+            Some(fq_runtime::transcript::DEFAULT_TRUNCATE_BYTES as u64)
+        },
+        queue: std::collections::VecDeque::new(),
+        done: false,
+    };
+
+    let stream = futures::stream::unfold(init, |mut s| async move {
+        loop {
+            if let Some(event) = s.queue.pop_front() {
+                return Some((Ok(event), s));
+            }
+            if s.done {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            if s.client.is_none() {
+                match read_service::connect(&s.addr).await {
+                    Ok(c) => s.client = Some(c),
+                    Err(err) => {
+                        s.queue.push_back(status_error(&format!("connect: {err}")));
+                        s.done = true;
+                        continue;
+                    }
+                }
+            }
+            let call = s
+                .client
+                .as_ref()
+                .expect("client dialled above")
+                .transcript_since(context::current(), s.id.clone(), s.cursor, s.truncate)
+                .await;
+            match call {
+                Ok(Ok(Some((json, next)))) => {
+                    s.cursor = next;
+                    let entries: Vec<fq_runtime::transcript::TranscriptEntry> =
+                        serde_json::from_str(&json).unwrap_or_default();
+                    for entry in &entries {
+                        s.queue.push_back(
+                            PatchElements::new(render::transcript_entry_html(entry, now_ms()))
+                                .selector("#turns")
+                                .mode(ElementPatchMode::Append)
+                                .write_as_axum_sse_event(),
+                        );
+                    }
+                    if let Some(phase) = render::transcript_outcome(&entries) {
+                        s.queue.push_back(
+                            PatchElements::new(render::transcript_status_html(Some(phase)))
+                                .write_as_axum_sse_event(),
+                        );
+                        s.done = true;
+                    }
+                }
+                // No transcript yet — keep polling; it may appear.
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => {
+                    s.queue.push_back(status_error(&err.to_string()));
+                    s.done = true;
+                }
+                Err(err) => {
+                    s.queue.push_back(status_error(&format!("rpc: {err}")));
+                    s.done = true;
+                }
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 async fn transcript_page(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -212,10 +337,30 @@ async fn transcript_page(
                         return unreachable_page(&state, "transcript", &format!("decode: {err}"));
                     }
                 };
-            ok_page(
-                &state,
-                &format!("transcript {}", &id.chars().take(8).collect::<String>()),
-                &render::transcript(&entries, now_ms(), full, &id),
+            let title = format!("transcript {}", &id.chars().take(8).collect::<String>());
+            let mut body = render::transcript(&entries, now_ms(), full, &id);
+            let live = render::transcript_outcome(&entries).is_none();
+            // Live runs stream: datastar opens the SSE tail from the
+            // snapshot's cursor and appends turns in place — no page
+            // reloads, no scroll resets. Finished runs render static.
+            // No-JS browsers fall back to the <noscript> meta-refresh.
+            let extra_head = if live {
+                r#"<script type="module" src="/assets/datastar.js"></script>"#
+            } else {
+                ""
+            };
+            if live {
+                body.push_str(&format!(
+                    r#"<div data-on-load="@get('/invocations/{}/transcript/stream?after={}&full={}')"></div>"#,
+                    render::esc(&id),
+                    entries.len(),
+                    u8::from(full),
+                ));
+            }
+            state.last_seen_ms.store(now_ms(), Ordering::Relaxed);
+            (
+                StatusCode::OK,
+                Html(render::page_opts(&title, None, extra_head, &body)),
             )
         }
         Ok(Ok(None)) => (
@@ -273,8 +418,13 @@ fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(health_page))
         .route("/invocations", get(invocations_page))
-        .route("/invocations/:id", get(invocation_page))
-        .route("/invocations/:id/transcript", get(transcript_page))
+        .route("/invocations/{id}", get(invocation_page))
+        .route("/invocations/{id}/transcript", get(transcript_page))
+        .route(
+            "/invocations/{id}/transcript/stream",
+            get(transcript_stream),
+        )
+        .route("/assets/datastar.js", get(datastar_js))
         .route("/events", get(events_page))
         .route("/costs", get(costs_page))
         .with_state(state)

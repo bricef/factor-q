@@ -37,8 +37,15 @@ each edge (`fq-dashboard` serves the browser HTTP as a BFF; the CLI
 consumes `views` in-process). That shape is proposed for the API
 generally: each edge owns its own protocol over one typed internal
 contract, which dissolves this ADR's one-protocol-for-all-clients
-dilemma and matches headless-first. The **streaming and write/admin
-halves remain open**.
+dilemma and matches headless-first.
+
+The **streaming half has a first concrete answer** (2026-07-13, the
+dashboard's live transcript): SSE at the browser edge (datastar patches
+appended in place), bridged internally by cursor-indexed incremental
+reads over the same tarpc surface (`transcript_since` — tarpc has no
+server-streaming, so the BFF polls cheap indexed reads at 1s and
+forwards only new entries). A push upgrade (NATS-fed) stays additive
+behind the same SSE contract. The **write/admin half remains open**.
 
 ## Considerations
 

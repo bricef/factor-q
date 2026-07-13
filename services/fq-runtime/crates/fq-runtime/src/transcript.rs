@@ -54,6 +54,16 @@ pub enum TranscriptEntry {
         output: Option<String>,
         is_error: Option<bool>,
     },
+    /// The invocation's terminal outcome. Not a WAL dispatch row —
+    /// synthesised by `views::transcript` from the invocation's
+    /// state/archive record, so a transcript states explicitly whether
+    /// more turns are expected. Absent while the run is in flight;
+    /// always the final entry once present.
+    Outcome {
+        timestamp_ms: i64,
+        /// The terminal phase, `completed` / `failed`.
+        phase: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -68,7 +78,8 @@ impl TranscriptEntry {
         match self {
             TranscriptEntry::Prompt { timestamp_ms, .. }
             | TranscriptEntry::Assistant { timestamp_ms, .. }
-            | TranscriptEntry::ToolResult { timestamp_ms, .. } => *timestamp_ms,
+            | TranscriptEntry::ToolResult { timestamp_ms, .. }
+            | TranscriptEntry::Outcome { timestamp_ms, .. } => *timestamp_ms,
         }
     }
 
@@ -81,6 +92,7 @@ impl TranscriptEntry {
             TranscriptEntry::Prompt { .. } => 0,
             TranscriptEntry::Assistant { .. } => 1,
             TranscriptEntry::ToolResult { .. } => 2,
+            TranscriptEntry::Outcome { .. } => 3,
         }
     }
 }
@@ -274,6 +286,8 @@ pub fn truncate_entries(entries: &mut [TranscriptEntry], max: usize) {
                     *o = truncate(o, cap);
                 }
             }
+            // No payload strings to cap.
+            TranscriptEntry::Outcome { .. } => {}
         }
     }
 }
@@ -352,6 +366,9 @@ pub fn render_pretty(entries: &[TranscriptEntry], truncate_bytes: Option<usize>)
                     out.push('\n');
                 }
             }
+            TranscriptEntry::Outcome { phase, .. } => {
+                out.push_str(&format!("── run {phase} ────────────────────────────\n"));
+            }
         }
     }
     out
@@ -386,6 +403,9 @@ pub fn dedup_key(entry: &TranscriptEntry) -> Option<String> {
             .first()
             .map(|tc| format!("call:{}", tc.tool_call_id)),
         TranscriptEntry::ToolResult { tool_call_id, .. } => Some(format!("tool:{tool_call_id}")),
+        // At most one outcome exists per invocation; a fixed key keeps
+        // the snapshot→live seam from ever printing it twice.
+        TranscriptEntry::Outcome { .. } => Some("outcome".to_string()),
     }
 }
 
