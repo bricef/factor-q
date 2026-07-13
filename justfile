@@ -76,9 +76,129 @@ go-ci:
     cd adapters/github-watcher && go test ./...
     cd adapters/github-watcher && go build ./...
 
-# Run all quality checks — docs lint + link check + both Rust gates + the
-# Go adapters (the full local gate).
-ci: lint-docs check-links rust-ci go-ci
+# Run all quality checks — docs lint + link check + both Rust gates + the Go
+# adapters (the full local gate) — and print a per-phase wall-clock timing
+# summary at the end, so an operator can see where `just ci` spent its time.
+#
+# Why a script body instead of `ci: lint-docs check-links rust-ci go-ci`:
+# recipe *dependencies* run before the body, so a dependency chain cannot be
+# timed phase-by-phase. The body below invokes each phase explicitly, wrapped
+# in a stopwatch, preserving the original checks, their order, and fail-fast
+# (the first failing phase stops the run and sets the exit code). The summary
+# is printed on success AND on failure, via an EXIT trap.
+#
+# compile vs. test: each Rust suite is split so the operator's main question —
+# "is a slow run compile-bound or test-bound?" — is answered. "compile
+# (<suite>)" is all the compile / static-check work (fmt-check + clippy +
+# rustdoc + a `cargo build --tests` that pre-builds the test binaries);
+# "test (<suite>)" is then the cache-warm `cargo test` run (its time is test
+# execution plus any doctest compilation). The extra build step only front-
+# loads work `cargo test` would do anyway, so the checks that run are unchanged.
+#
+# NATS: only the runtime suite needs the broker. If it is already warm (the dev
+# default) `ci` uses it and leaves it running; if it is cold, `ci` brings it up
+# and — even on failure, via the trap — tears it down again, so a run never
+# leaks a broker it started. store-ci and go-ci are hermetic.
+#
+# smoke is intentionally NOT part of `ci`: it needs ANTHROPIC_API_KEY and makes
+# a real, paid LLM call. Run it on its own with `just smoke`.
+ci:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    t_ci_start=$(date +%s)
+    declare -a T_LABEL=() T_VAL=()
+    nats_owned=0
+    failed_label=""
+    phase_no=0
+    # -- helpers --
+    record() { T_LABEL+=("$1"); T_VAL+=("$2"); }
+    repeat() { local n=$1 ch=$2 out= i; for (( i=0; i<n; i++ )); do out="$out$ch"; done; printf '%s' "$out"; }
+    human() {
+        local s=$1
+        if   [ "$s" -ge 3600 ]; then printf '%dh %dm %ds' $((s/3600)) $(((s%3600)/60)) $((s%60))
+        elif [ "$s" -ge 60   ]; then printf '%dm %ds' $((s/60)) $((s%60))
+        else                         printf '%ds' "$s"; fi
+    }
+    print_summary() {
+        local total=$(( $(date +%s) - t_ci_start )) w=5 i n
+        if [ "${#T_LABEL[@]}" -gt 0 ]; then
+            for i in "${T_LABEL[@]}"; do [ "${#i}" -gt "$w" ] && w=${#i}; done
+        fi
+        printf '\n── CI timing summary %s\n' "$(repeat $((w + 2)) '─')"
+        n=${#T_LABEL[@]}
+        for (( i=0; i<n; i++ )); do
+            printf '  %s %s %s\n' "${T_LABEL[$i]}" "$(repeat $(( w - ${#T_LABEL[$i]} + 3 )) '.')" "${T_VAL[$i]}"
+        done
+        printf '  %s\n' "$(repeat $((w + 5)) '─')"
+        printf '  TOTAL %s %s\n' "$(repeat $(( w - 5 + 3 )) '.')" "$(human "$total")"
+        [ -n "$failed_label" ] && printf '\n  x FAILED at phase: %s (exit non-zero)\n' "$failed_label"
+        return 0
+    }
+    on_exit() {
+        local rc=$?
+        # safety net: a phase failed while we still held a broker we started —
+        # tear it down (timed) so a failed run never leaks it.
+        if [ "$nats_owned" = "1" ]; then
+            local t0=$(date +%s)
+            just infra-down >/dev/null 2>&1 || true
+            record "NATS down" "$(human $(( $(date +%s) - t0 )))"
+            nats_owned=0
+        fi
+        print_summary
+        exit "$rc"
+    }
+    trap on_exit EXIT
+    run_phase() {
+        local label="$1"; shift
+        phase_no=$((phase_no + 1))
+        printf '\n==> [%d] %s\n' "$phase_no" "$label"
+        local t0=$(date +%s) rc=0
+        "$@" || rc=$?
+        record "$label" "$(human $(( $(date +%s) - t0 )))"
+        if [ "$rc" -ne 0 ]; then failed_label="$label"; exit "$rc"; fi
+    }
+    # -- phase bodies the generic runner cannot take as argv --
+    compile_runtime() { ( cd {{runtime_dir}} && just fmt-check && just lint && just doc && cargo build --tests ); }
+    test_runtime()    { ( cd {{runtime_dir}} && just test ); }
+    compile_store()   { ( cd {{store_dir}}   && just fmt-check && just lint && just doc && cargo build --tests --features cli,service ); }
+    test_store()      { ( cd {{store_dir}}   && just test ); }
+    nats_up() {
+        phase_no=$((phase_no + 1))
+        printf '\n==> [%d] NATS up\n' "$phase_no"
+        local t0=$(date +%s)
+        if curl -sf http://127.0.0.1:8222/healthz >/dev/null 2>&1; then
+            record "NATS up" "$(human $(( $(date +%s) - t0 ))) (already warm)"
+            return 0
+        fi
+        nats_owned=1
+        if ! ( just infra-up && just infra-wait ); then
+            record "NATS up" "$(human $(( $(date +%s) - t0 )))"
+            failed_label="NATS up"; exit 1
+        fi
+        record "NATS up" "$(human $(( $(date +%s) - t0 )))"
+    }
+    nats_down() {
+        phase_no=$((phase_no + 1))
+        printf '\n==> [%d] NATS down\n' "$phase_no"
+        local t0=$(date +%s)
+        if [ "$nats_owned" = "1" ]; then
+            just infra-down >/dev/null 2>&1 || true
+            record "NATS down" "$(human $(( $(date +%s) - t0 )))"
+            nats_owned=0
+        else
+            record "NATS down" "skipped (left warm)"
+        fi
+    }
+    # -- the gate, in order, fail-fast --
+    run_phase "lint-docs"         just lint-docs
+    run_phase "check-links"       just check-links
+    nats_up
+    run_phase "compile (runtime)" compile_runtime
+    run_phase "test (runtime)"    test_runtime
+    nats_down
+    run_phase "compile (store)"   compile_store
+    run_phase "test (store)"      test_store
+    run_phase "go-ci"             just go-ci
 
 # Build container images for all services
 docker-build:
