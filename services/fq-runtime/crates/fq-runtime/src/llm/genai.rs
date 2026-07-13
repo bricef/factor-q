@@ -320,6 +320,7 @@ fn convert_message(msg: Message) -> Result<provider::chat::ChatMessage, LlmError
                     call_id: call.tool_call_id.into_inner(),
                     fn_name: call.tool_name,
                     fn_arguments: call.parameters,
+                    thought_signatures: None,
                 },
             ));
         }
@@ -560,17 +561,16 @@ mod tests {
         assert_eq!(received.len(), 1);
         let body = &received[0];
 
-        // The system prompt is present. Note: genai 0.4.4 drops the
-        // cache marker on a *single* system message (its Anthropic
-        // adapter only renders system parts when the marked index is
-        // > 0 — an off-by-one). That costs nothing within a run: the
-        // final-message breakpoint below covers the whole prefix,
-        // system included. If genai fixes the bug, the system block
-        // becomes a parts array carrying its own marker — accept both.
+        // genai 0.6 renders a cache-marked single system message as
+        // a content-parts array, preserving its cache breakpoint.
+        let system_parts = body["system"]
+            .as_array()
+            .expect("system prompt should be a cache-marked parts array");
         assert!(
-            body["system"].is_string() || body["system"].is_array(),
-            "system missing from wire request, got {:?}",
-            body["system"]
+            system_parts
+                .iter()
+                .any(|part| part["cache_control"]["type"] == "ephemeral"),
+            "system prompt should carry cache_control, got {system_parts:?}"
         );
 
         // The final message's final content part carries the
@@ -607,7 +607,7 @@ mod tests {
                 }
             }),
         });
-        assert_eq!(tool.name, "read_file");
+        assert_eq!(tool.name.as_ref(), "read_file");
         assert!(tool.description.is_some());
         assert!(tool.schema.is_some());
     }
