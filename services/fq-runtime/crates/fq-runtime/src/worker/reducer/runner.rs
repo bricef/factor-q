@@ -517,6 +517,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             trigger_source,
             trigger_subject,
             trigger_payload,
+            None,
             DurableStart::noop(),
         )
         .await
@@ -535,6 +536,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger_source: TriggerSource,
         trigger_subject: Option<String>,
         trigger_payload: Value,
+        delivery_attempt: Option<u32>,
         durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
         // Every grant-bearing server runs per-invocation (ADR-0018): we
@@ -555,6 +557,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     trigger_source,
                     trigger_subject,
                     trigger_payload,
+                    delivery_attempt,
                     &self.context.tools(),
                     None,
                     durable_start,
@@ -623,6 +626,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 trigger_source,
                 trigger_subject,
                 trigger_payload,
+                delivery_attempt,
                 &tools,
                 sampling,
                 durable_start,
@@ -654,6 +658,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             trigger_source,
             trigger_subject,
             trigger_payload,
+            None,
             &self.context.tools(),
             sampling,
             DurableStart::noop(),
@@ -673,6 +678,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger_source: TriggerSource,
         trigger_subject: Option<String>,
         trigger_payload: Value,
+        delivery_attempt: Option<u32>,
         tools: &ToolRegistry,
         sampling: Option<SamplingChannel>,
         durable_start: DurableStart,
@@ -797,8 +803,23 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // already in the persisted conversation history, and the
         // binding is stable across resume (workspace_ref
         // re-association).
+        // The preamble timestamp is the invocation's *start* time
+        // (`started_at_ms`), not a fresh clock read: it must be stable
+        // across the fresh and resumed/drained execution paths or it
+        // breaks observational equivalence (the resumed run would stamp
+        // a different time into the replayed step-0 message). `started_at`
+        // is persisted and re-used verbatim on resume, so both paths
+        // agree; a fresh `unix_now_ms()` here also perturbs the sim
+        // clock sequence.
         let static_context = merge_step0_context(
-            workspace.as_deref().map(workspace_preamble),
+            Some(invocation_preamble(
+                workspace.as_deref(),
+                &agent_id,
+                delivery_attempt,
+                agent.budget(),
+                agent_config.max_iterations,
+                started_at_ms,
+            )),
             self.read_static_resources(agent).await,
         );
 
@@ -1079,6 +1100,31 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // written before v5 lack the columns; warn and degrade.
         let trigger = trigger_from_state_row(&state_row);
 
+        // Rebuild the *same* step-0 static context the fresh path
+        // injected (the invocation preamble + static-resource pins).
+        // Replay reconstructs the conversation from an empty state, so
+        // step 0 must re-inject this context or a resumed run diverges
+        // from an uninterrupted one — the resume/drain observational-
+        // equivalence property. Every input derives from persisted
+        // invocation state (`started_at`, the re-attached workspace,
+        // the agent's budget/ceiling) so both paths produce identical
+        // text. `delivery_attempt` is *not* persisted on the state row;
+        // a resumed run reconstructs it as the first attempt. That is
+        // exact for the common case and the sim harness; a resumed run
+        // of a redelivered trigger would show `attempt: 1` rather than
+        // the original count (issue #87).
+        let step0_static_context = merge_step0_context(
+            Some(invocation_preamble(
+                workspace.as_deref(),
+                &agent_id,
+                None,
+                agent.budget(),
+                agent_config.max_iterations,
+                state_row.started_at,
+            )),
+            self.read_static_resources(agent).await,
+        );
+
         // Replay the reducer deterministically through every
         // completed action. The reducer is pure; reading the
         // sequence of (state, last_result, step_index) tuples
@@ -1095,9 +1141,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 now_ms: self.config.clock.now_ms(),
                 random_seed: self.config.clock.rand_u64(),
                 step_index,
-                // Replay reconstructs persisted state; pins were
-                // already injected on the original step 0.
-                static_resource_context: None,
+                // Re-inject the step-0 context on replay so the rebuilt
+                // conversation matches the fresh path exactly.
+                static_resource_context: if step_index == 0 {
+                    step0_static_context.clone()
+                } else {
+                    None
+                },
             };
             let output = self.reducer.step(input).map_err(|e| {
                 ExecutorError::WorkerStore(format!("replay step {step_index} failed: {e}"))
@@ -1194,10 +1244,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 totals,
                 start,
                 state_row.started_at,
-                // Resume never re-injects static_resources: the pins'
-                // content is already in the replayed conversation
-                // history persisted on the original step 0.
-                None,
+                // Only applied when replay was empty (the crash fell at
+                // step 0, so `step_index_start == 0` here). A non-empty
+                // replay already injected this context at its step 0
+                // above; `run_loop_inner` applies static context only
+                // when `step_index == 0`, so there is no double-inject.
+                step0_static_context,
                 // No inbound server channel on resume: the per-invocation
                 // server connection died with the crash, so a resumed run
                 // cannot service (or replay) sampling (ADR-0018 §5). Any
@@ -3106,17 +3158,26 @@ const EVALUATOR_SYSTEM_PREAMBLE: &str = "You are a safety evaluator gating an au
      appropriate for the stated action. Respond with ONLY a single JSON object \
      {\"approved\": <true|false>, \"reason\": <string>} — no prose, no code fences.";
 
-/// The step-0 environment line telling the agent authoritatively where
-/// `${workspace}` points, instead of leaving it to infer the path from
-/// tool output (a `pwd` round-trip — or worse, confabulation).
-fn workspace_preamble(path: &Path) -> String {
+/// Stable runner-authored environment preamble injected as the first context message.
+fn invocation_preamble(
+    workspace: Option<&Path>,
+    agent_id: &AgentId,
+    delivery_attempt: Option<u32>,
+    budget: Option<f64>,
+    max_iterations: u32,
+    now_ms: i64,
+) -> String {
+    let timestamp = chrono::DateTime::from_timestamp_millis(now_ms)
+        .map(|time| time.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string());
+    let workspace = workspace.map_or_else(
+        || "unavailable".to_string(),
+        |path| path.display().to_string(),
+    );
+    let budget = budget.map_or_else(|| "unlimited".to_string(), |value| format!("${value:.2}"));
+    let attempt = delivery_attempt.unwrap_or(1);
     format!(
-        "Environment: your workspace for this invocation is `{}`. In path \
-         parameters of your tools (`cwd`, `path`) you may write \
-         `${{workspace}}` and the runtime resolves it to that directory; \
-         everywhere else — file contents, command arguments — your text is \
-         passed through verbatim.",
-        path.display()
+        "Environment: timestamp: {timestamp}; agent id: {agent_id}; workspace: {workspace}; attempt: {attempt}; budget: {budget}; iteration ceiling: {max_iterations}. In path parameters of your tools (`cwd`, `path`) you may write `${{workspace}}` and the runtime resolves it to that directory; everywhere else — file contents, command arguments — your text is passed through verbatim."
     )
 }
 
@@ -3895,6 +3956,24 @@ mod tests {
             7,
             "override wins over the daemon config default"
         );
+    }
+
+    #[test]
+    fn invocation_preamble_has_stable_environment_fields() {
+        let preamble = invocation_preamble(
+            Some(Path::new("/tmp/workspace")),
+            &AgentId::new("doc-drift").unwrap(),
+            Some(3),
+            Some(1.25),
+            12,
+            1_700_000_000_000,
+        );
+        assert!(preamble.contains("timestamp: 2023-11-14T22:13:20+00:00"));
+        assert!(preamble.contains("agent id: doc-drift"));
+        assert!(preamble.contains("workspace: /tmp/workspace"));
+        assert!(preamble.contains("attempt: 3"));
+        assert!(preamble.contains("budget: $1.25"));
+        assert!(preamble.contains("iteration ceiling: 12"));
     }
 
     #[tokio::test]

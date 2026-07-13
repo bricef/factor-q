@@ -404,6 +404,7 @@ impl TriggerDispatcher {
         // before firing it (a permanent error before any WAL write, or a
         // worker that never signals), we ack on return — retrying a
         // permanent error would not help, and the run already happened.
+        let delivery_attempt = msg.info().map(|info| info.delivered as u32).unwrap_or(1);
         let (durable_start, mut durably_started) = DurableStart::channel();
         let mut invocation = std::pin::pin!(self.worker.run_invocation(
             &loaded.agent,
@@ -411,6 +412,7 @@ impl TriggerDispatcher {
             TriggerSource::Subject,
             Some(msg.subject.to_string()),
             payload,
+            Some(delivery_attempt),
             durable_start,
         ));
 
@@ -842,6 +844,7 @@ You are a test agent."#
                 _source: TriggerSource,
                 _subject: Option<String>,
                 _payload: serde_json::Value,
+                _delivery_attempt: Option<u32>,
                 mut durable_start: crate::worker::DurableStart,
             ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
                 self.started.fetch_add(1, Ordering::SeqCst);
@@ -987,6 +990,7 @@ You are a test agent."#
                 _source: TriggerSource,
                 _subject: Option<String>,
                 _payload: serde_json::Value,
+                _delivery_attempt: Option<u32>,
                 _durable_start: crate::worker::DurableStart,
             ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
                 self.started.fetch_add(1, Ordering::SeqCst);
@@ -1108,6 +1112,7 @@ You are a test agent."#
             _source: TriggerSource,
             _subject: Option<String>,
             _payload: serde_json::Value,
+            _delivery_attempt: Option<u32>,
             _durable_start: crate::worker::DurableStart,
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
             // Return without firing durable_start (i.e. before any WAL
@@ -1261,6 +1266,7 @@ You are a test agent."#
                 _source: TriggerSource,
                 _subject: Option<String>,
                 _payload: serde_json::Value,
+                _delivery_attempt: Option<u32>,
                 _durable_start: crate::worker::DurableStart,
             ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -1360,6 +1366,7 @@ You are a test agent."#
             _source: TriggerSource,
             _subject: Option<String>,
             _payload: serde_json::Value,
+            _delivery_attempt: Option<u32>,
             mut durable_start: crate::worker::DurableStart,
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
             self.started
