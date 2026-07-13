@@ -21,7 +21,7 @@ bytes = "1"
 toml = "0.8"
 walkdir = "2"
 async-trait = "0.1"
-genai = "0.4"
+genai = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 strum = { version = "0.27", features = ["derive"] }
