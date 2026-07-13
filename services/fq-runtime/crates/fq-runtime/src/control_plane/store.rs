@@ -469,6 +469,42 @@ impl ControlPlaneStore {
     /// Workers whose heartbeat is older than `now_ms - threshold_ms`
     /// AND not already marked shutdown. Uses the pure
     /// [`is_stale`] predicate for the cutoff calculation.
+    /// Remove rows already classified as stale. Returns their ids so callers
+    /// can report exactly what was removed. Alive and shutdown workers are
+    /// deliberately untouched; repeating the operation is a no-op.
+    pub async fn prune_stale_workers(&self) -> Result<Vec<String>, ControlPlaneStoreError> {
+        let ids: Vec<String> = sqlx::query(
+            "SELECT worker_id FROM coordination_worker WHERE status = ? ORDER BY worker_id",
+        )
+        .bind(WorkerStatus::Stale.as_str())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| row.get("worker_id"))
+        .collect();
+        if !ids.is_empty() {
+            sqlx::query("DELETE FROM coordination_worker WHERE status = ?")
+                .bind(WorkerStatus::Stale.as_str())
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(ids)
+    }
+
+    pub async fn delete_invocation_owner(
+        &self,
+        invocation_id: &str,
+    ) -> Result<bool, ControlPlaneStoreError> {
+        Ok(
+            sqlx::query("DELETE FROM coordination_invocation_owner WHERE invocation_id = ?")
+                .bind(invocation_id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                > 0,
+        )
+    }
+
     pub async fn list_stale_workers(
         &self,
         now_ms: i64,
@@ -1184,6 +1220,22 @@ mod tests {
         let ids: Vec<_> = stale.iter().map(|w| w.worker_id.as_str()).collect();
         // alive is within threshold, gone is shutdown — both excluded.
         assert_eq!(ids, vec!["stale"]);
+    }
+
+    #[tokio::test]
+    async fn prune_stale_workers_removes_only_stale_rows_idempotently() {
+        let (store, _dir) = open_fresh().await;
+        store.register_worker("alive", "h", 1).await.unwrap();
+        store.register_worker("stale", "h", 1).await.unwrap();
+        store.register_worker("shutdown", "h", 1).await.unwrap();
+        store.mark_worker_stale("stale").await.unwrap();
+        store.mark_worker_shutdown("shutdown").await.unwrap();
+
+        assert_eq!(store.prune_stale_workers().await.unwrap(), vec!["stale"]);
+        assert!(store.get_worker("alive").await.unwrap().is_some());
+        assert!(store.get_worker("shutdown").await.unwrap().is_some());
+        assert!(store.get_worker("stale").await.unwrap().is_none());
+        assert!(store.prune_stale_workers().await.unwrap().is_empty());
     }
 
     #[tokio::test]
