@@ -110,8 +110,15 @@ impl ToolSandbox {
     /// Returns the canonicalised target path on success. On failure,
     /// classifies the outcome as either `NotFound` (the path itself
     /// does not exist) or `PermissionDenied` (the path exists or its
-    /// parent exists but resolves outside every allowed prefix).
+    /// parent exists but resolves outside every allowed prefix) — or,
+    /// when the failing path itself looks mangled, one of the
+    /// self-diagnosing variants (see `flag_mangled`).
     pub fn check_read(&self, target: &Path) -> Result<PathBuf, SandboxError> {
+        self.check_read_impl(target)
+            .map_err(|err| flag_mangled(target, err))
+    }
+
+    fn check_read_impl(&self, target: &Path) -> Result<PathBuf, SandboxError> {
         if self.fs_read.is_empty() {
             return Err(SandboxError::PermissionDenied {
                 target: target.to_path_buf(),
@@ -136,6 +143,11 @@ impl ToolSandbox {
     /// first and only check for the exec tool — nothing else about
     /// the command's execution is validated here.
     pub fn check_exec_cwd(&self, target: &Path) -> Result<PathBuf, SandboxError> {
+        self.check_exec_cwd_impl(target)
+            .map_err(|err| flag_mangled(target, err))
+    }
+
+    fn check_exec_cwd_impl(&self, target: &Path) -> Result<PathBuf, SandboxError> {
         if self.exec_cwd.is_empty() {
             return Err(SandboxError::PermissionDenied {
                 target: target.to_path_buf(),
@@ -168,6 +180,11 @@ impl ToolSandbox {
     /// it does not, the parent directory is canonicalised and the
     /// filename appended, giving the would-be path of the new file.
     pub fn check_write(&self, target: &Path) -> Result<PathBuf, SandboxError> {
+        self.check_write_impl(target)
+            .map_err(|err| flag_mangled(target, err))
+    }
+
+    fn check_write_impl(&self, target: &Path) -> Result<PathBuf, SandboxError> {
         if self.fs_write.is_empty() {
             return Err(SandboxError::PermissionDenied {
                 target: target.to_path_buf(),
@@ -202,6 +219,39 @@ impl ToolSandbox {
             ),
         })
     }
+}
+
+/// Re-classify a *failed* path check when the path itself looks
+/// mangled by the calling model, so the error names the real problem
+/// instead of a misleading "not found". Two mangles are recognised:
+///
+/// - **Embedded quotes/backslashes** — the tool-call JSON string value
+///   was itself wrapped in another layer of quoting (a live GLM-5.2
+///   failure: `"\"${workspace}/file.txt\""`), so every path check
+///   "correctly" failed and the agent concluded its workspace had been
+///   deleted mid-run.
+/// - **An unsubstituted `${...}` placeholder** — the template variable
+///   never got replaced (typically a knock-on of the quoting mangle,
+///   or a misspelled placeholder).
+///
+/// Only failures are re-classified: a genuine file whose name contains
+/// a quote character still canonicalises and passes untouched. An
+/// explicit, self-diagnosing error is what lets a weaker model correct
+/// itself on the next step rather than build a coherent wrong theory
+/// across the rest of the run.
+fn flag_mangled(target: &Path, err: SandboxError) -> SandboxError {
+    let raw = target.to_string_lossy();
+    if raw.contains('"') || raw.contains('\\') {
+        return SandboxError::MisquotedPath {
+            target: target.to_path_buf(),
+        };
+    }
+    if raw.contains("${") {
+        return SandboxError::UnsubstitutedPlaceholder {
+            target: target.to_path_buf(),
+        };
+    }
+    err
 }
 
 /// Canonicalise a path that must already exist.
@@ -268,6 +318,25 @@ pub enum SandboxError {
         #[source]
         source: std::io::Error,
     },
+
+    /// The failing path contains literal quote or backslash characters
+    /// — almost always the tool-call argument was double-quoted by the
+    /// model, not a genuinely missing file. See `flag_mangled`.
+    #[error(
+        "invalid path {target:?}: the path contains literal quote/backslash characters, \
+         which usually means the tool-call argument was wrapped in an extra layer of \
+         quoting — resend the bare path with no embedded quotes"
+    )]
+    MisquotedPath { target: PathBuf },
+
+    /// The failing path still contains a `${...}` template placeholder
+    /// that was never substituted. See `flag_mangled`.
+    #[error(
+        "invalid path {target:?}: it contains an unsubstituted ${{...}} placeholder — \
+         the template variable was not replaced; check the placeholder's spelling and \
+         make sure the argument is not wrapped in extra quoting"
+    )]
+    UnsubstitutedPlaceholder { target: PathBuf },
 }
 
 #[cfg(test)]
@@ -607,5 +676,73 @@ mod tests {
         let sb = make_sandbox(&[], &[dir.path()]);
         let err = sb.check_exec_cwd(dir.path()).unwrap_err();
         assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    // ---- mangled-path self-diagnosis (the 2026-07-12 GLM-5.2
+    // "workspace vanished" misdiagnosis: an extra layer of quoting on
+    // the tool-call argument made every path check fail as NotFound,
+    // and the model built a wrong theory instead of fixing its
+    // quoting) ----
+
+    /// The incident's literal shape: the JSON string value itself
+    /// wrapped in escaped quotes. All three check surfaces must name
+    /// the quoting, not report "not found".
+    #[test]
+    fn quoted_path_failure_names_the_quoting_bug() {
+        let dir = tempdir().unwrap();
+        let sb = ToolSandbox::new()
+            .allow_read(dir.path())
+            .allow_write(dir.path())
+            .allow_exec_cwd(dir.path());
+        let mangled = PathBuf::from(format!("\"{}/file.txt\"", dir.path().display()));
+
+        for err in [
+            sb.check_read(&mangled).unwrap_err(),
+            sb.check_write(&mangled).unwrap_err(),
+            sb.check_exec_cwd(&mangled).unwrap_err(),
+        ] {
+            assert!(
+                matches!(err, SandboxError::MisquotedPath { .. }),
+                "expected MisquotedPath, got: {err}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("quote"), "message must name quoting: {msg}");
+        }
+    }
+
+    /// A path that still carries `${...}` failed substitution — say so.
+    #[test]
+    fn unsubstituted_placeholder_failure_names_the_placeholder() {
+        let dir = tempdir().unwrap();
+        let sb = make_sandbox(&[dir.path()], &[]);
+        let err = sb
+            .check_read(Path::new("${workspace}/file.txt"))
+            .unwrap_err();
+        assert!(
+            matches!(err, SandboxError::UnsubstitutedPlaceholder { .. }),
+            "got: {err}"
+        );
+        assert!(err.to_string().contains("placeholder"), "got: {err}");
+    }
+
+    /// Re-classification applies to failures only: a real file whose
+    /// name genuinely contains a quote character still passes.
+    #[test]
+    fn existing_file_with_quote_in_name_still_passes() {
+        let dir = tempdir().unwrap();
+        let quoted = dir.path().join("has\"quote.txt");
+        fs::write(&quoted, b"x").unwrap();
+        let sb = make_sandbox(&[dir.path()], &[]);
+        assert!(sb.check_read(&quoted).is_ok());
+    }
+
+    /// No over-triggering: a plain missing path (no quotes, no
+    /// placeholder) keeps its honest NotFound classification.
+    #[test]
+    fn plain_missing_path_stays_not_found() {
+        let dir = tempdir().unwrap();
+        let sb = make_sandbox(&[dir.path()], &[]);
+        let err = sb.check_read(&dir.path().join("nope.txt")).unwrap_err();
+        assert!(matches!(err, SandboxError::NotFound(_)), "got: {err}");
     }
 }

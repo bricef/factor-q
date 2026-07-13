@@ -82,6 +82,15 @@ impl From<SandboxError> for ToolError {
             SandboxError::Io { path, source } => {
                 ToolError::Io(format!("{}: {source}", path.display()))
             }
+            // Both mangled-path diagnoses are the *caller's* argument
+            // problem, not a filesystem fact — surface them as invalid
+            // parameters (with the full self-diagnosing message) so a
+            // model corrects its tool call instead of concluding the
+            // file or its workspace is gone.
+            err @ (SandboxError::MisquotedPath { .. }
+            | SandboxError::UnsubstitutedPlaceholder { .. }) => {
+                ToolError::InvalidParameters(err.to_string())
+            }
         }
     }
 }
