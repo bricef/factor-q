@@ -570,7 +570,27 @@ impl Views {
         if llm.is_empty() && tools.is_empty() {
             return Ok(None);
         }
-        Ok(Some(crate::transcript::collect_transcript(&llm, &tools)))
+        let mut entries = crate::transcript::collect_transcript(&llm, &tools);
+
+        // Close the story: a terminal invocation gets an explicit
+        // Outcome entry so the transcript states whether more turns are
+        // expected. The live WAL row (if still present) knows the
+        // terminal phase; after archive hand-off the archive row does.
+        let terminal = match self.worker.get_invocation_state(invocation_id).await? {
+            Some(state) => state.terminal_at.map(|at| (at, state.phase)),
+            None => self
+                .control_plane
+                .get_archive(invocation_id)
+                .await?
+                .map(|a| (a.terminal_at, a.final_phase)),
+        };
+        if let Some((timestamp_ms, phase)) = terminal {
+            entries.push(crate::transcript::TranscriptEntry::Outcome {
+                timestamp_ms,
+                phase,
+            });
+        }
+        Ok(Some(entries))
     }
 
     /// Every currently-executing invocation as a row (the list behind
@@ -930,6 +950,73 @@ mod tests {
         assert_eq!(active[0].phase, "reducing");
         assert_eq!(active[0].step_index, 3);
         assert!(active[0].open_tools.is_empty());
+    }
+
+    /// A terminal invocation's transcript closes with an Outcome entry —
+    /// the explicit "no more turns expected" signal; a live one carries
+    /// no Outcome (#105 SSE slice).
+    #[tokio::test]
+    async fn transcript_outcome_reflects_terminality() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let ws = WorkerStore::open(&path).await.unwrap();
+            for (inv, terminal_at) in [("inv-done", Some(150_i64)), ("inv-live", None)] {
+                ws.write_llm_intent(inv, "req-1", "m", "{}", 100)
+                    .await
+                    .unwrap();
+                ws.write_llm_dispatched(inv, "req-1", 101).await.unwrap();
+                ws.write_llm_completed(inv, "req-1", r#"{"content":"done"}"#, false, 0.01, 102)
+                    .await
+                    .unwrap();
+                let row = InvocationStateRow {
+                    invocation_id: inv.into(),
+                    agent_id: "agent-a".into(),
+                    schema_version: 1,
+                    phase: if terminal_at.is_some() {
+                        "completed".into()
+                    } else {
+                        "reducing".into()
+                    },
+                    state_blob: vec![],
+                    step_index: 4,
+                    started_at: 100,
+                    updated_at: 140,
+                    terminal_at,
+                    workspace_ref: None,
+                    archive_status: None,
+                    archive_published_at: None,
+                    trigger_source: None,
+                    trigger_subject: None,
+                    trigger_payload: None,
+                };
+                ws.upsert_invocation_state(&row).await.unwrap();
+            }
+            let _cp = ControlPlaneStore::open(&path).await.unwrap();
+            let _proj = ProjectionStore::open(&path).await.unwrap();
+        }
+
+        let views = Views::open(&path).await.unwrap();
+
+        let done = views.transcript("inv-done").await.unwrap().expect("some");
+        match done.last().expect("entries") {
+            crate::transcript::TranscriptEntry::Outcome {
+                phase,
+                timestamp_ms,
+            } => {
+                assert_eq!(phase, "completed");
+                assert_eq!(*timestamp_ms, 150);
+            }
+            other => panic!("expected Outcome last, got {other:?}"),
+        }
+
+        let live = views.transcript("inv-live").await.unwrap().expect("some");
+        assert!(
+            !live
+                .iter()
+                .any(|e| matches!(e, crate::transcript::TranscriptEntry::Outcome { .. })),
+            "live invocation must not carry an Outcome"
+        );
     }
 
     /// An in-flight row whose `updated_at` is in the future (worker clock

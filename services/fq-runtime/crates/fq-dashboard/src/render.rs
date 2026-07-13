@@ -39,12 +39,24 @@ pub fn age(ms: i64, now_ms: i64) -> String {
 
 /// The shared page shell: title, auto-refresh, nav, tiny inline CSS.
 pub fn page(title: &str, refresh_secs: u64, body: &str) -> String {
+    page_opts(title, Some(refresh_secs), "", body)
+}
+
+/// Page shell with explicit head control. `refresh_secs: None` drops
+/// the meta-refresh but keeps a `<noscript>` fallback refresh — used by
+/// the SSE-streamed transcript page, where a page reload every 5s would
+/// defeat the stream (no-JS browsers keep polling instead).
+pub fn page_opts(title: &str, refresh_secs: Option<u64>, extra_head: &str, body: &str) -> String {
     let title = esc(title);
+    let refresh = match refresh_secs {
+        Some(secs) => format!(r#"<meta http-equiv="refresh" content="{secs}">"#),
+        None => r#"<noscript><meta http-equiv="refresh" content="5"></noscript>"#.to_string(),
+    };
     format!(
         r#"<!doctype html>
 <html><head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="{refresh_secs}">
+{refresh}{extra_head}
 <title>{title} — fq</title>
 <style>
 body {{ font-family: monospace; margin: 1.5rem; color: #222; }}
@@ -256,7 +268,51 @@ pub fn transcript(
         esc(invocation_id)
     ));
 
+    b.push_str(r#"<div id="turns">"#);
     for entry in entries {
+        b.push_str(&transcript_entry_html(entry, now_ms));
+    }
+    b.push_str("</div>");
+    if entries.is_empty() {
+        b.push_str(r#"<p class="muted">no transcript entries.</p>"#);
+    }
+    b.push_str(&transcript_status_html(transcript_outcome(entries)));
+    b
+}
+
+/// The terminal phase, when the transcript is closed by an Outcome.
+pub fn transcript_outcome(entries: &[TranscriptEntry]) -> Option<&str> {
+    entries.iter().rev().find_map(|e| match e {
+        TranscriptEntry::Outcome { phase, .. } => Some(phase.as_str()),
+        _ => None,
+    })
+}
+
+/// The transcript's liveness footer. Carries `id="status"` so the SSE
+/// stream can patch it in place (datastar's default outer-morph
+/// matches by id) when the run reaches its outcome.
+pub fn transcript_status_html(outcome: Option<&str>) -> String {
+    match outcome {
+        None => {
+            r#"<p id="status" class="muted">⟳ live — new turns appear as the run progresses</p>"#
+                .to_string()
+        }
+        Some("completed") => {
+            r#"<p id="status" class="ok">■ run completed — no more turns expected</p>"#.to_string()
+        }
+        Some(phase) => format!(
+            r#"<p id="status" class="bad">■ run {} — no more turns expected</p>"#,
+            esc(phase)
+        ),
+    }
+}
+
+/// One transcript entry as a standalone HTML fragment — used by the
+/// static page and shipped verbatim over the SSE stream as a
+/// datastar element patch.
+pub fn transcript_entry_html(entry: &TranscriptEntry, now_ms: i64) -> String {
+    let mut b = String::new();
+    {
         match entry {
             TranscriptEntry::Prompt {
                 timestamp_ms,
@@ -334,10 +390,20 @@ pub fn transcript(
                 }
                 b.push_str("</div>");
             }
+            TranscriptEntry::Outcome {
+                timestamp_ms,
+                phase,
+            } => {
+                let ok = phase == "completed";
+                b.push_str(&format!(
+                    r#"<div class="turn{}"><h3><span class="{}">run {}</span> <span class="muted">{}</span></h3></div>"#,
+                    if ok { "" } else { " err" },
+                    if ok { "ok" } else { "bad" },
+                    esc(phase),
+                    esc(&age(*timestamp_ms, now_ms)),
+                ));
+            }
         }
-    }
-    if entries.is_empty() {
-        b.push_str(r#"<p class="muted">no transcript entries.</p>"#);
     }
     b
 }

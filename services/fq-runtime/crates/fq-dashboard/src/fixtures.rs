@@ -366,12 +366,38 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
             ),
         ),
         (
+            // The live case: no Outcome yet — the status footer shows
+            // the stream-is-live signal.
             "transcript",
-            render::page(
+            render::page_opts(
                 "transcript 019f534f",
-                REFRESH_SECS,
+                None,
+                "",
                 &render::transcript(
                     &transcript_entries(),
+                    NOW_MS,
+                    false,
+                    "019f534f-4b3c-7f42-a619-b5e43a64fd38",
+                ),
+            ),
+        ),
+        (
+            // The finished case: an Outcome closes the timeline and the
+            // status footer says no more turns are expected.
+            "transcript-completed",
+            render::page_opts(
+                "transcript 019f534f",
+                None,
+                "",
+                &render::transcript(
+                    &{
+                        let mut entries = transcript_entries();
+                        entries.push(fq_runtime::transcript::TranscriptEntry::Outcome {
+                            timestamp_ms: NOW_MS - 30_000,
+                            phase: "completed".to_string(),
+                        });
+                        entries
+                    },
                     NOW_MS,
                     false,
                     "019f534f-4b3c-7f42-a619-b5e43a64fd38",

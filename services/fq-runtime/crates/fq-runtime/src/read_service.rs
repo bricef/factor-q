@@ -99,6 +99,16 @@ pub trait ReadService {
         id: String,
         truncate_bytes: Option<u64>,
     ) -> Result<Option<String>, WireError>;
+    /// Transcript entries strictly after index `after` — the incremental
+    /// read behind the dashboard's SSE stream. The entry list is
+    /// append-only and deterministically ordered, so a plain index is a
+    /// safe cursor. Returns `(json_entries, next_cursor)`; `None` when
+    /// the invocation has no transcript at all.
+    async fn transcript_since(
+        id: String,
+        after: u64,
+        truncate_bytes: Option<u64>,
+    ) -> Result<Option<(String, u64)>, WireError>;
     async fn events(
         agent: Option<String>,
         event_type: Option<String>,
@@ -218,6 +228,27 @@ impl ReadService for ReadServer {
         let json = serde_json::to_string(&entries)
             .map_err(|e| WireError::Message(format!("transcript serialisation: {e}")))?;
         Ok(Some(json))
+    }
+
+    async fn transcript_since(
+        self,
+        _: context::Context,
+        id: String,
+        after: u64,
+        truncate_bytes: Option<u64>,
+    ) -> Result<Option<(String, u64)>, WireError> {
+        let Some(entries) = self.views.transcript(&id).await? else {
+            return Ok(None);
+        };
+        let next = entries.len() as u64;
+        let start = (after as usize).min(entries.len());
+        let mut fresh = entries[start..].to_vec();
+        if let Some(max) = truncate_bytes {
+            crate::transcript::truncate_entries(&mut fresh, max as usize);
+        }
+        let json = serde_json::to_string(&fresh)
+            .map_err(|e| WireError::Message(format!("transcript serialisation: {e}")))?;
+        Ok(Some((json, next)))
     }
 
     async fn events(
@@ -416,6 +447,14 @@ mod tests {
             .expect("rpc")
             .expect("invocation");
         assert!(missing.is_none());
+
+        // Cursor reads: no transcript at all → None, whatever the cursor.
+        let since = client
+            .transcript_since(context::current(), "no-such-id".to_string(), 0, None)
+            .await
+            .expect("rpc")
+            .expect("since");
+        assert!(since.is_none());
     }
 
     /// End-to-end `health()` over the wire against a real broker —

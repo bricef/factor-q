@@ -85,7 +85,7 @@ Localhost bind, no auth, on both the tarpc service and the dashboard's HTTP port
 - **tarpc internal, HTTP at the edge** — over a direct HTTP endpoint on the daemon, for the typed contract, the decoupling, and the smaller in-daemon surface. (Discussed 2026-07-10.)
 - **Read service in-daemon** — over a separate reader process, because tarpc shrinks the in-daemon surface enough that the shared-process risk is bounded and acceptable, and it avoids duplicating the DB handle and NATS probe outside the runtime.
 - **Dashboard is a standalone binary and a BFF** — separate crash domain (hard requirement: it must be able to crash without affecting the runtime), and BFF rather than browser-direct so the runtime surface stays strictly localhost.
-- **Polling, not streaming (v0)** — a naive `<meta refresh>` page is sufficient for an operator tool and defers the streaming half of ADR-0006 entirely.
+- **Polling, not streaming (v0)** — a naive `<meta refresh>` page is sufficient for an operator tool and defers the streaming half of ADR-0006 entirely. **Superseded for the transcript page (2026-07-13):** the live transcript streams over SSE — datastar (v1.0.0, vendored, MIT, served from the dashboard binary) patches new turns in place, fed by cursor-indexed `transcript_since` reads over tarpc at 1s; the run's `Outcome` entry closes the stream, and no-JS browsers fall back to a `<noscript>` meta-refresh. Every other page keeps plain meta-refresh polling.
 - **No Q, no writes, no auth, no multi-agent trace (v0)** — see Non-goals; each is a deliberate cut, not an oversight.
 
 ## Open questions
