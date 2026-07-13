@@ -1,0 +1,26 @@
+# TLS + basic-auth front for the fq dogfood operator dashboard (#105).
+#
+# The dashboard and the runtime's read service both refuse non-loopback
+# binds; this proxy is the single public door. TLS-only by owner
+# decision: no plain-HTTP listener — certificates come via the
+# TLS-ALPN-01 challenge on :443, :80 stays closed, and a non-TLS
+# connection is refused outright, never redirected.
+#
+# Credentials come from ../.secrets/caddy.env (DASH_USER, DASH_HASH —
+# generate the bcrypt hash with `docker run --rm caddy:2 caddy
+# hash-password`), injected by docker-compose as env vars.
+{
+	auto_https disable_redirects
+}
+
+dev.lambda.works {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	basic_auth {
+		{$DASH_USER} {$DASH_HASH}
+	}
+	reverse_proxy 127.0.0.1:9472
+}

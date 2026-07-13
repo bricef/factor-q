@@ -75,8 +75,15 @@ since only launch reads the env file.
 
 The operator dashboard (read-only web view, #105) rides in the bundle:
 enable `[read_service]` in `fq.toml`, restart the daemon, then
-`setsid ./current/dashboard.sh >> logs/dashboard.log 2>&1 </dev/null &`
-and tunnel to `127.0.0.1:9472`. Not yet deploy-managed — restart it
+`setsid ./current/dashboard.sh >> logs/dashboard.log 2>&1 </dev/null &`.
+Reach it via SSH tunnel to `127.0.0.1:9472`, or through the public
+door: the infra compose runs Caddy serving `https://dev.lambda.works`
+(basic-auth; TLS-only — plain HTTP is refused, not redirected; the
+dashboard itself stays loopback-bound). One-time setup: write
+`.secrets/caddy.env` (chmod 600) containing `DASH_USER=<user>` and
+`DASH_HASH=<bcrypt>` (hash via `docker run --rm caddy:2 caddy
+hash-password`), then `docker compose -f infra/docker-compose.yml up
+-d`. Neither process is deploy-managed yet — restart `dashboard.sh`
 manually after a deploy.
 
 Not built yet, by design (see #102): health-gate + auto-rollback after
