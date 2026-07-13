@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use fq_tools::Tool;
 use fq_tools::builtin::{
-    ExecTool, FileListTool, FileReadTool, FileSearchTool, FileWriteTool, SelfInspectTool,
+    ExecConfig, ExecTool, FileListTool, FileReadTool, FileSearchTool, FileWriteTool,
+    SelfInspectTool,
 };
 
 /// Number of tools registered by [`ToolRegistry::with_builtins`].
@@ -37,14 +38,25 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// Create a registry with every built-in tool pre-registered.
+    /// Create a registry with every built-in tool pre-registered, using
+    /// the default `exec` configuration ([`ExecConfig::default`]). For a
+    /// daemon that must honour `[tools.exec]` timeouts, use
+    /// [`with_builtins_exec`](Self::with_builtins_exec) instead.
     pub fn with_builtins() -> Self {
+        Self::with_builtins_exec(ExecConfig::default())
+    }
+
+    /// Like [`with_builtins`](Self::with_builtins), but registers the
+    /// `exec` tool with an explicit [`ExecConfig`] — the seam that lets
+    /// the runtime thread `[tools.exec]` timeouts from `fq.toml` into the
+    /// registered tool. Every other built-in is identical.
+    pub fn with_builtins_exec(exec: ExecConfig) -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(FileReadTool::new()));
         registry.register(Arc::new(FileListTool::new()));
         registry.register(Arc::new(FileSearchTool::new()));
         registry.register(Arc::new(FileWriteTool::new()));
-        registry.register(Arc::new(ExecTool::new()));
+        registry.register(Arc::new(ExecTool::with_config(exec)));
         registry.register(Arc::new(SelfInspectTool::new()));
         registry
     }
@@ -115,6 +127,22 @@ mod tests {
         assert!(reg.get("file_search").is_some());
         assert!(reg.get("exec").is_some());
         assert!(reg.get("self_inspect").is_some());
+        assert_eq!(reg.len(), BUILTIN_TOOL_COUNT);
+    }
+
+    #[test]
+    fn with_builtins_exec_registers_same_tool_set() {
+        // An explicit exec config registers the identical built-in set —
+        // only the exec tool's timeouts differ (not observable through
+        // the Tool trait, so covered by exec.rs / config.rs tests).
+        use fq_tools::builtin::ExecConfig;
+        use std::time::Duration;
+        let reg = ToolRegistry::with_builtins_exec(ExecConfig {
+            default_timeout: Duration::from_secs(120),
+            max_timeout: Duration::from_secs(600),
+            ..ExecConfig::default()
+        });
+        assert!(reg.get("exec").is_some());
         assert_eq!(reg.len(), BUILTIN_TOOL_COUNT);
     }
 

@@ -151,3 +151,15 @@ models = ["claude-haiku-4-5"]
 # proportional to the number of rows past the cutoff each tick,
 # so a shorter interval just means smaller per-tick batches.
 # sweep_interval_seconds = 3600
+
+[tools.exec]
+# Timeouts for the built-in `exec` tool. Raise these for agents that run
+# long builds/test suites (e.g. a full `just ci`); a call that exceeds
+# the timeout is killed and returned as an error with partial output.
+#
+# Timeout applied when a call doesn't set its own `timeout_secs`. Default 120.
+# default_timeout_secs = 120
+#
+# Hard ceiling on any single call. A caller-supplied `timeout_secs` above
+# this is clamped down (not rejected). Default 600.
+# max_timeout_secs = 600
