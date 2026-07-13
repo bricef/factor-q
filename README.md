@@ -15,6 +15,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 ## Documentation
 
 - [Status](STATUS.md) — one screen: what runs today, where we are, what's next
+- [Security posture](SECURITY.md) — current security limitations and vulnerability reporting
 - [Quickstart](QUICKSTART.md) — clone to running agent in under ten minutes
 - [Vision](VISION.md) — what factor-q is and why it exists
 - [Architecture](ARCHITECTURE.md) — core subsystems and implementation
@@ -107,7 +108,7 @@ mkdir my-project && cd my-project
 just fq init                            # writes fq.toml, agents/, sample
 export ANTHROPIC_API_KEY='sk-ant-...'
 just fq trigger sample-agent "Hello."   # run the agent
-just fq events tail                     # (another terminal) watch the events
+just fq events tail                     # (another terminal) watch events
 ```
 
 For development setup and test tiers, see [CONTRIBUTING.md](CONTRIBUTING.md).
