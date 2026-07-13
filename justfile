@@ -89,10 +89,11 @@ go-ci:
 #
 # Why a script body instead of `ci: lint-docs check-links rust-ci go-ci`:
 # recipe *dependencies* run before the body, so a dependency chain cannot be
-# timed phase-by-phase. The body below invokes each phase explicitly, wrapped
-# in a stopwatch, preserving the original checks, their order, and fail-fast
-# (the first failing phase stops the run and sets the exit code). The summary
-# is printed on success AND on failure, via an EXIT trap.
+# timed phase-by-phase. The body sources the small timing framework in
+# scripts/ci-timing.sh and invokes each phase explicitly through its
+# `run_phase`, wrapped in a stopwatch, preserving the original checks, their
+# order, and fail-fast (the first failing phase stops the run and sets the exit
+# code). The summary is printed on success AND on failure, via an EXIT trap.
 #
 # compile vs. test: each Rust suite is split so the operator's main question —
 # "is a slow run compile-bound or test-bound?" — is answered. "compile
@@ -112,66 +113,29 @@ go-ci:
 ci:
     #!/usr/bin/env bash
     set -uo pipefail
-    t_ci_start=$(date +%s)
-    declare -a T_LABEL=() T_VAL=()
+    source {{justfile_directory()}}/scripts/ci-timing.sh
+    # -- project state + teardown hook (the generic timing framework is sourced
+    #    above; only the NATS lifecycle below is factor-q-specific) --
     nats_owned=0
-    failed_label=""
-    phase_no=0
-    # -- helpers --
-    record() { T_LABEL+=("$1"); T_VAL+=("$2"); }
-    repeat() { local n=$1 ch=$2 out= i; for (( i=0; i<n; i++ )); do out="$out$ch"; done; printf '%s' "$out"; }
-    human() {
-        local s=$1
-        if   [ "$s" -ge 3600 ]; then printf '%dh %dm %ds' $((s/3600)) $(((s%3600)/60)) $((s%60))
-        elif [ "$s" -ge 60   ]; then printf '%dm %ds' $((s/60)) $((s%60))
-        else                         printf '%ds' "$s"; fi
-    }
-    print_summary() {
-        local total=$(( $(date +%s) - t_ci_start )) w=5 i n
-        if [ "${#T_LABEL[@]}" -gt 0 ]; then
-            for i in "${T_LABEL[@]}"; do [ "${#i}" -gt "$w" ] && w=${#i}; done
-        fi
-        printf '\n── CI timing summary %s\n' "$(repeat $((w + 2)) '─')"
-        n=${#T_LABEL[@]}
-        for (( i=0; i<n; i++ )); do
-            printf '  %s %s %s\n' "${T_LABEL[$i]}" "$(repeat $(( w - ${#T_LABEL[$i]} + 3 )) '.')" "${T_VAL[$i]}"
-        done
-        printf '  %s\n' "$(repeat $((w + 5)) '─')"
-        printf '  TOTAL %s %s\n' "$(repeat $(( w - 5 + 3 )) '.')" "$(human "$total")"
-        [ -n "$failed_label" ] && printf '\n  x FAILED at phase: %s (exit non-zero)\n' "$failed_label"
-        return 0
-    }
-    on_exit() {
-        local rc=$?
-        # safety net: a phase failed while we still held a broker we started —
-        # tear it down (timed) so a failed run never leaks it.
+    # Safety net, run inside the EXIT trap (success or failure) before the
+    # summary: if a phase failed while we still held a broker we started, tear
+    # it down (timed) so a failed run never leaks it.
+    ci_cleanup() {
         if [ "$nats_owned" = "1" ]; then
             local t0=$(date +%s)
             just infra-down >/dev/null 2>&1 || true
             record "NATS down" "$(human $(( $(date +%s) - t0 )))"
             nats_owned=0
         fi
-        print_summary
-        exit "$rc"
     }
-    trap on_exit EXIT
-    run_phase() {
-        local label="$1"; shift
-        phase_no=$((phase_no + 1))
-        printf '\n==> [%d] %s\n' "$phase_no" "$label"
-        local t0=$(date +%s) rc=0
-        "$@" || rc=$?
-        record "$label" "$(human $(( $(date +%s) - t0 )))"
-        if [ "$rc" -ne 0 ]; then failed_label="$label"; exit "$rc"; fi
-    }
+    ci_timing_init
     # -- phase bodies the generic runner cannot take as argv --
     compile_runtime() { ( cd {{runtime_dir}} && just fmt-check && just lint && just doc && cargo build --tests ); }
     test_runtime()    { ( cd {{runtime_dir}} && just test ); }
     compile_store()   { ( cd {{store_dir}}   && just fmt-check && just lint && just doc && cargo build --tests --features cli,service ); }
     test_store()      { ( cd {{store_dir}}   && just test ); }
     nats_up() {
-        phase_no=$((phase_no + 1))
-        printf '\n==> [%d] NATS up\n' "$phase_no"
+        phase_header "NATS up"
         local t0=$(date +%s)
         if curl -sf http://127.0.0.1:8222/healthz >/dev/null 2>&1; then
             record "NATS up" "$(human $(( $(date +%s) - t0 ))) (already warm)"
@@ -185,8 +149,7 @@ ci:
         record "NATS up" "$(human $(( $(date +%s) - t0 )))"
     }
     nats_down() {
-        phase_no=$((phase_no + 1))
-        printf '\n==> [%d] NATS down\n' "$phase_no"
+        phase_header "NATS down"
         local t0=$(date +%s)
         if [ "$nats_owned" = "1" ]; then
             just infra-down >/dev/null 2>&1 || true
