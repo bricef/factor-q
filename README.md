@@ -77,29 +77,25 @@ factor-q/
 
 ## Install
 
-Download a pre-built `fq` binary (Linux x86_64/aarch64, Apple Silicon macOS):
+Until the first release, build factor-q from source, as in the [Quickstart](QUICKSTART.md):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/install.sh | sh
+git clone https://github.com/bricef/factor-q.git
+cd factor-q
+just up
 ```
 
-Or build from source with the Rust toolchain:
+This starts NATS+JetStream in Docker and builds the `fq` CLI. Use it through `just fq`:
 
 ```sh
-cargo install --git https://github.com/bricef/factor-q fq-cli
-```
-
-Then scaffold a project — `fq init` writes a `docker-compose.yml`, so a NATS broker is one command away:
-
-```sh
-fq init                                  # fq.toml, agents/, docker-compose.yml
-docker compose up -d                     # NATS (JetStream)
+mkdir my-project && cd my-project
+just fq init                            # writes fq.toml, agents/, sample agent
 export ANTHROPIC_API_KEY='sk-ant-...'
-fq trigger sample-agent "Hello."         # run the agent
-fq events tail                           # (another terminal) watch events
+just fq trigger sample-agent "Hello."   # run the agent
+just fq events tail                     # (another terminal) watch events
 ```
 
-On macOS, if you download the tarball in a browser rather than via the installer, clear the quarantine flag once: `xattr -d com.apple.quarantine ./fq`.
+Pre-built binary installs via `install.sh` will be available after the first release.
 
 ## Getting started
 
