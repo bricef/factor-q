@@ -71,6 +71,19 @@ pub const ALL_TRIGGERS_SUBJECT: &str = "fq.trigger.>";
 /// silently ignores on existing deployments.
 pub const NATS_DEFAULT_MAX_ACK_PENDING: i64 = 1000;
 
+/// Maximum attempts for a trigger that is NAK'd before it reaches its
+/// durable WAL start. JetStream emits a MAX_DELIVERIES advisory after this
+/// limit instead of redelivering a poison trigger forever.
+pub const TRIGGER_MAX_DELIVER: i64 = 3;
+
+/// Delay requested for a transient pre-WAL retry. A delayed NAK avoids a
+/// persistently unavailable dependency turning into a tight redelivery loop.
+pub const TRIGGER_REDELIVERY_DELAY: Duration = Duration::from_secs(1);
+
+/// JetStream advisory emitted when a consumer exhausts `max_deliver`.
+pub const TRIGGER_MAX_DELIVERIES_ADVISORY_SUBJECT: &str =
+    "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>";
+
 /// Control subject a running `fq run` daemon subscribes to for a
 /// hot-reload of agent definitions. Published by `fq reload`
 /// (fire-and-forget, core NATS — deliberately NOT one of the
@@ -445,6 +458,10 @@ impl EventBus {
                     // concurrency bound (see NATS_DEFAULT_MAX_ACK_PENDING
                     // for the floor rationale).
                     max_ack_pending,
+                    // A transient failure before its first WAL write is
+                    // retried, but must not consume capacity forever when
+                    // the dependency never recovers.
+                    max_deliver: TRIGGER_MAX_DELIVER,
                     ..Default::default()
                 },
             )
@@ -567,6 +584,18 @@ impl EventBus {
             .await
             .map_err(|err| BusError::Stream(err.to_string()))?;
         Ok(consumer)
+    }
+
+    /// Subscribe to JetStream's max-deliveries advisories. These advisories
+    /// are the terminal, operator-visible dead-letter signal for triggers
+    /// that exhaust [`TRIGGER_MAX_DELIVER`].
+    pub async fn subscribe_trigger_max_deliveries_advisories(
+        &self,
+    ) -> Result<async_nats::Subscriber, BusError> {
+        self.client
+            .subscribe(TRIGGER_MAX_DELIVERIES_ADVISORY_SUBJECT)
+            .await
+            .map_err(|err| BusError::Subscribe(err.to_string()))
     }
 
     /// Subscribe to events matching a subject filter.
@@ -793,6 +822,72 @@ mod tests {
 
         assert_eq!(received.envelope.event_id, expected_id);
         assert_eq!(received.envelope.agent_id.as_str(), agent_id);
+    }
+
+    /// A transient trigger is delivered only through the configured retry
+    /// bound. JetStream then emits the MAX_DELIVERIES advisory, providing the
+    /// terminal dead-letter signal consumed by the dispatcher.
+    #[tokio::test]
+    async fn exhausted_trigger_stops_redelivering_and_emits_advisory() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        let bus = EventBus::connect(&url).await.expect("connect to NATS");
+        let agent_id = format!("max-deliver-{}", Uuid::now_v7().simple());
+        let consumer_name = format!("max-deliver-test-{}", Uuid::now_v7().simple());
+        let mut advisory = bus
+            .subscribe_trigger_max_deliveries_advisories()
+            .await
+            .expect("subscribe to max-deliveries advisories");
+        let mut consumer = bus
+            .trigger_consumer_with_filter(
+                &consumer_name,
+                &trigger_subject(&agent_id),
+                NATS_DEFAULT_MAX_ACK_PENDING,
+            )
+            .await
+            .expect("consumer");
+        assert_eq!(
+            consumer
+                .info()
+                .await
+                .expect("consumer info")
+                .config
+                .max_deliver,
+            TRIGGER_MAX_DELIVER
+        );
+
+        bus.publish_trigger(&agent_id, &serde_json::json!({"input": "poison"}))
+            .await
+            .expect("publish trigger");
+        let mut messages = consumer.messages().await.expect("messages");
+        for _ in 0..TRIGGER_MAX_DELIVER {
+            let msg = tokio::time::timeout(Duration::from_secs(5), messages.next())
+                .await
+                .expect("delivery before max_deliver")
+                .expect("stream open")
+                .expect("message ok");
+            msg.ack_with(jetstream::AckKind::Nak(Some(Duration::from_millis(25))))
+                .await
+                .expect("delayed NAK");
+        }
+
+        let exhausted = tokio::time::timeout(Duration::from_secs(5), advisory.next())
+            .await
+            .expect("max-deliveries advisory")
+            .expect("advisory subscription open");
+        assert!(
+            String::from_utf8_lossy(&exhausted.payload).contains(&consumer_name),
+            "advisory must identify the exhausted trigger consumer"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), messages.next())
+                .await
+                .is_err(),
+            "trigger must not redeliver after max_deliver"
+        );
     }
 
     #[test]

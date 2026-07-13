@@ -50,7 +50,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
-use crate::bus::{BusError, EventBus, agent_id_from_trigger_subject};
+use crate::bus::{BusError, EventBus, TRIGGER_REDELIVERY_DELAY, agent_id_from_trigger_subject};
 use crate::events::TriggerSource;
 use crate::llm::LlmClient;
 use crate::worker::{DrainState, DurableStart, ExecutorError, Worker};
@@ -148,6 +148,24 @@ impl TriggerDispatcher {
         // `get_or_create` won't rewrite an existing consumer's config.
         let max_ack_pending =
             (self.max_concurrent as i64 * 2).max(crate::bus::NATS_DEFAULT_MAX_ACK_PENDING);
+        // JetStream publishes a MAX_DELIVERIES advisory when a transient
+        // trigger exhausts the bounded retry policy. Keep a live core-NATS
+        // subscription for the lifetime of the dispatcher so exhaustion is
+        // an explicit terminal signal rather than a silent disappearance.
+        let mut exhausted = self
+            .bus
+            .subscribe_trigger_max_deliveries_advisories()
+            .await?;
+        let advisory_task = tokio::spawn(async move {
+            while let Some(advisory) = exhausted.next().await {
+                warn!(
+                    subject = %advisory.subject,
+                    advisory = %String::from_utf8_lossy(&advisory.payload),
+                    "trigger delivery limit exhausted; operator action required"
+                );
+            }
+        });
+
         let consumer = match filter_subject {
             Some(filter) => {
                 self.bus
@@ -271,6 +289,8 @@ impl TriggerDispatcher {
             log_invocation_task(joined);
         }
 
+        advisory_task.abort();
+        let _ = advisory_task.await;
         info!("trigger dispatcher stopped");
         Ok(())
     }
@@ -446,8 +466,8 @@ impl TriggerDispatcher {
         //   poison trigger would loop under the consumer's unbounded
         //   redelivery.
         //
-        // Redelivery is unbounded today; bounding it (`max_deliver`) and
-        // dead-lettering exhausted triggers is tracked in #49.
+        // JetStream bounds these retries at TRIGGER_MAX_DELIVER and emits a
+        // MAX_DELIVERIES advisory, which the dispatcher logs for operators.
         if !acked {
             match &result {
                 Err(err) if err.is_transient() => {
@@ -484,13 +504,14 @@ impl TriggerDispatcher {
         }
     }
 
-    /// NAK a trigger so JetStream redelivers it after the ack-wait — used
-    /// when an invocation fails *before its first WAL write* with a
-    /// transient error, so the otherwise-lost run is retried. Redelivery
-    /// is unbounded today; bounding it + dead-lettering is tracked in #49.
+    /// NAK a trigger with a short delay when an invocation fails before its
+    /// first WAL write with a transient error. JetStream stops at the
+    /// consumer's bounded max-delivery policy and emits an advisory.
     async fn nak(&self, msg: &async_nats::jetstream::Message, context: &str) {
         if let Err(err) = msg
-            .ack_with(async_nats::jetstream::AckKind::Nak(None))
+            .ack_with(async_nats::jetstream::AckKind::Nak(Some(
+                TRIGGER_REDELIVERY_DELAY,
+            )))
             .await
         {
             error!(
