@@ -100,14 +100,28 @@ impl ProjectionStore {
         {
             sqlx::query(statement).execute(&self.pool).await?;
         }
-        // `CREATE TABLE IF NOT EXISTS` does not add columns to existing
-        // projection databases, so apply these additive migrations separately.
+        // `CREATE TABLE IF NOT EXISTS` cannot add a column to an existing
+        // table, so add these additively. Existence-checked via
+        // `pragma_table_info` (deterministic and idempotent) rather than
+        // matching driver error text.
+        //
+        // FORWARD-ONLY: the projection is not reprojected here, so rows
+        // written before this migration read NULL (0 through the
+        // `COALESCE(SUM(...))` aggregation) even though the source
+        // `llm.response` events carry the counts. `fq costs` therefore
+        // reports cache usage only from this migration forward. A proper
+        // projection-versioning + reproject story backfills history —
+        // tracked in #139 (the phase-1 inline-schema comment above is
+        // now overdue).
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('events')")
+                .fetch_all(&self.pool)
+                .await?;
         for column in ["cache_read_tokens", "cache_write_tokens"] {
-            let statement = format!("ALTER TABLE events ADD COLUMN {column} INTEGER");
-            if let Err(err) = sqlx::query(&statement).execute(&self.pool).await {
-                if !err.to_string().contains("duplicate column name") {
-                    return Err(err.into());
-                }
+            if !columns.iter().any(|c| c == column) {
+                sqlx::query(&format!("ALTER TABLE events ADD COLUMN {column} INTEGER"))
+                    .execute(&self.pool)
+                    .await?;
             }
         }
         Ok(())
