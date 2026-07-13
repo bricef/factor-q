@@ -15,11 +15,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fq_tools::Tool;
-use fq_tools::builtin::{ExecTool, FileReadTool, FileWriteTool, SelfInspectTool};
+use fq_tools::builtin::{
+    ExecTool, FileListTool, FileReadTool, FileSearchTool, FileWriteTool, SelfInspectTool,
+};
 
 /// Number of tools registered by [`ToolRegistry::with_builtins`].
 /// Useful for callers that report "MCP tools = total - builtins".
-pub const BUILTIN_TOOL_COUNT: usize = 4;
+pub const BUILTIN_TOOL_COUNT: usize = 6;
 
 use crate::events::ToolSchema;
 
@@ -39,6 +41,8 @@ impl ToolRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(FileReadTool::new()));
+        registry.register(Arc::new(FileListTool));
+        registry.register(Arc::new(FileSearchTool));
         registry.register(Arc::new(FileWriteTool::new()));
         registry.register(Arc::new(ExecTool::new()));
         registry.register(Arc::new(SelfInspectTool::new()));
@@ -107,6 +111,8 @@ mod tests {
         let reg = ToolRegistry::with_builtins();
         assert!(reg.get("file_read").is_some());
         assert!(reg.get("file_write").is_some());
+        assert!(reg.get("file_list").is_some());
+        assert!(reg.get("file_search").is_some());
         assert!(reg.get("exec").is_some());
         assert!(reg.get("self_inspect").is_some());
         assert_eq!(reg.len(), BUILTIN_TOOL_COUNT);

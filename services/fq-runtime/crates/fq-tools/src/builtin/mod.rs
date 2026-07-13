@@ -1,10 +1,12 @@
 //! Built-in tool implementations.
 
+pub mod discovery;
 pub mod exec;
 pub mod file_read;
 pub mod file_write;
 pub mod self_inspect;
 
+pub use discovery::{FileListTool, FileSearchTool};
 pub use exec::{ExecConfig, ExecTool};
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
