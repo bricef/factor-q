@@ -86,6 +86,19 @@ pub trait ReadService {
         limit: i64,
     ) -> Result<Vec<InvocationSummaryView>, WireError>;
     async fn invocation(id: String) -> Result<Option<InvocationDetailView>, WireError>;
+    /// The payload-bearing transcript for one invocation, as its
+    /// canonical JSON array of `transcript::TranscriptEntry`.
+    /// JSON-in-a-String rather than typed structs on the wire because
+    /// `TranscriptEntry` is internally-tagged serde, which bincode
+    /// cannot carry (the `StreamHealth` lesson) — and re-tagging would
+    /// break the CLI's shipped `--format json` shape. One canonical
+    /// JSON shape everywhere. `truncate_bytes` caps each payload chunk
+    /// server-side (`None` = full), so big transcripts don't cross the
+    /// wire to render a summary page.
+    async fn transcript(
+        id: String,
+        truncate_bytes: Option<u64>,
+    ) -> Result<Option<String>, WireError>;
     async fn events(
         agent: Option<String>,
         event_type: Option<String>,
@@ -188,6 +201,23 @@ impl ReadService for ReadServer {
         id: String,
     ) -> Result<Option<InvocationDetailView>, WireError> {
         Ok(self.views.invocation(&id).await?)
+    }
+
+    async fn transcript(
+        self,
+        _: context::Context,
+        id: String,
+        truncate_bytes: Option<u64>,
+    ) -> Result<Option<String>, WireError> {
+        let Some(mut entries) = self.views.transcript(&id).await? else {
+            return Ok(None);
+        };
+        if let Some(max) = truncate_bytes {
+            crate::transcript::truncate_entries(&mut entries, max as usize);
+        }
+        let json = serde_json::to_string(&entries)
+            .map_err(|e| WireError::Message(format!("transcript serialisation: {e}")))?;
+        Ok(Some(json))
     }
 
     async fn events(

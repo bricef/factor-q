@@ -6,6 +6,7 @@
 
 use fq_runtime::health::{ConsumerHealth, StreamHealth};
 use fq_runtime::read_service::HealthReport;
+use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
 use fq_runtime::views::{
     ActiveInvocationView, CostReport, EventView, InvocationDetailView, InvocationSummaryView,
 };
@@ -54,6 +55,11 @@ th {{ background: #eee; }}
 nav a {{ margin-right: 1rem; }}
 .ok {{ color: #060; }} .warn {{ color: #a60; }} .bad {{ color: #a00; }}
 .muted {{ color: #888; }}
+pre {{ background: #f6f6f6; border: 1px solid #ddd; padding: 0.5rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3rem 0; max-width: 72rem; }}
+details {{ margin: 0.3rem 0; }} summary {{ cursor: pointer; color: #555; }}
+.turn {{ border-left: 3px solid #ccc; padding-left: 0.8rem; margin: 1.2rem 0; }}
+.turn h3 {{ font-size: 1rem; margin: 0.2rem 0; }}
+.turn.err {{ border-left-color: #a00; }}
 </style>
 </head><body>
 <nav><a href="/">health</a><a href="/invocations">invocations</a><a href="/events">events</a><a href="/costs">costs</a></nav>
@@ -221,6 +227,132 @@ pub fn health(report: &HealthReport, now_ms: i64) -> String {
     b
 }
 
+/// The transcript page body: the step-by-step conversation — prompt,
+/// assistant turns, tool results — with payloads. Every dynamic string
+/// is escaped: tool output is the first *attacker-influenced* content
+/// the dashboard renders (a tool result can contain arbitrary HTML).
+/// Tool output is shown verbatim and NOT redacted (#72) — the page
+/// says so.
+pub fn transcript(
+    entries: &[TranscriptEntry],
+    now_ms: i64,
+    full: bool,
+    invocation_id: &str,
+) -> String {
+    let mut b = String::new();
+    let toggle = if full {
+        format!(
+            r#"full payloads — <a href="/invocations/{}/transcript">truncated view</a>"#,
+            esc(invocation_id)
+        )
+    } else {
+        format!(
+            r#"payloads truncated per chunk — <a href="/invocations/{}/transcript?full=1">full view</a>"#,
+            esc(invocation_id)
+        )
+    };
+    b.push_str(&format!(
+        r#"<p class="muted">verbatim tool output, not redacted — may contain secrets (#72). {toggle} · <a href="/invocations/{}">detail</a></p>"#,
+        esc(invocation_id)
+    ));
+
+    for entry in entries {
+        match entry {
+            TranscriptEntry::Prompt {
+                timestamp_ms,
+                system,
+                user,
+            } => {
+                b.push_str(&format!(
+                    r#"<div class="turn"><h3>prompt <span class="muted">{}</span></h3>"#,
+                    esc(&age(*timestamp_ms, now_ms))
+                ));
+                if let Some(s) = system {
+                    b.push_str(&format!(
+                        "<details><summary>system prompt ({} bytes)</summary><pre>{}</pre></details>",
+                        s.len(),
+                        esc(s)
+                    ));
+                }
+                if let Some(u) = user {
+                    b.push_str(&format!("<pre>{}</pre>", esc(u)));
+                }
+                b.push_str("</div>");
+            }
+            TranscriptEntry::Assistant {
+                timestamp_ms,
+                model,
+                content,
+                tool_calls,
+                cost_usd,
+                is_error,
+            } => {
+                let err = matches!(is_error, Some(true));
+                let cost = cost_usd.map(|c| format!(" · ${c:.4}")).unwrap_or_default();
+                b.push_str(&format!(
+                    r#"<div class="turn{}"><h3>assistant · {}{} <span class="muted">{}</span>{}</h3>"#,
+                    if err { " err" } else { "" },
+                    esc(model),
+                    esc(&cost),
+                    esc(&age(*timestamp_ms, now_ms)),
+                    if err { r#" <span class="bad">error</span>"# } else { "" },
+                ));
+                if let Some(c) = content {
+                    b.push_str(&format!("<pre>{}</pre>", esc(c)));
+                }
+                for tc in tool_calls {
+                    b.push_str(&tool_call_html(tc));
+                }
+                b.push_str("</div>");
+            }
+            TranscriptEntry::ToolResult {
+                timestamp_ms,
+                tool_call_id,
+                tool_name,
+                parameters,
+                output,
+                is_error,
+            } => {
+                let err = matches!(is_error, Some(true));
+                b.push_str(&format!(
+                    r#"<div class="turn{}"><h3>tool result · {} <span class="muted">{} · {}</span>{}</h3>"#,
+                    if err { " err" } else { "" },
+                    esc(tool_name),
+                    esc(tool_call_id),
+                    esc(&age(*timestamp_ms, now_ms)),
+                    if err { r#" <span class="bad">error</span>"# } else { "" },
+                ));
+                let params = serde_json::to_string_pretty(parameters)
+                    .unwrap_or_else(|_| parameters.to_string());
+                b.push_str(&format!(
+                    "<details><summary>parameters</summary><pre>{}</pre></details>",
+                    esc(&params)
+                ));
+                match output {
+                    Some(o) => b.push_str(&format!("<pre>{}</pre>", esc(o))),
+                    None => b.push_str(r#"<p class="muted">(no output recorded)</p>"#),
+                }
+                b.push_str("</div>");
+            }
+        }
+    }
+    if entries.is_empty() {
+        b.push_str(r#"<p class="muted">no transcript entries.</p>"#);
+    }
+    b
+}
+
+fn tool_call_html(tc: &AssistantToolCall) -> String {
+    let params =
+        serde_json::to_string_pretty(&tc.parameters).unwrap_or_else(|_| tc.parameters.to_string());
+    format!(
+        r#"<p>→ tool call <b>{}</b> <span class="muted">{}</span></p><pre>{}</pre>"#,
+        esc(&tc.tool_name),
+        esc(&tc.tool_call_id),
+        esc(&params)
+    )
+}
+
 /// The "active right now" table: currently-executing invocations from
 /// the worker WAL. Renders to NOTHING when nothing is in flight — the
 /// page contract is that the section only exists when there is live
@@ -338,6 +470,10 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
         ));
     }
     b.push_str("</table>");
+    b.push_str(&format!(
+        r#"<p><a href="/invocations/{}/transcript">transcript →</a></p>"#,
+        esc(&d.invocation_id)
+    ));
 
     if let Some(live) = &d.live {
         b.push_str("<h2>Live execution</h2><table>");
@@ -480,6 +616,62 @@ mod tests {
         assert!(never.contains("never seen"));
         let seen = unreachable("127.0.0.1:9471", "refused", Some(0), 30_000);
         assert!(seen.contains("last seen 30s ago"));
+    }
+
+    /// Tool output is attacker-influenced content: markup in a payload
+    /// must render as text, never as HTML.
+    #[test]
+    fn transcript_escapes_hostile_payloads() {
+        let entries = vec![fq_runtime::transcript::TranscriptEntry::ToolResult {
+            timestamp_ms: 0,
+            tool_call_id: "tc-1".into(),
+            tool_name: "exec".into(),
+            parameters: serde_json::json!({"cmd": "<img src=x onerror=alert(1)>"}),
+            output: Some("<script>alert('pwned')</script>".into()),
+            is_error: Some(true),
+        }];
+        let html = transcript(&entries, 1_000, false, "inv-1");
+        assert!(!html.contains("<script>"), "raw script leaked: {html}");
+        assert!(html.contains("&lt;script&gt;"), "got: {html}");
+        assert!(!html.contains("<img"), "raw img leaked: {html}");
+        // Error results are visually flagged.
+        assert!(html.contains(r#"class="turn err""#), "got: {html}");
+        // Truncated view links to the full one.
+        assert!(
+            html.contains("/invocations/inv-1/transcript?full=1"),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn transcript_renders_all_entry_kinds() {
+        use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
+        let entries = vec![
+            TranscriptEntry::Prompt {
+                timestamp_ms: 0,
+                system: Some("sys".into()),
+                user: Some("do the thing".into()),
+            },
+            TranscriptEntry::Assistant {
+                timestamp_ms: 1_000,
+                model: "claude-opus-4-8".into(),
+                content: Some("on it".into()),
+                tool_calls: vec![AssistantToolCall {
+                    tool_call_id: "tc-1".into(),
+                    tool_name: "exec".into(),
+                    parameters: serde_json::json!({"command": "ls"}),
+                }],
+                cost_usd: Some(0.01),
+                is_error: Some(false),
+            },
+        ];
+        let html = transcript(&entries, 60_000, true, "inv-1");
+        assert!(html.contains("system prompt (3 bytes)"), "got: {html}");
+        assert!(html.contains("do the thing"));
+        assert!(html.contains("assistant · claude-opus-4-8"));
+        assert!(html.contains("tool call <b>exec</b>"));
+        // Full view links back to the truncated one.
+        assert!(html.contains(r#"href="/invocations/inv-1/transcript""#));
     }
 
     #[test]

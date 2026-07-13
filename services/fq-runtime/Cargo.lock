@@ -911,6 +911,7 @@ dependencies = [
  "clap",
  "fq-runtime",
  "http-body-util",
+ "serde_json",
  "tarpc",
  "tempfile",
  "tokio",

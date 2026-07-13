@@ -19,6 +19,9 @@ anyhow = "1"
 axum = "0.7"
 clap = { version = "4", features = ["derive", "env"] }
 tarpc = { version = "0.37", features = ["tokio1", "serde1", "serde-transport", "serde-transport-bincode", "tcp"] }
+# Decodes the transcript wire payload (canonical JSON — see
+# ReadService::transcript) and pretty-prints tool parameters.
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

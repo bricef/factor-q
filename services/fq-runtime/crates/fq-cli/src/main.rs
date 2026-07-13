@@ -22,8 +22,6 @@ use tracing::error;
 use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
-mod transcript;
-
 const DEFAULT_CONFIG_PATH: &str = "fq.toml";
 
 /// Merge `[providers.<name>.pricing]` overrides over the loaded LiteLLM
@@ -3431,7 +3429,7 @@ async fn invocation_transcript(
     format: TranscriptFormat,
     full: bool,
 ) -> anyhow::Result<()> {
-    use transcript::{
+    use fq_runtime::transcript::{
         DEFAULT_TRUNCATE_BYTES, assistant_entry, collect_transcript, dedup_key, render_pretty,
         snapshot_keys, tool_result_entry,
     };
