@@ -87,9 +87,9 @@ type TriggerPublisher interface {
 type Config struct {
 	Repo               string        // "owner/name", e.g. "bricef/factor-q"
 	TargetAgent        string        // the agent to trigger, e.g. "m0-issue-fix"
-	ReadyLabel         string        // the label that means "go", e.g. "ready"
-	InProgressLabel    string        // the label applied on trigger, e.g. "in-progress"
-	InReviewLabel      string        // applied when the agent completes (PR open), e.g. "in-review"
+	ReadyLabel         string        // the label that means "go", e.g. "status:ready"
+	InProgressLabel    string        // the label applied on trigger, e.g. "status:in-progress"
+	InReviewLabel      string        // applied when the agent completes (PR open), e.g. "status:in-review"
 	FailedLabel        string        // applied when retries are exhausted / a terminal failure, e.g. "failed"
 	DoneLabel          string        // applied when the proposed PR merges, e.g. "done"
 	PollInterval       time.Duration // >= MinPollInterval
@@ -142,7 +142,7 @@ type Watcher struct {
 }
 
 // pollOnce runs one poll cycle: list ready issues, plan, and for each
-// planned trigger relabel (ready -> in-progress) THEN publish. The
+// planned trigger relabel (status:ready -> status:in-progress) THEN publish. The
 // relabel-before-publish order is the dedup: a re-seen issue is no longer
 // ready. If the publish fails after the relabel, the claim is reverted
 // (in-progress -> ready) so the next poll retries, rather than stranding

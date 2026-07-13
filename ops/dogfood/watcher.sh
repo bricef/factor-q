@@ -7,8 +7,9 @@
 #
 # The process environment comes ONLY from $FQ_DOGFOOD/.secrets/env (which
 # must provide GH_TOKEN — see env.example for the rotation trade-off).
-# Labels / retries use the #15 defaults (ready -> in-progress ->
-# in-review/failed -> done).
+# Lifecycle labels use the status: convention (status:ready ->
+# status:in-progress -> status:in-review/status:failed -> status:done),
+# the watcher default; override per-label via GHW_*_LABEL in .secrets/env.
 set -eu
 
 FQ_DOGFOOD="${FQ_DOGFOOD:-$(cd "$(dirname "$0")/.." && pwd)}"
