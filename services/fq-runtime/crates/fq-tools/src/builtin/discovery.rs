@@ -45,9 +45,21 @@ fn default_limit() -> usize {
 #[derive(Debug, Default)]
 pub struct FileListTool;
 
+impl FileListTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 /// Searches text files below a readable directory and returns line-level hits.
 #[derive(Debug, Default)]
 pub struct FileSearchTool;
+
+impl FileSearchTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 fn validate_root(ctx: &ToolContext<'_>, root: &str) -> Result<PathBuf, ToolError> {
     let root = ctx.sandbox.check_read(Path::new(root))?;

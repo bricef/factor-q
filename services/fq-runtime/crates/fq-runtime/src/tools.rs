@@ -41,8 +41,8 @@ impl ToolRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(FileReadTool::new()));
-        registry.register(Arc::new(FileListTool));
-        registry.register(Arc::new(FileSearchTool));
+        registry.register(Arc::new(FileListTool::new()));
+        registry.register(Arc::new(FileSearchTool::new()));
         registry.register(Arc::new(FileWriteTool::new()));
         registry.register(Arc::new(ExecTool::new()));
         registry.register(Arc::new(SelfInspectTool::new()));
