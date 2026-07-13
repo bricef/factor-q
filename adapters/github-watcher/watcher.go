@@ -77,10 +77,22 @@ type ReviewSource interface {
 }
 
 // TriggerPublisher publishes a trigger to a factor-q agent per the trigger
-// wire contract. payload is the opaque string handed to the agent; the
-// implementation JSON-encodes it as the message body.
+// wire contract. payload follows the trigger-payload convention.
 type TriggerPublisher interface {
-	Publish(ctx context.Context, agentID, payload string) error
+	Publish(ctx context.Context, agentID string, payload TriggerPayload) error
+}
+
+// TriggerPayload is the recommended semantic payload for task-oriented
+// triggers. Source-specific fields identify the originating GitHub issue.
+type TriggerPayload struct {
+	Task         string   `json:"task"`
+	Refs         []string `json:"refs"`
+	Constraints  []string `json:"constraints"`
+	DoneCriteria []string `json:"done_criteria"`
+	GitHub       struct {
+		Repo  string `json:"repo"`
+		Issue int    `json:"issue"`
+	} `json:"github"`
 }
 
 // Config is the watcher's configuration.
@@ -95,13 +107,13 @@ type Config struct {
 	PollInterval       time.Duration // >= MinPollInterval
 	MaxTriggersPerPoll int           // concurrency guard: at most N triggers per poll (0 = unbounded)
 	MaxRetries         int           // bounded auto-retry budget for a transiently-failed issue
-	TaskTemplate       string        // payload template; a single %d is the issue number
+	TaskTemplate       string        // task template; a single %d is the issue number
 }
 
 // PlannedTrigger is a decision to trigger the agent for one issue.
 type PlannedTrigger struct {
 	Issue   int
-	Payload string
+	Payload TriggerPayload
 }
 
 // planTriggers is pure: given the issues currently labelled ready and the
@@ -124,10 +136,23 @@ func planTriggers(issues []Issue, cfg Config) []PlannedTrigger {
 	for _, iss := range eligible {
 		planned = append(planned, PlannedTrigger{
 			Issue:   iss.Number,
-			Payload: fmt.Sprintf(cfg.TaskTemplate, iss.Number),
+			Payload: newTriggerPayload(cfg, iss.Number),
 		})
 	}
 	return planned
+}
+
+// newTriggerPayload builds the shared task-oriented payload convention.
+func newTriggerPayload(cfg Config, issue int) TriggerPayload {
+	payload := TriggerPayload{
+		Task:         fmt.Sprintf(cfg.TaskTemplate, issue),
+		Refs:         []string{fmt.Sprintf("https://github.com/%s/issues/%d", cfg.Repo, issue)},
+		Constraints:  []string{"Make the smallest change that satisfies the issue acceptance criteria."},
+		DoneCriteria: []string{"Open a reviewable pull request that closes the issue."},
+	}
+	payload.GitHub.Repo = cfg.Repo
+	payload.GitHub.Issue = issue
+	return payload
 }
 
 // Watcher polls an IssueSource and triggers via a TriggerPublisher. If

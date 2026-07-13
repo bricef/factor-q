@@ -53,6 +53,20 @@ func TestDecodeUnwrapsAdjacentlyTaggedTriggered(t *testing.T) {
 	}
 }
 
+func TestDecodeConventionPayloadUsesGitHubIssue(t *testing.T) {
+	s := &NatsOutcomeSource{taskTemplate: "issue #%d"}
+	data := wireEventJSON(t, "inv-10", "triggered", map[string]any{
+		"trigger_payload": map[string]any{
+			"task":   "issue #50",
+			"github": map[string]any{"repo": "owner/repo", "issue": 50},
+		},
+	})
+	ev, ok := s.decode(&nats.Msg{Subject: "fq.agent.m0-issue-fix.triggered", Data: data})
+	if !ok || ev.Issue != 50 {
+		t.Fatalf("convention payload decode = %+v ok=%v, want issue 50", ev, ok)
+	}
+}
+
 func TestDecodeCompletedCarriesInvocationID(t *testing.T) {
 	s := &NatsOutcomeSource{taskTemplate: "issue #%d"}
 	data := wireEventJSON(t, "inv-3", "completed", map[string]any{})

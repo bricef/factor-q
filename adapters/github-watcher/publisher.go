@@ -35,11 +35,11 @@ func NewNatsTriggerPublisher(url string) (*NatsTriggerPublisher, error) {
 
 // Publish publishes a trigger for agentID with the given payload, per the
 // wire contract: subject `fq.trigger.<agentID>`, a JSON-value body (here a
-// JSON string), awaiting the JetStream ack for durability.
-func (p *NatsTriggerPublisher) Publish(ctx context.Context, agentID, payload string) error {
+// JSON object), awaiting the JetStream ack for durability.
+func (p *NatsTriggerPublisher) Publish(ctx context.Context, agentID string, payload TriggerPayload) error {
 	subject := triggerSubject(agentID)
-	// The contract's body is a JSON value; a task payload is a JSON
-	// string. json.Marshal of a string produces exactly that.
+	// The contract's body is a JSON value; the convention payload is an
+	// object. json.Marshal produces exactly that.
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)

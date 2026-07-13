@@ -44,8 +44,7 @@ type eventEnvelope struct {
 }
 
 // triggeredPayload is the subset of the `triggered` payload the watcher
-// reads: the opaque trigger payload, which for the M0 fleet is the JSON
-// string rendered from the task template.
+// reads: the convention payload, which carries source-specific GitHub fields.
 type triggeredPayload struct {
 	TriggerPayload json.RawMessage `json:"trigger_payload"`
 }
@@ -133,11 +132,13 @@ func (s *NatsOutcomeSource) decode(msg *nats.Msg) (OutcomeEvent, bool) {
 }
 
 // issueFromTriggerPayload recovers the issue number from a `triggered`
-// event's trigger_payload. The payload is an opaque JSON value; for the M0
-// fleet it is a JSON string (the rendered task). If it decodes to a string,
-// the template matcher recovers the number; otherwise the number is unknown
-// (0).
+// event's convention payload. It accepts the watcher's former JSON-string
+// shape while in-flight legacy invocations complete.
 func issueFromTriggerPayload(template string, raw json.RawMessage) int {
+	var payload TriggerPayload
+	if err := json.Unmarshal(raw, &payload); err == nil && payload.GitHub.Issue > 0 {
+		return payload.GitHub.Issue
+	}
 	var task string
 	if err := json.Unmarshal(raw, &task); err != nil {
 		return 0

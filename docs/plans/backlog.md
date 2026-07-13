@@ -206,7 +206,9 @@ triggers from:
 - SMS / Telegram / other messaging platforms
 
 Each adapter is a small service that listens to an external
-system and publishes structured trigger messages to NATS. The
+system and publishes trigger messages to NATS using the
+[task-oriented payload convention](../design/committed/trigger-wire-contract.md#task-oriented-payload-convention).
+The
 agent definition's `trigger:` pattern matches the subject, so
 agents can subscribe to specific event types (e.g.,
 `trigger: github.issue.opened`).

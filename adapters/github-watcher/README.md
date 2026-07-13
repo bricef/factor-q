@@ -12,7 +12,8 @@ never gets stranded mid-flight.
 This adapter is deliberately **not** part of the `fq` CLI or `fq-runtime`.
 It talks to factor-q **only through documented wire contracts** — the
 [trigger wire contract](../../docs/design/committed/trigger-wire-contract.md)
-(a NATS subject and a JSON payload) and the
+(a NATS subject and a JSON payload, including its task-oriented convention)
+and the
 [event schema](../../docs/design/committed/event-schema.md) (the lifecycle
 events it observes) — never through Rust code. Writing it in a different
 language makes that boundary a *construction* rather than a convention: a Go
@@ -98,11 +99,11 @@ Every flag has an environment-variable fallback.
 | `--max-retries` | `GHW_MAX_RETRIES` | `2` | bounded auto-retry budget per issue for transient failures |
 | `--task-template` | `GHW_TASK_TEMPLATE` | `Implement the fix described in GitHub issue #%d.` | `%d` = issue number |
 
-The trigger payload is a JSON string (the rendered task template), per the
-wire contract. The `<agent>` interprets it. The same template is used in
-reverse to recover the issue number from the `triggered` event, so the
-watcher can bind an outcome back to its issue — keep it stable across a
-watcher restart while invocations are in flight.
+The trigger payload follows the [task-oriented payload convention](../../docs/design/committed/trigger-wire-contract.md#task-oriented-payload-convention):
+it includes `task`, `refs`, `constraints`, and `done_criteria`, plus a `github`
+object with the repository and issue number. The `<agent>` interprets it. The
+`github.issue` field binds an outcome back to its issue; the watcher also accepts
+the former task-string payload while in-flight legacy invocations finish.
 
 ## Development
 
