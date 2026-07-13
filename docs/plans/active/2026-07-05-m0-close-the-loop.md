@@ -32,7 +32,9 @@ on the capability alone.
   [reducer verification plan](../closed/2026-07-05-reducer-verification.md)). Crash
   recovery is WAL-based and independent of the event bus.
 - **The building blocks the loop needs**: MCP, shell/file tools, a
-  nothing-by-default sandbox, per-invocation budgets, triggers, and cron.
+  nothing-by-default sandbox, per-invocation budgets, and triggers. The daily
+  doc-drift run is scheduled by the host crontab, which calls `fq trigger`;
+  cron is not a runtime capability.
 - **The v0 dogfood loop** (`doc-drift`, live daily against this repo from
   `~/fq-dogfood`). It has `file_write` and `exec` in its sandbox but is
   scoped to **read-and-report** — it comprehends commits and writes a dated

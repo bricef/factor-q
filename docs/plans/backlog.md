@@ -10,27 +10,13 @@ here should be assumed scheduled.
 
 ## Deferred from phase 1
 
-### Hot-reload of agent definitions
+### File-watcher variant of agent reload
 **Source:** phase 1 plan (`docs/plans/closed/2026-04-02-phase-1-foundation.md`), stretch goals section.
 
-The runtime currently loads agent definitions once at `fq run`
-start. Editing a `.md` file does not affect a running daemon.
-
-Work needed:
-- File watcher on the configured agents directory (`notify` crate
-  is the usual choice)
-- Debounce burst changes (common when an editor writes via a
-  temp file and rename)
-- Parse the new definition; reject invalid changes with a clear
-  log line and keep the old one
-- Swap the definition in the registry atomically
-- Decide what happens to in-flight invocations using the old
-  definition — simplest is "they finish with the version they
-  started with" (ConfigSnapshot already supports this)
-
-Not urgent: operators can `kill` and restart the daemon. NATS
-durability means no triggers are lost. But iterative development
-is noticeably faster with hot-reload.
+`fq reload` has shipped: it reloads definitions through a control message
+and refreshes them between invocations. This item tracks only an optional
+file-watcher variant that would invoke that shipped reload path after agent
+definitions change.
 
 ### Second LLM provider wired end-to-end
 **Source:** phase 1 plan, stretch goals section.
@@ -793,12 +779,12 @@ The following ADRs are still in `docs/adrs/draft/` and should
 either be accepted (with a resolution documented) or deliberately
 deprecated:
 - ADR-0006 API design
-- ADR-0007 Inter-agent communication
 - ADR-0008 Extension model
+- ADR-0025 Storage GC observability
 
 ADR-0010 (agent execution isolation) has been accepted. Phase 2
 (MCP, memory, skills) will likely force ADR-0008 to resolution.
-ADR-0007 can wait for multi-agent deployments.
+ADR-0025 needs a resolution for storage lifecycle and observability.
 
 ## CI / test flakiness (flagged 2026-06-29)
 
@@ -875,13 +861,13 @@ flattened from an escalating $0.007→$0.084 to a steady ~$0.005–0.009,
 system-marker quirk (own entry below) and the missing cache token
 columns in the projection (see the corrected costs finding below).
 
-### Agent definitions load once at daemon startup — no reload
+### Agent definition changes require an explicit reload
 
-Already tracked as [Hot-reload of agent definitions](#hot-reload-of-agent-definitions)
+Already tracked as [File-watcher variant of agent reload](#file-watcher-variant-of-agent-reload)
 (§ Deferred from phase 1); the dogfood loop hit it in practice on day
-one — an agent budget bump was silently ignored until the daemon
-restarted, and the run failed at the old ceiling. Evidence that the
-deferral now has a real cost: bump its priority, and until it lands,
+one — an agent budget bump was silently ignored until `fq reload`, and
+the run failed at the old ceiling. Evidence that the watcher deferral
+now has a real cost: bump its priority, and until it lands,
 document the restart requirement loudly in the agent-definitions guide.
 
 ### `fq status | head` panics on SIGPIPE
