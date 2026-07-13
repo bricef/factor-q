@@ -11,6 +11,7 @@ use crate::agent::AgentId;
 use crate::bus::{BusError, EventBus};
 use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::projection::store::StoreError;
+use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError};
 use crate::events::{Event, EventPayload, InvocationOperatorRecoveredPayload};
 
 /// Outcome of a successful [`drop_invocation`].
@@ -37,6 +38,8 @@ pub enum DropError {
     },
     #[error("projection store error: {0}")]
     Store(#[from] StoreError),
+    #[error("control-plane store error: {0}")]
+    ControlPlane(#[from] ControlPlaneStoreError),
     #[error("event bus error: {0}")]
     Bus(#[from] BusError),
 }
@@ -51,13 +54,20 @@ pub enum DropError {
 pub async fn drop_invocation(
     bus: &EventBus,
     proj_store: &ProjectionStore,
+    control_store: &ControlPlaneStore,
     invocation_id: &str,
     reason: Option<&str>,
 ) -> Result<DropResult, DropError> {
-    let agent_id_str = proj_store
-        .agent_id_for_invocation(invocation_id)
-        .await?
-        .ok_or_else(|| DropError::UnknownInvocation(invocation_id.to_string()))?;
+    // Older/synthetic recovery rows may have no projection event and therefore
+    // no agent. Clear those rows directly; normal rows retain the existing
+    // event-driven terminal/archive transition.
+    let agent_id_str = match proj_store.agent_id_for_invocation(invocation_id).await? {
+        Some(agent_id) => agent_id,
+        None => {
+            control_store.delete_invocation_owner(invocation_id).await?;
+            "operator".to_string()
+        }
+    };
     let agent_id =
         AgentId::new(agent_id_str.clone()).map_err(|e| DropError::InvalidAgentId(e.to_string()))?;
     let inv_uuid = Uuid::parse_str(invocation_id).map_err(|e| DropError::InvalidInvocationId {

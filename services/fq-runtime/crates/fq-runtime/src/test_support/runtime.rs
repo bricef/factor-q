@@ -591,6 +591,7 @@ mod tests {
         let result = operator::drop_invocation(
             rt.bus(),
             rt.proj_store(),
+            rt.cp_store(),
             &inv_str,
             Some("e2e drop scenario"),
         )
@@ -901,6 +902,7 @@ mod tests {
         operator::drop_invocation(
             rt.bus(),
             rt.proj_store(),
+            rt.cp_store(),
             &inv_str,
             Some("race scenario: operator wins"),
         )
