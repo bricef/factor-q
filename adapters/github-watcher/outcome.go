@@ -94,7 +94,7 @@ func issueNumberFromTemplate(template, payload string) int {
 // OutcomeReactor observes invocation outcomes and drives the issue's label
 // state machine past `in-progress`, closing the observability gap that
 // stranded issue #9. It is the outcome-side counterpart to the poll loop's
-// ready → in-progress claim.
+// status:ready → status:in-progress claim.
 //
 // Bindings from invocation id to issue number are learned from `triggered`
 // events; retries per issue are bounded by Config.MaxRetries.
@@ -123,9 +123,9 @@ func NewOutcomeReactor(src IssueSource, cfg Config, log *slog.Logger) *OutcomeRe
 // invocation reaches a terminal state:
 //
 //   - triggered → record the invocation_id ↔ issue binding.
-//   - completed → in-progress → in-review (the agent opened its PR).
-//   - failed    → in-progress → ready to retry (bounded, transient errors)
-//     or in-progress → failed (retries exhausted or a terminal error).
+//   - completed → status:in-progress → status:in-review (the agent opened its PR).
+//   - failed    → status:in-progress → status:ready to retry (bounded, transient errors)
+//     or status:in-progress → status:failed (retries exhausted or a terminal error).
 //
 // Relabel errors are logged, not returned: one bad reaction must not stop
 // the outcome stream.
