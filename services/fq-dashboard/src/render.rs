@@ -59,19 +59,25 @@ pub fn page_opts(title: &str, refresh_secs: Option<u64>, extra_head: &str, body:
 {refresh}{extra_head}
 <title>{title} — fq</title>
 <style>
-body {{ font-family: monospace; margin: 1.5rem; color: #222; }}
+/* Dark by default (owner preference). Semantics keep their hue —
+   ok green / warn amber / bad red — tuned for contrast on the dark
+   ground; a light theme can arrive later as a prefers-color-scheme
+   override. */
+:root {{ color-scheme: dark; }}
+body {{ font-family: monospace; margin: 1.5rem; color: #d4d7dc; background: #14161a; }}
 h1 {{ font-size: 1.2rem; }} h2 {{ font-size: 1rem; margin-top: 1.5rem; }}
+a {{ color: #7aa2e8; }}
 table {{ border-collapse: collapse; margin: 0.5rem 0; }}
-th, td {{ border: 1px solid #bbb; padding: 0.25rem 0.6rem; text-align: left; }}
-th {{ background: #eee; }}
+th, td {{ border: 1px solid #3a3f47; padding: 0.25rem 0.6rem; text-align: left; }}
+th {{ background: #21252b; }}
 nav a {{ margin-right: 1rem; }}
-.ok {{ color: #060; }} .warn {{ color: #a60; }} .bad {{ color: #a00; }}
-.muted {{ color: #888; }}
-pre {{ background: #f6f6f6; border: 1px solid #ddd; padding: 0.5rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3rem 0; max-width: 72rem; }}
-details {{ margin: 0.3rem 0; }} summary {{ cursor: pointer; color: #555; }}
-.turn {{ border-left: 3px solid #ccc; padding-left: 0.8rem; margin: 1.2rem 0; }}
+.ok {{ color: #5fbf77; }} .warn {{ color: #d9a04c; }} .bad {{ color: #e06c6c; }}
+.muted {{ color: #7d838c; }}
+pre {{ background: #1c2026; border: 1px solid #333941; padding: 0.5rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3rem 0; max-width: 72rem; }}
+details {{ margin: 0.3rem 0; }} summary {{ cursor: pointer; color: #9aa1ab; }}
+.turn {{ border-left: 3px solid #3a3f47; padding-left: 0.8rem; margin: 1.2rem 0; }}
 .turn h3 {{ font-size: 1rem; margin: 0.2rem 0; }}
-.turn.err {{ border-left-color: #a00; }}
+.turn.err {{ border-left-color: #e06c6c; }}
 </style>
 </head><body>
 <nav><a href="/">health</a><a href="/invocations">invocations</a><a href="/events">events</a><a href="/costs">costs</a></nav>
