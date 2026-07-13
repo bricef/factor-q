@@ -29,7 +29,7 @@ use tarpc::{client, context};
 use crate::control_plane::store::OwnerStatus;
 use crate::health::{self, StreamHealth};
 use crate::views::{
-    CostReport, EventView, ExecutionsView, FailureView, InvocationDetailView,
+    ActiveInvocationView, CostReport, EventView, ExecutionsView, FailureView, InvocationDetailView,
     InvocationSummaryView, RecoveryView, Views, ViewsError, WorkerDetailView, WorkerView,
 };
 
@@ -74,6 +74,9 @@ pub struct HealthReport {
 #[tarpc::service]
 pub trait ReadService {
     async fn health() -> Result<HealthReport, WireError>;
+    /// Currently-executing invocations from the worker WAL, longest-
+    /// running first, with their open dispatches.
+    async fn active_invocations() -> Result<Vec<ActiveInvocationView>, WireError>;
     async fn workers() -> Result<Vec<WorkerView>, WireError>;
     async fn worker(id: String) -> Result<Option<WorkerDetailView>, WireError>;
     /// `status` accepts `in_flight | ambiguous | completed | failed`.
@@ -144,6 +147,13 @@ impl ReadService for ReadServer {
             executions: self.views.executions(now_ms, HEALTH_THRESHOLD_MS).await?,
             failures: self.views.failures().await?,
         })
+    }
+
+    async fn active_invocations(
+        self,
+        _: context::Context,
+    ) -> Result<Vec<ActiveInvocationView>, WireError> {
+        Ok(self.views.active_invocations().await?)
     }
 
     async fn workers(self, _: context::Context) -> Result<Vec<WorkerView>, WireError> {
@@ -333,6 +343,13 @@ mod tests {
             .expect("rpc")
             .expect("worker");
         assert_eq!(detail.expect("w1 exists").worker.worker_id, "w1");
+
+        let active = client
+            .active_invocations(context::current())
+            .await
+            .expect("rpc")
+            .expect("active");
+        assert!(active.is_empty());
 
         let invocations = client
             .invocations(context::current(), None, true, 50)

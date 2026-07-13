@@ -140,6 +140,11 @@ async fn invocations_page(
     };
     let include_archived = q.get("archived").is_some_and(|v| v == "1");
     let status = q.get("status").cloned();
+    let active = match client.active_invocations(context::current()).await {
+        Ok(Ok(active)) => active,
+        Ok(Err(err)) => return unreachable_page(&state, "invocations", &err.to_string()),
+        Err(err) => return unreachable_page(&state, "invocations", &format!("rpc: {err}")),
+    };
     match client
         .invocations(context::current(), status, include_archived, 100)
         .await
@@ -147,7 +152,7 @@ async fn invocations_page(
         Ok(Ok(items)) => ok_page(
             &state,
             "invocations",
-            &render::invocations(&items, include_archived, now_ms()),
+            &render::invocations_page(&active, &items, include_archived, now_ms()),
         ),
         Ok(Err(err)) => unreachable_page(&state, "invocations", &err.to_string()),
         Err(err) => unreachable_page(&state, "invocations", &format!("rpc: {err}")),
@@ -343,7 +348,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(body_string(resp).await.contains("no invocations"));
+        let html = body_string(resp).await;
+        assert!(html.contains("no invocations"));
+        // Nothing in flight → the active section must not exist at all.
+        assert!(!html.contains("Active now"), "got: {html}");
 
         let resp = app
             .clone()

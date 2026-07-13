@@ -6,7 +6,9 @@
 
 use fq_runtime::health::{ConsumerHealth, StreamHealth};
 use fq_runtime::read_service::HealthReport;
-use fq_runtime::views::{CostReport, EventView, InvocationDetailView, InvocationSummaryView};
+use fq_runtime::views::{
+    ActiveInvocationView, CostReport, EventView, InvocationDetailView, InvocationSummaryView,
+};
 
 /// Minimal HTML escape for text and attribute positions.
 pub fn esc(s: &str) -> String {
@@ -219,6 +221,62 @@ pub fn health(report: &HealthReport, now_ms: i64) -> String {
     b
 }
 
+/// The "active right now" table: currently-executing invocations from
+/// the worker WAL. Renders to NOTHING when nothing is in flight — the
+/// page contract is that the section only exists when there is live
+/// work to show.
+pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut b = String::new();
+    b.push_str("<h2>Active now</h2><table><tr><th>invocation</th><th>agent</th><th>phase</th><th>step</th><th>started</th><th>last advanced</th><th>doing</th></tr>");
+    for i in items {
+        let mut doing: Vec<String> = i
+            .open_tools
+            .iter()
+            .map(|t| format!("tool {}", esc(t)))
+            .collect();
+        doing.extend(i.open_llms.iter().map(|m| format!("llm {}", esc(m))));
+        let doing = if doing.is_empty() {
+            r#"<span class="muted">—</span>"#.to_string()
+        } else {
+            doing.join(", ")
+        };
+        b.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            inv_link(&i.invocation_id),
+            esc(&i.agent_id),
+            esc(&i.phase),
+            i.step_index,
+            esc(&age(i.started_at_ms, now_ms)),
+            esc(&age(i.updated_at_ms, now_ms)),
+            doing
+        ));
+    }
+    b.push_str("</table>");
+    b
+}
+
+/// The full invocations page body: the active table above the list,
+/// omitted entirely when nothing is in flight (in which case the page
+/// is byte-identical to the plain list). The list only earns its own
+/// heading when the active section exists above it.
+pub fn invocations_page(
+    active_rows: &[ActiveInvocationView],
+    items: &[InvocationSummaryView],
+    include_archived: bool,
+    now_ms: i64,
+) -> String {
+    let active_html = active(active_rows, now_ms);
+    let list_html = invocations(items, include_archived, now_ms);
+    if active_html.is_empty() {
+        list_html
+    } else {
+        format!("{active_html}<h2>All invocations</h2>{list_html}")
+    }
+}
+
 /// The invocations list body.
 pub fn invocations(items: &[InvocationSummaryView], include_archived: bool, now_ms: i64) -> String {
     let mut b = String::new();
@@ -422,6 +480,47 @@ mod tests {
         assert!(never.contains("never seen"));
         let seen = unreachable("127.0.0.1:9471", "refused", Some(0), 30_000);
         assert!(seen.contains("last seen 30s ago"));
+    }
+
+    #[test]
+    fn active_table_omitted_when_nothing_in_flight() {
+        let items = [fq_runtime::views::InvocationSummaryView {
+            invocation_id: "abc".into(),
+            agent_id: None,
+            worker_id: "w".into(),
+            status: "completed".into(),
+            assigned_at_ms: 0,
+            started_at_ms: 0,
+            archived: false,
+        }];
+        assert_eq!(active(&[], 1_000), "");
+        // With no active rows the page is byte-identical to the plain list.
+        assert_eq!(
+            invocations_page(&[], &items, false, 1_000),
+            invocations(&items, false, 1_000)
+        );
+    }
+
+    #[test]
+    fn active_table_shows_live_work_above_the_list() {
+        let active_rows = [fq_runtime::views::ActiveInvocationView {
+            invocation_id: "0123456789abcdef".into(),
+            agent_id: "m0-issue-fix".into(),
+            phase: "dispatching_tools".into(),
+            step_index: 165,
+            started_at_ms: 0,
+            updated_at_ms: 540_000,
+            open_tools: vec!["exec".into()],
+            open_llms: vec![],
+        }];
+        let html = invocations_page(&active_rows, &[], false, 600_000);
+        assert!(html.contains("Active now"), "got: {html}");
+        assert!(html.contains(r#"<a href="/invocations/0123456789abcdef">01234567</a>"#));
+        assert!(html.contains("tool exec"), "got: {html}");
+        assert!(html.contains("<td>10m ago</td>"), "started age: {html}");
+        assert!(html.contains("<td>1m ago</td>"), "advanced age: {html}");
+        // The list below gains its heading only when active is present.
+        assert!(html.contains("All invocations"), "got: {html}");
     }
 
     #[test]

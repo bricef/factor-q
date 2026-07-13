@@ -124,6 +124,27 @@ pub struct ExecutionsView {
     pub stuck_ids: Vec<String>,
 }
 
+/// One currently-executing invocation, straight from the worker WAL —
+/// the row form of [`ExecutionsView`]'s counts, for the dashboard's
+/// "active" table. Sourced from the WAL rather than the ownership
+/// table because dispatch does not populate the latter yet (#50), so
+/// the WAL is the only place live work is guaranteed to appear.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ActiveInvocationView {
+    pub invocation_id: String,
+    pub agent_id: String,
+    pub phase: String,
+    /// Reducer *step* counter — see [`LiveExecutionView::step_index`].
+    pub step_index: u32,
+    pub started_at_ms: i64,
+    /// Last WAL advance; long tool runs legitimately leave this old.
+    pub updated_at_ms: i64,
+    /// Tool names with an open (non-completed) dispatch right now.
+    pub open_tools: Vec<String>,
+    /// Models with an open (non-completed) LLM dispatch right now.
+    pub open_llms: Vec<String>,
+}
+
 /// One row in the invocation list: a coordination-ownership row, or (in
 /// the merged index) an archive-only row flagged `archived`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -521,6 +542,45 @@ impl Views {
         Ok(view)
     }
 
+    /// Every currently-executing invocation as a row (the list behind
+    /// [`Views::executions`]' counts), longest-running first, each with
+    /// its open tool/LLM dispatches — the "what is running right now"
+    /// table.
+    pub async fn active_invocations(&self) -> Result<Vec<ActiveInvocationView>, ViewsError> {
+        let mut rows = self.worker.find_in_flight_invocations().await?;
+        rows.sort_by_key(|r| r.started_at);
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let open_tools = self
+                .worker
+                .list_tool_dispatches_for_invocation(&row.invocation_id)
+                .await?
+                .into_iter()
+                .filter(|t| !matches!(t.status, crate::worker::store::DispatchStatus::Completed))
+                .map(|t| t.tool_name)
+                .collect();
+            let open_llms = self
+                .worker
+                .list_llm_dispatches_for_invocation(&row.invocation_id)
+                .await?
+                .into_iter()
+                .filter(|l| !matches!(l.status, crate::worker::store::DispatchStatus::Completed))
+                .map(|l| l.model)
+                .collect();
+            out.push(ActiveInvocationView {
+                invocation_id: row.invocation_id,
+                agent_id: row.agent_id,
+                phase: row.phase,
+                step_index: row.step_index,
+                started_at_ms: row.started_at,
+                updated_at_ms: row.updated_at,
+                open_tools,
+                open_llms,
+            });
+        }
+        Ok(out)
+    }
+
     /// Coordination-ownership rows, optionally filtered by status, newest
     /// first, capped at `limit`, each joined with its agent id from the
     /// projection.
@@ -761,6 +821,7 @@ mod tests {
         );
         assert_eq!(views.recovery(1_000, 30_000).await.unwrap().ambiguous, 0);
         assert_eq!(views.executions(1_000, 30_000).await.unwrap().in_flight, 0);
+        assert!(views.active_invocations().await.unwrap().is_empty());
         assert!(views.invocation("no-such-id").await.unwrap().is_none());
         assert!(views.worker("no-such-worker").await.unwrap().is_none());
     }
@@ -827,6 +888,15 @@ mod tests {
         assert_eq!(live.phase, "reducing");
         assert_eq!(live.step_index, 3);
         assert!(live.tools.is_empty());
+
+        // The active list carries the same WAL row, row-form.
+        let active = views.active_invocations().await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].invocation_id, "inv-1");
+        assert_eq!(active[0].agent_id, "agent-a");
+        assert_eq!(active[0].phase, "reducing");
+        assert_eq!(active[0].step_index, 3);
+        assert!(active[0].open_tools.is_empty());
     }
 
     /// An in-flight row whose `updated_at` is in the future (worker clock
