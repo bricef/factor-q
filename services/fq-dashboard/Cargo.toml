@@ -1,0 +1,52 @@
+[package]
+name = "fq-dashboard"
+version = "0.1.0"
+edition = "2024"
+license = "BUSL-1.1"
+description = "factor-q operator dashboard — a read-only web surface over the running daemon"
+repository = "https://github.com/bricef/factor-q"
+
+[[bin]]
+name = "fq-dashboard"
+path = "src/main.rs"
+
+[dependencies]
+# The typed contract: the wire client and the view DTOs come straight
+# from the runtime — a trait change fails this compile instead of
+# drifting silently (#105 layer 3).
+#
+# LOCKSTEP: this workspace has its own Cargo.lock, but fq-runtime is a
+# path dep compiled under it — shared transitive deps (rmcp, genai, …)
+# must resolve to the versions the runtime's own lock pins, or
+# fq-runtime may not compile here (rmcp 1.8 broke it on first resolve).
+# When the runtime bumps one, mirror it:
+#   cargo update -p <dep> --precise <version>
+fq-runtime = { path = "../fq-runtime/crates/fq-runtime", features = ["read-service"] }
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+# Server-side builders for the datastar SSE protocol (the client is
+# vendored at assets/datastar.js — v1.0.0, MIT, served from the binary).
+datastar = { version = "0.3", features = ["axum"] }
+futures = "0.3"
+# Decodes the transcript wire payload (canonical JSON — see
+# ReadService::transcript) and pretty-prints tool parameters.
+serde_json = "1"
+tarpc = { version = "0.37", features = ["tokio1", "serde1", "serde-transport", "serde-transport-bincode", "tcp"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+async-nats = "0.38"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+# Mirror the fq-runtime workspace lint policy: a clean build has zero
+# warnings, and that is enforced.
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
