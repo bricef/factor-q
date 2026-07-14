@@ -609,12 +609,31 @@ fn logging_level_name(level: LoggingLevel) -> &'static str {
     }
 }
 
+/// MCP server ids form the namespace in provider-visible tool names.
+fn validate_server_name(name: &str) -> Result<(), McpError> {
+    if name.is_empty()
+        || name.len() > 48
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(McpError::ToolDiscovery {
+            command: name.to_string(),
+            reason:
+                "server id must match [a-z0-9-]+, be at most 48 characters, and cannot contain '__'"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// A single tool from an MCP server, adapted to the fq-tools [`Tool`] trait.
 ///
 /// Holds an `Arc` to the shared client handle so multiple tools from the
 /// same server share one connection.
 pub struct McpTool {
     tool_name: String,
+    remote_tool_name: String,
     tool_description: String,
     tool_input_schema: Value,
     client: Arc<McpClient>,
@@ -650,7 +669,7 @@ impl Tool for McpTool {
         };
 
         let mut request =
-            CallToolRequestParams::new(self.tool_name.clone()).with_arguments(arguments);
+            CallToolRequestParams::new(self.remote_tool_name.clone()).with_arguments(arguments);
         // Attach a progress token so progress-capable servers can
         // report against this call (`notifications/progress`); servers
         // that don't support progress ignore it.
@@ -1046,6 +1065,7 @@ impl McpClientManager {
         client: &Arc<McpClient>,
         server_name: &str,
     ) -> Result<(Vec<Arc<dyn Tool>>, Vec<String>), McpError> {
+        validate_server_name(server_name)?;
         let mcp_tools = client
             .list_all_tools()
             .await
@@ -1064,7 +1084,14 @@ impl McpClientManager {
         let mut tool_names: Vec<String> = Vec::with_capacity(mcp_tools.len());
 
         for mcp_tool in mcp_tools {
-            let name = mcp_tool.name.to_string();
+            let remote_name = mcp_tool.name.to_string();
+            let name = format!("{server_name}__{remote_name}");
+            if name.len() > 64 {
+                return Err(McpError::ToolDiscovery {
+                    command: server_name.to_string(),
+                    reason: format!("namespaced tool name '{name}' exceeds 64 characters"),
+                });
+            }
             let description = mcp_tool.description.as_deref().unwrap_or("").to_string();
 
             // Convert the Arc<JsonObject> input_schema to a serde_json::Value.
@@ -1076,6 +1103,7 @@ impl McpClientManager {
             tool_names.push(name.clone());
             tools.push(Arc::new(McpTool {
                 tool_name: name,
+                remote_tool_name: remote_name,
                 tool_description: description,
                 tool_input_schema: input_schema,
                 client: Arc::clone(client),
@@ -1346,7 +1374,12 @@ impl McpClientManager {
     where
         F: std::future::Future<Output = ()>,
     {
-        let params = CallToolRequestParams::new(tool_name.to_string()).with_arguments(arguments);
+        let canonical_prefix = format!("{server}__");
+        let remote_tool_name = tool_name
+            .strip_prefix(&canonical_prefix)
+            .unwrap_or(tool_name);
+        let params =
+            CallToolRequestParams::new(remote_tool_name.to_string()).with_arguments(arguments);
         let mut handle = self
             .client_for(server)?
             .peer()
@@ -1568,7 +1601,9 @@ impl McpToolRefresher {
             match McpClientManager::discover_tools(client, name).await {
                 Ok((tools, _)) => {
                     for tool in tools {
-                        registry.register(tool);
+                        if let Err(error) = registry.register(tool) {
+                            warn!(server = %name, %error, "refusing MCP tool registration");
+                        }
                     }
                 }
                 Err(err) => {
@@ -2022,9 +2057,15 @@ mod tests {
             .await
             .expect("drain should rebuild before the timeout")
             .expect("registry");
-        assert!(rebuilt.get("alpha").is_some(), "existing tool present");
-        assert!(rebuilt.get("beta").is_some(), "new tool present");
-        assert!(rebuilt.get("file_read").is_some(), "built-ins present");
+        assert!(
+            rebuilt.get("mock__alpha").is_some(),
+            "existing tool present"
+        );
+        assert!(rebuilt.get("mock__beta").is_some(), "new tool present");
+        assert!(
+            rebuilt.get("builtin__file_read").is_some(),
+            "built-ins present"
+        );
         assert_eq!(
             out_rx.try_recv().ok().map(|_| ()),
             None,

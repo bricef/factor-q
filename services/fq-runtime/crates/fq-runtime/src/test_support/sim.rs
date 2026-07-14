@@ -360,7 +360,7 @@ impl SimWorld {
         let tool = Arc::new(ScriptedTool::new(SIM_TOOL));
 
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::clone(&tool) as Arc<dyn Tool>);
+        registry.register_fixture(Arc::clone(&tool) as Arc<dyn Tool>);
 
         let store_dir = TempDir::new().expect("sim store dir");
         let store = Arc::new(
@@ -475,7 +475,7 @@ impl SimWorld {
     ) -> Result<InvocationOutcome, ExecutorError> {
         self.sink.clear_drain();
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::clone(&self.tool) as Arc<dyn Tool>);
+        registry.register_fixture(Arc::clone(&self.tool) as Arc<dyn Tool>);
         let fresh = Self::build_runner(
             &self.clock,
             &self.sink,
@@ -555,7 +555,7 @@ impl SimWorld {
         self.sink.clear_drain();
         self.sink.clear_fault();
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::clone(&self.tool) as Arc<dyn Tool>);
+        registry.register_fixture(Arc::clone(&self.tool) as Arc<dyn Tool>);
         let fresh = Arc::new(Self::build_runner(
             &self.clock,
             &self.sink,

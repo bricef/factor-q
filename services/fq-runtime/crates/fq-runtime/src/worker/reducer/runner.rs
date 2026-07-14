@@ -20,7 +20,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use fq_tools::builtin::SELF_INSPECT_TOOL_NAME;
 use fq_tools::{ToolContext, ToolError, ToolSandbox};
 use serde_json::Value;
 use tracing::{debug, info, warn};
@@ -633,7 +632,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 Ok((server_tools, rx, _roots_handle)) => {
                     // Per-invocation server tools win on name collision.
                     for tool in server_tools {
-                        tools.register(tool);
+                        if let Err(error) = tools.register(tool) {
+                            tracing::warn!(%error, "refusing MCP tool registration");
+                        }
                     }
                     channels.push((decl.server.clone(), rx));
                 }
@@ -756,7 +757,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 return outcome;
             }
         };
-        let tool_schemas = tools.build_schemas(agent.tools());
+        let allowed_tool_names = canonical_tool_names(agent.tools());
+        let tool_schemas = tools.build_schemas(&allowed_tool_names);
         // A tool the agent declares but the registry has no
         // implementation for is dropped silently by `build_schemas` —
         // the model is simply never offered it, with no other signal.
@@ -766,7 +768,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // registry for this invocation (base + any per-invocation MCP
         // tools), so a name missing at this point is genuinely
         // unavailable, not merely unresolved.
-        let missing = tools.missing_tools(agent.tools());
+        let missing = tools.missing_tools(&allowed_tool_names);
         if !missing.is_empty() {
             warn!(
                 agent_id = %agent_id,
@@ -781,7 +783,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             model: agent.model().to_string(),
             system_prompt: agent.system_prompt().to_string(),
             tools_available: tool_schemas.clone(),
-            allowed_tool_names: agent.tools().to_vec(),
+            allowed_tool_names: allowed_tool_names.clone(),
             // Precedence: per-agent override (definition) -> daemon
             // config default -> built-in fallback (baked into the
             // config default). Issue #9 / Design Principle 8.
@@ -1135,13 +1137,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .ambient_var("FQ_AGENT_ID", agent_id.to_string())
             .ambient_var("FQ_MODEL", agent.model());
         let base_tools = self.context.tools();
-        let tool_schemas = base_tools.build_schemas(agent.tools());
+        let allowed_tool_names = canonical_tool_names(agent.tools());
+        let tool_schemas = base_tools.build_schemas(&allowed_tool_names);
         let agent_config = AgentConfig {
             agent_id: agent_id.clone(),
             model: agent.model().to_string(),
             system_prompt: agent.system_prompt().to_string(),
             tools_available: tool_schemas,
-            allowed_tool_names: agent.tools().to_vec(),
+            allowed_tool_names: allowed_tool_names.clone(),
             // Precedence: per-agent override (definition) -> daemon
             // config default -> built-in fallback (baked into the
             // config default). Issue #9 / Design Principle 8.
@@ -1772,13 +1775,17 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         agent_id: &AgentId,
         invocation_id: Uuid,
         workspace: Option<&Path>,
-        req: ToolCallRequest,
+        mut req: ToolCallRequest,
         totals: &mut InvocationTotals,
         start: Instant,
         sampling: Option<&mut SamplingChannel>,
         context: &mut ContextTracker,
         cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
+        // Accept legacy bare built-in calls while definitions migrate.
+        if let Some(name) = canonical_tool_names(std::slice::from_ref(&req.tool_name)).pop() {
+            req.tool_name = name;
+        }
         // Idempotent recovery: a completed WAL row for this exact call
         // means a prior incarnation already ran it. Reuse the recorded
         // result rather than re-executing (at-most-once) — and without
@@ -1807,7 +1814,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             (Some(ws), Some(tool)) => bind_workspace_params(req, ws, &tool.parameters_schema()),
             _ => req,
         };
-        if !agent.tools().iter().any(|name| name == &req.tool_name) {
+        if !canonical_tool_names(agent.tools())
+            .iter()
+            .any(|name| name == &req.tool_name)
+        {
             return self
                 .emit_synthetic_tool_error(
                     agent_id,
@@ -1863,7 +1873,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // schema but the data lives here. Intercept before falling
         // through to `Tool::execute` (which would surface a tripwire
         // error). See `crate::introspection`.
-        if req.tool_name == SELF_INSPECT_TOOL_NAME {
+        if req.tool_name == "builtin__self_inspect" {
             return self
                 .run_self_inspect_with_wal(
                     agent,
@@ -3289,6 +3299,21 @@ const EVALUATOR_SYSTEM_PREAMBLE: &str = "You are a safety evaluator gating an au
      appropriate for the stated action. Respond with ONLY a single JSON object \
      {\"approved\": <true|false>, \"reason\": <string>} — no prose, no code fences.";
 
+/// Map legacy bare built-in grants to their canonical names for one release.
+/// MCP tools are always explicitly namespaced.
+fn canonical_tool_names(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .map(|name| match name.as_str() {
+            "file_read" | "file_list" | "file_search" | "file_write" | "exec" | "self_inspect" => {
+                warn!(tool = %name, "bare built-in tool grant is deprecated; use builtin__ prefix");
+                format!("builtin__{name}")
+            }
+            _ => name.clone(),
+        })
+        .collect()
+}
+
 /// Stable runner-authored environment preamble injected as the first context message.
 fn invocation_preamble(
     workspace: Option<&Path>,
@@ -4629,14 +4654,19 @@ mod tests {
             .id(agent_id.clone())
             .model("claude-haiku")
             .system_prompt("Inspect yourself when asked.")
-            .tools(["self_inspect"])
+            .tools(["builtin__self_inspect"])
             .budget(0.50)
             .build()
             .unwrap();
 
         let llm = FixtureClient::new();
         // Turn 1: model asks for self_inspect.
-        llm.push_response(tool_use("self_inspect", "call_si", json!({}), (100, 50)));
+        llm.push_response(tool_use(
+            "builtin__self_inspect",
+            "call_si",
+            json!({}),
+            (100, 50),
+        ));
         // Turn 2: model summarises and finishes.
         llm.push_response(canned("I have one budget left.", 150, 30));
 
@@ -4719,7 +4749,7 @@ mod tests {
             model: "claude-haiku".to_string(),
             system_prompt: "introspect on demand.".to_string(),
             tools_available: vec![],
-            allowed_tool_names: vec!["self_inspect".to_string()],
+            allowed_tool_names: vec!["builtin__self_inspect".to_string()],
             max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
             effort: None,
         };
@@ -4753,7 +4783,7 @@ mod tests {
                     content: None,
                     tool_calls: vec![crate::events::MessageToolCall {
                         tool_call_id: crate::events::ToolCallId::new("si").unwrap(),
-                        tool_name: "self_inspect".to_string(),
+                        tool_name: "builtin__self_inspect".to_string(),
                         parameters: json!({"include": ["budget"]}),
                     }],
                     stop_reason: StopReason::ToolUse,
@@ -4785,7 +4815,7 @@ mod tests {
             &HostInvocationStats {
                 agent_id: "suspend-tools",
                 model: "claude-haiku",
-                allowed_tool_names: &["self_inspect".to_string()],
+                allowed_tool_names: &["builtin__self_inspect".to_string()],
                 budget: Some(0.50),
                 max_iterations: 20,
                 totals: InvocationTotals {

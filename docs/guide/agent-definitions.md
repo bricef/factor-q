@@ -65,16 +65,16 @@ ships four built-in tools:
 
 | Tool | What it does | Sandbox dimension |
 |---|---|---|
-| `file_read` | Read a file's contents | `fs_read` |
-| `file_write` | Write/overwrite a file | `fs_write` |
-| `exec` | Run a single program (argv, no shell) | `exec_cwd` |
-| `self_inspect` | Ask the runtime about this invocation's own state — budget, iteration count, model, available tools. | none — host-fulfilled |
+| `builtin__file_read` | Read a file's contents | `fs_read` |
+| `builtin__file_write` | Write/overwrite a file | `fs_write` |
+| `builtin__exec` | Run a single program (argv, no shell) | `exec_cwd` |
+| `builtin__self_inspect` | Ask the runtime about this invocation's own state — budget, iteration count, model, available tools. | none — host-fulfilled |
 
 To grant a tool, list it in `tools:` and declare the corresponding
 sandbox paths. **Nothing is available by default** — an agent with
 no sandbox declaration cannot touch the filesystem or run commands.
 
-`self_inspect` is special: its data is synthesised by the runtime
+`builtin__self_inspect` is special: its data is synthesised by the runtime
 itself, not by an external process, so it has no sandbox dimension
 to declare. Granting it just adds it to the `tools:` list. See the
 [self-aware example](../../agents/examples/self-aware.md).
@@ -86,14 +86,14 @@ to declare. Granting it just adds it to the `tools:` list. See the
 name: reader
 model: claude-haiku-4-5
 tools:
-  - file_read
+  - builtin__file_read
 sandbox:
   fs_read:
     - /path/to/readable/directory
 budget: 0.10
 ---
 
-You are a research assistant. Use `file_read` to answer questions
+You are a research assistant. Use `builtin__file_read` to answer questions
 about files in the readable directory.
 ```
 
@@ -104,8 +104,8 @@ about files in the readable directory.
 name: writer
 model: claude-haiku-4-5
 tools:
-  - file_read
-  - file_write
+  - builtin__file_read
+  - builtin__file_write
 sandbox:
   fs_read:
     - /data/project
@@ -120,7 +120,7 @@ files to /data/project/output.
 
 ### Command runner
 
-The `exec` tool takes an **argv array** (`["ls", "-la"]`), not a
+The `builtin__exec` tool takes an **argv array** (`["ls", "-la"]`), not a
 shell string. No shell is invoked — there is no opportunity for
 shell injection. Pipes, redirects, and glob expansion are not
 supported.
@@ -136,14 +136,14 @@ when — and by how much — it truncated.
 name: inspector
 model: claude-haiku-4-5
 tools:
-  - exec
+  - builtin__exec
 sandbox:
   exec_cwd:
     - /data/project
 budget: 0.10
 ---
 
-You can run commands in /data/project using the `exec` tool. Pass
+You can run commands in /data/project using the `builtin__exec` tool. Pass
 the command as an argv array, e.g. `["ls", "-la"]`.
 ```
 
@@ -158,9 +158,9 @@ automatically get exec access, and vice versa.
 name: full-toolkit
 model: claude-haiku-4-5
 tools:
-  - file_read
-  - file_write
-  - exec
+  - builtin__file_read
+  - builtin__file_write
+  - builtin__exec
 sandbox:
   fs_read:
     - /data/project
@@ -187,10 +187,10 @@ clear error message that the LLM sees and can adapt to.
 
 | Dimension | Controls | Used by |
 |---|---|---|
-| `fs_read` | Directories the agent can read from | `file_read` |
-| `fs_write` | Directories the agent can write to | `file_write` |
-| `exec_cwd` | Directories the agent can run commands in | `exec` |
-| `env` | Environment variables visible to child processes | `exec` |
+| `fs_read` | Directories the agent can read from | `builtin__file_read` |
+| `fs_write` | Directories the agent can write to | `builtin__file_write` |
+| `exec_cwd` | Directories the agent can run commands in | `builtin__exec` |
+| `env` | Environment variables visible to child processes | `builtin__exec` |
 | `network` | Network egress patterns — **declared but not enforced** | — |
 
 > **⚠ `network` is not a boundary yet (issue #35).** A definition may
@@ -218,7 +218,7 @@ clear error message that the LLM sees and can adapt to.
 ### Ambient identity variables
 
 Beyond the `env` allowlist, the runtime injects three variables of its
-own into every command the `exec` tool spawns:
+own into every command the `builtin__exec` tool spawns:
 
 | Variable | Value |
 |---|---|
@@ -271,8 +271,8 @@ sandbox:
 
 **Where the token resolves.** Sandbox paths always bind. In tool calls,
 substitution happens **only in declared path parameters** — properties
-whose JSON schema carries `format: "path"` (`cwd` on `exec`, `path` on
-`file_read`/`file_write`). Everything else is passed through verbatim:
+whose JSON schema carries `format: "path"` (`cwd` on `builtin__exec`, `path` on
+`builtin__file_read`/`builtin__file_write`). Everything else is passed through verbatim:
 file *contents*, command *arguments*, and any other string reach the tool
 exactly as the agent wrote them, so writing the literal text
 `${workspace}` into a file works and nothing silently rewrites agent
@@ -330,12 +330,11 @@ mcp:
 ```
 
 The server's **tools** become available exactly like built-ins — list
-the ones you want in `tools:` by their own names (MCP tool names are not
-prefixed):
+the ones you want in `tools:` by their own names (MCP tool names use the server namespace (`<server>__<tool>)):
 
 ```yaml
 tools:
-  - read_file                   # a tool the filesystem server provides
+  - filesystem__read_file       # a tool the filesystem server provides
 mcp:
   - server: filesystem
     command: npx
