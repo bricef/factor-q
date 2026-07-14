@@ -231,6 +231,10 @@ fn initial_step(input: StepInput, state: &mut HarnessState) -> Result<StepOutput
         tool_call_id: None,
     });
 
+    append_host_notices(state, &input.host_notices);
+
+    append_host_notices(state, &input.host_notices);
+
     let request = build_model_request(&input.config, &state.messages);
     state.phase = Phase::AwaitingModel;
 
@@ -275,6 +279,7 @@ fn model_response_step(
     };
 
     state.iteration = state.iteration.saturating_add(1);
+    append_host_notices(state, &input.host_notices);
 
     if response.tool_calls.is_empty() {
         let final_text = response.content.clone().unwrap_or_default();
@@ -384,6 +389,17 @@ fn tool_results_step(
         )],
         events: vec![],
     })
+}
+
+fn append_host_notices(state: &mut HarnessState, notices: &[String]) {
+    for body in notices {
+        state.messages.push(Message {
+            role: MessageRole::User,
+            content: Some(body.clone()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        });
+    }
 }
 
 fn terminal(state: &mut HarnessState, action: NextAction) -> Result<StepOutput, HarnessError> {
@@ -530,6 +546,7 @@ mod tests {
             random_seed: step_index as u64,
             step_index,
             static_resource_context: None,
+            host_notices: vec![],
         }
     }
 
@@ -707,6 +724,7 @@ mod tests {
             random_seed: idx as u64,
             step_index: idx,
             static_resource_context: None,
+            host_notices: vec![],
         };
 
         let s0 = h.step(mk(vec![], None, 0)).unwrap();
@@ -745,6 +763,7 @@ mod tests {
             random_seed: idx as u64,
             step_index: idx,
             static_resource_context: None,
+            host_notices: vec![],
         };
 
         let s0 = h.step(mk(vec![], None, 0)).unwrap();
@@ -827,6 +846,7 @@ mod tests {
                 random_seed: step_index as u64,
                 step_index,
                 static_resource_context: None,
+                host_notices: vec![],
             }
         };
         let h = Harness::new();
