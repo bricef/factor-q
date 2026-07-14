@@ -233,8 +233,6 @@ fn initial_step(input: StepInput, state: &mut HarnessState) -> Result<StepOutput
 
     append_host_notices(state, &input.host_notices);
 
-    append_host_notices(state, &input.host_notices);
-
     let request = build_model_request(&input.config, &state.messages);
     state.phase = Phase::AwaitingModel;
 
@@ -279,6 +277,11 @@ fn model_response_step(
     };
 
     state.iteration = state.iteration.saturating_add(1);
+    // Notices carried at this boundary fold in *before* the assistant
+    // message: a tool-carrying response must keep its tool calls
+    // adjacent to the tool results that answer them (providers reject
+    // content between the two). The model first sees the notice in the
+    // next request either way.
     append_host_notices(state, &input.host_notices);
 
     if response.tool_calls.is_empty() {
@@ -377,6 +380,10 @@ fn tool_results_step(
             tool_call_id: Some(result.tool_call_id),
         });
     }
+
+    // Notices carried at this boundary land after the tool results,
+    // immediately before the request they are first seen in.
+    append_host_notices(state, &input.host_notices);
 
     let request = build_model_request(&input.config, &state.messages);
     state.phase = Phase::AwaitingModel;
@@ -661,6 +668,154 @@ mod tests {
                 assert_eq!(assistant_msgs, 1);
             }
             other => panic!("expected CallModel after tool result, got {other:?}"),
+        }
+    }
+
+    /// Step-0 notices fold exactly once (regression: an early draft
+    /// appended them twice), in queue order, after the trigger and
+    /// before the first request.
+    #[test]
+    fn host_notices_fold_once_after_the_trigger() {
+        let h = Harness::new();
+        let mut input = step_input(vec![], None, 0);
+        input.host_notices = vec![
+            "<host-notice>first</host-notice>".to_string(),
+            "<host-notice>second</host-notice>".to_string(),
+        ];
+        let out = h.step(input).unwrap();
+        match out.next_action {
+            NextAction::CallModel(req) => {
+                let contents: Vec<Option<&str>> =
+                    req.messages.iter().map(|m| m.content.as_deref()).collect();
+                assert_eq!(
+                    contents,
+                    vec![
+                        Some("You are a test agent."),
+                        Some("hello"),
+                        Some("<host-notice>first</host-notice>"),
+                        Some("<host-notice>second</host-notice>"),
+                    ],
+                    "each notice folds exactly once, in order, after the trigger"
+                );
+                assert!(
+                    req.messages[2..]
+                        .iter()
+                        .all(|m| matches!(m.role, MessageRole::User)),
+                    "notices are user-role messages"
+                );
+            }
+            other => panic!("expected CallModel, got {other:?}"),
+        }
+    }
+
+    /// A notice carried at a model-response boundary folds in before
+    /// the assistant message, keeping the assistant's tool calls
+    /// adjacent to the tool results that answer them.
+    #[test]
+    fn host_notices_on_model_response_precede_the_assistant_message() {
+        let h = Harness::new();
+        let s0 = h.step(step_input(vec![], None, 0)).unwrap();
+
+        let mut s1_input = step_input(
+            s0.state,
+            Some(CapabilityResult::ModelResult(tool_use_response(
+                "echo",
+                "call_1",
+                json!({}),
+            ))),
+            1,
+        );
+        s1_input.host_notices = vec!["<host-notice>mid</host-notice>".to_string()];
+        let s1 = h.step(s1_input).unwrap();
+        assert!(matches!(s1.next_action, NextAction::CallTool(_)));
+
+        let s2 = h
+            .step(step_input(
+                s1.state,
+                Some(CapabilityResult::ToolResult(ToolCallResult {
+                    tool_call_id: crate::events::ToolCallId::new("call_1").unwrap(),
+                    output: "echoed".to_string(),
+                    is_error: false,
+                    error_kind: None,
+                    duration_ms: 1,
+                })),
+                2,
+            ))
+            .unwrap();
+        match s2.next_action {
+            NextAction::CallModel(req) => {
+                let roles: Vec<&str> = req
+                    .messages
+                    .iter()
+                    .map(|m| match m.role {
+                        MessageRole::System => "system",
+                        MessageRole::User => "user",
+                        MessageRole::Assistant => "assistant",
+                        MessageRole::Tool => "tool",
+                    })
+                    .collect();
+                assert_eq!(
+                    roles,
+                    vec!["system", "user", "user", "assistant", "tool"],
+                    "notice sits before the assistant message; \
+                     tool call and result stay adjacent"
+                );
+                assert_eq!(
+                    req.messages[2].content.as_deref(),
+                    Some("<host-notice>mid</host-notice>")
+                );
+            }
+            other => panic!("expected CallModel, got {other:?}"),
+        }
+    }
+
+    /// A notice carried at a tool-results boundary lands after the
+    /// tool results, immediately before the request it is first seen
+    /// in (regression: an early draft dropped it entirely).
+    #[test]
+    fn host_notices_on_tool_results_precede_the_request() {
+        let h = Harness::new();
+        let s0 = h.step(step_input(vec![], None, 0)).unwrap();
+        let s1 = h
+            .step(step_input(
+                s0.state,
+                Some(CapabilityResult::ModelResult(tool_use_response(
+                    "echo",
+                    "call_1",
+                    json!({}),
+                ))),
+                1,
+            ))
+            .unwrap();
+
+        let mut s2_input = step_input(
+            s1.state,
+            Some(CapabilityResult::ToolResult(ToolCallResult {
+                tool_call_id: crate::events::ToolCallId::new("call_1").unwrap(),
+                output: "echoed".to_string(),
+                is_error: false,
+                error_kind: None,
+                duration_ms: 1,
+            })),
+            2,
+        );
+        s2_input.host_notices = vec!["<host-notice>late</host-notice>".to_string()];
+        let s2 = h.step(s2_input).unwrap();
+        match s2.next_action {
+            NextAction::CallModel(req) => {
+                let last = req.messages.last().expect("non-empty request");
+                assert!(matches!(last.role, MessageRole::User));
+                assert_eq!(
+                    last.content.as_deref(),
+                    Some("<host-notice>late</host-notice>"),
+                    "notice is the final message before the request"
+                );
+                assert!(
+                    matches!(req.messages[req.messages.len() - 2].role, MessageRole::Tool),
+                    "notice follows the tool results"
+                );
+            }
+            other => panic!("expected CallModel, got {other:?}"),
         }
     }
 

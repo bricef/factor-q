@@ -1052,6 +1052,7 @@ fn print_event(event: &Event) {
         EventPayload::ToolResult(p) => {
             format!("tool.result {}", if p.is_error { "error" } else { "ok" })
         }
+        EventPayload::HostNotice(p) => format!("host.notice kind={} {}", p.kind, p.body),
         EventPayload::Completed(p) => format!(
             "completed duration={}ms cost=${:.6}",
             p.total_duration_ms, p.total_cost

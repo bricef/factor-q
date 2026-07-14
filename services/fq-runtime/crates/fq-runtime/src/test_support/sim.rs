@@ -2411,6 +2411,187 @@ mod soak {
 }
 
 #[cfg(test)]
+mod host_notice_channel {
+    //! #155 phase 1: the WAL-backed host→agent notice channel, held to
+    //! the same replay-equivalence bar as the crash/drain suites. No
+    //! real producer exists yet, so tests seed the runner's queue
+    //! directly at the seam producers will use
+    //! (`ReducerRunner::queue_host_notice`).
+
+    use super::resume_equivalence::{
+        RunResult, assert_equivalent, load_fixture, queue_tool_outputs, run_reference, script,
+        summary_of,
+    };
+    use super::*;
+    use crate::events::EventPayload;
+    use crate::test_support::oracle::{check_resume_trace, observational_trace};
+
+    const NOTICE_BODY: &str = "<host-notice>runtime resumed this invocation</host-notice>";
+
+    /// Crash a two-turn run at span 2's boundary and return the world
+    /// plus the crashed invocation's id (string and uuid forms) and the
+    /// script, ready for a notice-carrying resume.
+    async fn crashed_world(seed: u64, turns: usize) -> (SimWorld, String, uuid::Uuid) {
+        let world = SimWorld::new(seed, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        world.sink.fail_publish_at(1 + 3 * 2);
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &script(turns));
+        world.run(&llm).await.expect_err("crash at the boundary");
+
+        let in_flight = world.store.find_in_flight_invocations().await.unwrap();
+        assert_eq!(in_flight.len(), 1, "exactly one crashed invocation");
+        let inv_str = in_flight[0].invocation_id.clone();
+        let inv_id: uuid::Uuid = inv_str.parse().unwrap();
+        (world, inv_str, inv_id)
+    }
+
+    fn notice_counts_per_request(events: &[crate::events::Event]) -> Vec<usize> {
+        events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::LlmRequest(p) => Some(
+                    p.messages
+                        .iter()
+                        .filter(|m| m.content.as_deref() == Some(NOTICE_BODY))
+                        .count(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A notice queued for a crashed invocation and drained live by the
+    /// resumed run: the WAL row lands keyed to the resumed step, the
+    /// `host_notice` event opens the resumed leg (and the leg still
+    /// satisfies the headless-resume grammar), the next request carries
+    /// the body exactly once — and the combined run is observationally
+    /// equivalent to the uninterrupted reference, which never saw a
+    /// notice, because the oracle compares modulo host notices
+    /// (#155 constraint c).
+    #[tokio::test]
+    async fn live_notice_on_resume_reaches_wal_event_and_request() {
+        let turns = 2;
+        let reference = run_reference(77, turns).await;
+        let (world, inv_str, inv_id) = crashed_world(77, turns).await;
+        let crash_prefix_len = world.sink.events().len();
+
+        world
+            .runner
+            .queue_host_notice(inv_id, "resume", NOTICE_BODY);
+
+        // Span-2 crash: one model response was consumed pre-crash.
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &script(turns)[1..]);
+        let outcome = world.resume(&resume_llm).await.expect("resume");
+        assert_eq!(summary_of(&outcome).as_deref(), Some("all-done"));
+
+        // WAL: exactly one row, seq 0, recorded verbatim.
+        let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].seq, rows[0].kind.as_str()), (0, "resume"));
+        assert_eq!(rows[0].body, NOTICE_BODY);
+
+        // Event trail: the resumed leg opens with the notice event and
+        // still parses as a canonical headless resume.
+        let events = world.sink.events();
+        let resumed_leg = &events[crash_prefix_len..];
+        match &resumed_leg[0].payload {
+            EventPayload::HostNotice(p) => {
+                assert_eq!((p.kind.as_str(), p.body.as_str()), ("resume", NOTICE_BODY));
+            }
+            other => panic!("resumed leg must open with host_notice, got {other:?}"),
+        }
+        if let Err(violations) = check_resume_trace(resumed_leg) {
+            panic!("resumed leg violates the grammar: {violations:?}");
+        }
+
+        // The conversation carries the notice exactly once from the
+        // resumed request onward.
+        let counts = notice_counts_per_request(&events);
+        assert_eq!(
+            counts.last(),
+            Some(&1),
+            "final request carries the notice exactly once: {counts:?}"
+        );
+
+        let resumed = RunResult {
+            observed: observational_trace(&events),
+            summary: summary_of(&outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        };
+        assert_equivalent(&reference, &resumed, "notice on resume");
+    }
+
+    /// The landmine case (#155 constraint a): a crash *between* the
+    /// notice's WAL write and the step that would carry it. The queue
+    /// is gone — only the WAL can deliver it now. The next resume must
+    /// carry the recorded row into its first live step (no duplicate
+    /// row, no re-emit), and the conversation must end up identical to
+    /// the single-crash case.
+    #[tokio::test]
+    async fn notice_recorded_by_a_crashed_incarnation_still_reaches_the_conversation() {
+        let turns = 2;
+        let reference = run_reference(78, turns).await;
+        let (world, inv_str, inv_id) = crashed_world(78, turns).await;
+
+        world
+            .runner
+            .queue_host_notice(inv_id, "resume", NOTICE_BODY);
+
+        // The resumed leg's first publish is the notice event, which
+        // follows the WAL insert — failing it lands the crash exactly
+        // between the two. `SimWorld::resume` clears faults, so drive
+        // the runner directly.
+        world.sink.fail_publish_at(world.sink.events().len());
+        let mid_llm = FixtureClient::new();
+        load_fixture(&mid_llm, &script(turns)[1..]);
+        world
+            .runner
+            .resume(&world.agent, &mid_llm, inv_id)
+            .await
+            .expect_err("crash between the WAL write and the step");
+
+        // The row is durable; the queue is empty.
+        let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        assert_eq!(rows.len(), 1, "row written before the crash");
+
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &script(turns)[1..]);
+        let outcome = world.resume(&resume_llm).await.expect("second resume");
+        assert_eq!(summary_of(&outcome).as_deref(), Some("all-done"));
+
+        // Still exactly one row — the recorded notice was carried, not
+        // re-inserted (a re-insert would violate the primary key).
+        let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, NOTICE_BODY);
+
+        // No host_notice re-emit for a recorded row: the WAL, not the
+        // event trail, is the channel's source of truth.
+        let events = world.sink.events();
+        let notice_events = events
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::HostNotice(_)))
+            .count();
+        assert_eq!(notice_events, 0, "recorded rows are not re-emitted");
+
+        let counts = notice_counts_per_request(&events);
+        assert_eq!(
+            counts.last(),
+            Some(&1),
+            "final request carries the notice exactly once: {counts:?}"
+        );
+
+        let resumed = RunResult {
+            observed: observational_trace(&events),
+            summary: summary_of(&outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        };
+        assert_equivalent(&reference, &resumed, "notice across a double crash");
+    }
+}
+
 mod drain_equivalence {
     //! ADR-0027 PR-1: a drain requested at a step boundary suspends the
     //! invocation with its state already checkpointed, and the next
