@@ -375,6 +375,39 @@ fn cost_report() -> CostReport {
     }
 }
 
+/// The day-bounded companion report behind the costs page's "last 24h"
+/// column: only the agents that spent in the last day, fixed values.
+fn day_cost_report() -> CostReport {
+    let agents = vec![
+        CostView {
+            agent_id: "m0-issue-fix".to_string(),
+            event_count: 145,
+            total_cost: 13.156_3,
+            total_input_tokens: 16_800_000,
+            total_output_tokens: 38_900,
+            total_cache_read_tokens: 15_700_000,
+            total_cache_write_tokens: 0,
+        },
+        CostView {
+            agent_id: "doc-drift".to_string(),
+            event_count: 6,
+            total_cost: 0.063_4,
+            total_input_tokens: 21_400,
+            total_output_tokens: 1_800,
+            total_cache_read_tokens: 8_200,
+            total_cache_write_tokens: 900,
+        },
+    ];
+    CostReport {
+        total_cost: agents.iter().map(|a| a.total_cost).sum(),
+        total_input_tokens: agents.iter().map(|a| a.total_input_tokens).sum(),
+        total_output_tokens: agents.iter().map(|a| a.total_output_tokens).sum(),
+        total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
+        total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
+        agents,
+    }
+}
+
 /// Render every page to `<out>/<name>.html`; returns the page names.
 pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
     std::fs::create_dir_all(out)?;
@@ -448,7 +481,11 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
         ),
         (
             "costs",
-            render::page("costs", REFRESH_SECS, &render::costs(&cost_report())),
+            render::page(
+                "costs",
+                REFRESH_SECS,
+                &render::costs(&cost_report(), &day_cost_report(), render::Window::All),
+            ),
         ),
         (
             "unreachable",
