@@ -707,7 +707,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // and the directory is garbage — route it through the reclaim
         // decision.
         let sandbox = match agent.sandbox().to_tool_sandbox(workspace.as_deref()) {
-            Ok(sandbox) => sandbox,
+            // Ambient identity env (issue #162): every exec child
+            // learns which invocation/agent it runs for, so out-of-band
+            // work (git commits, PR bodies) can carry provenance. These
+            // are runtime-owned facts, not host env passthrough — no
+            // sandbox.env opt-in involved.
+            Ok(sandbox) => sandbox
+                .ambient_var("FQ_INVOCATION_ID", invocation_id.to_string())
+                .ambient_var("FQ_AGENT_ID", agent_id.to_string())
+                .ambient_var("FQ_MODEL", agent.model()),
             Err(err) => {
                 let outcome = Err(WorkspaceError::from(err).into());
                 self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
@@ -1074,10 +1082,16 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         // Set up agent context (mirrors run()). One registry snapshot
         // serves both the schemas and the loop (ADR-0020 consistency).
+        // Ambient identity env re-attaches on resume exactly as on the
+        // fresh path (issue #162) — same invocation id, so provenance
+        // stays consistent across the interruption.
         let sandbox = agent
             .sandbox()
             .to_tool_sandbox(workspace.as_deref())
-            .map_err(WorkspaceError::from)?;
+            .map_err(WorkspaceError::from)?
+            .ambient_var("FQ_INVOCATION_ID", invocation_id.to_string())
+            .ambient_var("FQ_AGENT_ID", agent_id.to_string())
+            .ambient_var("FQ_MODEL", agent.model());
         let base_tools = self.context.tools();
         let tool_schemas = base_tools.build_schemas(agent.tools());
         let agent_config = AgentConfig {

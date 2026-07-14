@@ -47,6 +47,14 @@ pub struct ToolSandbox {
     /// fixed `PATH` baseline is exposed unless a name is granted here
     /// — an agent opts in per variable (design principle 3).
     env_allowlist: Vec<String>,
+    /// Runtime-provided identity variables injected into every child a
+    /// tool spawns (`FQ_INVOCATION_ID` / `FQ_AGENT_ID` / `FQ_MODEL`,
+    /// issue #162). Distinct from `env_allowlist`: these are facts the
+    /// runtime owns about the invocation, not host environment passed
+    /// through, so they need no per-agent opt-in (they expose nothing
+    /// about the host) and they win over an allowlisted parent
+    /// variable of the same name.
+    ambient_env: Vec<(String, String)>,
 }
 
 impl ToolSandbox {
@@ -103,6 +111,19 @@ impl ToolSandbox {
     /// The environment variables a tool may pass through to a child.
     pub fn env_allowlist(&self) -> &[String] {
         &self.env_allowlist
+    }
+
+    /// Set a runtime-provided identity variable for spawned children
+    /// (issue #162). See the `ambient_env` field docs for how this
+    /// differs from `allow_env`.
+    pub fn ambient_var(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.ambient_env.push((name.into(), value.into()));
+        self
+    }
+
+    /// The runtime-provided identity variables injected into children.
+    pub fn ambient_env(&self) -> &[(String, String)] {
+        &self.ambient_env
     }
 
     /// Check that a target path is allowed for reading.
@@ -461,6 +482,21 @@ mod tests {
         assert_eq!(
             sb.env_allowlist(),
             &["HOME".to_string(), "GH_TOKEN".to_string()]
+        );
+    }
+
+    #[test]
+    fn ambient_env_round_trips_and_defaults_empty() {
+        assert!(ToolSandbox::new().ambient_env().is_empty());
+        let sb = ToolSandbox::new()
+            .ambient_var("FQ_INVOCATION_ID", "inv-1")
+            .ambient_var("FQ_AGENT_ID", "agent-a");
+        assert_eq!(
+            sb.ambient_env(),
+            &[
+                ("FQ_INVOCATION_ID".to_string(), "inv-1".to_string()),
+                ("FQ_AGENT_ID".to_string(), "agent-a".to_string()),
+            ]
         );
     }
 

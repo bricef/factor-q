@@ -277,11 +277,13 @@ impl Tool for ExecTool {
         // Build the child's environment. Start from a small fixed
         // baseline (just PATH), then copy each variable the agent
         // explicitly allowlisted (`sandbox.env`, carried on the
-        // ToolSandbox — issue #34) from the parent's env.
+        // ToolSandbox — issue #34) from the parent's env, then the
+        // runtime's ambient identity variables (`FQ_*`, issue #162).
         let env = build_child_env(
             &self.config.default_path,
             std::env::vars(),
             ctx.sandbox.env_allowlist(),
+            ctx.sandbox.ambient_env(),
         );
 
         debug!(
@@ -631,15 +633,19 @@ fn push_stream(out: &mut String, name: &str, text: &str, note: Option<String>) {
 
 /// Assemble the child's environment: a fixed `PATH` baseline, plus each
 /// allowlisted variable copied from the parent process if it is set
-/// there. `PATH` in the allowlist overrides the baseline with the
-/// parent's value — an agent that grants `PATH` opts into the daemon's
-/// fuller path (e.g. a toolchain on it). Generic over the name type so
-/// both a runtime `&[String]` (the sandbox allowlist) and `&[&str]`
-/// (tests) work.
+/// there, plus the runtime's ambient identity variables. `PATH` in the
+/// allowlist overrides the baseline with the parent's value — an agent
+/// that grants `PATH` opts into the daemon's fuller path (e.g. a
+/// toolchain on it). Ambient variables are applied last: they are
+/// runtime-owned facts about the invocation (`FQ_*`, issue #162), so a
+/// same-named variable from the host must not shadow them. Generic over
+/// the name type so both a runtime `&[String]` (the sandbox allowlist)
+/// and `&[&str]` (tests) work.
 fn build_child_env<I, S>(
     default_path: &str,
     parent_env: I,
     allowlist: &[S],
+    ambient: &[(String, String)],
 ) -> HashMap<String, String>
 where
     I: IntoIterator<Item = (String, String)>,
@@ -648,15 +654,17 @@ where
     let mut env = HashMap::new();
     env.insert("PATH".to_string(), default_path.to_string());
 
-    if allowlist.is_empty() {
-        return env;
-    }
-    let parent: HashMap<String, String> = parent_env.into_iter().collect();
-    for name in allowlist {
-        let name = name.as_ref();
-        if let Some(value) = parent.get(name) {
-            env.insert(name.to_string(), value.clone());
+    if !allowlist.is_empty() {
+        let parent: HashMap<String, String> = parent_env.into_iter().collect();
+        for name in allowlist {
+            let name = name.as_ref();
+            if let Some(value) = parent.get(name) {
+                env.insert(name.to_string(), value.clone());
+            }
         }
+    }
+    for (name, value) in ambient {
+        env.insert(name.clone(), value.clone());
     }
     env
 }
@@ -1194,6 +1202,7 @@ mod tests {
                 ("SECRET".to_string(), "no".to_string()),
             ],
             &[] as &[&str],
+            &[],
         );
         assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
         assert!(!env.contains_key("HOME"));
@@ -1210,6 +1219,7 @@ mod tests {
                 ("SECRET".to_string(), "no".to_string()),
             ],
             &["HOME"],
+            &[],
         );
         assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
         assert_eq!(env.get("HOME"), Some(&"/home/user".to_string()));
@@ -1224,6 +1234,7 @@ mod tests {
             "/usr/bin",
             vec![("PATH".to_string(), "/opt/tools/bin:/usr/bin".to_string())],
             &["PATH"],
+            &[],
         );
         assert_eq!(
             env.get("PATH"),
@@ -1240,8 +1251,42 @@ mod tests {
             "/usr/bin",
             vec![("HOME".to_string(), "/home/user".to_string())],
             &allow,
+            &[],
         );
         assert_eq!(env.get("HOME"), Some(&"/home/user".to_string()));
+    }
+
+    #[test]
+    fn build_child_env_injects_ambient_vars_without_any_allowlist() {
+        // Ambient identity vars (issue #162) need no sandbox.env
+        // opt-in — they are runtime-owned invocation facts.
+        let ambient = vec![
+            ("FQ_INVOCATION_ID".to_string(), "inv-1".to_string()),
+            ("FQ_AGENT_ID".to_string(), "agent-a".to_string()),
+        ];
+        let env = build_child_env(
+            "/usr/bin",
+            vec![("HOME".to_string(), "/home/user".to_string())],
+            &[] as &[&str],
+            &ambient,
+        );
+        assert_eq!(env.get("FQ_INVOCATION_ID"), Some(&"inv-1".to_string()));
+        assert_eq!(env.get("FQ_AGENT_ID"), Some(&"agent-a".to_string()));
+        assert!(!env.contains_key("HOME"));
+    }
+
+    #[test]
+    fn build_child_env_ambient_wins_over_allowlisted_parent_var() {
+        // A host variable that happens to share an FQ_* name must not
+        // shadow the runtime's value, even when allowlisted.
+        let ambient = vec![("FQ_AGENT_ID".to_string(), "real-agent".to_string())];
+        let env = build_child_env(
+            "/usr/bin",
+            vec![("FQ_AGENT_ID".to_string(), "spoofed".to_string())],
+            &["FQ_AGENT_ID"],
+            &ambient,
+        );
+        assert_eq!(env.get("FQ_AGENT_ID"), Some(&"real-agent".to_string()));
     }
 
     /// End-to-end (issue #34): a var named in `sandbox.env` reaches the
@@ -1304,6 +1349,34 @@ mod tests {
             std::env::remove_var("FQ_TEST_ALLOWED_34");
             std::env::remove_var("FQ_TEST_DENIED_34");
         }
+    }
+
+    /// End-to-end (issue #162): the runtime's ambient identity vars
+    /// reach the spawned child with no `sandbox.env` opt-in.
+    #[tokio::test]
+    async fn ambient_identity_vars_reach_the_child_process() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new()
+            .allow_exec_cwd(dir.path())
+            .ambient_var("FQ_INVOCATION_ID", "inv-e2e-162");
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["printenv", "FQ_INVOCATION_ID"],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "printenv of an ambient var: {result:?}");
+        assert!(
+            result.output.contains("inv-e2e-162"),
+            "ambient identity var must reach the child: {}",
+            result.output
+        );
     }
 
     // --- standalone shell-operator detection (#92) -------------------
