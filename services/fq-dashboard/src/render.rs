@@ -97,6 +97,21 @@ details {{ margin: 0.3rem 0; }} summary {{ cursor: pointer; color: #9aa1ab; }}
 
 /// The "runtime unreachable" page — the dashboard's own crash-domain
 /// contract: it renders this rather than breaking (plan, layer 3).
+/// The build-skew banner (#168): shown at the top of every page while
+/// the daemon's last-observed build differs from this binary's. Loud
+/// but warn-and-continue — the page under it still renders whatever
+/// decoded. The wire is a length-framed binary codec, so cross-build
+/// pairings can fail to decode; this banner is what turns that from
+/// "runtime unreachable" (the #154 misdiagnosis) into an explanation
+/// and a remedy.
+pub fn skew_banner(own_sha: &str, daemon_sha: &str) -> String {
+    format!(
+        r#"<p class="warn"><b>⚠ build skew:</b> dashboard @{} · daemon @{} — some data may fail to load; redeploy to matching builds</p>"#,
+        esc(own_sha),
+        esc(daemon_sha),
+    )
+}
+
 pub fn unreachable(read_addr: &str, error: &str, last_seen_ms: Option<i64>, now_ms: i64) -> String {
     let seen = match last_seen_ms {
         Some(ms) => format!("last seen {}", age(ms, now_ms)),

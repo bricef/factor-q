@@ -31,10 +31,17 @@ use tarpc::context;
 mod fixtures;
 mod render;
 
+/// This build's git SHA (stamped by build.rs). Compared against the
+/// daemon's over the frozen `ReadService::version` probe (#168), and
+/// printed by `--version` as `fq-dashboard <sha>` (watcher-style) so
+/// deploy.sh can verify bundle coherence.
+const OWN_SHA: &str = env!("FQ_GIT_SHA");
+
 #[derive(Parser)]
 #[command(
     name = "fq-dashboard",
-    about = "factor-q operator dashboard (read-only)"
+    about = "factor-q operator dashboard (read-only)",
+    version = OWN_SHA
 )]
 struct Args {
     #[command(subcommand)]
@@ -74,6 +81,28 @@ struct AppState {
     refresh_secs: u64,
     /// Epoch ms of the last successful RPC; 0 = never.
     last_seen_ms: AtomicI64,
+    /// The daemon's version string as last observed over the frozen
+    /// `ReadService::version` probe (#168). `None` until first
+    /// observed, or when the probe fails (daemon predates the RPC) —
+    /// in which case no skew is claimed. Kept across connect failures:
+    /// "last observed" is honest context for the unreachable page.
+    daemon_version: std::sync::Mutex<Option<String>>,
+}
+
+/// The SHA half of a `semver+sha` version string; the whole string
+/// when there is no `+` (defensive — both sides emit the suffix form).
+fn sha_suffix(version: &str) -> &str {
+    version.rsplit_once('+').map_or(version, |(_, sha)| sha)
+}
+
+/// `Some((own_sha, daemon_sha))` when the last-observed daemon build
+/// differs from this binary's — the build-skew signal (#168). Compares
+/// SHAs, not full version strings, so a semver difference between the
+/// two workspaces cannot false-positive.
+fn skew(state: &AppState) -> Option<(String, String)> {
+    let guard = state.daemon_version.lock().expect("daemon_version lock");
+    let daemon_sha = sha_suffix(guard.as_deref()?).to_string();
+    (daemon_sha != OWN_SHA).then(|| (OWN_SHA.to_string(), daemon_sha))
 }
 
 /// `std`-only epoch-ms clock (the dashboard has no chrono dependency).
@@ -87,11 +116,30 @@ fn now_ms() -> i64 {
 
 type Page = (StatusCode, Html<String>);
 
-/// Dial the read service, or produce the unreachable page.
+/// Dial the read service, or produce the unreachable page. On a
+/// successful dial, also runs the build-skew probe (#168): the frozen
+/// `version()` RPC decodes across any build pair, so it works exactly
+/// when the shape-carrying RPCs might not. A probe failure records
+/// "unknown" (`None`) rather than skew — a daemon predating the RPC
+/// must not trip a false banner.
 async fn client_or_unreachable(state: &AppState, title: &str) -> Result<ReadServiceClient, Page> {
     match read_service::connect(&state.read_addr).await {
-        Ok(c) => Ok(c),
+        Ok(c) => {
+            let observed = c.version(context::current()).await.ok();
+            *state.daemon_version.lock().expect("daemon_version lock") = observed;
+            Ok(c)
+        }
         Err(err) => Err(unreachable_page(state, title, &format!("connect: {err}"))),
+    }
+}
+
+/// Prefix the body with the skew banner when a build mismatch was
+/// observed. Warn-and-continue (#168): the banner is loud, but the
+/// page still renders whatever decoded.
+fn with_skew_banner(state: &AppState, body: &str) -> String {
+    match skew(state) {
+        Some((own, daemon)) => format!("{}{}", render::skew_banner(&own, &daemon), body),
+        None => body.to_string(),
     }
 }
 
@@ -100,12 +148,27 @@ fn unreachable_page(state: &AppState, title: &str, error: &str) -> Page {
         0 => None,
         ms => Some(ms),
     };
+    // With known skew, name the likely cause: a cross-build decode
+    // failure is indistinguishable from a dead daemon at this layer,
+    // and "runtime unreachable" alone sends the operator hunting for
+    // the wrong problem (the #154 incident).
+    let error = match skew(state) {
+        Some((own, daemon)) => {
+            format!(
+                "{error} — possibly wire mismatch from build skew (dashboard @{own}, daemon @{daemon})"
+            )
+        }
+        None => error.to_string(),
+    };
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Html(render::page(
             title,
             state.refresh_secs,
-            &render::unreachable(&state.read_addr, error, seen, now_ms()),
+            &with_skew_banner(
+                state,
+                &render::unreachable(&state.read_addr, &error, seen, now_ms()),
+            ),
         )),
     )
 }
@@ -114,7 +177,11 @@ fn ok_page(state: &AppState, title: &str, body: &str) -> Page {
     state.last_seen_ms.store(now_ms(), Ordering::Relaxed);
     (
         StatusCode::OK,
-        Html(render::page(title, state.refresh_secs, body)),
+        Html(render::page(
+            title,
+            state.refresh_secs,
+            &with_skew_banner(state, body),
+        )),
     )
 }
 
@@ -364,7 +431,12 @@ async fn transcript_page(
             state.last_seen_ms.store(now_ms(), Ordering::Relaxed);
             (
                 StatusCode::OK,
-                Html(render::page_opts(&title, None, extra_head, &body)),
+                Html(render::page_opts(
+                    &title,
+                    None,
+                    extra_head,
+                    &with_skew_banner(&state, &body),
+                )),
             )
         }
         Ok(Ok(None)) => (
@@ -467,6 +539,7 @@ async fn main() -> anyhow::Result<()> {
         read_addr: args.read_service.clone(),
         refresh_secs: args.refresh,
         last_seen_ms: AtomicI64::new(0),
+        daemon_version: std::sync::Mutex::new(None),
     });
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -502,6 +575,7 @@ mod tests {
             read_addr: addr.to_string(),
             refresh_secs: 5,
             last_seen_ms: AtomicI64::new(0),
+            daemon_version: std::sync::Mutex::new(None),
         })
     }
 
@@ -520,12 +594,14 @@ mod tests {
         }
         let views = Arc::new(Views::open(&path).await.unwrap());
         let js = async_nats_lazy().await;
+        // A version whose SHA half matches this binary's: the matched-
+        // builds case — the skew banner must NOT appear anywhere below.
         let (addr, serving) = read_service::bind(
             "127.0.0.1:0",
             views,
             js,
             std::time::Duration::from_millis(100),
-            "dash-test".to_string(),
+            format!("0.1.0+{OWN_SHA}"),
         )
         .await
         .unwrap();
@@ -542,8 +618,12 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let html = body_string(resp).await;
-        assert!(html.contains("dash-test"), "version rendered: {html}");
+        assert!(html.contains(OWN_SHA), "version rendered: {html}");
         assert!(html.contains("reachable"));
+        assert!(
+            !html.contains("build skew"),
+            "matched builds must not banner: {html}"
+        );
 
         let resp = app
             .clone()
@@ -613,6 +693,68 @@ mod tests {
         let html = body_string(resp).await;
         assert!(html.contains("runtime unreachable"), "got: {html}");
         assert!(html.contains("never seen"), "got: {html}");
+        // No skew has ever been observed — the page must not claim any
+        // (#168: unknown is not mismatch).
+        assert!(!html.contains("build skew"), "got: {html}");
+    }
+
+    /// Build skew (#168): a daemon from a different build trips the
+    /// banner naming both SHAs — but the page still renders whatever
+    /// decoded (warn-and-continue), and the unreachable page names
+    /// skew as the likely cause once observed.
+    #[tokio::test]
+    async fn mismatched_builds_banner_but_still_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let _cp = ControlPlaneStore::open(&path).await.unwrap();
+            let _ws = WorkerStore::open(&path).await.unwrap();
+            let _proj = ProjectionStore::open(&path).await.unwrap();
+        }
+        let views = Arc::new(Views::open(&path).await.unwrap());
+        let js = async_nats_lazy().await;
+        let (addr, serving) = read_service::bind(
+            "127.0.0.1:0",
+            views,
+            js,
+            std::time::Duration::from_millis(100),
+            "0.9.9+deadbeefcafe".to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(serving);
+
+        let state = state_for(&addr.to_string());
+        let app = app(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        // Warn-and-continue: the page is a 200 with data AND the banner.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(html.contains("build skew"), "banner missing: {html}");
+        assert!(html.contains("deadbeefcafe"), "daemon sha named: {html}");
+        assert!(html.contains(OWN_SHA), "own sha named: {html}");
+        assert!(html.contains("reachable"), "data still rendered: {html}");
+
+        // With skew observed, an RPC failure names the likely cause
+        // instead of a bare "runtime unreachable" (the #154 incident).
+        let page = unreachable_page(&state, "health", "rpc: decode failed");
+        assert!(
+            page.1.0.contains("wire mismatch from build skew"),
+            "got: {}",
+            page.1.0
+        );
+    }
+
+    #[test]
+    fn sha_suffix_takes_the_suffix_or_the_whole() {
+        assert_eq!(sha_suffix("0.1.0+abc123"), "abc123");
+        assert_eq!(sha_suffix("bare-sha"), "bare-sha");
+        assert_eq!(sha_suffix("1.0+with+plus"), "plus");
     }
 
     /// A jetstream context over a lazily-connecting client — the probe

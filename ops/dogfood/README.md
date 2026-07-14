@@ -91,6 +91,15 @@ hash-password`), then `docker compose -f infra/docker-compose.yml up
 -d`. Caddy is the one process deploy.sh does not manage (it is
 docker-supervised, `restart: unless-stopped`).
 
+If the dashboard shows a **"⚠ build skew"** banner (#168), it detected —
+over the frozen `ReadService::version` probe — that the daemon comes
+from a different build than itself. Pages still render whatever
+decodes, but data may be partial or failing (the wire is a binary
+codec); the remedy is always the same: redeploy so both run one build
+(`deploy.sh` does this by construction — the banner in practice means
+someone launched a process by hand from the wrong `releases/<sha>/`).
+`fq-dashboard --version` prints the dashboard's build SHA.
+
 Not built yet, by design (see #102): health-gate + auto-rollback after
 the flip, and any supervisor (systemd is deliberately out of scope; the
 launchers are detached with `setsid`, NATS restarts via docker's
