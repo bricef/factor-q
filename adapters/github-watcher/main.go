@@ -71,7 +71,10 @@ func run(args []string) error {
 	}
 	defer pub.Close()
 
-	source := &GhCliIssueSource{Repo: cfg.Repo}
+	source, err := NewGhCliIssueSource(cfg.Repo)
+	if err != nil {
+		return err
+	}
 	w := &Watcher{
 		Source:    source,
 		Publisher: pub,

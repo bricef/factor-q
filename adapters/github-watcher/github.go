@@ -1,104 +1,89 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
-	"strconv"
+	"net/http"
+	"os"
 	"strings"
+
+	"github.com/google/go-github/v76/github"
 )
 
-// GhCliIssueSource implements IssueSource and ReviewSource by shelling out
-// to the `gh` CLI, reusing the operator's existing GitHub auth. `gh` must
-// be on PATH and authenticated (e.g. via GH_TOKEN).
+// GhCliIssueSource implements the watcher GitHub interfaces using the GitHub
+// API directly. Its name is retained to avoid changing the internal interfaces.
 type GhCliIssueSource struct {
-	Repo string // "owner/name"
+	Repo            string // "owner/name"
+	Client          *github.Client
+	Token           string
+	GraphQLEndpoint string
 }
 
-// ghLabel and ghIssue mirror the JSON emitted by
-// `gh issue list --json number,labels`.
-type ghLabel struct {
-	Name string `json:"name"`
+// NewGhCliIssueSource creates an authenticated API source. GH_TOKEN is
+// preferred for compatibility with GitHub tooling; GITHUB_TOKEN is a fallback.
+func NewGhCliIssueSource(repo string) (*GhCliIssueSource, error) {
+	token := os.Getenv("GH_TOKEN")
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	if token == "" {
+		return nil, fmt.Errorf("GitHub token is required: set GH_TOKEN or GITHUB_TOKEN")
+	}
+	return &GhCliIssueSource{Repo: repo, Client: github.NewClient(nil).WithAuthToken(token), Token: token, GraphQLEndpoint: "https://api.github.com/graphql"}, nil
 }
 
-type ghIssue struct {
-	Number int       `json:"number"`
-	Labels []ghLabel `json:"labels"`
-}
-
-// ListReady returns open issues carrying readyLabel.
 func (g *GhCliIssueSource) ListReady(ctx context.Context, readyLabel string) ([]Issue, error) {
 	return g.ListByLabel(ctx, readyLabel)
 }
 
-// ListByLabel returns open issues carrying label.
 func (g *GhCliIssueSource) ListByLabel(ctx context.Context, label string) ([]Issue, error) {
-	cmd := exec.CommandContext(ctx, "gh", "issue", "list",
-		"--repo", g.Repo,
-		"--label", label,
-		"--state", "open",
-		"--json", "number,labels",
-		"--limit", "100",
-	)
-	out, err := cmd.Output()
+	owner, repo, err := splitRepo(g.Repo)
 	if err != nil {
-		return nil, fmt.Errorf("gh issue list: %w", ghError(err))
+		return nil, err
 	}
-	return parseGhIssueList(out)
-}
-
-// parseGhIssueList converts `gh issue list --json number,labels` output
-// into Issues. Split out so it is unit-testable without invoking gh.
-func parseGhIssueList(stdout []byte) ([]Issue, error) {
-	var raw []ghIssue
-	if err := json.Unmarshal(stdout, &raw); err != nil {
-		return nil, fmt.Errorf("parse gh issue list output: %w", err)
+	issues, _, err := g.Client.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{State: "open", Labels: []string{label}, ListOptions: github.ListOptions{PerPage: 100}})
+	if err != nil {
+		return nil, fmt.Errorf("list issues: %w", err)
 	}
-	issues := make([]Issue, 0, len(raw))
-	for _, r := range raw {
-		labels := make([]string, 0, len(r.Labels))
-		for _, l := range r.Labels {
-			labels = append(labels, l.Name)
+	out := make([]Issue, 0, len(issues))
+	for _, issue := range issues {
+		labels := make([]string, 0, len(issue.Labels))
+		for _, label := range issue.Labels {
+			labels = append(labels, label.GetName())
 		}
-		issues = append(issues, Issue{Number: r.Number, Labels: labels})
+		out = append(out, Issue{Number: issue.GetNumber(), Labels: labels})
 	}
-	return issues, nil
+	return out, nil
 }
 
-// Relabel removes `remove` and adds `add` on the issue via `gh issue edit`.
+// Relabel matches gh's idempotency: a missing removed label is harmless.
 func (g *GhCliIssueSource) Relabel(ctx context.Context, number int, remove, add string) error {
-	cmd := exec.CommandContext(ctx, "gh", "issue", "edit", strconv.Itoa(number),
-		"--repo", g.Repo,
-		"--remove-label", remove,
-		"--add-label", add,
-	)
-	// cmd.Output() (not cmd.Run()) so a non-zero exit populates
-	// ExitError.Stderr, which ghError surfaces — otherwise a failed
-	// relabel logs a bare "exit status 1" with no reason (e.g. a
-	// missing target label). stdout is discarded.
-	if _, err := cmd.Output(); err != nil {
-		return fmt.Errorf("gh issue edit #%d: %w", number, ghError(err))
+	owner, repo, err := splitRepo(g.Repo)
+	if err != nil {
+		return err
+	}
+	_, err = g.Client.Issues.RemoveLabelForIssue(ctx, owner, repo, number, remove)
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("remove label from #%d: %w", number, err)
+	}
+	if _, _, err := g.Client.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{add}); err != nil {
+		return fmt.Errorf("add label to #%d: %w", number, err)
 	}
 	return nil
 }
 
-// mergedPRQuery asks the GitHub GraphQL API for the merge state of the PRs
-// that close an issue. `closedByPullRequestsReferences` is the authoritative
-// "this PR closes this issue" link (a PR with `Closes #N`), so a merged one
-// means the proposed fix landed.
+func isNotFound(err error) bool {
+	var response *github.ErrorResponse
+	return errors.As(err, &response) && response.Response != nil && response.Response.StatusCode == http.StatusNotFound
+}
+
 const mergedPRQuery = `query($owner:String!,$repo:String!,$number:Int!){
-  repository(owner:$owner,name:$repo){
-    issue(number:$number){
-      closedByPullRequestsReferences(first:20,includeClosedPrs:true){
-        nodes{ merged }
-      }
-    }
-  }
+  repository(owner:$owner,name:$repo){ issue(number:$number){ closedByPullRequestsReferences(first:20,includeClosedPrs:true){ nodes{ merged } } } }
 }`
 
-// ghMergedPRResponse mirrors the GraphQL response for mergedPRQuery.
 type ghMergedPRResponse struct {
 	Data struct {
 		Repository struct {
@@ -113,32 +98,17 @@ type ghMergedPRResponse struct {
 	} `json:"data"`
 }
 
-// HasMergedPR reports whether a merged PR closes the issue, via the GitHub
-// GraphQL API.
 func (g *GhCliIssueSource) HasMergedPR(ctx context.Context, number int) (bool, error) {
-	owner, repo, err := splitRepo(g.Repo)
+	out, err := g.graphQL(ctx, mergedPRQuery, number)
 	if err != nil {
 		return false, err
 	}
-	cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
-		"-f", "query="+mergedPRQuery,
-		"-F", "owner="+owner,
-		"-F", "repo="+repo,
-		"-F", "number="+strconv.Itoa(number),
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return false, fmt.Errorf("gh api graphql (issue #%d): %w", number, ghError(err))
-	}
 	return parseMergedPRResponse(out)
 }
-
-// parseMergedPRResponse reports whether any closing PR in the GraphQL
-// response has merged. Split out so it is unit-testable without invoking gh.
 func parseMergedPRResponse(stdout []byte) (bool, error) {
 	var resp ghMergedPRResponse
 	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return false, fmt.Errorf("parse gh api graphql output: %w", err)
+		return false, fmt.Errorf("parse GitHub GraphQL response: %w", err)
 	}
 	for _, n := range resp.Data.Repository.Issue.ClosedByPullRequestsReferences.Nodes {
 		if n.Merged {
@@ -148,22 +118,10 @@ func parseMergedPRResponse(stdout []byte) (bool, error) {
 	return false, nil
 }
 
-// openPRQuery asks the GraphQL API for the *open* PRs that close an
-// issue — the provenance-stamp targets (issue #162). Same authoritative
-// `closedByPullRequestsReferences` link as mergedPRQuery, but excluding
-// closed/merged PRs (`includeClosedPrs` defaults false; the state field
-// is still selected and filtered defensively).
 const openPRQuery = `query($owner:String!,$repo:String!,$number:Int!){
-  repository(owner:$owner,name:$repo){
-    issue(number:$number){
-      closedByPullRequestsReferences(first:20){
-        nodes{ number state }
-      }
-    }
-  }
+  repository(owner:$owner,name:$repo){ issue(number:$number){ closedByPullRequestsReferences(first:20){ nodes{ number state } } } }
 }`
 
-// ghOpenPRResponse mirrors the GraphQL response for openPRQuery.
 type ghOpenPRResponse struct {
 	Data struct {
 		Repository struct {
@@ -179,32 +137,17 @@ type ghOpenPRResponse struct {
 	} `json:"data"`
 }
 
-// OpenPRsClosingIssue returns the numbers of open PRs that close the
-// issue, via the GitHub GraphQL API.
 func (g *GhCliIssueSource) OpenPRsClosingIssue(ctx context.Context, number int) ([]int, error) {
-	owner, repo, err := splitRepo(g.Repo)
+	out, err := g.graphQL(ctx, openPRQuery, number)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
-		"-f", "query="+openPRQuery,
-		"-F", "owner="+owner,
-		"-F", "repo="+repo,
-		"-F", "number="+strconv.Itoa(number),
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("gh api graphql (issue #%d): %w", number, ghError(err))
-	}
 	return parseOpenPRResponse(out)
 }
-
-// parseOpenPRResponse extracts the open closing-PR numbers. Split out so
-// it is unit-testable without invoking gh.
 func parseOpenPRResponse(stdout []byte) ([]int, error) {
 	var resp ghOpenPRResponse
 	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return nil, fmt.Errorf("parse gh api graphql output: %w", err)
+		return nil, fmt.Errorf("parse GitHub GraphQL response: %w", err)
 	}
 	var prs []int
 	for _, n := range resp.Data.Repository.Issue.ClosedByPullRequestsReferences.Nodes {
@@ -215,55 +158,91 @@ func parseOpenPRResponse(stdout []byte) ([]int, error) {
 	return prs, nil
 }
 
-// PRBody returns the PR's current body via `gh pr view`.
-func (g *GhCliIssueSource) PRBody(ctx context.Context, pr int) (string, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view", strconv.Itoa(pr),
-		"--repo", g.Repo,
-		"--json", "body",
-	)
-	out, err := cmd.Output()
+func (g *GhCliIssueSource) graphQL(ctx context.Context, query string, number int) ([]byte, error) {
+	owner, repo, err := splitRepo(g.Repo)
 	if err != nil {
-		return "", fmt.Errorf("gh pr view #%d: %w", pr, ghError(err))
+		return nil, err
 	}
-	var resp struct {
-		Body string `json:"body"`
+	body, err := json.Marshal(struct {
+		Query     string         `json:"query"`
+		Variables map[string]any `json:"variables"`
+	}{query, map[string]any{"owner": owner, "repo": repo, "number": number}})
+	if err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(out, &resp); err != nil {
-		return "", fmt.Errorf("parse gh pr view output: %w", err)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.GraphQLEndpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
 	}
-	return resp.Body, nil
+	req.Header.Set("Authorization", "Bearer "+g.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GitHub GraphQL: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GitHub GraphQL: %s", resp.Status)
+	}
+	var raw json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
-// SetPRBody replaces the PR's body via `gh pr edit`. The body is passed
-// on stdin (`--body-file -`) so its length and content never fight the
-// argument list.
+func (g *GhCliIssueSource) PRBody(ctx context.Context, pr int) (string, error) {
+	owner, repo, err := splitRepo(g.Repo)
+	if err != nil {
+		return "", err
+	}
+	pull, _, err := g.Client.PullRequests.Get(ctx, owner, repo, pr)
+	if err != nil {
+		return "", fmt.Errorf("get PR #%d: %w", pr, err)
+	}
+	return pull.GetBody(), nil
+}
 func (g *GhCliIssueSource) SetPRBody(ctx context.Context, pr int, body string) error {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "edit", strconv.Itoa(pr),
-		"--repo", g.Repo,
-		"--body-file", "-",
-	)
-	cmd.Stdin = strings.NewReader(body)
-	if _, err := cmd.Output(); err != nil {
-		return fmt.Errorf("gh pr edit #%d: %w", pr, ghError(err))
+	owner, repo, err := splitRepo(g.Repo)
+	if err != nil {
+		return err
+	}
+	_, _, err = g.Client.PullRequests.Edit(ctx, owner, repo, pr, &github.PullRequest{Body: github.Ptr(body)})
+	if err != nil {
+		return fmt.Errorf("edit PR #%d: %w", pr, err)
 	}
 	return nil
 }
-
-// splitRepo splits "owner/name" into its parts.
 func splitRepo(repo string) (owner, name string, err error) {
-	for i := 0; i < len(repo); i++ {
-		if repo[i] == '/' {
-			return repo[:i], repo[i+1:], nil
-		}
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("repo must be owner/name, got %q", repo)
 	}
-	return "", "", fmt.Errorf("repo must be owner/name, got %q", repo)
+	return parts[0], parts[1], nil
 }
 
-// ghError enriches an exec error with gh's stderr when available.
-func ghError(err error) error {
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-		return fmt.Errorf("%w: %s", err, string(ee.Stderr))
+// parseGhIssueList remains available for the legacy parser unit test; GitHub's
+// REST issue representation has the same number/label fields.
+type ghLabel struct {
+	Name string `json:"name"`
+}
+type ghIssue struct {
+	Number int       `json:"number"`
+	Labels []ghLabel `json:"labels"`
+}
+
+func parseGhIssueList(data []byte) ([]Issue, error) {
+	var raw []ghIssue
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse issue list response: %w", err)
 	}
-	return err
+	issues := make([]Issue, 0, len(raw))
+	for _, item := range raw {
+		labels := make([]string, 0, len(item.Labels))
+		for _, label := range item.Labels {
+			labels = append(labels, label.Name)
+		}
+		issues = append(issues, Issue{Number: item.Number, Labels: labels})
+	}
+	return issues, nil
 }
