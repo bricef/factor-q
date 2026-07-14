@@ -11,8 +11,9 @@ use std::path::Path;
 use fq_runtime::health::{ConsumerHealth, StreamHealth};
 use fq_runtime::read_service::HealthReport;
 use fq_runtime::views::{
-    CostReport, CostView, EventView, ExecutionsView, FailureView, InvocationDetailView,
-    InvocationSummaryView, LiveExecutionView, LlmDispatchView, RecoveryView, ToolDispatchView,
+    AgentCostDetailView, CostReport, CostView, EventView, ExecutionsView, FailureView,
+    InvocationCostView, InvocationDetailView, InvocationSummaryView, LiveExecutionView,
+    LlmDispatchView, ModelCostView, RecoveryView, ToolDispatchView,
 };
 
 use crate::render;
@@ -315,6 +316,7 @@ fn cost_report() -> CostReport {
             total_output_tokens: 663_307,
             total_cache_read_tokens: 98_000_000,
             total_cache_write_tokens: 1_200_000,
+            invocation_count: 38,
         },
         CostView {
             agent_id: "m0-loop".to_string(),
@@ -324,6 +326,7 @@ fn cost_report() -> CostReport {
             total_output_tokens: 58_912,
             total_cache_read_tokens: 5_900_000,
             total_cache_write_tokens: 74_000,
+            invocation_count: 6,
         },
         CostView {
             agent_id: "doc-drift".to_string(),
@@ -333,6 +336,7 @@ fn cost_report() -> CostReport {
             total_output_tokens: 20_545,
             total_cache_read_tokens: 380_000,
             total_cache_write_tokens: 5_000,
+            invocation_count: 15,
         },
         // One-shot e2e instances (uuid-suffixed ids): the costs page
         // folds these into per-family rows so they cannot bury the
@@ -345,6 +349,7 @@ fn cost_report() -> CostReport {
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
+            invocation_count: 1,
         },
         CostView {
             agent_id: "overspender-019f339b43c47822bdff48bec821d815".to_string(),
@@ -354,6 +359,7 @@ fn cost_report() -> CostReport {
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
+            invocation_count: 1,
         },
         CostView {
             agent_id: "self-inspect-019f339c171373c189d801651bdee8e5".to_string(),
@@ -363,6 +369,7 @@ fn cost_report() -> CostReport {
             total_output_tokens: 80,
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
+            invocation_count: 1,
         },
     ];
     CostReport {
@@ -387,6 +394,7 @@ fn day_cost_report() -> CostReport {
             total_output_tokens: 38_900,
             total_cache_read_tokens: 15_700_000,
             total_cache_write_tokens: 0,
+            invocation_count: 3,
         },
         CostView {
             agent_id: "doc-drift".to_string(),
@@ -396,6 +404,7 @@ fn day_cost_report() -> CostReport {
             total_output_tokens: 1_800,
             total_cache_read_tokens: 8_200,
             total_cache_write_tokens: 900,
+            invocation_count: 1,
         },
     ];
     CostReport {
@@ -405,6 +414,78 @@ fn day_cost_report() -> CostReport {
         total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
         total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
         agents,
+    }
+}
+
+/// The single-agent drill-down fixture: the multi-model spender with a
+/// few invocations, capped below its invocation count so the
+/// "showing N of M" footer is part of the screenshot.
+fn agent_cost_detail() -> AgentCostDetailView {
+    let inv =
+        |id: &str, ago_ms: i64, calls: i64, cost: f64, input: i64, cache: i64| InvocationCostView {
+            invocation_id: id.to_string(),
+            started_at_ms: NOW_MS - ago_ms,
+            event_count: calls,
+            total_cost: cost,
+            total_input_tokens: input,
+            total_output_tokens: input / 500,
+            total_cache_read_tokens: cache,
+            total_cache_write_tokens: 0,
+        };
+    AgentCostDetailView {
+        agent_id: "m0-issue-fix".to_string(),
+        totals: CostView {
+            agent_id: "m0-issue-fix".to_string(),
+            event_count: 1_112,
+            total_cost: 95.869_869,
+            total_input_tokens: 120_411_850,
+            total_output_tokens: 663_307,
+            total_cache_read_tokens: 98_000_000,
+            total_cache_write_tokens: 1_200_000,
+            invocation_count: 38,
+        },
+        models: vec![
+            ModelCostView {
+                model: "claude-opus-4-8".to_string(),
+                event_count: 812,
+                total_cost: 81.512_004,
+                total_input_tokens: 98_712_640,
+                total_output_tokens: 511_220,
+            },
+            ModelCostView {
+                model: "openai/gpt-5.6-terra".to_string(),
+                event_count: 300,
+                total_cost: 14.357_865,
+                total_input_tokens: 21_699_210,
+                total_output_tokens: 152_087,
+            },
+        ],
+        invocations: vec![
+            inv(
+                "019f534f-4b3c-7f42-a619-b5e43a64fd38",
+                600_000,
+                52,
+                2.213_7,
+                6_723_812,
+                6_554_327,
+            ),
+            inv(
+                "019f5b3f-31fb-7ae0-b130-3d65ccf40375",
+                7_200_000,
+                32,
+                0.253_8,
+                454_471,
+                433_790,
+            ),
+            inv(
+                "019f3844-11aa-7bb0-8cc1-dd22ee33ff44",
+                86_400_000,
+                54,
+                1.576_4,
+                4_582_808,
+                4_474_643,
+            ),
+        ],
     }
 }
 
@@ -485,6 +566,14 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
                 "costs",
                 REFRESH_SECS,
                 &render::costs(&cost_report(), &day_cost_report(), render::Window::All),
+            ),
+        ),
+        (
+            "costs-agent",
+            render::page(
+                "costs · m0-issue-fix",
+                REFRESH_SECS,
+                &render::agent_costs(&agent_cost_detail(), render::Window::All, NOW_MS),
             ),
         ),
         (

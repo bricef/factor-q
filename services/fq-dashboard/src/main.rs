@@ -520,6 +520,48 @@ async fn costs_page(
     ok_page(&state, "costs", &render::costs(&report, &day, window))
 }
 
+/// How many per-invocation rows the drill-down shows; the totals row
+/// carries the uncapped count ("showing N of M").
+const AGENT_COST_INVOCATION_LIMIT: i64 = 50;
+
+async fn agent_costs_page(
+    State(state): State<Arc<AppState>>,
+    Path(agent): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Page {
+    let window = render::Window::from_query(q.get("window").map(String::as_str));
+    let client = match client_or_unreachable(&state, "costs").await {
+        Ok(c) => c,
+        Err(page) => return page,
+    };
+    let since = window.since_ms().map(rfc3339_ago);
+    match client
+        .agent_costs(
+            context::current(),
+            agent.clone(),
+            since,
+            AGENT_COST_INVOCATION_LIMIT,
+        )
+        .await
+    {
+        Ok(Ok(Some(detail))) => ok_page(
+            &state,
+            &format!("costs · {agent}"),
+            &render::agent_costs(&detail, window, now_ms()),
+        ),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Html(render::page(
+                "costs",
+                state.refresh_secs,
+                r#"<p class="muted">no cost events for that agent (in this window). <a href="/costs">← all agents</a></p>"#,
+            )),
+        ),
+        Ok(Err(err)) => unreachable_page(&state, "costs", &err.to_string()),
+        Err(err) => unreachable_page(&state, "costs", &format!("rpc: {err}")),
+    }
+}
+
 /// Build the router — separated from `main` so tests drive it with
 /// `tower::ServiceExt::oneshot`.
 fn app(state: Arc<AppState>) -> Router {
@@ -535,6 +577,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/assets/datastar.js", get(datastar_js))
         .route("/events", get(events_page))
         .route("/costs", get(costs_page))
+        .route("/costs/{agent}", get(agent_costs_page))
         .with_state(state)
 }
 
@@ -714,6 +757,19 @@ mod tests {
         let html = body_string(resp).await;
         assert!(html.contains("no cost events"), "got: {html}");
         assert!(html.contains("<b>24h</b>"), "got: {html}");
+
+        // The drill-down 404s through the wire's None path for an
+        // agent with no cost events.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/costs/no-such-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let resp = app
             .oneshot(Request::get("/events").body(Body::empty()).unwrap())

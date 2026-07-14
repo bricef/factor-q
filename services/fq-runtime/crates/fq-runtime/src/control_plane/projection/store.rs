@@ -259,7 +259,8 @@ impl ProjectionStore {
              COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
              COALESCE(SUM(output_tokens), 0) AS total_output_tokens, \
              COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
-             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
+             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, \
+             COUNT(DISTINCT invocation_id) AS invocation_count \
              FROM events \
              WHERE event_type = 'llm_response' AND total_cost IS NOT NULL",
         );
@@ -289,6 +290,98 @@ impl ProjectionStore {
                 total_output_tokens: row.get::<i64, _>(4),
                 total_cache_read_tokens: row.get::<i64, _>(5),
                 total_cache_write_tokens: row.get::<i64, _>(6),
+                invocation_count: row.get::<i64, _>(7),
+            })
+            .collect())
+    }
+
+    /// One agent's cost-bearing events grouped per invocation, newest
+    /// first (by each invocation's first cost event), capped at
+    /// `limit`. Same row filter as [`Self::cost_summary`]; the columns
+    /// it groups on (`invocation_id`, and `model` for
+    /// [`Self::cost_by_model`]) have been on every event row since the
+    /// original schema — no new columns, only new GROUP BYs.
+    pub async fn cost_by_invocation(
+        &self,
+        agent: &str,
+        since: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<InvocationCostSummary>, StoreError> {
+        let mut sql = String::from(
+            "SELECT invocation_id, \
+             MIN(timestamp) AS first_timestamp, \
+             COUNT(*) AS event_count, \
+             COALESCE(SUM(total_cost), 0.0) AS total_cost, \
+             COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
+             COALESCE(SUM(output_tokens), 0) AS total_output_tokens, \
+             COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
+             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
+             FROM events \
+             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL \
+             AND agent_id = ?",
+        );
+        if since.is_some() {
+            sql.push_str(" AND timestamp >= ?");
+        }
+        sql.push_str(" GROUP BY invocation_id ORDER BY first_timestamp DESC LIMIT ?");
+
+        let mut q = sqlx::query(&sql).bind(agent);
+        if let Some(s) = since {
+            q = q.bind(s);
+        }
+        q = q.bind(limit);
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| InvocationCostSummary {
+                invocation_id: row.get::<String, _>(0),
+                first_timestamp: row.get::<String, _>(1),
+                event_count: row.get::<i64, _>(2),
+                total_cost: row.get::<f64, _>(3),
+                total_input_tokens: row.get::<i64, _>(4),
+                total_output_tokens: row.get::<i64, _>(5),
+                total_cache_read_tokens: row.get::<i64, _>(6),
+                total_cache_write_tokens: row.get::<i64, _>(7),
+            })
+            .collect())
+    }
+
+    /// One agent's cost-bearing events grouped per model, biggest
+    /// spender first. See [`Self::cost_by_invocation`] for the shared
+    /// filter rationale.
+    pub async fn cost_by_model(
+        &self,
+        agent: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<ModelCostSummary>, StoreError> {
+        let mut sql = String::from(
+            "SELECT COALESCE(model, 'unknown') AS model, \
+             COUNT(*) AS event_count, \
+             COALESCE(SUM(total_cost), 0.0) AS total_cost, \
+             COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
+             COALESCE(SUM(output_tokens), 0) AS total_output_tokens \
+             FROM events \
+             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL \
+             AND agent_id = ?",
+        );
+        if since.is_some() {
+            sql.push_str(" AND timestamp >= ?");
+        }
+        sql.push_str(" GROUP BY model ORDER BY total_cost DESC");
+
+        let mut q = sqlx::query(&sql).bind(agent);
+        if let Some(s) = since {
+            q = q.bind(s);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ModelCostSummary {
+                model: row.get::<String, _>(0),
+                event_count: row.get::<i64, _>(1),
+                total_cost: row.get::<f64, _>(2),
+                total_input_tokens: row.get::<i64, _>(3),
+                total_output_tokens: row.get::<i64, _>(4),
             })
             .collect())
     }
@@ -342,6 +435,38 @@ pub struct CostSummary {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
+    /// Distinct invocations behind the aggregate — "how many runs did
+    /// this spend buy".
+    pub invocation_count: i64,
+}
+
+/// One invocation's share of an agent's spend — a row from
+/// [`ProjectionStore::cost_by_invocation`].
+#[derive(Debug, Clone)]
+pub struct InvocationCostSummary {
+    pub invocation_id: String,
+    /// RFC3339 timestamp of the invocation's first cost event — its
+    /// effective start, as far as the projection knows.
+    pub first_timestamp: String,
+    pub event_count: i64,
+    pub total_cost: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_write_tokens: i64,
+}
+
+/// One model's share of an agent's spend — a row from
+/// [`ProjectionStore::cost_by_model`].
+#[derive(Debug, Clone)]
+pub struct ModelCostSummary {
+    /// Model name as recorded on the event; `unknown` for rows written
+    /// before the model column was populated.
+    pub model: String,
+    pub event_count: i64,
+    pub total_cost: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
 }
 
 /// One row of a failure summary: a terminal `FailureKind` and the
@@ -831,6 +956,67 @@ mod tests {
         assert_eq!(alpha.total_output_tokens, 100);
         assert_eq!(alpha.total_cache_read_tokens, 40);
         assert_eq!(alpha.total_cache_write_tokens, 20);
+        // Two events on two distinct invocations.
+        assert_eq!(alpha.invocation_count, 2);
+    }
+
+    /// The drill-down queries group the same cost-bearing rows by
+    /// invocation and by model — no new columns, only new GROUP BYs.
+    #[tokio::test]
+    async fn cost_detail_groups_by_invocation_and_model() {
+        let (store, _dir) = open_store().await;
+        let inv1 = Uuid::now_v7();
+        let inv2 = Uuid::now_v7();
+        for (inv, cost) in [(inv1, 0.10), (inv1, 0.05), (inv2, 0.20)] {
+            store
+                .insert_event(&sample_llm_response_with_cost("alpha", inv, cost))
+                .await
+                .unwrap();
+        }
+        // Another agent's spend must not leak into alpha's drill-down.
+        store
+            .insert_event(&sample_llm_response_with_cost("beta", Uuid::now_v7(), 9.0))
+            .await
+            .unwrap();
+
+        let invs = store.cost_by_invocation("alpha", None, 10).await.unwrap();
+        assert_eq!(invs.len(), 2);
+        // Newest first by each invocation's first cost event.
+        assert!(
+            invs[0].first_timestamp >= invs[1].first_timestamp,
+            "rows must be newest-first: {invs:?}"
+        );
+        let one = invs
+            .iter()
+            .find(|r| r.invocation_id == inv1.to_string())
+            .unwrap();
+        assert_eq!(one.event_count, 2);
+        assert!((one.total_cost - 0.15).abs() < 1e-9);
+        assert_eq!(one.total_input_tokens, 200);
+        assert_eq!(one.total_cache_read_tokens, 40);
+        let two = invs
+            .iter()
+            .find(|r| r.invocation_id == inv2.to_string())
+            .unwrap();
+        assert_eq!(two.event_count, 1);
+        assert!((two.total_cost - 0.20).abs() < 1e-9);
+
+        // The cap holds.
+        assert_eq!(
+            store
+                .cost_by_invocation("alpha", None, 1)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // All fixture events carry the same model → one row, summed.
+        let models = store.cost_by_model("alpha", None).await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model, "claude-haiku-4-5");
+        assert_eq!(models[0].event_count, 3);
+        assert!((models[0].total_cost - 0.35).abs() < 1e-9);
     }
 
     #[tokio::test]
