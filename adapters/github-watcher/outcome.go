@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // OutcomeKind is which lifecycle event the runtime emitted for an
@@ -102,6 +103,15 @@ type OutcomeReactor struct {
 	Source IssueSource
 	Config Config
 	Log    *slog.Logger
+	// Stamper, when set, stamps a provenance footer (agent id,
+	// invocation id, trigger issue) on the open PR closing the issue
+	// when the invocation completes (issue #162). Optional: nil
+	// disables stamping. Best-effort: a stamp failure is logged and
+	// never blocks the label transition.
+	Stamper ProvenanceStamper
+	// Now supplies the completed timestamp for the provenance footer;
+	// nil means time.Now. A seam for tests only.
+	Now func() time.Time
 
 	mu       sync.Mutex
 	binding  map[string]int // invocation_id -> issue number
@@ -144,6 +154,10 @@ func (r *OutcomeReactor) React(ctx context.Context, ev OutcomeEvent) {
 		}
 		r.relabel(ctx, issue, r.Config.InProgressLabel, r.Config.InReviewLabel,
 			"invocation completed; issue awaiting review")
+		// Stamp after the relabel: the label transition is the
+		// load-bearing state machine and must never wait on (or be
+		// blocked by) the cosmetic provenance write.
+		r.stampProvenance(ctx, issue, ev.InvocationID)
 		r.forget(ev.InvocationID)
 	case OutcomeFailed:
 		issue, ok := r.lookup(ev.InvocationID)
@@ -177,6 +191,46 @@ func (r *OutcomeReactor) reactFailed(ctx context.Context, issue int, errorKind s
 	}
 	r.relabel(ctx, issue, r.Config.InProgressLabel, r.Config.FailedLabel,
 		fmt.Sprintf("invocation failed (%s); %s — needs operator attention", errorKind, reason))
+}
+
+// stampProvenance appends the machine-authored provenance footer to
+// every open PR closing the issue (issue #162; normally exactly one).
+// Best-effort throughout: errors are logged, never propagated — and a
+// PR already carrying the marker is left untouched, so re-observed
+// completions (watcher restarts, retriggers) cannot double-stamp.
+func (r *OutcomeReactor) stampProvenance(ctx context.Context, issue int, invocationID string) {
+	if r.Stamper == nil {
+		return
+	}
+	now := time.Now
+	if r.Now != nil {
+		now = r.Now
+	}
+	prs, err := r.Stamper.OpenPRsClosingIssue(ctx, issue)
+	if err != nil {
+		r.Log.Error("listing open PRs for provenance stamp failed; PR left unstamped",
+			"issue", issue, "invocation", invocationID, "err", err)
+		return
+	}
+	footer := provenanceFooter(r.Config.TargetAgent, invocationID, issue, r.Config.ReadyLabel, now())
+	for _, pr := range prs {
+		body, err := r.Stamper.PRBody(ctx, pr)
+		if err != nil {
+			r.Log.Error("reading PR body for provenance stamp failed; PR left unstamped",
+				"issue", issue, "pr", pr, "err", err)
+			continue
+		}
+		stamped, changed := appendProvenance(body, footer)
+		if !changed {
+			continue
+		}
+		if err := r.Stamper.SetPRBody(ctx, pr, stamped); err != nil {
+			r.Log.Error("writing provenance stamp failed; PR left unstamped",
+				"issue", issue, "pr", pr, "err", err)
+			continue
+		}
+		r.Log.Info("stamped provenance on PR", "issue", issue, "pr", pr, "invocation", invocationID)
+	}
 }
 
 func (r *OutcomeReactor) lookup(invocationID string) (int, bool) {

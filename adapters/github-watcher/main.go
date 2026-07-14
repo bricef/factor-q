@@ -89,6 +89,9 @@ func run(args []string) error {
 	// error ends its goroutine but does not stop polling (the review
 	// sweep is the backstop for missed events).
 	reactor := NewOutcomeReactor(source, cfg, log)
+	// Stamp invocation provenance on the PR the agent opened (issue
+	// #162) — same gh-backed source, optional and best-effort.
+	reactor.Stamper = source
 	outcomes := NewNatsOutcomeSource(pub.Conn(), cfg.TaskTemplate)
 	go func() {
 		if err := reactor.Run(ctx, outcomes); err != nil && ctx.Err() == nil {

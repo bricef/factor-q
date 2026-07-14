@@ -48,7 +48,13 @@ watcher subscribes to the triggered agent's lifecycle events
 (`fq.agent.<agent>.triggered` / `.completed` / `.failed`), binds each
 invocation to its issue via the `triggered` event's payload, and reacts:
 
-- **completed** → `in-progress` → `in-review` (the agent opened its PR);
+- **completed** → `in-progress` → `in-review` (the agent opened its PR).
+  The watcher then stamps a **provenance footer** on the open PR closing
+  the issue — agent id, invocation id, trigger issue, completion time
+  (issue #162) — so any PR traces back to the exact invocation that
+  produced it. The stamp is idempotent (an HTML marker guards against
+  re-stamping) and best-effort: a failure is logged and never blocks the
+  label transition;
 - **failed, transient** (e.g. `llm_error`) → `in-progress` → `ready`, up to
   `--max-retries` times — a **bounded** auto-retry, not infinite;
 - **failed, terminal** (`budget_exceeded`, `max_iterations`,
