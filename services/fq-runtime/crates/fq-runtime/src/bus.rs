@@ -83,6 +83,23 @@ pub const TRIGGER_MAX_DELIVER: i64 = 5;
 /// `Nak(None)` redelivers immediately, overriding the consumer
 /// schedule). JetStream requires `max_deliver` > the schedule length,
 /// so four entries cover the four retries after the first delivery.
+/// JetStream stream capturing `MAX_DELIVERIES` advisories for the
+/// trigger stream (#169). Advisories are core-NATS fire-and-forget,
+/// and the crash that exhausts a trigger also kills any live
+/// subscriber — with the retry backoff, the delivery-5 advisory can
+/// fire minutes after the crash — so they are captured durably and
+/// drained by the control-plane's advisory watch. Same Limits/24h
+/// retention as the trigger stream: an advisory only needs to
+/// outlive daemon downtime.
+pub const ADVISORY_STREAM_NAME: &str = "fq-advisories";
+
+/// Subject the JetStream server publishes when a message on the
+/// trigger stream can no longer be delivered (delivery bound
+/// reached). One token per consumer name at the tail.
+pub fn trigger_max_deliveries_advisory_subject() -> String {
+    format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.>")
+}
+
 pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(1),
     std::time::Duration::from_secs(5),
@@ -281,6 +298,7 @@ impl EventBus {
         };
         bus.ensure_event_stream().await?;
         bus.ensure_trigger_stream().await?;
+        bus.ensure_advisory_stream().await?;
         Ok(bus)
     }
 
@@ -365,6 +383,55 @@ impl EventBus {
             })
             .await?;
         Ok(())
+    }
+
+    /// Ensure the advisory capture stream exists (#169). Capture must
+    /// be server-side and always-on: the advisory a crashed dispatcher
+    /// leaves behind fires while no subscriber is alive to hear it.
+    async fn ensure_advisory_stream(&self) -> Result<(), BusError> {
+        debug!(
+            stream = ADVISORY_STREAM_NAME,
+            "ensuring JetStream advisory capture stream exists"
+        );
+        self.jetstream
+            .get_or_create_stream(stream::Config {
+                name: ADVISORY_STREAM_NAME.to_string(),
+                subjects: vec![trigger_max_deliveries_advisory_subject()],
+                retention: stream::RetentionPolicy::Limits,
+                storage: stream::StorageType::File,
+                max_age: DEFAULT_TRIGGER_MAX_AGE,
+                ..Default::default()
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Durable consumer over the advisory capture stream (#169).
+    /// Bounded like the trigger consumer — a poison advisory must not
+    /// redeliver forever either.
+    pub async fn advisory_consumer(&self, name: &str) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            "getting/creating durable advisory consumer"
+        );
+        let stream = self
+            .jetstream
+            .get_stream(ADVISORY_STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        stream
+            .get_or_create_consumer(
+                name,
+                consumer::pull::Config {
+                    durable_name: Some(name.to_string()),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    max_deliver: TRIGGER_MAX_DELIVER,
+                    backoff: TRIGGER_RETRY_BACKOFF.to_vec(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))
     }
 
     /// Publish an event to the bus.

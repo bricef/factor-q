@@ -28,11 +28,17 @@
 //! - [`heartbeat_consumer`] — subscribes to
 //!   `fq.worker.*.heartbeat` and updates
 //!   `coordination_worker.last_heartbeat`.
+//! - [`advisory_watch`] — drains the captured JetStream
+//!   MAX_DELIVERIES advisories for the trigger stream and emits
+//!   the dead-letter events the dispatcher's inline path cannot
+//!   (crash during the final delivery; pre-bound poison triggers
+//!   at consumer-upgrade time). See #49 / #169.
 //!
 //! Future control-plane work (schedules, pending waits,
 //! retention sweep) lands here as the `data-architecture-v1`
 //! plan steps progress.
 
+pub mod advisory_watch;
 pub mod coordination_consumer;
 pub mod dispatcher;
 pub mod heartbeat_consumer;
@@ -41,6 +47,7 @@ pub mod projection;
 pub mod retention;
 pub mod store;
 
+pub use advisory_watch::{AdvisoryWatch, AdvisoryWatchError};
 pub use coordination_consumer::{CoordinationConsumer, CoordinationConsumerError};
 pub use heartbeat_consumer::{HeartbeatConsumer, HeartbeatConsumerError};
 pub use store::{

@@ -61,8 +61,9 @@ pub use control_plane::dispatcher::{
 };
 pub use control_plane::projection::{ProjectionConsumer, ProjectionStore};
 pub use control_plane::{
-    CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError, CoordinationConsumer,
-    CoordinationConsumerError, HeartbeatConsumer, HeartbeatConsumerError, OwnerStatus,
+    AdvisoryWatch, AdvisoryWatchError, CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore,
+    ControlPlaneStoreError, CoordinationConsumer, CoordinationConsumerError, HeartbeatConsumer,
+    HeartbeatConsumerError, OwnerStatus,
 };
 pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
 pub use mcp::{
