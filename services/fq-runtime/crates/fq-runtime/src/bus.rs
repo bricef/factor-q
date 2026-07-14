@@ -7,7 +7,7 @@
 //! See `docs/design/committed/event-schema.md` for the event schema and subject
 //! hierarchy.
 
-use async_nats::jetstream::{self, consumer, stream};
+use async_nats::jetstream::{self, consumer, consumer::FromConsumer, stream};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use std::pin::Pin;
@@ -70,6 +70,11 @@ pub const ALL_TRIGGERS_SUBJECT: &str = "fq.trigger.>";
 /// consumer's config — going lower would mean a config the server
 /// silently ignores on existing deployments.
 pub const NATS_DEFAULT_MAX_ACK_PENDING: i64 = 1000;
+
+/// Maximum times JetStream may deliver a trigger before it is surfaced as
+/// exhausted. This bounds poison-trigger retries while still allowing a few
+/// transient failures to recover.
+pub const TRIGGER_MAX_DELIVER: i64 = 5;
 
 /// Control subject a running `fq run` daemon subscribes to for a
 /// hot-reload of agent definitions. Published by `fq reload`
@@ -434,22 +439,51 @@ impl EventBus {
             .get_stream(TRIGGER_STREAM_NAME)
             .await
             .map_err(|err| BusError::Stream(err.to_string()))?;
-        let consumer = stream
-            .get_or_create_consumer(
-                name,
-                consumer::pull::Config {
-                    durable_name: Some(name.to_string()),
-                    ack_policy: consumer::AckPolicy::Explicit,
-                    filter_subject: filter_subject.to_string(),
-                    // Explicit ack window, sized by the caller from its
-                    // concurrency bound (see NATS_DEFAULT_MAX_ACK_PENDING
-                    // for the floor rationale).
-                    max_ack_pending,
-                    ..Default::default()
-                },
-            )
+        let config = consumer::pull::Config {
+            durable_name: Some(name.to_string()),
+            ack_policy: consumer::AckPolicy::Explicit,
+            filter_subject: filter_subject.to_string(),
+            // Explicit ack window, sized by the caller from its
+            // concurrency bound (see NATS_DEFAULT_MAX_ACK_PENDING
+            // for the floor rationale).
+            max_ack_pending,
+            // Never retry a poison trigger indefinitely. The dispatcher
+            // emits a terminal failure on the last delivery before
+            // acknowledging it.
+            max_deliver: TRIGGER_MAX_DELIVER,
+            ..Default::default()
+        };
+        let mut consumer = stream
+            .get_or_create_consumer(name, config)
             .await
             .map_err(|err| BusError::Stream(err.to_string()))?;
+
+        // Existing durable consumers retain their old configuration when
+        // opened. Upgrade their delivery bound too, otherwise a deployment
+        // made before this limit would keep retrying poison triggers forever.
+        if consumer
+            .info()
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?
+            .config
+            .max_deliver
+            != TRIGGER_MAX_DELIVER
+        {
+            let mut config = consumer::pull::Config::try_from_consumer_config(
+                consumer
+                    .info()
+                    .await
+                    .map_err(|err| BusError::Stream(err.to_string()))?
+                    .config
+                    .clone(),
+            )
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+            config.max_deliver = TRIGGER_MAX_DELIVER;
+            return stream
+                .update_consumer(config)
+                .await
+                .map_err(|err| BusError::Stream(err.to_string()));
+        }
         Ok(consumer)
     }
 

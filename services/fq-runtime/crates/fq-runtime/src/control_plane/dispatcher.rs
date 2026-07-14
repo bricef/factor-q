@@ -50,13 +50,21 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
-use crate::bus::{BusError, EventBus, agent_id_from_trigger_subject};
-use crate::events::TriggerSource;
+use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER, agent_id_from_trigger_subject};
+use crate::events::{
+    Event, EventPayload, FailureKind, FailurePhase, InvocationTotals, TriggerSource,
+};
 use crate::llm::LlmClient;
 use crate::worker::{DrainState, DurableStart, ExecutorError, Worker};
 
 /// Name of the durable JetStream consumer the dispatcher creates.
 pub const CONSUMER_NAME: &str = "fq-dispatcher";
+
+/// Whether the current JetStream delivery is the terminal retry. Kept pure so
+/// the delivery-limit boundary is testable without a live broker.
+fn trigger_retry_exhausted(delivery_attempt: u32) -> bool {
+    delivery_attempt >= TRIGGER_MAX_DELIVER as u32
+}
 
 /// Shared, hot-swappable agent registry — the manual equivalent of
 /// `ArcSwap` (which isn't a dependency in this tree). The nested
@@ -448,10 +456,13 @@ impl TriggerDispatcher {
         //   poison trigger would loop under the consumer's unbounded
         //   redelivery.
         //
-        // Redelivery is unbounded today; bounding it (`max_deliver`) and
-        // dead-lettering exhausted triggers is tracked in #49.
         if !acked {
             match &result {
+                Err(err) if err.is_transient() && trigger_retry_exhausted(delivery_attempt) => {
+                    self.dead_letter_exhausted(&agent_id, delivery_attempt, err)
+                        .await;
+                    self.ack(msg, "transient retry limit exhausted").await;
+                }
                 Err(err) if err.is_transient() => {
                     self.nak(msg, "transient failure before first WAL write")
                         .await;
@@ -486,10 +497,48 @@ impl TriggerDispatcher {
         }
     }
 
+    /// Emit a terminal failure event before consuming an exhausted transient
+    /// trigger. This is the dead-letter surface for the trigger consumer:
+    /// the original trigger remains available in JetStream until its normal
+    /// retention expiry, while the terminal event makes the exhaustion
+    /// visible to the projection and operators.
+    async fn dead_letter_exhausted(
+        &self,
+        agent_id: &AgentId,
+        delivery_attempt: u32,
+        err: &ExecutorError,
+    ) {
+        let event = Event::new(
+            agent_id.clone(),
+            uuid::Uuid::now_v7(),
+            EventPayload::Failed(crate::events::FailedPayload {
+                error_kind: FailureKind::RuntimeError,
+                error_message: format!(
+                    "trigger exhausted after {delivery_attempt} deliveries (limit {TRIGGER_MAX_DELIVER}): {err}"
+                ),
+                phase: FailurePhase::Setup,
+                partial_totals: InvocationTotals::default(),
+            }),
+        );
+        if let Err(publish_err) = self.bus.publish(&event).await {
+            error!(
+                agent_id = %agent_id,
+                delivery_attempt,
+                error = %publish_err,
+                "failed to publish exhausted trigger dead-letter event"
+            );
+        } else {
+            error!(
+                agent_id = %agent_id,
+                delivery_attempt,
+                "trigger retry limit exhausted; emitted terminal dead-letter event"
+            );
+        }
+    }
+
     /// NAK a trigger so JetStream redelivers it after the ack-wait — used
     /// when an invocation fails *before its first WAL write* with a
-    /// transient error, so the otherwise-lost run is retried. Redelivery
-    /// is unbounded today; bounding it + dead-lettering is tracked in #49.
+    /// transient error, so the otherwise-lost run is retried.
     async fn nak(&self, msg: &async_nats::jetstream::Message, context: &str) {
         if let Err(err) = msg
             .ack_with(async_nats::jetstream::AckKind::Nak(None))
@@ -642,6 +691,12 @@ mod tests {
                 .run_on_consumer(&consumer_name, Some(&filter_subject), shutdown)
                 .await
         }
+    }
+
+    #[test]
+    fn trigger_retry_limit_exhausts_on_the_configured_delivery() {
+        assert!(!trigger_retry_exhausted(TRIGGER_MAX_DELIVER as u32 - 1));
+        assert!(trigger_retry_exhausted(TRIGGER_MAX_DELIVER as u32));
     }
 
     #[test]
