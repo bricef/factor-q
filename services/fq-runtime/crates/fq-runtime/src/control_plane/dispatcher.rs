@@ -511,6 +511,7 @@ impl TriggerDispatcher {
                         &agent_id,
                         msg.subject.as_str(),
                         &trigger_payload,
+                        msg.info().map(|info| info.stream_sequence).unwrap_or(0),
                         delivery_attempt,
                         err,
                     )
@@ -559,17 +560,21 @@ impl TriggerDispatcher {
     /// `trigger_exhausted` kind; the annotations carry what a requeue
     /// needs).
     ///
-    /// Known hole, tracked in #169: exhaustion is only surfaced
-    /// when the final delivery reaches this dispatcher and fails. A crash
-    /// during the final delivery (or a pre-bound consumer whose poison
-    /// trigger already exceeded the limit at upgrade time) stops
-    /// redelivery without an event; closing that needs the JetStream
-    /// `MAX_DELIVERIES` advisory listener.
+    /// This is the *fast path*: it fires only when the final delivery
+    /// reaches a live dispatcher and fails there, and its ACK
+    /// suppresses the server's MAX_DELIVERIES advisory (probed
+    /// empirically, #169) — so the two emitters are mutually exclusive
+    /// in every non-crash path. Exhaustion this dispatcher never
+    /// observes (a crash during the final delivery; a pre-bound poison
+    /// trigger at upgrade time) is surfaced by the advisory watch
+    /// ([`super::advisory_watch`]) from the durable capture stream.
+    /// The shared `trigger_stream_seq` annotation reconciles the two.
     async fn dead_letter_exhausted(
         &self,
         agent_id: &AgentId,
         trigger_subject: &str,
         trigger_payload: &serde_json::Value,
+        stream_seq: u64,
         delivery_attempt: u32,
         err: &ExecutorError,
     ) {
@@ -586,10 +591,21 @@ impl TriggerDispatcher {
             }),
         )
         .annotate(
-            "trigger_subject",
+            crate::events::DEAD_LETTER_SUBJECT_KEY,
             serde_json::Value::String(trigger_subject.to_string()),
         )
-        .annotate("trigger_payload", trigger_payload.clone());
+        .annotate(
+            crate::events::DEAD_LETTER_PAYLOAD_KEY,
+            trigger_payload.clone(),
+        )
+        .annotate(
+            crate::events::DEAD_LETTER_STREAM_SEQ_KEY,
+            serde_json::json!(stream_seq),
+        )
+        .annotate(
+            crate::events::DEAD_LETTER_SOURCE_KEY,
+            serde_json::Value::String("inline".to_string()),
+        );
         if let Err(publish_err) = self.bus.publish(&event).await {
             error!(
                 agent_id = %agent_id,
@@ -1467,6 +1483,7 @@ You are a test agent."#
                 &agent_id,
                 &trigger_subject,
                 &trigger_payload,
+                4242,
                 TRIGGER_MAX_DELIVER as u32,
                 &ExecutorError::WorkerStore("simulated persistent outage".to_string()),
             )
@@ -1508,6 +1525,15 @@ You are a test agent."#
             event.annotations.0.get("trigger_payload"),
             Some(&trigger_payload),
             "annotations must carry the payload a requeue needs"
+        );
+        assert_eq!(
+            event.annotations.0.get("trigger_stream_seq"),
+            Some(&json!(4242)),
+            "the stream sequence is the inline/advisory reconciliation key"
+        );
+        assert_eq!(
+            event.annotations.0.get("dead_letter_source"),
+            Some(&json!("inline"))
         );
     }
 

@@ -2168,6 +2168,16 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let mut hb_consumer_handle =
         tokio::spawn(async move { hb_consumer.run(hb_consumer_shutdown_rx).await });
 
+    // Spawn the advisory watch (#169). Drains the captured JetStream
+    // MAX_DELIVERIES advisories for the trigger stream and emits the
+    // dead-letter events the dispatcher's inline path cannot: a crash
+    // during the final delivery, and pre-bound poison triggers at
+    // consumer-upgrade time.
+    let (advisory_shutdown_tx, advisory_shutdown_rx) = tokio::sync::oneshot::channel();
+    let advisory_watch = fq_runtime::AdvisoryWatch::new(bus.clone());
+    let mut advisory_handle =
+        tokio::spawn(async move { advisory_watch.run(advisory_shutdown_rx).await });
+
     // Spawn the worker heartbeat producer (worker side). Fires
     // a heartbeat immediately and then every 10s (the default
     // interval). Without this, the coordination consumer's
@@ -2549,6 +2559,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             let err_msg = describe_task_result("heartbeat consumer", result);
             ("task_failed", false, Some(("heartbeat_consumer", err_msg)))
         }
+        result = &mut advisory_handle => {
+            let err_msg = describe_task_result("advisory watch", result);
+            ("task_failed", false, Some(("advisory_watch", err_msg)))
+        }
         result = &mut hb_producer_handle => {
             let err_msg = describe_task_result("heartbeat producer", result);
             ("task_failed", false, Some(("heartbeat_producer", err_msg)))
@@ -2658,6 +2672,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = proj_shutdown_tx.send(());
     let _ = coord_shutdown_tx.send(());
     let _ = hb_consumer_shutdown_tx.send(());
+    let _ = advisory_shutdown_tx.send(());
     let _ = hb_producer_shutdown_tx.send(());
     let _ = archive_ack_shutdown_tx.send(());
     let _ = archive_retry_shutdown_tx.send(());
@@ -2688,6 +2703,14 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
         Ok(Err(err)) => tracing::error!(error = %err, "heartbeat consumer task panicked"),
         Err(_) => tracing::warn!("heartbeat consumer did not shut down within 5s"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), advisory_handle).await {
+        Ok(Ok(Ok(()))) => println!("  advisory watch stopped cleanly."),
+        Ok(Ok(Err(err))) => {
+            tracing::error!(error = %err, "advisory watch exited with error")
+        }
+        Ok(Err(err)) => tracing::error!(error = %err, "advisory watch task panicked"),
+        Err(_) => tracing::warn!("advisory watch did not shut down within 5s"),
     }
     match tokio::time::timeout(std::time::Duration::from_secs(5), hb_producer_handle).await {
         Ok(Ok(Ok(()))) => println!("  heartbeat producer stopped cleanly."),
