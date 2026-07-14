@@ -167,7 +167,14 @@ impl ReadService for ReadServer {
             streams,
             event_count: self.views.event_count().await?,
             recovery: self.views.recovery(now_ms, HEALTH_THRESHOLD_MS).await?,
-            executions: self.views.executions(now_ms, HEALTH_THRESHOLD_MS).await?,
+            executions: self
+                .views
+                .executions(
+                    now_ms,
+                    HEALTH_THRESHOLD_MS,
+                    crate::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+                )
+                .await?,
             failures: self.views.failures().await?,
         })
     }

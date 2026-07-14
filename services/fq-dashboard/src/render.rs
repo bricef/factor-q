@@ -118,6 +118,21 @@ fn inv_link(id: &str) -> String {
     format!(r#"<a href="/invocations/{}">{}</a>"#, esc(id), short(id))
 }
 
+/// ": <link>, <link>" suffix for a count that carries ids; empty when
+/// there are none.
+fn linked_ids(ids: &[String]) -> String {
+    if ids.is_empty() {
+        return String::new();
+    }
+    format!(
+        ": {}",
+        ids.iter()
+            .map(|id| inv_link(id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// The health page body.
 pub fn health(report: &HealthReport, now_ms: i64) -> String {
     let mut b = String::new();
@@ -207,35 +222,9 @@ pub fn health(report: &HealthReport, now_ms: i64) -> String {
         exec_class,
         report.executions.in_flight,
         report.executions.working,
-        if report.executions.working > 0 {
-            format!(
-                ": {}",
-                report
-                    .executions
-                    .working_ids
-                    .iter()
-                    .map(|id| inv_link(id))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        } else {
-            String::new()
-        },
+        linked_ids(&report.executions.working_ids),
         report.executions.stuck,
-        if report.executions.stuck > 0 {
-            format!(
-                ": {}",
-                report
-                    .executions
-                    .stuck_ids
-                    .iter()
-                    .map(|id| inv_link(id))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        } else {
-            String::new()
-        }
+        linked_ids(&report.executions.stuck_ids)
     ));
     let rec_class = if report.recovery.ambiguous > 0 || report.recovery.stale_workers > 0 {
         "warn"
@@ -682,6 +671,23 @@ pub fn costs(report: &CostReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The health page links working and stuck invocation ids (#130) —
+    /// asserted against the same fixture the screenshot gallery renders.
+    #[test]
+    fn health_links_working_and_stuck_ids() {
+        let report = crate::fixtures::health_report();
+        let html = health(&report, 0);
+        assert!(html.contains("2 in-flight (1 working"), "got: {html}");
+        assert!(
+            html.contains(r#"<a href="/invocations/019f5b3f-31fb-7ae0-b130-3d65ccf40375">"#),
+            "working id not linked: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/invocations/019f534f-4b3c-7f42-a619-b5e43a64fd38">"#),
+            "stuck id not linked: {html}"
+        );
+    }
 
     #[test]
     fn esc_neutralises_html() {

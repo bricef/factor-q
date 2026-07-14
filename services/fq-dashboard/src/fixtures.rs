@@ -21,7 +21,7 @@ use crate::render;
 const NOW_MS: i64 = 1_783_803_600_000;
 const REFRESH_SECS: u64 = 5;
 
-fn health_report() -> HealthReport {
+pub(crate) fn health_report() -> HealthReport {
     HealthReport {
         version: "0.1.0+abc123def456".to_string(),
         streams: vec![
@@ -62,8 +62,8 @@ fn health_report() -> HealthReport {
         },
         executions: ExecutionsView {
             in_flight: 2,
-            working: 0,
-            working_ids: vec![],
+            working: 1,
+            working_ids: vec!["019f5b3f-31fb-7ae0-b130-3d65ccf40375".to_string()],
             stuck: 1,
             stuck_ids: vec!["019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string()],
         },
