@@ -910,6 +910,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "axum",
+ "chrono",
  "clap",
  "datastar",
  "fq-runtime",

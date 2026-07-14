@@ -24,6 +24,11 @@ path = "src/main.rs"
 fq-runtime = { path = "../fq-runtime/crates/fq-runtime", features = ["read-service"] }
 anyhow = "1"
 axum = "0.8"
+# RFC3339 `since` strings for the costs page's time windows — the same
+# form the projection stores (envelope timestamp .to_rfc3339()), so the
+# store's lexicographic `timestamp >= ?` compare works. Already in the
+# tree via fq-runtime.
+chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 # Server-side builders for the datastar SSE protocol (the client is
 # vendored at assets/datastar.js — v1.0.0, MIT, served from the binary).

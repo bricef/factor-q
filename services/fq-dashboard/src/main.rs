@@ -105,7 +105,7 @@ fn skew(state: &AppState) -> Option<(String, String)> {
     (daemon_sha != OWN_SHA).then(|| (OWN_SHA.to_string(), daemon_sha))
 }
 
-/// `std`-only epoch-ms clock (the dashboard has no chrono dependency).
+/// Epoch-ms clock for age rendering.
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -476,16 +476,48 @@ async fn events_page(
     }
 }
 
-async fn costs_page(State(state): State<Arc<AppState>>) -> Page {
+/// RFC3339 timestamp `ms` milliseconds in the past. The projection
+/// stores envelope timestamps via `.to_rfc3339()`, so this form
+/// string-compares correctly against its `timestamp >= ?` bound.
+fn rfc3339_ago(ms: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::milliseconds(ms)).to_rfc3339()
+}
+
+async fn costs_page(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Page {
+    let window = render::Window::from_query(q.get("window").map(String::as_str));
     let client = match client_or_unreachable(&state, "costs").await {
         Ok(c) => c,
         Err(page) => return page,
     };
-    match client.costs(context::current(), None, None).await {
-        Ok(Ok(report)) => ok_page(&state, "costs", &render::costs(&report)),
-        Ok(Err(err)) => unreachable_page(&state, "costs", &err.to_string()),
-        Err(err) => unreachable_page(&state, "costs", &format!("rpc: {err}")),
-    }
+    let since = window.since_ms().map(rfc3339_ago);
+    let report = match client.costs(context::current(), None, since).await {
+        Ok(Ok(report)) => report,
+        Ok(Err(err)) => return unreachable_page(&state, "costs", &err.to_string()),
+        Err(err) => return unreachable_page(&state, "costs", &format!("rpc: {err}")),
+    };
+    // The last-24h column always reads from a day-bounded report; when
+    // the page window IS the day, that's the same data — skip the RPC.
+    let day = if window == render::Window::Day {
+        report.clone()
+    } else {
+        let day_since = rfc3339_ago(
+            render::Window::Day
+                .since_ms()
+                .expect("day window is bounded"),
+        );
+        match client
+            .costs(context::current(), None, Some(day_since))
+            .await
+        {
+            Ok(Ok(day)) => day,
+            Ok(Err(err)) => return unreachable_page(&state, "costs", &err.to_string()),
+            Err(err) => return unreachable_page(&state, "costs", &format!("rpc: {err}")),
+        }
+    };
+    ok_page(&state, "costs", &render::costs(&report, &day, window))
 }
 
 /// Build the router — separated from `main` so tests drive it with
@@ -666,6 +698,22 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(body_string(resp).await.contains("no cost events"));
+
+        // A bounded window renders the same empty page plus the
+        // selector (two RPCs collapse to one on the day window).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/costs?window=24h")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(html.contains("no cost events"), "got: {html}");
+        assert!(html.contains("<b>24h</b>"), "got: {html}");
 
         let resp = app
             .oneshot(Request::get("/events").body(Body::empty()).unwrap())

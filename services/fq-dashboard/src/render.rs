@@ -741,15 +741,83 @@ struct FamilyAgg {
     cost: f64,
 }
 
+/// The costs page's time window. `All` is the default; the bounded two
+/// map to a `since` the caller computes and passes to the read service
+/// (render stays pure — no wall clock in here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window {
+    All,
+    Days7,
+    Day,
+}
+
+impl Window {
+    /// Parse the `?window=` query value; anything unrecognised is `All`.
+    pub fn from_query(value: Option<&str>) -> Self {
+        match value {
+            Some("7d") => Window::Days7,
+            Some("24h") => Window::Day,
+            _ => Window::All,
+        }
+    }
+
+    /// How far back the window reaches, in ms; `None` = unbounded.
+    pub fn since_ms(self) -> Option<i64> {
+        match self {
+            Window::All => None,
+            Window::Days7 => Some(7 * 86_400_000),
+            Window::Day => Some(86_400_000),
+        }
+    }
+}
+
+/// The "window: all · 7d · 24h" selector row over `base` (the page's
+/// own path) — the current window is bold text, the others link.
+fn window_links(current: Window, base: &str) -> String {
+    let parts: Vec<String> = [
+        (Window::All, "all", String::new()),
+        (Window::Days7, "7d", "?window=7d".to_string()),
+        (Window::Day, "24h", "?window=24h".to_string()),
+    ]
+    .into_iter()
+    .map(|(w, label, query)| {
+        if w == current {
+            format!("<b>{label}</b>")
+        } else {
+            format!(r#"<a href="{base}{query}">{label}</a>"#)
+        }
+    })
+    .collect();
+    format!(r#"<p class="muted">window: {}</p>"#, parts.join(" · "))
+}
+
+/// A right-aligned "last 24h" spend cell; a muted dash when the agent
+/// spent nothing in the day window.
+fn day_cell(cost: Option<f64>) -> String {
+    match cost {
+        Some(c) if c > 0.0 => format!(r#"<td class="n">${c:.2}</td>"#),
+        _ => r#"<td class="n muted">—</td>"#.to_string(),
+    }
+}
+
 /// The costs page body: named agents as rows (the operator's
 /// spend-watch), one-shot test instances folded into per-family lines
 /// under a `<details>`, and totals split named vs one-shot so synthetic
 /// e2e spend (the $1-per-event budget-guard runs) cannot silently
-/// inflate "what did we actually spend".
-pub fn costs(report: &CostReport) -> String {
+/// inflate "what did we actually spend". `day` is the same report
+/// bounded to the last 24h — the per-agent spend-velocity column;
+/// `window` bounds `report` itself and drives the selector row.
+pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
+    let mut b = window_links(window, "/costs");
     if report.agents.is_empty() {
-        return r#"<p class="muted">no cost events recorded.</p>"#.to_string();
+        b.push_str(r#"<p class="muted">no cost events recorded.</p>"#);
+        return b;
     }
+    let day_costs: std::collections::HashMap<&str, f64> = day
+        .agents
+        .iter()
+        .map(|a| (a.agent_id.as_str(), a.total_cost))
+        .collect();
     let mut named: Vec<&CostView> = Vec::new();
     let mut families: std::collections::BTreeMap<&str, FamilyAgg> = Default::default();
     for a in &report.agents {
@@ -764,14 +832,13 @@ pub fn costs(report: &CostReport) -> String {
         }
     }
 
-    let mut b = String::new();
-
     if !named.is_empty() {
         b.push_str(
-            "<table><tr><th>agent</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">total cost</th><th>share</th></tr>",
+            "<table><tr><th>agent</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">last 24h</th><th class=\"n\">total cost</th><th>share</th></tr>",
         );
         let mut sub = FamilyAgg::default();
         let (mut sub_in, mut sub_out, mut sub_cr, mut sub_cw) = (0i64, 0i64, 0i64, 0i64);
+        let mut sub_day = 0.0_f64;
         for a in &named {
             sub.calls += a.event_count;
             sub.cost += a.total_cost;
@@ -779,25 +846,29 @@ pub fn costs(report: &CostReport) -> String {
             sub_out += a.total_output_tokens;
             sub_cr += a.total_cache_read_tokens;
             sub_cw += a.total_cache_write_tokens;
+            let day = day_costs.get(a.agent_id.as_str()).copied();
+            sub_day += day.unwrap_or(0.0);
             b.push_str(&format!(
-                r#"<tr><td>{}</td><td class="n">{}</td>{}{}{}{}<td class="n">${:.4}</td>{}</tr>"#,
+                r#"<tr><td>{}</td><td class="n">{}</td>{}{}{}{}{}<td class="n">${:.4}</td>{}</tr>"#,
                 esc(&a.agent_id),
                 fmt_grouped(a.event_count),
                 token_cell(a.total_input_tokens),
                 token_cell(a.total_output_tokens),
                 token_cell(a.total_cache_read_tokens),
                 token_cell(a.total_cache_write_tokens),
+                day_cell(day),
                 a.total_cost,
                 share_cell(a.total_cost, report.total_cost),
             ));
         }
         b.push_str(&format!(
-            r#"<tr class="sub"><th>named agents</th><td class="n">{}</td>{}{}{}{}<td class="n"><b>${:.4}</b></td>{}</tr>"#,
+            r#"<tr class="sub"><th>named agents</th><td class="n">{}</td>{}{}{}{}{}<td class="n"><b>${:.4}</b></td>{}</tr>"#,
             fmt_grouped(sub.calls),
             token_cell(sub_in),
             token_cell(sub_out),
             token_cell(sub_cr),
             token_cell(sub_cw),
+            day_cell(Some(sub_day)),
             sub.cost,
             share_cell(sub.cost, report.total_cost),
         ));
@@ -1096,9 +1167,15 @@ mod tests {
     /// One-shot instances collapse into per-family rows under the fold;
     /// named agents keep their own rows, and the totals line splits
     /// named vs one-shot spend.
+    /// `costs()` with an unbounded window and an empty day report — the
+    /// shape most render assertions want.
+    fn costs_all(report: &CostReport) -> String {
+        costs(report, &CostReport::default(), Window::All)
+    }
+
     #[test]
     fn costs_collapse_one_shot_agents_into_families() {
-        let html = costs(&cost_report(vec![
+        let html = costs_all(&cost_report(vec![
             cost_view("m0-issue-fix", 2474, 121.397646),
             cost_view("overspender-019f339c15767d70b8ffd6d7ca6b0a70", 1, 1.0),
             cost_view("overspender-019f339b43c47822bdff48bec821d815", 1, 1.0),
@@ -1128,7 +1205,7 @@ mod tests {
         a.total_input_tokens = 171_392_966;
         a.total_cache_read_tokens = 26_118_676;
         let b = cost_view("m0-loop", 162, 25.0);
-        let html = costs(&cost_report(vec![a, b]));
+        let html = costs_all(&cost_report(vec![a, b]));
         assert!(
             html.contains("<th class=\"n\">cache read</th>"),
             "got: {html}"
@@ -1153,9 +1230,63 @@ mod tests {
     /// Agent ids are attacker-adjacent strings and stay escaped.
     #[test]
     fn costs_escape_agent_ids() {
-        let html = costs(&cost_report(vec![cost_view("<agent>", 1, 0.5)]));
+        let html = costs_all(&cost_report(vec![cost_view("<agent>", 1, 0.5)]));
         assert!(html.contains("&lt;agent&gt;"), "got: {html}");
         assert!(!html.contains("<agent>"), "got: {html}");
+    }
+
+    /// The window selector: the current window is bold text, the other
+    /// two are links back to the page.
+    #[test]
+    fn costs_window_selector_marks_current_and_links_others() {
+        let html = costs(
+            &cost_report(vec![cost_view("a", 1, 1.0)]),
+            &CostReport::default(),
+            Window::Days7,
+        );
+        assert!(html.contains("<b>7d</b>"), "got: {html}");
+        assert!(html.contains(r#"<a href="/costs">all</a>"#), "got: {html}");
+        assert!(
+            html.contains(r#"<a href="/costs?window=24h">24h</a>"#),
+            "got: {html}"
+        );
+        // An empty windowed report still renders the selector — the way
+        // back out of a quiet window.
+        let empty = costs(&CostReport::default(), &CostReport::default(), Window::Day);
+        assert!(empty.contains("<b>24h</b>"), "got: {empty}");
+        assert!(empty.contains("no cost events"), "got: {empty}");
+    }
+
+    /// The last-24h column reads from the day-bounded report; agents
+    /// with no day spend show a muted dash.
+    #[test]
+    fn costs_day_column_reads_from_the_day_report() {
+        let report = cost_report(vec![
+            cost_view("m0-issue-fix", 10, 121.0),
+            cost_view("m0-loop", 5, 6.0),
+        ]);
+        let day = cost_report(vec![cost_view("m0-issue-fix", 2, 13.16)]);
+        let html = costs(&report, &day, Window::All);
+        assert!(
+            html.contains("<th class=\"n\">last 24h</th>"),
+            "got: {html}"
+        );
+        assert!(html.contains("$13.16"), "got: {html}");
+        assert!(
+            html.contains(r#"<td class="n muted">—</td>"#),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn window_parses_query_and_bounds() {
+        assert_eq!(Window::from_query(None), Window::All);
+        assert_eq!(Window::from_query(Some("7d")), Window::Days7);
+        assert_eq!(Window::from_query(Some("24h")), Window::Day);
+        assert_eq!(Window::from_query(Some("bogus")), Window::All);
+        assert_eq!(Window::All.since_ms(), None);
+        assert_eq!(Window::Day.since_ms(), Some(86_400_000));
+        assert_eq!(Window::Days7.since_ms(), Some(604_800_000));
     }
 
     #[test]
