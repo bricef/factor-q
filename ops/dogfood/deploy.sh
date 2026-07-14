@@ -87,7 +87,16 @@ if [ "$WANT" = "latest" ]; then
     case "$SHA" in *-dirty*) die "channel artifact is dirty-stamped ($SHA) — refusing" ;; esac
     WSHA="$(watcher_sha "$tmp/x/github-watcher")"
     [ "$WSHA" = "$SHA" ] || die "bundle mismatch: fq is $SHA but github-watcher is $WSHA"
-    ok "bundle is main @ $SHA (fq and watcher agree)"
+    # The dashboard gained --version with #168 (prints "fq-dashboard
+    # <sha>"); include it in the coherence check. Tolerate a bundle
+    # predating the flag (empty DSHA) rather than dying on it.
+    DSHA="$("$tmp/x/fq-dashboard" --version 2>/dev/null | awk '{print $2}')"
+    if [ -n "$DSHA" ]; then
+        [ "$DSHA" = "$SHA" ] || die "bundle mismatch: fq is $SHA but fq-dashboard is $DSHA"
+        ok "bundle is main @ $SHA (fq, watcher and dashboard agree)"
+    else
+        ok "bundle is main @ $SHA (fq and watcher agree; dashboard predates --version)"
+    fi
 
     REL="releases/$SHA"
     if [ -d "$REL" ]; then
@@ -249,6 +258,6 @@ printf '\n\033[1;32m════════════════════
 printf '  DEPLOYED — factor-q dogfood stack @ %s\n' "$SHA"
 printf '    daemon    PID %-8s %s\n' "$NEW_DAEMON" "$("$REL/fq" --version)"
 printf '    watcher   PID %-8s %s\n' "$NEW_WATCHER" "$("$REL/github-watcher" --version 2>&1)"
-printf '    dashboard PID %-8s %s/fq-dashboard (no --version; verified via /proc)\n' "$NEW_DASHBOARD" "$REL"
+printf '    dashboard PID %-8s %s\n' "$NEW_DASHBOARD" "$("$REL/fq-dashboard" --version 2>/dev/null || echo 'fq-dashboard (predates --version)')"
 printf '    rollback: ops/dogfood/deploy.sh <sha>   history: ls %s/releases\n' "$DOGFOOD"
 printf '════════════════════════════════════════════════════\033[0m\n'
