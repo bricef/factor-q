@@ -25,17 +25,21 @@ permissions:
 # is nothing to build), so branch protection is never left waiting on a
 # check that never arrives — the reason we gate steps, not the whole job.
 #
-# The Rust gate is two independent jobs — `runtime-ci` (needs NATS + Node
-# for the bus/MCP integration tests) and `store-ci` (hermetic) — so a red
-# in one never masks the other's results (#38). `rust-ci` is a thin
-# aggregate that fails iff either half fails; it keeps the "Rust CI"
+# The Rust gate is independent per-workspace jobs — `runtime-ci` (needs
+# NATS + Node for the bus/MCP integration tests), `store-ci` (hermetic),
+# and `dashboard-ci` (hermetic) — so a red in one never masks another's
+# results (#38). Each is triggered by its own `changes` path filter
+# (`runtime`/`store`/`dashboard`), so a store-only PR no longer rebuilds the
+# runtime suite (or spins up NATS/Node), and vice versa. `rust-ci` is a thin
+# aggregate that fails iff any half fails; it keeps the "Rust CI"
 # required-status-check name, so the split needs no branch-protection edit.
 jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
+      runtime: ${{ steps.filter.outputs.runtime }}
+      store: ${{ steps.filter.outputs.store }}
       go: ${{ steps.filter.outputs.go }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
     steps:
@@ -44,8 +48,19 @@ jobs:
         id: filter
         with:
           filters: |
-            rust:
-              - 'services/**'
+            # Per-suite Rust filters (#51) so each build job triggers only on
+            # its own changes. The shared entries — the top-level justfile, the
+            # toolchain pin, and any workflow edit — conservatively trigger every
+            # suite. fq-dashboard path-depends on fq-runtime, so dashboard-ci
+            # gates on `runtime || dashboard` (see its `if:` below) rather than
+            # getting a fourth filter that would duplicate the `runtime` globs.
+            runtime:
+              - 'services/fq-runtime/**'
+              - 'justfile'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/**'
+            store:
+              - 'services/fq-store/**'
               - 'justfile'
               - 'rust-toolchain.toml'
               - '.github/workflows/**'
@@ -80,38 +95,38 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     steps:
-      - if: needs.changes.outputs.rust != 'true'
-        run: echo "No Rust-relevant changes — skipping the runtime build."
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime != 'true'
+        run: echo "No runtime-relevant changes — skipping the runtime build."
+      - if: needs.changes.outputs.runtime == 'true'
         uses: actions/checkout@v4
       # Keep the version ref in lockstep with rust-toolchain.toml (#102) —
       # rustup enforces the pin either way; matching here avoids installing
       # a second, unused toolchain.
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true'
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: services/fq-runtime
       # The MCP integration tests spawn the reference server via npx.
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true'
         uses: extractions/setup-just@v3
       # Bring up NATS exactly as dev does (JetStream via
       # infrastructure/nats.conf), then wait for it before the
       # bus/integration tests run.
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true'
         run: just infra-up
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true'
         run: just infra-wait
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true'
         run: just runtime-ci
-      - if: always() && needs.changes.outputs.rust == 'true'
+      - if: always() && needs.changes.outputs.runtime == 'true'
         run: just infra-down
 
   store-ci:
@@ -119,23 +134,23 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     steps:
-      - if: needs.changes.outputs.rust != 'true'
-        run: echo "No Rust-relevant changes — skipping the store build."
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.store != 'true'
+        run: echo "No store-relevant changes — skipping the store build."
+      - if: needs.changes.outputs.store == 'true'
         uses: actions/checkout@v4
       # Same lockstep note as runtime-ci: match rust-toolchain.toml.
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.store == 'true'
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.store == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: services/fq-store
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.store == 'true'
         uses: extractions/setup-just@v3
       # Hermetic suite — no NATS broker, no Node toolchain needed.
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.store == 'true'
         run: just store-ci
 
   # Aggregate gate: keeps the "Rust CI" required-status-check name so the
@@ -160,25 +175,29 @@ jobs:
     name: Dashboard CI
     needs: changes
     runs-on: ubuntu-latest
+    # fq-dashboard path-depends on fq-runtime (services/fq-dashboard/Cargo.toml),
+    # so this job builds when EITHER changes — hence the `runtime || dashboard`
+    # gate on every step (rather than a dedicated filter that would duplicate
+    # the `runtime` globs). A pure fq-store change skips it.
     steps:
-      - if: needs.changes.outputs.rust != 'true'
-        run: echo "No Rust-relevant changes — skipping the dashboard build."
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime != 'true' && needs.changes.outputs.dashboard != 'true'
+        run: echo "No dashboard-relevant changes — skipping the dashboard build."
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: actions/checkout@v4
       # Keep in lockstep with rust-toolchain.toml (#102).
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: services/fq-dashboard
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: extractions/setup-just@v3
       # Hermetic — the router tests spin their own read service over a
       # temp DB; no broker, no Node.
-      - if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         run: just dashboard-ci
 
   # Visual artifact, not a required check: when dashboard code changes,
