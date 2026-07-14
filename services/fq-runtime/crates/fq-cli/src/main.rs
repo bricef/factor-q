@@ -1304,6 +1304,7 @@ fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) {
                     lag,
                     ack_pending,
                     num_pending,
+                    num_redelivered,
                 } => {
                     let status = if *lag == 0 {
                         "✓ caught up"
@@ -1318,6 +1319,12 @@ fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) {
                     }
                     if *num_pending > 0 {
                         println!("    num pending:    {num_pending}");
+                    }
+                    if *num_redelivered > 0 {
+                        println!(
+                            "    redelivered:    {num_redelivered} (retrying; bound {})",
+                            fq_runtime::bus::TRIGGER_MAX_DELIVER
+                        );
                     }
                 }
                 ConsumerHealth::Error { name, error } => {
@@ -1402,15 +1409,22 @@ struct DoctorExecutions {
 }
 
 /// Availability of the dead-letter section. Gated on issue #49:
-/// the trigger consumer sets no `max_deliver` and has no DLQ /
-/// advisory source, so there is nothing to query yet. `doctor`
-/// renders this honestly rather than fabricating a count.
+/// Dead-lettered triggers (#49): transient pre-WAL failures that
+/// exhausted the trigger consumer's delivery bound. The dispatcher
+/// consumes the exhausted trigger and emits a terminal `failed` event
+/// with kind [`DEAD_LETTER_KIND`]; this counts that bucket, so the
+/// report needs no extra query. The event's annotations carry the
+/// trigger subject and payload for requeue/diagnosis.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "state")]
-enum DoctorDeadLetters {
-    /// Not yet available; blocked on the named issue.
-    PendingIssue { issue: u32 },
+struct DoctorDeadLetters {
+    exhausted_triggers: i64,
 }
+
+/// The projection's failure-kind string for a dead-lettered trigger —
+/// `FailureKind::TriggerExhausted` as the projection renders kinds
+/// (`format!("{:?}").to_lowercase()`, see the projection store's
+/// failure mapping).
+const DEAD_LETTER_KIND: &str = "triggerexhausted";
 
 /// The full doctor report. Serialisable for `--json`; built by the
 /// pure [`build_doctor_report`] so the checks are unit-testable
@@ -1497,7 +1511,7 @@ fn build_doctor_report(
         stuck_ids: short(&executions.stuck_ids),
     };
 
-    let failures = failures
+    let failures: Vec<DoctorFailure> = failures
         .iter()
         .map(|f| DoctorFailure {
             error_kind: f.error_kind.clone(),
@@ -1505,13 +1519,20 @@ fn build_doctor_report(
         })
         .collect();
 
+    let dead_letters = DoctorDeadLetters {
+        exhausted_triggers: failures
+            .iter()
+            .filter(|f| f.error_kind == DEAD_LETTER_KIND)
+            .map(|f| f.count)
+            .sum(),
+    };
+
     DoctorReport {
         workers: w,
         executions: ex,
         ambiguous,
         failures,
-        // Gated: the dead-letter source does not exist until #49.
-        dead_letters: DoctorDeadLetters::PendingIssue { issue: 49 },
+        dead_letters,
     }
 }
 
@@ -1574,13 +1595,17 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
         out.push_str("  -> `fq invocation list --status=failed` to inspect\n");
     }
 
-    // Dead-letters — gated on #49; never a fabricated count.
-    match report.dead_letters {
-        DoctorDeadLetters::PendingIssue { issue } => {
-            out.push_str(&format!(
-                "Dead-letters: n/a (not yet available, pending #{issue})\n"
-            ));
-        }
+    // Dead-letters (#49): exhausted triggers the dispatcher consumed.
+    if report.dead_letters.exhausted_triggers > 0 {
+        out.push_str(&format!(
+            "Dead-letters: {} exhausted trigger(s)\n",
+            report.dead_letters.exhausted_triggers
+        ));
+        out.push_str(
+            "  -> `fq events query --type=failed` — annotations carry the trigger subject/payload\n",
+        );
+    } else {
+        out.push_str("Dead-letters: none\n");
     }
 
     out
@@ -4298,13 +4323,15 @@ mod doctor_tests {
         assert_eq!(report.failure_total(), 0);
         assert_eq!(
             report.dead_letters,
-            DoctorDeadLetters::PendingIssue { issue: 49 }
+            DoctorDeadLetters {
+                exhausted_triggers: 0
+            }
         );
 
         let out = render_doctor_report_human(&report);
         assert!(out.contains("All clear."), "got: {out}");
-        // Dead-letter section is always shown, gated on #49.
-        assert!(out.contains("pending #49"), "got: {out}");
+        // Dead-letter section is always shown.
+        assert!(out.contains("Dead-letters: none"), "got: {out}");
     }
 
     #[test]
@@ -4380,6 +4407,37 @@ mod doctor_tests {
         assert!(!out.contains("fq invocation drop"), "got: {out}");
     }
 
+    /// #49: dead-lettered triggers surface as their own doctor line,
+    /// counted from the `triggerexhausted` failures bucket.
+    #[test]
+    fn dead_lettered_triggers_are_counted_and_rendered() {
+        let failures = vec![
+            FailureView {
+                error_kind: "triggerexhausted".to_string(),
+                count: 2,
+            },
+            FailureView {
+                error_kind: "toolerror".to_string(),
+                count: 1,
+            },
+        ];
+        let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures);
+        assert_eq!(
+            report.dead_letters,
+            DoctorDeadLetters {
+                exhausted_triggers: 2
+            }
+        );
+        assert!(report.has_issues());
+
+        let out = render_doctor_report_human(&report);
+        assert!(
+            out.contains("Dead-letters: 2 exhausted trigger(s)"),
+            "got: {out}"
+        );
+        assert!(out.contains("fq events query --type=failed"), "got: {out}");
+    }
+
     #[test]
     fn ambiguous_flagged() {
         let report = build_doctor_report(&[], &ExecutionsView::default(), 3, &[]);
@@ -4438,17 +4496,24 @@ mod doctor_tests {
         assert_eq!(v["ambiguous"], 1);
         assert_eq!(v["failures"][0]["error_kind"], "runtimeerror");
         assert_eq!(v["failures"][0]["count"], 4);
-        assert_eq!(v["dead_letters"]["state"], "pending_issue");
-        assert_eq!(v["dead_letters"]["issue"], 49);
+        assert_eq!(v["dead_letters"]["exhausted_triggers"], 0);
     }
 
+    /// The count derives only from the `triggerexhausted` bucket —
+    /// other failure kinds never inflate it.
     #[test]
     fn dead_letters_never_fabricates_a_count() {
-        let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &[]);
-        // The gated variant carries no count field at all.
-        let v = serde_json::to_value(&report).unwrap();
-        assert!(v["dead_letters"].get("count").is_none());
+        let report = build_doctor_report(
+            &[],
+            &ExecutionsView::default(),
+            0,
+            &[FailureView {
+                error_kind: "runtimeerror".to_string(),
+                count: 7,
+            }],
+        );
+        assert_eq!(report.dead_letters.exhausted_triggers, 0);
         let out = render_doctor_report_human(&report);
-        assert!(out.contains("n/a"), "got: {out}");
+        assert!(out.contains("Dead-letters: none"), "got: {out}");
     }
 }

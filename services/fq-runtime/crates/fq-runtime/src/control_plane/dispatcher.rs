@@ -66,6 +66,50 @@ fn trigger_retry_exhausted(delivery_attempt: u32) -> bool {
     delivery_attempt >= TRIGGER_MAX_DELIVER as u32
 }
 
+/// Escalating redelivery delay for a transient pre-WAL failure. A
+/// `Nak(None)` redelivers immediately — five retries in milliseconds
+/// give a transient condition (broker blip, store contention) no time
+/// to clear, defeating the retry's purpose. Indexed by the 1-based
+/// delivery attempt; saturates at the last entry. Kept pure so the
+/// schedule is testable without a broker. Mirrors
+/// [`crate::bus::TRIGGER_RETRY_BACKOFF`], which paces the ack-wait
+/// redelivery path (a crashed dispatcher never reaches this NAK).
+fn trigger_retry_backoff(delivery_attempt: u32) -> std::time::Duration {
+    let schedule = crate::bus::TRIGGER_RETRY_BACKOFF;
+    let index = (delivery_attempt.saturating_sub(1) as usize).min(schedule.len() - 1);
+    schedule[index]
+}
+
+/// A trigger's fate once its invocation returned without durably
+/// starting — the whole pre-WAL retry policy as one pure decision, so
+/// the exhaustion/retry/consume split is unit-testable without a
+/// broker (the escalating backoff makes a live full-loop test take
+/// minutes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriggerFate {
+    /// Transient failure with retries remaining: NAK with this delay.
+    Retry(std::time::Duration),
+    /// Transient failure on the final delivery: dead-letter, then ack.
+    DeadLetter,
+    /// Permanent failure or a clean return: ack, nothing to retry.
+    Consume,
+}
+
+fn trigger_fate(
+    result: &Result<crate::worker::InvocationOutcome, ExecutorError>,
+    delivery_attempt: u32,
+) -> TriggerFate {
+    match result {
+        Err(err) if err.is_transient() && trigger_retry_exhausted(delivery_attempt) => {
+            TriggerFate::DeadLetter
+        }
+        Err(err) if err.is_transient() => {
+            TriggerFate::Retry(trigger_retry_backoff(delivery_attempt))
+        }
+        _ => TriggerFate::Consume,
+    }
+}
+
 /// Shared, hot-swappable agent registry — the manual equivalent of
 /// `ArcSwap` (which isn't a dependency in this tree). The nested
 /// `Arc`s are not a bug; each layer has a distinct job:
@@ -377,6 +421,10 @@ impl TriggerDispatcher {
             }
         };
 
+        // Kept for the dead-letter path: an exhausted trigger's event
+        // must carry what an operator needs to requeue or diagnose it.
+        let trigger_payload = payload.clone();
+
         debug!(
             agent_id = %agent_id,
             subject = %msg.subject,
@@ -457,14 +505,20 @@ impl TriggerDispatcher {
         //   redelivery.
         //
         if !acked {
-            match &result {
-                Err(err) if err.is_transient() && trigger_retry_exhausted(delivery_attempt) => {
-                    self.dead_letter_exhausted(&agent_id, delivery_attempt, err)
-                        .await;
+            match (trigger_fate(&result, delivery_attempt), &result) {
+                (TriggerFate::DeadLetter, Err(err)) => {
+                    self.dead_letter_exhausted(
+                        &agent_id,
+                        msg.subject.as_str(),
+                        &trigger_payload,
+                        delivery_attempt,
+                        err,
+                    )
+                    .await;
                     self.ack(msg, "transient retry limit exhausted").await;
                 }
-                Err(err) if err.is_transient() => {
-                    self.nak(msg, "transient failure before first WAL write")
+                (TriggerFate::Retry(delay), _) => {
+                    self.nak(msg, delay, "transient failure before first WAL write")
                         .await;
                 }
                 _ => {
@@ -501,10 +555,21 @@ impl TriggerDispatcher {
     /// trigger. This is the dead-letter surface for the trigger consumer:
     /// the original trigger remains available in JetStream until its normal
     /// retention expiry, while the terminal event makes the exhaustion
-    /// visible to the projection and operators.
+    /// visible to the projection and operators (`fq doctor` counts the
+    /// `trigger_exhausted` kind; the annotations carry what a requeue
+    /// needs).
+    ///
+    /// Known hole, tracked in #169: exhaustion is only surfaced
+    /// when the final delivery reaches this dispatcher and fails. A crash
+    /// during the final delivery (or a pre-bound consumer whose poison
+    /// trigger already exceeded the limit at upgrade time) stops
+    /// redelivery without an event; closing that needs the JetStream
+    /// `MAX_DELIVERIES` advisory listener.
     async fn dead_letter_exhausted(
         &self,
         agent_id: &AgentId,
+        trigger_subject: &str,
+        trigger_payload: &serde_json::Value,
         delivery_attempt: u32,
         err: &ExecutorError,
     ) {
@@ -512,14 +577,19 @@ impl TriggerDispatcher {
             agent_id.clone(),
             uuid::Uuid::now_v7(),
             EventPayload::Failed(crate::events::FailedPayload {
-                error_kind: FailureKind::RuntimeError,
+                error_kind: FailureKind::TriggerExhausted,
                 error_message: format!(
                     "trigger exhausted after {delivery_attempt} deliveries (limit {TRIGGER_MAX_DELIVER}): {err}"
                 ),
                 phase: FailurePhase::Setup,
                 partial_totals: InvocationTotals::default(),
             }),
-        );
+        )
+        .annotate(
+            "trigger_subject",
+            serde_json::Value::String(trigger_subject.to_string()),
+        )
+        .annotate("trigger_payload", trigger_payload.clone());
         if let Err(publish_err) = self.bus.publish(&event).await {
             error!(
                 agent_id = %agent_id,
@@ -536,12 +606,20 @@ impl TriggerDispatcher {
         }
     }
 
-    /// NAK a trigger so JetStream redelivers it after the ack-wait — used
-    /// when an invocation fails *before its first WAL write* with a
-    /// transient error, so the otherwise-lost run is retried.
-    async fn nak(&self, msg: &async_nats::jetstream::Message, context: &str) {
+    /// NAK a trigger so JetStream redelivers it — used when an
+    /// invocation fails *before its first WAL write* with a transient
+    /// error, so the otherwise-lost run is retried. The delay escalates
+    /// with the delivery attempt ([`trigger_retry_backoff`]); a bare
+    /// `Nak(None)` would redeliver immediately and burn the bounded
+    /// retries in a tight loop.
+    async fn nak(
+        &self,
+        msg: &async_nats::jetstream::Message,
+        delay: std::time::Duration,
+        context: &str,
+    ) {
         if let Err(err) = msg
-            .ack_with(async_nats::jetstream::AckKind::Nak(None))
+            .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
             .await
         {
             error!(
@@ -693,10 +771,74 @@ mod tests {
         }
     }
 
+    /// The whole pre-WAL retry policy at every boundary: transient
+    /// errors retry with the escalating schedule, the final delivery
+    /// dead-letters, permanent errors and clean returns consume.
     #[test]
-    fn trigger_retry_limit_exhausts_on_the_configured_delivery() {
-        assert!(!trigger_retry_exhausted(TRIGGER_MAX_DELIVER as u32 - 1));
-        assert!(trigger_retry_exhausted(TRIGGER_MAX_DELIVER as u32));
+    fn trigger_fate_covers_retry_deadletter_and_consume() {
+        use crate::bus::TRIGGER_RETRY_BACKOFF;
+        let transient = || {
+            Err(ExecutorError::Bus(crate::bus::BusError::Publish(
+                "broker away".to_string(),
+            )))
+        };
+        let permanent = || {
+            Err(ExecutorError::InvocationFailed {
+                kind: crate::events::FailureKind::RuntimeError,
+                message: "poison".to_string(),
+            })
+        };
+
+        // Deliveries 1..limit retry, each with its scheduled delay.
+        for attempt in 1..TRIGGER_MAX_DELIVER as u32 {
+            let idx = (attempt as usize - 1).min(TRIGGER_RETRY_BACKOFF.len() - 1);
+            assert_eq!(
+                trigger_fate(&transient(), attempt),
+                TriggerFate::Retry(TRIGGER_RETRY_BACKOFF[idx]),
+                "attempt {attempt}"
+            );
+        }
+        // The final delivery dead-letters instead of NAKing (a NAK
+        // there would end redelivery with no event).
+        assert_eq!(
+            trigger_fate(&transient(), TRIGGER_MAX_DELIVER as u32),
+            TriggerFate::DeadLetter
+        );
+        // Past the bound (defensive: the server should not deliver
+        // again) still dead-letters rather than retrying.
+        assert_eq!(
+            trigger_fate(&transient(), TRIGGER_MAX_DELIVER as u32 + 1),
+            TriggerFate::DeadLetter
+        );
+        // Permanent errors never retry, at any attempt.
+        assert_eq!(trigger_fate(&permanent(), 1), TriggerFate::Consume);
+        assert_eq!(
+            trigger_fate(&permanent(), TRIGGER_MAX_DELIVER as u32),
+            TriggerFate::Consume
+        );
+        // A clean return consumes.
+        assert_eq!(
+            trigger_fate(
+                &Ok(crate::worker::InvocationOutcome::Suspended {
+                    invocation_id: Uuid::now_v7(),
+                }),
+                1
+            ),
+            TriggerFate::Consume
+        );
+    }
+
+    /// The NAK schedule escalates and saturates at the last entry.
+    #[test]
+    fn trigger_retry_backoff_escalates_and_saturates() {
+        use crate::bus::TRIGGER_RETRY_BACKOFF;
+        assert_eq!(trigger_retry_backoff(1), TRIGGER_RETRY_BACKOFF[0]);
+        assert_eq!(trigger_retry_backoff(2), TRIGGER_RETRY_BACKOFF[1]);
+        assert_eq!(trigger_retry_backoff(4), TRIGGER_RETRY_BACKOFF[3]);
+        // Saturates rather than panicking past the schedule.
+        assert_eq!(trigger_retry_backoff(40), TRIGGER_RETRY_BACKOFF[3]);
+        // Attempt 0 (info unavailable defaults to 1 upstream) is safe.
+        assert_eq!(trigger_retry_backoff(0), TRIGGER_RETRY_BACKOFF[0]);
     }
 
     #[test]
@@ -1252,8 +1394,9 @@ You are a test agent."#
         dispatcher.handle(&msg).await;
 
         // A NAK redelivers the trigger; an ACK consumes it. Re-poll the
-        // same stream: a redelivered message means it was NAK'd.
-        match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
+        // same stream: a redelivered message means it was NAK'd. The
+        // window covers the first-retry backoff (1s) with margin.
+        match tokio::time::timeout(Duration::from_secs(4), stream.next()).await {
             Ok(Some(Ok(redelivered))) => {
                 // Ack the redelivery so it doesn't churn after the test.
                 let _ = redelivered.ack().await;
@@ -1290,6 +1433,127 @@ You are a test agent."#
         assert!(
             !dispatched_pre_wal_failure_is_redelivered(false).await,
             "a permanent pre-WAL failure must ACK (consume) the trigger"
+        );
+    }
+
+    /// #49: the dead-letter surface end-to-end against a live broker —
+    /// the event lands on the bus with the distinguishable kind and the
+    /// annotations an operator needs to requeue or diagnose the trigger.
+    /// (The full five-delivery exhaustion loop is not driven live: the
+    /// escalating backoff makes it minutes long; the decision that
+    /// routes into this path is the pure `trigger_fate`, tested above.)
+    #[tokio::test]
+    async fn dead_letter_event_carries_kind_and_trigger_annotations() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        use std::sync::Arc;
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("dead-letter-shape");
+        let dispatcher = TriggerDispatcher::new(
+            bus.clone(),
+            shared_registry(AgentRegistry::new()),
+            Arc::new(FailsBeforeWalWorker { transient: true }) as Arc<dyn Worker>,
+            Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
+            1,
+        );
+
+        let agent_id = crate::agent::AgentId::new(&agent_id_str).expect("agent id");
+        let trigger_subject = crate::bus::trigger_subject(&agent_id_str);
+        let trigger_payload = json!({"input": "hi"});
+        dispatcher
+            .dead_letter_exhausted(
+                &agent_id,
+                &trigger_subject,
+                &trigger_payload,
+                TRIGGER_MAX_DELIVER as u32,
+                &ExecutorError::WorkerStore("simulated persistent outage".to_string()),
+            )
+            .await;
+
+        let stream = bus
+            .jetstream()
+            .get_stream(crate::bus::STREAM_NAME)
+            .await
+            .expect("event stream");
+        let raw = stream
+            .get_last_raw_message_by_subject(&format!("fq.agent.{agent_id_str}.failed"))
+            .await
+            .expect("dead-letter event on the bus");
+        let event: crate::events::Event =
+            serde_json::from_slice(&raw.payload).expect("event parses");
+
+        match &event.payload {
+            EventPayload::Failed(p) => {
+                assert!(
+                    matches!(p.error_kind, FailureKind::TriggerExhausted),
+                    "kind must be distinguishable, got {:?}",
+                    p.error_kind
+                );
+                assert!(
+                    p.error_message.contains("after 5 deliveries (limit 5)"),
+                    "got: {}",
+                    p.error_message
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            event.annotations.0.get("trigger_subject"),
+            Some(&serde_json::Value::String(trigger_subject)),
+            "annotations must carry the subject a requeue needs"
+        );
+        assert_eq!(
+            event.annotations.0.get("trigger_payload"),
+            Some(&trigger_payload),
+            "annotations must carry the payload a requeue needs"
+        );
+    }
+
+    /// #49: a durable created by a pre-bound binary gets its retry
+    /// policy upgraded on open — the dogfood deployment's existing
+    /// consumer must not keep unbounded redelivery.
+    #[tokio::test]
+    async fn preexisting_consumer_is_upgraded_to_the_delivery_bound() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
+        let name = unique_consumer_name();
+        let filter = crate::bus::trigger_subject(&unique_agent_id("upgrade-path"));
+
+        // Create the durable the way pre-#49 binaries did: no
+        // max_deliver, no backoff.
+        let stream = bus
+            .jetstream()
+            .get_stream(crate::bus::TRIGGER_STREAM_NAME)
+            .await
+            .expect("trigger stream");
+        stream
+            .get_or_create_consumer(
+                &name,
+                async_nats::jetstream::consumer::pull::Config {
+                    durable_name: Some(name.clone()),
+                    ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                    filter_subject: filter.clone(),
+                    max_ack_pending: crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("legacy consumer");
+
+        let mut upgraded = bus
+            .trigger_consumer_with_filter(&name, &filter, crate::bus::NATS_DEFAULT_MAX_ACK_PENDING)
+            .await
+            .expect("open upgrades the durable");
+        let info = upgraded.info().await.expect("info");
+        assert_eq!(info.config.max_deliver, TRIGGER_MAX_DELIVER);
+        assert_eq!(
+            info.config.backoff,
+            crate::bus::TRIGGER_RETRY_BACKOFF.to_vec()
         );
     }
 

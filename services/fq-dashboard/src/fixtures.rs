@@ -37,6 +37,7 @@ pub(crate) fn health_report() -> HealthReport {
                     lag: 0,
                     ack_pending: 0,
                     num_pending: 0,
+                    num_redelivered: 0,
                 },
             },
             StreamHealth::Available {
@@ -51,6 +52,7 @@ pub(crate) fn health_report() -> HealthReport {
                     lag: 3,
                     ack_pending: 1,
                     num_pending: 2,
+                    num_redelivered: 4,
                 },
             },
         ],
@@ -74,6 +76,10 @@ pub(crate) fn health_report() -> HealthReport {
             },
             FailureView {
                 error_kind: "toolerror".to_string(),
+                count: 1,
+            },
+            FailureView {
+                error_kind: "triggerexhausted".to_string(),
                 count: 1,
             },
         ],

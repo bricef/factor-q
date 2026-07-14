@@ -989,6 +989,12 @@ pub enum FailureKind {
     ToolError,
     SandboxViolation,
     RuntimeError,
+    /// A transient pre-WAL trigger failure exhausted the consumer's
+    /// delivery bound (#49) and was dead-lettered. Distinct from
+    /// `RuntimeError` so operators can count and list dead letters
+    /// (`fq doctor`, the dashboard) rather than losing them in the
+    /// generic bucket.
+    TriggerExhausted,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

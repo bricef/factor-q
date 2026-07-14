@@ -64,6 +64,11 @@ pub enum ConsumerHealth {
         lag: u64,
         ack_pending: u64,
         num_pending: u64,
+        /// Outstanding redeliveries — messages delivered more than
+        /// once and not yet acked. The retry-pressure signal (#49): a
+        /// non-zero value means triggers are being NAK'd/timing out and
+        /// walking toward the delivery bound.
+        num_redelivered: u64,
     },
 }
 
@@ -107,6 +112,7 @@ pub async fn probe_stream(
                     lag: info.state.last_sequence.saturating_sub(delivered),
                     ack_pending: cinfo.num_ack_pending as u64,
                     num_pending: cinfo.num_pending,
+                    num_redelivered: cinfo.num_redelivered as u64,
                 }
             }
             Err(err) => ConsumerHealth::Error {

@@ -164,6 +164,7 @@ pub fn health(report: &HealthReport, now_ms: i64) -> String {
                         lag,
                         ack_pending,
                         num_pending,
+                        num_redelivered,
                         ..
                     } => {
                         let state = if *lag == 0 {
@@ -173,11 +174,16 @@ pub fn health(report: &HealthReport, now_ms: i64) -> String {
                         } else {
                             r#"<span class="bad">✗ lagging</span>"#.to_string()
                         };
+                        let redelivery_suffix = if *num_redelivered > 0 {
+                            format!(r#" / <span class="warn">redelivered {num_redelivered}</span>"#)
+                        } else {
+                            String::new()
+                        };
                         (
                             esc(name),
                             state,
                             lag.to_string(),
-                            format!("ack {ack_pending} / num {num_pending}"),
+                            format!("ack {ack_pending} / num {num_pending}{redelivery_suffix}"),
                         )
                     }
                     ConsumerHealth::Missing { name } => (
@@ -687,6 +693,14 @@ mod tests {
             html.contains(r#"<a href="/invocations/019f534f-4b3c-7f42-a619-b5e43a64fd38">"#),
             "stuck id not linked: {html}"
         );
+    }
+
+    /// Retry pressure (#49) is visible on the streams table when a
+    /// consumer has outstanding redeliveries.
+    #[test]
+    fn health_shows_redelivery_pressure() {
+        let html = health(&crate::fixtures::health_report(), 0);
+        assert!(html.contains("redelivered 4"), "got: {html}");
     }
 
     #[test]

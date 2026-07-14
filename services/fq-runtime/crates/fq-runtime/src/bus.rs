@@ -76,6 +76,20 @@ pub const NATS_DEFAULT_MAX_ACK_PENDING: i64 = 1000;
 /// transient failures to recover.
 pub const TRIGGER_MAX_DELIVER: i64 = 5;
 
+/// Escalating redelivery schedule paired with [`TRIGGER_MAX_DELIVER`]:
+/// entry N delays redelivery N+1. Applied twice — as the consumer's
+/// `backoff` (paces ack-wait redelivery when a dispatcher crashes
+/// mid-delivery) and as the dispatcher's explicit NAK delay (a bare
+/// `Nak(None)` redelivers immediately, overriding the consumer
+/// schedule). JetStream requires `max_deliver` > the schedule length,
+/// so four entries cover the four retries after the first delivery.
+pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(120),
+];
+
 /// Control subject a running `fq run` daemon subscribes to for a
 /// hot-reload of agent definitions. Published by `fq reload`
 /// (fire-and-forget, core NATS — deliberately NOT one of the
@@ -451,6 +465,9 @@ impl EventBus {
             // emits a terminal failure on the last delivery before
             // acknowledging it.
             max_deliver: TRIGGER_MAX_DELIVER,
+            // Paces ack-wait redelivery (a crashed dispatcher never
+            // reaches the explicit NAK delay in the handle path).
+            backoff: TRIGGER_RETRY_BACKOFF.to_vec(),
             ..Default::default()
         };
         let mut consumer = stream
@@ -459,26 +476,21 @@ impl EventBus {
             .map_err(|err| BusError::Stream(err.to_string()))?;
 
         // Existing durable consumers retain their old configuration when
-        // opened. Upgrade their delivery bound too, otherwise a deployment
+        // opened. Upgrade their retry policy too, otherwise a deployment
         // made before this limit would keep retrying poison triggers forever.
-        if consumer
+        let existing = consumer
             .info()
             .await
             .map_err(|err| BusError::Stream(err.to_string()))?
             .config
-            .max_deliver
-            != TRIGGER_MAX_DELIVER
+            .clone();
+        if existing.max_deliver != TRIGGER_MAX_DELIVER
+            || existing.backoff != TRIGGER_RETRY_BACKOFF.to_vec()
         {
-            let mut config = consumer::pull::Config::try_from_consumer_config(
-                consumer
-                    .info()
-                    .await
-                    .map_err(|err| BusError::Stream(err.to_string()))?
-                    .config
-                    .clone(),
-            )
-            .map_err(|err| BusError::Stream(err.to_string()))?;
+            let mut config = consumer::pull::Config::try_from_consumer_config(existing)
+                .map_err(|err| BusError::Stream(err.to_string()))?;
             config.max_deliver = TRIGGER_MAX_DELIVER;
+            config.backoff = TRIGGER_RETRY_BACKOFF.to_vec();
             return stream
                 .update_consumer(config)
                 .await
