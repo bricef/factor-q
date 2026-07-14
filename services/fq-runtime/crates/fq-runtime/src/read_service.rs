@@ -73,6 +73,17 @@ pub struct HealthReport {
 /// daemon speaks tarpc here rather than HTTP).
 #[tarpc::service]
 pub trait ReadService {
+    /// The serving daemon's version string (`semver+sha`) — identical
+    /// to [`HealthReport::version`], but reachable when nothing else
+    /// is. This is the dashboard's build-skew probe (#168): every
+    /// other RPC returns types whose shape changes across builds, and
+    /// under the length-framed binary codec a cross-build pairing
+    /// fails with a decode error that renders as "runtime
+    /// unreachable". **This signature is frozen forever** — a bare
+    /// `String`, no struct, no `Result`/`WireError` (those can
+    /// themselves change shape) — so it decodes across *any* build
+    /// pair. Never extend or wrap it; add a new method instead.
+    async fn version() -> String;
     async fn health() -> Result<HealthReport, WireError>;
     /// Currently-executing invocations from the worker WAL, longest-
     /// running first, with their open dispatches.
@@ -141,6 +152,10 @@ fn parse_status(s: &str) -> Result<OwnerStatus, WireError> {
 }
 
 impl ReadService for ReadServer {
+    async fn version(self, _: context::Context) -> String {
+        self.version.clone()
+    }
+
     async fn health(self, _: context::Context) -> Result<HealthReport, WireError> {
         // The probe is the only network-touching read; bound it so a
         // wedged JetStream cannot wedge the whole health surface.
@@ -503,6 +518,10 @@ mod tests {
             .expect("health");
 
         assert_eq!(health.version, "test-version");
+        // The frozen skew probe (#168) returns the same string bare —
+        // reachable even when shape-carrying RPCs would not decode.
+        let version = client.version(context::current()).await.expect("rpc");
+        assert_eq!(version, "test-version");
         // `EventBus::connect` ensured both core streams exist, so the
         // probe must report them Available. Their primary consumers may
         // or may not exist on the shared dev broker — both states are
