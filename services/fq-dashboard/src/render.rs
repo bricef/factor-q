@@ -8,7 +8,8 @@ use fq_runtime::health::{ConsumerHealth, StreamHealth};
 use fq_runtime::read_service::HealthReport;
 use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
 use fq_runtime::views::{
-    ActiveInvocationView, CostReport, EventView, InvocationDetailView, InvocationSummaryView,
+    ActiveInvocationView, CostReport, CostView, EventView, InvocationDetailView,
+    InvocationSummaryView,
 };
 
 /// Minimal HTML escape for text and attribute positions.
@@ -73,6 +74,13 @@ th {{ background: #21252b; }}
 nav a {{ margin-right: 1rem; }}
 .ok {{ color: #5fbf77; }} .warn {{ color: #d9a04c; }} .bad {{ color: #e06c6c; }}
 .muted {{ color: #7d838c; }}
+/* Numeric table cells: right-aligned, digits lined up. */
+td.n {{ text-align: right; font-variant-numeric: tabular-nums; }}
+/* Share-of-spend bar (costs page). Single-series magnitude only — the
+   percentage text beside it carries the value; the bar is the glance. */
+.bar {{ display: inline-block; vertical-align: baseline; width: 72px; height: 7px; background: #21252b; margin-right: 0.5rem; }}
+.bar i {{ display: block; height: 100%; background: #7aa2e8; opacity: 0.55; }}
+tr.sub td, tr.sub th {{ border-top: 2px solid #3a3f47; }}
 pre {{ background: #1c2026; border: 1px solid #333941; padding: 0.5rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3rem 0; max-width: 72rem; }}
 details {{ margin: 0.3rem 0; }} summary {{ cursor: pointer; color: #9aa1ab; }}
 .turn {{ border-left: 3px solid #3a3f47; padding-left: 0.8rem; margin: 1.2rem 0; }}
@@ -662,30 +670,190 @@ pub fn events(rows: &[EventView]) -> String {
     b
 }
 
-/// The costs page body.
+/// The family prefix of a one-shot agent id — an id whose last
+/// `-`-separated segment is a 32-hex uuid, the shape e2e suites and
+/// probes stamp on ephemeral instances (`overspender-019f33…` →
+/// `overspender`). Named agents return `None` and keep their own row;
+/// one-shots collapse into a per-family line so 161 test instances
+/// cannot bury the six agents an operator actually watches.
+fn one_shot_family(agent_id: &str) -> Option<&str> {
+    let (prefix, suffix) = agent_id.rsplit_once('-')?;
+    let is_lower_hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+    (!prefix.is_empty() && suffix.len() == 32 && suffix.bytes().all(is_lower_hex)).then_some(prefix)
+}
+
+/// Comma-grouped integer ("1,597") — the exact form, used in `title=`
+/// hovers and small cells.
+fn fmt_grouped(n: i64) -> String {
+    let digits = n.abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// A right-aligned token-count cell: compact in the cell ("171.39M",
+/// "58.9K"), exact in the hover title. Small counts render exact with
+/// no title.
+fn token_cell(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!(
+            r#"<td class="n" title="{}">{:.2}M</td>"#,
+            fmt_grouped(n),
+            n as f64 / 1e6
+        )
+    } else if n >= 10_000 {
+        format!(
+            r#"<td class="n" title="{}">{:.1}K</td>"#,
+            fmt_grouped(n),
+            n as f64 / 1e3
+        )
+    } else {
+        format!(r#"<td class="n">{}</td>"#, fmt_grouped(n))
+    }
+}
+
+/// A share-of-spend cell: a small bar plus the percentage as text (the
+/// text carries the value; the bar is the glance).
+fn share_cell(cost: f64, total: f64) -> String {
+    if total <= 0.0 {
+        return "<td></td>".to_string();
+    }
+    let pct = cost / total * 100.0;
+    let width = pct.round().clamp(0.0, 100.0);
+    let label = if pct < 0.05 {
+        r#"<span class="muted">&lt;0.1%</span>"#.to_string()
+    } else {
+        format!("{pct:.1}%")
+    };
+    format!(r#"<td><span class="bar"><i style="width:{width:.0}%"></i></span>{label}</td>"#)
+}
+
+/// A one-shot family's folded totals.
+#[derive(Default)]
+struct FamilyAgg {
+    runs: i64,
+    calls: i64,
+    cost: f64,
+}
+
+/// The costs page body: named agents as rows (the operator's
+/// spend-watch), one-shot test instances folded into per-family lines
+/// under a `<details>`, and totals split named vs one-shot so synthetic
+/// e2e spend (the $1-per-event budget-guard runs) cannot silently
+/// inflate "what did we actually spend".
 pub fn costs(report: &CostReport) -> String {
     if report.agents.is_empty() {
         return r#"<p class="muted">no cost events recorded.</p>"#.to_string();
     }
-    let mut b = String::new();
-    b.push_str(
-        "<table><tr><th>agent</th><th>events</th><th>input tokens</th><th>output tokens</th><th>total cost</th></tr>",
-    );
+    let mut named: Vec<&CostView> = Vec::new();
+    let mut families: std::collections::BTreeMap<&str, FamilyAgg> = Default::default();
     for a in &report.agents {
-        b.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>${:.6}</td></tr>",
-            esc(&a.agent_id),
-            a.event_count,
-            a.total_input_tokens,
-            a.total_output_tokens,
-            a.total_cost
-        ));
+        match one_shot_family(&a.agent_id) {
+            Some(family) => {
+                let f = families.entry(family).or_default();
+                f.runs += 1;
+                f.calls += a.event_count;
+                f.cost += a.total_cost;
+            }
+            None => named.push(a),
+        }
     }
+
+    let mut b = String::new();
+
+    if !named.is_empty() {
+        b.push_str(
+            "<table><tr><th>agent</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">total cost</th><th>share</th></tr>",
+        );
+        let mut sub = FamilyAgg::default();
+        let (mut sub_in, mut sub_out, mut sub_cr, mut sub_cw) = (0i64, 0i64, 0i64, 0i64);
+        for a in &named {
+            sub.calls += a.event_count;
+            sub.cost += a.total_cost;
+            sub_in += a.total_input_tokens;
+            sub_out += a.total_output_tokens;
+            sub_cr += a.total_cache_read_tokens;
+            sub_cw += a.total_cache_write_tokens;
+            b.push_str(&format!(
+                r#"<tr><td>{}</td><td class="n">{}</td>{}{}{}{}<td class="n">${:.4}</td>{}</tr>"#,
+                esc(&a.agent_id),
+                fmt_grouped(a.event_count),
+                token_cell(a.total_input_tokens),
+                token_cell(a.total_output_tokens),
+                token_cell(a.total_cache_read_tokens),
+                token_cell(a.total_cache_write_tokens),
+                a.total_cost,
+                share_cell(a.total_cost, report.total_cost),
+            ));
+        }
+        b.push_str(&format!(
+            r#"<tr class="sub"><th>named agents</th><td class="n">{}</td>{}{}{}{}<td class="n"><b>${:.4}</b></td>{}</tr>"#,
+            fmt_grouped(sub.calls),
+            token_cell(sub_in),
+            token_cell(sub_out),
+            token_cell(sub_cr),
+            token_cell(sub_cw),
+            sub.cost,
+            share_cell(sub.cost, report.total_cost),
+        ));
+        b.push_str("</table>");
+    }
+
+    let one_shot_cost: f64 = families.values().map(|f| f.cost).sum();
+    if !families.is_empty() {
+        let one_shot_ids: i64 = families.values().map(|f| f.runs).sum();
+        let mut rows: Vec<(&str, &FamilyAgg)> = families.iter().map(|(k, v)| (*k, v)).collect();
+        rows.sort_by(|a, b| {
+            b.1.cost
+                .partial_cmp(&a.1.cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(b.0))
+        });
+        b.push_str(&format!(
+            "<details><summary>one-shot agents — {} ids · ${:.4}</summary>",
+            one_shot_ids, one_shot_cost
+        ));
+        b.push_str(
+            "<table><tr><th>family</th><th class=\"n\">runs</th><th class=\"n\">llm calls</th><th class=\"n\">total cost</th></tr>",
+        );
+        for (family, f) in rows {
+            b.push_str(&format!(
+                r#"<tr><td>{}-*</td><td class="n">{}</td><td class="n">{}</td><td class="n">${:.4}</td></tr>"#,
+                esc(family),
+                f.runs,
+                fmt_grouped(f.calls),
+                f.cost,
+            ));
+        }
+        b.push_str("</table></details>");
+    }
+
+    let named_cost = report.total_cost - one_shot_cost;
+    let split = if families.is_empty() {
+        String::new()
+    } else {
+        format!(" — named ${named_cost:.4} · one-shot ${one_shot_cost:.4}")
+    };
     b.push_str(&format!(
-        r#"<tr><th>total</th><td></td><td>{}</td><td>{}</td><td><b>${:.6}</b></td></tr>"#,
-        report.total_input_tokens, report.total_output_tokens, report.total_cost
+        r#"<p><b>total ${:.4}</b><span class="muted">{} · {} in / {} out</span></p>"#,
+        report.total_cost,
+        split,
+        if report.total_input_tokens >= 1_000_000 {
+            format!("{:.1}M", report.total_input_tokens as f64 / 1e6)
+        } else {
+            fmt_grouped(report.total_input_tokens)
+        },
+        if report.total_output_tokens >= 1_000_000 {
+            format!("{:.1}M", report.total_output_tokens as f64 / 1e6)
+        } else {
+            fmt_grouped(report.total_output_tokens)
+        },
     ));
-    b.push_str("</table>");
     b
 }
 
@@ -871,6 +1039,139 @@ mod tests {
         assert!(html.contains("<td>1m ago</td>"), "advanced age: {html}");
         // The list below gains its heading only when active is present.
         assert!(html.contains("All invocations"), "got: {html}");
+    }
+
+    fn cost_view(agent: &str, calls: i64, cost: f64) -> CostView {
+        CostView {
+            agent_id: agent.to_string(),
+            event_count: calls,
+            total_cost: cost,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
+        }
+    }
+
+    fn cost_report(agents: Vec<CostView>) -> CostReport {
+        CostReport {
+            total_cost: agents.iter().map(|a| a.total_cost).sum(),
+            total_input_tokens: agents.iter().map(|a| a.total_input_tokens).sum(),
+            total_output_tokens: agents.iter().map(|a| a.total_output_tokens).sum(),
+            total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
+            total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
+            agents,
+        }
+    }
+
+    /// An id is a one-shot instance only when its last segment is
+    /// exactly 32 lowercase hex chars — named agents, short suffixes,
+    /// and uppercase all stay named.
+    #[test]
+    fn one_shot_family_matches_uuid_suffixed_ids_only() {
+        assert_eq!(
+            one_shot_family("overspender-019f339c15767d70b8ffd6d7ca6b0a70"),
+            Some("overspender")
+        );
+        assert_eq!(
+            one_shot_family("step4-tool-wal-019f339c178c74409c1552ce7ddf6ff8"),
+            Some("step4-tool-wal")
+        );
+        assert_eq!(one_shot_family("m0-issue-fix"), None);
+        assert_eq!(one_shot_family("deadbeef"), None);
+        // 31 hex chars — not a uuid suffix.
+        assert_eq!(
+            one_shot_family("agent-019f339c15767d70b8ffd6d7ca6b0a7"),
+            None
+        );
+        // Uppercase hex is not the uuid7 wire form.
+        assert_eq!(
+            one_shot_family("agent-019F339C15767D70B8FFD6D7CA6B0A70"),
+            None
+        );
+        // A bare 32-hex id with no family prefix stays named.
+        assert_eq!(one_shot_family("019f339c15767d70b8ffd6d7ca6b0a70"), None);
+    }
+
+    /// One-shot instances collapse into per-family rows under the fold;
+    /// named agents keep their own rows, and the totals line splits
+    /// named vs one-shot spend.
+    #[test]
+    fn costs_collapse_one_shot_agents_into_families() {
+        let html = costs(&cost_report(vec![
+            cost_view("m0-issue-fix", 2474, 121.397646),
+            cost_view("overspender-019f339c15767d70b8ffd6d7ca6b0a70", 1, 1.0),
+            cost_view("overspender-019f339b43c47822bdff48bec821d815", 1, 1.0),
+            cost_view("e2e-agent-019f339c10bd7200a1a72a3f07606067", 1, 0.0),
+        ]));
+        // Named row present; raw one-shot ids never rendered.
+        assert!(html.contains("m0-issue-fix"), "got: {html}");
+        assert!(!html.contains("019f339c15767d70"), "got: {html}");
+        // Family rows fold the instances.
+        assert!(html.contains("<td>overspender-*</td>"), "got: {html}");
+        assert!(html.contains("<td>e2e-agent-*</td>"), "got: {html}");
+        assert!(
+            html.contains("one-shot agents — 3 ids · $2.0000"),
+            "got: {html}"
+        );
+        // The totals line splits honest spend from synthetic e2e spend.
+        assert!(html.contains("total $123.3976"), "got: {html}");
+        assert!(html.contains("named $121.3976"), "got: {html}");
+        assert!(html.contains("one-shot $2.0000"), "got: {html}");
+    }
+
+    /// Cache token sums are on the wire (`CostView`) and must reach the
+    /// page; token cells compact with the exact value in the hover.
+    #[test]
+    fn costs_render_cache_columns_and_share() {
+        let mut a = cost_view("m0-issue-fix", 2474, 75.0);
+        a.total_input_tokens = 171_392_966;
+        a.total_cache_read_tokens = 26_118_676;
+        let b = cost_view("m0-loop", 162, 25.0);
+        let html = costs(&cost_report(vec![a, b]));
+        assert!(
+            html.contains("<th class=\"n\">cache read</th>"),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<td class="n" title="26,118,676">26.12M</td>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<td class="n" title="171,392,966">171.39M</td>"#),
+            "got: {html}"
+        );
+        // Share column: text carries the value, bar carries the glance.
+        assert!(html.contains("75.0%"), "got: {html}");
+        assert!(html.contains("25.0%"), "got: {html}");
+        assert!(html.contains(r#"style="width:75%""#), "got: {html}");
+        // No one-shot agents → no fold, no split in the total line.
+        assert!(!html.contains("one-shot"), "got: {html}");
+        assert!(html.contains("total $100.0000"), "got: {html}");
+    }
+
+    /// Agent ids are attacker-adjacent strings and stay escaped.
+    #[test]
+    fn costs_escape_agent_ids() {
+        let html = costs(&cost_report(vec![cost_view("<agent>", 1, 0.5)]));
+        assert!(html.contains("&lt;agent&gt;"), "got: {html}");
+        assert!(!html.contains("<agent>"), "got: {html}");
+    }
+
+    #[test]
+    fn token_cells_compact_with_exact_hover() {
+        assert_eq!(fmt_grouped(1_597), "1,597");
+        assert_eq!(fmt_grouped(171_392_966), "171,392,966");
+        assert_eq!(fmt_grouped(420), "420");
+        assert_eq!(token_cell(420), r#"<td class="n">420</td>"#);
+        assert_eq!(
+            token_cell(58_912),
+            r#"<td class="n" title="58,912">58.9K</td>"#
+        );
+        assert_eq!(
+            token_cell(7_409_042),
+            r#"<td class="n" title="7,409,042">7.41M</td>"#
+        );
     }
 
     #[test]
