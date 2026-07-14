@@ -1388,6 +1388,12 @@ struct DoctorWorkers {
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
 struct DoctorExecutions {
     in_flight: i64,
+    /// In-flight invocations with a fresh open dispatch (tool or LLM) —
+    /// actively working, however silent their WAL row (#130).
+    working: i64,
+    /// Short ids of the working invocations, same convention as
+    /// `stuck_ids`.
+    working_ids: Vec<String>,
     /// In-flight invocations whose `updated_at` is older than
     /// [`DOCTOR_STUCK_THRESHOLD_MS`].
     stuck: i64,
@@ -1479,15 +1485,16 @@ fn build_doctor_report(
         }
     }
 
+    // Short ids (8 chars) for triage, matching the human report.
+    let short = |ids: &[String]| -> Vec<String> {
+        ids.iter().map(|id| id.chars().take(8).collect()).collect()
+    };
     let ex = DoctorExecutions {
         in_flight: executions.in_flight,
+        working: executions.working,
+        working_ids: short(&executions.working_ids),
         stuck: executions.stuck,
-        // Short ids (8 chars) for triage, matching the human report.
-        stuck_ids: executions
-            .stuck_ids
-            .iter()
-            .map(|id| id.chars().take(8).collect())
-            .collect(),
+        stuck_ids: short(&executions.stuck_ids),
     };
 
     let failures = failures
@@ -1592,7 +1599,13 @@ async fn doctor(global: &GlobalArgs, json: bool, fail_on_issues: bool) -> anyhow
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     let workers = views.workers().await?;
-    let executions = views.executions(now_ms, DOCTOR_STUCK_THRESHOLD_MS).await?;
+    let executions = views
+        .executions(
+            now_ms,
+            DOCTOR_STUCK_THRESHOLD_MS,
+            fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+        )
+        .await?;
     let ambiguous = views
         .recovery(now_ms, DOCTOR_STUCK_THRESHOLD_MS)
         .await?
@@ -4335,8 +4348,36 @@ mod doctor_tests {
         assert!(report.has_issues());
 
         let out = render_doctor_report_human(&report);
-        assert!(out.contains("2 in-flight (1 stuck)"), "got: {out}");
+        assert!(
+            out.contains("2 in-flight (0 working, 1 stuck)"),
+            "got: {out}"
+        );
         assert!(out.contains("fq invocation drop"), "got: {out}");
+    }
+
+    /// Working invocations (fresh open dispatch, #130) surface in the human
+    /// report but are healthy — no issue, no remediation hint.
+    #[test]
+    fn working_in_flight_shown_but_not_an_issue() {
+        let ex = ExecutionsView {
+            in_flight: 2,
+            working: 1,
+            working_ids: vec!["019f5b3f-31fb-7ae0-b130-3d65ccf40375".to_string()],
+            stuck: 0,
+            stuck_ids: vec![],
+        };
+        let report = build_doctor_report(&[], &ex, 0, &[]);
+
+        assert!(!report.has_issues());
+        // Short id (8 chars), same convention as stuck_ids.
+        assert_eq!(report.executions.working_ids, vec!["019f5b3f".to_string()]);
+
+        let out = render_doctor_report_human(&report);
+        assert!(
+            out.contains("2 in-flight (1 working, 0 stuck)"),
+            "got: {out}"
+        );
+        assert!(!out.contains("fq invocation drop"), "got: {out}");
     }
 
     #[test]
