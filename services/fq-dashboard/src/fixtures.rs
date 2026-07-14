@@ -334,6 +334,36 @@ fn cost_report() -> CostReport {
             total_cache_read_tokens: 380_000,
             total_cache_write_tokens: 5_000,
         },
+        // One-shot e2e instances (uuid-suffixed ids): the costs page
+        // folds these into per-family rows so they cannot bury the
+        // named agents above — the fold is part of the screenshot.
+        CostView {
+            agent_id: "overspender-019f339c15767d70b8ffd6d7ca6b0a70".to_string(),
+            event_count: 1,
+            total_cost: 1.0,
+            total_input_tokens: 1_000_000,
+            total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
+        },
+        CostView {
+            agent_id: "overspender-019f339b43c47822bdff48bec821d815".to_string(),
+            event_count: 1,
+            total_cost: 1.0,
+            total_input_tokens: 1_000_000,
+            total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
+        },
+        CostView {
+            agent_id: "self-inspect-019f339c171373c189d801651bdee8e5".to_string(),
+            event_count: 2,
+            total_cost: 0.000_65,
+            total_input_tokens: 250,
+            total_output_tokens: 80,
+            total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
+        },
     ];
     CostReport {
         total_cost: agents.iter().map(|a| a.total_cost).sum(),
