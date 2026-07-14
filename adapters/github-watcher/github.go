@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 // GhCliIssueSource implements IssueSource and ReviewSource by shelling out
@@ -145,6 +146,107 @@ func parseMergedPRResponse(stdout []byte) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// openPRQuery asks the GraphQL API for the *open* PRs that close an
+// issue — the provenance-stamp targets (issue #162). Same authoritative
+// `closedByPullRequestsReferences` link as mergedPRQuery, but excluding
+// closed/merged PRs (`includeClosedPrs` defaults false; the state field
+// is still selected and filtered defensively).
+const openPRQuery = `query($owner:String!,$repo:String!,$number:Int!){
+  repository(owner:$owner,name:$repo){
+    issue(number:$number){
+      closedByPullRequestsReferences(first:20){
+        nodes{ number state }
+      }
+    }
+  }
+}`
+
+// ghOpenPRResponse mirrors the GraphQL response for openPRQuery.
+type ghOpenPRResponse struct {
+	Data struct {
+		Repository struct {
+			Issue struct {
+				ClosedByPullRequestsReferences struct {
+					Nodes []struct {
+						Number int    `json:"number"`
+						State  string `json:"state"`
+					} `json:"nodes"`
+				} `json:"closedByPullRequestsReferences"`
+			} `json:"issue"`
+		} `json:"repository"`
+	} `json:"data"`
+}
+
+// OpenPRsClosingIssue returns the numbers of open PRs that close the
+// issue, via the GitHub GraphQL API.
+func (g *GhCliIssueSource) OpenPRsClosingIssue(ctx context.Context, number int) ([]int, error) {
+	owner, repo, err := splitRepo(g.Repo)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
+		"-f", "query="+openPRQuery,
+		"-F", "owner="+owner,
+		"-F", "repo="+repo,
+		"-F", "number="+strconv.Itoa(number),
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh api graphql (issue #%d): %w", number, ghError(err))
+	}
+	return parseOpenPRResponse(out)
+}
+
+// parseOpenPRResponse extracts the open closing-PR numbers. Split out so
+// it is unit-testable without invoking gh.
+func parseOpenPRResponse(stdout []byte) ([]int, error) {
+	var resp ghOpenPRResponse
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		return nil, fmt.Errorf("parse gh api graphql output: %w", err)
+	}
+	var prs []int
+	for _, n := range resp.Data.Repository.Issue.ClosedByPullRequestsReferences.Nodes {
+		if n.State == "OPEN" {
+			prs = append(prs, n.Number)
+		}
+	}
+	return prs, nil
+}
+
+// PRBody returns the PR's current body via `gh pr view`.
+func (g *GhCliIssueSource) PRBody(ctx context.Context, pr int) (string, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", strconv.Itoa(pr),
+		"--repo", g.Repo,
+		"--json", "body",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view #%d: %w", pr, ghError(err))
+	}
+	var resp struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return "", fmt.Errorf("parse gh pr view output: %w", err)
+	}
+	return resp.Body, nil
+}
+
+// SetPRBody replaces the PR's body via `gh pr edit`. The body is passed
+// on stdin (`--body-file -`) so its length and content never fight the
+// argument list.
+func (g *GhCliIssueSource) SetPRBody(ctx context.Context, pr int, body string) error {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "edit", strconv.Itoa(pr),
+		"--repo", g.Repo,
+		"--body-file", "-",
+	)
+	cmd.Stdin = strings.NewReader(body)
+	if _, err := cmd.Output(); err != nil {
+		return fmt.Errorf("gh pr edit #%d: %w", pr, ghError(err))
+	}
+	return nil
 }
 
 // splitRepo splits "owner/name" into its parts.
