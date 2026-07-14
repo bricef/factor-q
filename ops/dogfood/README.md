@@ -74,7 +74,12 @@ key is the exception — add it to `.secrets/env` and `deploy.sh --force`,
 since only launch reads the env file.
 
 The operator dashboard (read-only web view, #105) rides in the bundle:
-enable `[read_service]` in `fq.toml`, restart the daemon, then
+enable `[read_service]` in `fq.toml` (one-time), and `deploy.sh` stops
+and relaunches it with the daemon and watcher — it must run the same
+build as the daemon, because the read-service RPC is a length-framed
+binary codec and a cross-build dashboard fails to decode responses,
+rendering "runtime unreachable" (the #154-skew incident). Manual
+launch, if ever needed:
 `setsid ./current/dashboard.sh >> logs/dashboard.log 2>&1 </dev/null &`.
 Reach it via SSH tunnel to `127.0.0.1:9472`, or through the public
 door: the infra compose runs Caddy serving `https://dev.lambda.works`
@@ -83,8 +88,8 @@ dashboard itself stays loopback-bound). One-time setup: write
 `.secrets/caddy.env` (chmod 600) containing `DASH_USER=<user>` and
 `DASH_HASH=<bcrypt>` (hash via `docker run --rm caddy:2 caddy
 hash-password`), then `docker compose -f infra/docker-compose.yml up
--d`. Neither process is deploy-managed yet — restart `dashboard.sh`
-manually after a deploy.
+-d`. Caddy is the one process deploy.sh does not manage (it is
+docker-supervised, `restart: unless-stopped`).
 
 Not built yet, by design (see #102): health-gate + auto-rollback after
 the flip, and any supervisor (systemd is deliberately out of scope; the

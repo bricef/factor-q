@@ -8,8 +8,11 @@
 # Requires `[read_service] enabled = true` in fq.toml (and a daemon
 # restart to pick it up). The dashboard is its own crash domain: if the
 # daemon is down it renders "runtime unreachable" rather than exiting,
-# and killing it never affects the daemon. Not yet relaunched by
-# deploy.sh — restart it manually after a deploy.
+# and killing it never affects the daemon. deploy.sh stops and
+# relaunches it with the daemon — it must run the same build, because
+# the read-service RPC is a length-framed binary codec and a
+# cross-build dashboard fails to decode responses (the #154-skew
+# incident).
 set -eu
 
 FQ_DOGFOOD="${FQ_DOGFOOD:-$(cd "$(dirname "$0")/.." && pwd)}"
