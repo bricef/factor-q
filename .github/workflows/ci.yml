@@ -94,6 +94,19 @@ jobs:
     name: Runtime CI
     needs: changes
     runs-on: ubuntu-latest
+    # sccache: a per-compilation-unit compiler cache over GitHub's Actions
+    # cache backend, layered on top of rust-cache's whole-target/ cache.
+    # HONEST CAVEAT (#51 Deliverable 6): this OVERLAPS rust-cache, which
+    # already restores target/ — sccache's marginal value on CI is only
+    # visible from this PR's own run (see `sccache --show-stats` at each
+    # job's end). Keep it only if those numbers beat rust-cache alone; it
+    # is isolated in one revertible commit. CARGO_INCREMENTAL=0 is required
+    # (incremental compilation bypasses RUSTC_WRAPPER); rust-cache sets it
+    # too, repeated here so the wiring is self-contained.
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
     steps:
       - if: needs.changes.outputs.runtime != 'true'
         run: echo "No runtime-relevant changes — skipping the runtime build."
@@ -110,6 +123,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: services/fq-runtime
+      # Installs sccache and points it at the GHA cache (reads SCCACHE_GHA_*).
+      - if: needs.changes.outputs.runtime == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.10
       # The MCP integration tests spawn the reference server via npx.
       - if: needs.changes.outputs.runtime == 'true'
         uses: actions/setup-node@v4
@@ -128,11 +144,19 @@ jobs:
         run: just runtime-ci
       - if: always() && needs.changes.outputs.runtime == 'true'
         run: just infra-down
+      # Cache hit-rate for the keep/drop decision on sccache (see env note).
+      - if: always() && needs.changes.outputs.runtime == 'true'
+        run: sccache --show-stats
 
   store-ci:
     name: Store CI
     needs: changes
     runs-on: ubuntu-latest
+    # sccache over the GHA backend — see the caveat on runtime-ci.
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
     steps:
       - if: needs.changes.outputs.store != 'true'
         run: echo "No store-relevant changes — skipping the store build."
@@ -148,10 +172,15 @@ jobs:
         with:
           workspaces: services/fq-store
       - if: needs.changes.outputs.store == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.10
+      - if: needs.changes.outputs.store == 'true'
         uses: extractions/setup-just@v3
       # Hermetic suite — no NATS broker, no Node toolchain needed.
       - if: needs.changes.outputs.store == 'true'
         run: just store-ci
+      # Cache hit-rate for the keep/drop decision on sccache.
+      - if: always() && needs.changes.outputs.store == 'true'
+        run: sccache --show-stats
 
   # Aggregate gate: keeps the "Rust CI" required-status-check name so the
   # runtime/store split needs no branch-protection change. Green iff both
@@ -179,6 +208,11 @@ jobs:
     # so this job builds when EITHER changes — hence the `runtime || dashboard`
     # gate on every step (rather than a dedicated filter that would duplicate
     # the `runtime` globs). A pure fq-store change skips it.
+    # sccache over the GHA backend — see the caveat on runtime-ci.
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
     steps:
       - if: needs.changes.outputs.runtime != 'true' && needs.changes.outputs.dashboard != 'true'
         run: echo "No dashboard-relevant changes — skipping the dashboard build."
@@ -194,11 +228,16 @@ jobs:
         with:
           workspaces: services/fq-dashboard
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.10
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: extractions/setup-just@v3
       # Hermetic — the router tests spin their own read service over a
       # temp DB; no broker, no Node.
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         run: just dashboard-ci
+      # Cache hit-rate for the keep/drop decision on sccache.
+      - if: always() && (needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true')
+        run: sccache --show-stats
 
   # Visual artifact, not a required check: when dashboard code changes,
   # render every page from deterministic fixtures and screenshot them
