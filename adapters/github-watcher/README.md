@@ -74,8 +74,7 @@ on the next poll.
 
 ## Requirements
 
-- `gh` on `PATH`, authenticated (e.g. via `GH_TOKEN`) — GitHub access is via
-  the `gh` CLI.
+- A GitHub token in `GH_TOKEN` (preferred) or `GITHUB_TOKEN` — GitHub access uses the API directly; `gh` is not required.
 - A running `fq run` daemon, which owns the `fq-triggers` JetStream stream
   the adapter publishes to and emits the lifecycle events it observes.
 
