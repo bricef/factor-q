@@ -50,6 +50,7 @@ pub fn event_kind_of(payload: &EventPayload) -> &'static str {
         EventPayload::ToolResult(_) => "tool_result",
         EventPayload::Completed(_) => "completed",
         EventPayload::Failed(_) => "failed",
+        EventPayload::HostNotice(_) => "host_notice",
         EventPayload::InvocationAmbiguous(_) => "invocation_ambiguous",
         EventPayload::InvocationArchived(_) => "invocation_archived",
         EventPayload::InvocationArchiveAcked(_) => "invocation_archive_acked",

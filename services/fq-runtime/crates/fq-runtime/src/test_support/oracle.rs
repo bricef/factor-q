@@ -168,6 +168,9 @@ fn check_with(
                 }
             },
             State::Idle => match payload {
+                // Host notices are injected at step boundaries only, so
+                // between-actions is the one legal position (#155).
+                EventPayload::HostNotice(_) => State::Idle,
                 EventPayload::LlmRequest(_) => State::Llm { dispatched: false },
                 EventPayload::ToolCall(_) => State::Tool {
                     dispatched: false,
@@ -423,6 +426,12 @@ fn kind(payload: &EventPayload) -> &'static str {
 /// stop reasons, token usage, totals, the final state blob) is load-
 /// bearing and kept. Two runs are observationally equivalent iff
 /// their projections are equal.
+///
+/// The comparison is **modulo host notices** (#155): once producers
+/// exist, a resumed trace legitimately differs from its uninterrupted
+/// reference by exactly the injected notices. `host_notice` events are
+/// dropped, and sentinel-prefixed user messages are removed from every
+/// messages array before comparing.
 pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
     const VOLATILE_KEYS: &[&str] = &[
         "call_id",
@@ -432,17 +441,50 @@ pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
         "terminal_at_ms",
     ];
 
+    /// A serialized [`crate::events::Message`] carrying a host notice:
+    /// user role, content starting with the fixed sentinel.
+    fn is_host_notice_message(value: &serde_json::Value) -> bool {
+        let Some(map) = value.as_object() else {
+            return false;
+        };
+        map.get("role").and_then(|role| role.as_str()) == Some("user")
+            && map
+                .get("content")
+                .and_then(|content| content.as_str())
+                .is_some_and(|content| content.starts_with(crate::events::HOST_NOTICE_SENTINEL))
+    }
+
     fn strip(value: &mut serde_json::Value) {
         match value {
             serde_json::Value::Object(map) => {
                 for key in VOLATILE_KEYS {
                     map.remove(*key);
                 }
+                // The final state blob is the serialized reducer state
+                // (JSON bytes); injected notices live inside its
+                // persisted conversation, so the modulo-host-notices
+                // comparison must reach through the encoding. Compare
+                // the parsed form; a blob that isn't JSON (a foreign
+                // reducer) is kept as-is.
+                if let Some(decoded) = map
+                    .get("final_state_blob")
+                    .and_then(|blob| blob.as_array())
+                    .and_then(|bytes| {
+                        bytes
+                            .iter()
+                            .map(|b| u8::try_from(b.as_u64()?).ok())
+                            .collect::<Option<Vec<u8>>>()
+                    })
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                {
+                    map.insert("final_state_blob".to_string(), decoded);
+                }
                 for child in map.values_mut() {
                     strip(child);
                 }
             }
             serde_json::Value::Array(items) => {
+                items.retain(|item| !is_host_notice_message(item));
                 for child in items.iter_mut() {
                     strip(child);
                 }
@@ -453,6 +495,7 @@ pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
 
     events
         .iter()
+        .filter(|event| !matches!(event.payload, EventPayload::HostNotice(_)))
         .map(|event| {
             let mut value = serde_json::to_value(&event.payload).expect("event payload serialises");
             strip(&mut value);
@@ -531,6 +574,37 @@ mod tests {
                 max_tokens: None,
             },
             origin: Default::default(),
+        })
+    }
+
+    fn llm_request_with(messages: Vec<crate::events::Message>) -> EventPayload {
+        EventPayload::LlmRequest(LlmRequestPayload {
+            call_id: Uuid::now_v7(),
+            model: "claude-test".to_string(),
+            messages,
+            tools_available: vec![],
+            request_params: crate::events::RequestParams {
+                effort: None,
+                temperature: None,
+                max_tokens: None,
+            },
+            origin: Default::default(),
+        })
+    }
+
+    fn user_message(content: &str) -> crate::events::Message {
+        crate::events::Message {
+            role: crate::events::MessageRole::User,
+            content: Some(content.to_string()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    fn host_notice() -> EventPayload {
+        EventPayload::HostNotice(crate::events::HostNoticePayload {
+            kind: "resume".to_string(),
+            body: "<host-notice>resumed</host-notice>".to_string(),
         })
     }
 
@@ -748,6 +822,105 @@ mod tests {
             violations
                 .iter()
                 .any(|v| v.message.contains("differs from")),
+            "{violations:?}"
+        );
+    }
+
+    /// #155 constraint (c): the observational projection compares
+    /// modulo host notices — the notice event and the sentinel-prefixed
+    /// user messages it injected are both invisible to the comparison.
+    #[test]
+    fn observational_trace_is_modulo_host_notices() {
+        // One archived payload for both traces: its `worker_id` is
+        // minted per `archived()` call and is not part of the claim.
+        let archive = archived();
+
+        let mut reference = Trace::new();
+        reference
+            .push(triggered())
+            .push(llm_request_with(vec![user_message("hi")]))
+            .push(llm_dispatched())
+            .push(llm_response())
+            .push(completed())
+            .push(archive.clone());
+
+        let mut resumed = Trace::new();
+        resumed
+            .push(triggered())
+            .push(host_notice())
+            .push(llm_request_with(vec![
+                user_message("hi"),
+                user_message("<host-notice>resumed</host-notice>"),
+            ]))
+            .push(llm_dispatched())
+            .push(llm_response())
+            .push(completed())
+            .push(archive);
+
+        assert_eq!(
+            observational_trace(&reference.events),
+            observational_trace(&resumed.events),
+            "host notices are invisible to the equivalence comparison"
+        );
+    }
+
+    /// The strip is sentinel-keyed, not user-role-keyed: an ordinary
+    /// user message must never be silently dropped from the comparison.
+    #[test]
+    fn strip_leaves_ordinary_user_messages_alone() {
+        let mut a = Trace::new();
+        a.push(triggered())
+            .push(llm_request_with(vec![user_message("hi")]))
+            .push(llm_dispatched())
+            .push(llm_response())
+            .push(completed())
+            .push(archived());
+
+        let mut b = Trace::new();
+        b.push(triggered())
+            .push(llm_request_with(vec![
+                user_message("hi"),
+                user_message("not a notice"),
+            ]))
+            .push(llm_dispatched())
+            .push(llm_response())
+            .push(completed())
+            .push(archived());
+
+        assert_ne!(
+            observational_trace(&a.events),
+            observational_trace(&b.events),
+            "a plain user message is load-bearing and must diverge"
+        );
+    }
+
+    /// Host notices are published at step boundaries only: legal
+    /// between actions, a violation inside a span.
+    #[test]
+    fn host_notice_legal_between_actions_only() {
+        let mut ok = Trace::new();
+        ok.push(triggered())
+            .push(host_notice())
+            .push(llm_request())
+            .push(llm_dispatched())
+            .push(llm_response())
+            .push(completed())
+            .push(archived());
+        assert_valid_trace(&ok.events);
+
+        let mut bad = Trace::new();
+        bad.push(triggered())
+            .push(llm_request())
+            .push(host_notice()) // mid-triple
+            .push(llm_dispatched())
+            .push(llm_response())
+            .push(completed())
+            .push(archived());
+        let violations = check_invocation_trace(&bad.events).unwrap_err();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.message.contains("inside an LLM triple")),
             "{violations:?}"
         );
     }

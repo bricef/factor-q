@@ -43,9 +43,9 @@ use crate::agent::{Agent, AgentId, EvaluatorSpec};
 use crate::bus::EventBus;
 use crate::events::{
     self, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
-    InvocationArchivedPayload, InvocationTotals, LlmCallOrigin, LlmRequestPayload,
-    LlmResponsePayload, Message, MessageRole, RequestParams, StopReason, ToolCallPayload,
-    ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
+    HostNoticePayload, InvocationArchivedPayload, InvocationTotals, LlmCallOrigin,
+    LlmRequestPayload, LlmResponsePayload, Message, MessageRole, RequestParams, StopReason,
+    ToolCallPayload, ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::mcp::{
@@ -467,6 +467,13 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     /// worker; flipped via [`Worker::request_drain`](crate::Worker) or
     /// [`Self::drain_signal`].
     drain: DrainSignal,
+    /// Host notices queued per invocation, drained at that
+    /// invocation's next step boundary (#155). Producers push
+    /// `(kind, body)` via [`Self::queue_host_notice`]; the drain
+    /// persists rows (WAL-before-effect) before building the
+    /// `StepInput` that carries them. Keyed by invocation because one
+    /// runner services concurrent invocations.
+    pending_notices: std::sync::Mutex<std::collections::HashMap<Uuid, Vec<(String, String)>>>,
 }
 
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
@@ -476,7 +483,33 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             config,
             reducer,
             drain: DrainSignal::new(),
+            pending_notices: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Queue a host notice for injection into `invocation_id`'s
+    /// conversation at its next step boundary (#155). `body` must be
+    /// fully rendered by the producer, `<host-notice>` sentinel
+    /// included — the exact string is WAL-persisted at the drain and
+    /// replayed verbatim on every future resume (replay never
+    /// re-renders).
+    pub fn queue_host_notice(
+        &self,
+        invocation_id: Uuid,
+        kind: impl Into<String>,
+        body: impl Into<String>,
+    ) {
+        let body = body.into();
+        debug_assert!(
+            body.starts_with(crate::events::HOST_NOTICE_SENTINEL),
+            "host-notice bodies are sentinel-wrapped by their producer"
+        );
+        self.pending_notices
+            .lock()
+            .expect("pending_notices lock poisoned")
+            .entry(invocation_id)
+            .or_default()
+            .push((kind.into(), body));
     }
 
     /// A cloneable handle to this runner's drain flag. Cloning shares
@@ -852,6 +885,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 sampling,
                 durable_start,
                 &mut cursor,
+                // Fresh invocation: no previous incarnation, nothing
+                // recorded for the first step.
+                Vec::new(),
             )
             .await;
         self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
@@ -1284,6 +1320,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // original attempt (issue #41).
                 DurableStart::noop(),
                 &mut cursor,
+                // Rows recorded for the step the crash interrupted (WAL
+                // write landed, the step never ran). The live re-run must
+                // carry them or its conversation silently diverges from
+                // what any later replay reconstructs.
+                host_notices
+                    .iter()
+                    .filter(|notice| notice.step_index == step_index)
+                    .map(|notice| (notice.seq, notice.kind.clone(), notice.body.clone()))
+                    .collect(),
             )
             .await;
         self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
@@ -1317,6 +1362,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         mut sampling: Option<SamplingChannel>,
         mut durable_start: DurableStart,
         cursor: &mut Option<Uuid>,
+        mut resumed_step_notices: Vec<(u32, String, String)>,
     ) -> Result<InvocationOutcome, ExecutorError> {
         // Invocation-scoped context-pressure tracking (issue #76). The
         // oldest turn is the invocation start — the first messages are
@@ -1326,36 +1372,66 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             oldest_turn_at_ms: started_at_ms,
             ..ContextTracker::default()
         };
-        // Producers populate this at future step boundaries. Keeping the
-        // durable drain here establishes WAL-before-effect ordering now.
-        let mut pending_notices: Vec<(String, String)> = Vec::new();
         for step_index in step_index_start..HOST_STEP_BUDGET {
-            let notices: Vec<(usize, String, String)> = pending_notices
-                .drain(..)
-                .enumerate()
-                .map(|(seq, (kind, body))| {
-                    // A producer must render its body before enqueueing it; this exact
-                    // string is persisted and subsequently replayed verbatim.
-                    (seq, kind, body)
-                })
-                .map(|(seq, kind, body)| (seq, kind, body))
-                .collect();
-            for (seq, kind, body) in &notices {
+            // Host notices (#155). `carried` starts with rows a previous
+            // incarnation recorded for this step — a crash after the WAL
+            // write but before the step ran. They are already durable, so
+            // they reach the reducer exactly as recorded (no re-insert, and
+            // no event re-emit: the WAL, not the event trail, is the
+            // channel's source of truth). Fresh drains are persisted before
+            // the `StepInput` that carries them is built — the
+            // WAL-write-before-effect ordering the runner already uses —
+            // with seq numbers continuing after the recorded ones so a
+            // future replay reconstructs the same order.
+            let mut carried: Vec<(u32, String, String)> = if step_index == step_index_start {
+                std::mem::take(&mut resumed_step_notices)
+            } else {
+                Vec::new()
+            };
+            let seq_base = carried.iter().map(|(seq, _, _)| seq + 1).max().unwrap_or(0);
+            let drained: Vec<(String, String)> = self
+                .pending_notices
+                .lock()
+                .expect("pending_notices lock poisoned")
+                .remove(&invocation_id)
+                .unwrap_or_default();
+            for (offset, (kind, body)) in drained.into_iter().enumerate() {
+                let next_seq = seq_base + offset as u32;
+                // The body was rendered by its producer, sentinel included;
+                // this exact string is persisted and replayed verbatim.
                 self.config
                     .store
                     .insert_host_notice(
                         &invocation_id.to_string(),
                         step_index,
-                        *seq as u32,
-                        kind,
-                        body,
+                        next_seq,
+                        &kind,
+                        &body,
                         self.config.clock.unix_now_ms(),
                     )
                     .await
                     .map_err(map_store_err)?;
-                tracing::info!(invocation_id = %invocation_id, kind = %kind, body = %body, "invocation.host_notice");
+                self.publish_chained(
+                    cursor,
+                    Event::new(
+                        agent_id.clone(),
+                        invocation_id,
+                        EventPayload::HostNotice(HostNoticePayload {
+                            kind: kind.clone(),
+                            body: body.clone(),
+                        }),
+                    ),
+                )
+                .await?;
+                info!(
+                    invocation_id = %invocation_id,
+                    step_index,
+                    kind = %kind,
+                    "host notice injected"
+                );
+                carried.push((next_seq, kind, body));
             }
-            let host_notices: Vec<String> = notices.into_iter().map(|(_, _, body)| body).collect();
+            let host_notices: Vec<String> = carried.into_iter().map(|(_, _, body)| body).collect();
             // ADR-0027 graceful drain: suspend at this step boundary if
             // a drain has been requested. The previous iteration's
             // checkpoint — or, for `step_index_start`, the `Triggered`

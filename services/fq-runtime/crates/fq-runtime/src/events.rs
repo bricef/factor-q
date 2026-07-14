@@ -150,6 +150,14 @@ pub mod subjects {
         format!("fq.agent.{agent_id}.invocation.operator_recovered")
     }
 
+    /// A durable host notice injected into the invocation's
+    /// conversation at a step boundary (#155). Deliberately outside
+    /// the coordination consumer's `fq.agent.*.invocation.*` filter —
+    /// notices are conversation-plane observability, not coordination.
+    pub fn agent_host_notice(agent_id: &str) -> String {
+        format!("fq.agent.{agent_id}.host_notice")
+    }
+
     pub fn agent_completed(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.completed")
     }
@@ -319,6 +327,7 @@ impl Event {
             }
             EventPayload::Completed(_) => subjects::agent_completed(agent),
             EventPayload::Failed(_) => subjects::agent_failed(agent),
+            EventPayload::HostNotice(_) => subjects::agent_host_notice(agent),
             EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
             EventPayload::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
             EventPayload::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
@@ -442,6 +451,7 @@ pub fn schema_id_for(payload: &EventPayload) -> &'static str {
         EventPayload::ToolResult(_) => "factor-q/tool_result@1",
         EventPayload::Completed(_) => "factor-q/completed@1",
         EventPayload::Failed(_) => "factor-q/failed@1",
+        EventPayload::HostNotice(_) => "factor-q/host_notice@1",
         EventPayload::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
         EventPayload::InvocationArchived(_) => "factor-q/invocation_archived@1",
         EventPayload::InvocationArchiveAcked(_) => "factor-q/invocation_archive_acked@1",
@@ -561,6 +571,15 @@ pub enum EventPayload {
     Completed(CompletedPayload),
     Failed(FailedPayload),
 
+    /// A durable host notice injected into the conversation at a
+    /// reducer step boundary (#155, phase 1 of #88). Emitted by the
+    /// runner when a queued notice is drained and WAL-persisted, so
+    /// operators see notices without diffing message arrays. The WAL
+    /// row — not this event — is the channel's source of truth: a
+    /// notice recorded by a crashed incarnation is *not* re-emitted
+    /// on resume.
+    HostNotice(HostNoticePayload),
+
     /// An in-flight invocation could not be auto-recovered
     /// on worker restart (see data-architecture.md §3.4).
     /// The worker publishes this when its WAL categorisation
@@ -623,6 +642,25 @@ pub enum EventPayload {
     /// notification drain (ADR-0020). Daemon-scoped — no agent or
     /// invocation.
     McpServerLog(McpServerLogPayload),
+}
+
+/// The fixed sentinel every host-notice body is wrapped in
+/// (`<host-notice>…</host-notice>`) — one marker for every producer,
+/// forever (#88). It separates "runtime ambient info" from "principal
+/// speaking" in the conversation, and the equivalence oracle strips
+/// sentinel-prefixed user messages when comparing resumed traces
+/// against uninterrupted references.
+pub const HOST_NOTICE_SENTINEL: &str = "<host-notice>";
+
+/// A durable host notice injected at a reducer step boundary (#155).
+/// `body` is the producer-rendered text, sentinel included — the exact
+/// string persisted in the WAL and replayed verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostNoticePayload {
+    /// Producer discriminator (`resume` | `tools_changed` |
+    /// `context_pressure`, …).
+    pub kind: String,
+    pub body: String,
 }
 
 /// Published when an agent invocation begins.

@@ -83,6 +83,10 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   count that `max_iterations` gates; the old name misread as
 ///   turn-vs-cap progress (issue #109). Pure rename — the value
 ///   written and every recovery/replay path are unchanged.
+/// - **v7** — adds the `host_notice` table (#155): durable host
+///   messages injected into the conversation at reducer step
+///   boundaries, keyed `(invocation_id, step_index, seq)` so a
+///   resume replays them verbatim at the recorded positions.
 pub const WORKER_SCHEMA_VERSION: u32 = 7;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
@@ -2068,6 +2072,153 @@ mod tests {
             .unwrap();
         assert_eq!(post.archive_status.as_deref(), Some("pending"));
         assert_eq!(post.archive_published_at, Some(999));
+    }
+
+    #[tokio::test]
+    async fn v6_to_v7_migration_adds_host_notice_table() {
+        // Pre-populate a v6 DB (initial tables + every migration
+        // through v6, no host_notice table). Open with the current
+        // binary; verify the v7 migration creates the table without
+        // disturbing existing rows.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.db");
+
+        {
+            let url = format!("sqlite://{}?mode=rwc", path.display());
+            let opts = SqliteConnectOptions::from_str(&url).unwrap();
+            let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+            for sql in [
+                SCHEMA_META_SQL,
+                WORKER_TABLES_V1_SQL,
+                WORKER_MIGRATION_V2_SQL,
+                WORKER_MIGRATION_V3_SQL,
+                WORKER_MIGRATION_V4_SQL,
+                WORKER_MIGRATION_V5_SQL,
+                WORKER_MIGRATION_V6_SQL,
+            ] {
+                for stmt in split_sql(sql) {
+                    sqlx::query(&stmt).execute(&pool).await.unwrap();
+                }
+            }
+            sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)")
+                .bind(SCHEMA_CLASS)
+                .bind(6_i64)
+                .bind(0_i64)
+                .execute(&pool)
+                .await
+                .unwrap();
+            // Pre-existing v6 row (post-rename: `step_index`).
+            sqlx::query(
+                "INSERT INTO invocation_state (invocation_id, agent_id, schema_version, phase, state_blob, step_index, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("legacy-inv")
+            .bind("a")
+            .bind(1_i64)
+            .bind("awaiting_model")
+            .bind(b"".as_slice())
+            .bind(0_i64)
+            .bind(1_i64)
+            .bind(1_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        let store = WorkerStore::open(&path).await.expect("migrate v6 -> v7");
+        assert_eq!(
+            store.read_schema_version().await.unwrap(),
+            Some(WORKER_SCHEMA_VERSION)
+        );
+
+        // Existing row preserved.
+        assert!(
+            store
+                .get_invocation_state("legacy-inv")
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // The migrated table serves the new write path.
+        store
+            .insert_host_notice(
+                "legacy-inv",
+                0,
+                0,
+                "resume",
+                "<host-notice>hello</host-notice>",
+                5,
+            )
+            .await
+            .unwrap();
+        let rows = store.list_host_notices("legacy-inv").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, "<host-notice>hello</host-notice>");
+    }
+
+    /// Insert/list round-trip: rows come back ordered by
+    /// `(step_index, seq)` regardless of insertion order, with every
+    /// column intact — the order a replay re-injects them in.
+    #[tokio::test]
+    async fn host_notice_round_trip_orders_by_step_then_seq() {
+        let dir = tempdir().unwrap();
+        let store = WorkerStore::open(&dir.path().join("events.db"))
+            .await
+            .unwrap();
+
+        // Deliberately inserted out of order.
+        for (step, seq, kind, body) in [
+            (
+                3_u32,
+                1_u32,
+                "context_pressure",
+                "<host-notice>c</host-notice>",
+            ),
+            (0, 0, "resume", "<host-notice>a</host-notice>"),
+            (3, 0, "tools_changed", "<host-notice>b</host-notice>"),
+        ] {
+            store
+                .insert_host_notice("inv-1", step, seq, kind, body, 42)
+                .await
+                .unwrap();
+        }
+        // A different invocation's rows must not bleed in.
+        store
+            .insert_host_notice("inv-2", 0, 0, "resume", "<host-notice>x</host-notice>", 42)
+            .await
+            .unwrap();
+
+        let rows = store.list_host_notices("inv-1").await.unwrap();
+        let summary: Vec<(u32, u32, &str, &str)> = rows
+            .iter()
+            .map(|r| (r.step_index, r.seq, r.kind.as_str(), r.body.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (0, 0, "resume", "<host-notice>a</host-notice>"),
+                (3, 0, "tools_changed", "<host-notice>b</host-notice>"),
+                (3, 1, "context_pressure", "<host-notice>c</host-notice>"),
+            ]
+        );
+        assert!(rows.iter().all(|r| r.invocation_id == "inv-1"));
+        assert!(rows.iter().all(|r| r.created_at == 42));
+
+        // The composite key is a real constraint: re-inserting an
+        // existing (invocation, step, seq) fails loudly rather than
+        // silently rewriting history.
+        let dup = store
+            .insert_host_notice(
+                "inv-1",
+                0,
+                0,
+                "resume",
+                "<host-notice>dup</host-notice>",
+                43,
+            )
+            .await;
+        assert!(dup.is_err(), "duplicate key must be rejected");
     }
 
     #[tokio::test]
