@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc a3af94d380f988cb8fb11f77b96fde00e71875d2d664abd9836667a6470a519b # shrinks to seed = 0, turns = 3, boundary = 0
 cc ab44bed2c8b36ededcae1d3021589fbc24345f5d4bbcb66861b362a3e49c16d2 # shrinks to seed = 0, calls = [2], boundary = 0
+cc bbd42af50c82dbe2f44bb2ff1d651b255414e3974981fd7cf1ce87bff99ef301 # shrinks to seed = 0, turns = 2, boundary = 2

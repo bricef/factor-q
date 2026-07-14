@@ -53,13 +53,12 @@ declined ([ADR-0017](../adrs/accepted/0017-mcp-human-in-the-loop.md)):
 ## Tools
 
 The simplest use: an MCP server provides tools, and the agent calls
-them. Declare the server, then list the tools you want by their own
-names (MCP tool names are not namespaced):
+them. Declare the server, then list canonical namespaced tools (`<server>__<tool>`):
 
 ```yaml
 tools:
-  - read_file
-  - write_file
+  - filesystem__read_file
+  - filesystem__write_file
 mcp:
   - server: filesystem
     command: npx

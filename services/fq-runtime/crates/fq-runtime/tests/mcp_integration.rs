@@ -129,7 +129,7 @@ async fn discovers_tools_from_everything_server() {
     // the echo tool.
     assert!(!tools.is_empty(), "should discover at least one tool");
 
-    let echo = tools.iter().find(|t| t.name() == "echo");
+    let echo = tools.iter().find(|t| t.name() == "everything__echo");
     assert!(echo.is_some(), "should discover the echo tool");
 
     let echo = echo.unwrap();
@@ -160,7 +160,7 @@ async fn calls_echo_tool_end_to_end() {
 
     let echo: Arc<dyn Tool> = tools
         .into_iter()
-        .find(|t| t.name() == "echo")
+        .find(|t| t.name() == "everything__echo")
         .expect("echo tool should exist");
 
     let sandbox = ToolSandbox::new();
@@ -912,7 +912,7 @@ async fn sampling_request_bridges_to_the_host() {
 
     let trigger: Arc<dyn Tool> = tools
         .into_iter()
-        .find(|t| t.name() == "trigger-sampling-request")
+        .find(|t| t.name() == "everything__trigger-sampling-request")
         .expect("everything server exposes trigger-sampling-request when sampling is advertised");
 
     let sandbox = ToolSandbox::new();
@@ -1039,7 +1039,7 @@ async fn run_sampling_scenario(
 
     let mut registry = ToolRegistry::with_builtins();
     for tool in tools {
-        registry.register(tool);
+        let _ = registry.register(tool);
     }
 
     // Agent permitted to call the sampling tool, with the grant under test.
@@ -1048,7 +1048,7 @@ async fn run_sampling_scenario(
         .model("claude-haiku")
         .system_prompt("You are a test agent.")
         .budget(1.0)
-        .tools(["trigger-sampling-request".to_string()]);
+        .tools(["everything__trigger-sampling-request".to_string()]);
     if let Some(grant) = grant {
         builder = builder.sampling_grant(grant);
     }
@@ -1075,7 +1075,7 @@ async fn run_sampling_scenario(
         content: None,
         tool_calls: vec![fq_runtime::events::MessageToolCall {
             tool_call_id: fq_runtime::events::ToolCallId::new("call-sampling").unwrap(),
-            tool_name: "trigger-sampling-request".to_string(),
+            tool_name: "everything__trigger-sampling-request".to_string(),
             parameters: serde_json::json!({"prompt": "hello from agent", "maxTokens": 16}),
         }],
         stop_reason: StopReason::ToolUse,
@@ -1407,7 +1407,7 @@ async fn roots_derived_from_sandbox_are_advertised_and_updatable() {
 
     let get_roots: Arc<dyn Tool> = tools
         .into_iter()
-        .find(|t| t.name() == "get-roots-list")
+        .find(|t| t.name() == "everything__get-roots-list")
         .expect("everything server exposes get-roots-list when roots is advertised");
 
     // The advertised roots reach the server on roots/list.
@@ -1540,7 +1540,7 @@ async fn run_elicitation_scenario(
 
     let mut registry = ToolRegistry::with_builtins();
     for tool in tools {
-        registry.register(tool);
+        let _ = registry.register(tool);
     }
 
     let mut builder = Agent::builder()
@@ -1548,7 +1548,7 @@ async fn run_elicitation_scenario(
         .model("claude-haiku")
         .system_prompt("You are a test agent.")
         .budget(1.0)
-        .tools(["trigger-elicitation-request".to_string()]);
+        .tools(["everything__trigger-elicitation-request".to_string()]);
     if let Some(grant) = grant {
         builder = builder.elicitation_grant(grant);
     }
@@ -1572,7 +1572,7 @@ async fn run_elicitation_scenario(
         content: None,
         tool_calls: vec![fq_runtime::events::MessageToolCall {
             tool_call_id: fq_runtime::events::ToolCallId::new("call-elicit").unwrap(),
-            tool_name: "trigger-elicitation-request".to_string(),
+            tool_name: "everything__trigger-elicitation-request".to_string(),
             parameters: serde_json::json!({}),
         }],
         stop_reason: StopReason::ToolUse,
@@ -1810,7 +1810,7 @@ async fn server_log_messages_are_forwarded_after_set_level() {
     // Enabling simulated logging sends one message immediately.
     let toggle: &Arc<dyn Tool> = tools
         .iter()
-        .find(|t| t.name() == "toggle-simulated-logging")
+        .find(|t| t.name() == "everything__toggle-simulated-logging")
         .expect("everything server exposes toggle-simulated-logging");
     let sandbox = ToolSandbox::new();
     let ctx = ToolContext::new(&sandbox);
@@ -1863,7 +1863,7 @@ async fn progress_notifications_track_a_long_running_operation() {
 
     let op: &Arc<dyn Tool> = tools
         .iter()
-        .find(|t| t.name() == "trigger-long-running-operation")
+        .find(|t| t.name() == "everything__trigger-long-running-operation")
         .expect("everything server exposes trigger-long-running-operation");
 
     // 3 steps over ~1s → 3 progress notifications (progress 1..3, total 3).
@@ -1922,7 +1922,7 @@ async fn refresh_tools_rediscovers_the_tool_list() {
         .expect("start server-everything");
     let initial_names: BTreeSet<String> = initial.iter().map(|t| t.name().to_string()).collect();
     assert!(
-        initial_names.contains("echo"),
+        initial_names.contains("everything__echo"),
         "baseline discovery should include echo"
     );
 
@@ -1975,7 +1975,7 @@ async fn in_flight_tool_call_can_be_cancelled() {
     let outcome = manager
         .call_tool_cancellable(
             "everything",
-            "trigger-long-running-operation",
+            "everything__trigger-long-running-operation",
             args,
             tokio::time::sleep(std::time::Duration::from_millis(200)),
         )
@@ -2020,11 +2020,14 @@ async fn advertised_capabilities_gate_what_the_server_registers() {
         .await
         .expect("start server-everything (no caps)");
     let names = tool_names(&tools);
-    assert!(names.contains("echo"), "ungated tools are still present");
     assert!(
-        !names.contains("trigger-sampling-request")
-            && !names.contains("trigger-elicitation-request")
-            && !names.contains("get-roots-list"),
+        names.contains("everything__echo"),
+        "ungated tools are still present"
+    );
+    assert!(
+        !names.contains("everything__trigger-sampling-request")
+            && !names.contains("everything__trigger-elicitation-request")
+            && !names.contains("everything__get-roots-list"),
         "ungranted capabilities must not be advertised → server registers none of their tools, got {names:?}"
     );
     none.shutdown().await;
@@ -2037,9 +2040,9 @@ async fn advertised_capabilities_gate_what_the_server_registers() {
         .expect("start server-everything (all caps)");
     let gnames = tool_names(&gtools);
     assert!(
-        gnames.contains("trigger-sampling-request")
-            && gnames.contains("trigger-elicitation-request")
-            && gnames.contains("get-roots-list"),
+        gnames.contains("everything__trigger-sampling-request")
+            && gnames.contains("everything__trigger-elicitation-request")
+            && gnames.contains("everything__get-roots-list"),
         "granted capabilities are advertised → server registers their tools, got {gnames:?}"
     );
     all.shutdown().await;
@@ -2084,7 +2087,7 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
         .model("claude-haiku")
         .system_prompt("You are a test agent.")
         .budget(1.0)
-        .tools(["trigger-sampling-request".to_string()])
+        .tools(["everything__trigger-sampling-request".to_string()])
         .mcp_servers(vec![McpServerDeclaration {
             server: "everything".to_string(),
             command: Some("npx".to_string()),
@@ -2115,7 +2118,7 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
         content: None,
         tool_calls: vec![fq_runtime::events::MessageToolCall {
             tool_call_id: fq_runtime::events::ToolCallId::new("call-sampling").unwrap(),
-            tool_name: "trigger-sampling-request".to_string(),
+            tool_name: "everything__trigger-sampling-request".to_string(),
             parameters: serde_json::json!({"prompt": "hello", "maxTokens": 16}),
         }],
         stop_reason: StopReason::ToolUse,
@@ -2232,7 +2235,7 @@ async fn stdio_shutdown_with_outstanding_tool_arc_is_graceful() {
         // liable to be mid-write at teardown): call the echo tool.
         let echo: Arc<dyn Tool> = tools
             .iter()
-            .find(|t| t.name() == "echo")
+            .find(|t| t.name() == "everything__echo")
             .expect("echo tool should exist")
             .clone();
         let sandbox = ToolSandbox::new();
