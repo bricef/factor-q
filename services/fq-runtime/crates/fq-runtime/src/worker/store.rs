@@ -291,6 +291,22 @@ pub struct LlmDispatchRow {
     pub completed_at: Option<i64>,
 }
 
+/// Minimal fields for an open tool dispatch used by read-model views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenToolDispatchRow {
+    pub tool_name: String,
+    pub intent_at: i64,
+    pub dispatched_at: Option<i64>,
+}
+
+/// Minimal fields for an open LLM dispatch used by read-model views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenLlmDispatchRow {
+    pub model: String,
+    pub intent_at: i64,
+    pub dispatched_at: Option<i64>,
+}
+
 /// One in-flight invocation row.
 ///
 /// `state_blob` holds the reducer's conversation state only —
@@ -1048,6 +1064,52 @@ impl WorkerStore {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_tool_dispatch).collect()
+    }
+
+    /// Open tool dispatches with only the fields needed by read-model views.
+    pub async fn open_tool_dispatches_for_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Vec<OpenToolDispatchRow>, WorkerStoreError> {
+        let rows = sqlx::query(
+            "SELECT tool_name, intent_at, dispatched_at FROM tool_dispatch \
+             WHERE invocation_id = ? AND status != 'completed' ORDER BY intent_at",
+        )
+        .bind(invocation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(OpenToolDispatchRow {
+                    tool_name: row.try_get("tool_name")?,
+                    intent_at: row.try_get("intent_at")?,
+                    dispatched_at: row.try_get("dispatched_at")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Open LLM dispatches with only the fields needed by read-model views.
+    pub async fn open_llm_dispatches_for_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Vec<OpenLlmDispatchRow>, WorkerStoreError> {
+        let rows = sqlx::query(
+            "SELECT model, intent_at, dispatched_at FROM llm_dispatch \
+             WHERE invocation_id = ? AND status != 'completed' ORDER BY intent_at",
+        )
+        .bind(invocation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(OpenLlmDispatchRow {
+                    model: row.try_get("model")?,
+                    intent_at: row.try_get("intent_at")?,
+                    dispatched_at: row.try_get("dispatched_at")?,
+                })
+            })
+            .collect()
     }
 
     /// Symmetric to [`Self::list_tool_dispatches_for_invocation`] for

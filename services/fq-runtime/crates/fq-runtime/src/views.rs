@@ -553,8 +553,6 @@ impl Views {
         stuck_threshold_ms: i64,
         long_dispatch_threshold_ms: i64,
     ) -> Result<ExecutionsView, ViewsError> {
-        use crate::worker::store::DispatchStatus;
-
         let in_flight = self.worker.find_in_flight_invocations().await?;
         let mut view = ExecutionsView {
             in_flight: in_flight.len() as i64,
@@ -567,18 +565,16 @@ impl Views {
             // `active_invocations`.
             let open_tool_at = self
                 .worker
-                .list_tool_dispatches_for_invocation(&row.invocation_id)
+                .open_tool_dispatches_for_invocation(&row.invocation_id)
                 .await?
                 .into_iter()
-                .filter(|d| !matches!(d.status, DispatchStatus::Completed))
                 .map(|d| d.dispatched_at.unwrap_or(d.intent_at))
                 .max();
             let open_llm_at = self
                 .worker
-                .list_llm_dispatches_for_invocation(&row.invocation_id)
+                .open_llm_dispatches_for_invocation(&row.invocation_id)
                 .await?
                 .into_iter()
-                .filter(|d| !matches!(d.status, DispatchStatus::Completed))
                 .map(|d| d.dispatched_at.unwrap_or(d.intent_at))
                 .max();
             if let Some(open_at) = open_tool_at.max(open_llm_at)
@@ -653,18 +649,16 @@ impl Views {
         for row in rows {
             let open_tools = self
                 .worker
-                .list_tool_dispatches_for_invocation(&row.invocation_id)
+                .open_tool_dispatches_for_invocation(&row.invocation_id)
                 .await?
                 .into_iter()
-                .filter(|t| !matches!(t.status, crate::worker::store::DispatchStatus::Completed))
                 .map(|t| t.tool_name)
                 .collect();
             let open_llms = self
                 .worker
-                .list_llm_dispatches_for_invocation(&row.invocation_id)
+                .open_llm_dispatches_for_invocation(&row.invocation_id)
                 .await?
                 .into_iter()
-                .filter(|l| !matches!(l.status, crate::worker::store::DispatchStatus::Completed))
                 .map(|l| l.model)
                 .collect();
             out.push(ActiveInvocationView {
