@@ -203,6 +203,33 @@ clear error message that the LLM sees and can adapt to.
 - The sandbox is enforced at the **process level**, not the OS
   level. For stronger isolation see [ADR-0010](../adrs/accepted/0010-agent-execution-isolation.md).
 
+### Ambient identity variables
+
+Beyond the `env` allowlist, the runtime injects three variables of its
+own into every command the `exec` tool spawns:
+
+| Variable | Value |
+|---|---|
+| `FQ_INVOCATION_ID` | The current invocation's id |
+| `FQ_AGENT_ID` | The agent's id |
+| `FQ_MODEL` | The model the agent runs on |
+
+They need no `env` grant: they are facts the runtime owns about the
+invocation, not host environment passed through, and they expose
+nothing about the host. A same-named host variable never shadows them,
+even if allowlisted. They persist across suspend/resume with the same
+invocation id.
+
+Use them for provenance on out-of-band work — for example, configuring
+the git author so commits attribute to the agent rather than the
+operator (a shell is needed for the expansion):
+
+```yaml
+# In the system prompt, an early step such as:
+#   ["sh", "-c", "git config user.name \"$FQ_AGENT_ID (factor-q agent)\" \
+#     && git config user.email \"$FQ_AGENT_ID+$FQ_INVOCATION_ID@agents.invalid\""]
+```
+
 
 ### The `${workspace}` token
 
