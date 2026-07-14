@@ -8,13 +8,19 @@
 #
 # The host never compiles. Artifacts come from the rolling `main-latest`
 # pre-release (.github/workflows/main-artifacts.yml): one checksummed
-# tarball holding fq, fq-cas, github-watcher and their launchers, all
-# stamped with the commit SHA they were built from. Every deployed build
-# is kept under releases/<sha>/ and `current` symlinks the active one,
-# so rollback is `deploy.sh <previous-sha>` — local, no network.
+# tarball holding fq, fq-cas, fq-dashboard, github-watcher and their
+# launchers, all stamped with the commit SHA they were built from. Every
+# deployed build is kept under releases/<sha>/ and `current` symlinks
+# the active one, so rollback is `deploy.sh <previous-sha>` — local, no
+# network.
 #
-# Contract: exits 0 ONLY when both processes are confirmed running from
-# releases/<sha>/ (checked via /proc/<pid>/exe, not just log lines).
+# Contract: exits 0 ONLY when all three processes (daemon, watcher,
+# dashboard) are confirmed running from releases/<sha>/ (checked via
+# /proc/<pid>/exe, not just log lines). The dashboard must move in
+# lockstep with the daemon: the read-service RPC uses a length-framed
+# binary codec, so a dashboard from another build fails to decode the
+# daemon's responses and renders "runtime unreachable" (the #154-skew
+# incident, 2026-07-14).
 #
 # Bring-down is graceful (ADR-0027): `fq drain` suspends in-flight
 # invocations at a step boundary (state on the WAL) and the process exits
@@ -23,7 +29,7 @@
 # `fq down --now` (#63 — clean teardown, worker deregistered, exit
 # observed), then SIGINT as the true last resort for a daemon that
 # predates `fq down` or is too wedged to service control messages.
-# The watcher is a stateless poller: SIGTERM.
+# The watcher and dashboard are stateless: SIGTERM.
 #
 # No health-gate / auto-rollback yet — that is the next slice of #102.
 set -euo pipefail
@@ -74,7 +80,7 @@ if [ "$WANT" = "latest" ]; then
 
     mkdir "$tmp/x"
     tar -xzf "$tmp"/*.tar.gz -C "$tmp/x"
-    chmod +x "$tmp/x/fq" "$tmp/x/fq-cas" "$tmp/x/github-watcher" "$tmp/x"/*.sh
+    chmod +x "$tmp/x/fq" "$tmp/x/fq-cas" "$tmp/x/fq-dashboard" "$tmp/x/github-watcher" "$tmp/x"/*.sh
 
     SHA="$(fq_sha "$tmp/x/fq")"
     [ -n "$SHA" ] || die "could not read the embedded SHA from the downloaded fq"
@@ -109,7 +115,8 @@ ACTIVE="$(readlink current 2>/dev/null || true)"
 DAEMON_PID="$(pgrep -x fq | head -1 || true)"
 if [ "$FORCE" != 1 ] && [ "$ACTIVE" = "$REL" ] && [ -n "$DAEMON_PID" ]; then
     exe="$(readlink "/proc/$DAEMON_PID/exe" 2>/dev/null || true)"
-    if [ "$exe" = "$DOGFOOD/$REL/fq" ] && pgrep -x github-watcher >/dev/null; then
+    if [ "$exe" = "$DOGFOOD/$REL/fq" ] && pgrep -x github-watcher >/dev/null \
+        && pgrep -x fq-dashboard >/dev/null; then
         ok "already running $SHA — nothing to do (--force to restart anyway)"
         exit 0
     fi
@@ -158,13 +165,23 @@ for wpid in $(pgrep -x github-watcher || true); do
     ok "watcher $wpid stopped"
 done
 
+# The dashboard must not outlive the flip: a stale binary cannot decode
+# the new daemon's read-service responses (see the header contract).
+for dpid in $(pgrep -x fq-dashboard || true); do
+    log "Stopping dashboard (PID $dpid)"
+    kill -TERM "$dpid" 2>/dev/null || true
+    for _ in $(seq 1 15); do kill -0 "$dpid" 2>/dev/null || break; sleep 1; done
+    kill -0 "$dpid" 2>/dev/null && kill -KILL "$dpid" 2>/dev/null || true
+    ok "dashboard $dpid stopped"
+done
+
 # --- 4. flip the symlink atomically ---------------------------------------
 rm -f current.new
 ln -s "$REL" current.new
 mv -Tf current.new current
 ok "current -> $REL"
 
-# --- 5. relaunch both (detached), verifying against fresh log lines -------
+# --- 5. relaunch all three (detached), verifying against fresh log lines --
 daemon_log_lines="$(wc -l < logs/fq-run.log 2>/dev/null || echo 0)"
 watcher_log_lines="$(wc -l < logs/watcher.log 2>/dev/null || echo 0)"
 
@@ -172,6 +189,8 @@ log "Relaunching daemon (current/run.sh)"
 setsid ./current/run.sh >> logs/fq-run.log 2>&1 </dev/null &
 log "Relaunching watcher (current/watcher.sh)"
 setsid ./current/watcher.sh >> logs/watcher.log 2>&1 </dev/null &
+log "Relaunching dashboard (current/dashboard.sh)"
+setsid ./current/dashboard.sh >> logs/dashboard.log 2>&1 </dev/null &
 
 log "Verifying daemon startup (up to ${READY_WAIT}s)"
 ready=0
@@ -206,6 +225,14 @@ else
     ok "watcher up (PID $NEW_WATCHER) from $REL"
 fi
 
+log "Verifying dashboard startup"
+NEW_DASHBOARD="$(pgrep -x fq-dashboard | head -1 || true)"
+[ -n "$NEW_DASHBOARD" ] || die "dashboard not running after relaunch (see logs/dashboard.log)"
+dexe="$(readlink "/proc/$NEW_DASHBOARD/exe" 2>/dev/null || true)"
+[ "$dexe" = "$DOGFOOD/$REL/fq-dashboard" ] \
+    || die "dashboard PID $NEW_DASHBOARD runs $dexe, not $DOGFOOD/$REL/fq-dashboard"
+ok "dashboard up (PID $NEW_DASHBOARD) from $REL"
+
 # --- 6. prune old releases (keep the newest KEEP_RELEASES, never $REL) ---
 i=0
 for d in $(ls -1t releases); do
@@ -220,7 +247,8 @@ done
 # --- done ------------------------------------------------------------------
 printf '\n\033[1;32m════════════════════════════════════════════════════\n'
 printf '  DEPLOYED — factor-q dogfood stack @ %s\n' "$SHA"
-printf '    daemon  PID %-8s %s\n' "$NEW_DAEMON" "$("$REL/fq" --version)"
-printf '    watcher PID %-8s %s\n' "$NEW_WATCHER" "$("$REL/github-watcher" --version 2>&1)"
+printf '    daemon    PID %-8s %s\n' "$NEW_DAEMON" "$("$REL/fq" --version)"
+printf '    watcher   PID %-8s %s\n' "$NEW_WATCHER" "$("$REL/github-watcher" --version 2>&1)"
+printf '    dashboard PID %-8s %s/fq-dashboard (no --version; verified via /proc)\n' "$NEW_DASHBOARD" "$REL"
 printf '    rollback: ops/dogfood/deploy.sh <sha>   history: ls %s/releases\n' "$DOGFOOD"
 printf '════════════════════════════════════════════════════\033[0m\n'
