@@ -29,8 +29,9 @@ use tarpc::{client, context};
 use crate::control_plane::store::OwnerStatus;
 use crate::health::{self, StreamHealth};
 use crate::views::{
-    ActiveInvocationView, CostReport, EventView, ExecutionsView, FailureView, InvocationDetailView,
-    InvocationSummaryView, RecoveryView, Views, ViewsError, WorkerDetailView, WorkerView,
+    ActiveInvocationView, AgentCostDetailView, CostReport, EventView, ExecutionsView, FailureView,
+    InvocationDetailView, InvocationSummaryView, RecoveryView, Views, ViewsError, WorkerDetailView,
+    WorkerView,
 };
 
 /// Staleness / stuck-ness threshold used by [`ReadService::health`] —
@@ -127,6 +128,15 @@ pub trait ReadService {
         limit: i64,
     ) -> Result<Vec<EventView>, WireError>;
     async fn costs(agent: Option<String>, since: Option<String>) -> Result<CostReport, WireError>;
+    /// One agent's cost drill-down: totals plus per-model and
+    /// per-invocation breakdowns (invocations newest first, capped at
+    /// `invocation_limit`). `None` when the agent has no cost events
+    /// in the window.
+    async fn agent_costs(
+        agent: String,
+        since: Option<String>,
+        invocation_limit: i64,
+    ) -> Result<Option<AgentCostDetailView>, WireError>;
 }
 
 /// Server handler: forwards each RPC to the backing [`Views`] and the
@@ -300,6 +310,19 @@ impl ReadService for ReadServer {
     ) -> Result<CostReport, WireError> {
         Ok(self.views.costs(agent.as_deref(), since.as_deref()).await?)
     }
+
+    async fn agent_costs(
+        self,
+        _: context::Context,
+        agent: String,
+        since: Option<String>,
+        invocation_limit: i64,
+    ) -> Result<Option<AgentCostDetailView>, WireError> {
+        Ok(self
+            .views
+            .agent_costs(&agent, since.as_deref(), invocation_limit)
+            .await?)
+    }
 }
 
 /// Bind a TCP listener and return its address plus a future that serves
@@ -462,6 +485,14 @@ mod tests {
             .expect("rpc")
             .expect("costs");
         assert!(costs.agents.is_empty());
+
+        // The drill-down round-trips its None case for an unknown agent.
+        let detail = client
+            .agent_costs(context::current(), "no-such-agent".to_string(), None, 10)
+            .await
+            .expect("rpc")
+            .expect("agent_costs");
+        assert!(detail.is_none());
 
         let missing = client
             .invocation(context::current(), "no-such-id".to_string())

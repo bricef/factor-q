@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::projection::store::{
-    CostSummary, EventFilter, EventRow, FailureSummary, StoreError,
+    CostSummary, EventFilter, EventRow, FailureSummary, InvocationCostSummary, ModelCostSummary,
+    StoreError,
 };
 use crate::control_plane::store::{
     ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerRow, OwnerStatus,
@@ -265,6 +266,8 @@ pub struct CostView {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
+    /// Distinct invocations behind the aggregate.
+    pub invocation_count: i64,
 }
 
 impl From<CostSummary> for CostView {
@@ -277,8 +280,78 @@ impl From<CostSummary> for CostView {
             total_output_tokens: r.total_output_tokens,
             total_cache_read_tokens: r.total_cache_read_tokens,
             total_cache_write_tokens: r.total_cache_write_tokens,
+            invocation_count: r.invocation_count,
         }
     }
+}
+
+/// One invocation's share of an agent's spend.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct InvocationCostView {
+    pub invocation_id: String,
+    /// Epoch ms of the invocation's first cost event (its effective
+    /// start as the projection sees it); 0 when the stored timestamp
+    /// fails to parse.
+    pub started_at_ms: i64,
+    pub event_count: i64,
+    pub total_cost: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_write_tokens: i64,
+}
+
+impl From<InvocationCostSummary> for InvocationCostView {
+    fn from(r: InvocationCostSummary) -> Self {
+        InvocationCostView {
+            started_at_ms: chrono::DateTime::parse_from_rfc3339(&r.first_timestamp)
+                .map(|d| d.timestamp_millis())
+                .unwrap_or(0),
+            invocation_id: r.invocation_id,
+            event_count: r.event_count,
+            total_cost: r.total_cost,
+            total_input_tokens: r.total_input_tokens,
+            total_output_tokens: r.total_output_tokens,
+            total_cache_read_tokens: r.total_cache_read_tokens,
+            total_cache_write_tokens: r.total_cache_write_tokens,
+        }
+    }
+}
+
+/// One model's share of an agent's spend.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ModelCostView {
+    pub model: String,
+    pub event_count: i64,
+    pub total_cost: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+}
+
+impl From<ModelCostSummary> for ModelCostView {
+    fn from(r: ModelCostSummary) -> Self {
+        ModelCostView {
+            model: r.model,
+            event_count: r.event_count,
+            total_cost: r.total_cost,
+            total_input_tokens: r.total_input_tokens,
+            total_output_tokens: r.total_output_tokens,
+        }
+    }
+}
+
+/// One agent's cost drill-down: its own totals plus per-model and
+/// per-invocation breakdowns — the dashboard's `/costs/<agent>` page
+/// and any future `fq costs show <agent>`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AgentCostDetailView {
+    pub agent_id: String,
+    pub totals: CostView,
+    /// Biggest spender first.
+    pub models: Vec<ModelCostView>,
+    /// Newest first, capped by the caller's limit;
+    /// `totals.invocation_count` carries the uncapped count.
+    pub invocations: Vec<InvocationCostView>,
 }
 
 /// Per-agent costs plus the grand totals, so a caller renders both without
@@ -464,6 +537,42 @@ impl Views {
             report.agents.push(CostView::from(r));
         }
         Ok(report)
+    }
+
+    /// One agent's cost drill-down — totals plus per-model and
+    /// per-invocation breakdowns (invocations newest first, capped at
+    /// `invocation_limit`). `None` when the agent has no cost events
+    /// in the window.
+    pub async fn agent_costs(
+        &self,
+        agent: &str,
+        since: Option<&str>,
+        invocation_limit: i64,
+    ) -> Result<Option<AgentCostDetailView>, ViewsError> {
+        let mut rows = self.projection.cost_summary(Some(agent), since).await?;
+        let Some(totals) = rows.pop() else {
+            return Ok(None);
+        };
+        let models = self
+            .projection
+            .cost_by_model(agent, since)
+            .await?
+            .into_iter()
+            .map(ModelCostView::from)
+            .collect();
+        let invocations = self
+            .projection
+            .cost_by_invocation(agent, since, invocation_limit)
+            .await?
+            .into_iter()
+            .map(InvocationCostView::from)
+            .collect();
+        Ok(Some(AgentCostDetailView {
+            agent_id: agent.to_string(),
+            totals: CostView::from(totals),
+            models,
+            invocations,
+        }))
     }
 
     /// Terminal failures grouped by kind.
@@ -874,12 +983,33 @@ mod tests {
                 total_output_tokens: outs,
                 total_cache_read_tokens: 0,
                 total_cache_write_tokens: 0,
+                invocation_count: 1,
             });
         }
         assert_eq!(report.agents.len(), 2);
         assert!((report.total_cost - 3.5).abs() < f64::EPSILON);
         assert_eq!(report.total_input_tokens, 15);
         assert_eq!(report.total_output_tokens, 27);
+    }
+
+    /// The RFC3339 projection timestamp becomes epoch ms on the view;
+    /// an unparseable value degrades to 0, never a panic.
+    #[test]
+    fn invocation_cost_view_parses_rfc3339_start() {
+        let summary = |ts: &str| InvocationCostSummary {
+            invocation_id: "inv-1".into(),
+            first_timestamp: ts.into(),
+            event_count: 1,
+            total_cost: 0.1,
+            total_input_tokens: 10,
+            total_output_tokens: 5,
+            total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
+        };
+        let v = InvocationCostView::from(summary("1970-01-01T00:00:01+00:00"));
+        assert_eq!(v.started_at_ms, 1_000);
+        let bad = InvocationCostView::from(summary("not-a-time"));
+        assert_eq!(bad.started_at_ms, 0);
     }
 
     // ---- DB wiring smoke test (empty, freshly-created stores) ----
@@ -906,6 +1036,13 @@ mod tests {
         assert!(views.workers().await.unwrap().is_empty());
         assert!(views.events(None, None, None, 50).await.unwrap().is_empty());
         assert!(views.costs(None, None).await.unwrap().agents.is_empty());
+        assert!(
+            views
+                .agent_costs("no-such-agent", None, 10)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(views.failures().await.unwrap().is_empty());
         assert!(views.invocations(None, 50).await.unwrap().is_empty());
         assert!(

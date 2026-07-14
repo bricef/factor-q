@@ -8,8 +8,8 @@ use fq_runtime::health::{ConsumerHealth, StreamHealth};
 use fq_runtime::read_service::HealthReport;
 use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
 use fq_runtime::views::{
-    ActiveInvocationView, CostReport, CostView, EventView, InvocationDetailView,
-    InvocationSummaryView,
+    ActiveInvocationView, AgentCostDetailView, CostReport, CostView, EventView,
+    InvocationDetailView, InvocationSummaryView,
 };
 
 /// Minimal HTML escape for text and attribute positions.
@@ -834,11 +834,12 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
 
     if !named.is_empty() {
         b.push_str(
-            "<table><tr><th>agent</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">last 24h</th><th class=\"n\">total cost</th><th>share</th></tr>",
+            "<table><tr><th>agent</th><th class=\"n\">invocations</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">last 24h</th><th class=\"n\">total cost</th><th>share</th></tr>",
         );
         let mut sub = FamilyAgg::default();
         let (mut sub_in, mut sub_out, mut sub_cr, mut sub_cw) = (0i64, 0i64, 0i64, 0i64);
         let mut sub_day = 0.0_f64;
+        let mut sub_invs = 0i64;
         for a in &named {
             sub.calls += a.event_count;
             sub.cost += a.total_cost;
@@ -846,11 +847,14 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
             sub_out += a.total_output_tokens;
             sub_cr += a.total_cache_read_tokens;
             sub_cw += a.total_cache_write_tokens;
+            sub_invs += a.invocation_count;
             let day = day_costs.get(a.agent_id.as_str()).copied();
             sub_day += day.unwrap_or(0.0);
             b.push_str(&format!(
-                r#"<tr><td>{}</td><td class="n">{}</td>{}{}{}{}{}<td class="n">${:.4}</td>{}</tr>"#,
+                r#"<tr><td><a href="/costs/{}">{}</a></td><td class="n">{}</td><td class="n">{}</td>{}{}{}{}{}<td class="n">${:.4}</td>{}</tr>"#,
                 esc(&a.agent_id),
+                esc(&a.agent_id),
+                fmt_grouped(a.invocation_count),
                 fmt_grouped(a.event_count),
                 token_cell(a.total_input_tokens),
                 token_cell(a.total_output_tokens),
@@ -862,7 +866,8 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
             ));
         }
         b.push_str(&format!(
-            r#"<tr class="sub"><th>named agents</th><td class="n">{}</td>{}{}{}{}{}<td class="n"><b>${:.4}</b></td>{}</tr>"#,
+            r#"<tr class="sub"><th>named agents</th><td class="n">{}</td><td class="n">{}</td>{}{}{}{}{}<td class="n"><b>${:.4}</b></td>{}</tr>"#,
+            fmt_grouped(sub_invs),
             fmt_grouped(sub.calls),
             token_cell(sub_in),
             token_cell(sub_out),
@@ -924,6 +929,75 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
         } else {
             fmt_grouped(report.total_output_tokens)
         },
+    ));
+    b
+}
+
+/// The single-agent cost drill-down body (`/costs/<agent>`): the
+/// agent's totals, its per-model split, and per-invocation rows that
+/// link each run's spend back to its invocation page (and from there
+/// the transcript).
+pub fn agent_costs(d: &AgentCostDetailView, window: Window, now_ms: i64) -> String {
+    let mut b = r#"<p class="muted"><a href="/costs">← all agents</a></p>"#.to_string();
+    b.push_str(&window_links(
+        window,
+        &format!("/costs/{}", esc(&d.agent_id)),
+    ));
+    b.push_str(&format!(
+        r#"<p><b>total ${:.4}</b><span class="muted"> · {} invocations · {} llm calls · {} in / {} out</span></p>"#,
+        d.totals.total_cost,
+        fmt_grouped(d.totals.invocation_count),
+        fmt_grouped(d.totals.event_count),
+        if d.totals.total_input_tokens >= 1_000_000 {
+            format!("{:.1}M", d.totals.total_input_tokens as f64 / 1e6)
+        } else {
+            fmt_grouped(d.totals.total_input_tokens)
+        },
+        if d.totals.total_output_tokens >= 1_000_000 {
+            format!("{:.1}M", d.totals.total_output_tokens as f64 / 1e6)
+        } else {
+            fmt_grouped(d.totals.total_output_tokens)
+        },
+    ));
+
+    b.push_str("<h2>By model</h2>");
+    b.push_str(
+        "<table><tr><th>model</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">total cost</th><th>share</th></tr>",
+    );
+    for m in &d.models {
+        b.push_str(&format!(
+            r#"<tr><td>{}</td><td class="n">{}</td>{}{}<td class="n">${:.4}</td>{}</tr>"#,
+            esc(&m.model),
+            fmt_grouped(m.event_count),
+            token_cell(m.total_input_tokens),
+            token_cell(m.total_output_tokens),
+            m.total_cost,
+            share_cell(m.total_cost, d.totals.total_cost),
+        ));
+    }
+    b.push_str("</table>");
+
+    b.push_str("<h2>By invocation</h2>");
+    b.push_str(
+        "<table><tr><th>invocation</th><th>started</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cost</th></tr>",
+    );
+    for i in &d.invocations {
+        b.push_str(&format!(
+            r#"<tr><td>{}</td><td>{}</td><td class="n">{}</td>{}{}{}<td class="n">${:.4}</td></tr>"#,
+            inv_link(&i.invocation_id),
+            esc(&age(i.started_at_ms, now_ms)),
+            fmt_grouped(i.event_count),
+            token_cell(i.total_input_tokens),
+            token_cell(i.total_output_tokens),
+            token_cell(i.total_cache_read_tokens),
+            i.total_cost,
+        ));
+    }
+    b.push_str("</table>");
+    b.push_str(&format!(
+        r#"<p class="muted">showing {} of {} invocations</p>"#,
+        d.invocations.len(),
+        d.totals.invocation_count,
     ));
     b
 }
@@ -1121,6 +1195,7 @@ mod tests {
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
+            invocation_count: 1,
         }
     }
 
@@ -1276,6 +1351,81 @@ mod tests {
             html.contains(r#"<td class="n muted">—</td>"#),
             "got: {html}"
         );
+    }
+
+    /// Named agents link to their drill-down and carry the invocation
+    /// count; the folded family rows do not link (a family is not an
+    /// agent id).
+    #[test]
+    fn costs_link_named_agents_to_their_drilldown() {
+        let mut a = cost_view("m0-issue-fix", 2474, 121.0);
+        a.invocation_count = 43;
+        let html = costs_all(&cost_report(vec![
+            a,
+            cost_view("overspender-019f339c15767d70b8ffd6d7ca6b0a70", 1, 1.0),
+        ]));
+        assert!(
+            html.contains(r#"<a href="/costs/m0-issue-fix">m0-issue-fix</a>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains("<th class=\"n\">invocations</th>"),
+            "got: {html}"
+        );
+        assert!(html.contains(r#"<td class="n">43</td>"#), "got: {html}");
+        assert!(!html.contains(r#"href="/costs/overspender"#), "got: {html}");
+    }
+
+    /// The drill-down page: totals strip, per-model split with share,
+    /// and per-invocation rows linking to the invocation detail page.
+    #[test]
+    fn agent_costs_render_models_and_linked_invocations() {
+        use fq_runtime::views::{InvocationCostView, ModelCostView};
+        let mut totals = cost_view("m0-issue-fix", 1187, 101.38);
+        totals.invocation_count = 43;
+        let d = AgentCostDetailView {
+            agent_id: "m0-issue-fix".to_string(),
+            totals,
+            models: vec![ModelCostView {
+                model: "claude-opus-4-8".to_string(),
+                event_count: 1187,
+                total_cost: 101.38,
+                total_input_tokens: 126_872_419,
+                total_output_tokens: 702_313,
+            }],
+            invocations: vec![InvocationCostView {
+                invocation_id: "019f6176-78c3-7cb3-9f0a-73c98b760b70".to_string(),
+                started_at_ms: 0,
+                event_count: 52,
+                total_cost: 2.2137,
+                total_input_tokens: 6_723_812,
+                total_output_tokens: 10_095,
+                total_cache_read_tokens: 6_554_327,
+                total_cache_write_tokens: 0,
+            }],
+        };
+        let html = agent_costs(&d, Window::All, 1_860_000);
+        assert!(
+            html.contains(r#"<a href="/costs">← all agents</a>"#),
+            "got: {html}"
+        );
+        // Window links target this agent's own path.
+        assert!(
+            html.contains(r#"<a href="/costs/m0-issue-fix?window=7d">7d</a>"#),
+            "got: {html}"
+        );
+        assert!(html.contains("By model"), "got: {html}");
+        assert!(html.contains("claude-opus-4-8"), "got: {html}");
+        assert!(html.contains("By invocation"), "got: {html}");
+        assert!(
+            html.contains(
+                r#"<a href="/invocations/019f6176-78c3-7cb3-9f0a-73c98b760b70">019f6176</a>"#
+            ),
+            "got: {html}"
+        );
+        assert!(html.contains("<td>31m ago</td>"), "got: {html}");
+        assert!(html.contains("$2.2137"), "got: {html}");
+        assert!(html.contains("showing 1 of 43 invocations"), "got: {html}");
     }
 
     #[test]
