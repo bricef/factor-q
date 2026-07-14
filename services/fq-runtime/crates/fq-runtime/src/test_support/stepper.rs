@@ -80,6 +80,7 @@ impl<R: Reducer> ManualStepper<R> {
             random_seed,
             step_index: self.step_index,
             static_resource_context: None,
+            host_notices: vec![],
         };
         let output = self
             .reducer

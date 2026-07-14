@@ -83,7 +83,7 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   count that `max_iterations` gates; the old name misread as
 ///   turn-vs-cap progress (issue #109). Pure rename — the value
 ///   written and every recovery/replay path are unchanged.
-pub const WORKER_SCHEMA_VERSION: u32 = 6;
+pub const WORKER_SCHEMA_VERSION: u32 = 7;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -201,6 +201,30 @@ ALTER TABLE invocation_state ADD COLUMN trigger_payload TEXT;
 const WORKER_MIGRATION_V6_SQL: &str = r#"
 ALTER TABLE invocation_state RENAME COLUMN iteration TO step_index;
 "#;
+
+/// v7 migration: durable host notices injected at reducer step boundaries.
+const WORKER_MIGRATION_V7_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS host_notice (
+    invocation_id TEXT NOT NULL,
+    step_index INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (invocation_id, step_index, seq)
+);
+"#;
+
+/// One durable host notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostNoticeRow {
+    pub invocation_id: String,
+    pub step_index: u32,
+    pub seq: u32,
+    pub kind: String,
+    pub body: String,
+    pub created_at: i64,
+}
 
 /// One of the three WAL states a dispatch can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,7 +499,12 @@ impl WorkerStore {
                 sqlx::query(&stmt).execute(&self.pool).await?;
             }
         }
-        // Future migrations: 6 → 7, etc.
+        if from < 7 && to >= 7 {
+            for stmt in split_sql(WORKER_MIGRATION_V7_SQL) {
+                sqlx::query(&stmt).execute(&self.pool).await?;
+            }
+        }
+        // Future migrations: 7 → 8, etc.
         Ok(())
     }
 
@@ -774,6 +803,44 @@ impl WorkerStore {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_llm_dispatch).collect()
+    }
+
+    // -----------------------------------------------------------
+    // Host-notice WAL operations.
+    // -----------------------------------------------------------
+
+    pub async fn insert_host_notice(
+        &self,
+        invocation_id: &str,
+        step_index: u32,
+        seq: u32,
+        kind: &str,
+        body: &str,
+        created_at: i64,
+    ) -> Result<(), WorkerStoreError> {
+        sqlx::query("INSERT INTO host_notice (invocation_id, step_index, seq, kind, body, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(invocation_id).bind(step_index as i64).bind(seq as i64).bind(kind).bind(body)
+            .bind(created_at).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn list_host_notices(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Vec<HostNoticeRow>, WorkerStoreError> {
+        let rows = sqlx::query("SELECT invocation_id, step_index, seq, kind, body, created_at FROM host_notice WHERE invocation_id = ? ORDER BY step_index, seq")
+            .bind(invocation_id).fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| HostNoticeRow {
+                invocation_id: r.get("invocation_id"),
+                step_index: r.get::<i64, _>("step_index") as u32,
+                seq: r.get::<i64, _>("seq") as u32,
+                kind: r.get("kind"),
+                body: r.get("body"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     // -----------------------------------------------------------

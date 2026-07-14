@@ -990,6 +990,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .list_llm_dispatches_for_invocation(&inv_str)
             .await
             .map_err(map_store_err)?;
+        let host_notices = self
+            .config
+            .store
+            .list_host_notices(&inv_str)
+            .await
+            .map_err(map_store_err)?;
         if tools.iter().any(|r| r.status == DispatchStatus::Dispatched)
             || llms.iter().any(|r| r.status == DispatchStatus::Dispatched)
         {
@@ -1162,6 +1168,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 } else {
                     None
                 },
+                host_notices: host_notices
+                    .iter()
+                    .filter(|notice| notice.step_index == step_index)
+                    .map(|notice| notice.body.clone())
+                    .collect(),
             };
             let output = self.reducer.step(input).map_err(|e| {
                 ExecutorError::WorkerStore(format!("replay step {step_index} failed: {e}"))
@@ -1315,7 +1326,36 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             oldest_turn_at_ms: started_at_ms,
             ..ContextTracker::default()
         };
+        // Producers populate this at future step boundaries. Keeping the
+        // durable drain here establishes WAL-before-effect ordering now.
+        let mut pending_notices: Vec<(String, String)> = Vec::new();
         for step_index in step_index_start..HOST_STEP_BUDGET {
+            let notices: Vec<(usize, String, String)> = pending_notices
+                .drain(..)
+                .enumerate()
+                .map(|(seq, (kind, body))| {
+                    // A producer must render its body before enqueueing it; this exact
+                    // string is persisted and subsequently replayed verbatim.
+                    (seq, kind, body)
+                })
+                .map(|(seq, kind, body)| (seq, kind, body))
+                .collect();
+            for (seq, kind, body) in &notices {
+                self.config
+                    .store
+                    .insert_host_notice(
+                        &invocation_id.to_string(),
+                        step_index,
+                        *seq as u32,
+                        kind,
+                        body,
+                        self.config.clock.unix_now_ms(),
+                    )
+                    .await
+                    .map_err(map_store_err)?;
+                tracing::info!(invocation_id = %invocation_id, kind = %kind, body = %body, "invocation.host_notice");
+            }
+            let host_notices: Vec<String> = notices.into_iter().map(|(_, _, body)| body).collect();
             // ADR-0027 graceful drain: suspend at this step boundary if
             // a drain has been requested. The previous iteration's
             // checkpoint — or, for `step_index_start`, the `Triggered`
@@ -1350,6 +1390,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 } else {
                     None
                 },
+                host_notices,
             };
 
             let output = match self.reducer.step(input) {
@@ -4457,6 +4498,7 @@ mod tests {
                 random_seed: 0,
                 step_index: 0,
                 static_resource_context: None,
+                host_notices: vec![],
             })
             .unwrap();
         // Suspended snapshot.
@@ -4483,6 +4525,7 @@ mod tests {
                 random_seed: 1,
                 step_index: 1,
                 static_resource_context: None,
+                host_notices: vec![],
             })
             .unwrap();
 
@@ -4619,6 +4662,7 @@ mod tests {
             random_seed: idx as u64,
             step_index: idx,
             static_resource_context: None,
+            host_notices: vec![],
         };
 
         // Step 0: seed → CallModel.
@@ -5618,6 +5662,7 @@ mod tests {
             random_seed: 0,
             step_index: 0,
             static_resource_context: None,
+            host_notices: vec![],
         };
         let s0_output = harness.step(s0_input).expect("step 0");
 
@@ -5775,6 +5820,7 @@ mod tests {
                 random_seed: 0,
                 step_index: 0,
                 static_resource_context: None,
+                host_notices: vec![],
             })
             .expect("step 0");
 

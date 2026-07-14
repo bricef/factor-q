@@ -96,6 +96,9 @@ pub struct StepInput {
     /// passes the rendered content in here.
     #[serde(default)]
     pub static_resource_context: Option<String>,
+    /// Durable host messages injected at this step boundary.
+    #[serde(default)]
+    pub host_notices: Vec<String>,
 }
 
 /// Output of one invocation of `step`.
