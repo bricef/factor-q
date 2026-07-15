@@ -2,6 +2,10 @@
 
 set positional-arguments
 
+# Build the crate.
+build:
+    cargo build
+
 # Check formatting
 fmt-check:
     cargo fmt --check
