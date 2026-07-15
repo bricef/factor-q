@@ -82,3 +82,39 @@ func TestNewGhCliIssueSourceRequiresToken(t *testing.T) {
 		t.Fatalf("fallback = %#v, %v", source, err)
 	}
 }
+
+// GraphQL failures arrive as HTTP 200 with an `errors` array — they
+// must surface as errors, not silently read as "no PRs" (the
+// label-stranding failure mode). gh exited non-zero here; so do we.
+func TestGraphQLQueryErrorsAreLoud(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":null,"errors":[{"message":"boom: insufficient scopes"}]}`))
+	}))
+	defer server.Close()
+	source := &GhCliIssueSource{Repo: "o/r", Token: "token", GraphQLEndpoint: server.URL}
+
+	if _, err := source.HasMergedPR(context.Background(), 7); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("HasMergedPR must surface GraphQL errors, got: %v", err)
+	}
+	if _, err := source.OpenPRsClosingIssue(context.Background(), 7); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("OpenPRsClosingIssue must surface GraphQL errors, got: %v", err)
+	}
+}
+
+// Relabel's remove-leniency is 404-only: the removal out of `ready` is
+// the double-trigger dedup, so a permission failure must fail loudly —
+// a lenient 403 would let a claim "succeed" while the issue stays
+// `ready` and re-triggers next poll.
+func TestRelabelFailsLoudlyOnForbiddenRemoval(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"forbidden"}`, http.StatusForbidden)
+	}))
+	defer server.Close()
+	client := github.NewClient(nil)
+	client.BaseURL, _ = client.BaseURL.Parse(server.URL + "/")
+	source := &GhCliIssueSource{Repo: "o/r", Client: client, Token: "token", GraphQLEndpoint: server.URL + "/graphql"}
+
+	if err := source.Relabel(context.Background(), 7, "ready", "in-progress"); err == nil {
+		t.Fatal("a 403 on label removal must fail the claim, not be swallowed")
+	}
+}
