@@ -39,6 +39,16 @@ doc:
 # `test` measures test *execution*. It carries the same `cli,service` features
 # as `test` — matching the hermetic path, no `bus`, no broker needed.
 #
+# `doctest` is split out because it cannot be front-loaded: rustdoc compiles
+# doctests at run time, so their build cost is irreducible and, left inside
+# `test`, reads as test execution. Its own phase makes it visible.
+#
+# `--tests` selects every target with `test = true` — lib and bin unittests plus
+# integration tests — which is `cargo test`'s default set minus doctests (no
+# examples here, so nothing is dropped). Benches default to `test = false`, so
+# the throughput bench stays out; NOT --all-targets, which adds --benches and
+# would run that benchmark (harness = false) as part of the gate.
+#
 # Nested under the root gate the rows join its summary; run standalone (as CI
 # does) this prints its own. See scripts/ci-timing.sh.
 # All quality checks — hermetic, no external services required. Run `test-bus`
@@ -56,4 +66,5 @@ ci:
     run_phase "lint"      just lint
     run_phase "doc"       just doc
     run_phase "build"     cargo build --tests --features cli,service
-    run_phase "test"      just test
+    run_phase "test"      just test --tests
+    run_phase "doctest"   just test --doc

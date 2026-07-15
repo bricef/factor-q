@@ -75,6 +75,19 @@ doc:
 # `build` front-loads the test-binary codegen that `cargo test` would do anyway,
 # so `test` measures test *execution*. It adds no net work.
 #
+# `doctest` is split out because it cannot be front-loaded — doctests are
+# compiled by rustdoc at run time and `--no-run` does not apply to them, so
+# their build cost is irreducible. Left inside `test` it masquerades as test
+# execution: fq-runtime has *one* doctest that runs in 0.00s behind tens of
+# seconds of compilation. Its own phase makes that visible instead.
+#
+# `--tests` selects every target with `test = true` — lib and bin unittests plus
+# integration tests — which is `cargo test`'s default set minus doctests (no
+# examples here, so nothing is dropped). NOT --all-targets: that adds --benches,
+# and fq-store's throughput bench is harness = false, so cargo would run a
+# benchmark as part of the gate. Not `--lib --bins --tests` either — `--lib`
+# hard-errors on a crate with no library target, as fq-dashboard has none.
+#
 # Nested under the root gate the rows join its summary; run standalone (as CI
 # does) this prints its own. See scripts/ci-timing.sh.
 # Run all quality checks
@@ -91,7 +104,8 @@ ci:
     run_phase "lint"      just lint
     run_phase "doc"       just doc
     run_phase "build"     cargo build --tests
-    run_phase "test"      just test
+    run_phase "test"      just test --tests
+    run_phase "doctest"   just test --doc
 
 # Drift detector against the live Anthropic API. Sends one short
 # Haiku call (~fractions of a cent) and asserts the response

@@ -30,6 +30,20 @@ doc:
 # `build` front-loads the test-binary codegen `cargo test` would do anyway, so
 # `test` measures test *execution*. It adds no net work.
 #
+# `doctest` is split out because it cannot be front-loaded: rustdoc compiles
+# doctests at run time, so their build cost is irreducible and, left inside
+# `test`, reads as test execution. Its own phase makes it visible.
+#
+# `--tests` selects every target with `test = true` — bin unittests plus
+# integration tests — which is `cargo test`'s default set here. It is a filter,
+# so it is safe on this crate, which is bin-only; `--lib` would hard-error.
+# NOT --all-targets: that adds --benches, which `cargo test` does not run.
+#
+# There is no `doctest` phase, unlike the other two suites: doctests only exist
+# for library targets, and this crate has none, so `cargo test --doc` fails
+# outright ("no library targets found"). `cargo test` would not run any here
+# either, so nothing is lost by leaving the phase out.
+#
 # Nested under the root gate the phases join its summary; run standalone (as CI
 # does) this prints its own. See scripts/ci-timing.sh.
 # All quality checks — hermetic, no external services required.
@@ -46,4 +60,4 @@ ci:
     run_phase "lint"      just lint
     run_phase "doc"       just doc
     run_phase "build"     cargo build --tests
-    run_phase "test"      just test
+    run_phase "test"      just test --tests
