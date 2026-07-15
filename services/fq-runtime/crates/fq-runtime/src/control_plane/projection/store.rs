@@ -124,12 +124,28 @@ impl ProjectionStore {
                     .await?;
             }
         }
+        // One-time sweep (idempotent, cheap once empty via the
+        // type index): heartbeats stopped being projected — see
+        // `insert_event` — and this evicts the rows older builds
+        // accumulated so the events surface reads as history again.
+        sqlx::query("DELETE FROM events WHERE event_type = 'worker_heartbeat'")
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     /// Insert an event into the store. Idempotent on `event_id` —
     /// re-delivery from a durable consumer is a no-op.
+    ///
+    /// Worker heartbeats are NOT projected: a heartbeat is an
+    /// operational liveness signal that goes stale the moment the next
+    /// one lands (every 10s — ~13k rows/day of noise that buried the
+    /// events surface), not history. Liveness lives where it is
+    /// consumed: the control-plane worker table's `last_heartbeat`.
     pub async fn insert_event(&self, event: &Event) -> Result<(), StoreError> {
+        if matches!(event.payload, EventPayload::WorkerHeartbeat(_)) {
+            return Ok(());
+        }
         let fields = extract_fields(event);
         let event_type = event_type_name(&event.payload);
 
@@ -587,7 +603,8 @@ fn extract_fields(event: &Event) -> Fields {
         // System events carry no agent metadata. The projection
         // still records them for visibility (useful for "when did
         // the daemon restart" queries), but every denormalised
-        // column is NULL.
+        // column is NULL. WorkerHeartbeat never reaches this point —
+        // `insert_event` drops it (operational signal, not data).
         EventPayload::SystemStartup(_)
         | EventPayload::SystemShutdown(_)
         | EventPayload::SystemTaskFailed(_)
@@ -844,6 +861,51 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.count().await.unwrap(), 3);
+    }
+
+    /// Heartbeats are an operational signal, not data: `insert_event`
+    /// drops them, and the migration sweep evicts rows older builds
+    /// accumulated.
+    #[tokio::test]
+    async fn heartbeats_are_not_projected_and_legacy_rows_are_swept() {
+        use crate::events::WorkerHeartbeatPayload;
+        use crate::worker::WorkerId;
+
+        let (store, dir) = open_store().await;
+        let heartbeat = Event::system(
+            Uuid::now_v7(),
+            EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
+                worker_id: WorkerId::new("w1".to_string()).unwrap(),
+            }),
+        );
+        store.insert_event(&heartbeat).await.unwrap();
+        // A real event still lands; the heartbeat never did.
+        store
+            .insert_event(&sample_triggered("alpha", Uuid::now_v7()))
+            .await
+            .unwrap();
+        assert_eq!(store.count().await.unwrap(), 1);
+        let rows = store
+            .query_events(&EventFilter::default(), 10)
+            .await
+            .unwrap();
+        assert!(rows.iter().all(|r| r.event_type != "worker_heartbeat"));
+
+        // A row written by an older build (heartbeats were projected
+        // until 2026-07-15) is deleted by the reopen migration.
+        sqlx::query(
+            "INSERT INTO events (event_id, timestamp, agent_id, invocation_id, event_type) \
+             VALUES ('legacy-hb', '2026-07-14T00:00:00+00:00', 'system', 'inv', 'worker_heartbeat')",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(store.count().await.unwrap(), 2);
+        drop(store);
+        let reopened = ProjectionStore::open(&dir.path().join("events.db"))
+            .await
+            .unwrap();
+        assert_eq!(reopened.count().await.unwrap(), 1, "legacy heartbeat swept");
     }
 
     #[tokio::test]
