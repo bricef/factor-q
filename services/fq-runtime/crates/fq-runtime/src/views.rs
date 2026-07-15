@@ -24,6 +24,7 @@ use std::path::Path;
 // read service's bincode wire (#105 layer 2), not just out as JSON.
 use serde::{Deserialize, Serialize};
 
+use crate::agent::AgentId;
 use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::projection::store::{
     CostSummary, EventFilter, EventRow, FailureSummary, InvocationCostSummary, ModelCostSummary,
@@ -41,6 +42,14 @@ use crate::worker::store::{LlmDispatchRow, ToolDispatchRow, WorkerStore, WorkerS
 /// fine for triage volumes.
 const INVOCATION_EVENT_SCAN: i64 = 200;
 const INVOCATION_EVENT_KEEP: usize = 20;
+
+fn archived_agent_id(agent_id: String) -> Option<String> {
+    (!matches!(
+        agent_id.as_str(),
+        AgentId::SYSTEM_STR | AgentId::SUMMARY_STR | AgentId::OPERATOR_STR
+    ))
+    .then_some(agent_id)
+}
 
 /// Errors surfaced by the read views. Each variant wraps the originating
 /// store's error so callers can distinguish which store failed; the public
@@ -856,7 +865,7 @@ impl Views {
                 }
                 items.push(InvocationSummaryView {
                     invocation_id: arc.invocation_id,
-                    agent_id: Some(arc.agent_id),
+                    agent_id: archived_agent_id(arc.agent_id),
                     worker_id: String::new(),
                     status: arc.final_phase,
                     assigned_at_ms: arc.archived_at,
@@ -971,7 +980,7 @@ impl Views {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control_plane::store::{WorkerRow, WorkerStatus};
+    use crate::control_plane::store::{InvocationArchiveRow, WorkerRow, WorkerStatus};
     use crate::worker::store::{DispatchStatus, InvocationStateRow, ToolDispatchRow};
 
     // ---- Pure From-conversion tests (no DB) ----
@@ -1109,6 +1118,56 @@ mod tests {
         assert!(views.active_invocations().await.unwrap().is_empty());
         assert!(views.invocation("no-such-id").await.unwrap().is_none());
         assert!(views.worker("no-such-worker").await.unwrap().is_none());
+    }
+
+    /// Archive-only tombstones are written by operator recovery with a reserved
+    /// agent id; they have no attributable agent on the invocation list.
+    #[tokio::test]
+    async fn invocation_index_hides_sentinel_archive_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let cp = ControlPlaneStore::open(&path).await.unwrap();
+            for (id, agent_id) in [("tombstone", AgentId::OPERATOR_STR), ("real", "agent-a")] {
+                cp.insert_archive(&InvocationArchiveRow {
+                    invocation_id: id.into(),
+                    agent_id: agent_id.into(),
+                    final_phase: "failed".into(),
+                    final_state_blob: vec![],
+                    started_at: 10,
+                    terminal_at: 20,
+                    archived_at: if id == "tombstone" { 30 } else { 40 },
+                })
+                .await
+                .unwrap();
+            }
+            let _ws = WorkerStore::open(&path).await.unwrap();
+            let _proj = ProjectionStore::open(&path).await.unwrap();
+        }
+
+        let index = Views::open(&path)
+            .await
+            .unwrap()
+            .invocation_index(None, true, 50)
+            .await
+            .unwrap();
+        assert_eq!(
+            index
+                .iter()
+                .find(|row| row.invocation_id == "tombstone")
+                .unwrap()
+                .agent_id,
+            None
+        );
+        assert_eq!(
+            index
+                .iter()
+                .find(|row| row.invocation_id == "real")
+                .unwrap()
+                .agent_id
+                .as_deref(),
+            Some("agent-a")
+        );
     }
 
     /// #216: the one-line summary joins onto both invocation surfaces
