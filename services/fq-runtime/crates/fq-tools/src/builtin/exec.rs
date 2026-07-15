@@ -59,7 +59,11 @@
 //!
 //! - **No PATH restriction on binaries**. Any executable reachable by
 //!   the default PATH can be called — `curl`, `wget`, system tools.
-//! - **No network isolation**. Commands can open network connections.
+//! - **No network isolation**. Commands can open network connections to
+//!   any host. An agent definition's `sandbox.network` allowlist is
+//!   parsed but never consulted here, so declaring it restricts nothing
+//!   — the load path warns about this rather than let it pass silently
+//!   (#35; enforcement tracked by #208 and #209).
 //! - **No cgroup / rlimit enforcement**. The child can consume CPU,
 //!   memory, and open files up to the process-level limits.
 //! - **No syscall filtering (seccomp)**. Anything the binary can do,

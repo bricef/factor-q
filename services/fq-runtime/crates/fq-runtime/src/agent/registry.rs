@@ -114,6 +114,23 @@ impl AgentRegistry {
             return;
         }
 
+        // #35: `sandbox.network` is parsed and carried but nothing
+        // enforces it, so a definition declaring hosts still gets ambient
+        // egress. Say so at load — a silently-ignored boundary is worse
+        // than no boundary, because the operator believes it holds. Not a
+        // load error on purpose: definitions declare intent ahead of
+        // enforcement (#208 proxy, #209 ADR-0010 boundary).
+        if let Some(declared) = agent.sandbox().unenforced_network() {
+            tracing::warn!(
+                agent = id.as_str(),
+                path = %path.display(),
+                declared = ?declared,
+                "sandbox.network is declared but NOT enforced: this agent has ambient \
+                 network access and can reach any host. The declaration is currently a \
+                 no-op (#35); enforcement is tracked by #208 (proxy) and #209 (ADR-0010)."
+            );
+        }
+
         self.agents.insert(
             id,
             LoadedAgent {

@@ -760,6 +760,15 @@ fn validate_agent(path: &Path) -> anyhow::Result<()> {
             if let Some(budget) = agent.budget() {
                 println!("  budget:  ${budget:.2}");
             }
+            // #35: valid, but do not let "✓ is valid" imply the declared
+            // network boundary holds — nothing enforces it yet.
+            if let Some(declared) = agent.sandbox().unenforced_network() {
+                println!();
+                println!("  ⚠ sandbox.network is declared but NOT enforced (#35)");
+                println!("    declared: {}", declared.join(", "));
+                println!("    This agent has ambient network access — it can reach any");
+                println!("    host regardless. Enforcement: #208 (proxy), #209 (ADR-0010).");
+            }
             Ok(())
         }
         Err(err) => Err(anyhow::anyhow!("{} is invalid: {err}", path.display())),

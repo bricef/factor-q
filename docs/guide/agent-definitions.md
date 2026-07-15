@@ -191,7 +191,19 @@ clear error message that the LLM sees and can adapt to.
 | `fs_write` | Directories the agent can write to | `file_write` |
 | `exec_cwd` | Directories the agent can run commands in | `exec` |
 | `env` | Environment variables visible to child processes | `exec` |
-| `network` | Network access patterns (reserved for future use) | — |
+| `network` | Network egress patterns — **declared but not enforced** | — |
+
+> **⚠ `network` is not a boundary yet (issue #35).** A definition may
+> declare `sandbox.network`, and the runtime parses and carries it — but
+> no tool consults it. The agent has **ambient network access** and can
+> reach any host regardless of what it declares. Declaring it is
+> accepted, so definitions can record intent ahead of enforcement, and
+> logs a warning at load; `fq` also flags it when validating a
+> definition. Until enforcement lands, **treat every agent as
+> network-unrestricted no matter what its definition says.** Enforcement
+> is tracked by #208 (a filtering proxy) and #209
+> ([ADR-0010](../adrs/accepted/0010-agent-execution-isolation.md)'s
+> container boundary).
 
 ### Path handling
 

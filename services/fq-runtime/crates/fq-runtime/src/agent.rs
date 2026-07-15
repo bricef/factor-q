@@ -598,6 +598,28 @@ impl Sandbox {
         &self.network
     }
 
+    /// The declared `network` allowlist, when non-empty — a declaration
+    /// the runtime does **not** enforce (#35).
+    ///
+    /// `network` is parsed and carried, but no tool consults it: an
+    /// agent's `exec` children reach any host regardless of what the
+    /// definition declares. The load path calls this to warn loudly
+    /// rather than silently honour nothing — an unenforced declared
+    /// boundary is a silent trust hazard (design principle 3).
+    ///
+    /// Deliberately a warning and **not** a load error: definitions
+    /// declare `sandbox.network` ahead of enforcement, so rejecting them
+    /// would break every such agent at load. Enforcement is tracked by
+    /// #208 (filtering proxy) and #209 (ADR-0010 container boundary);
+    /// this goes away once `network` is enforced.
+    pub fn unenforced_network(&self) -> Option<&[String]> {
+        if self.network.is_empty() {
+            None
+        } else {
+            Some(&self.network)
+        }
+    }
+
     pub fn env_vars(&self) -> &[String] {
         &self.env
     }
