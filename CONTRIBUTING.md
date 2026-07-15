@@ -58,12 +58,21 @@ Fast, run in-process. Most don't need NATS, but the integration
 tests (bus round-trips, executor event sequences, dispatcher,
 projection consumer) do.
 
-```sh
-# Without NATS — runs ~110 tests, skips integration tests
-just test
+Only the runtime suite needs NATS; the store and dashboard suites are
+hermetic.
 
-# With NATS — runs all ~155 tests
+```sh
+# The runtime suite without NATS — skips the integration tests
+just test-runtime
+
+# The runtime suite with NATS — runs the integration tests too
+FQ_NATS_URL=nats://localhost:4222 just test-runtime
+
+# Every Rust suite (runtime + store + dashboard)
 FQ_NATS_URL=nats://localhost:4222 just test
+
+# Filter, by forwarding cargo args to one suite
+just test-runtime -p fq-runtime --lib agent::definition
 ```
 
 If a test says "skipping: FQ_NATS_URL not set", it's gated on
@@ -104,7 +113,7 @@ subsequent runs.
 
 ```sh
 just infra-up
-FQ_NATS_URL=nats://localhost:4222 just test    # unit + integration
+FQ_NATS_URL=nats://localhost:4222 just test    # all three Rust suites
 just smoke                                       # end-to-end (needs API key)
 just test-shell-sandbox                          # containerised sandbox
 ```

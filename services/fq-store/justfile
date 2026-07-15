@@ -2,6 +2,11 @@
 
 set positional-arguments
 
+# Build the crate. `cli,service` matches the hermetic `test` path: the fq-cas
+# binary and tarpc service, without the NATS-backed `bus` feature.
+build:
+    cargo build --features cli,service
+
 # Check formatting
 fmt-check:
     cargo fmt --check
