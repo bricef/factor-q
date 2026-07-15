@@ -102,8 +102,8 @@ dashboard-ci:
 rust-ci: runtime-ci store-ci dashboard-ci
 
 # The Go trigger adapters — standalone binaries that talk to factor-q only
-# through the trigger wire contract, never fq-runtime code. gofmt + vet +
-# test + build.
+# through the trigger wire contract, never fq-runtime code.
+# Run the Go adapter gate (gofmt, vet, test, build).
 go-ci:
     cd adapters/github-watcher && test -z "$(gofmt -l .)"
     cd adapters/github-watcher && go vet ./...
@@ -202,48 +202,51 @@ ci:
 docker-build:
     cd {{runtime_dir}} && just docker-build
 
-# Run the shell tool test battery inside a disposable container
-# with networking disabled, for extra blast-radius containment
-# while iterating on the sandbox.
+# Runs inside a disposable container with networking disabled, for extra
+# blast-radius containment while iterating on the sandbox.
+# Run the exec tool's test battery in a locked-down container.
 test-shell-sandbox:
     cd {{runtime_dir}} && just test-shell-sandbox
 
-# Run end-to-end smoke tests against a real LLM. Exercises the
-# full walking skeleton: agent definitions parse, triggers run,
-# the tool-call loop drives file_read and shell built-ins against
-# Anthropic, events land in the SQLite projection, and the CLI
-# query commands read them back.
+# Exercises the full walking skeleton: agent definitions parse, triggers
+# run, the tool-call loop drives file_read and shell built-ins against
+# Anthropic, events land in the SQLite projection, and the CLI query
+# commands read them back.
 #
 # Requires:
 #   - ANTHROPIC_API_KEY in the environment
 #   - NATS running (see `just infra-up`)
 #   - fq binary built (this recipe builds it first)
+#
+# Run the end-to-end smoke tests against a real LLM (costs ~$0.005-0.01).
 smoke: build-runtime
     {{justfile_directory()}}/tests/smoke/smoke.sh
 
-# The parallel-workers live drill: N concurrent invocations through
-# drain / clean-shutdown / crash-recovery on a scratch daemon (plan §3,
-# the Phase-2 gate's live leg). Needs ANTHROPIC_API_KEY and a running
-# broker (`just infra-up`) with no other fq daemon on it.
+# N concurrent invocations through drain / clean-shutdown / crash-recovery
+# on a scratch daemon (plan §3, the Phase-2 gate's live leg). Needs
+# ANTHROPIC_API_KEY and a running broker (`just infra-up`) with no other fq
+# daemon on it.
+# Run the parallel-workers live drill.
 drill: build-runtime
     {{justfile_directory()}}/tests/smoke/drain-drill.sh
 
-# Run the fq CLI (e.g. `just fq --agents-dir ./agents agent list`)
-#
 # Preserves the user's invocation directory so relative paths in
 # arguments resolve against the directory where the user invoked `just`,
 # not the workspace or justfile directory.
 #
 # Uses "$@" (enabled by `set positional-arguments`) so quoted arguments
 # are forwarded to fq intact.
+#
+# Run the fq CLI (e.g. `just fq --agents-dir ./agents agent list`).
 [no-cd]
 fq *args:
     cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- "$@"
 
-# Screenshot every fq-dashboard page from deterministic fixtures into
-# dist/dashboard-screenshots/ (headless chromium over file:// — no
-# daemon, no broker). CI runs this when dashboard code changes and
-# uploads the PNGs as an artifact.
+# Renders from deterministic fixtures (headless chromium over file:// — no
+# daemon, no broker). CI runs this when dashboard code changes and uploads
+# the PNGs as an artifact. An artifact job, not a correctness gate — hence
+# not part of `just ci` (#196).
+# Screenshot every fq-dashboard page into dist/dashboard-screenshots/.
 dashboard-screenshots out="dist/dashboard-screenshots":
     bash scripts/dashboard-screenshots.sh {{out}}
 
@@ -255,8 +258,9 @@ dashboard-screenshots out="dist/dashboard-screenshots":
 lint-docs *args:
     npx --yes markdownlint-cli2@0.22.1 {{args}} "docs/adrs/**/*.md"
 
-# Check that relative links in all repo markdown resolve. Links pointing
-# outside the repo (sibling checkouts) are reported but not failed.
+# Links pointing outside the repo (sibling checkouts) are reported but not
+# failed.
+# Check that relative links in all repo markdown resolve.
 check-links:
     python3 scripts/check-links.py
 
@@ -273,10 +277,9 @@ check-version tag:
     fi
     echo "release tag {{tag}} matches Cargo version v${cargo_version}"
 
-# Build the release binaries (fq, fq-cas, fq-dashboard) for a target
-# triple. Tagged releases still package only fq + fq-cas
-# (`just package`); the main-branch deploy bundle takes all of them
-# (`just package-main`).
+# Tagged releases still package only fq + fq-cas (`just package`); the
+# main-branch deploy bundle takes all of them (`just package-main`).
+# Build the release binaries (fq, fq-cas, fq-dashboard) for a target triple.
 build-release target:
     cd {{runtime_dir}} && cargo build --release --target {{target}} --bin fq
     cd {{store_dir}} && cargo build --release --target {{target}} --features cli --bin fq-cas
@@ -292,11 +295,11 @@ publish-release tag:
 
 # === Main-branch deploy artifacts (#102) ===
 
-# Build the github-watcher for a target triple, into the same
-# target/<triple>/release/ layout the Rust binaries use so
-# scripts/package.sh bundles all three with one spec form. Pure Go with
-# CGO_ENABLED=0 — as static as the musl Rust builds; the git SHA is
+# Builds into the same target/<triple>/release/ layout the Rust binaries
+# use, so scripts/package.sh bundles all three with one spec form. Pure Go
+# with CGO_ENABLED=0 — as static as the musl Rust builds; the git SHA is
 # embedded by Go's default -buildvcs.
+# Build the github-watcher for a target triple.
 build-watcher target:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -309,16 +312,17 @@ build-watcher target:
     cd adapters/github-watcher
     CGO_ENABLED=0 go build -o "target/{{target}}/release/github-watcher" .
 
-# Package the rolling main-branch bundle: every deployable plus the
-# dogfood launchers, so a deployed releases/<sha>/ dir is self-contained
-# (ops/dogfood/deploy.sh extracts it verbatim).
+# Every deployable plus the dogfood launchers, so a deployed
+# releases/<sha>/ dir is self-contained (ops/dogfood/deploy.sh extracts it
+# verbatim).
+# Package the rolling main-branch deploy bundle into dist/.
 package-main target:
     bash scripts/package.sh {{target}} {{runtime_dir}}:fq {{dashboard_dir}}:fq-dashboard {{store_dir}}:fq-cas adapters/github-watcher:github-watcher ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh
 
-# Publish/refresh the rolling `main-latest` pre-release from dist/.
 # Recreates both the release and its tag so tag, assets, and notes always
 # point at the same commit. The channel keeps no history by design —
 # deploy hosts retain their own releases/<sha>/ dirs for rollback (#102).
+# Publish/refresh the rolling `main-latest` pre-release from dist/.
 publish-main sha:
     -gh release delete main-latest --yes
     -git push origin :refs/tags/main-latest
