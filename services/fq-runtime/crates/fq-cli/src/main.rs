@@ -3506,9 +3506,21 @@ fn format_invocation_list_row_human(item: &fq_runtime::views::InvocationSummaryV
     let agent_trim: String = agent.chars().take(22).collect();
     let worker_trim: String = item.worker_id.chars().take(22).collect();
     let archived_flag = if item.archived { "yes" } else { "no" };
+    // The one-line summary (#216) rides last: it is the only
+    // variable-width column, truncated char-wise so a long line
+    // cannot wrap the table.
+    let summary = match item.summary.as_deref() {
+        Some(line) if line.chars().count() > 60 => {
+            let mut t: String = line.chars().take(59).collect();
+            t.push('…');
+            t
+        }
+        Some(line) => line.to_string(),
+        None => "—".to_string(),
+    };
     format!(
-        "{:<11} {:<10} {:<24} {:<24} {}",
-        inv_short, item.status, agent_trim, worker_trim, archived_flag
+        "{:<11} {:<10} {:<24} {:<24} {:<5} {}",
+        inv_short, item.status, agent_trim, worker_trim, archived_flag, summary
     )
 }
 
@@ -3534,8 +3546,8 @@ async fn invocation_list(
         println!("0 invocations {what}— nothing to list.");
     } else {
         println!(
-            "{:<11} {:<10} {:<24} {:<24} arch",
-            "invocation", "status", "agent", "worker"
+            "{:<11} {:<10} {:<24} {:<24} {:<5} summary",
+            "invocation", "status", "agent", "worker", "arch"
         );
         for item in &items {
             println!("{}", format_invocation_list_row_human(item));
@@ -3557,6 +3569,9 @@ async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::R
         println!("Invocation: {}", detail.invocation_id);
         if let Some(a) = &detail.agent_id {
             println!("  agent:    {a}");
+        }
+        if let Some(s) = &detail.summary {
+            println!("  summary:  {s}");
         }
         if let Some(o) = &detail.owner {
             println!("  status:   {}", o.status);
@@ -3894,6 +3909,36 @@ mod invocation_tests {
         assert!(!line.contains(&"a".repeat(23)));
     }
 
+    /// #216: the summary line rides last, truncated char-safe; absent
+    /// renders an em-dash.
+    #[test]
+    fn format_invocation_list_row_human_renders_summary_last() {
+        let mut item = fq_runtime::views::InvocationSummaryView {
+            invocation_id: "019e3b328fd47de1aae0bb91bb24528d".to_string(),
+            agent_id: Some("m0-issue-fix".to_string()),
+            worker_id: "w".to_string(),
+            status: "in_flight".to_string(),
+            assigned_at_ms: 0,
+            started_at_ms: 0,
+            archived: false,
+            summary: Some("Fixing #7: editing widget.rs".to_string()),
+        };
+        let line = format_invocation_list_row_human(&item);
+        assert!(
+            line.ends_with("Fixing #7: editing widget.rs"),
+            "got: {line}"
+        );
+
+        item.summary = Some("x".repeat(200));
+        let line = format_invocation_list_row_human(&item);
+        assert!(line.ends_with('…'), "truncated: {line}");
+        assert!(line.chars().count() < 150, "bounded: {line}");
+
+        item.summary = None;
+        let line = format_invocation_list_row_human(&item);
+        assert!(line.ends_with('—'), "fallback dash: {line}");
+    }
+
     #[test]
     fn format_invocation_list_row_human_marks_archived() {
         let item = fq_runtime::views::InvocationSummaryView {
@@ -3907,8 +3952,10 @@ mod invocation_tests {
             summary: None,
         };
         let line = format_invocation_list_row_human(&item);
+        // The archived flag sits before the (now trailing) summary
+        // column (#216).
         assert!(
-            line.trim_end().ends_with("yes"),
+            line.contains(" yes "),
             "archived flag should be 'yes', got: {line:?}"
         );
     }

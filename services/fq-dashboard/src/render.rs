@@ -593,6 +593,12 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
             agent_link(agent)
         ));
     }
+    if let Some(summary) = &d.summary {
+        b.push_str(&format!(
+            "<tr><th>summary</th><td>{}</td></tr>",
+            esc(summary)
+        ));
+    }
     if let Some(o) = &d.owner {
         b.push_str(&format!(
             "<tr><th>status</th><td>{}</td></tr><tr><th>worker</th><td>{}</td></tr>",
