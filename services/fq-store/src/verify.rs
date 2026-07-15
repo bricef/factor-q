@@ -79,7 +79,7 @@ pub enum Violation {
 pub enum CheckMode {
     /// At rest: no operation in flight. The object refcount must **equal** its
     /// live name count.
-    Quiescent,
+    AtRest,
     /// Mid-interleaving, safe to assert after every protocol step. The object
     /// refcount need only **dominate** its live name count (any excess is a
     /// writer's live reservation); everything else is an always-invariant and is
@@ -93,7 +93,7 @@ pub async fn check<C: ContentStore + ?Sized>(
     snapshot: &IndexSnapshot,
     store: &C,
 ) -> Result<Vec<Violation>> {
-    check_with_mode(snapshot, store, CheckMode::Quiescent).await
+    check_with_mode(snapshot, store, CheckMode::AtRest).await
 }
 
 /// Like [`check`], but sound to run **after every protocol step** while a writer
@@ -161,7 +161,7 @@ async fn check_with_mode<C: ContentStore + ?Sized>(
     for (object, rc) in &snapshot.objects {
         let nr = name_refs.get(object).copied().unwrap_or(0);
         let bad = match mode {
-            CheckMode::Quiescent => *rc != nr,
+            CheckMode::AtRest => *rc != nr,
             CheckMode::InFlight => *rc < nr,
         };
         if bad {

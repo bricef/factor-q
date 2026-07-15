@@ -88,11 +88,11 @@ primary. (Prior art for state-deduped Rust model checking: `stateright` — but 
 models an abstraction; the value here is driving the *real* trait
 implementations, which makes it a conformance suite, below.)
 
-### 3. The oracle at every seam — split always vs quiescent
+### 3. The oracle at every seam — split always vs at-rest
 
 Running the oracle after *every* step is the move that turns "did we reach a bad
 state" into "no reachable interleaving reaches one." But the oracle as written is
-a **quiescent** oracle: `ObjectRefcountDrift` asserts `refcount == name_refs`,
+an **at-rest** oracle: `ObjectRefcountDrift` asserts `refcount == name_refs`,
 which false-fires at a seam where a writer has RESERVED but not yet BOUND (a
 legal in-flight reservation makes `refcount = name_refs + 1`). So the oracle
 splits:
@@ -101,7 +101,7 @@ splits:
   manifest present, and every referenced block file present), refcount
   **dominance** (`refcount >= name_refs`; excess is reservations), `I1` (one
   available generation), `I3` (claimed ⇒ refcount 0), no negative refcounts.
-- **Quiescent-invariants — asserted only at scenario end:** the refcount
+- **At-rest invariants — asserted only at scenario end:** the refcount
   **equality** (`refcount == name_refs`), true only with nothing in flight.
 
 Concretely: change `ObjectRefcountDrift` to a dominance check for the per-seam
@@ -138,7 +138,7 @@ the design artifact that drives the fix.
 - Write the adversarial `bind`-alias-vs-collect test that drives the #173
   interleaving through the seams.
 - **Acceptance:** the test reaches S1-obj on today's code — it goes **red** —
-  proving both the bug and that the test catches it. Add the always/quiescent
+  proving both the bug and that the test catches it. Add the always/at-rest
   oracle split so the seam assertion is sound.
 
 ### Phase 2 — implement back-off, turn it green
@@ -154,7 +154,7 @@ the design artifact that drives the fix.
 
 - Build the deterministic, state-deduped driver over the seams for the GC-vs
   writer scenarios, with error and crash injection, asserting the always
-  invariants at every seam and the quiescent invariants at scenario end.
+  invariants at every seam and the at-rest invariants at scenario end.
 - **Acceptance:** exhaustive over the bounded scenario (state count in the same
   order as the TLA model, no seeds, runs in CI time); clean on back-off; and —
   as a meta-check — it **reaches** S1-obj if back-off is reverted (the checker
