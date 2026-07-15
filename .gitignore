@@ -19,3 +19,6 @@ docs/design/states/
 # time went. Anchored — every gate anchors the log on {{justfile_directory()}},
 # so it is always this one file, never a stray copy in a service directory.
 /.ci-timings
+
+# TLC model-checker scratch output
+docs/design/committed/states/
