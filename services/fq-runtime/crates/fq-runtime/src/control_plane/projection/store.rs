@@ -318,7 +318,11 @@ impl ProjectionStore {
     /// Aggregate cost-bearing events into per-agent totals. Cost
     /// now rides on `llm.response` envelopes (envelope-refactor
     /// plan step 3), so the filter is `total_cost IS NOT NULL`
-    /// instead of `event_type = 'cost'`.
+    /// instead of `event_type = 'cost'`. The event-type allowlist
+    /// covers per-call cost carriers only — `llm_response` and the
+    /// summariser's `invocation_summary` (#216) — because terminal
+    /// events (`completed`/`failed`) carry invocation *totals* and
+    /// would double-count.
     pub async fn cost_summary(
         &self,
         agent: Option<&str>,
@@ -334,7 +338,7 @@ impl ProjectionStore {
              COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, \
              COUNT(DISTINCT invocation_id) AS invocation_count \
              FROM events \
-             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL",
+             WHERE event_type IN ('llm_response', 'invocation_summary') AND total_cost IS NOT NULL",
         );
         if agent.is_some() {
             sql.push_str(" AND agent_id = ?");
@@ -389,7 +393,7 @@ impl ProjectionStore {
              COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
              COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
              FROM events \
-             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL \
+             WHERE event_type IN ('llm_response', 'invocation_summary') AND total_cost IS NOT NULL \
              AND agent_id = ?",
         );
         if since.is_some() {
@@ -433,7 +437,7 @@ impl ProjectionStore {
              COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
              COALESCE(SUM(output_tokens), 0) AS total_output_tokens \
              FROM events \
-             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL",
+             WHERE event_type IN ('llm_response', 'invocation_summary') AND total_cost IS NOT NULL",
         );
         if agent.is_some() {
             sql.push_str(" AND agent_id = ?");
@@ -830,6 +834,21 @@ mod tests {
         assert!(
             rows.iter()
                 .all(|r| r.model.as_deref() == Some("cheap-model"))
+        );
+
+        // Reported, not just recorded (#216's operator-costed
+        // guarantee): the summariser appears in the cost aggregations
+        // `fq costs` renders — per-agent and per-model.
+        let agents = store.cost_summary(None, None).await.unwrap();
+        let summary_row = agents
+            .iter()
+            .find(|c| c.agent_id == "summary")
+            .expect("summary agent row in cost_summary");
+        assert!((summary_row.total_cost - 0.001).abs() < 1e-9);
+        let models = store.cost_by_model(None, None).await.unwrap();
+        assert!(
+            models.iter().any(|m| m.model == "cheap-model"),
+            "summariser model in the per-model split"
         );
     }
 
