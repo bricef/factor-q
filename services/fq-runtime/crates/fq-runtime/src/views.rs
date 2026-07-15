@@ -480,6 +480,10 @@ pub struct InvocationDetailView {
     pub live: Option<LiveExecutionView>,
     /// Most recent events for this invocation (newest first).
     pub recent_events: Vec<EventView>,
+    /// One-line operator summary (#216); see
+    /// [`ActiveInvocationView::summary`].
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 // ============================================================
@@ -942,6 +946,12 @@ impl Views {
             .map(EventView::from)
             .collect();
 
+        let summary = self
+            .projection
+            .summaries_for(&[invocation_id.to_string()])
+            .await?
+            .remove(invocation_id);
+
         Ok(Some(InvocationDetailView {
             invocation_id: invocation_id.to_string(),
             agent_id: agent_id.clone(),
@@ -953,6 +963,7 @@ impl Views {
             archive: archive.map(ArchiveView::from),
             live,
             recent_events,
+            summary,
         }))
     }
 }
