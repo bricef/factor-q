@@ -17,25 +17,29 @@ use async_trait::async_trait;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
-use crate::{Cid, Result, StoreError};
+use crate::{Cid, Result};
 
 /// The mutable name index over a content store. See the module docs.
 #[async_trait]
 pub trait NameIndex: Send + Sync {
-    /// Bind `name` to `cid`, handing off the writer's block reservations.
-    /// `reserved` are the object's unique blocks as `(hash, generation)` pairs,
-    /// each already reserved (its refcount bumped) by the caller. If the object
-    /// becomes live the reservations become its object→block edges; if it was
-    /// already live (an alias) or this re-binds the current CID, they are
-    /// released. A new current version is recorded; the previous is retained.
-    ///
-    /// This is the object-side reserve-before-rely: it bumps the object refcount
-    /// under the claim CAS, so a `bind` that would resurrect an object the
-    /// collector has **claimed** (`available = 0`) is refused with
-    /// [`StoreError::Conflict`] (ADR-0030) — the caller retries once the
-    /// collector has finished. `reserved` is left untouched on that refusal, for
-    /// the caller to release or reuse.
-    async fn bind(&self, name: &str, cid: &Cid, reserved: &[(Cid, u32)]) -> Result<()>;
+    /// Bind `name` to `cid`. The object must already be reserved by the caller
+    /// via [`reserve_object`](Self::reserve_object) (reserve-before-rely — the
+    /// reservation, made *before* the manifest is written, is what keeps the
+    /// collector from claiming and unlinking it out from under the write, #173).
+    /// `prev_rc` is that reserve's returned prior refcount: `0` means the object
+    /// is going live, so `reserved` (the object's unique blocks as
+    /// `(hash, generation)` pairs, each already block-reserved) become its
+    /// object→block edges; `> 0` means an alias of a live object, so they are
+    /// released as redundant. Re-binding the current CID undoes the object
+    /// reserve and releases `reserved` (a no-op for the name). A new current
+    /// version is recorded; the previous is retained.
+    async fn bind(
+        &self,
+        name: &str,
+        cid: &Cid,
+        reserved: &[(Cid, u32)],
+        prev_rc: i64,
+    ) -> Result<()>;
 
     /// The current CID for `name`, or `None` if there is no such name.
     async fn resolve(&self, name: &str) -> Result<Option<Cid>>;
@@ -116,12 +120,28 @@ pub trait NameIndex: Send + Sync {
     /// its file is unlinked. Idempotent.
     async fn delete_block(&self, hash: &Cid, generation: u32) -> Result<()>;
 
+    /// Reserve an object for a writer — the object-side reserve-before-rely, run
+    /// *before* the manifest is written. Bumps `refcount` (so the collector
+    /// cannot claim it), or creates it fresh (`refcount = 1`, available) if
+    /// absent. `Ok(Some(prev_refcount))` when reserved — `0` means the object is
+    /// going live (its edges are created at [`bind`](Self::bind)), `> 0` an alias
+    /// of a live object. `Ok(None)` if the object is claimed (`available = 0`):
+    /// the caller backs off and retries (ADR-0030). Pair with `bind`, or
+    /// [`release_object`](Self::release_object) to undo a reserve whose bind
+    /// never happened.
+    async fn reserve_object(&self, cid: &Cid) -> Result<Option<i64>>;
+
+    /// Release one object reservation from [`reserve_object`](Self::reserve_object)
+    /// — `refcount -= 1` — for a put that gave up or a bind that failed after
+    /// reserving.
+    async fn release_object(&self, cid: &Cid) -> Result<()>;
+
     /// Atomically claim an object for collection (the object-side GC
     /// compare-and-swap, ADR-0030): flip `available` to false, **conditional on
     /// `refcount = 0` and still available**. `Ok(true)` if claimed; `Ok(false)`
     /// if a writer reserved it first (`refcount > 0`) or it was already claimed.
-    /// A claimed object cannot be resurrected by [`bind`](Self::bind), so its
-    /// manifest is safe to unlink.
+    /// A claimed object cannot be reserved by [`reserve_object`](Self::reserve_object),
+    /// so its manifest is safe to unlink.
     async fn claim_object(&self, cid: &Cid) -> Result<bool>;
 
     /// Objects eligible for collection — `(cid, available)` for every object at
@@ -329,7 +349,13 @@ impl SqliteNameIndex {
 #[async_trait]
 impl NameIndex for SqliteNameIndex {
     #[tracing::instrument(level = "debug", skip_all, fields(name, cid = %cid))]
-    async fn bind(&self, name: &str, cid: &Cid, reserved: &[(Cid, u32)]) -> Result<()> {
+    async fn bind(
+        &self,
+        name: &str,
+        cid: &Cid,
+        reserved: &[(Cid, u32)],
+        prev_rc: i64,
+    ) -> Result<()> {
         let cid_hex = cid.to_hex();
         let mut tx = self.pool.begin().await?;
 
@@ -340,9 +366,15 @@ impl NameIndex for SqliteNameIndex {
         .fetch_optional(&mut *tx)
         .await?;
 
-        // Re-binding the current CID is a no-op for the name — the caller's
-        // reservations are then redundant, so release them.
+        // Re-binding the current CID is a no-op for the name, so the caller's
+        // object reserve and block reservations are both redundant — undo the
+        // reserve (the collector could not have claimed it meanwhile: refcount
+        // was > 0) and release the block reservations.
         if current.as_deref() == Some(cid_hex.as_str()) {
+            sqlx::query("UPDATE objects SET refcount = refcount - 1 WHERE cid = ?")
+                .bind(&cid_hex)
+                .execute(&mut *tx)
+                .await?;
             release_reservations(&mut tx, reserved).await?;
             tx.commit().await?;
             return Ok(());
@@ -362,40 +394,9 @@ impl NameIndex for SqliteNameIndex {
             .execute(&mut *tx)
             .await?;
 
-        // Reserve the object under the claim CAS (ADR-0030). The single-writer
-        // index serialises this against the collector's `claim_object`, so the
-        // read-then-reserve is atomic: a claimed object (`available = 0`) is
-        // refused rather than resurrected over a manifest being unlinked.
-        let existing: Option<(i64, i64)> =
-            sqlx::query_as("SELECT refcount, available FROM objects WHERE cid = ?")
-                .bind(&cid_hex)
-                .fetch_optional(&mut *tx)
-                .await?;
-        let prev_rc = match existing {
-            // Claimed by the collector (available = 0) — refuse. The transaction
-            // rolls back (the name-version above is undone); `reserved` is left
-            // intact for the caller to release or reuse on retry.
-            Some((_, 0)) => {
-                return Err(StoreError::Conflict(format!(
-                    "cannot bind {cid}: object is being collected; retry"
-                )));
-            }
-            Some((rc, _)) => {
-                sqlx::query("UPDATE objects SET refcount = refcount + 1 WHERE cid = ?")
-                    .bind(&cid_hex)
-                    .execute(&mut *tx)
-                    .await?;
-                rc
-            }
-            None => {
-                sqlx::query("INSERT INTO objects (cid, refcount, available) VALUES (?, 1, 1)")
-                    .bind(&cid_hex)
-                    .execute(&mut *tx)
-                    .await?;
-                0
-            }
-        };
-
+        // The object is already reserved (its refcount bumped by `reserve_object`
+        // before the manifest was written) — `prev_rc` is that reserve's prior
+        // refcount and decides the block-reservation hand-off below.
         if prev_rc == 0 {
             // Object going live: hand the reservations off to object→block edges
             // (their refcounts are already bumped — no second increment).
@@ -697,6 +698,48 @@ impl NameIndex for SqliteNameIndex {
         Ok(())
     }
 
+    async fn reserve_object(&self, cid: &Cid) -> Result<Option<i64>> {
+        let cid_hex = cid.to_hex();
+        let mut tx = self.pool.begin().await?;
+        // The single-writer index serialises this against the collector's
+        // `claim_object`, so the read-then-reserve is atomic: a claimed object
+        // (`available = 0`) is refused rather than reserved out from under the
+        // collector, and once reserved (`refcount > 0`) it can no longer be
+        // claimed — protecting the manifest the caller is about to write (#173).
+        let existing: Option<(i64, i64)> =
+            sqlx::query_as("SELECT refcount, available FROM objects WHERE cid = ?")
+                .bind(&cid_hex)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let prev_rc = match existing {
+            Some((_, 0)) => return Ok(None), // claimed — refuse (tx rolls back)
+            Some((rc, _)) => {
+                sqlx::query("UPDATE objects SET refcount = refcount + 1 WHERE cid = ?")
+                    .bind(&cid_hex)
+                    .execute(&mut *tx)
+                    .await?;
+                rc
+            }
+            None => {
+                sqlx::query("INSERT INTO objects (cid, refcount, available) VALUES (?, 1, 1)")
+                    .bind(&cid_hex)
+                    .execute(&mut *tx)
+                    .await?;
+                0
+            }
+        };
+        tx.commit().await?;
+        Ok(Some(prev_rc))
+    }
+
+    async fn release_object(&self, cid: &Cid) -> Result<()> {
+        sqlx::query("UPDATE objects SET refcount = refcount - 1 WHERE cid = ?")
+            .bind(cid.to_hex())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn claim_object(&self, cid: &Cid) -> Result<bool> {
         let affected = sqlx::query(
             "UPDATE objects SET available = 0
@@ -769,8 +812,9 @@ mod tests {
         v
     }
 
-    /// Mimic a put at the index layer: reserve (or mint) each unique block, then
-    /// hand the reservations to `bind`.
+    /// Mimic a put at the index layer: reserve (or mint) each unique block,
+    /// reserve the object (reserve-before-rely), then hand the reservations to
+    /// `bind`. `Conflict` (a claimed object) propagates as an error.
     async fn reserve_and_bind(
         s: &SqliteNameIndex,
         name: &str,
@@ -792,7 +836,11 @@ mod tests {
             };
             reserved.push((*b, generation));
         }
-        s.bind(name, obj, &reserved).await
+        let prev_rc = s
+            .reserve_object(obj)
+            .await?
+            .expect("object not claimed in this test");
+        s.bind(name, obj, &reserved, prev_rc).await
     }
 
     #[tokio::test]
