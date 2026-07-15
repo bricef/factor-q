@@ -42,7 +42,13 @@ impl<C: BlockStore, N: NameIndex> Collector<C, N> for ReferenceCollector {
 
         // Unreferenced objects: remove the manifest, then the row + its edges.
         for cid in index.unreferenced_objects().await? {
+            // Seam: the object has been selected as unreferenced but its manifest
+            // is still present. Pausing here lets a test interleave a concurrent
+            // `bind`-alias that resurrects the object over the manifest we are
+            // about to unlink — the #173 race. Zero-cost unless `failpoints` is on.
+            fail::fail_point!("fq_store::gc::obj::before_unlink");
             content.remove(&cid).await?;
+            fail::fail_point!("fq_store::gc::obj::before_delete");
             index.delete_object(&cid).await?;
             reclaimed.objects += 1;
         }
