@@ -159,6 +159,36 @@ as it already does when a *block* it needs was claimed mid-alias. Only `put`
 (which holds the bytes) can re-materialize; in the back-off model that is the
 retry after `DELETE_ROW`, in the generation model the fresh-generation mint.
 
+### Refining the model in code: `MATERIALIZE` is not atomic
+
+The model's `MATERIALIZE` writes the manifest **and** creates the reserved row in
+one action. The code cannot — the manifest is a file and the row is a SQLite
+row, two stores with no shared transaction. This abstraction gap hid a real hole
+that the model, by construction, could not express, and that implementation
+review (not the model) caught: a first cut wrote the manifest and *then* reserved
+the object inside `bind`, so a re-`put` racing collection could write a manifest,
+have the collector claim → unlink → delete the object, and then have `bind`
+fresh-insert a live name over the now-missing manifest — S1-obj on the `put`
+path (the `bind`-alias path was already safe).
+
+The refinement that makes the code observably atomic is the same
+reserve-before-rely the block layer uses (`reserve_block` before `write_block`):
+**`reserve_object` runs before `write_object`**. The object protocol is therefore
+three code steps — `RESERVE` (bump the object refcount, or create it fresh
+available; refuse if claimed) → `MATERIALIZE` (write the manifest, now protected
+because the reserved object cannot be claimed) → `BIND` (record the name; the
+reserve already counts it). A reserved-but-unnamed object with no manifest is not
+S1 — S1 is about live *names* — so the window between `RESERVE` and `MATERIALIZE`
+is safe.
+
+The lesson is the standing one for the concurrency verification method
+([storage-concurrency-verification](storage-concurrency-verification.md)): a
+design-level model that abstracts a two-store step to one action must be refined
+in code with reserve-before-rely, and the **code-level** exhaustive interleaving
+checker — driving the real `write_object`/`bind` steps through the seams — is
+what would catch a botched refinement that the abstract model cannot. Both holes
+are pinned by red-then-green regressions in `tests/gc_interleaving.rs`.
+
 ## The fault map (object layer)
 
 Mirrors the block fault map; every step leans to retention.
@@ -175,6 +205,15 @@ Mirrors the block fault map; every step leans to retention.
 Concurrency, as for blocks, is the central axis: `RESERVE` vs `CLAIM` on the same
 object must linearise — exactly one wins. The `bind`-alias vs `CLAIM` race is the
 S1-obj attack, checked directly by the models.
+
+> **Not yet implemented (crash-recovery parity).** Reserve-before-rely bumps the
+> object refcount *before* the name is bound, so a crash between `reserve_object`
+> and `BIND` leaks an object reservation (an object retained at `refcount > 0`
+> with no name — leak-safe, never S1). The `RESERVE` fault-map row's "audit
+> reconciles" is the intended recovery, mirroring `reconcile_block`, but no
+> **object** reconcile exists yet (objects also lack the `touched_at` grace
+> stamp blocks use to tell a leaked reservation from a live one). Tracked as a
+> follow-up; the online-reclaim S1 fix does not depend on it.
 
 ## Verification strategy
 

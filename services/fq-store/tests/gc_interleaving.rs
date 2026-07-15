@@ -96,3 +96,65 @@ async fn bind_alias_racing_collect_is_refused_no_s1_obj() {
         "back-off must refuse the racing bind — a violation means S1-obj was reached (#173 regression): {violations:#?}"
     );
 }
+
+/// #173, the **put-path** variant. A `put` that re-puts content whose object is
+/// mid-collection writes the manifest first; without reserve-before-rely the
+/// collector then claims the object, unlinks that manifest and deletes the row,
+/// and the put's `bind` fresh-inserts a live object over the missing manifest
+/// (S1-obj). This is the residual the alias-bind fix did not cover.
+///
+/// Driven through the `put::before_bind` seam: when the re-put has written the
+/// manifest, the callback runs the collector fully (claim → unlink → delete).
+/// With object reserve-before-rely the re-put has already **reserved** the
+/// object by this point (refcount > 0), so the collector's claim fails and the
+/// manifest survives — the store stays clean. Without it, the object is
+/// collected and the bind resurrects it over nothing.
+///
+/// Green with reserve-before-rely, red without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_racing_collect_is_reserved_no_s1_obj() {
+    let scenario = fail::FailScenario::setup();
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Arc::new(open_repo(dir.path()).await);
+
+    // A dead-but-uncollected object (a GC candidate), manifest present.
+    let content = vec![9u8; 20_000];
+    let cid = repo.put("a", &content).await.unwrap();
+    repo.unbind("a").await.unwrap();
+    assert_eq!(
+        repo.index().unreferenced_objects().await.unwrap(),
+        vec![cid],
+        "precondition: the object is a GC candidate"
+    );
+
+    // At the seam — the re-put has written the manifest, before its bind — run
+    // the collector to completion against the same object. Configured after the
+    // setup `put` above so only the re-put below triggers it.
+    {
+        let repo = repo.clone();
+        fail::cfg_callback("fq_store::repo::put::before_bind", move || {
+            let repo = repo.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let _ = ReferenceCollector.collect(&*repo).await;
+                });
+            });
+        })
+        .unwrap();
+    }
+
+    // Re-put the same content — triggers the seam mid-put. Result ignored: the
+    // store-clean assertion below is what discriminates the fix.
+    let _ = repo.put("b", &content).await;
+
+    let violations = verify::check_index(repo.index(), repo.content())
+        .await
+        .unwrap();
+    scenario.teardown();
+
+    assert!(
+        violations.is_empty(),
+        "put-path S1-obj: a re-put racing collection left a live name over a missing manifest (#173 regression): {violations:#?}"
+    );
+}
