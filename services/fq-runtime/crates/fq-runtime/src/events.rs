@@ -869,6 +869,11 @@ pub struct ToolSchema {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
+    /// Disables (nearly) all reasoning — required for gpt-5-family
+    /// models on short mechanical tasks: their default reasoning
+    /// scales to fill `max_tokens`, returning empty content (found
+    /// live: the #216 summariser produced nothing on gpt-5-nano).
+    Minimal,
     Low,
     Medium,
     High,

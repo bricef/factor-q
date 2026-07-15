@@ -364,6 +364,7 @@ fn convert_params(params: RequestParams) -> provider::chat::ChatOptions {
         temperature: params.temperature,
         max_tokens: params.max_tokens,
         reasoning_effort: params.effort.map(|effort| match effort {
+            Effort::Minimal => provider::chat::ReasoningEffort::Minimal,
             Effort::Low => provider::chat::ReasoningEffort::Low,
             Effort::Medium => provider::chat::ReasoningEffort::Medium,
             Effort::High => provider::chat::ReasoningEffort::High,

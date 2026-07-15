@@ -427,6 +427,7 @@ impl ReadService for ReadServer {
             // The definition frontmatter's own lowercase spelling.
             effort: agent.effort().map(|e| {
                 match e {
+                    crate::events::Effort::Minimal => "minimal",
                     crate::events::Effort::Low => "low",
                     crate::events::Effort::Medium => "medium",
                     crate::events::Effort::High => "high",
