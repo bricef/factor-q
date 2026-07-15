@@ -26,6 +26,8 @@ use tarpc::server::{BaseChannel, Channel};
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
 
+use crate::agent::AgentId;
+use crate::control_plane::dispatcher::SharedRegistry;
 use crate::control_plane::store::OwnerStatus;
 use crate::health::{self, StreamHealth};
 use crate::views::{
@@ -68,6 +70,50 @@ pub struct HealthReport {
     pub recovery: RecoveryView,
     pub executions: ExecutionsView,
     pub failures: Vec<FailureView>,
+}
+
+/// One agent definition in the daemon's live registry — the summary
+/// row behind the dashboard's agents list.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AgentSummaryView {
+    pub agent_id: String,
+    pub model: String,
+    pub budget: Option<f64>,
+    /// The NATS trigger suffix the agent listens on, if any.
+    pub trigger: Option<String>,
+    pub tool_count: i64,
+    /// Size of the system prompt, so the list hints at definition
+    /// weight without shipping every prompt on every refresh.
+    pub prompt_bytes: i64,
+}
+
+/// The registry listing plus its per-file load errors — a broken
+/// definition should be visible on the operator surface, not only in
+/// the daemon log.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct AgentsView {
+    /// Sorted by agent id.
+    pub agents: Vec<AgentSummaryView>,
+    pub errors: Vec<String>,
+}
+
+/// One agent definition in full — the dashboard's agent detail page.
+/// Sourced from the daemon's registry handle, so `fq reload` is
+/// reflected without a restart.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AgentDetailView {
+    pub agent_id: String,
+    pub model: String,
+    pub system_prompt: String,
+    pub tools: Vec<String>,
+    /// Declared MCP server names.
+    pub mcp_servers: Vec<String>,
+    pub budget: Option<f64>,
+    pub max_iterations: Option<u32>,
+    pub effort: Option<String>,
+    pub trigger: Option<String>,
+    /// The definition file the agent was loaded from.
+    pub path: String,
 }
 
 /// The RPC surface, mirroring [`Views`] (see the module doc for why the
@@ -137,16 +183,23 @@ pub trait ReadService {
         since: Option<String>,
         invocation_limit: i64,
     ) -> Result<Option<AgentCostDetailView>, WireError>;
+    /// The daemon's live agent registry (hot-swapped by `fq reload`):
+    /// definition summaries plus per-file load errors.
+    async fn agents() -> Result<AgentsView, WireError>;
+    /// One agent definition in full. `None` when the id is not in the
+    /// registry (including ids that fail `AgentId` validation).
+    async fn agent(id: String) -> Result<Option<AgentDetailView>, WireError>;
 }
 
-/// Server handler: forwards each RPC to the backing [`Views`] and the
-/// JetStream probe.
+/// Server handler: forwards each RPC to the backing [`Views`], the
+/// JetStream probe, and the daemon's live agent registry.
 #[derive(Clone)]
 struct ReadServer {
     views: Arc<Views>,
     js: async_nats::jetstream::Context,
     probe_timeout: Duration,
     version: String,
+    registry: SharedRegistry,
 }
 
 fn parse_status(s: &str) -> Result<OwnerStatus, WireError> {
@@ -323,6 +376,68 @@ impl ReadService for ReadServer {
             .agent_costs(&agent, since.as_deref(), invocation_limit)
             .await?)
     }
+
+    async fn agents(self, _: context::Context) -> Result<AgentsView, WireError> {
+        // Clone the inner Arc out of the lock so the wire work never
+        // holds it — the same discipline as the dispatcher.
+        let registry = self.registry.read().await.clone();
+        let mut agents: Vec<AgentSummaryView> = registry
+            .iter()
+            .map(|loaded| AgentSummaryView {
+                agent_id: loaded.agent.id().as_str().to_string(),
+                model: loaded.agent.model().to_string(),
+                budget: loaded.agent.budget(),
+                trigger: loaded.agent.trigger().map(String::from),
+                tool_count: loaded.agent.tools().len() as i64,
+                prompt_bytes: loaded.agent.system_prompt().len() as i64,
+            })
+            .collect();
+        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        let errors = registry.errors().iter().map(|e| e.to_string()).collect();
+        Ok(AgentsView { agents, errors })
+    }
+
+    async fn agent(
+        self,
+        _: context::Context,
+        id: String,
+    ) -> Result<Option<AgentDetailView>, WireError> {
+        // An id that fails validation cannot be in the registry —
+        // "not found", not an error.
+        let Ok(agent_id) = AgentId::new(&id) else {
+            return Ok(None);
+        };
+        let registry = self.registry.read().await.clone();
+        let Some(loaded) = registry.get_loaded(&agent_id) else {
+            return Ok(None);
+        };
+        let agent = &loaded.agent;
+        Ok(Some(AgentDetailView {
+            agent_id: agent.id().as_str().to_string(),
+            model: agent.model().to_string(),
+            system_prompt: agent.system_prompt().to_string(),
+            tools: agent.tools().to_vec(),
+            mcp_servers: agent
+                .mcp_servers()
+                .iter()
+                .map(|s| s.server.clone())
+                .collect(),
+            budget: agent.budget(),
+            max_iterations: agent.max_iterations(),
+            // The definition frontmatter's own lowercase spelling.
+            effort: agent.effort().map(|e| {
+                match e {
+                    crate::events::Effort::Low => "low",
+                    crate::events::Effort::Medium => "medium",
+                    crate::events::Effort::High => "high",
+                    crate::events::Effort::XHigh => "xhigh",
+                }
+                .to_string()
+            }),
+            trigger: agent.trigger().map(String::from),
+            path: loaded.path.display().to_string(),
+        }))
+    }
 }
 
 /// Bind a TCP listener and return its address plus a future that serves
@@ -335,6 +450,7 @@ pub async fn bind(
     js: async_nats::jetstream::Context,
     probe_timeout: Duration,
     version: String,
+    registry: SharedRegistry,
 ) -> std::io::Result<(SocketAddr, BoxFuture<'static, ()>)> {
     let requested: SocketAddr = addr.parse().map_err(|e| {
         std::io::Error::new(
@@ -368,6 +484,7 @@ pub async fn bind(
                     js: js.clone(),
                     probe_timeout,
                     version: version.clone(),
+                    registry: registry.clone(),
                 };
                 channel
                     .execute(server.serve())
@@ -390,9 +507,14 @@ pub async fn connect(addr: &str) -> std::io::Result<ReadServiceClient> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentRegistry;
     use crate::control_plane::projection::ProjectionStore;
     use crate::control_plane::store::ControlPlaneStore;
     use crate::worker::store::WorkerStore;
+
+    fn empty_registry() -> SharedRegistry {
+        Arc::new(tokio::sync::RwLock::new(Arc::new(AgentRegistry::new())))
+    }
 
     /// Round-trip the DB-backed reads over a real ephemeral TCP wire:
     /// seed a temp DB, bind on 127.0.0.1:0, and read back through the
@@ -428,6 +550,7 @@ mod tests {
             js,
             Duration::from_millis(100),
             "test-version".to_string(),
+            empty_registry(),
         )
         .await
         .expect("bind ephemeral");
@@ -536,6 +659,7 @@ mod tests {
             bus.jetstream(),
             Duration::from_millis(2_000),
             "test-version".to_string(),
+            empty_registry(),
         )
         .await
         .expect("bind ephemeral");
@@ -594,11 +718,92 @@ mod tests {
             js,
             Duration::from_millis(100),
             "test".to_string(),
+            empty_registry(),
         )
         .await
         else {
             panic!("0.0.0.0 must be refused");
         };
         assert!(err.to_string().contains("loopback"), "got: {err}");
+    }
+
+    /// The registry-backed RPCs round-trip a real parsed definition:
+    /// list, detail (with the system prompt), and the None cases for
+    /// unknown and invalid ids.
+    #[tokio::test]
+    async fn agents_round_trip_from_a_seeded_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let _cp = ControlPlaneStore::open(&path).await.unwrap();
+            let _ws = WorkerStore::open(&path).await.unwrap();
+            let _proj = ProjectionStore::open(&path).await.unwrap();
+        }
+        let views = Arc::new(Views::open(&path).await.unwrap());
+        let js = async_nats::jetstream::new(
+            async_nats::connect_with_options(
+                "nats://127.0.0.1:1",
+                async_nats::ConnectOptions::new().retry_on_initial_connect(),
+            )
+            .await
+            .expect("lazy client"),
+        );
+
+        let agents_dir = dir.path().join("agents");
+        std::fs::create_dir(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("probe.md"),
+            "---\nname: probe\nmodel: claude-haiku-4-5\ntools:\n  - exec\nbudget: 0.10\n---\n\nYou are a probe.\n",
+        )
+        .unwrap();
+        let registry = AgentRegistry::load_from_directory(&agents_dir, None).unwrap();
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+        let shared: SharedRegistry = Arc::new(tokio::sync::RwLock::new(Arc::new(registry)));
+
+        let (addr, serving) = bind(
+            "127.0.0.1:0",
+            views,
+            js,
+            Duration::from_millis(100),
+            "test-version".to_string(),
+            shared,
+        )
+        .await
+        .expect("bind ephemeral");
+        tokio::spawn(serving);
+        let client = connect(&addr.to_string()).await.expect("connect");
+
+        let listing = client
+            .agents(context::current())
+            .await
+            .expect("rpc")
+            .expect("agents");
+        assert_eq!(listing.agents.len(), 1);
+        assert_eq!(listing.agents[0].agent_id, "probe");
+        assert_eq!(listing.agents[0].model, "claude-haiku-4-5");
+        assert_eq!(listing.agents[0].tool_count, 1);
+        assert!(listing.agents[0].prompt_bytes > 0);
+        assert!(listing.errors.is_empty());
+
+        let detail = client
+            .agent(context::current(), "probe".to_string())
+            .await
+            .expect("rpc")
+            .expect("agent")
+            .expect("probe exists");
+        assert_eq!(detail.agent_id, "probe");
+        assert!(detail.system_prompt.contains("You are a probe."));
+        assert_eq!(detail.tools, vec!["exec".to_string()]);
+        assert_eq!(detail.budget, Some(0.10));
+        assert!(detail.path.ends_with("probe.md"), "got: {}", detail.path);
+
+        for missing in ["no-such-agent", "NOT A VALID ID!!"] {
+            let none = client
+                .agent(context::current(), missing.to_string())
+                .await
+                .expect("rpc")
+                .expect("agent");
+            assert!(none.is_none(), "{missing} must be None");
+        }
     }
 }

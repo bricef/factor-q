@@ -2444,7 +2444,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
     let dispatcher = TriggerDispatcher::new(
         bus.clone(),
-        shared_registry,
+        shared_registry.clone(),
         worker,
         llm,
         config.worker.max_concurrent_invocations,
@@ -2467,6 +2467,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             bus.jetstream(),
             std::time::Duration::from_millis(config.read_service.probe_timeout_ms),
             FQ_VERSION.to_string(),
+            // The same hot-swapped handle `fq reload` updates, so the
+            // dashboard's agents pages reflect reloads live.
+            shared_registry,
         )
         .await
         .context("read service: failed to bind (check [read_service] in fq.toml)")?;

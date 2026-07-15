@@ -562,6 +562,42 @@ async fn agent_costs_page(
     }
 }
 
+async fn agents_page(State(state): State<Arc<AppState>>) -> Page {
+    let client = match client_or_unreachable(&state, "agents").await {
+        Ok(c) => c,
+        Err(page) => return page,
+    };
+    match client.agents(context::current()).await {
+        Ok(Ok(view)) => ok_page(&state, "agents", &render::agents(&view)),
+        Ok(Err(err)) => unreachable_page(&state, "agents", &err.to_string()),
+        Err(err) => unreachable_page(&state, "agents", &format!("rpc: {err}")),
+    }
+}
+
+async fn agent_page(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Page {
+    let client = match client_or_unreachable(&state, "agent").await {
+        Ok(c) => c,
+        Err(page) => return page,
+    };
+    match client.agent(context::current(), id.clone()).await {
+        Ok(Ok(Some(detail))) => ok_page(
+            &state,
+            &format!("agent · {id}"),
+            &render::agent_detail(&detail),
+        ),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Html(render::page(
+                "agent",
+                state.refresh_secs,
+                r#"<p class="muted">no agent with that id in the registry. <a href="/agents">← all agents</a></p>"#,
+            )),
+        ),
+        Ok(Err(err)) => unreachable_page(&state, "agent", &err.to_string()),
+        Err(err) => unreachable_page(&state, "agent", &format!("rpc: {err}")),
+    }
+}
+
 /// Build the router — separated from `main` so tests drive it with
 /// `tower::ServiceExt::oneshot`.
 fn app(state: Arc<AppState>) -> Router {
@@ -578,6 +614,8 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/events", get(events_page))
         .route("/costs", get(costs_page))
         .route("/costs/{agent}", get(agent_costs_page))
+        .route("/agents", get(agents_page))
+        .route("/agents/{id}", get(agent_page))
         .with_state(state)
 }
 
@@ -669,6 +707,17 @@ mod tests {
         }
         let views = Arc::new(Views::open(&path).await.unwrap());
         let js = async_nats_lazy().await;
+        // A registry with one real parsed definition, so the agents
+        // pages exercise the full wire path.
+        let agents_dir = dir.path().join("agents");
+        std::fs::create_dir(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("probe.md"),
+            "---\nname: probe\nmodel: claude-haiku-4-5\ntools:\n  - exec\n---\n\nYou are a probe.\n",
+        )
+        .unwrap();
+        let registry = fq_runtime::AgentRegistry::load_from_directory(&agents_dir, None).unwrap();
+        let registry = Arc::new(tokio::sync::RwLock::new(Arc::new(registry)));
         // A version whose SHA half matches this binary's: the matched-
         // builds case — the skew banner must NOT appear anywhere below.
         let (addr, serving) = read_service::bind(
@@ -677,6 +726,7 @@ mod tests {
             js,
             std::time::Duration::from_millis(100),
             format!("0.1.0+{OWN_SHA}"),
+            registry,
         )
         .await
         .unwrap();
@@ -771,6 +821,46 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
+        // The agents list serves the registry over the wire, and each
+        // definition links to its detail page.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/agents").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(
+            html.contains(r#"<a href="/agents/probe">probe</a>"#),
+            "got: {html}"
+        );
+
+        // The detail page carries the collapsed system prompt.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/agents/probe").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(
+            html.contains("<details><summary>system prompt ("),
+            "got: {html}"
+        );
+        assert!(html.contains("You are a probe."), "got: {html}");
+
+        // Unknown agent: 404 through the wire's None path.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/agents/no-such-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
         let resp = app
             .oneshot(Request::get("/events").body(Body::empty()).unwrap())
             .await
@@ -817,12 +907,16 @@ mod tests {
         }
         let views = Arc::new(Views::open(&path).await.unwrap());
         let js = async_nats_lazy().await;
+        let registry = Arc::new(tokio::sync::RwLock::new(Arc::new(
+            fq_runtime::AgentRegistry::new(),
+        )));
         let (addr, serving) = read_service::bind(
             "127.0.0.1:0",
             views,
             js,
             std::time::Duration::from_millis(100),
             "0.9.9+deadbeefcafe".to_string(),
+            registry,
         )
         .await
         .unwrap();
