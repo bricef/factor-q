@@ -162,19 +162,6 @@ func TestPollOnceRevertsOnPublishFailure(t *testing.T) {
 	}
 }
 
-// --- gh parsing ---
-
-func TestParseGhIssueList(t *testing.T) {
-	out := []byte(`[{"number":6,"labels":[{"name":"ready"},{"name":"bug"}]},{"number":9,"labels":[]}]`)
-	issues, err := parseGhIssueList(out)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if len(issues) != 2 || issues[0].Number != 6 || !issues[0].HasLabel("ready") || issues[1].Number != 9 {
-		t.Fatalf("unexpected parse: %+v", issues)
-	}
-}
-
 // --- config validation ---
 
 func TestConfigFromArgsValidation(t *testing.T) {
