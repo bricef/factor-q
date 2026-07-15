@@ -354,11 +354,14 @@ pub struct AgentCostDetailView {
     pub invocations: Vec<InvocationCostView>,
 }
 
-/// Per-agent costs plus the grand totals, so a caller renders both without
-/// re-summing.
+/// Per-agent costs plus the per-model split and the grand totals, so a
+/// caller renders all three without re-summing.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct CostReport {
     pub agents: Vec<CostView>,
+    /// The same cost rows grouped by model, biggest spender first —
+    /// spend by capability tier rather than by consumer.
+    pub models: Vec<ModelCostView>,
     pub total_cost: f64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
@@ -536,6 +539,13 @@ impl Views {
             report.total_cache_write_tokens += r.total_cache_write_tokens;
             report.agents.push(CostView::from(r));
         }
+        report.models = self
+            .projection
+            .cost_by_model(agent, since)
+            .await?
+            .into_iter()
+            .map(ModelCostView::from)
+            .collect();
         Ok(report)
     }
 
@@ -555,7 +565,7 @@ impl Views {
         };
         let models = self
             .projection
-            .cost_by_model(agent, since)
+            .cost_by_model(Some(agent), since)
             .await?
             .into_iter()
             .map(ModelCostView::from)

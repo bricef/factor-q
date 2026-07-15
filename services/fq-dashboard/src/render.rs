@@ -9,7 +9,7 @@ use fq_runtime::read_service::{AgentDetailView, AgentsView, HealthReport};
 use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
 use fq_runtime::views::{
     ActiveInvocationView, AgentCostDetailView, CostReport, CostView, EventView,
-    InvocationDetailView, InvocationSummaryView,
+    InvocationDetailView, InvocationSummaryView, ModelCostView,
 };
 
 /// Minimal HTML escape for text and attribute positions.
@@ -811,6 +811,28 @@ fn day_cell(cost: Option<f64>) -> String {
     }
 }
 
+/// The per-model spend table — shared between the top-level costs page
+/// (all agents) and the per-agent drill-down, so the two by-model
+/// views cannot drift apart. `total` is the share denominator.
+fn by_model_table(models: &[ModelCostView], total: f64) -> String {
+    let mut b = String::from(
+        "<table><tr><th>model</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">total cost</th><th>share</th></tr>",
+    );
+    for m in models {
+        b.push_str(&format!(
+            r#"<tr><td>{}</td><td class="n">{}</td>{}{}<td class="n">${:.4}</td>{}</tr>"#,
+            esc(&m.model),
+            fmt_grouped(m.event_count),
+            token_cell(m.total_input_tokens),
+            token_cell(m.total_output_tokens),
+            m.total_cost,
+            share_cell(m.total_cost, total),
+        ));
+    }
+    b.push_str("</table>");
+    b
+}
+
 /// The costs page body: named agents as rows (the operator's
 /// spend-watch), one-shot test instances folded into per-family lines
 /// under a `<details>`, and totals split named vs one-shot so synthetic
@@ -844,6 +866,7 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
     }
 
     if !named.is_empty() {
+        b.push_str("<h2>By agent</h2>");
         b.push_str(
             "<table><tr><th>agent</th><th class=\"n\">invocations</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">last 24h</th><th class=\"n\">total cost</th><th>share</th></tr>",
         );
@@ -889,6 +912,11 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
             share_cell(sub.cost, report.total_cost),
         ));
         b.push_str("</table>");
+    }
+
+    if !report.models.is_empty() {
+        b.push_str("<h2>By model</h2>");
+        b.push_str(&by_model_table(&report.models, report.total_cost));
     }
 
     let one_shot_cost: f64 = families.values().map(|f| f.cost).sum();
@@ -975,21 +1003,7 @@ pub fn agent_costs(d: &AgentCostDetailView, window: Window, now_ms: i64) -> Stri
     ));
 
     b.push_str("<h2>By model</h2>");
-    b.push_str(
-        "<table><tr><th>model</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">total cost</th><th>share</th></tr>",
-    );
-    for m in &d.models {
-        b.push_str(&format!(
-            r#"<tr><td>{}</td><td class="n">{}</td>{}{}<td class="n">${:.4}</td>{}</tr>"#,
-            esc(&m.model),
-            fmt_grouped(m.event_count),
-            token_cell(m.total_input_tokens),
-            token_cell(m.total_output_tokens),
-            m.total_cost,
-            share_cell(m.total_cost, d.totals.total_cost),
-        ));
-    }
-    b.push_str("</table>");
+    b.push_str(&by_model_table(&d.models, d.totals.total_cost));
 
     b.push_str("<h2>By invocation</h2>");
     b.push_str(
@@ -1323,7 +1337,45 @@ mod tests {
             total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
             total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
             agents,
+            models: vec![],
         }
+    }
+
+    /// The top-level costs page renders the report's per-model split
+    /// with shares against the grand total; no models, no section.
+    #[test]
+    fn costs_render_the_by_model_split() {
+        let mut report = cost_report(vec![
+            cost_view("m0-issue-fix", 100, 75.0),
+            cost_view("m0-loop", 10, 25.0),
+        ]);
+        report.models = vec![
+            ModelCostView {
+                model: "claude-opus-4-8".to_string(),
+                event_count: 80,
+                total_cost: 90.0,
+                total_input_tokens: 100_000_000,
+                total_output_tokens: 500_000,
+            },
+            ModelCostView {
+                model: "z-ai/glm-5.2".to_string(),
+                event_count: 30,
+                total_cost: 10.0,
+                total_input_tokens: 8_000_000,
+                total_output_tokens: 60_000,
+            },
+        ];
+        let html = costs(&report, &CostReport::default(), Window::All);
+        assert!(html.contains("<h2>By agent</h2>"), "got: {html}");
+        assert!(html.contains("<h2>By model</h2>"), "got: {html}");
+        assert!(html.contains("claude-opus-4-8"), "got: {html}");
+        assert!(html.contains("z-ai/glm-5.2"), "got: {html}");
+        assert!(html.contains("90.0%"), "got: {html}");
+        assert!(html.contains("10.0%"), "got: {html}");
+
+        // Without model rows the section is absent entirely.
+        let bare = costs_all(&cost_report(vec![cost_view("a", 1, 1.0)]));
+        assert!(!bare.contains("By model"), "got: {bare}");
     }
 
     /// An id is a one-shot instance only when its last segment is
