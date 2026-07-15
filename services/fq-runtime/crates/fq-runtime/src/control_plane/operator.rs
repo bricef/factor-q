@@ -78,7 +78,7 @@ pub async fn drop_invocation(
             if !control_store.delete_invocation_owner(invocation_id).await? {
                 return Err(DropError::UnknownInvocation(invocation_id.to_string()));
             }
-            "operator".to_string()
+            AgentId::operator().into_inner()
         }
     };
     let agent_id =

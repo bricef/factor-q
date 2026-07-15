@@ -11,6 +11,7 @@ use std::str::FromStr;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
 
+use crate::agent::AgentId;
 use crate::events::{Event, EventPayload};
 
 /// Schema — migrations live inline for phase 1. When the schema
@@ -308,7 +309,14 @@ impl ProjectionStore {
         &self,
         invocation_id: &str,
     ) -> Result<Option<String>, StoreError> {
-        let row = sqlx::query("SELECT agent_id FROM events WHERE invocation_id = ? LIMIT 1")
+        let query = format!(
+            "SELECT agent_id FROM events WHERE invocation_id = ? \
+             AND agent_id NOT IN ('{}', '{}', '{}') ORDER BY timestamp LIMIT 1",
+            AgentId::SYSTEM_STR,
+            AgentId::SUMMARY_STR,
+            AgentId::OPERATOR_STR,
+        );
+        let row = sqlx::query(&query)
             .bind(invocation_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -769,6 +777,59 @@ mod tests {
             cumulative_agent_cost: 0.0005,
             origin: Default::default(),
         })
+    }
+
+    #[tokio::test]
+    async fn agent_id_for_invocation_ignores_operator_only_tombstone() {
+        let dir = tempdir().unwrap();
+        let store = ProjectionStore::open(&dir.path().join("events.db"))
+            .await
+            .unwrap();
+        let inv = Uuid::now_v7();
+        let event = Event::new(
+            AgentId::operator(),
+            inv,
+            EventPayload::InvocationOperatorRecovered(
+                crate::events::InvocationOperatorRecoveredPayload {
+                    action: "drop".to_string(),
+                    final_phase: "failed".to_string(),
+                    reason: None,
+                },
+            ),
+        );
+
+        store.insert_event(&event).await.unwrap();
+        assert_eq!(
+            store
+                .agent_id_for_invocation(&inv.to_string())
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_id_for_invocation_uses_first_real_agent_not_summary() {
+        let dir = tempdir().unwrap();
+        let store = ProjectionStore::open(&dir.path().join("events.db"))
+            .await
+            .unwrap();
+        let inv = Uuid::now_v7();
+        let summary = summary_event(inv, crate::events::SummaryKind::Start, "starting");
+        let mut triggered = sample_triggered("builder", inv);
+        triggered.envelope.timestamp = summary.envelope.timestamp + chrono::Duration::seconds(1);
+
+        // Insert the real event first while giving the sentinel row an earlier
+        // timestamp, pinning both sentinel exclusion and timestamp ordering.
+        store.insert_event(&triggered).await.unwrap();
+        store.insert_event(&summary).await.unwrap();
+        assert_eq!(
+            store
+                .agent_id_for_invocation(&inv.to_string())
+                .await
+                .unwrap(),
+            Some("builder".to_string())
+        );
     }
 
     /// #216: a summary event lands twice — as a costed events row
