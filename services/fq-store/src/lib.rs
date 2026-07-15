@@ -49,7 +49,9 @@ pub use grants::{GrantEvent, GrantId, GrantModel, Grantor, Principal, Scope, Ver
 pub use index::{BlockRow, Edge, IndexSnapshot, NameIndex, SqliteNameIndex};
 pub use repository::Repository;
 pub use stats::Stats;
-pub use tokens::{DEFAULT_TOKEN_TTL, TokenMinter, TokenVerifier, VerifiedToken, generate_keypair};
+pub use tokens::{
+    DEFAULT_TOKEN_TTL, ScopeRef, TokenMinter, TokenVerifier, VerifiedToken, generate_keypair,
+};
 
 use async_trait::async_trait;
 

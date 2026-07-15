@@ -74,6 +74,59 @@ fn verb_term(verb: Verb) -> Term {
     Term::Str(verb.as_str().to_string())
 }
 
+/// The scope semantics of a single evaluation: is the operation a
+/// **point** op on one name, or a **subtree** op (a `list`, a grant or
+/// revocation over a namespace) whose resource string denotes a whole
+/// namespace? Every [`VerifiedToken::permits`] / [`VerifiedToken::authorizes`]
+/// call states this explicitly, and the authorizer presents it as the
+/// `scope_kind` fact — so a Name-attenuated token cannot satisfy a
+/// namespace-semantics evaluation just because the strings match (#171).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeRef<'a> {
+    /// A point operation on exactly this name.
+    Name(&'a str),
+    /// A subtree operation anchored at this namespace root.
+    Namespace(&'a str),
+}
+
+impl<'a> ScopeRef<'a> {
+    /// The datalog `scope_kind` discriminant — the same vocabulary as
+    /// [`Scope::kind`] and the minted `right(verb, kind, value)` facts.
+    fn kind(self) -> &'static str {
+        match self {
+            ScopeRef::Name(_) => "name",
+            ScopeRef::Namespace(_) => "namespace",
+        }
+    }
+
+    /// The scope's string value (the name, or the namespace root).
+    fn value(self) -> &'a str {
+        match self {
+            ScopeRef::Name(v) | ScopeRef::Namespace(v) => v,
+        }
+    }
+}
+
+impl<'a> From<&'a Scope> for ScopeRef<'a> {
+    fn from(scope: &'a Scope) -> Self {
+        match scope {
+            Scope::Name(v) => ScopeRef::Name(v),
+            Scope::Namespace(v) => ScopeRef::Namespace(v),
+        }
+    }
+}
+
+impl std::fmt::Display for ScopeRef<'_> {
+    /// Denial-message form: the bare name for a point op, `root.*` for a
+    /// subtree op — so "may not list research.*" reads as what was asked.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScopeRef::Name(v) => write!(f, "{v}"),
+            ScopeRef::Namespace(v) => write!(f, "{v}.*"),
+        }
+    }
+}
+
 fn date_term(at: SystemTime) -> Term {
     let secs = at
         .duration_since(UNIX_EPOCH)
@@ -210,15 +263,28 @@ impl TokenVerifier {
             match scope {
                 Scope::Name(name) => {
                     params.insert("name".to_string(), Term::Str(name.clone()));
+                    // The scope_kind guard is the #171 fix: a point
+                    // attenuation satisfies point evaluations on exactly
+                    // this name and *nothing* with namespace semantics —
+                    // without it, a subtree operation whose root string
+                    // equals the name would pass. (Tokens attenuated
+                    // before this guard existed keep the kind-blind check
+                    // until they expire; the exposure window is the token
+                    // TTL — see the access-control guide.)
                     block = block
                         .code_with_params(
-                            "check if resource($r), $r == {name};",
+                            "check if resource($r), scope_kind(\"name\"), $r == {name};",
                             params,
                             HashMap::new(),
                         )
                         .map_err(|e| token_err("attenuate scope", e))?;
                 }
                 Scope::Namespace(ns) => {
+                    // Deliberately kind-blind: a namespace attenuation
+                    // covers point ops inside the subtree AND namespace
+                    // ops at-or-below its root, while a namespace op on a
+                    // strict parent already fails the string test —
+                    // mirroring `Scope::covers_scope` case-for-case.
                     params.insert("ns".to_string(), Term::Str(ns.clone()));
                     params.insert("ns_dot".to_string(), Term::Str(format!("{ns}.")));
                     block = block
@@ -266,35 +332,50 @@ impl VerifiedToken {
     }
 
     /// The **offline / remote** decision: does an embedded `right` cover
-    /// `verb` on `resource`, with every attenuation check and the TTL passing
+    /// `verb` on `resource` (a point or subtree operation — the caller
+    /// states which), with every attenuation check and the TTL passing
     /// at time `at`? Any failure — expired, attenuated away, no covering
     /// right — is a plain `false` (deny-by-default; the credential itself
     /// being invalid was already rejected by [`TokenVerifier::verify`]).
-    pub fn authorizes(&self, verb: Verb, resource: &str, at: SystemTime) -> bool {
+    pub fn authorizes(&self, verb: Verb, resource: ScopeRef<'_>, at: SystemTime) -> bool {
         self.evaluate(verb, resource, at, true)
     }
 
     /// The **in-process gate** decision: do the TTL and the bearer's
-    /// attenuation permit `verb` on `resource` at `at`? Embedded rights are
+    /// attenuation permit `verb` on `resource` (a point or subtree
+    /// operation — the caller states which) at `at`? Embedded rights are
     /// *not* required — under belt-and-braces enforcement the live projection
     /// supplies authority, so an unattenuated token permits everything and
     /// the projection decides (including own-scope operations).
-    pub fn permits(&self, verb: Verb, resource: &str, at: SystemTime) -> bool {
+    pub fn permits(&self, verb: Verb, resource: ScopeRef<'_>, at: SystemTime) -> bool {
         self.evaluate(verb, resource, at, false)
     }
 
-    fn evaluate(&self, verb: Verb, resource: &str, at: SystemTime, require_right: bool) -> bool {
+    fn evaluate(
+        &self,
+        verb: Verb,
+        resource: ScopeRef<'_>,
+        at: SystemTime,
+        require_right: bool,
+    ) -> bool {
         let mut params = HashMap::new();
         params.insert("op".to_string(), verb_term(verb));
-        params.insert("res".to_string(), Term::Str(resource.to_string()));
+        params.insert("res".to_string(), Term::Str(resource.value().to_string()));
+        params.insert("kind".to_string(), Term::Str(resource.kind().to_string()));
         params.insert("at".to_string(), date_term(at));
         let facts = "time({at});
              operation({op});
-             resource({res});";
+             resource({res});
+             scope_kind({kind});";
         let policies = if require_right {
-            // A right covers the resource exactly (a name right) or by
-            // segment-aware namespace prefix (equal, or extends past a `.`).
-            "allow if operation($v), resource($r), right($v, \"name\", $r);
+            // A *name* right covers point operations on exactly its name —
+            // and nothing with namespace semantics (#171: without the
+            // scope_kind guard, a name right's string equality would also
+            // satisfy a subtree operation anchored at that string). A
+            // *namespace* right covers both kinds at-or-below its root:
+            // the segment-aware string test is `Scope::covers_scope`
+            // case-for-case, so no guard is needed.
+            "allow if operation($v), resource($r), scope_kind(\"name\"), right($v, \"name\", $r);
              allow if operation($v), resource($r), right($v, \"namespace\", $ns), $r == $ns;
              allow if operation($v), resource($r), right($v, \"namespace\", $ns), $r.starts_with($ns + \".\");
              deny if true;"
@@ -383,11 +464,11 @@ mod tests {
         let token = minter.mint(&alice(), &grants).unwrap();
         let verified = verifier.verify(&token).unwrap();
 
-        assert!(verified.authorizes(Verb::Read, "research.papers.doc1", now()));
-        assert!(verified.authorizes(Verb::Write, "research", now()));
-        assert!(!verified.authorizes(Verb::Delete, "research.papers.doc1", now())); // verb not granted
-        assert!(!verified.authorizes(Verb::Read, "researchX", now())); // segment boundary
-        assert!(!verified.authorizes(Verb::Read, "docs.readme", now())); // outside scope
+        assert!(verified.authorizes(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
+        assert!(verified.authorizes(Verb::Write, ScopeRef::Name("research"), now()));
+        assert!(!verified.authorizes(Verb::Delete, ScopeRef::Name("research.papers.doc1"), now())); // verb not granted
+        assert!(!verified.authorizes(Verb::Read, ScopeRef::Name("researchX"), now())); // segment boundary
+        assert!(!verified.authorizes(Verb::Read, ScopeRef::Name("docs.readme"), now())); // outside scope
     }
 
     #[test]
@@ -396,11 +477,15 @@ mod tests {
         let token = minter.mint(&alice(), &[]).unwrap();
         let verified = verifier.verify(&token).unwrap();
         // Offline semantics: no rights, no authority (A1 at the token level).
-        assert!(!verified.authorizes(Verb::Read, "research.papers.doc1", now()));
+        assert!(!verified.authorizes(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
         // Gate semantics: identity + TTL only — the projection decides, so an
         // unattenuated token places no bounds of its own.
-        assert!(verified.permits(Verb::Read, "research.papers.doc1", now()));
-        assert!(verified.permits(Verb::Write, "system.agents.alice.files.x", now()));
+        assert!(verified.permits(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
+        assert!(verified.permits(
+            Verb::Write,
+            ScopeRef::Name("system.agents.alice.files.x"),
+            now()
+        ));
     }
 
     #[test]
@@ -415,10 +500,10 @@ mod tests {
         let verified = verifier.verify(&token).unwrap();
         let fresh = now();
         let expired = now() + HOUR + Duration::from_secs(60);
-        assert!(verified.authorizes(Verb::Read, "research.x", fresh));
-        assert!(verified.permits(Verb::Read, "research.x", fresh));
-        assert!(!verified.authorizes(Verb::Read, "research.x", expired));
-        assert!(!verified.permits(Verb::Read, "research.x", expired));
+        assert!(verified.authorizes(Verb::Read, ScopeRef::Name("research.x"), fresh));
+        assert!(verified.permits(Verb::Read, ScopeRef::Name("research.x"), fresh));
+        assert!(!verified.authorizes(Verb::Read, ScopeRef::Name("research.x"), expired));
+        assert!(!verified.permits(Verb::Read, ScopeRef::Name("research.x"), expired));
     }
 
     #[test]
@@ -441,13 +526,13 @@ mod tests {
             .unwrap();
         let verified = verifier.verify(&narrowed).unwrap();
 
-        assert!(verified.authorizes(Verb::Read, "research.papers.doc1", now()));
-        assert!(!verified.authorizes(Verb::Write, "research.papers.doc1", now())); // verb attenuated away
-        assert!(!verified.authorizes(Verb::Read, "research.other", now())); // outside attenuated scope
+        assert!(verified.authorizes(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
+        assert!(!verified.authorizes(Verb::Write, ScopeRef::Name("research.papers.doc1"), now())); // verb attenuated away
+        assert!(!verified.authorizes(Verb::Read, ScopeRef::Name("research.other"), now())); // outside attenuated scope
         // permits() honours the same attenuation (the gate's bound):
-        assert!(verified.permits(Verb::Read, "research.papers.doc1", now()));
-        assert!(!verified.permits(Verb::Write, "research.papers.doc1", now()));
-        assert!(!verified.permits(Verb::Read, "docs.readme", now()));
+        assert!(verified.permits(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
+        assert!(!verified.permits(Verb::Write, ScopeRef::Name("research.papers.doc1"), now()));
+        assert!(!verified.permits(Verb::Read, ScopeRef::Name("docs.readme"), now()));
     }
 
     #[test]
@@ -468,10 +553,10 @@ mod tests {
             )
             .unwrap();
         let verified = verifier.verify(&narrowed).unwrap();
-        assert!(verified.authorizes(Verb::Read, "research.papers.doc1", now()));
-        assert!(!verified.authorizes(Verb::Read, "research.papersX", now()));
-        assert!(verified.permits(Verb::Read, "research.papers.doc1", now()));
-        assert!(!verified.permits(Verb::Read, "research.papersX", now()));
+        assert!(verified.authorizes(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
+        assert!(!verified.authorizes(Verb::Read, ScopeRef::Name("research.papersX"), now()));
+        assert!(verified.permits(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
+        assert!(!verified.permits(Verb::Read, ScopeRef::Name("research.papersX"), now()));
     }
 
     #[test]
@@ -488,9 +573,9 @@ mod tests {
             .attenuate(&token, Some(&Scope::Namespace("research".into())), None)
             .unwrap();
         let verified = verifier.verify(&widened).unwrap();
-        assert!(verified.authorizes(Verb::Read, "research.papers.doc1", now()));
+        assert!(verified.authorizes(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
         assert!(
-            !verified.authorizes(Verb::Read, "research.other", now()),
+            !verified.authorizes(Verb::Read, ScopeRef::Name("research.other"), now()),
             "a wider attenuation must not create authority"
         );
     }
@@ -516,35 +601,132 @@ mod tests {
                 .unwrap();
             let token = minter.mint_for(&log, &alice()).await.unwrap();
             let verified = verifier.verify(&token).unwrap();
-            assert!(verified.authorizes(Verb::Read, "research.x", now()));
+            assert!(verified.authorizes(Verb::Read, ScopeRef::Name("research.x"), now()));
 
             // Revoke, then mint again: the new token carries no stale authority.
             log.append_revoked(id).await.unwrap();
             let token = minter.mint_for(&log, &alice()).await.unwrap();
             let verified = verifier.verify(&token).unwrap();
             assert!(
-                !verified.authorizes(Verb::Read, "research.x", now()),
+                !verified.authorizes(Verb::Read, ScopeRef::Name("research.x"), now()),
                 "new mints fail immediately after revocation (A3)"
             );
         });
     }
 
-    /// The authorized set over the shared query grid.
-    fn authorized_set(verified: &VerifiedToken, at: SystemTime) -> Vec<bool> {
+    /// The full query grid: every resource string as BOTH a point op and a
+    /// subtree op — the #171 fix is precisely that these two evaluations
+    /// can differ, so every sweep must cover both kinds.
+    fn query_grid() -> Vec<(Verb, ScopeRef<'static>)> {
         let mut out = Vec::new();
         for verb in Verb::all() {
             for resource in RESOURCES {
-                out.push(verified.authorizes(verb, resource, at));
+                out.push((verb, ScopeRef::Name(resource)));
+                out.push((verb, ScopeRef::Namespace(resource)));
             }
         }
         out
+    }
+
+    /// The scope-kinded domain oracle for a query: the [`Scope`] whose
+    /// cover the token layer must agree with.
+    fn query_scope(q: ScopeRef<'_>) -> Scope {
+        match q {
+            ScopeRef::Name(v) => Scope::Name(v.to_string()),
+            ScopeRef::Namespace(v) => Scope::Namespace(v.to_string()),
+        }
+    }
+
+    /// The authorized set over the kinded query grid.
+    fn authorized_set(verified: &VerifiedToken, at: SystemTime) -> Vec<bool> {
+        query_grid()
+            .into_iter()
+            .map(|(verb, q)| verified.authorizes(verb, q, at))
+            .collect()
+    }
+
+    #[test]
+    fn name_attenuation_pins_point_semantics() {
+        // The #171 exploit shape: alice's authority is namespace-wide, the
+        // token is attenuated to ONE NAME — the token layer must refuse
+        // anything with subtree semantics anchored at that same string.
+        let (minter, verifier) = minter();
+        let grants = [live(
+            1,
+            &[Verb::Read, Verb::List, Verb::Grant],
+            Scope::Namespace("research".into()),
+        )];
+        let token = minter.mint(&alice(), &grants).unwrap();
+        let narrowed = verifier
+            .attenuate(&token, Some(&Scope::Name("research.papers".into())), None)
+            .unwrap();
+        let verified = verifier.verify(&narrowed).unwrap();
+
+        // Point op on exactly the attenuated name: within bounds.
+        assert!(verified.permits(Verb::Read, ScopeRef::Name("research.papers"), now()));
+        assert!(verified.authorizes(Verb::Read, ScopeRef::Name("research.papers"), now()));
+        // Subtree ops anchored at the SAME string: the fix — refused.
+        assert!(!verified.permits(Verb::List, ScopeRef::Namespace("research.papers"), now()));
+        assert!(!verified.permits(Verb::Grant, ScopeRef::Namespace("research.papers"), now()));
+        assert!(!verified.authorizes(Verb::List, ScopeRef::Namespace("research.papers"), now()));
+        // Point ops on descendants were never covered by a Name attenuation.
+        assert!(!verified.permits(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
+    }
+
+    #[test]
+    fn namespace_attenuation_covers_both_kinds_at_or_below() {
+        let (minter, verifier) = minter();
+        let grants = [live(
+            1,
+            &[Verb::Read, Verb::List],
+            Scope::Namespace("research".into()),
+        )];
+        let token = minter.mint(&alice(), &grants).unwrap();
+        let narrowed = verifier
+            .attenuate(
+                &token,
+                Some(&Scope::Namespace("research.papers".into())),
+                None,
+            )
+            .unwrap();
+        let verified = verifier.verify(&narrowed).unwrap();
+
+        // Point and subtree ops at-or-below the attenuation root: allowed.
+        assert!(verified.permits(Verb::Read, ScopeRef::Name("research.papers.doc1"), now()));
+        assert!(verified.permits(Verb::List, ScopeRef::Namespace("research.papers"), now()));
+        assert!(verified.permits(
+            Verb::List,
+            ScopeRef::Namespace("research.papers.reviews"),
+            now()
+        ));
+        // A subtree op on a strict PARENT escapes the attenuation: refused.
+        assert!(!verified.permits(Verb::List, ScopeRef::Namespace("research"), now()));
+        assert!(!verified.authorizes(Verb::List, ScopeRef::Namespace("research"), now()));
+    }
+
+    #[test]
+    fn a_name_right_does_not_authorize_namespace_semantics_offline() {
+        // The offline (M5 remote) semantic has the same rule: a `name`
+        // right is a point capability, never subtree enumeration.
+        let (minter, verifier) = minter();
+        let grants = [live(
+            1,
+            &[Verb::Read, Verb::List],
+            Scope::Name("research.papers".into()),
+        )];
+        let token = minter.mint(&alice(), &grants).unwrap();
+        let verified = verifier.verify(&token).unwrap();
+        assert!(verified.authorizes(Verb::Read, ScopeRef::Name("research.papers"), now()));
+        assert!(!verified.authorizes(Verb::List, ScopeRef::Namespace("research.papers"), now()));
     }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(24))]
 
         /// The datalog encoding agrees with the domain semantics: an
-        /// unattenuated token authorizes exactly what its minted grants cover.
+        /// unattenuated token authorizes exactly what its minted grants
+        /// cover — with `Scope::covers_scope` as the oracle, so the
+        /// (name right, namespace query) ⇒ deny case is swept too (#171).
         #[test]
         fn token_rights_match_domain_cover(
             grants in proptest::collection::vec((arb_verbs(), arb_scope()), 0..4),
@@ -558,23 +740,22 @@ mod tests {
             let token = minter.mint(&alice(), &grants).unwrap();
             let verified = verifier.verify(&token).unwrap();
             let at = now();
-            for verb in Verb::all() {
-                for resource in RESOURCES {
-                    let expected = grants
-                        .iter()
-                        .any(|g| g.verbs.contains(&verb) && g.scope.covers(resource));
-                    prop_assert_eq!(
-                        verified.authorizes(verb, resource, at),
-                        expected,
-                        "verb {:?} on {}", verb, resource
-                    );
-                }
+            for (verb, q) in query_grid() {
+                let target = query_scope(q);
+                let expected = grants
+                    .iter()
+                    .any(|g| g.verbs.contains(&verb) && g.scope.covers_scope(&target));
+                prop_assert_eq!(
+                    verified.authorizes(verb, q, at),
+                    expected,
+                    "verb {:?} on {:?}", verb, q
+                );
             }
         }
 
         /// A2 — attenuation never widens: whatever block we append, the
         /// authorized set is a subset of the parent's (and the same for the
-        /// gate's permits semantics).
+        /// gate's permits semantics), across BOTH scope kinds.
         #[test]
         fn attenuation_never_widens(
             grants in proptest::collection::vec((arb_verbs(), arb_scope()), 0..3),
@@ -603,12 +784,38 @@ mod tests {
                 prop_assert!(!c || p, "attenuation widened the authorized set");
             }
             // permits: the child's permitted set is likewise a subset.
-            for verb in Verb::all() {
-                for resource in RESOURCES {
-                    let p = parent.permits(verb, resource, at);
-                    let c = child.permits(verb, resource, at);
-                    prop_assert!(!c || p, "attenuation widened the permitted set");
-                }
+            for (verb, q) in query_grid() {
+                let p = parent.permits(verb, q, at);
+                let c = child.permits(verb, q, at);
+                prop_assert!(!c || p, "attenuation widened the permitted set");
+            }
+        }
+
+        /// The attenuated permitted set matches the domain oracle exactly:
+        /// a token attenuated to `scope` permits precisely the queries
+        /// `scope` covers under `Scope::covers_scope` (TTL fresh, single
+        /// attenuation). This is the differential sweep the #171 fix is
+        /// verified against — string-equal kind mismatches included.
+        #[test]
+        fn attenuated_permits_match_covers_scope(
+            att_scope in arb_scope(),
+            agent in proptest::sample::select(AGENTS),
+        ) {
+            let (minter, verifier) = minter();
+            let principal = Principal::Agent(agent.to_string());
+            let token = minter.mint(&principal, &[]).unwrap();
+            let attenuated = verifier
+                .attenuate(&token, Some(&att_scope), None)
+                .unwrap();
+            let child = verifier.verify(&attenuated).unwrap();
+            let at = now();
+            for (verb, q) in query_grid() {
+                let expected = att_scope.covers_scope(&query_scope(q));
+                prop_assert_eq!(
+                    child.permits(verb, q, at),
+                    expected,
+                    "attenuated to {:?}, query {:?}", att_scope, q
+                );
             }
         }
     }
