@@ -26,6 +26,13 @@ test *args:
 test-bus:
     cargo test --features bus --test grant_bus
 
+# Adversarial interleaving tests driven through the fail-crate seams (the
+# concurrency verification plan). Hermetic, but separate from `test` so the
+# `failpoints` feature — which activates the protocol-step seams — is only
+# compiled in where they're actually driven.
+test-failpoints:
+    cargo test --features failpoints --test gc_interleaving
+
 # Build the docs with warnings denied — catches broken intra-doc links.
 # `--all-features` type-checks the `bus` code too (compiling needs no broker).
 doc:
@@ -68,3 +75,4 @@ ci:
     run_phase "build"     cargo build --tests --features cli,service
     run_phase "test"      just test --tests
     run_phase "doctest"   just test --doc
+    run_phase "failpoints" just test-failpoints
