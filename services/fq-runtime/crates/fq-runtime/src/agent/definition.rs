@@ -568,6 +568,63 @@ Prompt.
     }
 
     #[test]
+    fn network_declaration_loads_and_is_reported_unenforced() {
+        // Issue #35: `sandbox.network` is parsed but nothing enforces it.
+        // Both halves of that decision are asserted here:
+        //   1. declaring it is NOT a load error — definitions record
+        //      intent ahead of enforcement, and rejecting them would
+        //      break every fleet agent (they all declare hosts);
+        //   2. it is reported as the no-op it currently is, so the load
+        //      path can warn instead of silently honouring nothing.
+        let content = r#"---
+name: network-agent
+model: claude-haiku-4-5
+tools:
+  - exec
+sandbox:
+  exec_cwd:
+    - /work
+  network:
+    - github.com
+    - api.github.com
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content)
+            .expect("a definition declaring sandbox.network must still load (#35)");
+        assert_eq!(
+            agent.sandbox().unenforced_network(),
+            Some(&["github.com".to_string(), "api.github.com".to_string()][..]),
+            "a non-empty sandbox.network must be reported as declared-but-unenforced"
+        );
+    }
+
+    #[test]
+    fn absent_network_declaration_reports_nothing() {
+        // Nothing declared, nothing to warn about — the warning must not
+        // fire for the agents that never asked for network in the first
+        // place (#35).
+        let content = r#"---
+name: quiet-agent
+model: claude-haiku-4-5
+tools:
+  - exec
+sandbox:
+  exec_cwd:
+    - /work
+---
+
+Prompt.
+"#;
+        let agent = parse_agent(content).unwrap();
+        assert!(
+            agent.sandbox().unenforced_network().is_none(),
+            "an absent sandbox.network must not be reported as unenforced"
+        );
+    }
+
+    #[test]
     fn workspace_token_without_binding_fails_loud() {
         let content = r#"---
 name: unbound
