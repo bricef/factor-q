@@ -166,6 +166,9 @@ pub mod subjects {
         format!("fq.agent.{agent_id}.failed")
     }
 
+    /// Every agent's `failed` subject — the dead-letter scan's filter.
+    pub const ALL_AGENTS_FAILED: &str = "fq.agent.*.failed";
+
     /// Worker liveness signal. Emitted periodically by each
     /// worker; the control-plane's heartbeat consumer updates
     /// `coordination_worker.last_heartbeat` on receipt. The

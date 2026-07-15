@@ -465,19 +465,22 @@ impl EventBus {
     /// payload becomes the message body. The delivery is ack'd by
     /// JetStream once it's durably accepted, so this returns only
     /// after the trigger is persisted.
+    /// Returns the trigger's sequence on the trigger stream — the
+    /// operator-facing handle (`fq dead-letters` reconciles on it).
     pub async fn publish_trigger(
         &self,
         agent_id: &str,
         payload: &serde_json::Value,
-    ) -> Result<(), BusError> {
+    ) -> Result<u64, BusError> {
         let subject = trigger_subject(agent_id);
         let body = serde_json::to_vec(payload)?;
         debug!(subject = %subject, "publishing trigger");
-        self.jetstream
+        let ack = self
+            .jetstream
             .publish(subject, Bytes::from(body))
             .await?
             .await?;
-        Ok(())
+        Ok(ack.sequence)
     }
 
     /// Create (or open) a durable JetStream pull consumer on the

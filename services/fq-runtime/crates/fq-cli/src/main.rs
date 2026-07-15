@@ -190,6 +190,11 @@ enum Commands {
         #[arg(long)]
         via_nats: bool,
     },
+    /// Dead-lettered triggers: list and requeue (#49/#169)
+    DeadLetters {
+        #[command(subcommand)]
+        command: DeadLetterCommands,
+    },
     /// Agent management commands
     Agent {
         #[command(subcommand)]
@@ -282,6 +287,35 @@ enum WorkerCommands {
     Show {
         /// Worker id to inspect.
         id: String,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeadLetterCommands {
+    /// List dead-lettered triggers (from the event stream, newest first)
+    List {
+        /// Filter by agent
+        #[arg(long)]
+        agent: Option<String>,
+        /// Maximum number of rows
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-publish a dead-lettered trigger as a fresh trigger.
+    /// NOT idempotent: requeueing twice triggers the agent twice.
+    Requeue {
+        /// Agent whose dead letter to requeue
+        agent: String,
+        /// Select by the original trigger's stream sequence
+        /// (see `fq dead-letters list`); default: the most recent
+        #[arg(long)]
+        trigger_seq: Option<u64>,
         /// Emit JSON instead of human-readable output.
         #[arg(long)]
         json: bool,
@@ -481,6 +515,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 trigger_agent(&cli.global, &agent, payload.as_deref()).await?
             }
         }
+        Commands::DeadLetters { command } => match command {
+            DeadLetterCommands::List { agent, limit, json } => {
+                list_dead_letters(&cli.global, agent.as_deref(), limit, json).await?
+            }
+            DeadLetterCommands::Requeue {
+                agent,
+                trigger_seq,
+                json,
+            } => requeue_dead_letter(&cli.global, &agent, trigger_seq, json).await?,
+        },
         Commands::Agent { command } => match command {
             AgentCommands::List => list_agents(&cli.global)?,
             AgentCommands::Validate { path } => validate_agent(&path)?,
@@ -1612,7 +1656,7 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
             report.dead_letters.exhausted_triggers
         ));
         out.push_str(
-            "  -> `fq events query --type=failed` — annotations carry the trigger subject/payload\n",
+            "  -> `fq dead-letters list` to inspect; `fq dead-letters requeue <agent>` to re-run\n",
         );
     } else {
         out.push_str("Dead-letters: none\n");
@@ -3193,6 +3237,88 @@ async fn publish_trigger(
     Ok(())
 }
 
+/// `fq dead-letters list`: dead-lettered triggers, newest first,
+/// scanned from the event stream (the projection stores no
+/// annotations, so this — unlike `fq events query` — needs NATS).
+async fn list_dead_letters(
+    global: &GlobalArgs,
+    agent: Option<&str>,
+    limit: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    let dead = fq_runtime::control_plane::operator::list_dead_letters(&bus, agent, limit).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&dead)?);
+        return Ok(());
+    }
+    if dead.is_empty() {
+        println!("No dead-lettered triggers.");
+        return Ok(());
+    }
+    println!("{} dead-lettered trigger(s), newest first:\n", dead.len());
+    for d in &dead {
+        let seq = d
+            .trigger_stream_seq
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  {}  {}  seq={} via {}",
+            d.timestamp.format("%Y-%m-%d %H:%M:%S"),
+            d.agent_id,
+            seq,
+            d.source,
+        );
+        println!("      {}", d.error_message);
+        println!("      payload: {}", truncate_json(&d.trigger_payload, 120));
+    }
+    println!("\n-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one");
+    Ok(())
+}
+
+/// `fq dead-letters requeue`: re-publish a dead-lettered trigger as a
+/// fresh trigger. Not idempotent — see the command help.
+async fn requeue_dead_letter(
+    global: &GlobalArgs,
+    agent: &str,
+    trigger_seq: Option<u64>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    fq_runtime::AgentId::new(agent).with_context(|| format!("invalid agent name '{agent}'"))?;
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    let result =
+        fq_runtime::control_plane::operator::requeue_dead_letter(&bus, agent, trigger_seq).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    println!(
+        "Requeued dead-lettered trigger for '{}' as trigger seq {} (from event {}).",
+        result.agent_id, result.new_trigger_seq, result.source_event_id
+    );
+    println!("  payload: {}", truncate_json(&result.trigger_payload, 120));
+    println!("A running `fq run` daemon will pick this up with a fresh delivery budget.");
+    Ok(())
+}
+
+/// Compact single-line JSON, truncated for terminal display.
+fn truncate_json(value: &serde_json::Value, max: usize) -> String {
+    let s = value.to_string();
+    if s.len() > max {
+        format!("{}…", &s[..s.floor_char_boundary(max)])
+    } else {
+        s
+    }
+}
+
 /// Query the SQLite projection for events matching the given
 /// filters. Read-only — does not require the projector to be
 /// currently running, only that it has been run at some point.
@@ -4471,7 +4597,8 @@ mod doctor_tests {
             out.contains("Dead-letters: 2 exhausted trigger(s)"),
             "got: {out}"
         );
-        assert!(out.contains("fq events query --type=failed"), "got: {out}");
+        assert!(out.contains("fq dead-letters list"), "got: {out}");
+        assert!(out.contains("fq dead-letters requeue"), "got: {out}");
     }
 
     #[test]
