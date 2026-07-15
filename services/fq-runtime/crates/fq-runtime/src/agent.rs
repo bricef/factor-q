@@ -457,6 +457,9 @@ impl AgentId {
     /// The reserved summariser sentinel — see [`AgentId::summary`].
     pub const SUMMARY_STR: &'static str = "summary";
 
+    /// The reserved operator sentinel — see [`AgentId::operator`].
+    pub const OPERATOR_STR: &'static str = "operator";
+
     /// Construct an agent id from a string, validating its shape.
     pub fn new(s: impl Into<String>) -> Result<Self, BuildError> {
         let s = s.into();
@@ -478,6 +481,11 @@ impl AgentId {
     /// and is never confused with (or charged to) a real agent.
     pub fn summary() -> Self {
         Self::new(Self::SUMMARY_STR).expect("`summary` is a valid agent id")
+    }
+
+    /// The operator sentinel used for operator-authored recovery events.
+    pub fn operator() -> Self {
+        Self::new(Self::OPERATOR_STR).expect("`operator` is a valid agent id")
     }
 
     pub fn as_str(&self) -> &str {
