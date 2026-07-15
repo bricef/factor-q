@@ -61,7 +61,7 @@ the recovered state, and each gets a test that proves it.
 
 | Step | Crash (`kill -9`) | I/O error | Lost un-fsynced write |
 |---|---|---|---|
-| `RESERVE` | leaked reservation → block **retained**; audit reconciles when quiescent | put fails; no state change | n/a — index txn is atomic |
+| `RESERVE` | leaked reservation → block **retained**; audit reconciles when at rest | put fails; no state change | n/a — index txn is atomic |
 | `WRITE_FILE` / `MINT` | orphan file, no row → **reaper** (mtime grace) reclaims | put fails → `RELEASE`s reservation | orphan or absent → reaper / retry; canonical file is never torn (atomic temp + rename) |
 | `BIND` | reservations leaked → retained; audit reconciles | put fails → `RELEASE` | index txn is atomic |
 | `CLAIM` | block `CLAIMED`, file present → next GC / audit resumes or resets to available | GC retries | claim lost → block stays available (safe) |

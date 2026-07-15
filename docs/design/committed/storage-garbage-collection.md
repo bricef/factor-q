@@ -208,7 +208,7 @@ Transitions:
   the next GC pass or the audit removes the row. No live reference points at it
   (it was refcount 0).
 - Crash mid-`put` after reserving → a leaked reservation keeps the block
-  **retained**; the audit reconciles the count down once quiescent.
+  **retained**; the audit reconciles the count down once at rest.
 - A block stuck `unavailable` because GC died mid-reclaim is reset by
   startup/the audit (or carries a lease), so a writer never waits on a dead GC.
 - A brand-new file written before its row is committed is an orphan; the orphan
@@ -226,7 +226,7 @@ A periodic worker, the safety net ADR-0023 F2 requires:
 - **Reconciles refcount drift** — recomputes the true reference set by walking
   `name_versions → objects → object_blocks → blocks`. It asserts
   `refcount ≥ object-derived count` (the excess is in-flight reservations, which
-  are normal) and only hard-reconciles blocks that have been quiescent past the
+  are normal) and only hard-reconciles blocks that have been at rest past the
   grace.
 - **Alarms on the forbidden state** — a live object whose block file is missing.
   The protocol makes this impossible; if the audit ever sees it, that is a bug to

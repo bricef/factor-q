@@ -82,7 +82,7 @@ async fn run_seed(seed: u64, steps: usize) {
             }
             10..=11 => {
                 // Reachability audit past the grace (0 → everything eligible; the
-                // workload is quiescent between steps, so nothing is truly in
+                // workload is at rest between steps, so nothing is truly in
                 // flight). It reclaims, reconciles, and reaps, holding the oracle.
                 ReachabilityAuditor
                     .audit(&repo, Duration::ZERO)
