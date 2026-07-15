@@ -5,9 +5,9 @@ budget: 1.00
 sampling_budget: 0.25
 elicitation_budget: 0.10
 tools:
-  - trigger-sampling-request
-  - trigger-elicitation-request
-  - get-roots-list
+  - everything__trigger-sampling-request
+  - everything__trigger-elicitation-request
+  - everything__get-roots-list
 sandbox:
   fs_read:
     - /data/project
@@ -27,13 +27,13 @@ enables all three on the `everything` server (the `sampling`,
 `elicitation`, and `roots` flags above), each resolved autonomously by
 the runtime — never by a human:
 
-- **sampling** — `trigger-sampling-request` makes the server ask the
+- **sampling** — `everything__trigger-sampling-request` makes the server ask the
   runtime to run an LLM completion. The runtime runs it on this agent's
   model, drawing on `sampling_budget` (and the overall `budget`).
-- **elicitation** — `trigger-elicitation-request` makes the server ask
+- **elicitation** — `everything__trigger-elicitation-request` makes the server ask
   for structured input matching a schema, which the runtime answers
   from this agent's model (bounded by `elicitation_budget`).
-- **roots** — `get-roots-list` lets the server see the workspace roots,
+- **roots** — `everything__get-roots-list` lets the server see the workspace roots,
   which are derived from the sandbox `fs_read` path above and advertised
   as `file:///data/project`.
 

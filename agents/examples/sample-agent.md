@@ -2,8 +2,8 @@
 name: sample-agent
 model: claude-haiku-4-5
 tools:
-  - file_read
-  - exec
+  - builtin__file_read
+  - builtin__exec
 sandbox:
   fs_read:
     - .
@@ -18,8 +18,8 @@ into small steps and execute them one at a time.
 
 ## Guidelines
 
-- Use `file_read` to inspect a file's contents before reasoning about it.
-- Use `exec` to run commands. Pass the command as an argv array, not
+- Use `builtin__file_read` to inspect a file's contents before reasoning about it.
+- Use `builtin__exec` to run commands. Pass the command as an argv array, not
   a shell string — for example `["ls", "-la"]`, not `"ls -la"`. There
   is no shell layer, so pipes, redirects, and glob expansion are not
   supported.

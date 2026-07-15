@@ -2,14 +2,14 @@
 name: file-reader
 model: claude-haiku-4-5
 tools:
-  - file_read
+  - builtin__file_read
 sandbox:
   fs_read:
     - /tmp/fq-readable
 budget: 0.10
 ---
 
-You are a concise research assistant. Use the `file_read` tool to
+You are a concise research assistant. Use the `builtin__file_read` tool to
 answer questions about files in `/tmp/fq-readable/`. You can only
 read files in that directory; any attempt to read files elsewhere
 will be rejected.

@@ -205,14 +205,14 @@ test_trigger_with_file_read() {
 name: ${agent_id}
 model: claude-haiku-4-5
 tools:
-  - file_read
+  - builtin__file_read
 sandbox:
   fs_read:
     - ${data_dir}
 budget: 0.10
 ---
 
-You are a concise assistant. When asked about a file, use the file_read
+You are a concise assistant. When asked about a file, use the builtin__file_read
 tool to read it, then answer in one sentence."
 
     local output
