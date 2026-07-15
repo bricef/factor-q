@@ -28,6 +28,17 @@
 //!   clamped to the runtime-configured maximum. On timeout the child
 //!   is killed and the tool returns with `is_error: true` plus
 //!   whatever output was captured up to that point.
+//! - **Bounded output drain** — once the child is gone (exited or
+//!   killed), legitimate leftover output is only what sits in the
+//!   kernel pipe buffer, so capture continues for a short grace window
+//!   (`drain_grace`) and is then cut. Without the bound, a descendant
+//!   that inherited the stdout/stderr pipe (anything daemonized — a
+//!   `nohup`-style spawn, a test runner leaving a child) holds EOF
+//!   hostage and the tool hangs forever *despite the timeout having
+//!   fired* (#176). Cut output carries an explicit note. The
+//!   longer-term fix is a process-group kill (`setpgid` +
+//!   `kill(-pgid)`) that ends the whole tree, not just the direct
+//!   child — worth doing when OS-level isolation lands (ADR-0010).
 //! - **Output cap & line limits** — stdout and stderr are each bounded
 //!   by a configurable byte cap (a safety backstop). When bytes are
 //!   dropped the returned text carries a marker showing how much (kept
@@ -86,6 +97,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
@@ -107,6 +119,11 @@ pub struct ExecConfig {
     /// fixed value so children do not inherit whatever weird PATH the
     /// parent had.
     pub default_path: String,
+    /// How long output capture may continue after the child is gone
+    /// (exited or killed). Bounds the drain so a descendant holding
+    /// the inherited pipe open cannot hang the tool forever (#176);
+    /// the kernel pipe buffer flushes in far less than this.
+    pub drain_grace: Duration,
 }
 
 impl Default for ExecConfig {
@@ -116,6 +133,7 @@ impl Default for ExecConfig {
             max_timeout: Duration::from_secs(300),
             max_output_bytes: 100 * 1024,
             default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
+            drain_grace: Duration::from_secs(2),
         }
     }
 }
@@ -318,16 +336,26 @@ impl Tool for ExecTool {
         // window; every other mode keeps the head up to the byte cap.
         let capture_tail = matches!(limit, LineLimit::Tail(_));
 
+        // The drain-cut signal (#176): flipped to `true` a grace period
+        // after the child is gone, so a descendant holding the
+        // inherited pipe open cannot stall the capture tasks forever.
+        let (stop_tx, stop_rx) = watch::channel(false);
+
+        let stdout_stop = stop_rx.clone();
         let stdout_task = tokio::spawn(async move {
             match stdout {
-                Some(stream) => capture_stream(stream, max_output_bytes, capture_tail).await,
-                None => (Vec::new(), 0),
+                Some(stream) => {
+                    capture_stream(stream, max_output_bytes, capture_tail, stdout_stop).await
+                }
+                None => (Vec::new(), 0, false),
             }
         });
         let stderr_task = tokio::spawn(async move {
             match stderr {
-                Some(stream) => capture_stream(stream, max_output_bytes, capture_tail).await,
-                None => (Vec::new(), 0),
+                Some(stream) => {
+                    capture_stream(stream, max_output_bytes, capture_tail, stop_rx).await
+                }
+                None => (Vec::new(), 0, false),
             }
         });
 
@@ -355,21 +383,45 @@ impl Tool for ExecTool {
             }
         };
 
-        let (stdout_bytes, stdout_total) = stdout_task
+        // The child is gone on both branches above. Whatever output is
+        // still legitimately owed sits in the kernel pipe buffer and
+        // flushes near-instantly; a stream still open past the grace is
+        // a descendant that inherited the pipe. Arm the cut.
+        let drain_grace = self.config.drain_grace;
+        tokio::spawn(async move {
+            tokio::time::sleep(drain_grace).await;
+            let _ = stop_tx.send(true);
+        });
+
+        let (stdout_bytes, stdout_total, stdout_cut) = stdout_task
             .await
             .map_err(|err| ToolError::ExecutionFailed(format!("stdout task panicked: {err}")))?;
-        let (stderr_bytes, stderr_total) = stderr_task
+        let (stderr_bytes, stderr_total, stderr_cut) = stderr_task
             .await
             .map_err(|err| ToolError::ExecutionFailed(format!("stderr task panicked: {err}")))?;
 
-        if timed_out {
-            let body = format_output(
-                &stdout_bytes,
-                stdout_total,
-                &stderr_bytes,
-                stderr_total,
-                limit,
+        let mut body = format_output(
+            &stdout_bytes,
+            stdout_total,
+            &stderr_bytes,
+            stderr_total,
+            limit,
+        );
+        if stdout_cut || stderr_cut {
+            warn!(
+                grace_ms = drain_grace.as_millis() as u64,
+                "exec output drain cut — a descendant process still held the pipe"
             );
+            body.push_str(&format!(
+                "(output capture ended after a {}s grace: the command's process \
+                 exited but a background/descendant process it started still \
+                 holds the output pipe open — any later output from it is not \
+                 captured)\n",
+                drain_grace.as_secs_f64(),
+            ));
+        }
+
+        if timed_out {
             return Ok(ToolResult {
                 output: format!(
                     "Command timed out after {}s.\n\n{body}",
@@ -387,13 +439,6 @@ impl Tool for ExecTool {
             Some(code) => format!("Exit code: {code}"),
             None => "Command was terminated by a signal.".to_string(),
         };
-        let body = format_output(
-            &stdout_bytes,
-            stdout_total,
-            &stderr_bytes,
-            stderr_total,
-            limit,
-        );
 
         Ok(ToolResult {
             output: format!("{header}\n\n{body}"),
@@ -463,23 +508,35 @@ enum LineLimit {
 }
 
 /// Capture a child stream, keeping either the head (default) or the tail
-/// (`tail = true`) up to `max_bytes`. Returns the kept bytes and the total
-/// number of bytes the stream produced (so the caller can report drops).
-async fn capture_stream<R>(stream: R, max_bytes: usize, tail: bool) -> (Vec<u8>, usize)
+/// (`tail = true`) up to `max_bytes`. Returns the kept bytes, the total
+/// number of bytes the stream produced (so the caller can report drops),
+/// and whether capture was cut by the drain-grace signal rather than
+/// ending at EOF (#176).
+async fn capture_stream<R>(
+    stream: R,
+    max_bytes: usize,
+    tail: bool,
+    stop: watch::Receiver<bool>,
+) -> (Vec<u8>, usize, bool)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     if tail {
-        read_capped_tail(stream, max_bytes).await
+        read_capped_tail(stream, max_bytes, stop).await
     } else {
-        read_capped(stream, max_bytes).await
+        read_capped(stream, max_bytes, stop).await
     }
 }
 
 /// Keep at most `max_bytes` from the **front** of a stream, draining and
 /// counting the rest (so the child never blocks on a full pipe and the
-/// caller learns the true size). Returns `(kept, total_produced)`.
-async fn read_capped<R>(stream: R, max_bytes: usize) -> (Vec<u8>, usize)
+/// caller learns the true size). Ends at EOF, or when `stop` flips true
+/// (the bounded drain, #176). Returns `(kept, total_produced, cut)`.
+async fn read_capped<R>(
+    stream: R,
+    max_bytes: usize,
+    mut stop: watch::Receiver<bool>,
+) -> (Vec<u8>, usize, bool)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -487,26 +544,40 @@ where
     let mut buf = Vec::with_capacity(max_bytes.min(8 * 1024));
     let mut scratch = [0u8; 8 * 1024];
     let mut total = 0usize;
+    let mut stop_open = true;
     loop {
-        match reader.read(&mut scratch).await {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n;
-                if buf.len() < max_bytes {
-                    let take = (max_bytes - buf.len()).min(n);
-                    buf.extend_from_slice(&scratch[..take]);
+        tokio::select! {
+            read = reader.read(&mut scratch) => match read {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    if buf.len() < max_bytes {
+                        let take = (max_bytes - buf.len()).min(n);
+                        buf.extend_from_slice(&scratch[..take]);
+                    }
                 }
-            }
-            Err(_) => break,
+                Err(_) => break,
+            },
+            changed = stop.changed(), if stop_open => match changed {
+                Ok(()) if *stop.borrow() => return (buf, total, true),
+                Ok(()) => {}
+                // Sender gone without a cut: drain to EOF as before.
+                Err(_) => stop_open = false,
+            },
         }
     }
-    (buf, total)
+    (buf, total, false)
 }
 
 /// Keep at most `max_bytes` from the **end** of a stream, reading the whole
-/// thing but trimming the retained window so memory stays bounded. Returns
-/// `(kept_tail, total_produced)`.
-async fn read_capped_tail<R>(stream: R, max_bytes: usize) -> (Vec<u8>, usize)
+/// thing but trimming the retained window so memory stays bounded. Ends at
+/// EOF, or when `stop` flips true (the bounded drain, #176). Returns
+/// `(kept_tail, total_produced, cut)`.
+async fn read_capped_tail<R>(
+    stream: R,
+    max_bytes: usize,
+    mut stop: watch::Receiver<bool>,
+) -> (Vec<u8>, usize, bool)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -514,26 +585,39 @@ where
     let mut buf: Vec<u8> = Vec::new();
     let mut scratch = [0u8; 8 * 1024];
     let mut total = 0usize;
+    let mut stop_open = true;
+    let mut cut = false;
     loop {
-        match reader.read(&mut scratch).await {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n;
-                buf.extend_from_slice(&scratch[..n]);
-                // Amortised trim: only memmove once the window doubles.
-                if buf.len() > 2 * max_bytes {
-                    let excess = buf.len() - max_bytes;
-                    buf.drain(..excess);
+        tokio::select! {
+            read = reader.read(&mut scratch) => match read {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    buf.extend_from_slice(&scratch[..n]);
+                    // Amortised trim: only memmove once the window doubles.
+                    if buf.len() > 2 * max_bytes {
+                        let excess = buf.len() - max_bytes;
+                        buf.drain(..excess);
+                    }
                 }
-            }
-            Err(_) => break,
+                Err(_) => break,
+            },
+            changed = stop.changed(), if stop_open => match changed {
+                Ok(()) if *stop.borrow() => {
+                    cut = true;
+                    break;
+                }
+                Ok(()) => {}
+                // Sender gone without a cut: drain to EOF as before.
+                Err(_) => stop_open = false,
+            },
         }
     }
     if buf.len() > max_bytes {
         let excess = buf.len() - max_bytes;
         buf.drain(..excess);
     }
-    (buf, total)
+    (buf, total, cut)
 }
 
 /// Human-readable byte size, e.g. `3.4 MiB`, `100.0 KiB`, `512 B`.
@@ -691,6 +775,7 @@ mod tests {
             max_timeout: Duration::from_secs(10),
             max_output_bytes: 4 * 1024, // Small to make truncation tests fast
             default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
+            drain_grace: Duration::from_millis(500),
         })
     }
 
@@ -714,6 +799,8 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.output.contains("hello world"));
         assert!(result.output.contains("Exit code: 0"));
+        // Normal EOF path: the drain-cut note must not appear.
+        assert!(!result.output.contains("output capture ended"));
     }
 
     #[tokio::test]
@@ -894,6 +981,7 @@ mod tests {
             max_timeout: Duration::from_secs(10),
             max_output_bytes: 4 * 1024,
             default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
+            drain_grace: Duration::from_millis(500),
         });
 
         let start = std::time::Instant::now();
@@ -927,6 +1015,7 @@ mod tests {
             max_timeout: Duration::from_secs(2),
             max_output_bytes: 4 * 1024,
             default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
+            drain_grace: Duration::from_millis(500),
         });
 
         let start = std::time::Instant::now();
@@ -944,6 +1033,93 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(4));
         assert!(result.is_error);
         assert!(result.output.contains("timed out"));
+    }
+
+    /// #176 regression: a grandchild that inherited the output pipe
+    /// must not hold the tool hostage after the timeout kill — the
+    /// drain is bounded, and what was captured before the cut is
+    /// still returned with an honest note.
+    #[tokio::test]
+    async fn timeout_with_pipe_holding_grandchild_returns_within_drain_grace() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = ExecTool::with_config(ExecConfig {
+            default_timeout: Duration::from_secs(1),
+            max_timeout: Duration::from_secs(10),
+            max_output_bytes: 4 * 1024,
+            default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
+            drain_grace: Duration::from_secs(1),
+        });
+
+        let start = std::time::Instant::now();
+        // `sleep 60 &` inherits the stdout/stderr pipes; `wait` keeps
+        // the direct child alive past the timeout so the kill path
+        // fires. Without the bounded drain this call hangs ~60s.
+        // (Operator characters inside ONE argv element are legitimate
+        // values, not standalone operators — the #92 guard allows it.)
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["sh", "-c", "echo hi; sleep 60 & wait"],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "must return within timeout + drain grace, took {elapsed:?}"
+        );
+        assert!(result.is_error);
+        assert!(result.output.contains("timed out"), "{}", result.output);
+        // Output captured before the cut is present…
+        assert!(result.output.contains("hi"), "{}", result.output);
+        // …and the cut is reported honestly.
+        assert!(
+            result.output.contains("output capture ended"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// The same defect one branch over (#176): a child that exits
+    /// cleanly but leaves a daemonized descendant holding the pipe
+    /// must not hang the tool either. The command itself succeeded,
+    /// so the result is NOT an error — just cut, with the note.
+    #[tokio::test]
+    async fn clean_exit_with_pipe_holding_grandchild_is_not_hung() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast(); // 500ms drain grace
+
+        let start = std::time::Instant::now();
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": ["sh", "-c", "echo done; sleep 60 &"],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "must return within the drain grace, took {elapsed:?}"
+        );
+        assert!(!result.is_error, "{}", result.output);
+        assert!(result.output.contains("Exit code: 0"), "{}", result.output);
+        assert!(result.output.contains("done"), "{}", result.output);
+        assert!(
+            result.output.contains("output capture ended"),
+            "{}",
+            result.output
+        );
     }
 
     #[tokio::test]
