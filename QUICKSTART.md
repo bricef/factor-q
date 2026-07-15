@@ -50,7 +50,7 @@ This produces:
 | File | What it does |
 |---|---|
 | `fq.toml` | Runtime configuration — NATS URL, agents directory, provider env vars. |
-| `agents/sample-agent.md` | A starter agent with `file_read` and `exec` tools and a `$0.10` budget. |
+| `agents/sample-agent.md` | A starter agent with `builtin__file_read` and `builtin__exec` tools and a `$0.10` budget. |
 | `README.md` | A pointer back to factor-q docs. |
 
 Open `agents/sample-agent.md` to see the format: YAML frontmatter declaring model, tools, sandbox, and budget; Markdown body containing the system prompt. Full reference in the [agent authoring guide](docs/guide/agent-definitions.md).
@@ -108,16 +108,16 @@ just fq costs --since 2026-04-25
 
 The projection is rebuildable from NATS at any time — NATS is the source of truth.
 
-## 7. Try `self_inspect` (optional)
+## 7. Try `builtin__self_inspect` (optional)
 
-The `self_inspect` built-in lets an agent ask the runtime about its own invocation state — budget remaining, iterations used, the configured model — instead of guessing. Try it via the bundled `self-aware` example:
+The `builtin__self_inspect` built-in lets an agent ask the runtime about its own invocation state — budget remaining, iterations used, the configured model — instead of guessing. Try it via the bundled `self-aware` example:
 
 ```sh
 just fq --agents-dir agents/examples trigger self-aware \
   "What model are you running and how much budget do you have left?"
 ```
 
-The agent calls `self_inspect`, the runtime synthesises the answer from its own bookkeeping, and the agent reports back with authoritative numbers (e.g. *"Claude Haiku 4.5, $0.049 remaining of $0.05"*). See the [host-fulfilled tools section](docs/guide/reducer-harness.md#host-fulfilled-tools) of the reducer guide for the implementation pattern.
+The agent calls `builtin__self_inspect`, the runtime synthesises the answer from its own bookkeeping, and the agent reports back with authoritative numbers (e.g. *"Claude Haiku 4.5, $0.049 remaining of $0.05"*). See the [host-fulfilled tools section](docs/guide/reducer-harness.md#host-fulfilled-tools) of the reducer guide for the implementation pattern.
 
 ## 8. Run the daemon (optional)
 

@@ -233,8 +233,8 @@ the tool runs, the result comes back. The reducer never sees
 the difference.
 
 Some tools need data the `ToolContext` cannot expose because it
-isn't sandbox-scoped — it's invocation-scoped. The `self_inspect`
-tool is the canonical example: an agent calling `self_inspect`
+isn't sandbox-scoped — it's invocation-scoped. The `builtin__self_inspect`
+tool is the canonical example: an agent calling `builtin__self_inspect`
 wants the runtime's own bookkeeping (cost so far, iterations,
 configured budget). That state lives on the runner, not on the
 tool. For these the runtime uses a **host-fulfilled tool**
@@ -249,11 +249,11 @@ pattern:
    telling itself it forgot to intercept.
 3. The actual data is synthesised by
    [`crate::worker::introspection::synthesize_self_inspect`](../../services/fq-runtime/crates/fq-runtime/src/worker/introspection.rs).
-4. The agent sees `self_inspect` exactly like any other tool —
+4. The agent sees `builtin__self_inspect` exactly like any other tool —
    one entry in its `tools:` list, ordinary `tool.call` /
    `tool.result` events, JSON output.
 
-For an agent that uses `self_inspect`, see
+For an agent that uses `builtin__self_inspect`, see
 [`agents/examples/self-aware.md`](../../agents/examples/self-aware.md).
 
 ## What's not yet supported

@@ -1039,7 +1039,9 @@ async fn run_sampling_scenario(
 
     let mut registry = ToolRegistry::with_builtins();
     for tool in tools {
-        let _ = registry.register(tool);
+        registry
+            .register(tool)
+            .expect("register namespaced MCP tool");
     }
 
     // Agent permitted to call the sampling tool, with the grant under test.
@@ -1540,7 +1542,9 @@ async fn run_elicitation_scenario(
 
     let mut registry = ToolRegistry::with_builtins();
     for tool in tools {
-        let _ = registry.register(tool);
+        registry
+            .register(tool)
+            .expect("register namespaced MCP tool");
     }
 
     let mut builder = Agent::builder()

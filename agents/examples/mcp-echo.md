@@ -2,7 +2,7 @@
 name: mcp-echo
 model: claude-haiku-4-5
 tools:
-  - echo
+  - everything__echo
 mcp:
   - server: everything
     command: npx
@@ -12,5 +12,5 @@ budget: 0.10
 
 You are a test agent that demonstrates MCP tool integration.
 
-When given a message, use the `echo` tool to echo it back. The echo tool
+When given a message, use the `everything__echo` tool to echo it back. The echo tool
 accepts a `message` parameter and returns the same text.

@@ -409,8 +409,8 @@ You are an agent.
         let id = AgentId::new("exec-runner").unwrap();
         let agent = registry.get(&id).expect("exec-runner example");
         assert!(
-            agent.tools().iter().any(|t| t == "exec"),
-            "exec-runner should list exec tool"
+            agent.tools().iter().any(|t| t == "builtin__exec"),
+            "exec-runner should list the canonical exec tool"
         );
         assert!(
             !agent.sandbox().exec_cwd_paths().is_empty(),

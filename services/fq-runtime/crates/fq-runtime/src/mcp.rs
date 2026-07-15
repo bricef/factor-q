@@ -609,8 +609,18 @@ fn logging_level_name(level: LoggingLevel) -> &'static str {
     }
 }
 
-/// MCP server ids form the namespace in provider-visible tool names.
+/// MCP server ids form the namespace in provider-visible tool names
+/// (`<server>__<tool>`, #177). The charset excludes `_` so the first
+/// `__` in a canonical name unambiguously splits namespace from tool,
+/// and the whole name stays inside provider tool-name rules
+/// (`[a-zA-Z0-9_-]`, e.g. Anthropic's).
 fn validate_server_name(name: &str) -> Result<(), McpError> {
+    if name == "builtin" {
+        return Err(McpError::ToolDiscovery {
+            command: name.to_string(),
+            reason: "server id 'builtin' is reserved for runtime tools".to_string(),
+        });
+    }
     if name.is_empty()
         || name.len() > 48
         || !name
@@ -619,12 +629,25 @@ fn validate_server_name(name: &str) -> Result<(), McpError> {
     {
         return Err(McpError::ToolDiscovery {
             command: name.to_string(),
-            reason:
-                "server id must match [a-z0-9-]+, be at most 48 characters, and cannot contain '__'"
-                    .to_string(),
+            reason: "server id must match [a-z0-9-]+ and be at most 48 characters".to_string(),
         });
     }
     Ok(())
+}
+
+/// Compose the canonical, provider-visible name for a server's tool and
+/// enforce the 64-character combined bound (the strictest provider
+/// tool-name length, Anthropic's). Failing one tool fails the server's
+/// discovery loudly rather than silently offering a partial tool set.
+fn namespaced_tool_name(server_name: &str, remote_name: &str) -> Result<String, McpError> {
+    let name = format!("{server_name}__{remote_name}");
+    if name.len() > 64 {
+        return Err(McpError::ToolDiscovery {
+            command: server_name.to_string(),
+            reason: format!("namespaced tool name '{name}' exceeds 64 characters"),
+        });
+    }
+    Ok(name)
 }
 
 /// A single tool from an MCP server, adapted to the fq-tools [`Tool`] trait.
@@ -1085,13 +1108,7 @@ impl McpClientManager {
 
         for mcp_tool in mcp_tools {
             let remote_name = mcp_tool.name.to_string();
-            let name = format!("{server_name}__{remote_name}");
-            if name.len() > 64 {
-                return Err(McpError::ToolDiscovery {
-                    command: server_name.to_string(),
-                    reason: format!("namespaced tool name '{name}' exceeds 64 characters"),
-                });
-            }
+            let name = namespaced_tool_name(server_name, &remote_name)?;
             let description = mcp_tool.description.as_deref().unwrap_or("").to_string();
 
             // Convert the Arc<JsonObject> input_schema to a serde_json::Value.
@@ -1830,6 +1847,48 @@ fn content_meta<A: serde::Serialize, M: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_name_validation_enforces_charset_length_and_reservation() {
+        for ok in ["everything", "a", "srv-2", &"x".repeat(48)] {
+            assert!(validate_server_name(ok).is_ok(), "'{ok}' should be valid");
+        }
+        for (bad, why) in [
+            ("", "empty"),
+            ("Server", "uppercase"),
+            ("my_server", "underscore breaks __ splitting"),
+            ("srv.1", "dot violates provider tool-name rules"),
+            (&"x".repeat(49), "over the 48-char bound"),
+            ("builtin", "reserved runtime namespace"),
+        ] {
+            assert!(validate_server_name(bad).is_err(), "'{bad}' ({why})");
+        }
+        // The reservation gets its own message so the failure is
+        // self-explaining, not a charset complaint.
+        let err = validate_server_name("builtin").unwrap_err();
+        assert!(format!("{err}").contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn namespaced_tool_names_are_bounded_to_provider_limits() {
+        assert_eq!(
+            namespaced_tool_name("everything", "echo").unwrap(),
+            "everything__echo"
+        );
+        // 48 (max server) + 2 + 14 = 64: exactly at the bound is fine.
+        let server = "x".repeat(48);
+        assert!(namespaced_tool_name(&server, &"t".repeat(14)).is_ok());
+        // One more character crosses the provider bound and must fail
+        // loudly at discovery, not at the first LLM call.
+        let err = namespaced_tool_name(&server, &"t".repeat(15)).unwrap_err();
+        assert!(format!("{err}").contains("64"), "{err}");
+        // A remote tool name containing `__` is legal — only the FIRST
+        // `__` is the namespace split (server ids cannot contain `_`).
+        assert_eq!(
+            namespaced_tool_name("srv", "get__thing").unwrap(),
+            "srv__get__thing"
+        );
+    }
 
     #[test]
     fn advertised_capabilities_reflect_the_grant() {

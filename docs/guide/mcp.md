@@ -68,6 +68,19 @@ mcp:
 Tool calls go through the same sandbox/budget/event machinery as
 built-ins. A tool-only server is shared across invocations.
 
+Naming rules — enforced at discovery, failing the server loudly rather
+than offering a partial tool set:
+
+- Server ids must match `[a-z0-9-]+` and be at most 48 characters. The
+  charset excludes `_`, so the first `__` in a canonical name always
+  splits server from tool; `builtin` is reserved for runtime tools.
+- The combined `<server>__<tool>` name must fit provider tool-name
+  rules: at most 64 characters of `[a-zA-Z0-9_-]` (the strictest
+  provider limit — names reach the LLM API verbatim).
+- Registrations never replace an existing name: a collision with a
+  built-in or another server's tool is rejected and logged, not
+  silently shadowed.
+
 ## Resources
 
 A server that advertises resources gets three host-fulfilled tools so

@@ -61,14 +61,26 @@ and `[agents]` sections (`fq init`).
 ## Adding tools
 
 Tools give the agent capabilities beyond text generation. factor-q
-ships four built-in tools:
+ships six built-in tools:
 
 | Tool | What it does | Sandbox dimension |
 |---|---|---|
 | `builtin__file_read` | Read a file's contents | `fs_read` |
 | `builtin__file_write` | Write/overwrite a file | `fs_write` |
+| `builtin__file_list` | List files under the sandbox by relative glob | `fs_read` |
+| `builtin__file_search` | Find text in sandboxed files | `fs_read` |
 | `builtin__exec` | Run a single program (argv, no shell) | `exec_cwd` |
 | `builtin__self_inspect` | Ask the runtime about this invocation's own state — budget, iteration count, model, available tools. | none — host-fulfilled |
+
+Every tool name is namespaced: built-ins live under the reserved
+`builtin__` prefix, MCP tools under their server's id
+(`<server>__<tool>` — see [MCP servers](#mcp-servers)). The registry
+rejects any other registration into `builtin__` and never replaces on
+a name collision, so an MCP server cannot shadow a sandboxed built-in.
+Legacy bare built-in names (`exec`, `file_read`, …) in `tools:` are
+still accepted for one release and mapped to their canonical names
+with a deprecation warning in the daemon log — update definitions to
+the `builtin__` form now.
 
 To grant a tool, list it in `tools:` and declare the corresponding
 sandbox paths. **Nothing is available by default** — an agent with
@@ -330,7 +342,8 @@ mcp:
 ```
 
 The server's **tools** become available exactly like built-ins — list
-the ones you want in `tools:` by their own names (MCP tool names use the server namespace (`<server>__<tool>)):
+the ones you want in `tools:` by their canonical namespaced names,
+`<server>__<tool>`:
 
 ```yaml
 tools:

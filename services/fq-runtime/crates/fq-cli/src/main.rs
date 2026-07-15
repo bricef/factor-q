@@ -908,7 +908,7 @@ async fn trigger_agent(
             Ok(mcp_tools) => {
                 for tool in mcp_tools {
                     if let Err(error) = tools.register(tool) {
-                        tracing::warn!(%error, "refusing MCP tool registration");
+                        tracing::warn!(server = %decl.server, %error, "refusing MCP tool registration");
                     }
                 }
             }
@@ -2011,7 +2011,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 Ok(mcp_tools) => {
                     for tool in mcp_tools {
                         if let Err(error) = tools.register(tool) {
-                            tracing::warn!(%error, "refusing MCP tool registration");
+                            tracing::warn!(server = %decl.server, %error, "refusing MCP tool registration");
                         }
                     }
                 }

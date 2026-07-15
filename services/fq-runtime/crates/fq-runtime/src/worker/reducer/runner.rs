@@ -630,10 +630,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 .await
             {
                 Ok((server_tools, rx, _roots_handle)) => {
-                    // Per-invocation server tools win on name collision.
+                    // Per-invocation server tools are additive: on a name
+                    // collision the registry rejects the newcomer (first
+                    // registration wins). The CLI never starts a
+                    // grant-bearing server as shared (ADR-0018), so a
+                    // rejection here means two declarations collide —
+                    // surfaced loudly instead of silently shadowing.
                     for tool in server_tools {
                         if let Err(error) = tools.register(tool) {
-                            tracing::warn!(%error, "refusing MCP tool registration");
+                            warn!(server = %decl.server, %error, "refusing per-invocation MCP tool registration");
                         }
                     }
                     channels.push((decl.server.clone(), rx));
@@ -757,6 +762,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 return outcome;
             }
         };
+        warn_on_deprecated_bare_grants(&agent_id, agent.tools());
         let allowed_tool_names = canonical_tool_names(agent.tools());
         let tool_schemas = tools.build_schemas(&allowed_tool_names);
         // A tool the agent declares but the registry has no
@@ -1137,6 +1143,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .ambient_var("FQ_AGENT_ID", agent_id.to_string())
             .ambient_var("FQ_MODEL", agent.model());
         let base_tools = self.context.tools();
+        warn_on_deprecated_bare_grants(&agent_id, agent.tools());
         let allowed_tool_names = canonical_tool_names(agent.tools());
         let tool_schemas = base_tools.build_schemas(&allowed_tool_names);
         let agent_config = AgentConfig {
@@ -1782,9 +1789,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         context: &mut ContextTracker,
         cursor: &mut Option<Uuid>,
     ) -> Result<ToolCallResult, ExecutorError> {
-        // Accept legacy bare built-in calls while definitions migrate.
-        if let Some(name) = canonical_tool_names(std::slice::from_ref(&req.tool_name)).pop() {
-            req.tool_name = name;
+        // Accept legacy bare built-in calls while definitions migrate
+        // (#177): grants are canonicalised the same way, so the
+        // allowed-check, dispatch, the WAL, and events all see one
+        // vocabulary within a runtime version.
+        if let Some(canonical) = canonicalize_bare_builtin(&req.tool_name) {
+            debug!(from = %req.tool_name, to = %canonical, "normalised legacy bare tool call");
+            req.tool_name = canonical;
         }
         // Idempotent recovery: a completed WAL row for this exact call
         // means a prior incarnation already ran it. Reuse the recorded
@@ -1873,7 +1884,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // schema but the data lives here. Intercept before falling
         // through to `Tool::execute` (which would surface a tripwire
         // error). See `crate::introspection`.
-        if req.tool_name == "builtin__self_inspect" {
+        if req.tool_name == crate::tools::SELF_INSPECT_CANONICAL_NAME {
             return self
                 .run_self_inspect_with_wal(
                     agent,
@@ -3299,19 +3310,44 @@ const EVALUATOR_SYSTEM_PREAMBLE: &str = "You are a safety evaluator gating an au
      appropriate for the stated action. Respond with ONLY a single JSON object \
      {\"approved\": <true|false>, \"reason\": <string>} — no prose, no code fences.";
 
-/// Map legacy bare built-in grants to their canonical names for one release.
-/// MCP tools are always explicitly namespaced.
+/// Canonical form of a legacy bare built-in name (`exec` →
+/// `builtin__exec`), or `None` when the name is not a bare built-in.
+/// The basename list lives beside the registry so a new built-in cannot
+/// miss this mapping. MCP tools are always explicitly namespaced and
+/// never map.
+fn canonicalize_bare_builtin(name: &str) -> Option<String> {
+    crate::tools::BUILTIN_TOOL_BASENAMES
+        .contains(&name)
+        .then(|| format!("{}{name}", crate::tools::BUILTIN_PREFIX))
+}
+
+/// Map legacy bare built-in grants to their canonical names. Pure and
+/// quiet — it runs on every tool call's allowed-check, so deprecation
+/// warnings are emitted once per invocation setup by
+/// [`warn_on_deprecated_bare_grants`], not here. Accepted for one
+/// release while agent definitions migrate (#177).
 fn canonical_tool_names(names: &[String]) -> Vec<String> {
     names
         .iter()
-        .map(|name| match name.as_str() {
-            "file_read" | "file_list" | "file_search" | "file_write" | "exec" | "self_inspect" => {
-                warn!(tool = %name, "bare built-in tool grant is deprecated; use builtin__ prefix");
-                format!("builtin__{name}")
-            }
-            _ => name.clone(),
-        })
+        .map(|name| canonicalize_bare_builtin(name).unwrap_or_else(|| name.clone()))
         .collect()
+}
+
+/// Emit the one-per-invocation deprecation warning for legacy bare
+/// built-in grants in an agent definition (#177 migration window).
+fn warn_on_deprecated_bare_grants(agent_id: &AgentId, names: &[String]) {
+    let deprecated: Vec<&str> = names
+        .iter()
+        .filter(|name| canonicalize_bare_builtin(name).is_some())
+        .map(|name| name.as_str())
+        .collect();
+    if !deprecated.is_empty() {
+        warn!(
+            agent_id = %agent_id,
+            tools = ?deprecated,
+            "bare built-in tool grants are deprecated; use the builtin__ prefix"
+        );
+    }
 }
 
 /// Stable runner-authored environment preamble injected as the first context message.
@@ -4727,6 +4763,141 @@ mod tests {
         // is dispatched; tool counter is still 0 at synthesis time.
         assert_eq!(parsed["iterations"]["llm_calls_made"], 1);
         assert_eq!(parsed["iterations"]["tool_calls_made"], 0);
+    }
+
+    #[test]
+    fn canonicalize_bare_builtin_maps_every_basename_and_nothing_else() {
+        for base in crate::tools::BUILTIN_TOOL_BASENAMES {
+            assert_eq!(
+                canonicalize_bare_builtin(base).as_deref(),
+                Some(format!("{}{base}", crate::tools::BUILTIN_PREFIX).as_str())
+            );
+        }
+        // Already-canonical, MCP-namespaced, and unknown names pass through.
+        assert_eq!(canonicalize_bare_builtin("builtin__exec"), None);
+        assert_eq!(canonicalize_bare_builtin("everything__echo"), None);
+        assert_eq!(canonicalize_bare_builtin("shell"), None);
+    }
+
+    #[test]
+    fn canonical_tool_names_rewrites_only_bare_builtins() {
+        let names = vec![
+            "exec".to_string(),
+            "everything__echo".to_string(),
+            "builtin__file_read".to_string(),
+        ];
+        assert_eq!(
+            canonical_tool_names(&names),
+            vec![
+                "builtin__exec".to_string(),
+                "everything__echo".to_string(),
+                "builtin__file_read".to_string(),
+            ]
+        );
+    }
+
+    /// #177 migration window: a definition still granting bare built-in
+    /// names keeps working for one release — the grant is canonicalised
+    /// (the model is offered `builtin__self_inspect`), and a model that
+    /// nevertheless calls the bare name is normalised on dispatch. Both
+    /// legacy paths are exercised deliberately: bare grant + bare call.
+    #[tokio::test]
+    async fn legacy_bare_builtin_grants_and_calls_still_resolve() {
+        let Ok(url) = std::env::var("FQ_NATS_URL") else {
+            eprintln!("skipping: FQ_NATS_URL not set");
+            return;
+        };
+
+        let agent_id = unique_agent_id("legacy-bare");
+        let agent = Agent::builder()
+            .id(agent_id.clone())
+            .model("claude-haiku")
+            .system_prompt("Inspect yourself when asked.")
+            .tools(["self_inspect"]) // deprecated bare grant
+            .budget(0.50)
+            .build()
+            .unwrap();
+
+        let llm = FixtureClient::new();
+        // Turn 1: the model calls the bare legacy name.
+        llm.push_response(tool_use("self_inspect", "call_si", json!({}), (100, 50)));
+        // Turn 2: model summarises and finishes.
+        llm.push_response(canned("done", 150, 30));
+
+        let bus = EventBus::connect(&url).await.expect("connect to NATS");
+        let store_dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            WorkerStore::open(&store_dir.path().join("events.db"))
+                .await
+                .expect("worker store"),
+        );
+        let runner = ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus.clone())
+                    .pricing(test_pricing())
+                    .store(store)
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
+            Harness::new(),
+        );
+
+        let mut sub = bus
+            .subscribe(format!("fq.agent.{agent_id}.>"))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        runner
+            .run(&agent, &llm, TriggerSource::Manual, None, json!({}))
+            .await
+            .expect("invocation");
+
+        // The model was offered the canonical name, not the bare grant.
+        let offered: Vec<String> = llm
+            .requests()
+            .first()
+            .expect("at least one LLM request")
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(offered, vec!["builtin__self_inspect".to_string()]);
+
+        // The event trail records the canonical vocabulary even though
+        // the model issued the bare name.
+        let mut call_name: Option<String> = None;
+        let mut saw_result = false;
+        for _ in 0..15 {
+            let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
+                .await
+                .expect("timeout")
+                .expect("stream closed")
+                .expect("deserialise");
+            match &event.payload {
+                EventPayload::ToolCall(p) => call_name = Some(p.tool_name.clone()),
+                EventPayload::ToolResult(_) => {
+                    saw_result = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            call_name.as_deref(),
+            Some(crate::tools::SELF_INSPECT_CANONICAL_NAME),
+            "tool.call must record the canonical name"
+        );
+        assert!(
+            saw_result,
+            "self_inspect must dispatch and produce a result"
+        );
     }
 
     /// The motivating test for picking SelfInspect as the first
