@@ -312,9 +312,14 @@ impl SummaryConsumer {
             ],
             tools: vec![],
             params: RequestParams {
-                effort: None,
+                // Minimal, explicitly: gpt-5-family models otherwise
+                // scale reasoning to fill max_tokens and return EMPTY
+                // content — every summary silently skipped (found live
+                // on gpt-5-nano; reasoning consumed all of 100 and,
+                // raised to 400, all of 400).
+                effort: Some(crate::events::Effort::Minimal),
                 temperature: None,
-                max_tokens: Some(100),
+                max_tokens: Some(150),
             },
         };
         let response = match self.llm.chat(request).await {
@@ -335,7 +340,14 @@ impl SummaryConsumer {
             self.max_line_chars,
         );
         if line.is_empty() {
-            warn!(invocation_id = %invocation_id, "summariser returned no content; skipping");
+            // stop_reason in the warning is the diagnosis: MaxTokens
+            // with empty content means reasoning ate the budget.
+            warn!(
+                invocation_id = %invocation_id,
+                stop_reason = ?response.stop_reason,
+                output_tokens = response.usage.output_tokens,
+                "summariser returned no content; skipping"
+            );
             let _ = msg.ack().await;
             return;
         }
@@ -731,6 +743,10 @@ mod tests {
         // and the latest content — and must NOT be conversation-sized.
         let requests = world.fixture.requests();
         let second = &requests[1];
+        // Reasoning must be pinned to Minimal: gpt-5-family models
+        // otherwise burn the whole max_tokens budget thinking and
+        // return no content at all.
+        assert_eq!(second.params.effort, Some(crate::events::Effort::Minimal));
         let user = second.messages[1].content.as_deref().unwrap();
         assert!(
             user.contains("Fixing #7: reading the issue"),
