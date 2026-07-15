@@ -454,6 +454,9 @@ impl AgentId {
     /// any real agent.
     pub const SYSTEM_STR: &'static str = "system";
 
+    /// The reserved summariser sentinel — see [`AgentId::summary`].
+    pub const SUMMARY_STR: &'static str = "summary";
+
     /// Construct an agent id from a string, validating its shape.
     pub fn new(s: impl Into<String>) -> Result<Self, BuildError> {
         let s = s.into();
@@ -467,6 +470,14 @@ impl AgentId {
         // "system" passes `validate`; this never panics. The
         // expect-message documents the invariant.
         Self::new(Self::SYSTEM_STR).expect("`system` is a valid agent id")
+    }
+
+    /// The invocation-summariser sentinel (#216): the reserved agent
+    /// id `invocation.summary` events are emitted under, so the
+    /// summariser's own LLM spend appears in `fq costs` as its own row
+    /// and is never confused with (or charged to) a real agent.
+    pub fn summary() -> Self {
+        Self::new(Self::SUMMARY_STR).expect("`summary` is a valid agent id")
     }
 
     pub fn as_str(&self) -> &str {

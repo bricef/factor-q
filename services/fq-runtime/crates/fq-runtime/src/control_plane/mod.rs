@@ -46,6 +46,7 @@ pub mod operator;
 pub mod projection;
 pub mod retention;
 pub mod store;
+pub mod summary_consumer;
 
 pub use advisory_watch::{AdvisoryWatch, AdvisoryWatchError};
 pub use coordination_consumer::{CoordinationConsumer, CoordinationConsumerError};
@@ -54,3 +55,4 @@ pub use store::{
     CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow,
     OwnerRow, OwnerStatus, PendingWaitRow, ScheduleEntryRow, WorkerRow, WorkerStatus,
 };
+pub use summary_consumer::{SummaryConsumer, SummaryConsumerError};

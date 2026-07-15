@@ -73,6 +73,14 @@ Config and agent-definition changes don't need a deploy at all:
 key is the exception — add it to `.secrets/env` and `deploy.sh --force`,
 since only launch reads the env file.
 
+One-line invocation summaries (#216): set `[summary] model = "<cheap-model>"`
+in `fq.toml` (and `fq reload`-or-restart) and the daemon keeps a one-line,
+cheap-model status per invocation on the dashboard's invocation surfaces —
+what work was expected, what it is doing now, how it ended. The model must
+be priced (the ADR-0004 startup guarantee applies, so deploy config-first);
+the summariser's own spend shows in `fq costs` as the reserved `summary`
+agent and is never charged to an invocation. Unset = disabled, zero change.
+
 The operator dashboard (read-only web view, #105) rides in the bundle:
 enable `[read_service]` in `fq.toml` (one-time), and `deploy.sh` stops
 and relaunches it with the daemon and watcher — it must run the same

@@ -160,6 +160,11 @@ pub struct ActiveInvocationView {
     pub open_tools: Vec<String>,
     /// Models with an open (non-completed) LLM dispatch right now.
     pub open_llms: Vec<String>,
+    /// One-line operator summary (#216), when the summariser has
+    /// produced one. `None` with the summariser disabled or before
+    /// the first line lands.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 /// One row in the invocation list: a coordination-ownership row, or (in
@@ -186,6 +191,10 @@ pub struct InvocationSummaryView {
     /// True when the row came from `invocation_archive` (no live
     /// ownership row remains).
     pub archived: bool,
+    /// One-line operator summary (#216); see
+    /// [`ActiveInvocationView::summary`].
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 impl From<OwnerRow> for InvocationSummaryView {
@@ -198,6 +207,7 @@ impl From<OwnerRow> for InvocationSummaryView {
             assigned_at_ms: r.assigned_at,
             started_at_ms: r.assigned_at,
             archived: false,
+            summary: None,
         }
     }
 }
@@ -789,7 +799,14 @@ impl Views {
                 updated_at_ms: row.updated_at,
                 open_tools,
                 open_llms,
+                summary: None,
             });
+        }
+        // Join the one-line summaries (#216) in one pass.
+        let ids: Vec<String> = out.iter().map(|v| v.invocation_id.clone()).collect();
+        let mut summaries = self.projection.summaries_for(&ids).await?;
+        for view in &mut out {
+            view.summary = summaries.remove(&view.invocation_id);
         }
         Ok(out)
     }
@@ -841,8 +858,15 @@ impl Views {
                     assigned_at_ms: arc.archived_at,
                     started_at_ms: arc.started_at,
                     archived: true,
+                    summary: None,
                 });
             }
+        }
+        // Join the one-line summaries (#216) in one pass.
+        let ids: Vec<String> = items.iter().map(|v| v.invocation_id.clone()).collect();
+        let mut summaries = self.projection.summaries_for(&ids).await?;
+        for view in &mut items {
+            view.summary = summaries.remove(&view.invocation_id);
         }
         Ok(items)
     }
@@ -1074,6 +1098,72 @@ mod tests {
         assert!(views.active_invocations().await.unwrap().is_empty());
         assert!(views.invocation("no-such-id").await.unwrap().is_none());
         assert!(views.worker("no-such-worker").await.unwrap().is_none());
+    }
+
+    /// #216: the one-line summary joins onto both invocation surfaces
+    /// (the active list and the invocation index) from the
+    /// projection's `invocation_summary` table.
+    #[tokio::test]
+    async fn summary_line_joins_onto_invocation_surfaces() {
+        use crate::agent::AgentId;
+        use crate::events::{Event, EventPayload, InvocationSummaryPayload, SummaryKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let inv = uuid::Uuid::now_v7();
+        {
+            let cp = ControlPlaneStore::open(&path).await.unwrap();
+            let ws = WorkerStore::open(&path).await.unwrap();
+            let proj = ProjectionStore::open(&path).await.unwrap();
+            cp.register_worker("w1", "host", 100).await.unwrap();
+            cp.assign_invocation(&inv.to_string(), "w1", 100)
+                .await
+                .unwrap();
+            let row = InvocationStateRow {
+                invocation_id: inv.to_string(),
+                agent_id: "agent-a".into(),
+                schema_version: 1,
+                phase: "reducing".into(),
+                state_blob: vec![],
+                step_index: 1,
+                started_at: 100,
+                updated_at: 150,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
+            };
+            ws.upsert_invocation_state(&row).await.unwrap();
+            proj.insert_event(&Event::new(
+                AgentId::summary(),
+                inv,
+                EventPayload::InvocationSummary(InvocationSummaryPayload {
+                    kind: SummaryKind::Progress,
+                    summary: "Fixing #7: editing widget.rs".to_string(),
+                }),
+            ))
+            .await
+            .unwrap();
+        }
+
+        let views = Views::open(&path).await.unwrap();
+
+        let active = views.active_invocations().await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(
+            active[0].summary.as_deref(),
+            Some("Fixing #7: editing widget.rs")
+        );
+
+        let index = views.invocation_index(None, true, 50).await.unwrap();
+        assert_eq!(index.len(), 1);
+        assert_eq!(
+            index[0].summary.as_deref(),
+            Some("Fixing #7: editing widget.rs")
+        );
     }
 
     /// Seed a worker and an in-flight invocation, then read them back through

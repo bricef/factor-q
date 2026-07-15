@@ -409,6 +409,24 @@ Published by `fq invocation drop` (and any future operator-issued recovery actio
 - **Resume semantics are deferred.** The control-plane doesn't currently hold the worker's `state_blob` for ambiguous invocations; honest resume would require either enriching `invocation.ambiguous` with the blob or adding an operator-RPC to the worker. See the step-9 plan (`docs/plans/closed/2026-05-22-operator-cli.md`).
 - **No ack.** Unlike `invocation.archived`, no worker is waiting to clean up. The `invocation.archived` handler has a no-downgrade guard so a late `archived` event from a still-alive worker doesn't override the operator's `Failed`.
 
+### `invocation_summary`
+
+Published by the daemon's summary consumer (#216) — never by an agent — under the reserved sentinel `agent_id` of `"summary"`, with `invocation_id` binding the line to the summarised invocation. Subject: `fq.agent.summary.invocation_summary`.
+
+```json
+{
+  "kind": "progress",
+  "summary": "Fixing #7: tests green, opening the PR"
+}
+```
+
+**Design notes:**
+
+- **`kind` is `start` | `progress` | `outcome`.** `start` summarises the trigger payload (what work is expected), `progress` is a rolling update from the latest model turn, `outcome` is the final line on `completed`/`failed`.
+- **Cost rides the envelope.** The summariser's own token usage and spend are attached as `envelope.cost` exactly as on `llm.response` — so `fq costs` (and the dashboard's per-model split) report the summariser as its own `summary` agent row, and no invocation's totals or budget are touched (operator overhead by design).
+- **Derived, not authoritative.** The projection maintains `invocation_summary` (current line per invocation, last write wins). A reprojection replays these events; the LLM is never re-called.
+- **The summariser never writes into the invocation.** No WAL row, no conversation message — the reducer's resume/drain equivalence is untouched by construction.
+
 ### `system.startup`
 
 ```json

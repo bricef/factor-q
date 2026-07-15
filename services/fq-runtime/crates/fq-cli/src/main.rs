@@ -45,7 +45,7 @@ fn build_validated_pricing(
     if overrides > 0 {
         println!("Applied {overrides} model pricing override(s) from config");
     }
-    let agent_models: Vec<(String, String)> = registry
+    let mut agent_models: Vec<(String, String)> = registry
         .iter()
         .map(|l| {
             (
@@ -54,6 +54,12 @@ fn build_validated_pricing(
             )
         })
         .collect();
+    // The summariser's model (#216) is held to the same guarantee as
+    // agent models: routed by a provider and priced, or refuse to
+    // start — its spend is cost-accounted like everyone else's.
+    if let Some(model) = &config.summary.model {
+        agent_models.push(("summary".to_string(), model.clone()));
+    }
     fq_runtime::config::validate_model_registry(
         &config.providers,
         config.agents.default_model.as_deref(),
@@ -1075,6 +1081,9 @@ fn print_event(event: &Event) {
 
     let summary = match &event.payload {
         EventPayload::Triggered(p) => format!("triggered source={:?}", p.trigger_source),
+        EventPayload::InvocationSummary(p) => {
+            format!("invocation.summary [{:?}] {}", p.kind, p.summary)
+        }
         EventPayload::LlmRequest(p) => format!(
             "llm.request model={} messages={}",
             p.model,
@@ -2059,7 +2068,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             Arc::new(
                 fq_runtime::RunnerConfig::builder()
                     .bus(bus.clone())
-                    .pricing(pricing)
+                    .pricing(pricing.clone())
                     .store(worker_store.clone())
                     .worker_id(worker_id.clone())
                     .max_iterations(config.max_iterations)
@@ -2224,6 +2233,23 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let hb_consumer = fq_runtime::HeartbeatConsumer::new(bus.clone(), cp_store.clone());
     let mut hb_consumer_handle =
         tokio::spawn(async move { hb_consumer.run(hb_consumer_shutdown_rx).await });
+
+    // Spawn the invocation summary consumer (#216) when `[summary]`
+    // names a model. Reuses the daemon's LLM client (routing is
+    // per-model) and pricing table; its spend is emitted under the
+    // reserved `summary` agent id, never against an invocation.
+    let (summary_shutdown_tx, summary_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let summary_handle = config.summary.model.clone().map(|model| {
+        println!("  summariser:       {model}");
+        let sc = fq_runtime::SummaryConsumer::new(
+            bus.clone(),
+            llm.clone(),
+            pricing.clone(),
+            model,
+            config.summary.max_line_chars,
+        );
+        tokio::spawn(async move { sc.run(summary_shutdown_rx).await })
+    });
 
     // Spawn the advisory watch (#169). Drains the captured JetStream
     // MAX_DELIVERIES advisories for the trigger stream and emits the
@@ -2732,6 +2758,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = proj_shutdown_tx.send(());
     let _ = coord_shutdown_tx.send(());
     let _ = hb_consumer_shutdown_tx.send(());
+    let _ = summary_shutdown_tx.send(());
     let _ = advisory_shutdown_tx.send(());
     let _ = hb_producer_shutdown_tx.send(());
     let _ = archive_ack_shutdown_tx.send(());
@@ -2755,6 +2782,14 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
         Ok(Err(err)) => tracing::error!(error = %err, "coordination consumer task panicked"),
         Err(_) => tracing::warn!("coordination consumer did not shut down within 5s"),
+    }
+    if let Some(handle) = summary_handle {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+            Ok(Ok(Ok(()))) => println!("  summary consumer stopped cleanly."),
+            Ok(Ok(Err(err))) => tracing::error!(error = %err, "summary consumer exited with error"),
+            Ok(Err(err)) => tracing::error!(error = %err, "summary consumer task panicked"),
+            Err(_) => tracing::warn!("summary consumer did not shut down within 5s"),
+        }
     }
     match tokio::time::timeout(std::time::Duration::from_secs(5), hb_consumer_handle).await {
         Ok(Ok(Ok(()))) => println!("  heartbeat consumer stopped cleanly."),
@@ -3847,6 +3882,7 @@ mod invocation_tests {
             assigned_at_ms: 1_700_000_000_000,
             started_at_ms: 1_700_000_000_000,
             archived: false,
+            summary: None,
         };
         let line = format_invocation_list_row_human(&item);
         assert!(line.starts_with("019e3b32"), "expected 8-char id prefix");
@@ -3868,6 +3904,7 @@ mod invocation_tests {
             assigned_at_ms: 0,
             started_at_ms: 0,
             archived: true,
+            summary: None,
         };
         let line = format_invocation_list_row_human(&item);
         assert!(
@@ -4031,6 +4068,7 @@ mod invocation_tests {
             assigned_at_ms: 42,
             started_at_ms: 41,
             archived: false,
+            summary: None,
         };
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["invocation_id"], "inv-1");
