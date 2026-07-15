@@ -31,7 +31,7 @@ use std::time::SystemTime;
 
 use crate::grant_log::SqliteGrantLog;
 use crate::grants::{GrantId, Grantor, Principal, Scope, Verb};
-use crate::tokens::TokenVerifier;
+use crate::tokens::{ScopeRef, TokenVerifier};
 use crate::{BlockStore, Cid, NameIndex, Repository, Result, StoreError};
 
 /// A [`Repository`] whose named operations are authorization-gated. Every
@@ -134,7 +134,9 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
                 "listing all names requires the operator; supply a namespace prefix".into(),
             ));
         }
-        let principal = self.identify(token, Verb::List, prefix).await?;
+        let principal = self
+            .identify(token, Verb::List, ScopeRef::Namespace(prefix))
+            .await?;
         let subtree = Scope::Namespace(prefix.to_string());
         let authorized = principal.owns(prefix)
             || self
@@ -164,7 +166,10 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
         verbs: &BTreeSet<Verb>,
         scope: &Scope,
     ) -> Result<GrantId> {
-        let principal = self.identify(token, Verb::Grant, scope.value()).await?;
+        // The token check receives the delegation's scope with its KIND —
+        // a Name-attenuated token may delegate that point, never the
+        // namespace anchored at the same string (#171).
+        let principal = self.identify(token, Verb::Grant, scope.into()).await?;
         if !grantee.has_valid_id() {
             return Err(StoreError::Token(
                 "grantee id is not a valid agent id".into(),
@@ -217,11 +222,11 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
                 )));
             }
         }
-        if !verified.permits(Verb::Grant, scope.value(), self.now()) {
+        if !verified.permits(Verb::Grant, (&scope).into(), self.now()) {
             return Err(StoreError::Denied(format!(
                 "{id}'s token does not permit revoking grant {grant_id} \
                  (expired, or attenuated away from grant on {})",
-                scope.value()
+                ScopeRef::from(&scope)
             )));
         }
         self.grants.append_revoked(grant_id).await
@@ -269,11 +274,13 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
         &self.repo
     }
 
-    /// The full gate for a named operation: verify the token, validate the
-    /// principal id, check the token permits the op, check the projection
-    /// authorizes it. Returns the acting principal.
+    /// The full gate for a **point** operation on one name: verify the
+    /// token, validate the principal id, check the token permits the op,
+    /// check the projection authorizes it. Returns the acting principal.
+    /// (Subtree-semantics operations — `list`, `grant`, `revoke` — call
+    /// [`identify`](Self::identify) with the namespace kind themselves.)
     async fn authorize(&self, token: &str, verb: Verb, resource: &str) -> Result<Principal> {
-        let principal = self.identify(token, verb, resource).await?;
+        let principal = self.identify(token, verb, ScopeRef::Name(resource)).await?;
         if !self.grants.can(&principal, verb, resource).await? {
             let Principal::Agent(id) = &principal;
             return Err(StoreError::Denied(format!(
@@ -284,8 +291,10 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
     }
 
     /// The identity + token-bounds half of the gate (no projection check):
-    /// signature, principal-id shape, TTL, and the bearer's attenuation.
-    async fn identify(&self, token: &str, verb: Verb, resource: &str) -> Result<Principal> {
+    /// signature, principal-id shape, TTL, and the bearer's attenuation —
+    /// evaluated against the operation's scope **kind** as well as its
+    /// string, so point and subtree semantics can't be conflated (#171).
+    async fn identify(&self, token: &str, verb: Verb, resource: ScopeRef<'_>) -> Result<Principal> {
         let verified = self.verifier.verify(token)?;
         let principal = verified.principal().clone();
         if !principal.has_valid_id() {
@@ -602,6 +611,110 @@ mod tests {
                 .await,
             Err(StoreError::Denied(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_name_attenuated_token_cannot_exercise_namespace_semantics() {
+        // The #171 exploit shape end-to-end: alice's PROJECTION authority is
+        // namespace-wide, but her token is attenuated to ONE NAME. Before the
+        // fix, the token layer collapsed subtree operations to their root
+        // string, so this token could list the subtree, delegate the
+        // namespace, and revoke a namespace grant — all beyond its
+        // attenuation. Each must now deny, while point ops still work.
+        let f = fixture().await;
+        f.gate
+            .operator_grant(
+                &alice(),
+                &BTreeSet::from([
+                    Verb::Read,
+                    Verb::Write,
+                    Verb::List,
+                    Verb::Grant,
+                    Verb::Delete,
+                ]),
+                &Scope::Namespace("research".into()),
+            )
+            .await
+            .unwrap();
+        let full = token_for(&f, &alice()).await;
+        f.gate
+            .put(&full, "research.papers", b"root-object")
+            .await
+            .unwrap();
+        f.gate
+            .put(&full, "research.papers.doc1", b"paper")
+            .await
+            .unwrap();
+        // A namespace delegation issued with the FULL token — the narrowed
+        // token must not be able to revoke it later.
+        let ns_grant = f
+            .gate
+            .grant(
+                &full,
+                &bob(),
+                &BTreeSet::from([Verb::Read]),
+                &Scope::Namespace("research.papers".into()),
+            )
+            .await
+            .unwrap();
+
+        let verifier = TokenVerifier::from_public_key_hex(&f.minter.public_key_hex()).unwrap();
+        let narrowed = verifier
+            .attenuate(&full, Some(&Scope::Name("research.papers".into())), None)
+            .unwrap();
+
+        // Point ops on exactly the attenuated name: allowed.
+        assert_eq!(
+            f.gate.get(&narrowed, "research.papers").await.unwrap(),
+            b"root-object"
+        );
+        // …and a POINT delegation of that name is within the attenuation.
+        f.gate
+            .grant(
+                &narrowed,
+                &bob(),
+                &BTreeSet::from([Verb::Read]),
+                &Scope::Name("research.papers".into()),
+            )
+            .await
+            .unwrap();
+
+        // The three formerly-bypassing subtree operations, all anchored at
+        // the SAME string as the attenuation:
+        assert!(matches!(
+            f.gate.list(&narrowed, "research.papers").await,
+            Err(StoreError::Denied(_))
+        ));
+        assert!(matches!(
+            f.gate
+                .grant(
+                    &narrowed,
+                    &bob(),
+                    &BTreeSet::from([Verb::Read]),
+                    &Scope::Namespace("research.papers".into()),
+                )
+                .await,
+            Err(StoreError::Denied(_))
+        ));
+        assert!(matches!(
+            f.gate.revoke(&narrowed, ns_grant).await,
+            Err(StoreError::Denied(_))
+        ));
+        // A point op on a DESCENDANT was never inside a Name attenuation.
+        assert!(matches!(
+            f.gate.get(&narrowed, "research.papers.doc1").await,
+            Err(StoreError::Denied(_))
+        ));
+        // The full token retains all of it (the projection was always right);
+        // list includes the exact-match root name alongside descendants.
+        assert_eq!(
+            f.gate.list(&full, "research.papers").await.unwrap(),
+            vec![
+                "research.papers".to_string(),
+                "research.papers.doc1".to_string()
+            ]
+        );
+        f.gate.revoke(&full, ns_grant).await.unwrap();
     }
 
     #[tokio::test]

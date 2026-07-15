@@ -32,7 +32,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use fq_store::{
-    GrantEvent, GrantModel, Grantor, InMemoryGrantBus, Principal, Scope, SqliteGrantLog,
+    GrantEvent, GrantModel, Grantor, InMemoryGrantBus, Principal, Scope, ScopeRef, SqliteGrantLog,
     StoreError, TokenMinter, TokenVerifier, Verb, VerifiedToken, drain, generate_keypair,
 };
 
@@ -288,7 +288,9 @@ async fn run_seed(seed: u64, steps: usize) {
             for _ in 0..3 {
                 let verb = *Verb::all().iter().nth(below(&mut rng, 5) as usize).unwrap();
                 let resource = pick(&mut rng, RESOURCES);
-                let composed = held.verified.permits(verb, resource, now)
+                // A point-op query: `can` and the model both decide point
+                // access, so the token side states the Name kind (#171).
+                let composed = held.verified.permits(verb, ScopeRef::Name(resource), now)
                     && log.can(&held.principal, verb, resource).await.unwrap();
                 assert_eq!(
                     composed,

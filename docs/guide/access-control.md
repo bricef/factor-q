@@ -96,6 +96,37 @@ Two things follow for operators:
   in-process today, but it widens the future remote window; the 300 s default
   is deliberate.
 
+## Attenuation and scope kinds
+
+Attenuation narrows a token offline — to fewer verbs, and/or to a smaller
+scope — and can never widen (checks are conjunctive; claim A2). Scope
+attenuation follows the same two-kind model as grants, and the two kinds
+bound **different operation shapes**:
+
+- Attenuated to a **namespace** (`research.papers.*`): the token permits
+  point operations on names inside the subtree *and* subtree operations
+  (`list`, a namespace-scoped `grant` or `revoke`) anchored at or below
+  the root. A subtree operation on a strict parent is outside the
+  attenuation.
+- Attenuated to a **name** (`research.papers`): the token permits point
+  operations on exactly that name — and **nothing with namespace
+  semantics**, including a `list` or a namespace delegation anchored at
+  the very same string. A point capability never licenses a subtree.
+
+The gate evaluates every operation against the token with its scope
+**kind**, not just its resource string (the `scope_kind` datalog fact), so
+these bounds hold structurally — the token layer agrees with the domain's
+`Scope::covers_scope` case-for-case. The same rule applies to the offline
+(`authorizes`) semantic a future remote verifier (M5) will use: a `name`
+right never satisfies a namespace-semantics operation.
+
+> **Upgrade note.** Tokens attenuated to a *name* by builds prior to this
+> rule carry the older, kind-blind check and keep the wider behaviour
+> until they expire — a window bounded by the token TTL (default 300 s).
+> Namespace attenuations behave identically before and after. If a store
+> ran with long-TTL name-attenuated tokens in circulation, rotate the
+> store keypair to invalidate them at once.
+
 ## Managing grants and tokens
 
 The `fq-cas` CLI is the **operator** surface — root authority by possession of
