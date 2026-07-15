@@ -89,7 +89,7 @@ pub trait NameIndex: Send + Sync {
     /// Reduce block `(hash, generation)`'s `refcount` to `to_refcount` — the
     /// audit's leaked-reservation reconcile. Conditional and atomic: it fires
     /// only if `refcount > to_refcount` (there is drift to shed) **and** the row
-    /// was last touched at or before `touched_before` (quiescent past the grace,
+    /// was last touched at or before `touched_before` (at rest past the grace,
     /// so no live in-flight reservation is being reduced). `Ok(true)` if it
     /// reconciled. Never increases a refcount.
     async fn reconcile_block(
