@@ -409,7 +409,14 @@ async fn transcript_page(
                     }
                 };
             let title = format!("transcript {}", &id.chars().take(8).collect::<String>());
-            let mut body = render::transcript(&entries, now_ms(), full, &id);
+            // Best-effort: the one-line summary (#216) rides the
+            // invocation detail view. A failure here must not take the
+            // transcript down — the page renders without the line.
+            let summary = match client.invocation(context::current(), id.clone()).await {
+                Ok(Ok(Some(detail))) => detail.summary,
+                _ => None,
+            };
+            let mut body = render::transcript(&entries, now_ms(), full, &id, summary.as_deref());
             let live = render::transcript_outcome(&entries).is_none();
             // Live runs stream: datastar opens the SSE tail from the
             // snapshot's cursor and appends turns in place — no page
