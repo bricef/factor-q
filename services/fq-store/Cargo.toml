@@ -12,6 +12,11 @@ async-trait = "0.1"
 biscuit-auth = "6"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"], optional = true }
+# Named, individually-failable protocol-step seams (`fail_point!`). Compiles to
+# nothing unless the `failpoints` feature is on — production is zero-cost; tests
+# and the interleaving checker turn it on to schedule and fault-inject each step.
+# See docs/design/committed/storage-concurrency-verification.md.
+fail = "0.5"
 fastcdc = "3"
 futures = { version = "0.3", optional = true }
 hex = "0.4"
@@ -40,6 +45,9 @@ cli = ["dep:clap", "service", "dep:tracing-subscriber"]
 # The NATS-backed grant-event bus (M2). Optional so the store stays hermetic
 # for library consumers and tests; only the fan-out feed needs a broker.
 bus = ["dep:async-nats"]
+# Activate the protocol-step seams (`fail_point!`). Off in production (the seams
+# compile to nothing); on for the interleaving tests and the exhaustive checker.
+failpoints = ["fail/failpoints"]
 
 [[bin]]
 name = "fq-cas"

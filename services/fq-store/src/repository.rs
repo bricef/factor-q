@@ -54,6 +54,8 @@ impl<C: BlockStore, N: NameIndex> Repository<C, N> {
         self.content
             .write_object(&cid, content.len() as u64, &blocks)
             .await?;
+        // Seam: manifest written, about to commit the name binding.
+        fail::fail_point!("fq_store::repo::put::before_bind");
         self.index.bind(name, &cid, &reserved).await?;
         Ok(cid)
     }
@@ -81,6 +83,9 @@ impl<C: BlockStore, N: NameIndex> Repository<C, N> {
             })?;
             reserved.push((hash, generation));
         }
+        // Seam: blocks reserved, about to commit the name binding — the point at
+        // which a bind-alias resurrects the object. Zero-cost unless `failpoints`.
+        fail::fail_point!("fq_store::repo::bind::before_commit");
         self.index.bind(name, cid, &reserved).await
     }
 

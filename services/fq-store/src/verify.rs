@@ -71,11 +71,47 @@ pub enum Violation {
     },
 }
 
-/// Check the invariants over an index `snapshot` and the live `store`. Returns
-/// every violation found (empty ⇒ all invariants hold).
+/// When the oracle is being run — which decides how the object refcount is
+/// judged (the only invariant that differs between an at-rest store and one
+/// with a writer mid-flight). See
+/// `docs/design/committed/storage-concurrency-verification.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckMode {
+    /// At rest: no operation in flight. The object refcount must **equal** its
+    /// live name count.
+    Quiescent,
+    /// Mid-interleaving, safe to assert after every protocol step. The object
+    /// refcount need only **dominate** its live name count (any excess is a
+    /// writer's live reservation); everything else is an always-invariant and is
+    /// checked identically.
+    InFlight,
+}
+
+/// Check the invariants over an index `snapshot` and the live `store`, at rest.
+/// Returns every violation found (empty ⇒ all invariants hold).
 pub async fn check<C: ContentStore + ?Sized>(
     snapshot: &IndexSnapshot,
     store: &C,
+) -> Result<Vec<Violation>> {
+    check_with_mode(snapshot, store, CheckMode::Quiescent).await
+}
+
+/// Like [`check`], but sound to run **after every protocol step** while a writer
+/// or the collector is mid-flight: it drops the object refcount *equality* check
+/// (a legal in-flight reservation makes the count exceed the names) and keeps
+/// every always-invariant, including S1. This is the per-seam oracle the
+/// interleaving checker asserts.
+pub async fn check_in_flight<C: ContentStore + ?Sized>(
+    snapshot: &IndexSnapshot,
+    store: &C,
+) -> Result<Vec<Violation>> {
+    check_with_mode(snapshot, store, CheckMode::InFlight).await
+}
+
+async fn check_with_mode<C: ContentStore + ?Sized>(
+    snapshot: &IndexSnapshot,
+    store: &C,
+    mode: CheckMode,
 ) -> Result<Vec<Violation>> {
     let mut violations = Vec::new();
 
@@ -118,10 +154,17 @@ pub async fn check<C: ContentStore + ?Sized>(
         }
     }
 
-    // Object refcount consistency: stored == name-version reference count.
+    // Object refcount vs name-version count. At rest they must be EQUAL; mid-
+    // flight the count only DOMINATES (any excess is a writer's live
+    // reservation), so only a deficit — a name with no backing reservation — is a
+    // violation then. The deficit direction is dangerous in both modes.
     for (object, rc) in &snapshot.objects {
         let nr = name_refs.get(object).copied().unwrap_or(0);
-        if *rc != nr {
+        let bad = match mode {
+            CheckMode::Quiescent => *rc != nr,
+            CheckMode::InFlight => *rc < nr,
+        };
+        if bad {
             violations.push(Violation::ObjectRefcountDrift {
                 object: *object,
                 stored: *rc,
@@ -220,7 +263,7 @@ pub async fn check<C: ContentStore + ?Sized>(
     Ok(violations)
 }
 
-/// Snapshot `index` and check the invariants against `store`.
+/// Snapshot `index` and check the invariants against `store`, at rest.
 pub async fn check_index<N, C>(index: &N, store: &C) -> Result<Vec<Violation>>
 where
     N: NameIndex + ?Sized,
@@ -230,7 +273,19 @@ where
     check(&snapshot, store).await
 }
 
-/// Test helper: panic with the violations if any invariant fails.
+/// Snapshot `index` and check the always-invariants against `store` — sound to
+/// run after every protocol step while an operation is in flight (see
+/// [`check_in_flight`]).
+pub async fn check_index_in_flight<N, C>(index: &N, store: &C) -> Result<Vec<Violation>>
+where
+    N: NameIndex + ?Sized,
+    C: ContentStore + ?Sized,
+{
+    let snapshot = index.snapshot().await?;
+    check_in_flight(&snapshot, store).await
+}
+
+/// Test helper: panic with the violations if any invariant fails, at rest.
 pub async fn assert_clean<N, C>(index: &N, store: &C)
 where
     N: NameIndex + ?Sized,
@@ -240,6 +295,22 @@ where
     assert!(
         violations.is_empty(),
         "invariant violations: {violations:#?}"
+    );
+}
+
+/// Test helper: panic with the violations if any **always-invariant** fails —
+/// the per-seam assertion for the interleaving checker.
+pub async fn assert_clean_in_flight<N, C>(index: &N, store: &C)
+where
+    N: NameIndex + ?Sized,
+    C: ContentStore + ?Sized,
+{
+    let violations = check_index_in_flight(index, store)
+        .await
+        .expect("snapshot the index");
+    assert!(
+        violations.is_empty(),
+        "in-flight invariant violations: {violations:#?}"
     );
 }
 
