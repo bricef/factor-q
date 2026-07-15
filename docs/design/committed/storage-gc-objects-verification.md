@@ -129,8 +129,8 @@ deterministic simulation, which drives real retries.
 
 ## The choice
 
-The recommendation is **back-off**, unless review weighs writer wait-freedom on
-the manifest path as essential:
+**Decided: back-off** ([ADR-0030](../../adrs/accepted/0030-object-manifest-gc-back-off.md)).
+The reasoning:
 
 - **Safety is equal** — both eliminate S1-obj across every interleaving.
 - **Back-off is dramatically simpler.** No generation dimension, no
