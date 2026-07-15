@@ -5,7 +5,7 @@
 //! unit-testable without HTTP or a runtime.
 
 use fq_runtime::health::{ConsumerHealth, StreamHealth};
-use fq_runtime::read_service::HealthReport;
+use fq_runtime::read_service::{AgentDetailView, AgentsView, HealthReport};
 use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
 use fq_runtime::views::{
     ActiveInvocationView, AgentCostDetailView, CostReport, CostView, EventView,
@@ -95,7 +95,7 @@ details {{ margin: 0.3rem 0; }} summary {{ cursor: pointer; color: #9aa1ab; }}
 #turns {{ display: flex; flex-direction: column-reverse; overflow-y: auto; max-height: calc(100vh - 16rem); border-top: 1px solid #21252b; border-bottom: 1px solid #21252b; }}
 </style>
 </head><body>
-<nav><a href="/">health</a><a href="/invocations">invocations</a><a href="/events">events</a><a href="/costs">costs</a></nav>
+<nav><a href="/">health</a><a href="/invocations">invocations</a><a href="/events">events</a><a href="/costs">costs</a><a href="/agents">agents</a></nav>
 <h1>{title}</h1>
 {body}
 </body></html>
@@ -139,6 +139,11 @@ fn short(id: &str) -> String {
 
 fn inv_link(id: &str) -> String {
     format!(r#"<a href="/invocations/{}">{}</a>"#, esc(id), short(id))
+}
+
+/// An agent id linking to its definition page.
+fn agent_link(id: &str) -> String {
+    format!(r#"<a href="/agents/{}">{}</a>"#, esc(id), esc(id))
 }
 
 /// ": <link>, <link>" suffix for a count that carries ids; empty when
@@ -493,7 +498,7 @@ pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
         b.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             inv_link(&i.invocation_id),
-            esc(&i.agent_id),
+            agent_link(&i.agent_id),
             esc(&i.phase),
             i.step_index,
             esc(&age(i.started_at_ms, now_ms)),
@@ -549,7 +554,10 @@ pub fn invocations(items: &[InvocationSummaryView], include_archived: bool, now_
             inv_link(&i.invocation_id),
             esc(&i.status),
             esc(&age(i.started_at_ms, now_ms)),
-            esc(i.agent_id.as_deref().unwrap_or("?")),
+            match i.agent_id.as_deref() {
+                Some(agent) => agent_link(agent),
+                None => r#"<span class="muted">?</span>"#.to_string(),
+            },
             short(&i.worker_id),
             if i.archived { "yes" } else { "no" }
         ));
@@ -568,7 +576,10 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
         esc(&d.invocation_id)
     ));
     if let Some(agent) = &d.agent_id {
-        b.push_str(&format!("<tr><th>agent</th><td>{}</td></tr>", esc(agent)));
+        b.push_str(&format!(
+            "<tr><th>agent</th><td>{}</td></tr>",
+            agent_link(agent)
+        ));
     }
     if let Some(o) = &d.owner {
         b.push_str(&format!(
@@ -938,7 +949,10 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
 /// link each run's spend back to its invocation page (and from there
 /// the transcript).
 pub fn agent_costs(d: &AgentCostDetailView, window: Window, now_ms: i64) -> String {
-    let mut b = r#"<p class="muted"><a href="/costs">← all agents</a></p>"#.to_string();
+    let mut b = format!(
+        r#"<p class="muted"><a href="/costs">← all agents</a> · <a href="/agents/{}">definition</a></p>"#,
+        esc(&d.agent_id)
+    );
     b.push_str(&window_links(
         window,
         &format!("/costs/{}", esc(&d.agent_id)),
@@ -998,6 +1012,108 @@ pub fn agent_costs(d: &AgentCostDetailView, window: Window, now_ms: i64) -> Stri
         r#"<p class="muted">showing {} of {} invocations</p>"#,
         d.invocations.len(),
         d.totals.invocation_count,
+    ));
+    b
+}
+
+/// The agents page body: every definition in the daemon's live
+/// registry (so `fq reload` is reflected on refresh), plus any
+/// per-file load errors — a broken definition should be as loud here
+/// as it is in the daemon log.
+pub fn agents(view: &AgentsView) -> String {
+    let mut b = String::new();
+    if !view.errors.is_empty() {
+        b.push_str(&format!(
+            r#"<p class="warn"><b>⚠ {} definition(s) failed to load</b></p>"#,
+            view.errors.len()
+        ));
+        b.push_str("<details><summary>load errors</summary>");
+        for e in &view.errors {
+            b.push_str(&format!("<pre>{}</pre>", esc(e)));
+        }
+        b.push_str("</details>");
+    }
+    if view.agents.is_empty() {
+        b.push_str(r#"<p class="muted">no agents loaded.</p>"#);
+        return b;
+    }
+    b.push_str(
+        "<table><tr><th>agent</th><th>model</th><th>trigger</th><th class=\"n\">tools</th><th class=\"n\">budget</th><th class=\"n\">prompt</th></tr>",
+    );
+    for a in &view.agents {
+        b.push_str(&format!(
+            r#"<tr><td>{}</td><td>{}</td><td>{}</td><td class="n">{}</td><td class="n">{}</td><td class="n">{} B</td></tr>"#,
+            agent_link(&a.agent_id),
+            esc(&a.model),
+            match a.trigger.as_deref() {
+                Some(t) => esc(t),
+                None => r#"<span class="muted">—</span>"#.to_string(),
+            },
+            a.tool_count,
+            match a.budget {
+                Some(budget) => format!("${budget:.2}"),
+                None => r#"<span class="muted">—</span>"#.to_string(),
+            },
+            fmt_grouped(a.prompt_bytes),
+        ));
+    }
+    b.push_str("</table>");
+    b
+}
+
+/// The single-agent definition page (`/agents/<id>`): the definition's
+/// fields, links to the agent's other surfaces, and the system prompt
+/// in a collapsed `<details>` (the transcript page's pattern) so the
+/// page stays scannable however long the prompt is.
+pub fn agent_detail(d: &AgentDetailView) -> String {
+    let mut b = format!(
+        r#"<p class="muted"><a href="/agents">← all agents</a> · <a href="/costs/{}">costs</a> · <a href="/events?agent={}">events</a></p>"#,
+        esc(&d.agent_id),
+        esc(&d.agent_id),
+    );
+    b.push_str("<table>");
+    b.push_str(&format!(
+        "<tr><th>model</th><td>{}</td></tr>",
+        esc(&d.model)
+    ));
+    if let Some(effort) = &d.effort {
+        b.push_str(&format!("<tr><th>effort</th><td>{}</td></tr>", esc(effort)));
+    }
+    if let Some(budget) = d.budget {
+        b.push_str(&format!("<tr><th>budget</th><td>${budget:.2}</td></tr>"));
+    }
+    if let Some(max) = d.max_iterations {
+        b.push_str(&format!("<tr><th>max iterations</th><td>{max}</td></tr>"));
+    }
+    if let Some(trigger) = &d.trigger {
+        b.push_str(&format!(
+            "<tr><th>trigger</th><td>fq.trigger.{}</td></tr>",
+            esc(trigger)
+        ));
+    }
+    b.push_str(&format!(
+        "<tr><th>tools</th><td>{}</td></tr>",
+        if d.tools.is_empty() {
+            r#"<span class="muted">none</span>"#.to_string()
+        } else {
+            esc(&d.tools.join(", "))
+        }
+    ));
+    if !d.mcp_servers.is_empty() {
+        b.push_str(&format!(
+            "<tr><th>mcp servers</th><td>{}</td></tr>",
+            esc(&d.mcp_servers.join(", "))
+        ));
+    }
+    b.push_str(&format!(
+        r#"<tr><th>source</th><td class="muted">{}</td></tr>"#,
+        esc(&d.path)
+    ));
+    b.push_str("</table>");
+    b.push_str(&format!(
+        "<details><summary>system prompt ({} bytes)</summary><pre>{}</pre></details>",
+        d.system_prompt.len(),
+        esc(&d.system_prompt)
     ));
     b
 }
@@ -1426,6 +1542,148 @@ mod tests {
         assert!(html.contains("<td>31m ago</td>"), "got: {html}");
         assert!(html.contains("$2.2137"), "got: {html}");
         assert!(html.contains("showing 1 of 43 invocations"), "got: {html}");
+    }
+
+    /// The agents list links each definition and surfaces registry
+    /// load errors loudly.
+    #[test]
+    fn agents_list_links_definitions_and_surfaces_load_errors() {
+        use fq_runtime::read_service::AgentSummaryView;
+        let view = AgentsView {
+            agents: vec![
+                AgentSummaryView {
+                    agent_id: "m0-issue-fix".to_string(),
+                    model: "claude-opus-4-8".to_string(),
+                    budget: Some(12.0),
+                    trigger: Some("m0-issue-fix".to_string()),
+                    tool_count: 3,
+                    prompt_bytes: 4_212,
+                },
+                AgentSummaryView {
+                    agent_id: "doc-drift".to_string(),
+                    model: "claude-sonnet-4-5".to_string(),
+                    budget: None,
+                    trigger: None,
+                    tool_count: 1,
+                    prompt_bytes: 900,
+                },
+            ],
+            errors: vec!["failed to parse /agents/broken.md: missing model".to_string()],
+        };
+        let html = agents(&view);
+        assert!(
+            html.contains(r#"<a href="/agents/m0-issue-fix">m0-issue-fix</a>"#),
+            "got: {html}"
+        );
+        assert!(html.contains("$12.00"), "got: {html}");
+        assert!(html.contains("4,212 B"), "got: {html}");
+        // Missing budget/trigger render as muted dashes, not blanks.
+        assert!(
+            html.contains(r#"<span class="muted">—</span>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains("1 definition(s) failed to load"),
+            "got: {html}"
+        );
+        assert!(html.contains("broken.md"), "got: {html}");
+        // Empty registry has its own message.
+        assert!(agents(&AgentsView::default()).contains("no agents loaded"));
+    }
+
+    /// The agent definition page: fields, cross-links, and the system
+    /// prompt inside a collapsed <details> — escaped, since a prompt is
+    /// arbitrary text.
+    #[test]
+    fn agent_detail_collapses_and_escapes_the_prompt() {
+        let d = AgentDetailView {
+            agent_id: "m0-issue-fix".to_string(),
+            model: "claude-opus-4-8".to_string(),
+            system_prompt: "Fix issues end-to-end. Never claim <b>unpersisted</b> work."
+                .to_string(),
+            tools: vec!["exec".to_string(), "file_read".to_string()],
+            mcp_servers: vec!["github".to_string()],
+            budget: Some(12.0),
+            max_iterations: Some(200),
+            effort: Some("high".to_string()),
+            trigger: Some("m0-issue-fix".to_string()),
+            path: "/home/fq/agents/m0-issue-fix.md".to_string(),
+        };
+        let html = agent_detail(&d);
+        assert!(
+            html.contains("<details><summary>system prompt (59 bytes)</summary>"),
+            "got: {html}"
+        );
+        assert!(
+            !html.contains("<b>unpersisted</b>"),
+            "prompt leaked markup: {html}"
+        );
+        assert!(
+            html.contains("&lt;b&gt;unpersisted&lt;/b&gt;"),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/costs/m0-issue-fix">costs</a>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/events?agent=m0-issue-fix">events</a>"#),
+            "got: {html}"
+        );
+        assert!(html.contains("fq.trigger.m0-issue-fix"), "got: {html}");
+        assert!(html.contains("exec, file_read"), "got: {html}");
+        assert!(html.contains("m0-issue-fix.md"), "got: {html}");
+    }
+
+    /// Agent names across the invocation surfaces link to the agent
+    /// page; an unknown agent renders a muted placeholder, not a link.
+    #[test]
+    fn invocation_surfaces_link_agent_names() {
+        let items = vec![
+            fq_runtime::views::InvocationSummaryView {
+                invocation_id: "inv-1".into(),
+                agent_id: Some("m0-loop".into()),
+                worker_id: "w".into(),
+                status: "completed".into(),
+                assigned_at_ms: 0,
+                started_at_ms: 0,
+                archived: false,
+            },
+            fq_runtime::views::InvocationSummaryView {
+                invocation_id: "inv-2".into(),
+                agent_id: None,
+                worker_id: "w".into(),
+                status: "failed".into(),
+                assigned_at_ms: 0,
+                started_at_ms: 0,
+                archived: false,
+            },
+        ];
+        let html = invocations(&items, false, 1_000);
+        assert!(
+            html.contains(r#"<a href="/agents/m0-loop">m0-loop</a>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<span class="muted">?</span>"#),
+            "got: {html}"
+        );
+
+        let active_rows = [fq_runtime::views::ActiveInvocationView {
+            invocation_id: "inv-3".into(),
+            agent_id: "m0-issue-fix".into(),
+            phase: "reducing".into(),
+            step_index: 1,
+            started_at_ms: 0,
+            updated_at_ms: 0,
+            open_tools: vec![],
+            open_llms: vec![],
+        }];
+        let html = active(&active_rows, 1_000);
+        assert!(
+            html.contains(r#"<a href="/agents/m0-issue-fix">m0-issue-fix</a>"#),
+            "got: {html}"
+        );
     }
 
     #[test]

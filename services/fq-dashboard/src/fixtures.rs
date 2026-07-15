@@ -489,6 +489,79 @@ fn agent_cost_detail() -> AgentCostDetailView {
     }
 }
 
+/// The agents-list fixture: the dogfood roster plus one broken
+/// definition, so the load-error surface is part of the screenshot.
+fn agents_view() -> fq_runtime::read_service::AgentsView {
+    use fq_runtime::read_service::AgentSummaryView;
+    let mk = |id: &str, model: &str, budget: Option<f64>, trigger: Option<&str>, tools, prompt| {
+        AgentSummaryView {
+            agent_id: id.to_string(),
+            model: model.to_string(),
+            budget,
+            trigger: trigger.map(String::from),
+            tool_count: tools,
+            prompt_bytes: prompt,
+        }
+    };
+    fq_runtime::read_service::AgentsView {
+        agents: vec![
+            mk(
+                "doc-drift",
+                "claude-sonnet-4-5",
+                Some(2.0),
+                Some("doc-drift"),
+                4,
+                2_180,
+            ),
+            mk(
+                "m0-issue-fix",
+                "claude-opus-4-8",
+                Some(12.0),
+                Some("m0-issue-fix"),
+                6,
+                4_212,
+            ),
+            mk("m0-loop", "claude-opus-4-8", Some(20.0), None, 6, 3_704),
+            mk(
+                "m0-review-fix",
+                "claude-opus-4-8",
+                Some(15.0),
+                Some("m0-review-fix"),
+                6,
+                3_950,
+            ),
+        ],
+        errors: vec![
+            "failed to parse /home/fq/agents/experimental.md: missing required field `model`"
+                .to_string(),
+        ],
+    }
+}
+
+/// The agent-detail fixture: the multi-tool dogfood fixer with its
+/// system prompt in the collapsed details block.
+fn agent_detail_view() -> fq_runtime::read_service::AgentDetailView {
+    fq_runtime::read_service::AgentDetailView {
+        agent_id: "m0-issue-fix".to_string(),
+        model: "claude-opus-4-8".to_string(),
+        system_prompt: "You are m0-issue-fix. Fix the referenced issue end-to-end: clone the \
+                        repo, branch, make the minimal change, validate with `just ci`, open \
+                        a PR. Report honestly — never claim work you could not persist."
+            .to_string(),
+        tools: vec![
+            "exec".to_string(),
+            "file_read".to_string(),
+            "file_write".to_string(),
+        ],
+        mcp_servers: vec!["github".to_string()],
+        budget: Some(12.0),
+        max_iterations: Some(200),
+        effort: Some("high".to_string()),
+        trigger: Some("m0-issue-fix".to_string()),
+        path: "/home/fq/agents/m0-issue-fix.md".to_string(),
+    }
+}
+
 /// Render every page to `<out>/<name>.html`; returns the page names.
 pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
     std::fs::create_dir_all(out)?;
@@ -574,6 +647,18 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
                 "costs · m0-issue-fix",
                 REFRESH_SECS,
                 &render::agent_costs(&agent_cost_detail(), render::Window::All, NOW_MS),
+            ),
+        ),
+        (
+            "agents",
+            render::page("agents", REFRESH_SECS, &render::agents(&agents_view())),
+        ),
+        (
+            "agent-detail",
+            render::page(
+                "agent · m0-issue-fix",
+                REFRESH_SECS,
+                &render::agent_detail(&agent_detail_view()),
             ),
         ),
         (
