@@ -146,6 +146,11 @@ go-ci:
 ci:
     #!/usr/bin/env bash
     set -uo pipefail
+    # Anchor the phase log on the justfile's own directory, not the caller's
+    # cwd, so it lands in the same place whichever gate you enter through. An
+    # inherited value wins: when a parent gate is already writing a log, this
+    # run appends to that one rather than starting its own (#223).
+    export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
     source {{justfile_directory()}}/scripts/ci-timing.sh
     # -- project state + teardown hook (the generic timing framework is sourced
     #    above; only the NATS lifecycle below is factor-q-specific) --
@@ -155,37 +160,35 @@ ci:
     # it down (timed) so a failed run never leaks it.
     ci_cleanup() {
         if [ "$nats_owned" = "1" ]; then
-            local t0=$(date +%s)
+            start_phase "NATS down"
             just infra-down >/dev/null 2>&1 || true
-            record "NATS down" "$(human $(( $(date +%s) - t0 )))"
+            end_phase "NATS down"
             nats_owned=0
         fi
     }
     ci_timing_init
     # -- phase bodies the generic runner cannot take as argv --
     nats_up() {
-        phase_header "NATS up"
-        local t0=$(date +%s)
+        start_phase "NATS up"
         if curl -sf http://127.0.0.1:8222/healthz >/dev/null 2>&1; then
-            record "NATS up" "$(human $(( $(date +%s) - t0 ))) (already warm)"
+            end_phase "NATS up" "already warm"
             return 0
         fi
         nats_owned=1
         if ! ( just infra-up && just infra-wait ); then
-            record "NATS up" "$(human $(( $(date +%s) - t0 )))"
+            end_phase "NATS up"
             failed_label="NATS up"; exit 1
         fi
-        record "NATS up" "$(human $(( $(date +%s) - t0 )))"
+        end_phase "NATS up"
     }
     nats_down() {
-        phase_header "NATS down"
-        local t0=$(date +%s)
+        start_phase "NATS down"
         if [ "$nats_owned" = "1" ]; then
             just infra-down >/dev/null 2>&1 || true
-            record "NATS down" "$(human $(( $(date +%s) - t0 )))"
+            end_phase "NATS down"
             nats_owned=0
         else
-            record "NATS down" "skipped (left warm)"
+            end_phase "NATS down" "skipped — left warm"
         fi
     }
     # -- the gate, in order, fail-fast. Each phase is the same target CI runs. --

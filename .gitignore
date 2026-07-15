@@ -13,3 +13,9 @@ docs/design/states/
 # tracked; ignoring it also keeps the working tree clean so release
 # builds stamp a bare commit SHA (not "<sha>-dirty").
 .claude/
+
+# `just ci`'s phase log (scripts/ci-timing.sh, #223). Truncated by each run and
+# left behind on purpose: after a killed run it is the only record of where the
+# time went. Anchored — every gate anchors the log on {{justfile_directory()}},
+# so it is always this one file, never a stray copy in a service directory.
+/.ci-timings
