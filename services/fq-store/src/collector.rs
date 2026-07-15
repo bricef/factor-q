@@ -40,17 +40,28 @@ impl<C: BlockStore, N: NameIndex> Collector<C, N> for ReferenceCollector {
         let index = repo.index();
         let mut reclaimed = Reclaimed::default();
 
-        // Unreferenced objects: remove the manifest, then the row + its edges.
-        for cid in index.unreferenced_objects().await? {
-            // Seam: the object has been selected as unreferenced but its manifest
-            // is still present. Pausing here lets a test interleave a concurrent
-            // `bind`-alias that resurrects the object over the manifest we are
-            // about to unlink — the #173 race. Zero-cost unless `failpoints` is on.
-            fail::fail_point!("fq_store::gc::obj::before_unlink");
-            content.remove(&cid).await?;
-            fail::fail_point!("fq_store::gc::obj::before_delete");
-            index.delete_object(&cid).await?;
-            reclaimed.objects += 1;
+        // Unreferenced objects: claim → unlink → delete (ADR-0030), symmetric
+        // with the block loop below. A writer that reserves the object first
+        // makes the claim fail and the object is left alone; a claimed object
+        // cannot be resurrected by `bind`, so unlinking its manifest is safe.
+        for (cid, available) in index.claimable_objects().await? {
+            let owned = if available {
+                index.claim_object(&cid).await?
+            } else {
+                // An orphaned claim (a crash mid-reclaim): adopt and finish it.
+                true
+            };
+            if owned {
+                // Seam: the object is now CLAIMED and its manifest still present.
+                // A `bind`-alias racing here meets a claimed object and is refused
+                // (the #173 fix); pre-fix, it would resurrect over the manifest we
+                // unlink next. Zero-cost unless `failpoints` is on.
+                fail::fail_point!("fq_store::gc::obj::before_unlink");
+                content.remove(&cid).await?;
+                fail::fail_point!("fq_store::gc::obj::before_delete");
+                index.delete_object(&cid).await?;
+                reclaimed.objects += 1;
+            }
         }
 
         // Unreferenced blocks: claim → unlink → delete. A writer that reserves

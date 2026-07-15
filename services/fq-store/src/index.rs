@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
-use crate::{Cid, Result};
+use crate::{Cid, Result, StoreError};
 
 /// The mutable name index over a content store. See the module docs.
 #[async_trait]
@@ -28,6 +28,13 @@ pub trait NameIndex: Send + Sync {
     /// becomes live the reservations become its object→block edges; if it was
     /// already live (an alias) or this re-binds the current CID, they are
     /// released. A new current version is recorded; the previous is retained.
+    ///
+    /// This is the object-side reserve-before-rely: it bumps the object refcount
+    /// under the claim CAS, so a `bind` that would resurrect an object the
+    /// collector has **claimed** (`available = 0`) is refused with
+    /// [`StoreError::Conflict`] (ADR-0030) — the caller retries once the
+    /// collector has finished. `reserved` is left untouched on that refusal, for
+    /// the caller to release or reuse.
     async fn bind(&self, name: &str, cid: &Cid, reserved: &[(Cid, u32)]) -> Result<()>;
 
     /// The current CID for `name`, or `None` if there is no such name.
@@ -109,8 +116,23 @@ pub trait NameIndex: Send + Sync {
     /// its file is unlinked. Idempotent.
     async fn delete_block(&self, hash: &Cid, generation: u32) -> Result<()>;
 
-    /// Delete a dead object (`refcount = 0`) — its row and its object→block
-    /// edges — after its manifest is removed. A no-op if a writer resurrected it.
+    /// Atomically claim an object for collection (the object-side GC
+    /// compare-and-swap, ADR-0030): flip `available` to false, **conditional on
+    /// `refcount = 0` and still available**. `Ok(true)` if claimed; `Ok(false)`
+    /// if a writer reserved it first (`refcount > 0`) or it was already claimed.
+    /// A claimed object cannot be resurrected by [`bind`](Self::bind), so its
+    /// manifest is safe to unlink.
+    async fn claim_object(&self, cid: &Cid) -> Result<bool>;
+
+    /// Objects eligible for collection — `(cid, available)` for every object at
+    /// `refcount = 0`. An `available` object is claimed first; an unavailable one
+    /// is an orphaned claim (a crash mid-reclaim) the collector adopts directly.
+    async fn claimable_objects(&self) -> Result<Vec<(Cid, bool)>>;
+
+    /// Delete a claimed, dead object (`refcount = 0` **and** unavailable) — its
+    /// row and its object→block edges — after its manifest is unlinked.
+    /// Conditional on the claim so a writer that reserved it (making it available
+    /// again is impossible, but `refcount > 0` is) is never deleted. Idempotent.
     async fn delete_object(&self, cid: &Cid) -> Result<()>;
 }
 
@@ -212,6 +234,12 @@ const MIGRATIONS: &[&str] = &[
     // distant past → immediately eligible, which is correct: they predate any
     // in-flight reservation).
     "ALTER TABLE blocks ADD COLUMN touched_at INTEGER NOT NULL DEFAULT 0;",
+    // v5 — object/manifest GC (ADR-0030 back-off): give objects the same
+    // `available` claim flag blocks have, so the collector can CLAIM an object
+    // (available → 0) before unlinking its manifest and a writer's `bind` is
+    // refused if it would resurrect a claimed object. Existing objects become
+    // available (the normal state).
+    "ALTER TABLE objects ADD COLUMN available INTEGER NOT NULL DEFAULT 1;",
 ];
 
 /// Release the writer's reservations on `reserved` (`refcount -= 1` per
@@ -334,19 +362,41 @@ impl NameIndex for SqliteNameIndex {
             .execute(&mut *tx)
             .await?;
 
-        let prev_rc: Option<i64> = sqlx::query_scalar("SELECT refcount FROM objects WHERE cid = ?")
-            .bind(&cid_hex)
-            .fetch_optional(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO objects (cid, refcount) VALUES (?, 1)
-             ON CONFLICT(cid) DO UPDATE SET refcount = refcount + 1",
-        )
-        .bind(&cid_hex)
-        .execute(&mut *tx)
-        .await?;
+        // Reserve the object under the claim CAS (ADR-0030). The single-writer
+        // index serialises this against the collector's `claim_object`, so the
+        // read-then-reserve is atomic: a claimed object (`available = 0`) is
+        // refused rather than resurrected over a manifest being unlinked.
+        let existing: Option<(i64, i64)> =
+            sqlx::query_as("SELECT refcount, available FROM objects WHERE cid = ?")
+                .bind(&cid_hex)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let prev_rc = match existing {
+            // Claimed by the collector (available = 0) — refuse. The transaction
+            // rolls back (the name-version above is undone); `reserved` is left
+            // intact for the caller to release or reuse on retry.
+            Some((_, 0)) => {
+                return Err(StoreError::Conflict(format!(
+                    "cannot bind {cid}: object is being collected; retry"
+                )));
+            }
+            Some((rc, _)) => {
+                sqlx::query("UPDATE objects SET refcount = refcount + 1 WHERE cid = ?")
+                    .bind(&cid_hex)
+                    .execute(&mut *tx)
+                    .await?;
+                rc
+            }
+            None => {
+                sqlx::query("INSERT INTO objects (cid, refcount, available) VALUES (?, 1, 1)")
+                    .bind(&cid_hex)
+                    .execute(&mut *tx)
+                    .await?;
+                0
+            }
+        };
 
-        if prev_rc.unwrap_or(0) == 0 {
+        if prev_rc == 0 {
             // Object going live: hand the reservations off to object→block edges
             // (their refcounts are already bumped — no second increment).
             for (hash, generation) in reserved {
@@ -647,14 +697,41 @@ impl NameIndex for SqliteNameIndex {
         Ok(())
     }
 
+    async fn claim_object(&self, cid: &Cid) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE objects SET available = 0
+             WHERE cid = ? AND refcount = 0 AND available = 1",
+        )
+        .bind(cid.to_hex())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(affected == 1)
+    }
+
+    async fn claimable_objects(&self) -> Result<Vec<(Cid, bool)>> {
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT cid, available FROM objects WHERE refcount = 0")
+                .fetch_all(&self.pool)
+                .await?;
+        rows.into_iter()
+            .map(|(c, a)| Ok((Cid::from_hex(&c)?, a != 0)))
+            .collect()
+    }
+
     async fn delete_object(&self, cid: &Cid) -> Result<()> {
         let cid_hex = cid.to_hex();
         let mut tx = self.pool.begin().await?;
-        let rc: Option<i64> = sqlx::query_scalar("SELECT refcount FROM objects WHERE cid = ?")
-            .bind(&cid_hex)
-            .fetch_optional(&mut *tx)
-            .await?;
-        if rc == Some(0) {
+        // Only a claimed, dead object is deleted (refcount 0 AND unavailable) —
+        // symmetric with `delete_block`. A writer that reserved it (refcount > 0)
+        // is never deleted; a claim must precede the unlink + delete.
+        let deletable: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM objects WHERE cid = ? AND refcount = 0 AND available = 0",
+        )
+        .bind(&cid_hex)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if deletable.is_some() {
             sqlx::query("DELETE FROM object_blocks WHERE object_cid = ?")
                 .bind(&cid_hex)
                 .execute(&mut *tx)

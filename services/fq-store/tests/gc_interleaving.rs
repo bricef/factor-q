@@ -25,21 +25,24 @@ async fn open_repo(dir: &Path) -> Repository<FilesystemStore, SqliteNameIndex> {
 }
 
 /// #173, deterministically. A `bind`-alias resurrects a dead-but-uncollected
-/// object *at the instant the collector is about to unlink its manifest*, leaving
-/// a live name that resolves to a missing manifest — the object forbidden state
-/// (S1-obj).
+/// object *at the instant the collector is about to unlink its manifest*, which
+/// pre-fix left a live name resolving to a missing manifest — the object
+/// forbidden state (S1-obj).
 ///
-/// The interleaving is forced through the collector's `before_unlink` seam: the
-/// object has been selected as unreferenced and its manifest is still present,
-/// and the seam callback performs the resurrecting `bind` right there — so when
-/// the collector resumes it unlinks the manifest of a now-live object, and its
-/// `delete_object` (guarded on refcount 0) then no-ops, leaving the row. Doing
-/// the bind inside the callback makes the race deterministic without threads.
+/// The interleaving is forced through the collector's `before_unlink` seam: at
+/// the seam the object has just been **claimed** and its manifest is still
+/// present, and the callback performs the racing `bind` right there. Under
+/// back-off (ADR-0030) the bind meets a claimed object and is **refused**
+/// (`Conflict`), so no name is resurrected and the store stays clean. On the
+/// pre-fix collector (no claim, no `available` bit) the bind resurrected the
+/// object and the collector then unlinked a live object's manifest — the
+/// assertion below caught that as `LostLiveBlock`. Doing the bind inside the
+/// callback makes the race deterministic without threads.
 ///
-/// The final assertion — the store is clean — **fails on today's code** (the
-/// oracle reports the lost manifest) and must pass once back-off lands.
+/// So this test is **green with back-off and red without it** — the regression
+/// that pins the fix.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bind_alias_racing_collect_reaches_s1_obj() {
+async fn bind_alias_racing_collect_is_refused_no_s1_obj() {
     let scenario = fail::FailScenario::setup();
 
     let dir = tempfile::tempdir().unwrap();
@@ -59,16 +62,20 @@ async fn bind_alias_racing_collect_reaches_s1_obj() {
         "precondition: its manifest is present"
     );
 
-    // At the seam — object selected, manifest still present — resurrect it under a
-    // new name. The bind is async; run it inline via a nested block_on (valid on a
-    // multi-thread runtime inside block_in_place).
+    // At the seam — object just claimed, manifest still present — race a `bind`
+    // that would resurrect it under a new name. Under back-off this is refused
+    // (Conflict); pre-fix it succeeded and caused S1-obj. Either outcome is
+    // tolerated here (the store-clean assertion below is what discriminates), so
+    // the bind result is deliberately ignored. Run inline via a nested block_on
+    // (valid on a multi-thread runtime inside block_in_place).
     {
         let repo = repo.clone();
         fail::cfg_callback("fq_store::gc::obj::before_unlink", move || {
             let repo = repo.clone();
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { repo.bind("b", &cid).await.unwrap() });
+                tokio::runtime::Handle::current().block_on(async {
+                    let _ = repo.bind("b", &cid).await;
+                });
             });
         })
         .unwrap();
@@ -86,6 +93,6 @@ async fn bind_alias_racing_collect_reaches_s1_obj() {
 
     assert!(
         violations.is_empty(),
-        "S1-obj reached — the live name `b` resolves to a missing manifest (#173): {violations:#?}"
+        "back-off must refuse the racing bind — a violation means S1-obj was reached (#173 regression): {violations:#?}"
     );
 }

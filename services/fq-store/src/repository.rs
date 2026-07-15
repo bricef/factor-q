@@ -51,13 +51,44 @@ impl<C: BlockStore, N: NameIndex> Repository<C, N> {
             .iter()
             .map(|c| (c.hash, generations[&c.hash], c.len as u64))
             .collect();
-        self.content
-            .write_object(&cid, content.len() as u64, &blocks)
-            .await?;
-        // Seam: manifest written, about to commit the name binding.
-        fail::fail_point!("fq_store::repo::put::before_bind");
-        self.index.bind(name, &cid, &reserved).await?;
-        Ok(cid)
+        // Write the manifest, then bind the name. If the object is mid-collection
+        // the bind is refused (ADR-0030 back-off); retry after yielding so the
+        // collector can finish (claim → unlink → delete → the CID goes absent),
+        // then materialize afresh. The manifest is content-addressed, so
+        // re-writing it each attempt is idempotent. The block reservations are
+        // stable across attempts (they hold their blocks at refcount > 0).
+        const MAX_BIND_ATTEMPTS: usize = 128;
+        let mut attempt = 0usize;
+        loop {
+            self.content
+                .write_object(&cid, content.len() as u64, &blocks)
+                .await?;
+            // Seam: manifest written, about to commit the name binding.
+            fail::fail_point!("fq_store::repo::put::before_bind");
+            match self.index.bind(name, &cid, &reserved).await {
+                Ok(()) => return Ok(cid),
+                Err(StoreError::Conflict(msg)) => {
+                    attempt += 1;
+                    if attempt >= MAX_BIND_ATTEMPTS {
+                        self.release_reservations(&reserved).await;
+                        return Err(StoreError::Conflict(msg));
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Err(e) => {
+                    self.release_reservations(&reserved).await;
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Release block reservations the caller made but never handed to a bind —
+    /// used when a `bind` is refused (a claimed object) or a `put` gives up.
+    async fn release_reservations(&self, reserved: &[(Cid, u32)]) {
+        for (hash, generation) in reserved {
+            let _ = self.index.release_block(hash, *generation).await;
+        }
     }
 
     /// Bind `name` to an already-stored `cid` (aliasing — many names, one
@@ -84,9 +115,18 @@ impl<C: BlockStore, N: NameIndex> Repository<C, N> {
             reserved.push((hash, generation));
         }
         // Seam: blocks reserved, about to commit the name binding — the point at
-        // which a bind-alias resurrects the object. Zero-cost unless `failpoints`.
+        // which a bind-alias would resurrect the object. Zero-cost unless `failpoints`.
         fail::fail_point!("fq_store::repo::bind::before_commit");
-        self.index.bind(name, cid, &reserved).await
+        // If the object is being collected the bind is refused (ADR-0030); release
+        // the block reservations we made so they don't leak, and surface the
+        // retryable Conflict to the caller.
+        match self.index.bind(name, cid, &reserved).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.release_reservations(&reserved).await;
+                Err(e)
+            }
+        }
     }
 
     /// The current CID for `name`, or `None` if unbound.
