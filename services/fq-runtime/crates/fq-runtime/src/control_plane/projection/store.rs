@@ -346,12 +346,12 @@ impl ProjectionStore {
             .collect())
     }
 
-    /// One agent's cost-bearing events grouped per model, biggest
-    /// spender first. See [`Self::cost_by_invocation`] for the shared
-    /// filter rationale.
+    /// Cost-bearing events grouped per model, biggest spender first —
+    /// across every agent, or one agent when `agent` is set. See
+    /// [`Self::cost_by_invocation`] for the shared filter rationale.
     pub async fn cost_by_model(
         &self,
-        agent: &str,
+        agent: Option<&str>,
         since: Option<&str>,
     ) -> Result<Vec<ModelCostSummary>, StoreError> {
         let mut sql = String::from(
@@ -361,15 +361,20 @@ impl ProjectionStore {
              COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
              COALESCE(SUM(output_tokens), 0) AS total_output_tokens \
              FROM events \
-             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL \
-             AND agent_id = ?",
+             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL",
         );
+        if agent.is_some() {
+            sql.push_str(" AND agent_id = ?");
+        }
         if since.is_some() {
             sql.push_str(" AND timestamp >= ?");
         }
         sql.push_str(" GROUP BY model ORDER BY total_cost DESC");
 
-        let mut q = sqlx::query(&sql).bind(agent);
+        let mut q = sqlx::query(&sql);
+        if let Some(a) = agent {
+            q = q.bind(a);
+        }
         if let Some(s) = since {
             q = q.bind(s);
         }
@@ -1012,11 +1017,18 @@ mod tests {
         );
 
         // All fixture events carry the same model → one row, summed.
-        let models = store.cost_by_model("alpha", None).await.unwrap();
+        let models = store.cost_by_model(Some("alpha"), None).await.unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].model, "claude-haiku-4-5");
         assert_eq!(models[0].event_count, 3);
         assert!((models[0].total_cost - 0.35).abs() < 1e-9);
+
+        // Unfiltered, the same GROUP BY spans every agent — the
+        // top-level costs page's by-model split.
+        let all_models = store.cost_by_model(None, None).await.unwrap();
+        assert_eq!(all_models.len(), 1);
+        assert_eq!(all_models[0].event_count, 4);
+        assert!((all_models[0].total_cost - 9.35).abs() < 1e-9);
     }
 
     #[tokio::test]

@@ -379,6 +379,30 @@ fn cost_report() -> CostReport {
         total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
         total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
         agents,
+        // The same spend split by model — the page's "By model" table.
+        models: vec![
+            ModelCostView {
+                model: "claude-opus-4-8".to_string(),
+                event_count: 999,
+                total_cost: 88.126_871,
+                total_input_tokens: 105_800_000,
+                total_output_tokens: 590_000,
+            },
+            ModelCostView {
+                model: "openai/gpt-5.6-terra".to_string(),
+                event_count: 300,
+                total_cost: 14.357_865,
+                total_input_tokens: 21_699_210,
+                total_output_tokens: 152_087,
+            },
+            ModelCostView {
+                model: "z-ai/glm-5.2".to_string(),
+                event_count: 58,
+                total_cost: 2.880_260,
+                total_input_tokens: 4_813_382,
+                total_output_tokens: 31_677,
+            },
+        ],
     }
 }
 
@@ -414,6 +438,8 @@ fn day_cost_report() -> CostReport {
         total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
         total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
         agents,
+        // Unused by the last-24h merge — only per-agent costs are read.
+        models: vec![],
     }
 }
 
