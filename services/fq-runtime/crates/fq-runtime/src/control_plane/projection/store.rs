@@ -36,6 +36,18 @@ CREATE INDEX IF NOT EXISTS idx_events_agent_time ON events(agent_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_invocation ON events(invocation_id);
 CREATE INDEX IF NOT EXISTS idx_events_type_time ON events(event_type, timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_time ON events(timestamp);
+
+-- One-line operator-facing status per invocation (#216), projected
+-- from `invocation.summary` events (last write wins). Derived data:
+-- a reprojection replays the summary events without re-calling the
+-- LLM. (No semicolons in these comments -- the schema runner splits
+-- statements on them.)
+CREATE TABLE IF NOT EXISTS invocation_summary (
+    invocation_id   TEXT PRIMARY KEY,
+    summary         TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
 "#;
 
 /// SQLite projection store. Cheap to clone (the underlying
@@ -173,7 +185,51 @@ impl ProjectionStore {
         .execute(&self.pool)
         .await?;
 
+        // Summary events additionally maintain the per-invocation
+        // current line (#216). Last write wins; `Outcome` lines are
+        // final because no later summary event is emitted for the
+        // invocation.
+        if let EventPayload::InvocationSummary(p) = &event.payload {
+            sqlx::query(
+                "INSERT INTO invocation_summary (invocation_id, summary, kind, updated_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(invocation_id) DO UPDATE SET
+                     summary = excluded.summary,
+                     kind = excluded.kind,
+                     updated_at = excluded.updated_at",
+            )
+            .bind(event.envelope.invocation_id.to_string())
+            .bind(&p.summary)
+            .bind(summary_kind_name(p.kind))
+            .bind(event.envelope.timestamp.to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        }
+
         Ok(())
+    }
+
+    /// The current summary line per invocation (#216) for a set of
+    /// ids — the views layer joins these onto its invocation lists.
+    /// Missing ids simply have no line yet.
+    pub async fn summaries_for(
+        &self,
+        invocation_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, StoreError> {
+        let mut out = std::collections::HashMap::new();
+        // Ids arrive from our own store reads (bounded by the view's
+        // limit), so a simple per-id lookup keeps the SQL static.
+        for id in invocation_ids {
+            if let Some(row) =
+                sqlx::query("SELECT summary FROM invocation_summary WHERE invocation_id = ?")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?
+            {
+                out.insert(id.clone(), row.get::<String, _>(0));
+            }
+        }
+        Ok(out)
     }
 
     /// Return the number of events in the store.
@@ -577,6 +633,22 @@ fn extract_fields(event: &Event) -> Fields {
             }
             f
         }
+        // The summariser's own spend (#216): everything lives on
+        // envelope.cost (the llm_response pattern), emitted under the
+        // reserved `summary` agent id — `fq costs` reports it as its
+        // own row with no changes to the cost queries.
+        EventPayload::InvocationSummary(_) => {
+            let mut f = Fields::default();
+            if let Some(cost) = &event.envelope.cost {
+                f.model = Some(cost.model.clone());
+                f.input_tokens = Some(cost.input_tokens as i64);
+                f.output_tokens = Some(cost.output_tokens as i64);
+                f.cache_read_tokens = Some(cost.cache_read_tokens as i64);
+                f.cache_write_tokens = Some(cost.cache_write_tokens as i64);
+                f.total_cost = Some(cost.total_cost);
+            }
+            f
+        }
         EventPayload::ToolCall(_) => Fields::default(),
         EventPayload::ToolDispatched(_) => Fields::default(),
         EventPayload::LlmDispatched(_) => Fields::default(),
@@ -615,6 +687,14 @@ fn extract_fields(event: &Event) -> Fields {
     }
 }
 
+fn summary_kind_name(kind: crate::events::SummaryKind) -> &'static str {
+    match kind {
+        crate::events::SummaryKind::Start => "start",
+        crate::events::SummaryKind::Progress => "progress",
+        crate::events::SummaryKind::Outcome => "outcome",
+    }
+}
+
 fn event_type_name(payload: &EventPayload) -> &'static str {
     match payload {
         EventPayload::Triggered(_) => "triggered",
@@ -627,6 +707,7 @@ fn event_type_name(payload: &EventPayload) -> &'static str {
         EventPayload::Completed(_) => "completed",
         EventPayload::Failed(_) => "failed",
         EventPayload::HostNotice(_) => "host_notice",
+        EventPayload::InvocationSummary(_) => "invocation_summary",
         EventPayload::InvocationAmbiguous(_) => "invocation_ambiguous",
         EventPayload::InvocationArchived(_) => "invocation_archived",
         EventPayload::InvocationArchiveAcked(_) => "invocation_archive_acked",
@@ -659,6 +740,97 @@ mod tests {
     /// in test code where the inputs are hardcoded by us.
     fn aid(s: &str) -> AgentId {
         AgentId::new(s).expect("test agent id must be valid")
+    }
+
+    fn summary_event(inv: Uuid, kind: crate::events::SummaryKind, line: &str) -> Event {
+        Event::new(
+            AgentId::summary(),
+            inv,
+            EventPayload::InvocationSummary(crate::events::InvocationSummaryPayload {
+                kind,
+                summary: line.to_string(),
+            }),
+        )
+        .with_cost(CostMetadata {
+            call_id: Uuid::now_v7(),
+            model: "cheap-model".to_string(),
+            input_tokens: 400,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            input_cost: 0.0004,
+            output_cost: 0.0001,
+            total_cost: 0.0005,
+            cumulative_invocation_cost: 0.0005,
+            cumulative_agent_cost: 0.0005,
+            origin: Default::default(),
+        })
+    }
+
+    /// #216: a summary event lands twice — as a costed events row
+    /// under the reserved `summary` agent (the operator-overhead
+    /// accounting), and as the per-invocation current line (last
+    /// write wins).
+    #[tokio::test]
+    async fn summary_events_are_costed_and_upsert_the_current_line() {
+        let dir = tempdir().unwrap();
+        let store = ProjectionStore::open(&dir.path().join("events.db"))
+            .await
+            .unwrap();
+        let inv = Uuid::now_v7();
+
+        store
+            .insert_event(&summary_event(
+                inv,
+                crate::events::SummaryKind::Start,
+                "Fixing #7: starting",
+            ))
+            .await
+            .unwrap();
+        store
+            .insert_event(&summary_event(
+                inv,
+                crate::events::SummaryKind::Progress,
+                "Fixing #7: editing widget.rs",
+            ))
+            .await
+            .unwrap();
+
+        // The current line: last write wins.
+        let summaries = store.summaries_for(&[inv.to_string()]).await.unwrap();
+        assert_eq!(
+            summaries.get(&inv.to_string()).map(String::as_str),
+            Some("Fixing #7: editing widget.rs")
+        );
+        assert!(
+            store
+                .summaries_for(&["no-such".to_string()])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // The cost accounting: events rows under agent `summary` carry
+        // model/tokens/cost from the envelope, so `fq costs` reports
+        // the summariser as its own row.
+        let rows = store
+            .query_events(
+                &EventFilter {
+                    agent: Some("summary"),
+                    event_type: None,
+                    since: None,
+                },
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.event_type == "invocation_summary"));
+        assert!(rows.iter().all(|r| r.total_cost == Some(0.0005)));
+        assert!(
+            rows.iter()
+                .all(|r| r.model.as_deref() == Some("cheap-model"))
+        );
     }
 
     fn sample_triggered(agent: &str, inv: Uuid) -> Event {

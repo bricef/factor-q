@@ -50,6 +50,8 @@ pub struct Config {
     pub read_service: ReadServiceConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub summary: SummaryConfig,
 }
 
 /// The in-daemon read-only operator service (#105 layer 2) — the tarpc
@@ -488,6 +490,28 @@ pub struct CacheConfig {
     pub directory: PathBuf,
 }
 
+/// `[summary]` — the invocation summariser (#216): a cheap model that
+/// keeps a one-line, operator-facing status per invocation on the
+/// dashboard. Disabled unless `model` is set. The model resolves
+/// through `[providers]` like any other, and the startup pricing
+/// guarantee (ADR-0004) applies to it — the summariser's spend is
+/// itself cost-accounted, under the reserved `summary` agent id.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SummaryConfig {
+    /// Summariser model id (e.g. `claude-haiku-4-5`, or an
+    /// `openrouter/...` flash-class model). `None` disables the
+    /// summariser entirely.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Hard cap on the summary line length, enforced host-side.
+    #[serde(default = "default_summary_max_line_chars")]
+    pub max_line_chars: usize,
+}
+
+fn default_summary_max_line_chars() -> usize {
+    120
+}
+
 fn default_nats_url() -> String {
     "nats://localhost:4222".to_string()
 }
@@ -564,6 +588,7 @@ impl Default for Config {
             cache: CacheConfig::default(),
             worker: WorkerConfig::default(),
             state: StateConfig::default(),
+            summary: SummaryConfig::default(),
             max_iterations: default_max_iterations(),
             drain_deadline_ms: default_drain_deadline_ms(),
             read_service: ReadServiceConfig::default(),

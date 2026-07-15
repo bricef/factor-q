@@ -158,6 +158,10 @@ pub mod subjects {
         format!("fq.agent.{agent_id}.host_notice")
     }
 
+    pub fn agent_invocation_summary(agent_id: &str) -> String {
+        format!("fq.agent.{agent_id}.invocation_summary")
+    }
+
     pub fn agent_completed(agent_id: &str) -> String {
         format!("fq.agent.{agent_id}.completed")
     }
@@ -331,6 +335,7 @@ impl Event {
             EventPayload::Completed(_) => subjects::agent_completed(agent),
             EventPayload::Failed(_) => subjects::agent_failed(agent),
             EventPayload::HostNotice(_) => subjects::agent_host_notice(agent),
+            EventPayload::InvocationSummary(_) => subjects::agent_invocation_summary(agent),
             EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
             EventPayload::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
             EventPayload::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
@@ -452,6 +457,7 @@ pub fn schema_id_for(payload: &EventPayload) -> &'static str {
         EventPayload::ToolCall(_) => "factor-q/tool_call@1",
         EventPayload::ToolDispatched(_) => "factor-q/tool_dispatched@1",
         EventPayload::ToolResult(_) => "factor-q/tool_result@1",
+        EventPayload::InvocationSummary(_) => "factor-q/invocation_summary@1",
         EventPayload::Completed(_) => "factor-q/completed@1",
         EventPayload::Failed(_) => "factor-q/failed@1",
         EventPayload::HostNotice(_) => "factor-q/host_notice@1",
@@ -583,6 +589,15 @@ pub enum EventPayload {
     /// on resume.
     HostNotice(HostNoticePayload),
 
+    /// A one-line operator-facing summary of an invocation (#216),
+    /// emitted by the summary consumer under the reserved `summary`
+    /// agent id (never by the invocation's own agent). The envelope's
+    /// `invocation_id` binds it to the summarised invocation; the
+    /// summariser's own LLM spend rides `envelope.cost` exactly like
+    /// an `llm_response`, so `fq costs` reports it as agent `summary`
+    /// without touching the invocation's totals or budget.
+    InvocationSummary(InvocationSummaryPayload),
+
     /// An in-flight invocation could not be auto-recovered
     /// on worker restart (see data-architecture.md §3.4).
     /// The worker publishes this when its WAL categorisation
@@ -664,6 +679,31 @@ pub struct HostNoticePayload {
     /// `context_pressure`, …).
     pub kind: String,
     pub body: String,
+}
+
+/// Which moment of the invocation an [`EventPayload::InvocationSummary`]
+/// describes. `Outcome` is terminal — the last summary an invocation
+/// receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryKind {
+    /// From the trigger payload: what work was expected.
+    Start,
+    /// Rolling update from the latest model turn: what it is doing now.
+    Progress,
+    /// Final line on `completed`/`failed`, naming the failure kind.
+    Outcome,
+}
+
+/// A one-line operator-facing invocation summary (#216). The
+/// summariser's token usage and cost ride `envelope.cost`
+/// ([`CostMetadata`]) exactly as they do for `llm_response` events, so
+/// the payload carries only the line itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationSummaryPayload {
+    pub kind: SummaryKind,
+    /// The single summary line (bounded by `[summary].max_line_chars`).
+    pub summary: String,
 }
 
 /// Annotation keys shared by the two dead-letter emitters (#49/#169):

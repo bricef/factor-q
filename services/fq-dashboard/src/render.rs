@@ -161,6 +161,16 @@ fn linked_ids(ids: &[String]) -> String {
     )
 }
 
+/// The one-line invocation summary cell (#216): escaped, with a muted
+/// em-dash when the summariser has not produced a line (disabled, or
+/// the invocation just started).
+fn summary_cell(summary: Option<&str>) -> String {
+    match summary {
+        Some(line) => format!(r#"<span class="muted">{}</span>"#, esc(line)),
+        None => r#"<span class="muted">—</span>"#.to_string(),
+    }
+}
+
 /// The health page body.
 pub fn health(report: &HealthReport, now_ms: i64) -> String {
     let mut b = String::new();
@@ -482,7 +492,7 @@ pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
         return String::new();
     }
     let mut b = String::new();
-    b.push_str("<h2>Active now</h2><table><tr><th>invocation</th><th>agent</th><th>phase</th><th>step</th><th>started</th><th>last advanced</th><th>doing</th></tr>");
+    b.push_str("<h2>Active now</h2><table><tr><th>invocation</th><th>agent</th><th>summary</th><th>phase</th><th>step</th><th>started</th><th>last advanced</th><th>doing</th></tr>");
     for i in items {
         let mut doing: Vec<String> = i
             .open_tools
@@ -496,9 +506,10 @@ pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
             doing.join(", ")
         };
         b.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             inv_link(&i.invocation_id),
             agent_link(&i.agent_id),
+            summary_cell(i.summary.as_deref()),
             esc(&i.phase),
             i.step_index,
             esc(&age(i.started_at_ms, now_ms)),
@@ -546,13 +557,14 @@ pub fn invocations(items: &[InvocationSummaryView], include_archived: bool, now_
         return b;
     }
     b.push_str(
-        "<table><tr><th>invocation</th><th>status</th><th>started</th><th>agent</th><th>worker</th><th>archived</th></tr>",
+        "<table><tr><th>invocation</th><th>status</th><th>summary</th><th>started</th><th>agent</th><th>worker</th><th>archived</th></tr>",
     );
     for i in items {
         b.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             inv_link(&i.invocation_id),
             esc(&i.status),
+            summary_cell(i.summary.as_deref()),
             esc(&age(i.started_at_ms, now_ms)),
             match i.agent_id.as_deref() {
                 Some(agent) => agent_link(agent),
@@ -1275,6 +1287,45 @@ mod tests {
         assert!(html.contains(r#"href="/invocations/inv-1/transcript""#));
     }
 
+    /// #216: the one-line summary renders (escaped) in both tables,
+    /// with a muted em-dash when absent.
+    #[test]
+    fn summary_column_renders_escaped_with_fallback() {
+        let mut items = vec![fq_runtime::views::InvocationSummaryView {
+            invocation_id: "inv-s".into(),
+            agent_id: Some("m0-issue-fix".into()),
+            worker_id: "w".into(),
+            status: "in_flight".into(),
+            assigned_at_ms: 0,
+            started_at_ms: 0,
+            archived: false,
+            summary: Some("Fixing #7: <script>alert(1)</script>".into()),
+        }];
+        let html = invocations(&items, false, 1_000);
+        assert!(html.contains("<th>summary</th>"), "got: {html}");
+        assert!(
+            html.contains("Fixing #7: &lt;script&gt;alert(1)&lt;/script&gt;"),
+            "summary escaped: {html}"
+        );
+        items[0].summary = None;
+        let html = invocations(&items, false, 1_000);
+        assert!(html.contains("—"), "fallback dash: {html}");
+
+        let active_rows = [fq_runtime::views::ActiveInvocationView {
+            invocation_id: "inv-a".into(),
+            agent_id: "m0-issue-fix".into(),
+            phase: "reducing".into(),
+            step_index: 1,
+            started_at_ms: 0,
+            updated_at_ms: 0,
+            open_tools: vec![],
+            open_llms: vec![],
+            summary: Some("Editing widget.rs".into()),
+        }];
+        let html = active(&active_rows, 1_000);
+        assert!(html.contains("Editing widget.rs"), "got: {html}");
+    }
+
     #[test]
     fn active_table_omitted_when_nothing_in_flight() {
         let items = [fq_runtime::views::InvocationSummaryView {
@@ -1285,6 +1336,7 @@ mod tests {
             assigned_at_ms: 0,
             started_at_ms: 0,
             archived: false,
+            summary: None,
         }];
         assert_eq!(active(&[], 1_000), "");
         // With no active rows the page is byte-identical to the plain list.
@@ -1305,6 +1357,7 @@ mod tests {
             updated_at_ms: 540_000,
             open_tools: vec!["exec".into()],
             open_llms: vec![],
+            summary: None,
         }];
         let html = invocations_page(&active_rows, &[], false, 600_000);
         assert!(html.contains("Active now"), "got: {html}");
@@ -1700,6 +1753,7 @@ mod tests {
                 assigned_at_ms: 0,
                 started_at_ms: 0,
                 archived: false,
+                summary: None,
             },
             fq_runtime::views::InvocationSummaryView {
                 invocation_id: "inv-2".into(),
@@ -1709,6 +1763,7 @@ mod tests {
                 assigned_at_ms: 0,
                 started_at_ms: 0,
                 archived: false,
+                summary: None,
             },
         ];
         let html = invocations(&items, false, 1_000);
@@ -1730,6 +1785,7 @@ mod tests {
             updated_at_ms: 0,
             open_tools: vec![],
             open_llms: vec![],
+            summary: None,
         }];
         let html = active(&active_rows, 1_000);
         assert!(
@@ -1775,6 +1831,7 @@ mod tests {
             assigned_at_ms: 600_000,
             started_at_ms: 600_000,
             archived: false,
+            summary: None,
         }];
         let html = invocations(&items, false, 1_200_000);
         assert!(html.contains(r#"<a href="/invocations/0123456789abcdef">01234567</a>"#));

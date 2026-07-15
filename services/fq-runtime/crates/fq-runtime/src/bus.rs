@@ -638,6 +638,77 @@ impl EventBus {
         Ok(consumer)
     }
 
+    /// Durable JetStream consumer scoped to *several* subject
+    /// filters. Same shape as
+    /// [`Self::durable_consumer_with_filter`], for consumers that
+    /// react to a handful of unrelated event types (the summary
+    /// consumer, #216: triggered + llm_response + completed +
+    /// failed) — a single-wildcard filter would force it to churn
+    /// through the tool-event firehose it never acts on.
+    pub async fn durable_consumer_with_filters(
+        &self,
+        name: &str,
+        filter_subjects: &[&str],
+    ) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            filters = ?filter_subjects,
+            "getting/creating multi-filter durable JetStream consumer"
+        );
+        let stream = self
+            .jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let consumer = stream
+            .get_or_create_consumer(
+                name,
+                consumer::pull::Config {
+                    durable_name: Some(name.to_string()),
+                    filter_subjects: filter_subjects.iter().map(|s| s.to_string()).collect(),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        Ok(consumer)
+    }
+
+    /// Like [`Self::durable_consumer_with_filters`] but starting
+    /// from new messages only. Test-oriented, mirroring
+    /// [`Self::durable_consumer_with_filter_from_new`].
+    pub async fn durable_consumer_with_filters_from_new(
+        &self,
+        name: &str,
+        filter_subjects: &[String],
+    ) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            filters = ?filter_subjects,
+            "getting/creating multi-filter durable JetStream consumer (deliver_policy=new)"
+        );
+        let stream = self
+            .jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let consumer = stream
+            .get_or_create_consumer(
+                name,
+                consumer::pull::Config {
+                    durable_name: Some(name.to_string()),
+                    filter_subjects: filter_subjects.to_vec(),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    deliver_policy: consumer::DeliverPolicy::New,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        Ok(consumer)
+    }
+
     /// Like [`Self::durable_consumer_with_filter`] but the
     /// consumer starts from new messages only (skips the
     /// stream's historical messages on first creation).

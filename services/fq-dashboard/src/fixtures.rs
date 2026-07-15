@@ -98,6 +98,7 @@ fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
             updated_at_ms: NOW_MS - 45_000,
             open_tools: vec!["exec".to_string()],
             open_llms: vec![],
+            summary: Some("Fixing #83: SECURITY.md drafted, running just ci".to_string()),
         },
         fq_runtime::views::ActiveInvocationView {
             invocation_id: "019f5b3f-31fb-7ae0-b130-3d65ccf40375".to_string(),
@@ -108,6 +109,7 @@ fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
             updated_at_ms: NOW_MS - 8_000,
             open_tools: vec![],
             open_llms: vec!["claude-opus-4-8".to_string()],
+            summary: None,
         },
     ]
 }
@@ -122,6 +124,7 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             assigned_at_ms: NOW_MS - 600_000,
             started_at_ms: NOW_MS - 600_000,
             archived: false,
+            summary: Some("Fixing #83: SECURITY.md drafted, running just ci".to_string()),
         },
         InvocationSummaryView {
             invocation_id: "019f3844-11aa-7bb0-8cc1-dd22ee33ff44".to_string(),
@@ -131,6 +134,7 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             assigned_at_ms: NOW_MS - 7_200_000,
             started_at_ms: NOW_MS - 7_200_000,
             archived: false,
+            summary: Some("Done: docs drift fixed, PR #141 opened".to_string()),
         },
         InvocationSummaryView {
             invocation_id: "019f36b6-55ff-7001-9223-445566778899".to_string(),
@@ -142,6 +146,7 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             assigned_at_ms: NOW_MS - 86_400_000,
             started_at_ms: NOW_MS - 90_000_000,
             archived: true,
+            summary: None,
         },
         InvocationSummaryView {
             invocation_id: "019f33a7-9988-7776-6554-332211009988".to_string(),
@@ -151,6 +156,7 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             assigned_at_ms: NOW_MS - 172_800_000,
             started_at_ms: NOW_MS - 172_800_000,
             archived: false,
+            summary: Some("Failed: budget exceeded before a PR could be opened".to_string()),
         },
     ]
 }
