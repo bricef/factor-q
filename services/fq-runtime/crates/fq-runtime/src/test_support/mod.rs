@@ -17,6 +17,7 @@
 
 pub mod events;
 pub mod mock_anthropic;
+pub mod nats;
 pub mod oracle;
 pub mod runtime;
 pub mod sim;

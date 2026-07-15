@@ -18,6 +18,41 @@ default:
 
 # === Infrastructure ===
 
+# The broker version the test suite spawns, pinned in .nats-version so CI, the
+# justfile, and any tooling read one source of truth rather than a literal
+# buried in code (#233). Bump the file, not this.
+nats_version := trim(read(".nats-version"))
+nats_bin := justfile_directory() / ".tools" / "nats-server"
+
+# Tests spawn their own private broker rather than sharing the dev one, so they
+# need the binary — NATS is otherwise Docker-only here. Idempotent: re-running
+# with the pinned version already installed is a no-op, so it is cheap to call
+# from CI and from a dev's first run.
+# Install the pinned nats-server into .tools/ (see .nats-version).
+install-nats:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    want="{{nats_version}}"
+    if [ -x "{{nats_bin}}" ] && "{{nats_bin}}" --version 2>/dev/null | grep -q "v${want}$"; then
+        echo "nats-server v${want} already installed ({{nats_bin}})"
+        exit 0
+    fi
+    case "$(uname -s)-$(uname -m)" in
+        Linux-x86_64)   plat=linux-amd64  ;;
+        Linux-aarch64)  plat=linux-arm64  ;;
+        Darwin-x86_64)  plat=darwin-amd64 ;;
+        Darwin-arm64)   plat=darwin-arm64 ;;
+        *) echo "no nats-server build mapped for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+    esac
+    mkdir -p "$(dirname "{{nats_bin}}")"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    url="https://github.com/nats-io/nats-server/releases/download/v${want}/nats-server-v${want}-${plat}.tar.gz"
+    echo "fetching ${url}"
+    curl -sfL "$url" -o "$tmp/nats.tgz"
+    tar -xzf "$tmp/nats.tgz" --strip-components=1 -C "$(dirname "{{nats_bin}}")" "nats-server-v${want}-${plat}/nats-server"
+    "{{nats_bin}}" --version
+
 # Start infrastructure services (NATS, etc.)
 infra-up:
     cd {{infra_dir}} && docker compose up -d

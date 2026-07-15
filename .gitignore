@@ -14,6 +14,10 @@ docs/design/states/
 # builds stamp a bare commit SHA (not "<sha>-dirty").
 .claude/
 
+# Pinned dev/test tooling fetched by `just install-nats` (#233) — a binary,
+# and reproducible from .nats-version, so it is never committed.
+/.tools/
+
 # `just ci`'s phase log (scripts/ci-timing.sh, #223). Truncated by each run and
 # left behind on purpose: after a killed run it is the only record of where the
 # time went. Anchored — every gate anchors the log on {{justfile_directory()}},
