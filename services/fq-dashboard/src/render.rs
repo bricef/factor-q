@@ -311,6 +311,7 @@ pub fn transcript(
     now_ms: i64,
     full: bool,
     invocation_id: &str,
+    summary: Option<&str>,
 ) -> String {
     let mut b = String::new();
     let toggle = if full {
@@ -328,6 +329,15 @@ pub fn transcript(
         r#"<p class="muted">verbatim tool output, not redacted — may contain secrets (#72). {toggle} · <a href="/invocations/{}">detail</a></p>"#,
         esc(invocation_id)
     ));
+    // The one-line operator summary (#216): the "what is this run
+    // about" header, snapshotted at page load (the SSE stream patches
+    // turns, not this line — a reload refreshes it).
+    if let Some(summary) = summary {
+        b.push_str(&format!(
+            r#"<p><span class="muted">summary —</span> {}</p>"#,
+            esc(summary)
+        ));
+    }
 
     // NEWEST-FIRST in the DOM: #turns is a column-reverse scroll panel
     // (see the shell CSS), so reversed emission renders oldest-at-top
@@ -1223,7 +1233,7 @@ mod tests {
             output: Some("<script>alert('pwned')</script>".into()),
             is_error: Some(true),
         }];
-        let html = transcript(&entries, 1_000, false, "inv-1");
+        let html = transcript(&entries, 1_000, false, "inv-1", None);
         assert!(!html.contains("<script>"), "raw script leaked: {html}");
         assert!(html.contains("&lt;script&gt;"), "got: {html}");
         assert!(!html.contains("<img"), "raw img leaked: {html}");
@@ -1253,7 +1263,7 @@ mod tests {
                 phase: "completed".to_string(),
             },
         ];
-        let html = transcript(&entries, 10_000, true, "inv-1");
+        let html = transcript(&entries, 10_000, true, "inv-1", None);
         let first = html.find("FIRST").expect("prompt rendered");
         let outcome = html.find("run completed").expect("outcome rendered");
         assert!(
@@ -1284,7 +1294,7 @@ mod tests {
                 is_error: Some(false),
             },
         ];
-        let html = transcript(&entries, 60_000, true, "inv-1");
+        let html = transcript(&entries, 60_000, true, "inv-1", None);
         assert!(html.contains("system prompt (3 bytes)"), "got: {html}");
         assert!(html.contains("do the thing"));
         assert!(html.contains("assistant · claude-opus-4-8"));
@@ -1330,6 +1340,45 @@ mod tests {
         }];
         let html = active(&active_rows, 1_000);
         assert!(html.contains("Editing widget.rs"), "got: {html}");
+    }
+
+    /// The one-line summary (#216) renders on the invocation detail
+    /// page as a table row, and on the transcript page as a header
+    /// line — both escaped, both absent when there is no summary.
+    #[test]
+    fn summary_renders_on_detail_and_transcript_pages() {
+        let detail = fq_runtime::views::InvocationDetailView {
+            invocation_id: "inv-1".into(),
+            agent_id: Some("m0-issue-fix".into()),
+            owner: None,
+            archive: None,
+            live: None,
+            recent_events: vec![],
+            summary: Some("Fixing #83: <b>ci</b> running".into()),
+        };
+        let html = invocation_detail(&detail, 1_000);
+        assert_eq!(
+            html.matches("<th>summary</th>").count(),
+            1,
+            "exactly one summary row: {html}"
+        );
+        assert!(
+            html.contains("Fixing #83: &lt;b&gt;ci&lt;/b&gt; running"),
+            "summary must be escaped: {html}"
+        );
+        assert!(!html.contains("<b>ci</b>"), "raw markup leaked: {html}");
+
+        let mut no_summary = detail.clone();
+        no_summary.summary = None;
+        assert!(!invocation_detail(&no_summary, 1_000).contains("<th>summary</th>"));
+
+        let html = transcript(&[], 1_000, false, "inv-1", Some("Fixing #83: ci running"));
+        assert!(
+            html.contains(r#"<span class="muted">summary —</span> Fixing #83: ci running"#),
+            "got: {html}"
+        );
+        let html = transcript(&[], 1_000, false, "inv-1", None);
+        assert!(!html.contains("summary —"), "got: {html}");
     }
 
     #[test]
