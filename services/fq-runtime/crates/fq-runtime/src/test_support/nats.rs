@@ -45,7 +45,8 @@ impl NatsServer {
     /// Panics — rather than skips — if the binary is missing or never comes
     /// up. A test that cannot get a broker has not passed.
     pub fn start() -> Self {
-        let bin = std::env::var("FQ_TEST_NATS_SERVER").unwrap_or_else(|_| "nats-server".to_string());
+        let bin =
+            std::env::var("FQ_TEST_NATS_SERVER").unwrap_or_else(|_| "nats-server".to_string());
 
         // Unique per server: the ports file is globbed out of here, and
         // JetStream gets a store of its own so nothing is shared.
@@ -137,7 +138,11 @@ impl NatsServer {
             let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
                 continue; // written non-atomically: a partial read just retries
             };
-            if let Some(url) = parsed.get("nats").and_then(|v| v.get(0)).and_then(|v| v.as_str()) {
+            if let Some(url) = parsed
+                .get("nats")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str())
+            {
                 return Some(url.to_string());
             }
         }
@@ -172,7 +177,10 @@ mod tests {
         assert!(server.url().starts_with("nats://"), "url: {}", server.url());
         // The readiness contract: once start() returns, it is connectable.
         let client = async_nats::connect(server.url()).await.expect("connect");
-        assert_eq!(client.connection_state(), async_nats::connection::State::Connected);
+        assert_eq!(
+            client.connection_state(),
+            async_nats::connection::State::Connected
+        );
     }
 
     #[tokio::test]

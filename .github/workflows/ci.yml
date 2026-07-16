@@ -133,9 +133,14 @@ jobs:
           node-version: "20"
       - if: needs.changes.outputs.runtime == 'true'
         uses: extractions/setup-just@v3
+      # Install the pinned test broker (#233): tests that spawn their own
+      # nats-server need the binary. Idempotent; version from .nats-version.
+      - if: needs.changes.outputs.runtime == 'true'
+        run: just install-nats
       # Bring up NATS exactly as dev does (JetStream via
       # infrastructure/nats.conf), then wait for it before the
-      # bus/integration tests run.
+      # bus/integration tests run. (Removed once every test spawns its own
+      # broker — #233 step 4.)
       - if: needs.changes.outputs.runtime == 'true'
         run: just infra-up
       - if: needs.changes.outputs.runtime == 'true'

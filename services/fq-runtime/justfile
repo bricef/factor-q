@@ -11,6 +11,12 @@ set positional-arguments
 # url_credentials).
 export FQ_NATS_URL := env_var_or_default("FQ_NATS_URL", "nats://fq-dev-token@127.0.0.1:4222")
 
+# Tests that spawn a private broker (#233) find nats-server here. The guard
+# itself falls back to `nats-server` on PATH; this points it at the pinned
+# binary `just install-nats` drops in .tools/ at the repo root, so a plain
+# `just test` works without a PATH tweak. Override by exporting it yourself.
+export FQ_TEST_NATS_SERVER := env_var_or_default("FQ_TEST_NATS_SERVER", justfile_directory() / ".." / ".." / ".tools" / "nats-server")
+
 # Show available recipes
 default:
     @just --list
