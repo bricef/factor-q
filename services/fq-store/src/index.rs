@@ -140,6 +140,20 @@ pub trait NameIndex: Send + Sync {
     /// reserving.
     async fn release_object(&self, cid: &Cid) -> Result<()>;
 
+    /// Reduce object `cid`'s `refcount` to `to_refcount` — the audit's
+    /// leaked-reservation reconcile, the object twin of
+    /// [`reconcile_block`](Self::reconcile_block) (#243). Conditional and atomic:
+    /// it fires only if `refcount > to_refcount` (there is drift to shed) **and**
+    /// the object was last reserved at or before `touched_before` (at rest past
+    /// the grace, so no live in-flight reservation is reduced). `Ok(true)` if it
+    /// reconciled. Never increases a refcount.
+    async fn reconcile_object(
+        &self,
+        cid: &Cid,
+        to_refcount: i64,
+        touched_before: i64,
+    ) -> Result<bool>;
+
     /// Atomically claim an object for collection (the object-side GC
     /// compare-and-swap, ADR-0030): flip `available` to false, **conditional on
     /// `refcount = 0` and still available**. `Ok(true)` if claimed; `Ok(false)`
@@ -264,6 +278,14 @@ const MIGRATIONS: &[&str] = &[
     // refused if it would resurrect a claimed object. Existing objects become
     // available (the normal state).
     "ALTER TABLE objects ADD COLUMN available INTEGER NOT NULL DEFAULT 1;",
+    // v6 — object reconcile (#243): stamp when an object was last reserved (Unix
+    // millis), the object twin of blocks.touched_at (v4). The audit reconciles a
+    // drifted object refcount — a reservation a crash mid-`put` leaked between the
+    // reserve and the bind — only once the object has gone untouched past the
+    // grace, so a live in-flight reserve (touched just now) is never mistaken for
+    // a leaked one. Existing rows start at 0 (the distant past → immediately
+    // eligible, which is correct: they predate any reservation).
+    "ALTER TABLE objects ADD COLUMN touched_at INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Release the writer's reservations on `reserved` (`refcount -= 1` per
@@ -718,10 +740,13 @@ impl NameIndex for SqliteNameIndex {
         let prev_rc = match existing {
             Some((_, 0)) => return Ok(None), // claimed — refuse (tx rolls back)
             Some((rc, _)) => {
-                sqlx::query("UPDATE objects SET refcount = refcount + 1 WHERE cid = ?")
-                    .bind(&cid_hex)
-                    .execute(&mut *tx)
-                    .await?;
+                sqlx::query(
+                    "UPDATE objects SET refcount = refcount + 1, touched_at = ? WHERE cid = ?",
+                )
+                .bind(now_millis())
+                .bind(&cid_hex)
+                .execute(&mut *tx)
+                .await?;
                 rc
             }
             // Absent. Only `put` (which will write the manifest) may create it
@@ -729,10 +754,13 @@ impl NameIndex for SqliteNameIndex {
             // fully collected must refuse rather than mint a live object with no
             // manifest — that would be S1 (found by the exhaustive checker).
             None if create_if_absent => {
-                sqlx::query("INSERT INTO objects (cid, refcount, available) VALUES (?, 1, 1)")
-                    .bind(&cid_hex)
-                    .execute(&mut *tx)
-                    .await?;
+                sqlx::query(
+                    "INSERT INTO objects (cid, refcount, available, touched_at) VALUES (?, 1, 1, ?)",
+                )
+                .bind(&cid_hex)
+                .bind(now_millis())
+                .execute(&mut *tx)
+                .await?;
                 0
             }
             None => return Ok(None),
@@ -747,6 +775,26 @@ impl NameIndex for SqliteNameIndex {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    async fn reconcile_object(
+        &self,
+        cid: &Cid,
+        to_refcount: i64,
+        touched_before: i64,
+    ) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE objects SET refcount = ?
+             WHERE cid = ? AND refcount > ? AND touched_at <= ?",
+        )
+        .bind(to_refcount)
+        .bind(cid.to_hex())
+        .bind(to_refcount)
+        .bind(touched_before)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(affected == 1)
     }
 
     async fn claim_object(&self, cid: &Cid) -> Result<bool> {

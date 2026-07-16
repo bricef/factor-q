@@ -214,7 +214,7 @@ Mirrors the block fault map; every step leans to retention.
 
 | Step | Crash (`kill -9`) | I/O error | Lost un-fsynced write |
 |---|---|---|---|
-| `RESERVE` | leaked reservation → object **retained**; audit reconciles when quiescent | put fails; no change | index txn atomic |
+| `RESERVE` | leaked reservation → object **retained**; audit reconciles past the grace | put fails; no change | index txn atomic |
 | `MATERIALIZE` (manifest + row) | manifest with no row → orphan → reaper (mtime grace) reclaims | put fails → `RELEASE` | manifest **must** be fsync'd before the row that names it; else a crash loses a named object's manifest (the object analogue of the block I2 refinement) |
 | `BIND` | reservation leaked → retained; audit reconciles | put fails → `RELEASE` | index txn atomic |
 | `CLAIM` | object `CLAIMED`, manifest present → next GC / audit resumes or resets to available | GC retries | claim lost → object stays available (safe) |
@@ -225,14 +225,19 @@ Concurrency, as for blocks, is the central axis: `RESERVE` vs `CLAIM` on the sam
 object must linearise — exactly one wins. The `bind`-alias vs `CLAIM` race is the
 S1-obj attack, checked directly by the models.
 
-> **Not yet implemented (crash-recovery parity).** Reserve-before-rely bumps the
+> **Crash-recovery parity — implemented (#243).** Reserve-before-rely bumps the
 > object refcount *before* the name is bound, so a crash between `reserve_object`
 > and `BIND` leaks an object reservation (an object retained at `refcount > 0`
 > with no name — leak-safe, never S1). The `RESERVE` fault-map row's "audit
-> reconciles" is the intended recovery, mirroring `reconcile_block`, but no
-> **object** reconcile exists yet (objects also lack the `touched_at` grace
-> stamp blocks use to tell a leaked reservation from a live one). Tracked as a
-> follow-up; the online-reclaim S1 fix does not depend on it.
+> reconciles" is now real: `reconcile_object` (the twin of `reconcile_block`)
+> plus the audit's Phase 1 object arm reduce a drifted object refcount to its
+> live name count once the object has gone untouched past the grace — objects
+> gained the `touched_at` stamp (migration v6) blocks use to tell a leaked
+> reservation from a live one. The audit's alarm also moved to the in-flight
+> oracle, so a live in-flight reserve is tolerated (dominance) rather than
+> raising a spurious drift alarm. Recovery is tested by *simulating* the crash (a
+> reserve with no bind); true process-crash injection in the DST is the last
+> deferred item (#248). The online-reclaim S1 fix never depended on any of this.
 
 ## Verification strategy
 
