@@ -118,7 +118,8 @@ test-dashboard *args:
 # equivalents, and `rust-ci` runs all three in one command. `ci` invokes these
 # same targets, so the local gate cannot drift from CI (#196).
 
-# Bus and MCP integration tests need NATS (`just infra-up`) and Node/npx.
+# NATS-backed tests spawn their own broker (need the pinned nats-server from
+# `just install-nats`, #233); the MCP integration tests need Node/npx.
 # Run the runtime Rust gate (fmt-check, clippy, doc, test).
 runtime-ci:
     cd {{runtime_dir}} && just ci
@@ -180,10 +181,10 @@ go-ci:
 # start_timer/end_timer inside each suite's own justfile, where those phases
 # actually live — not re-inlining their builds here.
 #
-# NATS: only the runtime suite needs the broker. If it is already warm (the dev
-# default) `ci` uses it and leaves it running; if it is cold, `ci` brings it up
-# and — even on failure, via the trap — tears it down again, so a run never
-# leaks a broker it started. store-ci, dashboard-ci and go-ci are hermetic.
+# NATS: no shared broker. Every suite's NATS-backed tests spawn their own
+# private nats-server per test (#233, via fq-test-support), so `ci` neither
+# brings a broker up nor tears one down — it just needs the pinned binary
+# (`just install-nats`), like the tests do.
 #
 # smoke is intentionally NOT part of `ci`: it needs ANTHROPIC_API_KEY and makes
 # a real, paid LLM call. Run it on its own with `just smoke`.
@@ -198,51 +199,13 @@ ci:
     # run appends to that one rather than starting its own (#223).
     export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
     source {{justfile_directory()}}/scripts/ci-timing.sh
-    # -- project state + teardown hook (the generic timing framework is sourced
-    #    above; only the NATS lifecycle below is factor-q-specific) --
-    nats_owned=0
-    # Safety net, run inside the EXIT trap (success or failure) before the
-    # summary: if a phase failed while we still held a broker we started, tear
-    # it down (timed) so a failed run never leaks it.
-    ci_cleanup() {
-        if [ "$nats_owned" = "1" ]; then
-            start_phase "NATS down"
-            just infra-down >/dev/null 2>&1 || true
-            end_phase "NATS down"
-            nats_owned=0
-        fi
-    }
     ci_timing_init
-    # -- phase bodies the generic runner cannot take as argv --
-    nats_up() {
-        start_phase "NATS up"
-        if curl -sf http://127.0.0.1:8222/healthz >/dev/null 2>&1; then
-            end_phase "NATS up" "already warm"
-            return 0
-        fi
-        nats_owned=1
-        if ! ( just infra-up && just infra-wait ); then
-            end_phase "NATS up"
-            failed_label="NATS up"; exit 1
-        fi
-        end_phase "NATS up"
-    }
-    nats_down() {
-        start_phase "NATS down"
-        if [ "$nats_owned" = "1" ]; then
-            just infra-down >/dev/null 2>&1 || true
-            end_phase "NATS down"
-            nats_owned=0
-        else
-            end_phase "NATS down" "skipped — left warm"
-        fi
-    }
-    # -- the gate, in order, fail-fast. Each phase is the same target CI runs. --
+    # -- the gate, in order, fail-fast. Each phase is the same target CI runs.
+    #    No NATS lifecycle: every suite spawns its own broker per test (#233),
+    #    so there is no shared broker to bring up, wait for, or tear down. --
     run_phase "lint-docs"   just lint-docs
     run_phase "check-links" just check-links
-    nats_up
     run_phase "runtime"     just runtime-ci
-    nats_down
     run_phase "store"       just store-ci
     run_phase "dashboard"   just dashboard-ci
     run_phase "test-support" just test-support-ci

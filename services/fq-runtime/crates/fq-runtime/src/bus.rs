@@ -942,21 +942,12 @@ mod tests {
         )
     }
 
-    /// Integration test that requires a running NATS server on the default URL.
-    ///
-    /// Run with `just infra-up` before invoking:
-    ///
-    /// ```sh
-    /// just fq-test
-    /// ```
-    ///
-    /// Skipped unless the `FQ_NATS_URL` environment variable is set.
+    /// Round-trips a publish through a private `nats-server` this test spawns
+    /// (#233) — no shared broker, no skip.
     #[tokio::test]
     async fn publish_and_subscribe_round_trip() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
         let agent_id = format!("bus-test-{}", Uuid::now_v7().simple());
@@ -1048,10 +1039,8 @@ mod tests {
     #[tokio::test]
     async fn annotations_preserved_through_publish_round_trip() {
         use crate::events::annotation_keys;
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
         let agent_id = format!("bus-anno-{}", Uuid::now_v7().simple());
         let event = sample_event(&agent_id)
