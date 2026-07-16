@@ -220,9 +220,26 @@ mod tests {
 
     #[tokio::test]
     async fn two_servers_are_isolated_from_each_other() {
+        use futures::StreamExt as _;
+
         let a = test_nats();
         let b = test_nats();
         assert_ne!(a.url(), b.url(), "each test must get its own broker");
+
+        // Distinct URLs alone don't prove isolation — show a message
+        // published on one broker never reaches a subscriber on the other.
+        let ca = async_nats::connect(a.url()).await.expect("connect a");
+        let cb = async_nats::connect(b.url()).await.expect("connect b");
+        let mut sub = cb.subscribe("isolation.probe").await.expect("subscribe b");
+        ca.publish("isolation.probe", "leak?".into())
+            .await
+            .expect("publish a");
+        ca.flush().await.expect("flush a");
+        let crossed = tokio::time::timeout(Duration::from_millis(250), sub.next()).await;
+        assert!(
+            crossed.is_err(),
+            "a message crossed between private brokers: {crossed:?}"
+        );
     }
 
     /// The PDEATHSIG contract: when the thread that spawned the broker

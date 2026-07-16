@@ -26,6 +26,7 @@ libc = "0.2"
 [dev-dependencies]
 # The crate's own tests exercise the guard against a real broker.
 async-nats = "0.38"
+futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 
 # Match the house zero-warnings policy. Can't inherit workspace lints (this is
