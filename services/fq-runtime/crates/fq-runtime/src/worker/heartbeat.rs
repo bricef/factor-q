@@ -148,9 +148,8 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_producer_emits_immediately_and_on_tick() {
-        let Some(url) = crate::test_support::events::require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
         let worker_id = WorkerId::new(format!("hb-test-{}", Uuid::now_v7().simple())).unwrap();
         let runtime_id = Uuid::now_v7();

@@ -303,10 +303,8 @@ mod tests {
     /// by the stream-sequence dedup.
     #[tokio::test]
     async fn exhausted_unacked_trigger_is_surfaced_from_the_advisory() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         use futures::StreamExt;
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let suffix = Uuid::now_v7().simple().to_string();
@@ -408,10 +406,8 @@ mod tests {
     /// processed still counts — attributed to the system sentinel.
     #[tokio::test]
     async fn aged_out_trigger_still_surfaces_under_the_system_sentinel() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let watch = AdvisoryWatch::new(bus.clone());
         // No message exists at this sequence.

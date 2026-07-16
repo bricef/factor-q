@@ -196,9 +196,8 @@ mod tests {
 
     #[tokio::test]
     async fn ack_deletes_matching_invocation_state_row() {
-        let Some(url) = crate::test_support::events::require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();

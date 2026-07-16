@@ -275,9 +275,8 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_republishes_pending_terminal_rows() {
-        let Some(url) = crate::test_support::events::require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
@@ -341,9 +340,8 @@ mod tests {
         // no real time. The sweep_once method needs the bus to
         // republish, so we exercise the warn logic directly via
         // maybe_warn_once.
-        let Some(url) = crate::test_support::events::require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
         let store = Arc::new(

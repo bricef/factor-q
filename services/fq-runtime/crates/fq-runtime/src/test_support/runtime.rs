@@ -1,12 +1,11 @@
 //! In-process test harness that boots the full `fq run`
 //! runtime against live NATS and [`MockAnthropicServer`].
 //!
-//! Use it from NATS-gated tests to write acceptance
-//! scenarios without re-building the per-test wiring inline.
-//! Each [`TestRuntime`] instance gets a unique agent id,
-//! worker id, and durable consumer name so multiple tests
-//! can run in parallel against a shared NATS without
-//! stepping on each other.
+//! Use it to write acceptance scenarios without re-building
+//! the per-test wiring inline. Each [`TestRuntime`] owns a
+//! private `nats-server` ([`NatsServer`], #233), so tests are
+//! isolated by construction — no shared broker to step on, and
+//! nothing to skip when an env var is unset.
 //!
 //! See `docs/plans/closed/2026-05-22-acceptance-harness.md`.
 //!
@@ -40,20 +39,8 @@ use crate::control_plane::store::{ControlPlaneStore, OwnerStatus};
 use crate::events::Event;
 use crate::llm::GenAiClient;
 use crate::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
+use crate::test_support::nats::NatsServer;
 use crate::worker::{ArchiveAckConsumer, ArchiveRetrySweeper, WorkerId, WorkerStore};
-
-/// Skip the test if `FQ_NATS_URL` isn't set. Returns the URL
-/// on success; prints a `skipping:` line and returns `None`
-/// otherwise. Test code calls `let Some(url) = ... else { return; };`.
-pub fn require_nats() -> Option<String> {
-    match std::env::var("FQ_NATS_URL") {
-        Ok(url) => Some(url),
-        Err(_) => {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            None
-        }
-    }
-}
 
 /// Builder for [`TestRuntime`]. Defaults give you the
 /// "happy path" harness (coordination consumer + ack
@@ -133,9 +120,11 @@ impl TestRuntimeBuilder {
     }
 
     pub async fn start(self) -> Result<TestRuntime, String> {
-        let Some(url) = require_nats() else {
-            return Err("FQ_NATS_URL not set".to_string());
-        };
+        // A private broker for this harness (#233), not a shared one. Panics
+        // with install instructions if the pinned binary is missing — a test
+        // that cannot get a broker has not passed.
+        let nats = NatsServer::start();
+        let url = nats.url().to_string();
 
         // genai's auth resolver demands the env var even
         // though the mock ignores the bearer.
@@ -258,6 +247,7 @@ impl TestRuntimeBuilder {
             retention_handle: Some(retention_handle),
             _cp_dir: cp_dir,
             _worker_dir: worker_dir,
+            _nats: nats,
         })
     }
 }
@@ -283,6 +273,9 @@ pub struct TestRuntime {
     retention_handle: Option<JoinHandle<()>>,
     _cp_dir: TempDir,
     _worker_dir: TempDir,
+    // Last field on purpose: struct fields drop top-to-bottom, so the broker
+    // is killed only after the bus and consumer handles above have dropped.
+    _nats: NatsServer,
 }
 
 impl TestRuntime {
@@ -501,9 +494,6 @@ mod tests {
 
     #[tokio::test]
     async fn harness_starts_and_shuts_down_cleanly() {
-        let Some(_) = require_nats() else {
-            return;
-        };
         let rt = TestRuntime::start().await.expect("harness");
         assert!(!rt.agent_id().as_str().is_empty());
         assert!(!rt.worker_id().as_str().is_empty());
@@ -513,9 +503,6 @@ mod tests {
 
     #[tokio::test]
     async fn harness_without_coordination_starts_and_shuts_down() {
-        let Some(_) = require_nats() else {
-            return;
-        };
         let rt = TestRuntime::builder()
             .with_coordination(false)
             .start()
@@ -533,9 +520,6 @@ mod tests {
         // consumer flips the owner to Failed, writes the
         // archive row, and the audit chain shows the
         // operator_recovered event with our reason.
-        let Some(_) = require_nats() else {
-            return;
-        };
 
         use crate::control_plane::operator;
         use crate::events::{EventPayload, InvocationAmbiguousPayload};
@@ -643,9 +627,6 @@ mod tests {
         // The ArchiveRetrySweeper republishes; we observe
         // ≥2 archived events. Then we start the CP consumer
         // and verify the archive lands + local row cleaned up.
-        let Some(_) = require_nats() else {
-            return;
-        };
 
         use crate::Agent;
         use crate::events::TriggerSource;
@@ -787,9 +768,6 @@ mod tests {
         // and a 1s sweep interval, an archive row older than
         // 1 day gets deleted within a few sweep ticks; a
         // 12-hour-old row remains untouched.
-        let Some(_) = require_nats() else {
-            return;
-        };
 
         use crate::control_plane::store::InvocationArchiveRow;
         use chrono::Utc;
@@ -862,9 +840,6 @@ mod tests {
         // final_phase=completed later; the no-downgrade
         // guard keeps owner = Failed and the first archive
         // insert wins (ON CONFLICT DO NOTHING).
-        let Some(_) = require_nats() else {
-            return;
-        };
 
         use crate::control_plane::operator;
         use crate::events::{EventPayload, InvocationAmbiguousPayload, InvocationArchivedPayload};
@@ -978,9 +953,6 @@ mod tests {
         // a registered worker that stops heartbeating gets
         // flipped to Stale by the coordination consumer's
         // sweep within the configured window.
-        let Some(_) = require_nats() else {
-            return;
-        };
 
         use crate::control_plane::store::WorkerStatus;
         use chrono::Utc;

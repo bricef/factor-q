@@ -207,10 +207,8 @@ mod tests {
     /// shut down the consumer cleanly.
     #[tokio::test]
     async fn consumer_projects_events_into_store() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();

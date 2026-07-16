@@ -177,7 +177,6 @@ pub enum HeartbeatConsumerError {
 mod tests {
     use super::*;
     use crate::events::WorkerHeartbeatPayload;
-    use crate::test_support::events::require_nats;
     use crate::worker::WorkerId;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -185,9 +184,8 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_consumer_updates_coordination_row_end_to_end() {
-        let Some(url) = require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
         let store = Arc::new(

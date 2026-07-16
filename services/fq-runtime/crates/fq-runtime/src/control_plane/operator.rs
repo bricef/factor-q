@@ -355,10 +355,8 @@ mod tests {
     /// on unknown agents and sequences.
     #[tokio::test]
     async fn dead_letters_list_and_requeue_round_trip() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let agent = unique_agent("dl-op");
         let other = unique_agent("dl-op-other");
@@ -449,10 +447,8 @@ mod tests {
     /// error rather than requeueing a null trigger.
     #[tokio::test]
     async fn requeue_of_an_unrecoverable_dead_letter_refuses() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let agent = unique_agent("dl-aged");
         let event = Event::new(
