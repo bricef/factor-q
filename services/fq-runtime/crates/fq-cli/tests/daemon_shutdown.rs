@@ -14,13 +14,13 @@
 //! waits up to `drain_deadline_ms`, then exits cleanly — the NATS-transport
 //! equivalent of the SIGTERM path.
 //!
-//! These tests are **serialized** by a shared lock: each spawns a full
-//! `fq run` daemon that subscribes to the *global* `fq.control.drain`
-//! subject, so a drain from one would otherwise reach the other's daemon.
-//!
-//! Both need a live NATS broker, so they are gated on `FQ_NATS_URL` and
-//! skip when it is unset. `just ci` in the runtime workspace exports it
-//! (dev broker on :4222); CI brings that broker up.
+//! Each test spawns a full `fq run` daemon that subscribes to the *global*
+//! `fq.control.drain` / `fq.control.down` subjects. On a shared broker one
+//! test's control message would reach another test's daemon, so these used
+//! to run under a process-wide lock and skip when `FQ_NATS_URL` was unset.
+//! Each test now spawns its **own** `nats-server` (#233), so they are
+//! isolated by construction — no lock, no skip, and they run in parallel.
+//! The pinned binary comes from `just install-nats` (`FQ_TEST_NATS_SERVER`).
 
 #![cfg(unix)]
 
@@ -28,11 +28,6 @@ use std::io::ErrorKind;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-/// Serializes the daemon-shutdown tests: each spawns a full `fq run`
-/// daemon on the shared broker, and `fq.control.drain` is a global
-/// subject, so two must never be up at once.
-static SHUTDOWN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn fq_binary() -> &'static str {
     env!("CARGO_BIN_EXE_fq")
@@ -53,11 +48,8 @@ fn unique_scratch() -> std::path::PathBuf {
 
 #[test]
 fn daemon_shuts_down_gracefully_on_sigterm() {
-    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
-        eprintln!("skipping daemon_shuts_down_gracefully_on_sigterm: FQ_NATS_URL not set");
-        return;
-    };
-    let _guard = SHUTDOWN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
     let log_path = scratch.join("daemon.log");
@@ -185,11 +177,8 @@ fn wait_with_timeout(
 /// is proven at the unit level by the drain-equivalence property test.
 #[test]
 fn daemon_drains_and_exits_on_fq_drain() {
-    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
-        eprintln!("skipping daemon_drains_and_exits_on_fq_drain: FQ_NATS_URL not set");
-        return;
-    };
-    let _guard = SHUTDOWN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
     let log_path = scratch.join("daemon.log");
@@ -272,11 +261,8 @@ fn daemon_drains_and_exits_on_fq_drain() {
 /// nothing to suspend and the stop completes at once.
 #[test]
 fn daemon_stops_and_confirms_on_fq_down() {
-    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
-        eprintln!("skipping daemon_stops_and_confirms_on_fq_down: FQ_NATS_URL not set");
-        return;
-    };
-    let _guard = SHUTDOWN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
     let log_path = scratch.join("daemon.log");
@@ -372,11 +358,8 @@ fn daemon_stops_and_confirms_on_fq_down() {
 /// `pkill -INT` (issue #63). Confirmed via the same shutdown-event wait.
 #[test]
 fn daemon_stops_now_on_fq_down_now() {
-    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
-        eprintln!("skipping daemon_stops_now_on_fq_down_now: FQ_NATS_URL not set");
-        return;
-    };
-    let _guard = SHUTDOWN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
     let log_path = scratch.join("daemon.log");
@@ -453,11 +436,8 @@ fn daemon_stops_now_on_fq_down_now() {
 /// review follow-up.
 #[test]
 fn fq_down_fast_fails_when_no_daemon_running() {
-    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
-        eprintln!("skipping fq_down_fast_fails_when_no_daemon_running: FQ_NATS_URL not set");
-        return;
-    };
-    let _guard = SHUTDOWN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
 

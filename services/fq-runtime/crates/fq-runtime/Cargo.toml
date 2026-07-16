@@ -40,8 +40,16 @@ tarpc = { version = "0.37", features = [
 # JetStream health probe). `fq-cli` enables it; whether the *listener*
 # starts is a runtime decision (`[read_service]` in fq.toml).
 read-service = ["dep:tarpc"]
+# Exposes `test_support::nats` (the private-broker guard) to integration
+# tests in this and dependent crates, which cannot see `cfg(test)` items
+# (#233). Only the dependency-free broker guard — never the dev-dep helpers.
+test-support = []
 
 [dev-dependencies]
+# Self-reference with the test-support feature so this crate's own
+# integration tests (tests/*.rs) can use `test_support::nats` — the standard
+# cargo idiom for exposing a feature-gated helper to integration tests (#233).
+fq-runtime = { path = ".", features = ["test-support"] }
 proptest = "1"
 tempfile = "3"
 axum = "0.7"
