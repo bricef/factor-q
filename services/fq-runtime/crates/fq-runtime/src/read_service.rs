@@ -636,14 +636,16 @@ mod tests {
 
     /// End-to-end `health()` over the wire against a real broker —
     /// exercises the probe, its timeout wrapper, and the composed
-    /// report. Self-gating: skips when no broker listens on the dev
-    /// port (`just ci` and the CI runtime job both provide one).
+    /// report. Spawns its own private `nats-server` (#233): this used
+    /// to self-gate by probing the shared dev broker on :4222, which
+    /// no longer exists on the test path — left as-is it would have
+    /// skipped forever and reported green.
     #[tokio::test]
     async fn health_round_trips_against_a_live_broker() {
-        let Ok(bus) = crate::bus::EventBus::connect("nats://127.0.0.1:4222").await else {
-            eprintln!("skipping: no NATS broker on 127.0.0.1:4222");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let bus = crate::bus::EventBus::connect(server.url())
+            .await
+            .expect("connect to private broker");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
@@ -678,10 +680,10 @@ mod tests {
         // reachable even when shape-carrying RPCs would not decode.
         let version = client.version(context::current()).await.expect("rpc");
         assert_eq!(version, "test-version");
-        // `EventBus::connect` ensured both core streams exist, so the
-        // probe must report them Available. Their primary consumers may
-        // or may not exist on the shared dev broker — both states are
-        // valid here, so only the stream level is asserted.
+        // `EventBus::connect` ensured both core streams exist on the
+        // private broker, so the probe must report them Available. No
+        // daemon runs here, so their primary consumers deterministically
+        // do not exist — only the stream level is asserted.
         assert_eq!(health.streams.len(), 2);
         for s in &health.streams {
             assert!(
