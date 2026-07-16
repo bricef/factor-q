@@ -27,8 +27,8 @@ permissions:
 #
 # The Rust gate is independent per-workspace jobs — `runtime-ci` (installs the
 # pinned nats-server the per-test brokers use, plus Node for the MCP integration
-# tests), `store-ci` (hermetic), and `dashboard-ci` (hermetic) — so a red in one
-# never masks another's
+# tests), `store-ci` (its grant-bus test spawns private brokers likewise), and
+# `dashboard-ci` (hermetic) — so a red in one never masks another's
 # results (#38). Each is triggered by its own `changes` path filter
 # (`runtime`/`store`/`dashboard`), so a store-only PR no longer rebuilds the
 # runtime suite (or spins up NATS/Node), and vice versa. `rust-ci` is a thin
@@ -62,11 +62,18 @@ jobs:
               - 'services/fq-test-support/**'
               - 'justfile'
               - 'rust-toolchain.toml'
+              - '.nats-version'
+              - '.nats-checksums'
               - '.github/workflows/**'
             store:
               - 'services/fq-store/**'
+              # grant_bus dev-depends on the shared broker guard and the
+              # pinned nats-server it spawns (#233).
+              - 'services/fq-test-support/**'
               - 'justfile'
               - 'rust-toolchain.toml'
+              - '.nats-version'
+              - '.nats-checksums'
               - '.github/workflows/**'
             go:
               - 'adapters/**'
@@ -179,7 +186,9 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
       - if: needs.changes.outputs.store == 'true'
         uses: extractions/setup-just@v3
-      # Hermetic suite — no NATS broker, no Node toolchain needed.
+      # No Node toolchain needed. The grant-bus test spawns its own private
+      # broker (#233); `just store-ci` provisions the pinned nats-server via
+      # its `install-nats` dependency.
       - if: needs.changes.outputs.store == 'true'
         run: just store-ci
       # Cache hit-rate for the keep/drop decision on sccache.

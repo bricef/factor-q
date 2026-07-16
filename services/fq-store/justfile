@@ -23,8 +23,9 @@ test *args:
 
 # The NATS-backed grant-bus integration test. It spawns its own private
 # nats-server (#233) — no shared broker needed — so it just needs the pinned
-# binary `just install-nats` drops in .tools/ at the repo root. Kept out of the
-# hermetic `test`/`ci` path because it needs that binary.
+# binary `just install-nats` drops in .tools/ at the repo root. Part of `ci`
+# below (the root `store-ci` provisions the binary via its `install-nats`
+# dependency); kept callable on its own for a quick bus-only loop.
 test-bus:
     FQ_TEST_NATS_SERVER="${FQ_TEST_NATS_SERVER:-{{justfile_directory()}}/../../.tools/nats-server}" cargo test --features bus --test grant_bus
 
@@ -60,8 +61,9 @@ doc:
 #
 # Nested under the root gate the rows join its summary; run standalone (as CI
 # does) this prints its own. See scripts/ci-timing.sh.
-# All quality checks — hermetic, no external services required. Run `test-bus`
-# separately (with NATS up) to cover the bus integration test.
+# All quality checks. The final phase (`test-bus`) spawns private brokers
+# (#233) and so needs the pinned nats-server — root `just store-ci` provisions
+# it; a bare `just ci` here panics with install instructions if it is missing.
 ci:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -78,3 +80,4 @@ ci:
     run_phase "test"      just test --tests
     run_phase "doctest"   just test --doc
     run_phase "failpoints" just test-failpoints
+    run_phase "test-bus"  just test-bus

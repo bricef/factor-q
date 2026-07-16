@@ -138,15 +138,17 @@ test-dashboard *args:
 # equivalents, and `rust-ci` runs all three in one command. `ci` invokes these
 # same targets, so the local gate cannot drift from CI (#196).
 
-# NATS-backed tests spawn their own broker (need the pinned nats-server from
-# `just install-nats`, #233); the MCP integration tests need Node/npx.
+# NATS-backed tests spawn their own broker (#233) from the pinned nats-server,
+# provisioned by the `install-nats` dependency; the MCP integration tests need
+# Node/npx.
 # Run the runtime Rust gate (fmt-check, clippy, doc, test).
-runtime-ci:
+runtime-ci: install-nats
     cd {{runtime_dir}} && just ci
 
-# Hermetic — no NATS, no Node; the grant-bus test is fq-store's `test-bus`.
+# No Node needed; the grant-bus test spawns its own private broker (#233) from
+# the pinned nats-server, provisioned by the `install-nats` dependency.
 # Run the store Rust gate (fmt-check, clippy, doc, test).
-store-ci:
+store-ci: install-nats
     cd {{store_dir}} && just ci
 
 # Hermetic — the dashboard's router tests spin their own read service
@@ -157,10 +159,10 @@ dashboard-ci:
 
 # The shared test-only crate (#233) is its own workspace, so the per-service
 # gates only compile it as a dependency — this runs its own fmt/clippy/tests.
-# Its self-tests spawn a broker, so it needs the pinned binary like the runtime
-# suite does.
+# Its self-tests spawn a broker; the `install-nats` dependency provisions the
+# pinned binary.
 # Run the fq-test-support gate (fmt-check, clippy, test).
-test-support-ci:
+test-support-ci: install-nats
     cd {{test_support_dir}} && cargo fmt --check
     cd {{test_support_dir}} && cargo clippy --all-targets -- -D warnings
     cd {{test_support_dir}} && FQ_TEST_NATS_SERVER="${FQ_TEST_NATS_SERVER:-{{nats_bin}}}" cargo test
@@ -203,8 +205,8 @@ go-ci:
 #
 # NATS: no shared broker. Every suite's NATS-backed tests spawn their own
 # private nats-server per test (#233, via fq-test-support), so `ci` neither
-# brings a broker up nor tears one down — it just needs the pinned binary
-# (`just install-nats`), like the tests do.
+# brings a broker up nor tears one down. The pinned binary provisions itself:
+# the Rust gates depend on `install-nats` (idempotent, a no-op once installed).
 #
 # smoke is intentionally NOT part of `ci`: it needs ANTHROPIC_API_KEY and makes
 # a real, paid LLM call. Run it on its own with `just smoke`.
