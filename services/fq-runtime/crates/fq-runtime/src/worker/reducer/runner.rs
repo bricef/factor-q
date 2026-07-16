@@ -49,7 +49,7 @@ use crate::events::{
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::mcp::{
     AdvertisedCapabilities, McpClientManager, McpResourceReader, McpServerConfig, ServerRequest,
-    advertised_roots, elicitation_decline,
+    advertised_roots_from_tool_sandbox, elicitation_decline,
 };
 use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
@@ -571,108 +571,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         delivery_attempt: Option<u32>,
         durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        // Every grant-bearing server runs per-invocation (ADR-0018): we
-        // start each, layer its tools onto the base registry, and merge
-        // their server-initiated request streams into one channel keyed
-        // by server name.
-        let grant_servers: Vec<_> = agent
-            .mcp_servers()
-            .iter()
-            .filter(|d| agent.grants_inbound_capability(&d.server))
-            .collect();
-        if grant_servers.is_empty() {
-            // No grant-bearing server: base registry, no channel.
-            return self
-                .run_loop_for(
-                    agent,
-                    llm,
-                    trigger_source,
-                    trigger_subject,
-                    trigger_payload,
-                    delivery_attempt,
-                    &self.context.tools(),
-                    None,
-                    durable_start,
-                )
-                .await;
-        }
-
-        let mut manager = McpClientManager::new();
-        let mut tools = (*self.context.tools()).clone();
-        let mut channels: Vec<(String, UnboundedReceiver<ServerRequest>)> = Vec::new();
-        for decl in grant_servers {
-            let capabilities = AdvertisedCapabilities {
-                sampling: agent
-                    .sampling_grant()
-                    .is_some_and(|g| g.permits(&decl.server)),
-                elicitation: agent
-                    .elicitation_grant()
-                    .is_some_and(|g| g.permits(&decl.server)),
-                roots: agent.roots_grant().is_some_and(|g| g.permits(&decl.server)),
-            };
-            // Advertised roots ⊆ sandbox grant; the roots outbound seam
-            // is default-allow (roots have no evaluator path).
-            let roots = advertised_roots(
-                agent.sandbox(),
-                agent.roots_grant(),
-                &decl.server,
-                &ValidatorChain::new(),
-            );
-            let config = McpServerConfig {
-                name: decl.server.clone(),
-                command: decl.command.clone().unwrap_or_default(),
-                args: decl.args.clone(),
-                env: decl.env.clone(),
-                url: decl.url.clone(),
-            };
-            match manager
-                .start_server_with_requests(config, roots, capabilities)
-                .await
-            {
-                Ok((server_tools, rx, _roots_handle)) => {
-                    // Per-invocation server tools are additive: on a name
-                    // collision the registry rejects the newcomer (first
-                    // registration wins). The CLI never starts a
-                    // grant-bearing server as shared (ADR-0018), so a
-                    // rejection here means two declarations collide —
-                    // surfaced loudly instead of silently shadowing.
-                    for tool in server_tools {
-                        if let Err(error) = tools.register(tool) {
-                            warn!(server = %decl.server, %error, "refusing per-invocation MCP tool registration");
-                        }
-                    }
-                    channels.push((decl.server.clone(), rx));
-                }
-                // A server that fails to start is skipped (its tools and
-                // server-initiated requests are simply absent) rather
-                // than failing the whole invocation.
-                Err(err) => {
-                    warn!(
-                        agent_id = %agent.id(),
-                        server = %decl.server,
-                        error = %err,
-                        "failed to start grant-bearing MCP server per-invocation; skipping it"
-                    );
-                }
-            }
-        }
-
-        let sampling = (!channels.is_empty()).then(|| SamplingChannel::merged(channels));
-        let outcome = self
-            .run_loop_for(
-                agent,
-                llm,
-                trigger_source,
-                trigger_subject,
-                trigger_payload,
-                delivery_attempt,
-                &tools,
-                sampling,
-                durable_start,
-            )
-            .await;
-        manager.shutdown().await;
-        outcome
+        self.run_loop_for(
+            agent,
+            llm,
+            trigger_source,
+            trigger_subject,
+            trigger_payload,
+            delivery_attempt,
+            &self.context.tools(),
+            None,
+            durable_start,
+        )
+        .await
     }
 
     /// Run a single invocation, servicing inbound server-initiated
@@ -762,9 +672,59 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 return outcome;
             }
         };
+        // Start grant-bearing MCP servers only after the sandbox has been
+        // materialised, so roots use the same bound paths tools enforce.
+        let mut manager = McpClientManager::new();
+        let mut invocation_tools = (*tools).clone();
+        let mut channels = sampling.map_or_else(Vec::new, |channel| channel.channels);
+        for decl in agent
+            .mcp_servers()
+            .iter()
+            .filter(|decl| agent.grants_inbound_capability(&decl.server))
+        {
+            let capabilities = AdvertisedCapabilities {
+                sampling: agent
+                    .sampling_grant()
+                    .is_some_and(|g| g.permits(&decl.server)),
+                elicitation: agent
+                    .elicitation_grant()
+                    .is_some_and(|g| g.permits(&decl.server)),
+                roots: agent.roots_grant().is_some_and(|g| g.permits(&decl.server)),
+            };
+            let roots = advertised_roots_from_tool_sandbox(
+                &sandbox,
+                agent.roots_grant(),
+                &decl.server,
+                &ValidatorChain::new(),
+            );
+            let config = McpServerConfig {
+                name: decl.server.clone(),
+                command: decl.command.clone().unwrap_or_default(),
+                args: decl.args.clone(),
+                env: decl.env.clone(),
+                url: decl.url.clone(),
+            };
+            match manager
+                .start_server_with_requests(config, roots, capabilities)
+                .await
+            {
+                Ok((server_tools, rx, _)) => {
+                    for tool in server_tools {
+                        if let Err(error) = invocation_tools.register(tool) {
+                            warn!(server = %decl.server, %error, "refusing per-invocation MCP tool registration");
+                        }
+                    }
+                    channels.push((decl.server.clone(), rx));
+                }
+                Err(err) => {
+                    warn!(agent_id = %agent_id, server = %decl.server, error = %err, "failed to start grant-bearing MCP server per-invocation; skipping it")
+                }
+            }
+        }
+        let sampling = (!channels.is_empty()).then(|| SamplingChannel::merged(channels));
         warn_on_deprecated_bare_grants(&agent_id, agent.tools());
         let allowed_tool_names = canonical_tool_names(agent.tools());
-        let tool_schemas = tools.build_schemas(&allowed_tool_names);
+        let tool_schemas = invocation_tools.build_schemas(&allowed_tool_names);
         // A tool the agent declares but the registry has no
         // implementation for is dropped silently by `build_schemas` —
         // the model is simply never offered it, with no other signal.
@@ -774,7 +734,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // registry for this invocation (base + any per-invocation MCP
         // tools), so a name missing at this point is genuinely
         // unavailable, not merely unresolved.
-        let missing = tools.missing_tools(&allowed_tool_names);
+        let missing = invocation_tools.missing_tools(&allowed_tool_names);
         if !missing.is_empty() {
             warn!(
                 agent_id = %agent_id,
@@ -881,7 +841,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 &agent_config,
                 &trigger,
                 &sandbox,
-                tools,
+                &invocation_tools,
                 workspace.as_deref(),
                 state,
                 last_result,
@@ -898,6 +858,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 Vec::new(),
             )
             .await;
+        manager.shutdown().await;
         self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
             .await;
         outcome

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
+use fq_tools::{Tool, ToolContext, ToolError, ToolResult, ToolSandbox};
 use rmcp::ClientHandler;
 use rmcp::ServiceExt;
 use rmcp::model::{
@@ -242,6 +242,25 @@ pub fn roots_from_sandbox(sandbox: &Sandbox) -> Vec<Root> {
     roots
 }
 
+/// Derive roots from the materialised tool sandbox. Unlike the declarative
+/// sandbox, its prefixes have already had invocation placeholders bound.
+pub fn roots_from_tool_sandbox(sandbox: &ToolSandbox) -> Vec<Root> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut roots = Vec::new();
+    for path in sandbox
+        .read_prefixes()
+        .iter()
+        .chain(sandbox.write_prefixes())
+    {
+        let path = path.to_string_lossy().into_owned();
+        let uri = format!("file://{path}");
+        if seen.insert(uri.clone()) {
+            roots.push(Root::new(uri).with_name(path));
+        }
+    }
+    roots
+}
+
 /// Compute the roots to advertise to `server`: nothing unless the
 /// agent's [`RootsGrant`] permits it, otherwise the sandbox-derived
 /// roots run through the outbound validator chain (ADR-0018 §4). A
@@ -257,6 +276,22 @@ pub fn advertised_roots(
     }
     validators
         .run(roots_from_sandbox(sandbox))
+        .unwrap_or_default()
+}
+
+/// Like [`advertised_roots`], but derives from the materialised sandbox
+/// used by tools after invocation-specific placeholders are bound.
+pub fn advertised_roots_from_tool_sandbox(
+    sandbox: &ToolSandbox,
+    grant: Option<&RootsGrant>,
+    server: &str,
+    validators: &ValidatorChain<Vec<Root>>,
+) -> Vec<Root> {
+    if !grant.is_some_and(|g| g.permits(server)) {
+        return Vec::new();
+    }
+    validators
+        .run(roots_from_tool_sandbox(sandbox))
         .unwrap_or_default()
 }
 
