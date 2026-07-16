@@ -201,15 +201,18 @@ and the `tarpc` service is content-only (no `write_object`, no `NameIndex`).
 Over-the-wire coverage stays with the functional `conformance.rs` (content
 conformance); the interleaving checker is the *local* contract.
 
-Object reconcile is now in place (#243: `reconcile_object` plus the audit's
-Phase 1 object arm, the twin of the block reconcile), so a crash-leaked object
+Object reconcile is in place (#243: `reconcile_object` plus the audit's Phase 1
+object arm, the twin of the block reconcile), so a crash-leaked object
 reservation is healed past the grace rather than flagged by the at-rest oracle —
 and the audit's alarm moved to the in-flight oracle, so a live in-flight reserve
-is tolerated (dominance) instead of raising a spurious drift alarm. Still
-deferred (documented): the `Crash` process itself — the crash-injection harness
-that kills a `put` at a seam, reopens the index, and asserts the audit heals it
-(#248) — plus a second concurrent writer, the block arm, and per-step error
-injection. The `Proc`/step-machine structure extends to all of them.
+is tolerated (dominance) instead of raising a spurious drift alarm. The `Crash`
+process is now implemented (#248): the exhaustive checker halts the writer
+reserved-but-unbound at every point and every collector interleaving and asserts
+the audit recovers a clean, at-rest store (non-vacuously — each crash really
+leaked), and the DST injects leaked object reservations across its randomized
+soak. Still deferred (#253): a second concurrent writer, the block arm, and
+per-step (graceful) error injection — bounded additions the `Proc`/step-machine
+structure extends to.
 
 ### A standing discipline (for layer 2+)
 

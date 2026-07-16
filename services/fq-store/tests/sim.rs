@@ -8,10 +8,16 @@
 //! printed `seed` and `step`.
 //!
 //! Fault steps inject the crash-orphans the reachability audit exists to recover
-//! from — an orphan file (a block written with no row) or a leaked reservation (a
-//! reserve with no bind). These are safe leaks, not violations, so the per-step
-//! oracle still holds; at the end of each seed a full audit past the grace must
-//! restore a fully clean store (L4), proven by a second audit finding nothing.
+//! from — an orphan file (a block written with no row), a leaked block
+//! reservation, or a leaked object reservation (a reserve with no bind — the
+//! crash mid-put after reserve, before bind, that #243/#248 recover). These are
+//! safe leaks — the per-step **in-flight** oracle tolerates them (dominance: a
+//! refcount above its live-reference count is an in-flight or leaked reservation,
+//! never a violation). At the end of each seed, repeated audits past the grace
+//! must drive the store to a clean fixed point (L4) — proven by an audit that
+//! finds nothing left to do *and* a strict **at-rest** oracle check (refcount
+//! equality) on the result. One pass clears block-only faults; object and block
+//! leaks sharing a block can need a second (see the recovery loop below).
 //!
 //! The "crash" step drops and reopens the index on the same files — the faithful
 //! single-process crash model: in-memory state is lost, WAL-committed survives.
@@ -91,9 +97,11 @@ async fn run_seed(seed: u64, steps: usize) {
             }
             12..=13 => {
                 // Inject a crash-orphan for the audit to recover from: an orphan
-                // file (a block written with no row) or a leaked reservation (a
-                // reserve with no bind). Both are safe leaks — the oracle holds.
-                match below(&mut rng, 2) {
+                // file (a block written with no row), a leaked block reservation,
+                // or a leaked object reservation (a reserve with no bind — a crash
+                // mid-put after reserve, before bind). All are safe leaks the
+                // in-flight oracle tolerates; the end-of-seed audit recovers them.
+                match below(&mut rng, 3) {
                     0 => {
                         let len = below(&mut rng, 400) as usize;
                         let bytes: Vec<u8> = (0..len).map(|_| next_u64(&mut rng) as u8).collect();
@@ -102,10 +110,20 @@ async fn run_seed(seed: u64, steps: usize) {
                             .await
                             .unwrap();
                     }
-                    _ => {
+                    1 => {
                         let snapshot = repo.index().snapshot().await.unwrap();
                         if let Some(row) = snapshot.blocks.iter().find(|b| b.available) {
                             repo.index().reserve_block(&row.hash).await.unwrap();
+                        }
+                    }
+                    _ => {
+                        // Object twin (#243/#248): reserve an existing object with
+                        // no bind, leaking its reservation for the object reconcile
+                        // to recover. reserve_object(create=false) bumps an
+                        // available object; a claimed one refuses (a no-op).
+                        let snapshot = repo.index().snapshot().await.unwrap();
+                        if let Some((cid, _)) = snapshot.objects.first() {
+                            repo.index().reserve_object(cid, false).await.unwrap();
                         }
                     }
                 }
@@ -136,8 +154,11 @@ async fn run_seed(seed: u64, steps: usize) {
             }
         }
 
-        // Invariant oracle.
-        let violations = verify::check_index(repo.index(), repo.content())
+        // Invariant oracle — in-flight (dominance), so an injected leaked
+        // reservation (block or object) is tolerated, not flagged. The dangerous
+        // direction (a refcount below truth, S1) still fails. Strict at-rest
+        // equality is asserted once at end-of-seed, after recovery.
+        let violations = verify::check_index_in_flight(repo.index(), repo.content())
             .await
             .unwrap();
         assert!(
@@ -147,21 +168,36 @@ async fn run_seed(seed: u64, steps: usize) {
     }
 
     // Recovery (L4): after the whole workload — including injected orphan files
-    // and leaked reservations — a full audit past the grace must restore a wholly
-    // clean store, so a *second* audit finds nothing left to do.
-    ReachabilityAuditor
-        .audit(&repo, Duration::ZERO)
-        .await
-        .unwrap();
-    let residual = ReachabilityAuditor
-        .audit(&repo, Duration::ZERO)
-        .await
-        .unwrap();
-    assert_eq!(
-        residual,
-        AuditReport::default(),
-        "seed={seed}: audit did not converge to a clean store"
+    // and leaked block/object reservations — repeated audits past the grace must
+    // drive the store to a clean fixed point. A single pass clears block-only
+    // faults, but a leaked *object* sharing a block with a leaked *block*
+    // reservation can need a second: Phase 1 reconciles from one snapshot, and
+    // collecting the leaked object in Phase 2 then orphans a block only a later
+    // pass reconciles. Eventual convergence (bounded) is the real L4 property; the
+    // audit is a maintenance sweep run repeatedly, not a one-shot. (Making Phase 1
+    // single-pass for this case is tracked as an optional enhancement, #255.)
+    let mut passes = 0;
+    let converged = loop {
+        passes += 1;
+        let report = ReachabilityAuditor
+            .audit(&repo, Duration::ZERO)
+            .await
+            .unwrap();
+        if report == AuditReport::default() {
+            break true;
+        }
+        if passes >= 8 {
+            break false;
+        }
+    };
+    assert!(
+        converged,
+        "seed={seed}: audit did not converge to a clean store within {passes} passes"
     );
+    // The converged store is genuinely at rest: strict at-rest equality must hold
+    // — every object/block refcount equals its live-reference count — the check
+    // the per-step in-flight oracle deliberately relaxes for injected leaks.
+    verify::assert_clean(repo.index(), repo.content()).await;
 }
 
 /// Quick by default for the CI gate; crank it for a soak run with
