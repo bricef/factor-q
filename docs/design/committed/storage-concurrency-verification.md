@@ -177,16 +177,34 @@ extends directly to the **Phase 3b** generalisations: a second writer, the alias
 path, the block arm, and a `Crash` process that resets in-flight PCs (the model's
 `Crash` action). Those, plus `error` injection at steps, are the next increments.
 
-### Phase 3b — generalise to conformance
+### Phase 3b — generalise to conformance ✅
 
-- Lift 3a into a trait-generic harness over `ContentStore` / `NameIndex`, run
-  in-process and over `tarpc`, alongside the functional `conformance.rs`.
-- **Acceptance:** the remote backend passes the same exhaustive interleaving bar;
-  the suite is documented as the correctness contract for future store
-  implementations.
+Landed. The checker is now generic over a `StoreBackend` (a `BlockStore` +
+`NameIndex` pair): implement `fresh` and the same exhaustive interleaving bar
+applies — the reusable **correctness contract** for future backends. The single
+`FsSqlite` backend exists today. A second scenario, the **alias** writer
+(`RESERVE → BIND`, no manifest write), joins the `put` writer; each is checked
+clean under back-off and non-vacuous under the sabotaged collector.
 
-3a lands before 3b so the framework's shape is proven before it is generalised;
-3b lands only if 3a earns it.
+**It earned its keep immediately:** the exhaustive alias sweep found a *third*
+S1-obj hole that review and the hand-written regressions missed — `reserve_object`
+minted an absent object fresh even for an alias, so an alias whose target was
+fully collected mid-flight created a live name over no manifest. Fixed with
+`reserve_object(cid, create_if_absent)` (see
+[storage-gc-objects-verification](storage-gc-objects-verification.md)). This is
+the payoff the method predicted: the code-level exhaustive checker mechanically
+finding the interleaving a human missed.
+
+**One correction to the plan.** "Run over `tarpc`" does not apply to *this*
+checker: the GC interleaving protocol lives at the local index + manifest layer,
+and the `tarpc` service is content-only (no `write_object`, no `NameIndex`).
+Over-the-wire coverage stays with the functional `conformance.rs` (content
+conformance); the interleaving checker is the *local* contract.
+
+Deferred (documented): a `Crash` process — it needs object reconcile (#243) so a
+crash-leaked reservation is recoverable rather than flagged by the at-rest
+oracle — plus a second concurrent writer, the block arm, and per-step error
+injection. The `Proc`/step-machine structure extends to all of them.
 
 ### A standing discipline (for layer 2+)
 
