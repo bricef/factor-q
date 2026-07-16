@@ -68,7 +68,7 @@ pub use control_plane::{
 pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
 pub use mcp::{
     AdvertisedCapabilities, McpClientManager, McpError, McpResourceReader, McpServerConfig,
-    RootsHandle, ServerRequest, advertised_roots, roots_from_sandbox,
+    RootsHandle, ServerRequest, advertised_roots_from_tool_sandbox, roots_from_tool_sandbox,
 };
 pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;

@@ -38,7 +38,7 @@ use tracing::{debug, info, warn};
 
 use fq_tools::builtin::ExecConfig;
 
-use crate::agent::{RootsGrant, Sandbox};
+use crate::agent::RootsGrant;
 use crate::tools::ToolRegistry;
 use crate::validation::ValidatorChain;
 
@@ -220,30 +220,14 @@ impl RootsHandle {
     }
 }
 
-/// Derive the `file://` roots a server should be advertised from an
-/// agent's sandbox filesystem grant (ADR-0018): the union of the
-/// sandbox's read and write paths, deduplicated, each as a `file://`
-/// root named by its path. This enforces *advertised roots ⊆ sandbox
-/// boundary* by construction — only granted paths are ever advertised.
+/// Derive the `file://` roots a server should be advertised from the
+/// invocation's **materialised** tool sandbox (ADR-0018): the union of
+/// its read and write prefixes, deduplicated, each as a `file://` root
+/// named by its path. Taking the [`ToolSandbox`] — the same object the
+/// tools enforce against, with `${workspace}` already bound (#179) —
+/// makes *advertised roots ⊆ enforced boundary* hold by construction;
+/// the declared sandbox's raw strings may still carry placeholders.
 /// `file://` only for v1.
-pub fn roots_from_sandbox(sandbox: &Sandbox) -> Vec<Root> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut roots = Vec::new();
-    for path in sandbox
-        .fs_read_paths()
-        .iter()
-        .chain(sandbox.fs_write_paths())
-    {
-        let uri = format!("file://{path}");
-        if seen.insert(uri.clone()) {
-            roots.push(Root::new(uri).with_name(path.clone()));
-        }
-    }
-    roots
-}
-
-/// Derive roots from the materialised tool sandbox. Unlike the declarative
-/// sandbox, its prefixes have already had invocation placeholders bound.
 pub fn roots_from_tool_sandbox(sandbox: &ToolSandbox) -> Vec<Root> {
     let mut seen = std::collections::BTreeSet::new();
     let mut roots = Vec::new();
@@ -265,22 +249,6 @@ pub fn roots_from_tool_sandbox(sandbox: &ToolSandbox) -> Vec<Root> {
 /// agent's [`RootsGrant`] permits it, otherwise the sandbox-derived
 /// roots run through the outbound validator chain (ADR-0018 §4). A
 /// `Deny` from the chain advertises nothing rather than a partial set.
-pub fn advertised_roots(
-    sandbox: &Sandbox,
-    grant: Option<&RootsGrant>,
-    server: &str,
-    validators: &ValidatorChain<Vec<Root>>,
-) -> Vec<Root> {
-    if !grant.is_some_and(|g| g.permits(server)) {
-        return Vec::new();
-    }
-    validators
-        .run(roots_from_sandbox(sandbox))
-        .unwrap_or_default()
-}
-
-/// Like [`advertised_roots`], but derives from the materialised sandbox
-/// used by tools after invocation-specific placeholders are bound.
 pub fn advertised_roots_from_tool_sandbox(
     sandbox: &ToolSandbox,
     grant: Option<&RootsGrant>,
