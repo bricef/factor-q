@@ -80,8 +80,8 @@ impl NatsServer {
         // hard kill leaves behind — to the network. Loopback also pins the
         // ports file to loopback URLs, so taking its first entry stops
         // depending on nats-server's interface ordering.
-        let child = Command::new(&bin)
-            .arg("-a")
+        let mut cmd = Command::new(&bin);
+        cmd.arg("-a")
             .arg("127.0.0.1")
             .arg("--port")
             .arg("-1")
@@ -91,16 +91,38 @@ impl NatsServer {
             .arg("-sd")
             .arg(dir.join("js"))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap_or_else(|e| {
-                panic!(
-                    "could not start `{bin}`: {e}\n\
+            .stderr(Stdio::null());
+
+        // Drop kills the server, but a SIGKILLed test runner never runs
+        // Drop. On Linux the kernel delivers SIGKILL to the server when the
+        // thread that spawned it dies, so interrupted runs cannot accumulate
+        // orphaned brokers. Per-thread on purpose: every shape here starts
+        // the server from a thread that outlives the guard — the test's own
+        // thread (#[test], current-thread #[tokio::test]) or a runtime
+        // worker that lives until the runtime drops (multi_thread). Do not
+        // call this from spawn_blocking: those threads idle out mid-test
+        // and would take the broker with them.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                // Post-fork, pre-exec; prctl is async-signal-safe and the
+                // setting survives the exec.
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let child = cmd.spawn().unwrap_or_else(|e| {
+            panic!(
+                "could not start `{bin}`: {e}\n\
                      The test broker is a pinned nats-server (.nats-version).\n\
                      Install it with `just install-nats`, or point \
                      FQ_TEST_NATS_SERVER at one."
-                )
-            });
+            )
+        });
 
         let mut server = Self {
             child,
@@ -201,5 +223,36 @@ mod tests {
         let a = test_nats();
         let b = test_nats();
         assert_ne!(a.url(), b.url(), "each test must get its own broker");
+    }
+
+    /// The PDEATHSIG contract: when the thread that spawned the broker
+    /// dies without running Drop (a hard-killed test runner), the kernel
+    /// reaps the broker. `mem::forget` stands in for the never-ran Drop;
+    /// the scratch dir it leaks is the price of the test.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn broker_dies_with_its_spawning_thread() {
+        let url = std::thread::spawn(|| {
+            let server = test_nats();
+            let url = server.url().to_string();
+            std::mem::forget(server);
+            url
+        })
+        .join()
+        .expect("spawn thread");
+
+        // The thread is gone; SIGKILL delivery is immediate, but give the
+        // socket a moment to close before declaring the orphan immortal.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if async_nats::connect(&url).await.is_err() {
+                return; // dead, as required
+            }
+            assert!(
+                Instant::now() < deadline,
+                "broker at {url} outlived its spawning thread"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
