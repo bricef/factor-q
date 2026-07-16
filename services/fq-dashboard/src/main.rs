@@ -225,7 +225,11 @@ async fn invocations_page(
         Ok(c) => c,
         Err(page) => return page,
     };
-    let include_archived = q.get("archived").is_some_and(|v| v == "1");
+    let filters = render::InvocationFilters {
+        include_archived: q.get("archived").is_some_and(|v| v == "1"),
+        show_completed: q.get("completed").is_none_or(|v| v != "0"),
+        show_failed: q.get("failed").is_none_or(|v| v != "0"),
+    };
     let status = q.get("status").cloned();
     let active = match client.active_invocations(context::current()).await {
         Ok(Ok(active)) => active,
@@ -233,13 +237,13 @@ async fn invocations_page(
         Err(err) => return unreachable_page(&state, "invocations", &format!("rpc: {err}")),
     };
     match client
-        .invocations(context::current(), status, include_archived, 100)
+        .invocations(context::current(), status, filters.include_archived, 100)
         .await
     {
         Ok(Ok(items)) => ok_page(
             &state,
             "invocations",
-            &render::invocations_page(&active, &items, include_archived, now_ms()),
+            &render::invocations_page(&active, &items, filters, now_ms()),
         ),
         Ok(Err(err)) => unreachable_page(&state, "invocations", &err.to_string()),
         Err(err) => unreachable_page(&state, "invocations", &format!("rpc: {err}")),

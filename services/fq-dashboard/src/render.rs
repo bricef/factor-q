@@ -563,6 +563,67 @@ pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
     b
 }
 
+/// Which invocation rows the list shows. Archived rows are opt-in;
+/// the terminal statuses are opt-out, so the default view keeps
+/// history while letting an operator hide the routine outcomes and
+/// focus on live or anomalous rows. Filter state rides the query
+/// string, which the live region polls verbatim — toggles survive
+/// ticks for free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvocationFilters {
+    pub include_archived: bool,
+    pub show_completed: bool,
+    pub show_failed: bool,
+}
+
+impl Default for InvocationFilters {
+    fn default() -> Self {
+        InvocationFilters {
+            include_archived: false,
+            show_completed: true,
+            show_failed: true,
+        }
+    }
+}
+
+impl InvocationFilters {
+    /// The canonical query string for this state — only non-default
+    /// values appear, so the default view keeps the bare URL.
+    fn query(&self) -> String {
+        let mut params: Vec<&str> = Vec::new();
+        if self.include_archived {
+            params.push("archived=1");
+        }
+        if !self.show_completed {
+            params.push("completed=0");
+        }
+        if !self.show_failed {
+            params.push("failed=0");
+        }
+        if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        }
+    }
+
+    /// One toggle link: the current state with `flip` applied.
+    fn toggle(&self, flip: fn(&mut Self), on_label: &str, off_label: &str, is_on: bool) -> String {
+        let mut flipped = *self;
+        flip(&mut flipped);
+        format!(
+            r#"<a href="/invocations{}">{}</a>"#,
+            flipped.query(),
+            if is_on { off_label } else { on_label },
+        )
+    }
+
+    /// True when a terminal-status row is hidden by this state.
+    fn hides(&self, status: &str) -> bool {
+        (!self.show_completed && status == "completed") || (!self.show_failed && status == "failed")
+    }
+}
+
 /// The full invocations page body: the active table above the list,
 /// omitted entirely when nothing is in flight (in which case the page
 /// is byte-identical to the plain list). The list only earns its own
@@ -570,11 +631,11 @@ pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
 pub fn invocations_page(
     active_rows: &[ActiveInvocationView],
     items: &[InvocationSummaryView],
-    include_archived: bool,
+    filters: InvocationFilters,
     now_ms: i64,
 ) -> String {
     let active_html = active(active_rows, now_ms);
-    let list_html = invocations(items, include_archived, now_ms);
+    let list_html = invocations(items, filters, now_ms);
     if active_html.is_empty() {
         list_html
     } else {
@@ -582,20 +643,45 @@ pub fn invocations_page(
     }
 }
 
-/// The invocations list body.
-pub fn invocations(items: &[InvocationSummaryView], include_archived: bool, now_ms: i64) -> String {
+/// The invocations list body. Terminal-status filtering happens here,
+/// over the already-fetched rows — the read service's status filter
+/// selects one status, it cannot exclude, and the list is capped at
+/// 100 rows anyway.
+pub fn invocations(
+    items: &[InvocationSummaryView],
+    filters: InvocationFilters,
+    now_ms: i64,
+) -> String {
     let mut b = String::new();
     b.push_str(&format!(
-        r#"<p><a href="/invocations{}">{}</a></p>"#,
-        if include_archived { "" } else { "?archived=1" },
-        if include_archived {
-            "hide archived"
-        } else {
-            "show archived"
-        }
+        "<p>{} · {} · {}</p>",
+        filters.toggle(
+            |f| f.include_archived = !f.include_archived,
+            "show archived",
+            "hide archived",
+            filters.include_archived,
+        ),
+        filters.toggle(
+            |f| f.show_completed = !f.show_completed,
+            "show completed",
+            "hide completed",
+            filters.show_completed,
+        ),
+        filters.toggle(
+            |f| f.show_failed = !f.show_failed,
+            "show failed",
+            "hide failed",
+            filters.show_failed,
+        ),
     ));
+    let items: Vec<&InvocationSummaryView> =
+        items.iter().filter(|i| !filters.hides(&i.status)).collect();
     if items.is_empty() {
-        b.push_str(r#"<p class="muted">no invocations.</p>"#);
+        if filters.show_completed && filters.show_failed {
+            b.push_str(r#"<p class="muted">no invocations.</p>"#);
+        } else {
+            b.push_str(r#"<p class="muted">no invocations match the filters.</p>"#);
+        }
         return b;
     }
     b.push_str(
@@ -1424,14 +1510,14 @@ mod tests {
             archived: false,
             summary: Some("Fixing #7: <script>alert(1)</script>".into()),
         }];
-        let html = invocations(&items, false, 1_000);
+        let html = invocations(&items, InvocationFilters::default(), 1_000);
         assert!(html.contains("<th>summary</th>"), "got: {html}");
         assert!(
             html.contains("Fixing #7: &lt;script&gt;alert(1)&lt;/script&gt;"),
             "summary escaped: {html}"
         );
         items[0].summary = None;
-        let html = invocations(&items, false, 1_000);
+        let html = invocations(&items, InvocationFilters::default(), 1_000);
         assert!(html.contains("—"), "fallback dash: {html}");
 
         let active_rows = [fq_runtime::views::ActiveInvocationView {
@@ -1523,8 +1609,8 @@ mod tests {
         assert_eq!(active(&[], 1_000), "");
         // With no active rows the page is byte-identical to the plain list.
         assert_eq!(
-            invocations_page(&[], &items, false, 1_000),
-            invocations(&items, false, 1_000)
+            invocations_page(&[], &items, InvocationFilters::default(), 1_000),
+            invocations(&items, InvocationFilters::default(), 1_000)
         );
     }
 
@@ -1541,7 +1627,7 @@ mod tests {
             open_llms: vec![],
             summary: None,
         }];
-        let html = invocations_page(&active_rows, &[], false, 600_000);
+        let html = invocations_page(&active_rows, &[], InvocationFilters::default(), 600_000);
         assert!(html.contains("Active now"), "got: {html}");
         assert!(html.contains(r#"<a href="/invocations/0123456789abcdef">01234567</a>"#));
         assert!(html.contains("tool exec"), "got: {html}");
@@ -1948,7 +2034,7 @@ mod tests {
                 summary: None,
             },
         ];
-        let html = invocations(&items, false, 1_000);
+        let html = invocations(&items, InvocationFilters::default(), 1_000);
         assert!(
             html.contains(r#"<a href="/agents/m0-loop">m0-loop</a>"#),
             "got: {html}"
@@ -1972,6 +2058,80 @@ mod tests {
         let html = active(&active_rows, 1_000);
         assert!(
             html.contains(r#"<a href="/agents/m0-issue-fix">m0-issue-fix</a>"#),
+            "got: {html}"
+        );
+    }
+
+    /// Terminal-status filters: hide/show completed and failed rows,
+    /// with toggle links that flip one flag while preserving the rest
+    /// (the live region polls the same query string, so state
+    /// survives ticks).
+    #[test]
+    fn invocation_filters_hide_terminal_rows_and_compose_links() {
+        let mk = |id: &str, status: &str| fq_runtime::views::InvocationSummaryView {
+            invocation_id: id.into(),
+            agent_id: Some("a".into()),
+            worker_id: "w".into(),
+            status: status.into(),
+            assigned_at_ms: 0,
+            started_at_ms: 0,
+            archived: false,
+            summary: None,
+        };
+        let items = vec![
+            mk("inv-live", "in_flight"),
+            mk("inv-done", "completed"),
+            mk("inv-boom", "failed"),
+        ];
+
+        // Default: everything visible, both toggles say "hide".
+        let html = invocations(&items, InvocationFilters::default(), 1_000);
+        for id in ["inv-live", "inv-done", "inv-boom"] {
+            assert!(html.contains(id), "default shows {id}: {html}");
+        }
+        assert!(
+            html.contains(r#"<a href="/invocations?completed=0">hide completed</a>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/invocations?failed=0">hide failed</a>"#),
+            "got: {html}"
+        );
+
+        // Hiding completed drops only those rows; its link flips to
+        // "show" and the OTHER toggles carry the completed=0 state.
+        let filters = InvocationFilters {
+            show_completed: false,
+            ..Default::default()
+        };
+        let html = invocations(&items, filters, 1_000);
+        assert!(!html.contains("inv-done"), "got: {html}");
+        assert!(
+            html.contains("inv-live") && html.contains("inv-boom"),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/invocations">show completed</a>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/invocations?completed=0&failed=0">hide failed</a>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/invocations?archived=1&completed=0">show archived</a>"#),
+            "got: {html}"
+        );
+
+        // Everything hidden → the honest empty message.
+        let filters = InvocationFilters {
+            show_completed: false,
+            show_failed: false,
+            ..Default::default()
+        };
+        let html = invocations(&items[1..], filters, 1_000);
+        assert!(
+            html.contains("no invocations match the filters"),
             "got: {html}"
         );
     }
@@ -2015,7 +2175,7 @@ mod tests {
             archived: false,
             summary: None,
         }];
-        let html = invocations(&items, false, 1_200_000);
+        let html = invocations(&items, InvocationFilters::default(), 1_200_000);
         assert!(html.contains(r#"<a href="/invocations/0123456789abcdef">01234567</a>"#));
         assert!(html.contains("&lt;agent&gt;"));
         assert!(!html.contains("<agent>"));
