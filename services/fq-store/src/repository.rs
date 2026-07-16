@@ -60,7 +60,7 @@ impl<C: BlockStore, N: NameIndex> Repository<C, N> {
         const MAX_RESERVE_ATTEMPTS: usize = 128;
         let mut attempt = 0usize;
         let prev_rc = loop {
-            match self.index.reserve_object(&cid).await? {
+            match self.index.reserve_object(&cid, true).await? {
                 Some(prev_rc) => break prev_rc,
                 None => {
                     attempt += 1;
@@ -126,16 +126,18 @@ impl<C: BlockStore, N: NameIndex> Repository<C, N> {
             })?;
             reserved.push((hash, generation));
         }
-        // Reserve the object (reserve-before-rely): an alias trusts the existing
-        // manifest, and the reserve is what keeps the collector from unlinking it.
-        // A claimed object is refused (ADR-0030) — release the block reservations
-        // and surface the retryable Conflict.
-        let prev_rc = match self.index.reserve_object(cid).await? {
+        // Reserve the object (reserve-before-rely) WITHOUT create-if-absent: an
+        // alias trusts the existing manifest, so if the object was fully collected
+        // between reading its blocks and here, it must refuse — minting a fresh
+        // object would leave a live name over no manifest (S1). A claimed object
+        // is likewise refused (ADR-0030). Either way release the block
+        // reservations and surface the retryable Conflict.
+        let prev_rc = match self.index.reserve_object(cid, false).await? {
             Some(prev_rc) => prev_rc,
             None => {
                 self.release_reservations(&reserved).await;
                 return Err(StoreError::Conflict(format!(
-                    "cannot alias {cid}: object is being collected; retry"
+                    "cannot alias {cid}: object is gone or being collected; retry or re-put"
                 )));
             }
         };

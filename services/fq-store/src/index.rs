@@ -122,14 +122,18 @@ pub trait NameIndex: Send + Sync {
 
     /// Reserve an object for a writer — the object-side reserve-before-rely, run
     /// *before* the manifest is written. Bumps `refcount` (so the collector
-    /// cannot claim it), or creates it fresh (`refcount = 1`, available) if
-    /// absent. `Ok(Some(prev_refcount))` when reserved — `0` means the object is
-    /// going live (its edges are created at [`bind`](Self::bind)), `> 0` an alias
-    /// of a live object. `Ok(None)` if the object is claimed (`available = 0`):
-    /// the caller backs off and retries (ADR-0030). Pair with `bind`, or
+    /// cannot claim it). `create_if_absent` distinguishes the two writers:
+    /// `put`, which will write the manifest, passes `true` so an absent object is
+    /// created fresh (`refcount = 1`, available); a `bind`-alias, which trusts an
+    /// existing manifest, passes `false` so an absent object — one the collector
+    /// fully reclaimed — returns `Ok(None)` rather than a live object with no
+    /// manifest (S1). `Ok(Some(prev_refcount))` when reserved — `0` means going
+    /// live (edges created at [`bind`](Self::bind)), `> 0` an alias of a live
+    /// object. `Ok(None)` if claimed, or absent and not creating: the caller
+    /// backs off / retries (ADR-0030). Pair with `bind`, or
     /// [`release_object`](Self::release_object) to undo a reserve whose bind
     /// never happened.
-    async fn reserve_object(&self, cid: &Cid) -> Result<Option<i64>>;
+    async fn reserve_object(&self, cid: &Cid, create_if_absent: bool) -> Result<Option<i64>>;
 
     /// Release one object reservation from [`reserve_object`](Self::reserve_object)
     /// — `refcount -= 1` — for a put that gave up or a bind that failed after
@@ -698,7 +702,7 @@ impl NameIndex for SqliteNameIndex {
         Ok(())
     }
 
-    async fn reserve_object(&self, cid: &Cid) -> Result<Option<i64>> {
+    async fn reserve_object(&self, cid: &Cid, create_if_absent: bool) -> Result<Option<i64>> {
         let cid_hex = cid.to_hex();
         let mut tx = self.pool.begin().await?;
         // The single-writer index serialises this against the collector's
@@ -720,13 +724,18 @@ impl NameIndex for SqliteNameIndex {
                     .await?;
                 rc
             }
-            None => {
+            // Absent. Only `put` (which will write the manifest) may create it
+            // fresh; an alias (`create_if_absent = false`) that finds its object
+            // fully collected must refuse rather than mint a live object with no
+            // manifest — that would be S1 (found by the exhaustive checker).
+            None if create_if_absent => {
                 sqlx::query("INSERT INTO objects (cid, refcount, available) VALUES (?, 1, 1)")
                     .bind(&cid_hex)
                     .execute(&mut *tx)
                     .await?;
                 0
             }
+            None => return Ok(None),
         };
         tx.commit().await?;
         Ok(Some(prev_rc))
@@ -837,7 +846,7 @@ mod tests {
             reserved.push((*b, generation));
         }
         let prev_rc = s
-            .reserve_object(obj)
+            .reserve_object(obj, true)
             .await?
             .expect("object not claimed in this test");
         s.bind(name, obj, &reserved, prev_rc).await

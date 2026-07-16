@@ -185,9 +185,28 @@ The lesson is the standing one for the concurrency verification method
 ([storage-concurrency-verification](storage-concurrency-verification.md)): a
 design-level model that abstracts a two-store step to one action must be refined
 in code with reserve-before-rely, and the **code-level** exhaustive interleaving
-checker — driving the real `write_object`/`bind` steps through the seams — is
-what would catch a botched refinement that the abstract model cannot. Both holes
-are pinned by red-then-green regressions in `tests/gc_interleaving.rs`.
+checker is what catches a botched refinement the abstract model cannot.
+
+### A third hole, found by the checker (not review): alias fresh-insert
+
+The exhaustive checker (Phase 3b, `tests/gc_exhaustive.rs`) then found a hole
+neither review nor the hand-written regressions caught. `reserve_object`
+create**s** an absent object fresh — correct for `put`, which writes the
+manifest, but wrong for a `bind`-**alias**, which trusts an existing one. An
+alias reads the object's manifest, then reserves; if the collector fully
+reclaims the object (`CLAIM → UNLINK → DELETE`) in between, the alias's
+`reserve_object` mints a *new* live object with **no manifest** — S1-obj again.
+The hand-written alias regression only exercised the *claimed* case (refused);
+the *fully-collected* case slipped through. The exhaustive alias-vs-collect
+sweep reached it in its 11-state space. Fix: `reserve_object(cid,
+create_if_absent)` — `put` passes `true`, alias passes `false`, so a
+fully-collected alias target refuses (retryable `Conflict`) instead of minting.
+This is the checker doing exactly the job it was built for: finding, mechanically
+and exhaustively, the interleaving a human missed.
+
+All three holes (put-path, and the alias claimed and absent cases) are covered:
+the first two by red-then-green regressions in `tests/gc_interleaving.rs`, the
+third by the exhaustive checker, which would fail if the fix were reverted.
 
 ## The fault map (object layer)
 
