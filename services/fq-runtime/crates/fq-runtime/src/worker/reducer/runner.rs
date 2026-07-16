@@ -4380,10 +4380,8 @@ mod tests {
         // middle-state events. After AgentExecutor is deleted
         // the legacy half is gone, so this asserts the
         // reducer-side canonical sequence directly.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let agent_id = unique_agent_id("canonical-simple");
         let agent = Agent::builder()
@@ -4418,10 +4416,8 @@ mod tests {
         // Was `equivalent_event_sequence_for_tool_call_loop`.
         // Same conversion as the simple-completion test:
         // reducer-only canonical-sequence assertion.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let dir = tempdir().unwrap();
         let target = dir.path().join("hello.md");
@@ -4483,9 +4479,8 @@ mod tests {
         // rooted at `triggered`, with no orphans, no branches, and
         // no multiple roots. Reconstructable without consulting
         // timestamps.
-        let Some(url) = crate::test_support::events::require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
         let agent_id = unique_agent_id("chain");
         let agent = Agent::builder()
@@ -4659,10 +4654,8 @@ mod tests {
     /// the synthesised JSON fields.
     #[tokio::test]
     async fn self_inspect_is_dispatched_by_the_runner() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let agent_id = unique_agent_id("self-inspect");
         let agent = Agent::builder()
@@ -4782,10 +4775,8 @@ mod tests {
     /// legacy paths are exercised deliberately: bare grant + bare call.
     #[tokio::test]
     async fn legacy_bare_builtin_grants_and_calls_still_resolve() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let agent_id = unique_agent_id("legacy-bare");
         let agent = Agent::builder()
@@ -5186,10 +5177,8 @@ mod tests {
 
     #[tokio::test]
     async fn llm_only_invocation_writes_intent_dispatched_completed_in_order() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let agent_id = unique_agent_id("step4-llm-only");
         let agent = simple_responder_agent(&agent_id);
@@ -5215,10 +5204,8 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_invocation_writes_tool_wal_in_order() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let dir = tempdir().unwrap();
         let target = dir.path().join("hello.md");
@@ -5315,10 +5302,8 @@ mod tests {
 
     #[tokio::test]
     async fn tool_error_writes_completed_with_is_error_true() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         // Sandbox that allows the read, but the file doesn't
         // exist — file_read will return is_error=true.
@@ -5377,10 +5362,8 @@ mod tests {
         // the legacy executor's `tool_not_in_agent_allowlist_is_denied`
         // — this is the reducer-path counterpart that was
         // missing as of commit `c9fd92e`.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let agent_id = unique_agent_id("gating-deny");
         // Agent declares only file_read; LLM will try file_write.
@@ -5485,10 +5468,8 @@ mod tests {
         // shortcut. So the event sequence includes both
         // `tool.call` and `tool.dispatched` before the failing
         // `tool.result`.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let allowed = tempdir().unwrap();
         let forbidden = tempdir().unwrap();
@@ -5547,10 +5528,8 @@ mod tests {
         // short-circuits to `Failed { BudgetExceeded }` when the
         // budget is blown. Asserts both the outcome variant and
         // the on-bus event.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let agent_id = unique_agent_id("overspender");
         let agent = Agent::builder()
@@ -5617,10 +5596,8 @@ mod tests {
         // "pending"`. The ack consumer (commit 6) deletes the
         // row on receipt; the retry sweeper (commit 7) re-emits
         // if the ack never arrives.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let agent_id = unique_agent_id("step8-archive-on-complete");
         let agent = simple_responder_agent(&agent_id);
@@ -5680,10 +5657,8 @@ mod tests {
 
     #[tokio::test]
     async fn state_row_written_on_completion_with_terminal_at_set() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let agent_id = unique_agent_id("step5-state-completion");
         let agent = simple_responder_agent(&agent_id);
@@ -5720,10 +5695,8 @@ mod tests {
     /// `runtime_error` (neither side was right).
     #[tokio::test]
     async fn max_iterations_failure_carries_the_max_iterations_kind() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
 
         let agent_id_str = unique_agent_id("max-iter-kind");
@@ -5791,10 +5764,8 @@ mod tests {
     /// returned error must say so, not claim max-iterations.
     #[tokio::test]
     async fn reducer_step_error_carries_the_runtime_error_kind() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect to NATS");
 
         use crate::worker::reducer::types::StepOutput;
@@ -5868,10 +5839,8 @@ mod tests {
         // 0 (LLM call) completed with end-turn" state — i.e.
         // the safe-replay case. The reducer should pick up the
         // persisted result, produce Complete, and finish.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         use crate::worker::reducer::types::{
             AgentConfig, StepInput, TriggerPayload, TriggerSourceKind,
@@ -6026,10 +5995,8 @@ mod tests {
         // turn. That first post-resume call must terminate the
         // invocation as BudgetExceeded carrying the lifetime cost
         // — not run to completion on a fresh accumulator.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         use crate::worker::reducer::types::{
             AgentConfig, StepInput, TriggerPayload, TriggerSourceKind,
@@ -6187,10 +6154,8 @@ mod tests {
 
     #[tokio::test]
     async fn resume_refuses_ambiguous_invocation() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         let dir = tempdir().unwrap();
         let store = Arc::new(
@@ -6266,10 +6231,8 @@ mod tests {
 
     #[tokio::test]
     async fn state_row_step_index_advances_with_each_step() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         // A two-turn invocation (tool call + final summary) goes
         // through enough reducer steps that `step_index` should

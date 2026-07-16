@@ -547,10 +547,8 @@ mod tests {
 
     #[tokio::test]
     async fn coordination_consumer_handles_invocation_ambiguous_end_to_end() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         use crate::events::{Event, EventPayload, InvocationAmbiguousPayload};
         use tempfile::tempdir;
@@ -636,10 +634,8 @@ mod tests {
         // ack subject all land. Skips the JetStream consume side
         // since that's exercised by the ambiguous end-to-end test
         // above — the dispatch loop is the same code path.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         use crate::events::EventPayload;
         use crate::worker::WorkerId;
@@ -745,10 +741,8 @@ mod tests {
         // Operator-issued drop: no live worker involvement.
         // Handler writes the archive row, flips the owner row
         // to Failed, and does not publish an ack.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         use crate::events::{Event, EventPayload, InvocationOperatorRecoveredPayload};
         use crate::worker::WorkerId;
@@ -840,10 +834,8 @@ mod tests {
 
     #[tokio::test]
     async fn handler_operator_recovered_idempotent_on_redelivery() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         use crate::events::{Event, EventPayload, InvocationOperatorRecoveredPayload};
         use crate::worker::WorkerId;
@@ -914,10 +906,8 @@ mod tests {
         // Failed; then the worker emits invocation.archived
         // with final_phase = "completed". The owner row must
         // remain Failed.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
 
         use crate::events::{Event, EventPayload, InvocationArchivedPayload};
         use crate::worker::WorkerId;
@@ -981,10 +971,6 @@ mod tests {
         // → archive row + ack → ArchiveAckConsumer → invocation_state
         // row deleted. Uses the TestRuntime harness so the setup
         // boilerplate isn't repeated across scenarios.
-        let Some(_) = crate::test_support::runtime::require_nats() else {
-            return;
-        };
-
         use crate::Agent;
         use crate::events::TriggerSource;
         use crate::test_support::mock_anthropic::MockResponse;

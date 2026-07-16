@@ -65,28 +65,6 @@ pub fn event_kind_of(payload: &EventPayload) -> &'static str {
     }
 }
 
-/// Skip a NATS-backed test if `FQ_NATS_URL` isn't set. Returns
-/// the URL when present; prints a `skipping:` line otherwise.
-///
-/// Use at the top of any test that needs a real NATS connection:
-///
-/// ```ignore
-/// #[tokio::test]
-/// async fn my_test() {
-///     let Some(url) = require_nats() else { return };
-///     // ... real test ...
-/// }
-/// ```
-pub fn require_nats() -> Option<String> {
-    match std::env::var("FQ_NATS_URL") {
-        Ok(url) => Some(url),
-        Err(_) => {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            None
-        }
-    }
-}
-
 /// Subscribe to an agent's event subject, run an async action,
 /// then collect `expected_count` events emitted while it ran.
 ///

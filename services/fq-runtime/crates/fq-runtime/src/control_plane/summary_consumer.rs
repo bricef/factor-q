@@ -465,7 +465,6 @@ mod tests {
     use crate::llm::ChatResponse;
     use crate::llm::fixture::FixtureClient;
     use crate::pricing::ModelPricing;
-    use crate::test_support::events::require_nats;
     use std::collections::HashMap as StdHashMap;
     use std::time::Duration;
 
@@ -613,9 +612,8 @@ mod tests {
     /// operator-overhead accounting #216 requires).
     #[tokio::test]
     async fn triggered_event_produces_costed_start_summary() {
-        let Some(url) = require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let world = World::start(&url).await;
         world
             .fixture
@@ -651,9 +649,8 @@ mod tests {
     /// stays alive and the next event still summarises.
     #[tokio::test]
     async fn llm_failure_is_skipped_and_consumer_survives() {
-        let Some(url) = require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let world = World::start(&url).await;
         world
             .fixture
@@ -694,9 +691,8 @@ mod tests {
     /// the summariser's input — never the conversation.
     #[tokio::test]
     async fn rolling_update_feeds_prior_summary_plus_latest_turn_only() {
-        let Some(url) = require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let world = World::start(&url).await;
         world
             .fixture
@@ -763,9 +759,8 @@ mod tests {
     /// A failed invocation gets an Outcome summary.
     #[tokio::test]
     async fn failed_event_produces_outcome_summary() {
-        let Some(url) = require_nats() else {
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let world = World::start(&url).await;
         world
             .fixture

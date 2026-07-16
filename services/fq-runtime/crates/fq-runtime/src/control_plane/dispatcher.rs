@@ -880,10 +880,8 @@ mod tests {
     /// verify that the agent's events appear in the event stream.
     #[tokio::test]
     async fn dispatcher_executes_published_trigger() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         use crate::bus::EventBus;
         use crate::control_plane::projection::store::{EventFilter, ProjectionStore};
 
@@ -1036,10 +1034,8 @@ You are a test agent."#
     /// unacked while the invocation runs).
     #[tokio::test]
     async fn trigger_is_acked_before_the_invocation_finishes() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::sync::Notify;
@@ -1180,10 +1176,8 @@ You are a test agent."#
     /// behaviour this would drop to 0 immediately — the missed-run gap.
     #[tokio::test]
     async fn trigger_is_not_acked_before_the_first_wal_write() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::sync::Notify;
@@ -1355,7 +1349,8 @@ You are a test agent."#
     /// rather than consumed (ACK). Requires a live broker.
     async fn dispatched_pre_wal_failure_is_redelivered(transient: bool) -> bool {
         use std::sync::Arc;
-        let url = std::env::var("FQ_NATS_URL").expect("FQ_NATS_URL");
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let label = if transient {
             "pre-wal-transient"
@@ -1427,10 +1422,6 @@ You are a test agent."#
     /// retried, not dropped.
     #[tokio::test]
     async fn transient_failure_before_first_wal_write_naks_for_redelivery() {
-        if std::env::var("FQ_NATS_URL").is_err() {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        }
         assert!(
             dispatched_pre_wal_failure_is_redelivered(true).await,
             "a transient pre-WAL failure must NAK (redeliver) the trigger"
@@ -1442,10 +1433,6 @@ You are a test agent."#
     /// consumer, and the Failed event already recorded why.
     #[tokio::test]
     async fn permanent_failure_before_first_wal_write_acks() {
-        if std::env::var("FQ_NATS_URL").is_err() {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        }
         assert!(
             !dispatched_pre_wal_failure_is_redelivered(false).await,
             "a permanent pre-WAL failure must ACK (consume) the trigger"
@@ -1460,10 +1447,8 @@ You are a test agent."#
     /// routes into this path is the pure `trigger_fate`, tested above.)
     #[tokio::test]
     async fn dead_letter_event_carries_kind_and_trigger_annotations() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         use std::sync::Arc;
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let agent_id_str = unique_agent_id("dead-letter-shape");
@@ -1542,10 +1527,8 @@ You are a test agent."#
     /// consumer must not keep unbounded redelivery.
     #[tokio::test]
     async fn preexisting_consumer_is_upgraded_to_the_delivery_bound() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let name = unique_consumer_name();
         let filter = crate::bus::trigger_subject(&unique_agent_id("upgrade-path"));
@@ -1590,10 +1573,8 @@ You are a test agent."#
     /// so JetStream retains it for the next binary.
     #[tokio::test]
     async fn a_draining_dispatcher_stops_consuming_triggers() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         use crate::bus::EventBus;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -1800,10 +1781,8 @@ You are a test agent."#
     /// Releasing both and shutting down exercises the join phase.
     #[tokio::test]
     async fn fan_out_runs_invocations_concurrently() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let (bus, agent_id, started, gate, run, shutdown_tx) =
             gated_fanout_world(&url, "fanout-two", 2).await;
 
@@ -1832,10 +1811,8 @@ You are a test agent."#
     /// finished.
     #[tokio::test]
     async fn serial_bound_runs_one_invocation_at_a_time() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
         let (bus, agent_id, started, gate, run, shutdown_tx) =
             gated_fanout_world(&url, "fanout-serial", 1).await;
 
