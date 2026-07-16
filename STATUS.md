@@ -15,9 +15,10 @@ milestone boundaries — **last: 2026-07-05** (M2 access control merged,
   stdio + Streamable HTTP transports; tools, resources, prompts, and the
   server-initiated capabilities (sampling, elicitation, roots). Operator
   surface: `fq init / run / trigger / reload / drain / agent / invocation`
-  (including `transcript`) `/ events / costs / status / workers / doctor`
-  (read commands take `--json`), plus a read-only web dashboard
-  (`fq-dashboard` over the daemon's localhost tarpc read service — the
+  (including `transcript`) `/ events / costs / status / workers /
+  dead-letters / doctor` (read commands take `--json`), plus a read-only
+  web dashboard (`fq-dashboard` over the daemon's localhost tarpc read
+  service — the
   [operator-dashboard plan](docs/plans/active/2026-07-10-operator-dashboard.md)).
 - **Store (`fq-cas`)** — [content-addressed storage](services/fq-store/README.md)
   (BLAKE3, FastCDC dedup) + named objects with version history + verified
