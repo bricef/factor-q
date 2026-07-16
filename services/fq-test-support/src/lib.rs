@@ -1,18 +1,24 @@
-//! A private `nats-server` per test (#233).
+//! Test-only helpers shared across factor-q's independent workspaces (#233).
 //!
-//! Tests used to share the developer's dev broker via `FQ_NATS_URL`. That
-//! made them lie to each other and to us:
+//! [`NatsServer`] is a private `nats-server` per test. Tests used to share the
+//! developer's dev broker via `FQ_NATS_URL`, which made them lie to each other
+//! and to us:
 //!
-//! - `fq.control.down` is a **global** subject, so one test's `fq down`
-//!   reached every daemon on the broker — including strays left behind by an
-//!   interrupted run, which then poisoned every later run.
+//! - `fq.control.*` subjects are **global**, so one test's `fq down` / `fq
+//!   drain` reached every daemon on the broker — including strays left behind
+//!   by an interrupted run, which then poisoned every later run.
 //! - JetStream streams were shared, so state leaked between tests even though
-//!   each had its own projection DB.
+//!   each had its own scratch dir.
 //! - Worst: with `FQ_NATS_URL` unset the tests **skipped and reported green**.
 //!
 //! Each [`NatsServer`] is its own process with its own port and its own
-//! JetStream store, so none of that is reachable. An orphan left by a hard
-//! kill is harmless — it holds a random port nobody else asks for.
+//! JetStream store, so none of that is reachable. An orphan left by a hard kill
+//! is harmless — it holds a random port nobody else asks for.
+//!
+//! This lives in a standalone crate rather than any one service's
+//! `#[cfg(test)]` module because integration tests (a separate compilation
+//! unit) and other workspaces (fq-store) cannot see `cfg(test)` items — they
+//! dev-depend on this crate instead.
 //!
 //! The binary is pinned by `.nats-version` at the repo root and installed by
 //! `just install-nats`; `FQ_TEST_NATS_SERVER` overrides the path. A missing
@@ -160,9 +166,6 @@ impl Drop for NatsServer {
 
 /// Start a private broker for this test. The returned guard must be held for
 /// the test's lifetime — dropping it kills the server.
-///
-/// Replaces the old `require_nats()`, which read `FQ_NATS_URL` and *skipped*
-/// when it was unset. Nothing skips now.
 pub fn test_nats() -> NatsServer {
     NatsServer::start()
 }

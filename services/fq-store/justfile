@@ -21,10 +21,12 @@ lint:
 test *args:
     cargo test --features cli,service "$@"
 
-# The NATS-backed grant-bus integration test (needs a broker: `just infra-up`
-# from the repo root). Kept out of the hermetic `test`/`ci` path.
+# The NATS-backed grant-bus integration test. It spawns its own private
+# nats-server (#233) — no shared broker needed — so it just needs the pinned
+# binary `just install-nats` drops in .tools/ at the repo root. Kept out of the
+# hermetic `test`/`ci` path because it needs that binary.
 test-bus:
-    cargo test --features bus --test grant_bus
+    FQ_TEST_NATS_SERVER="${FQ_TEST_NATS_SERVER:-{{justfile_directory()}}/../../.tools/nats-server}" cargo test --features bus --test grant_bus
 
 # Adversarial interleaving tests driven through the fail-crate seams (the
 # concurrency verification plan). Hermetic, but separate from `test` so the

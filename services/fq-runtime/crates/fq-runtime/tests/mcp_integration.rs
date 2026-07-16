@@ -541,7 +541,7 @@ async fn static_resource_pin_appears_in_first_model_request() {
         eprintln!("skipping: npx not found");
         return;
     }
-    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     // Start the everything server and pick a concrete resource to pin.
@@ -1023,7 +1023,7 @@ async fn run_sampling_scenario(
         eprintln!("skipping: npx not found");
         return None;
     }
-    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     // Per-invocation everything server with its inbound request channel.
@@ -1603,7 +1603,7 @@ async fn run_elicitation_scenario(
         eprintln!("skipping: npx not found");
         return None;
     }
-    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     let mut manager = McpClientManager::new();
@@ -2150,7 +2150,7 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
         eprintln!("skipping: npx not found");
         return;
     }
-    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     // The agent *declares* the everything server in its `mcp:` block and

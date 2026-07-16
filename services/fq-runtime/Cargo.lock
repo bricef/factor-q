@@ -890,6 +890,7 @@ dependencies = [
  "chrono",
  "clap",
  "fq-runtime",
+ "fq-test-support",
  "futures",
  "libc",
  "serde",
@@ -910,7 +911,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
- "fq-runtime",
+ "fq-test-support",
  "fq-tools",
  "futures",
  "genai",
@@ -931,6 +932,13 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "fq-test-support"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

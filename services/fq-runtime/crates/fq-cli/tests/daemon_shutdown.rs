@@ -48,7 +48,7 @@ fn unique_scratch() -> std::path::PathBuf {
 
 #[test]
 fn daemon_shuts_down_gracefully_on_sigterm() {
-    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
@@ -177,7 +177,7 @@ fn wait_with_timeout(
 /// is proven at the unit level by the drain-equivalence property test.
 #[test]
 fn daemon_drains_and_exits_on_fq_drain() {
-    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
@@ -261,7 +261,7 @@ fn daemon_drains_and_exits_on_fq_drain() {
 /// nothing to suspend and the stop completes at once.
 #[test]
 fn daemon_stops_and_confirms_on_fq_down() {
-    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
@@ -358,7 +358,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
 /// `pkill -INT` (issue #63). Confirmed via the same shutdown-event wait.
 #[test]
 fn daemon_stops_now_on_fq_down_now() {
-    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
@@ -436,7 +436,7 @@ fn daemon_stops_now_on_fq_down_now() {
 /// review follow-up.
 #[test]
 fn fq_down_fast_fails_when_no_daemon_running() {
-    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
