@@ -3,7 +3,7 @@
 ## Status
 
 Draft (2026-07-05). Answers the open half of
-[2026-07-05 project assessment](../2026-07-05-project-assessment.md) §3
+[2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md) §3
 ("context-window management… is unstarted with no design… it couples to
 Memory, so its absence will be felt exactly when Memory ships"). This doc
 defines the *architecture* — a harness-owned, pluggable seam with an explicit
@@ -284,7 +284,7 @@ model.
 
 ## References
 
-- [2026-07-05 project assessment](../2026-07-05-project-assessment.md) §3 — the
+- [2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md) §3 — the
   critique this answers.
 - [ADR-0014](../../adrs/accepted/0014-agent-harness-as-reducer.md) — the
   harness-owns-the-loop boundary this extends.

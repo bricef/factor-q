@@ -950,7 +950,7 @@ host, e.g. via `gh`/`git`). This violates
 [design principle 3](../design/committed/design-principles.md)
 ("safe by construction, not by restriction" — capability granted exactly,
 nothing ambient), and it is the exposure
-[assessment §4](../design/2026-07-05-project-assessment.md) flags:
+[assessment §4](../reviews/2026-07-05-project-assessment.md) flags:
 agents grow more capable and longer-lived, so unrestricted network is a
 gap to close before they gain reach. Scope: enforce the declared
 `network` allowlist at the sandbox boundary (the `fs_*` / `exec_cwd`

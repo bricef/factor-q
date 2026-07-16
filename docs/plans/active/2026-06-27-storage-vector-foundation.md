@@ -77,7 +77,7 @@ context-window management (#5) are separate pillars that *consume* this.
 
 Built under [design principle 6](../../design/committed/design-principles.md)
 — the simplest reference implementation behind a verified, swappable seam.
-The [2026-07-05 assessment](../../design/2026-07-05-project-assessment.md) §2
+The [2026-07-05 assessment](../../reviews/2026-07-05-project-assessment.md) §2
 flagged the opportunity cost of the platform growing ahead of the services it
 serves, and offered three correctives. Disposition (2026-07-05):
 

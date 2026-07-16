@@ -9,7 +9,7 @@ infrastructure choice is committed to.
 
 This document exists because durable suspension came up as a
 near-term need and the first cut at solving it
-([context](../2026-04-19-design-assessment.md))
+([context](../../reviews/2026-04-19-design-assessment.md))
 anchored on a single store before surveying the broader data
 architecture. Solving one persistence problem in isolation
 risks locking in answers that fight the next four problems

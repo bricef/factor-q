@@ -14,7 +14,7 @@ the WAL never carrying call costs (4, slice 6), the crash window
 that laundered overspends (5, soak), resume choking on
 provider-errored WALs (6, deep soak), and synthetic tool errors
 invisible to replay (7, deep soak). Adopts critique 3 of the
-[2026-07-05 project assessment](../../design/2026-07-05-project-assessment.md)
+[2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
 and absorbs the "Round-trip invariants on `HarnessState`" thread of
 [backlog § Reducer boundary invariants](../backlog.md).
 
@@ -342,7 +342,7 @@ slices 1–2 are immediately valuable even if later slices pause for M3.
 
 ## References
 
-- [2026-07-05 project assessment](../../design/2026-07-05-project-assessment.md)
+- [2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
   (critique 3) — why this, why now
 - [Backlog § Reducer boundary invariants](../backlog.md) — thread 2 absorbed
   here; threads 1 and 3 unchanged

@@ -11,7 +11,7 @@ from convention to cryptographic attestation. It is **design-ahead**
 (lives in `aspirational/`): nothing here is built yet, and the cryptographic
 layers have a hard dependency on isolation ([ADR-0010](../../adrs/accepted/0010-agent-execution-isolation.md))
 that is not yet satisfied. It elaborates the exposure flagged in
-[assessment §4](../2026-07-05-project-assessment.md) (credentials and
+[assessment §4](../../reviews/2026-07-05-project-assessment.md) (credentials and
 identity at the agent boundary).
 
 ## The problem: three half-identities that disagree

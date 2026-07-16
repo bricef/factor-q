@@ -11,7 +11,7 @@ through [ADR-0016](0016-typed-operations-no-free-form-apis.md) (typed
 operations); and adds spawn to the capability-grant lineage of
 [ADR-0017](0017-mcp-human-in-the-loop.md) /
 [ADR-0018](0018-mcp-server-initiated-execution.md). Arising from the
-[2026-07-05 project assessment](../../design/2026-07-05-project-assessment.md)
+[2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
 §7, which flagged this as the frontier the project's "multi-agent" identity
 depends on.
 

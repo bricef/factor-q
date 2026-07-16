@@ -19,20 +19,20 @@ diplomatic.
 
 Written in sequence through April 2026:
 
-- [`wasm-boundary-design.md`](committed/wasm-boundary-design.md) —
+- [`wasm-boundary-design.md`](../design/committed/wasm-boundary-design.md) —
   the agent harness as a reducer: the guest exports a single
   pure `step(StepInput) -> StepOutput` function with zero
   imports; the host drives the loop.
-- [`tool-isolation-model.md`](committed/tool-isolation-model.md) —
+- [`tool-isolation-model.md`](../design/committed/tool-isolation-model.md) —
   trust boundary moved from agent-scoped to tool-scoped;
   per-tool isolation tiers (in-process, subprocess,
   container, WASM, microVM); workspace state introduced as
   the third leg alongside harness and external state.
-- [`wasm-posix-sandbox.md`](aspirational/wasm-posix-sandbox.md) —
+- [`wasm-posix-sandbox.md`](../design/aspirational/wasm-posix-sandbox.md) —
   exploratory direction for the WASM isolation tier
   specifically for shell and file-manipulation tools
   (BusyBox-in-WASI with overlay filesystem).
-- [`agent-os-architecture.md`](aspirational/agent-os-architecture.md) —
+- [`agent-os-architecture.md`](../design/aspirational/agent-os-architecture.md) —
   earlier framing doc positioning factor-q as an OS for
   agents; updated to cross-reference the newer design
   documents.

@@ -10,7 +10,7 @@ content-addressed store of
 [ADR-0023](0023-storage-and-vector-foundation.md) and the
 durability-class separation of
 [ADR-0024](0024-separate-databases-storage-foundation.md). Arising from
-[the 2026-07-05 project assessment](../../design/2026-07-05-project-assessment.md)
+[the 2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
 §5 ("Two source-of-truth patterns now coexist").
 
 ## Context
@@ -143,7 +143,7 @@ persistent system of record.** Concretely:
   disjoint Cargo workspaces with no shared code. Extracting the CAS forces
   a small workspace-topology decision (where the shared crate lives). This
   is also the first real cross-service integration — the step
-  [assessment critique #2](../../design/2026-07-05-project-assessment.md)
+  [assessment critique #2](../../reviews/2026-07-05-project-assessment.md)
   was implicitly asking for.
 - **A new cross-boundary seam: the projection rebuild path.** With the
   archive as a separate service, the projection rebuilds *from the archive*
