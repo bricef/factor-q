@@ -4,7 +4,7 @@
 **Status**: Closed (initial slice landed)
 **Design references**:
 - [`docs/design/committed/wasm-boundary-design.md`](../../design/committed/wasm-boundary-design.md) — the boundary the reducer is built to.
-- [`docs/design/2026-04-19-design-assessment.md`](../../design/2026-04-19-design-assessment.md) — recommended building a *native* reducer prototype before WASM packaging.
+- [`docs/reviews/2026-04-19-design-assessment.md`](../../reviews/2026-04-19-design-assessment.md) — recommended building a *native* reducer prototype before WASM packaging.
 
 ## Goal
 
@@ -19,7 +19,7 @@ the prototype tractable.
 
 ## What the design assessment asked us to test
 
-From [`2026-04-19-design-assessment.md`](../../design/2026-04-19-design-assessment.md):
+From [`2026-04-19-design-assessment.md`](../../reviews/2026-04-19-design-assessment.md):
 
 > Build the reducer prototype before more design.
 > Specifically: port `AgentExecutor::run()` to a state-enum

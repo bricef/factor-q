@@ -3,7 +3,7 @@
 **Status:** proposed (2026-07-05). Drives the **M0** milestone named in
 [VISION.md](../../../VISION.md) ("factor-q can be used to work on factor-q
 itself") — which the
-[2026-07-05 project assessment](../../design/2026-07-05-project-assessment.md)
+[2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
 §1 flagged as having no active plan. This is that plan. It is deliberately
 *loop-first* rather than platform-first: it turns one of the
 [reference workloads](../../design/committed/reference-workloads.md) from a
@@ -235,7 +235,7 @@ proxies rather than reduced to them.
 ## References
 
 - [VISION.md](../../../VISION.md) — the M0 milestone and the Q ladder.
-- [2026-07-05 project assessment](../../design/2026-07-05-project-assessment.md)
+- [2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
   §1 — the critique this plan answers.
 - [reference-workloads.md](../../design/committed/reference-workloads.md) —
   the touchstones this turns into a running load.

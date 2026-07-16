@@ -1,0 +1,126 @@
+digraph factorq {
+  label=<<b>factor-q — architecture as implemented</b><br/><font point-size="12">cleanroom read of source · 2026-07-16 · v1: a single `fq run` process hosts both control-plane and worker roles (boundary enforced by the worker::Worker trait)</font><br/><font point-size="11">solid = dataflow / requests&#160;&#160;·&#160;&#160;dashed = control &amp; secondary paths&#160;&#160;·&#160;&#160;①–⑧ = invocation lifecycle&#160;&#160;·&#160;&#160;grey dashed box = built but not yet wired in</font>>;
+  labelloc=t;
+  fontname="Helvetica";
+  fontsize=18;
+  compound=true;
+  rankdir=TB;
+  ranksep=0.8;
+  nodesep=0.5;
+  pad=0.5;
+  splines=spline;
+  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", fillcolor="#ffffff", color="#555555", margin="0.18,0.12"];
+  edge [fontname="Helvetica", fontsize=9.5, color="#444444", fontcolor="#333333", arrowsize=0.8];
+
+  /* ── Top row: operator & trigger surfaces ────────── */
+  github [label="GitHub API", shape=ellipse, fillcolor="#f2f2f2"];
+  ghwatcher [label=<<b>github-watcher</b><br/><font point-size="9">Go adapter · polls issues labelled 'ready'<br/>labels: ready → in-progress → done/failed</font>>, fillcolor="#e8f4e8"];
+  fqcli [label=<<b>fq CLI</b><br/><font point-size="9">operator surface: init · run · trigger · reload · drain ·<br/>down · status · costs · events · doctor · dead-letters<br/><i>default `fq trigger` runs the invocation<br/>in-process against the same events.db</i></font>>, fillcolor="#e8f4e8"];
+  config [label=<<b>fq.toml + agents/*.md</b><br/><font point-size="9">config · agent definitions<br/>(Markdown + YAML frontmatter)</font>>, shape=note, fillcolor="#fdf6e3"];
+  browser [label="Browser", shape=ellipse, fillcolor="#f2f2f2"];
+
+  dashboard [label=<<b>fq-dashboard</b><br/><font point-size="9">axum BFF, separate crash domain<br/>HTML + datastar SSE · 127.0.0.1:9472<br/>read-only: cannot touch runtime state</font>>, fillcolor="#e8f4e8"];
+
+  /* ── NATS ────────────────────────────────────────── */
+  subgraph cluster_nats {
+    label=<<b>NATS</b>&#160;&#160;&#160;·&#160;&#160;&#160;nats://localhost:4222>;
+    fontname="Helvetica"; fontsize=13;
+    style="rounded,filled"; fillcolor="#f0ecfa"; color="#8a7bbf";
+    nats_control [label=<<b>core NATS</b><br/><font point-size="9">ephemeral control subjects:<br/>fq.control.reload / .drain / .down</font>>];
+    nats_triggers [label=<<b>fq-triggers</b><br/><font point-size="9">JetStream work-queue stream<br/>fq.trigger.&lt;agent&gt; · 24h · max_deliver 5<br/>NAK backoff 1s/5s/30s/120s</font>>];
+    nats_events [label=<<b>fq-events</b><br/><font point-size="9">JetStream stream, 30d retention<br/>fq.agent.&gt; · fq.system.&gt; · fq.worker.&gt;</font>>];
+    nats_advisories [label=<<b>fq-advisories</b><br/><font point-size="9">JetStream stream<br/>$JS.EVENT…MAX_DELIVERIES.fq-triggers.&gt;</font>>];
+  }
+
+  /* ── Daemon ──────────────────────────────────────── */
+  subgraph cluster_daemon {
+    label=<<b>fq run daemon</b>&#160;&#160;&#160;·&#160;&#160;&#160;fq-cli + fq-runtime, single process, ~12 tokio tasks>;
+    fontname="Helvetica"; fontsize=13;
+    style="rounded,filled"; fillcolor="#e9f2fb"; color="#5b8ec9";
+
+    subgraph cluster_cp {
+      label=<<b>Control plane</b>>;
+      fontsize=11; style="rounded,filled"; fillcolor="#d7e7f8"; color="#5b8ec9";
+      dispatcher [label=<<b>TriggerDispatcher</b><br/><font point-size="9">durable consumer 'fq-dispatcher'</font>>];
+      coordination [label=<<b>CoordinationConsumer</b><br/><font point-size="9">ownership: InFlight → Completed |<br/>Failed | Ambiguous · stale-worker sweep</font>>];
+      deadletter [label=<<b>AdvisoryWatch + sweepers</b><br/><font point-size="9">dead-letters · archive retry · retention</font>>];
+    }
+
+    registry [label=<<b>AgentRegistry</b><br/><font point-size="9">Arc&lt;RwLock&gt; · atomic hot swap ·<br/>affects next trigger only (ADR-0020)</font>>];
+
+    subgraph cluster_worker {
+      label=<<b>Worker — ReducerRunner</b>>;
+      fontsize=11; style="rounded,filled"; fillcolor="#d7e7f8"; color="#5b8ec9";
+      hostloop [label=<<b>Host loop</b><br/><font point-size="9">drives pure Reducer::step:<br/>CallModel | CallTool(sParallel) | Complete | Failed<br/>budget enforcement · heartbeat ~10s<br/>outcome: Completed | BudgetExceeded | Suspended (drain)</font>>];
+      llmclient [label=<<b>LLM client</b><br/><font point-size="9">genai · RetryingLlmClient · PricingTable</font>>];
+      tools [label=<<b>ToolRegistry</b><br/><font point-size="9">fq-tools built-ins + sandbox<br/>+ MCP tools via McpClientManager</font>>];
+    }
+
+    projection [label=<<b>ProjectionConsumer</b><br/><font point-size="9">+ SummaryConsumer ·<br/>materialise events into the read model</font>>];
+    readsvc [label=<<b>Read-service</b><br/><font point-size="9">tarpc · 127.0.0.1:9471 · loopback-only ·<br/>unauthenticated · off by default</font>>];
+  }
+
+  /* ── Bottom: state ───────────────────────────────── */
+  subgraph cluster_db {
+    label=<<b>events.db</b>&#160;&#160;&#160;·&#160;&#160;&#160;single SQLite file (WAL), three schema-gated stores>;
+    fontname="Helvetica"; fontsize=13;
+    style="rounded,filled"; fillcolor="#fdf6e3"; color="#c9a95b";
+    workerstore [label=<<b>WorkerStore</b><br/><font point-size="9"><b>source of truth</b> — reducer WAL:<br/>dispatch rows + opaque state blob<br/>(crash recovery)</font>>];
+    cpstore [label=<<b>ControlPlaneStore</b><br/><font point-size="9"><b>source of truth</b> — invocation ownership ·<br/>schedule · invocation_archive · worker liveness</font>>];
+    projstore [label=<<b>ProjectionStore</b><br/><font point-size="9"><b>rebuildable read model</b> —<br/>events · invocation_summary</font>>];
+  }
+
+  /* ── Bottom: external services ───────────────────── */
+  llmapis [label=<<b>LLM provider APIs</b><br/><font point-size="9">Anthropic / OpenAI / … over HTTPS<br/>keys from env vars named in fq.toml</font>>, shape=ellipse, fillcolor="#f2f2f2"];
+  mcpsrv [label=<<b>MCP servers</b><br/><font point-size="9">stdio child processes or streamable HTTP<br/>grant-bearing servers run per-invocation</font>>, shape=ellipse, fillcolor="#f2f2f2"];
+  litellm [label=<<b>LiteLLM pricing JSON</b><br/><font point-size="9">fetched at boot, cached · daemon refuses<br/>to start if any model is unpriced</font>>, shape=ellipse, fillcolor="#f2f2f2"];
+
+  /* ── fq-cas (unwired) ────────────────────────────── */
+  subgraph cluster_cas {
+    label=<<b>fq-cas</b>&#160;&#160;— standalone CAS, unwired&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;>;
+    fontname="Helvetica"; fontsize=12;
+    style="rounded,dashed"; color="#999999"; fontcolor="#777777";
+    cas [label=<<b>fq-cas serve</b>&#160;&#160;+ CLI<br/><font point-size="9">tarpc 127.0.0.1:9000 · BLAKE3 CIDs · FastCDC chunking<br/>biscuit-auth capability tokens · own SQLite ·<br/>publishes fq.store.grant.* to NATS (bus feature)</font>>, color="#999999", fontcolor="#666666"];
+  }
+
+  /* ── Trigger path ────────────────────────────────── */
+  ghwatcher -> github [dir=both, label="poll + relabel issues", style=dashed];
+  ghwatcher -> nats_triggers [label=<① publish fq.trigger.&lt;agent&gt;>];
+  ghwatcher -> nats_events [dir=back, label="observe .completed / .failed", style=dashed];
+  fqcli -> nats_triggers [label="fq trigger --via-nats"];
+  fqcli -> nats_control [label="fq reload / drain / down", style=dashed];
+  nats_control -> registry [label="reload → re-read agents\ndir, swap registry", style=dashed];
+  config -> registry [label="loaded at boot / on reload"];
+
+  nats_triggers -> dispatcher [label=<② durable pull ·<br/>ack only after first WAL write>];
+  dispatcher -> hostloop [label=<③ dyn Worker::run(invocation)>];
+  registry -> dispatcher [label="resolve agent", style=dashed];
+
+  /* ── Execution ───────────────────────────────────── */
+  hostloop -> llmclient [label=<④ CallModel>];
+  hostloop -> tools [label=<④ CallTool(s)>];
+  llmclient -> llmapis [label="HTTPS"];
+  tools -> mcpsrv [label="rmcp"];
+  mcpsrv -> llmclient [label="sampling / elicitation / roots\nbridged back to host", style=dashed, constraint=false];
+  llmclient -> litellm [label="pricing fetch @ boot", style=dashed];
+  hostloop -> workerstore [label=<⑤ WAL checkpoint every step ·<br/>resume / replay / Ambiguous on restart>, minlen=2];
+  nats_events -> hostloop [dir=back, label=<⑥ publish fq.agent.&lt;id&gt;.* lifecycle ·<br/>fq.worker.&lt;id&gt;.heartbeat · .invocation.archived>];
+
+  /* ── Event fan-in ────────────────────────────────── */
+  nats_events -> projection [label=<⑦ fq.agent.&lt;id&gt;.&gt;>, minlen=4];
+  projection -> projstore [label="materialise"];
+  nats_events -> coordination [label=<⑦ lifecycle + archive events>, minlen=4];
+  coordination -> cpstore [label="ownership · archive"];
+  nats_advisories -> deadletter [label="MAX_DELIVERIES → dead-letter", minlen=3];
+  coordination -> hostloop [label=<⑧ archive_acked →<br/>worker deletes WAL row>, style=dashed, constraint=false];
+
+  /* ── Read path ───────────────────────────────────── */
+  browser -> dashboard [label="HTTP + SSE :9472"];
+  dashboard -> readsvc [label="tarpc / bincode TCP :9471", minlen=4];
+  readsvc -> projstore [label="reads (Views)"];
+  fqcli -> projstore [label="direct read-only SQLite:\nstatus · costs · doctor · transcript", style=dashed];
+
+  /* layout: keep fq-cas at the bottom */
+  projstore -> cas [style=invis];
+  {rank=same; github; ghwatcher;}
+}

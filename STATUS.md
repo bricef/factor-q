@@ -66,7 +66,7 @@ drives the next step — an agent that lands validated PRs against this
 repo — with a crude proxy-metric set (read relative to an expert+frontier
 baseline) to keep the Q ladder honest. Open strategic questions
 (security sequencing, the API layer) are in the
-[2026-07-05 project assessment](docs/design/2026-07-05-project-assessment.md).
+[2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
 
 ## Not built yet
 
