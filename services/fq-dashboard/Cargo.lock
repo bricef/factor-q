@@ -936,6 +936,7 @@ dependencies = [
  "fq-tools",
  "futures",
  "genai",
+ "getrandom 0.2.17",
  "reqwest 0.12.28",
  "rmcp",
  "serde",

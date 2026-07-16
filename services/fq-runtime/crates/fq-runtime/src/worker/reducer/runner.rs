@@ -1260,7 +1260,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     "cost ${:.6} exceeded budget ${budget:.2} (detected on resume)",
                     totals.total_cost
                 ),
-                FailurePhase::LlmResponse,
+                FailurePhase::Budget,
                 totals,
                 &mut cursor,
             )
@@ -1469,7 +1469,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         invocation_id,
                         kind,
                         message.clone(),
-                        FailurePhase::LlmResponse,
+                        FailurePhase::Reducer,
                         totals,
                         cursor,
                     )
@@ -1583,7 +1583,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         invocation_id,
                         kind,
                         err.message.clone(),
-                        FailurePhase::LlmResponse,
+                        FailurePhase::Reducer,
                         totals,
                         cursor,
                     )
@@ -1686,7 +1686,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             invocation_id,
             kind,
             message.clone(),
-            FailurePhase::LlmResponse,
+            FailurePhase::HostStepBudget,
             totals,
             cursor,
         )
@@ -4001,18 +4001,11 @@ fn now_ms() -> u64 {
 }
 
 fn rand_u64() -> u64 {
-    // Cheap host-side randomness. The reducer is not allowed to
-    // read time/randomness directly, but that's enforced by the
-    // boundary: it can only see what we put in `StepInput`.
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-        .hash(&mut h);
-    h.finish()
+    // The reducer is not allowed to read randomness directly; the host
+    // supplies an OS-generated seed through `StepInput`.
+    let mut bytes = [0; 8];
+    getrandom::getrandom(&mut bytes).expect("OS entropy unavailable");
+    u64::from_ne_bytes(bytes)
 }
 
 fn trigger_source_label(kind: &TriggerSourceKind) -> &'static str {
@@ -5576,6 +5569,7 @@ mod tests {
             "failed.error_kind must be BudgetExceeded, got {:?}",
             failed.error_kind
         );
+        assert!(matches!(failed.phase, FailurePhase::Budget));
     }
 
     // -----------------------------------------------------------
@@ -5842,9 +5836,7 @@ mod tests {
         let server = crate::test_support::nats::test_nats();
         let url = server.url().to_string();
 
-        use crate::worker::reducer::types::{
-            AgentConfig, StepInput, TriggerPayload, TriggerSourceKind,
-        };
+        use crate::worker::reducer::{AgentConfig, StepInput, TriggerPayload, TriggerSourceKind};
 
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("events.db");
@@ -5998,9 +5990,7 @@ mod tests {
         let server = crate::test_support::nats::test_nats();
         let url = server.url().to_string();
 
-        use crate::worker::reducer::types::{
-            AgentConfig, StepInput, TriggerPayload, TriggerSourceKind,
-        };
+        use crate::worker::reducer::{AgentConfig, StepInput, TriggerPayload, TriggerSourceKind};
 
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("events.db");

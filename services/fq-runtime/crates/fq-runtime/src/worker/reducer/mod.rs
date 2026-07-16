@@ -34,7 +34,7 @@ pub use runner::{
     SamplingChannel,
 };
 pub use types::{
-    CapabilityResult, EmittedEvent, HarnessError, HarnessErrorKind, LogEntry, LogLevel,
-    ModelRequest, ModelResponse, NextAction, Reducer, StepInput, StepOutput, ToolCallRequest,
-    ToolCallResult, TriggerPayload, TriggerSourceKind,
+    AgentConfig, CapabilityResult, EmittedEvent, HarnessError, HarnessErrorKind, LogEntry,
+    LogLevel, ModelRequest, ModelResponse, NextAction, Reducer, StepInput, StepOutput,
+    ToolCallRequest, ToolCallResult, TriggerPayload, TriggerSourceKind,
 };

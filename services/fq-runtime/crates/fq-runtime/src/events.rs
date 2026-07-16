@@ -1099,6 +1099,12 @@ pub enum FailurePhase {
     Setup,
     LlmRequest,
     LlmResponse,
+    /// The reducer failed while processing a step.
+    Reducer,
+    /// The host-side reducer-step safety budget was exhausted.
+    HostStepBudget,
+    /// A configured invocation budget was exceeded.
+    Budget,
     ToolCall,
     ToolResult,
 }

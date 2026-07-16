@@ -16,7 +16,7 @@ use super::types::{
     AgentConfig, CapabilityResult, HarnessError, HarnessErrorKind, LogEntry, LogLevel,
     ModelRequest, NextAction, Reducer, StepInput, StepOutput, ToolCallRequest, TriggerPayload,
 };
-use crate::events::{Message, MessageRole, MessageToolCall, RequestParams, StopReason};
+use crate::events::{Message, MessageRole, RequestParams};
 
 /// Built-in fallback cap on LLM turns per invocation — a backstop
 /// against a wedged agent, distinct from and well below the host's
@@ -455,10 +455,6 @@ fn internal_error(msg: &str) -> HarnessError {
     }
 }
 
-// Suppress dead-code warnings for fields used only via deserialise.
-#[allow(dead_code)]
-fn _force_use(_: MessageToolCall, _: StopReason) {}
-
 #[cfg(test)]
 mod tests {
     //! Unit tests for the reducer itself. These need no I/O,
@@ -467,7 +463,7 @@ mod tests {
 
     use super::*;
     use crate::agent::AgentId;
-    use crate::events::{StopReason, TokenUsage, ToolSchema};
+    use crate::events::{MessageToolCall, StopReason, TokenUsage, ToolSchema};
     use crate::worker::reducer::types::{
         ModelResponse, ToolCallResult, TriggerPayload, TriggerSourceKind,
     };
