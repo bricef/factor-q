@@ -493,6 +493,11 @@ pub struct InvocationDetailView {
     /// [`ActiveInvocationView::summary`].
     #[serde(default)]
     pub summary: Option<String>,
+    /// The invocation's cost so far — llm calls, tokens, and spend
+    /// summed from the projection's cost-bearing events. Grows while
+    /// the run is live; `None` before the first priced call lands.
+    #[serde(default)]
+    pub cost: Option<InvocationCostView>,
 }
 
 // ============================================================
@@ -961,6 +966,12 @@ impl Views {
             .await?
             .remove(invocation_id);
 
+        let cost = self
+            .projection
+            .cost_of_invocation(invocation_id)
+            .await?
+            .map(InvocationCostView::from);
+
         Ok(Some(InvocationDetailView {
             invocation_id: invocation_id.to_string(),
             agent_id: agent_id.clone(),
@@ -973,6 +984,7 @@ impl Views {
             live,
             recent_events,
             summary,
+            cost,
         }))
     }
 }

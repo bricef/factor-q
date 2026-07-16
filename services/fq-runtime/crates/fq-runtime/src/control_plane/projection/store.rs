@@ -430,6 +430,42 @@ impl ProjectionStore {
             .collect())
     }
 
+    /// One invocation's cost aggregate — the same row filter as
+    /// [`Self::cost_by_invocation`], for a single id. `None` when the
+    /// invocation has no cost-bearing events yet.
+    pub async fn cost_of_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Option<InvocationCostSummary>, StoreError> {
+        let row = sqlx::query(
+            "SELECT invocation_id, \
+             MIN(timestamp) AS first_timestamp, \
+             COUNT(*) AS event_count, \
+             COALESCE(SUM(total_cost), 0.0) AS total_cost, \
+             COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
+             COALESCE(SUM(output_tokens), 0) AS total_output_tokens, \
+             COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
+             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
+             FROM events \
+             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL \
+             AND invocation_id = ? \
+             GROUP BY invocation_id",
+        )
+        .bind(invocation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| InvocationCostSummary {
+            invocation_id: row.get::<String, _>(0),
+            first_timestamp: row.get::<String, _>(1),
+            event_count: row.get::<i64, _>(2),
+            total_cost: row.get::<f64, _>(3),
+            total_input_tokens: row.get::<i64, _>(4),
+            total_output_tokens: row.get::<i64, _>(5),
+            total_cache_read_tokens: row.get::<i64, _>(6),
+            total_cache_write_tokens: row.get::<i64, _>(7),
+        }))
+    }
+
     /// Cost-bearing events grouped per model, biggest spender first —
     /// across every agent, or one agent when `agent` is set. See
     /// [`Self::cost_by_invocation`] for the shared filter rationale.
@@ -1328,6 +1364,22 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+
+        // The single-invocation aggregate matches the grouped rows.
+        let one = store
+            .cost_of_invocation(&inv1.to_string())
+            .await
+            .unwrap()
+            .expect("inv1 has cost events");
+        assert_eq!(one.event_count, 2);
+        assert!((one.total_cost - 0.15).abs() < 1e-9);
+        assert!(
+            store
+                .cost_of_invocation("no-such-id")
+                .await
+                .unwrap()
+                .is_none()
         );
 
         // All fixture events carry the same model → one row, summed.
