@@ -619,7 +619,15 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
             render::live_page(
                 "invocations",
                 REFRESH_SECS,
-                &render::invocations_page(&active_rows(), &invocation_rows(), true, NOW_MS),
+                &render::invocations_page(
+                    &active_rows(),
+                    &invocation_rows(),
+                    render::InvocationFilters {
+                        include_archived: true,
+                        ..Default::default()
+                    },
+                    NOW_MS,
+                ),
             ),
         ),
         (
