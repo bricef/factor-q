@@ -48,9 +48,29 @@ install-nats:
     mkdir -p "$(dirname "{{nats_bin}}")"
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    url="https://github.com/nats-io/nats-server/releases/download/v${want}/nats-server-v${want}-${plat}.tar.gz"
+    file="nats-server-v${want}-${plat}.tar.gz"
+    url="https://github.com/nats-io/nats-server/releases/download/v${want}/${file}"
     echo "fetching ${url}"
     curl -sfL "$url" -o "$tmp/nats.tgz"
+    # Verify against .nats-checksums (vendored from the release's SHA256SUMS)
+    # before anything from the archive can be executed — the version pin alone
+    # doesn't protect against a swapped release asset or a corrupt download.
+    expected="$(awk -v f="$file" '$2 == f {print $1}' "{{justfile_directory()}}/.nats-checksums")"
+    if [ -z "$expected" ]; then
+        echo "no pinned checksum for ${file} in .nats-checksums — regenerate it alongside .nats-version (see its header)" >&2
+        exit 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "$tmp/nats.tgz" | awk '{print $1}')"
+    else
+        actual="$(shasum -a 256 "$tmp/nats.tgz" | awk '{print $1}')"
+    fi
+    if [ "$actual" != "$expected" ]; then
+        echo "checksum mismatch for ${url}" >&2
+        echo "  expected ${expected}" >&2
+        echo "  got      ${actual}" >&2
+        exit 1
+    fi
     tar -xzf "$tmp/nats.tgz" --strip-components=1 -C "$(dirname "{{nats_bin}}")" "nats-server-v${want}-${plat}/nats-server"
     "{{nats_bin}}" --version
 

@@ -1,0 +1,9 @@
+# SHA256 checksums for the nats-server release pinned in .nats-version —
+# `just install-nats` refuses a download that doesn't match, so a tampered
+# or corrupted release asset can never be executed.
+# Regenerate on version bump (update .nats-version first):
+#   v="$(cat .nats-version)"; curl -sfL "https://github.com/nats-io/nats-server/releases/download/v${v}/SHA256SUMS" | grep -E '(linux|darwin)-(amd64|arm64)\.tar\.gz$'
+effa518fe623433d7c3321991db419bb1e00aa9b19ae761b559b580434afc3ab  nats-server-v2.14.3-darwin-amd64.tar.gz
+e086395457a7a93a440433a446c9f161f917d35c0374640555123e8d8d4b7fe9  nats-server-v2.14.3-darwin-arm64.tar.gz
+f3d0c820c749f81d717310fb00d4903919e70e3e66b268bd352a088b9788eb93  nats-server-v2.14.3-linux-amd64.tar.gz
+1759b6a0ddebade9471b7c02891dfaa8c73b526c6f3ce391d4e21ec3eceffab8  nats-server-v2.14.3-linux-arm64.tar.gz
