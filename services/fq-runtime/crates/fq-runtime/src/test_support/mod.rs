@@ -1,6 +1,7 @@
 //! Test-only helpers shared across the runtime crate's `mod tests`
-//! blocks. Items here are gated on `#[cfg(test)]` and not part of
-//! the runtime's public API.
+//! blocks. Most are `#[cfg(test)]` and not part of the public API; the
+//! exception is [`nats`], exposed to integration tests via the
+//! `test-support` feature (#233).
 //!
 //! The two submodules cover the two reusable patterns called out
 //! in `docs/plans/closed/2026-04-28-data-architecture-v1.md`:
@@ -15,10 +16,23 @@
 //!   inject specific [`crate::worker::reducer::types::CapabilityResult`]s,
 //!   or verify state shape after every step.
 
-pub mod events;
-pub mod mock_anthropic;
+// `nats` is dependency-free (std + serde_json), so it can be exposed to
+// integration tests via the `test-support` feature, not only `cfg(test)`
+// (#233). Every other submodule pulls a dev-dependency (axum, tempfile, …)
+// that is unavailable when the lib is built as a dependency, so they stay
+// `cfg(test)`.
+#[cfg(any(test, feature = "test-support"))]
 pub mod nats;
+
+#[cfg(test)]
+pub mod events;
+#[cfg(test)]
+pub mod mock_anthropic;
+#[cfg(test)]
 pub mod oracle;
+#[cfg(test)]
 pub mod runtime;
+#[cfg(test)]
 pub mod sim;
+#[cfg(test)]
 pub mod stepper;

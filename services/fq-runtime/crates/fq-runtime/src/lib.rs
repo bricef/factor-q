@@ -47,7 +47,12 @@ pub mod read_service;
 pub mod control_plane;
 pub mod worker;
 
-#[cfg(test)]
+// `test_support` is available to this crate's own unit tests (`cfg(test)`) and,
+// under the `test-support` feature, to integration tests in this and dependent
+// crates (#233 — they need the private-broker guard but cannot see `cfg(test)`
+// items). Only the dependency-free `nats` submodule is exposed by the feature;
+// the rest stay `cfg(test)` because they pull dev-dependencies.
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
 pub use agent::{

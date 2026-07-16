@@ -541,10 +541,8 @@ async fn static_resource_pin_appears_in_first_model_request() {
         eprintln!("skipping: npx not found");
         return;
     }
-    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
-        eprintln!("skipping: FQ_NATS_URL not set");
-        return;
-    };
+    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let nats_url = server.url().to_string();
 
     // Start the everything server and pick a concrete resource to pin.
     let mut manager = McpClientManager::new();
@@ -1025,10 +1023,8 @@ async fn run_sampling_scenario(
         eprintln!("skipping: npx not found");
         return None;
     }
-    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
-        eprintln!("skipping: FQ_NATS_URL not set");
-        return None;
-    };
+    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let nats_url = server.url().to_string();
 
     // Per-invocation everything server with its inbound request channel.
     let mut manager = McpClientManager::new();
@@ -1607,10 +1603,8 @@ async fn run_elicitation_scenario(
         eprintln!("skipping: npx not found");
         return None;
     }
-    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
-        eprintln!("skipping: FQ_NATS_URL not set");
-        return None;
-    };
+    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let nats_url = server.url().to_string();
 
     let mut manager = McpClientManager::new();
     let (tools, rx, _roots) = manager
@@ -2156,10 +2150,8 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
         eprintln!("skipping: npx not found");
         return;
     }
-    let Ok(nats_url) = std::env::var("FQ_NATS_URL") else {
-        eprintln!("skipping: FQ_NATS_URL not set");
-        return;
-    };
+    let server = fq_runtime::test_support::nats::NatsServer::start();
+    let nats_url = server.url().to_string();
 
     // The agent *declares* the everything server in its `mcp:` block and
     // *grants* it sampling. No manual server start, no

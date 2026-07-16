@@ -38,6 +38,9 @@ uuid = { version = "1", features = ["v7"] }
 libc = "0.2"
 
 [dev-dependencies]
+# fq-runtime with test-support so the daemon_shutdown integration tests can
+# spawn a private broker (#233). Unifies with the normal dep's read-service.
+fq-runtime = { path = "../fq-runtime", features = ["test-support"] }
 libc = "0.2"
 tempfile = "3"
 
