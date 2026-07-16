@@ -25,9 +25,10 @@ permissions:
 # is nothing to build), so branch protection is never left waiting on a
 # check that never arrives — the reason we gate steps, not the whole job.
 #
-# The Rust gate is independent per-workspace jobs — `runtime-ci` (needs
-# NATS + Node for the bus/MCP integration tests), `store-ci` (hermetic),
-# and `dashboard-ci` (hermetic) — so a red in one never masks another's
+# The Rust gate is independent per-workspace jobs — `runtime-ci` (installs the
+# pinned nats-server the per-test brokers use, plus Node for the MCP integration
+# tests), `store-ci` (hermetic), and `dashboard-ci` (hermetic) — so a red in one
+# never masks another's
 # results (#38). Each is triggered by its own `changes` path filter
 # (`runtime`/`store`/`dashboard`), so a store-only PR no longer rebuilds the
 # runtime suite (or spins up NATS/Node), and vice versa. `rust-ci` is a thin
@@ -140,14 +141,6 @@ jobs:
       # nats-server need the binary. Idempotent; version from .nats-version.
       - if: needs.changes.outputs.runtime == 'true'
         run: just install-nats
-      # Bring up NATS exactly as dev does (JetStream via
-      # infrastructure/nats.conf), then wait for it before the
-      # bus/integration tests run. (Removed once every test spawns its own
-      # broker — #233 step 4.)
-      - if: needs.changes.outputs.runtime == 'true'
-        run: just infra-up
-      - if: needs.changes.outputs.runtime == 'true'
-        run: just infra-wait
       - if: needs.changes.outputs.runtime == 'true'
         run: just runtime-ci
       # The shared test-only crate's own gate (#233) — its own workspace, so the
@@ -155,8 +148,6 @@ jobs:
       # above.
       - if: needs.changes.outputs.runtime == 'true'
         run: just test-support-ci
-      - if: always() && needs.changes.outputs.runtime == 'true'
-        run: just infra-down
       # Cache hit-rate for the keep/drop decision on sccache (see env note).
       - if: always() && needs.changes.outputs.runtime == 'true'
         run: sccache --show-stats

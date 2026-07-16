@@ -3967,10 +3967,8 @@ mod invocation_tests {
         // works, then call publish_invocation_drop and capture
         // the event on the agent-scoped operator_recovered
         // subject.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = fq_test_support::NatsServer::start();
+        let url = server.url().to_string();
 
         use fq_runtime::events::{EventPayload as EP, TriggerSource, TriggeredPayload};
         use tempfile::tempdir;
@@ -4044,10 +4042,8 @@ mod invocation_tests {
 
     #[tokio::test]
     async fn publish_invocation_drop_removes_agentless_owner() {
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = fq_test_support::NatsServer::start();
+        let url = server.url().to_string();
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
@@ -4083,10 +4079,8 @@ mod invocation_tests {
         // No projection event *and* no coordination owner row: a truly
         // unknown id must still error rather than emit a phantom
         // operator-recovered event for something that never existed.
-        let Ok(url) = std::env::var("FQ_NATS_URL") else {
-            eprintln!("skipping: FQ_NATS_URL not set");
-            return;
-        };
+        let server = fq_test_support::NatsServer::start();
+        let url = server.url().to_string();
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
