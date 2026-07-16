@@ -13,7 +13,7 @@
 //!
 //! Each [`NatsServer`] is its own process with its own port and its own
 //! JetStream store, so none of that is reachable. An orphan left by a hard kill
-//! is harmless — it holds a random port nobody else asks for.
+//! is harmless — it holds a random loopback-only port nobody else asks for.
 //!
 //! This lives in a standalone crate rather than any one service's
 //! `#[cfg(test)]` module because integration tests (a separate compilation
@@ -73,7 +73,16 @@ impl NatsServer {
         // publish the choice once it is listening. That pairing is both the
         // race-free port discovery and the readiness signal — binding :0
         // ourselves and handing the number over would be a TOCTOU race.
+        //
+        // `-a 127.0.0.1` because the default bind is 0.0.0.0 and the server
+        // is unauthenticated with JetStream enabled: on a box with a public
+        // interface that would expose every test broker — and any orphan a
+        // hard kill leaves behind — to the network. Loopback also pins the
+        // ports file to loopback URLs, so taking its first entry stops
+        // depending on nats-server's interface ordering.
         let child = Command::new(&bin)
+            .arg("-a")
+            .arg("127.0.0.1")
             .arg("--port")
             .arg("-1")
             .arg("--ports_file_dir")
@@ -133,9 +142,10 @@ impl NatsServer {
         }
     }
 
-    /// `{"nats":["nats://127.0.0.1:45393","nats://[::1]:45393"]}` — take the
-    /// first entry, which is the IPv4 client URL. Returns `None` until the
-    /// file exists and parses, since it is written non-atomically.
+    /// `{"nats":["nats://127.0.0.1:45393"]}` — the `-a 127.0.0.1` bind makes
+    /// loopback the only entry, so taking the first is deterministic. Returns
+    /// `None` until the file exists and parses, since it is written
+    /// non-atomically.
     fn read_ports_file(&self) -> Option<String> {
         for entry in std::fs::read_dir(self.dir.join("ports")).ok()?.flatten() {
             let Ok(body) = std::fs::read_to_string(entry.path()) else {
