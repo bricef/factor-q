@@ -150,15 +150,32 @@ the design artifact that drives the fix.
 - **Acceptance:** the Phase 1 test is green; the existing block DST, conformance,
   and concurrency suites stay green; `just ci` (store) passes.
 
-### Phase 3a — targeted exhaustive interleaving checker
+### Phase 3a — targeted exhaustive interleaving checker ✅
 
-- Build the deterministic, state-deduped driver over the seams for the GC-vs
-  writer scenarios, with error and crash injection, asserting the always
-  invariants at every seam and the at-rest invariants at scenario end.
-- **Acceptance:** exhaustive over the bounded scenario (state count in the same
-  order as the TLA model, no seeds, runs in CI time); clean on back-off; and —
-  as a meta-check — it **reaches** S1-obj if back-off is reverted (the checker
-  provably can find the bug, not just pass).
+Landed in `tests/gc_exhaustive.rs`. A deterministic BFS drives the *real* index
+and content primitives as discrete steps — a writer (`RESERVE → MATERIALIZE →
+BIND`, mirroring `put`) and the collector (`CLAIM → UNLINK → DELETE`, mirroring
+`collect`'s object arm) — enumerates every interleaving, and asserts the
+always-invariants (`check_index_in_flight`) after **every** step. It dedupes by an
+abstract-state projection (object kind, manifest present, name bound, each
+process's PC), so it converges to the reachable-*state* count, not the far larger
+*schedule* count; each successor replays its schedule from a fresh store (the
+store is not cheaply snapshot-restored), which the dedup keeps bounded.
+
+**Results (met the acceptance):** back-off is clean across **13 distinct states**
+with no reachable S1-obj, no seeds, ~2 s — and the meta-check, a **sabotaged
+collector** that unlinks without the claim CAS (reverting the fix's core
+protection), *reaches* S1-obj across 20 states, proving the clean result is a
+real guarantee, not a vacuous pass. Runs in the hermetic store `test` phase (no
+`failpoints` feature — it calls the primitives directly rather than pausing real
+`put`/`collect`).
+
+Deliberately minimal scope — one writer, one collector, one object, no crash
+injection — since it targets exactly the #173 object/manifest race (and would
+have caught the put-path hole automatically). The `Proc`/step-machine structure
+extends directly to the **Phase 3b** generalisations: a second writer, the alias
+path, the block arm, and a `Crash` process that resets in-flight PCs (the model's
+`Crash` action). Those, plus `error` injection at steps, are the next increments.
 
 ### Phase 3b — generalise to conformance
 
