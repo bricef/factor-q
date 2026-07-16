@@ -601,15 +601,11 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
     let pages: Vec<(&str, String)> = vec![
         (
             "health",
-            render::page(
-                "health",
-                REFRESH_SECS,
-                &render::health(&health_report(), NOW_MS),
-            ),
+            render::live_page("health", REFRESH_SECS, &render::health(&health_report())),
         ),
         (
             "invocations",
-            render::page(
+            render::live_page(
                 "invocations",
                 REFRESH_SECS,
                 &render::invocations_page(&active_rows(), &invocation_rows(), true, NOW_MS),
@@ -617,7 +613,7 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
         ),
         (
             "invocation-detail",
-            render::page(
+            render::live_page(
                 "invocation 019f534f",
                 REFRESH_SECS,
                 &render::invocation_detail(&invocation_detail(), NOW_MS),
@@ -666,11 +662,11 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
         ),
         (
             "events",
-            render::page("events", REFRESH_SECS, &render::events(&event_rows())),
+            render::live_page("events", REFRESH_SECS, &render::events(&event_rows())),
         ),
         (
             "costs",
-            render::page(
+            render::live_page(
                 "costs",
                 REFRESH_SECS,
                 &render::costs(&cost_report(), &day_cost_report(), render::Window::All),
@@ -678,7 +674,7 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
         ),
         (
             "costs-agent",
-            render::page(
+            render::live_page(
                 "costs · m0-issue-fix",
                 REFRESH_SECS,
                 &render::agent_costs(&agent_cost_detail(), render::Window::All, NOW_MS),
@@ -686,11 +682,11 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
         ),
         (
             "agents",
-            render::page("agents", REFRESH_SECS, &render::agents(&agents_view())),
+            render::live_page("agents", REFRESH_SECS, &render::agents(&agents_view())),
         ),
         (
             "agent-detail",
-            render::page(
+            render::live_page(
                 "agent · m0-issue-fix",
                 REFRESH_SECS,
                 &render::agent_detail(&agent_detail_view()),
@@ -698,7 +694,7 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
         ),
         (
             "unreachable",
-            render::page(
+            render::live_page(
                 "health",
                 REFRESH_SECS,
                 &render::unreachable(

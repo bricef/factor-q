@@ -43,6 +43,29 @@ pub fn page(title: &str, refresh_secs: u64, body: &str) -> String {
     page_opts(title, Some(refresh_secs), "", body)
 }
 
+/// The live page shell: the same chrome as [`page`], but instead of a
+/// whole-page `<meta refresh>` the body sits in a `#main` region that
+/// datastar re-fetches every `refresh_secs` seconds and morphs in
+/// place (the `Datastar-Request` negotiation in main.rs). A tick
+/// without a reload preserves everything the server HTML does not
+/// dictate — open `<details>` folds (see [`fold`]), scroll position,
+/// text selection. No-JS browsers keep working via the `<noscript>`
+/// full-page refresh that [`page_opts`] emits for `None`.
+pub fn live_page(title: &str, refresh_secs: u64, body: &str) -> String {
+    page_opts(
+        title,
+        None,
+        r#"<script type="module" src="/assets/datastar.js"></script>"#,
+        &format!(
+            // The poll target is the page's own URL (path AND query —
+            // `/costs?window=7d` must poll `/costs?window=7d`), read
+            // from `location` so no handler has to thread its URI into
+            // the shell. Datastar expressions evaluate as JS.
+            r#"<div id="main" data-on-interval__duration.{refresh_secs}s="@get(window.location.pathname + window.location.search)">{body}</div>"#,
+        ),
+    )
+}
+
 /// Page shell with explicit head control. `refresh_secs: None` drops
 /// the meta-refresh but keeps a `<noscript>` fallback refresh — used by
 /// the SSE-streamed transcript page, where a page reload every 5s would
@@ -146,6 +169,19 @@ fn agent_link(id: &str) -> String {
     format!(r#"<a href="/agents/{}">{}</a>"#, esc(id), esc(id))
 }
 
+/// A collapsible section that survives live-region morphs: the stable
+/// id lets the morph pair the old and new nodes, and
+/// `data-preserve-attr` keeps the reader's open/closed choice when a
+/// poll re-renders the fold — without it every tick slams the fold
+/// shut. `summary_html` / `body_html` are trusted markup; callers
+/// escape their dynamic strings as usual.
+fn fold(id: &str, summary_html: &str, body_html: &str) -> String {
+    format!(
+        r#"<details id="{}" data-preserve-attr="open"><summary>{summary_html}</summary>{body_html}</details>"#,
+        esc(id),
+    )
+}
+
 /// ": <link>, <link>" suffix for a count that carries ids; empty when
 /// there are none.
 fn linked_ids(ids: &[String]) -> String {
@@ -172,7 +208,7 @@ fn summary_cell(summary: Option<&str>) -> String {
 }
 
 /// The health page body.
-pub fn health(report: &HealthReport, now_ms: i64) -> String {
+pub fn health(report: &HealthReport) -> String {
     let mut b = String::new();
 
     b.push_str(&format!(
@@ -293,10 +329,6 @@ pub fn health(report: &HealthReport, now_ms: i64) -> String {
         b.push_str("</table>");
     }
 
-    b.push_str(&format!(
-        r#"<p class="muted">rendered {}</p>"#,
-        esc(&age(now_ms, now_ms))
-    ));
     b
 }
 
@@ -957,15 +989,11 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.0.cmp(b.0))
         });
-        b.push_str(&format!(
-            "<details><summary>one-shot agents — {} ids · ${:.4}</summary>",
-            one_shot_ids, one_shot_cost
-        ));
-        b.push_str(
+        let mut fold_body = String::from(
             "<table><tr><th>family</th><th class=\"n\">runs</th><th class=\"n\">llm calls</th><th class=\"n\">total cost</th></tr>",
         );
         for (family, f) in rows {
-            b.push_str(&format!(
+            fold_body.push_str(&format!(
                 r#"<tr><td>{}-*</td><td class="n">{}</td><td class="n">{}</td><td class="n">${:.4}</td></tr>"#,
                 esc(family),
                 f.runs,
@@ -973,7 +1001,12 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
                 f.cost,
             ));
         }
-        b.push_str("</table></details>");
+        fold_body.push_str("</table>");
+        b.push_str(&fold(
+            "one-shot-agents",
+            &format!("one-shot agents — {one_shot_ids} ids · ${one_shot_cost:.4}"),
+            &fold_body,
+        ));
     }
 
     let named_cost = report.total_cost - one_shot_cost;
@@ -1069,11 +1102,11 @@ pub fn agents(view: &AgentsView) -> String {
             r#"<p class="warn"><b>⚠ {} definition(s) failed to load</b></p>"#,
             view.errors.len()
         ));
-        b.push_str("<details><summary>load errors</summary>");
+        let mut errors_body = String::new();
         for e in &view.errors {
-            b.push_str(&format!("<pre>{}</pre>", esc(e)));
+            errors_body.push_str(&format!("<pre>{}</pre>", esc(e)));
         }
-        b.push_str("</details>");
+        b.push_str(&fold("load-errors", "load errors", &errors_body));
     }
     if view.agents.is_empty() {
         b.push_str(r#"<p class="muted">no agents loaded.</p>"#);
@@ -1152,10 +1185,10 @@ pub fn agent_detail(d: &AgentDetailView) -> String {
         esc(&d.path)
     ));
     b.push_str("</table>");
-    b.push_str(&format!(
-        "<details><summary>system prompt ({} bytes)</summary><pre>{}</pre></details>",
-        d.system_prompt.len(),
-        esc(&d.system_prompt)
+    b.push_str(&fold(
+        "system-prompt",
+        &format!("system prompt ({} bytes)", d.system_prompt.len()),
+        &format!("<pre>{}</pre>", esc(&d.system_prompt)),
     ));
     b
 }
@@ -1169,7 +1202,7 @@ mod tests {
     #[test]
     fn health_links_working_and_stuck_ids() {
         let report = crate::fixtures::health_report();
-        let html = health(&report, 0);
+        let html = health(&report);
         assert!(html.contains("2 in-flight (1 working"), "got: {html}");
         assert!(
             html.contains(r#"<a href="/invocations/019f5b3f-31fb-7ae0-b130-3d65ccf40375">"#),
@@ -1185,7 +1218,7 @@ mod tests {
     /// consumer has outstanding redeliveries.
     #[test]
     fn health_shows_redelivery_pressure() {
-        let html = health(&crate::fixtures::health_report(), 0);
+        let html = health(&crate::fixtures::health_report());
         assert!(html.contains("redelivered 4"), "got: {html}");
     }
 
@@ -1203,6 +1236,52 @@ mod tests {
         assert_eq!(age(0, 120_000), "2m ago");
         assert_eq!(age(0, 7_200_000), "2h ago");
         assert_eq!(age(0, 172_800_000), "2d ago");
+    }
+
+    /// The live shell: datastar loaded, the #main region polling its
+    /// own URL on the configured cadence, and the no-JS fallback in
+    /// place of the old hard refresh.
+    #[test]
+    fn live_page_polls_its_own_url_and_keeps_a_noscript_fallback() {
+        let html = live_page("costs", 7, "<p>x</p>");
+        assert!(
+            html.contains(r#"<script type="module" src="/assets/datastar.js"></script>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(
+                r#"<div id="main" data-on-interval__duration.7s="@get(window.location.pathname + window.location.search)"><p>x</p></div>"#
+            ),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<noscript><meta http-equiv="refresh" content="5"></noscript>"#),
+            "no-JS fallback missing: {html}"
+        );
+        assert!(
+            !html.contains(r#"<meta http-equiv="refresh" content="7">"#),
+            "hard refresh must be gone: {html}"
+        );
+    }
+
+    /// Folds carry a stable id and preserve their open state across
+    /// live-region morphs — the whole point of the change.
+    #[test]
+    fn folds_carry_stable_ids_and_preserve_open() {
+        let html = fold("one-shot-agents", "one-shot agents", "<p>rows</p>");
+        assert_eq!(
+            html,
+            r#"<details id="one-shot-agents" data-preserve-attr="open"><summary>one-shot agents</summary><p>rows</p></details>"#
+        );
+        // The three fold sites emit through the helper.
+        let costs_html = costs_all(&cost_report(vec![
+            cost_view("a", 1, 1.0),
+            cost_view("overspender-019f339c15767d70b8ffd6d7ca6b0a70", 1, 1.0),
+        ]));
+        assert!(
+            costs_html.contains(r#"<details id="one-shot-agents" data-preserve-attr="open">"#),
+            "got: {costs_html}"
+        );
     }
 
     #[test]
@@ -1771,7 +1850,7 @@ mod tests {
         };
         let html = agent_detail(&d);
         assert!(
-            html.contains("<details><summary>system prompt (59 bytes)</summary>"),
+            html.contains(r#"<details id="system-prompt" data-preserve-attr="open"><summary>system prompt (59 bytes)</summary>"#),
             "got: {html}"
         );
         assert!(

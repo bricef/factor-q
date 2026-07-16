@@ -8,11 +8,16 @@
 //!
 //! Deliberately naive (v0, per the plan): each browser request dials
 //! the read service fresh (localhost TCP — microseconds, and it doubles
-//! as reconnect logic), renders static HTML, and the browser refreshes
-//! via `<meta refresh>`. Zero client-side JS, zero framework, zero CORS
-//! (the browser only ever talks to this process). Localhost-only: the
-//! operator reaches it via SSH tunnel, and the bind refuses anything
-//! else.
+//! as reconnect logic) and renders server-side HTML. Liveness is a
+//! datastar poll (the vendored client, no framework): every page's
+//! `#main` region re-fetches its own URL each tick and the response —
+//! negotiated via the `Datastar-Request` header — is a single-event
+//! SSE patch morphed in place, so open folds, scroll position, and
+//! text selection survive (the old whole-page `<meta refresh>` reset
+//! them every 5s). No-JS browsers keep the full-page refresh via
+//! `<noscript>`. Zero CORS (the browser only ever talks to this
+//! process). Localhost-only: the operator reaches it via SSH tunnel,
+//! and the bind refuses anything else.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -114,6 +119,19 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The live region's freshness line: wall-clock HH:MM:SS UTC, morphed
+/// on every poll. A reader can tell at a glance that ticks are landing
+/// — and a frozen time is the honest signal that they stopped.
+fn updated_line(now_ms: i64) -> String {
+    let s = now_ms / 1000 % 86_400;
+    format!(
+        r#"<p class="muted">updated {:02}:{:02}:{:02} UTC</p>"#,
+        s / 3600,
+        (s % 3600) / 60,
+        s % 60
+    )
+}
+
 type Page = (StatusCode, Html<String>);
 
 /// Dial the read service, or produce the unreachable page. On a
@@ -160,28 +178,30 @@ fn unreachable_page(state: &AppState, title: &str, error: &str) -> Page {
         }
         None => error.to_string(),
     };
+    let body = format!(
+        "{}{}",
+        with_skew_banner(
+            state,
+            &render::unreachable(&state.read_addr, &error, seen, now_ms()),
+        ),
+        updated_line(now_ms()),
+    );
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Html(render::page(
-            title,
-            state.refresh_secs,
-            &with_skew_banner(
-                state,
-                &render::unreachable(&state.read_addr, &error, seen, now_ms()),
-            ),
-        )),
+        Html(render::live_page(title, state.refresh_secs, &body)),
     )
 }
 
 fn ok_page(state: &AppState, title: &str, body: &str) -> Page {
     state.last_seen_ms.store(now_ms(), Ordering::Relaxed);
+    let body = format!(
+        "{}{}",
+        with_skew_banner(state, body),
+        updated_line(now_ms())
+    );
     (
         StatusCode::OK,
-        Html(render::page(
-            title,
-            state.refresh_secs,
-            &with_skew_banner(state, body),
-        )),
+        Html(render::live_page(title, state.refresh_secs, &body)),
     )
 }
 
@@ -191,7 +211,7 @@ async fn health_page(State(state): State<Arc<AppState>>) -> Page {
         Err(page) => return page,
     };
     match client.health(context::current()).await {
-        Ok(Ok(report)) => ok_page(&state, "health", &render::health(&report, now_ms())),
+        Ok(Ok(report)) => ok_page(&state, "health", &render::health(&report)),
         Ok(Err(err)) => unreachable_page(&state, "health", &err.to_string()),
         Err(err) => unreachable_page(&state, "health", &format!("rpc: {err}")),
     }
@@ -239,10 +259,13 @@ async fn invocation_page(State(state): State<Arc<AppState>>, Path(id): Path<Stri
         ),
         Ok(Ok(None)) => (
             StatusCode::NOT_FOUND,
-            Html(render::page(
+            Html(render::live_page(
                 "invocation",
                 state.refresh_secs,
-                r#"<p class="muted">no invocation with that id.</p>"#,
+                &format!(
+                    r#"<p class="muted">no invocation with that id.</p>{}"#,
+                    updated_line(now_ms())
+                ),
             )),
         ),
         Ok(Err(err)) => unreachable_page(&state, "invocation", &err.to_string()),
@@ -558,10 +581,13 @@ async fn agent_costs_page(
         ),
         Ok(Ok(None)) => (
             StatusCode::NOT_FOUND,
-            Html(render::page(
+            Html(render::live_page(
                 "costs",
                 state.refresh_secs,
-                r#"<p class="muted">no cost events for that agent (in this window). <a href="/costs">← all agents</a></p>"#,
+                &format!(
+                    r#"<p class="muted">no cost events for that agent (in this window). <a href="/costs">← all agents</a></p>{}"#,
+                    updated_line(now_ms())
+                ),
             )),
         ),
         Ok(Err(err)) => unreachable_page(&state, "costs", &err.to_string()),
@@ -594,15 +620,83 @@ async fn agent_page(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         ),
         Ok(Ok(None)) => (
             StatusCode::NOT_FOUND,
-            Html(render::page(
+            Html(render::live_page(
                 "agent",
                 state.refresh_secs,
-                r#"<p class="muted">no agent with that id in the registry. <a href="/agents">← all agents</a></p>"#,
+                &format!(
+                    r#"<p class="muted">no agent with that id in the registry. <a href="/agents">← all agents</a></p>{}"#,
+                    updated_line(now_ms())
+                ),
             )),
         ),
         Ok(Err(err)) => unreachable_page(&state, "agent", &err.to_string()),
         Err(err) => unreachable_page(&state, "agent", &format!("rpc: {err}")),
     }
+}
+
+/// Datastar content negotiation: the vendored client stamps a
+/// `Datastar-Request` header on every `@get`, so the same URL serves
+/// two representations — a full HTML page for navigations, and for
+/// poll ticks a single-event SSE patch that morphs the `#main` region
+/// in place (mode `inner`, so the region's own `data-on-interval`
+/// attribute is never touched). Same handlers, same render path, same
+/// bytes; the reload disappears, so open folds, scroll position, and
+/// text selection survive the tick.
+///
+/// Pass-through cases: requests without the header; non-HTML responses
+/// (the transcript's own SSE stream, the vendored asset); and any HTML
+/// page without a live region (the transcript page).
+async fn datastar_negotiation(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let is_datastar = req.headers().contains_key("datastar-request");
+    let resp = next.run(req).await;
+    if !is_datastar {
+        return resp;
+    }
+    let is_html = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html"));
+    if !is_html {
+        return resp;
+    }
+
+    let (parts, body) = resp.into_parts();
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => return axum::response::Response::from_parts(parts, axum::body::Body::empty()),
+    };
+    let html = String::from_utf8_lossy(&bytes);
+    let Some(inner) = extract_main_inner(&html) else {
+        // No live region — hand back the full page unchanged.
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+
+    use datastar::prelude::{ElementPatchMode, PatchElements};
+    let event = PatchElements::new(inner)
+        .selector("#main")
+        .mode(ElementPatchMode::Inner)
+        .write_as_axum_sse_event();
+    axum::response::sse::Sse::new(futures::stream::once(async move {
+        Ok::<_, std::convert::Infallible>(event)
+    }))
+    .into_response()
+}
+
+/// The inner HTML of the `#main` live region. The shell is our own
+/// deterministic template ([`render::live_page`]): exactly one
+/// `<div id="main" …>` whose closing `</div>` is the document's last —
+/// nothing but `</body></html>` follows it.
+fn extract_main_inner(html: &str) -> Option<String> {
+    let start = html.find(r#"<div id="main""#)?;
+    let open_end = start + html[start..].find('>')? + 1;
+    let end = html.rfind("</div>")?;
+    (end >= open_end).then(|| html[open_end..end].to_string())
 }
 
 /// Build the router — separated from `main` so tests drive it with
@@ -623,6 +717,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/costs/{agent}", get(agent_costs_page))
         .route("/agents", get(agents_page))
         .route("/agents/{id}", get(agent_page))
+        .layer(axum::middleware::from_fn(datastar_negotiation))
         .with_state(state)
 }
 
@@ -851,7 +946,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let html = body_string(resp).await;
         assert!(
-            html.contains("<details><summary>system prompt ("),
+            html.contains(
+                r#"<details id="system-prompt" data-preserve-attr="open"><summary>system prompt ("#
+            ),
             "got: {html}"
         );
         assert!(html.contains("You are a probe."), "got: {html}");
@@ -869,10 +966,77 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let resp = app
+            .clone()
             .oneshot(Request::get("/events").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+
+        // Datastar negotiation: the same URL with the header the
+        // vendored client stamps returns a single-event SSE morph of
+        // #main — same content, no page shell.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/")
+                    .header("Datastar-Request", "true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ct.starts_with("text/event-stream"), "got: {ct}");
+        let sse = body_string(resp).await;
+        assert!(sse.contains("datastar-patch-elements"), "got: {sse}");
+        assert!(sse.contains("selector #main"), "got: {sse}");
+        assert!(sse.contains("mode inner"), "got: {sse}");
+        assert!(sse.contains("reachable"), "got: {sse}");
+        assert!(sse.contains("updated "), "freshness line: {sse}");
+        assert!(
+            !sse.contains("<!doctype html>"),
+            "fragment must not carry the shell: {sse}"
+        );
+
+        // The full page carries the poll wiring and the no-JS fallback.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let html = body_string(resp).await;
+        assert!(
+            html.contains("data-on-interval__duration.5s"),
+            "got: {html}"
+        );
+        assert!(html.contains("/assets/datastar.js"), "got: {html}");
+        assert!(html.contains("<noscript>"), "got: {html}");
+
+        // Non-HTML responses pass through untouched even with the header.
+        let resp = app
+            .oneshot(
+                Request::get("/assets/datastar.js")
+                    .header("Datastar-Request", "true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ct.starts_with("text/javascript"), "got: {ct}");
     }
 
     /// The crash-domain contract: with no read service listening, every
@@ -894,6 +1058,21 @@ mod tests {
         let html = body_string(resp).await;
         assert!(html.contains("runtime unreachable"), "got: {html}");
         assert!(html.contains("never seen"), "got: {html}");
+
+        // A poll tick during an outage morphs the unreachable body in —
+        // the page goes loud within one interval instead of freezing.
+        let resp = super::app(state_for(&dead))
+            .oneshot(
+                Request::get("/")
+                    .header("Datastar-Request", "true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let sse = body_string(resp).await;
+        assert!(sse.contains("datastar-patch-elements"), "got: {sse}");
+        assert!(sse.contains("runtime unreachable"), "got: {sse}");
         // No skew has ever been observed — the page must not claim any
         // (#168: unknown is not mismatch).
         assert!(!html.contains("build skew"), "got: {html}");
@@ -953,6 +1132,17 @@ mod tests {
             "got: {}",
             page.1.0
         );
+    }
+
+    #[test]
+    fn extract_main_inner_finds_the_live_region() {
+        let html = render::live_page("t", 5, "<p>hello</p><details open></details>");
+        assert_eq!(
+            extract_main_inner(&html).as_deref(),
+            Some("<p>hello</p><details open></details>")
+        );
+        // Pages without a live region (the transcript) pass through.
+        assert_eq!(extract_main_inner("<html><body>x</body></html>"), None);
     }
 
     #[test]
