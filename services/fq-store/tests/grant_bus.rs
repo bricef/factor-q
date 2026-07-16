@@ -1,7 +1,8 @@
 //! The NATS-backed grant bus, proven against a real broker (feature `bus`):
 //! append to the local log, drain to JetStream, read back, and compare with
-//! the log's own replay. Requires NATS at `FQ_NATS_URL` (default
-//! `nats://127.0.0.1:4222`) — `just infra-up` provides it, as in CI.
+//! the log's own replay. Spawns its own private `nats-server` (#233, via
+//! `fq-test-support`) — no shared broker; `just test-bus` provides the pinned
+//! binary.
 #![cfg(feature = "bus")]
 
 use std::collections::BTreeSet;
@@ -9,10 +10,6 @@ use std::collections::BTreeSet;
 use fq_store::grant_log::nats::NatsGrantBus;
 use fq_store::{Grantor, Principal, Scope, SqliteGrantLog, Verb, WireGrantEvent, drain};
 use futures::StreamExt as _;
-
-fn nats_url() -> String {
-    std::env::var("FQ_NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".into())
-}
 
 /// A per-run unique suffix so parallel/repeated runs never share a stream.
 fn unique() -> String {
@@ -28,7 +25,8 @@ async fn drain_publishes_to_jetstream_and_round_trips() {
     let uniq = unique();
     let stream_name = format!("FQ_GRANTS_TEST_{uniq}");
     let prefix = format!("fq.test.grant{uniq}");
-    let url = nats_url();
+    let server = fq_test_support::NatsServer::start();
+    let url = server.url().to_string();
 
     // Local log with three events: grant, delegation, revocation.
     let dir = tempfile::tempdir().unwrap();

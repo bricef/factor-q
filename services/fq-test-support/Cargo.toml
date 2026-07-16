@@ -1,0 +1,29 @@
+# Shared test-only helpers usable across factor-q's independent workspaces
+# (fq-runtime, fq-store, …) — they cannot share a `#[cfg(test)]` module, so the
+# cross-cutting guards live here and each consumer dev-depends on this crate
+# (#233). Standalone (own `[workspace]`) because there is no parent workspace
+# the service workspaces share; version/edition are set explicitly rather than
+# inherited for the same reason.
+[workspace]
+
+[package]
+name = "fq-test-support"
+version = "0.1.0"
+edition = "2024"
+license = "BUSL-1.1"
+description = "Test-only helpers shared across factor-q's workspaces"
+repository = "https://github.com/bricef/factor-q"
+publish = false
+
+[dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+# The crate's own tests exercise the guard against a real broker.
+async-nats = "0.38"
+tokio = { version = "1", features = ["full"] }
+
+# Match the house zero-warnings policy. Can't inherit workspace lints (this is
+# a standalone crate), so denied explicitly.
+[lints.rust]
+warnings = "deny"

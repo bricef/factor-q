@@ -922,6 +922,7 @@ dependencies = [
  "criterion",
  "fail",
  "fastcdc",
+ "fq-test-support",
  "futures",
  "hex",
  "proptest",
@@ -934,6 +935,13 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fq-test-support"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

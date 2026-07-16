@@ -10,6 +10,7 @@ set positional-arguments
 runtime_dir := "services/fq-runtime"
 store_dir := "services/fq-store"
 dashboard_dir := "services/fq-dashboard"
+test_support_dir := "services/fq-test-support"
 infra_dir := "infrastructure"
 
 # Show available recipes
@@ -133,8 +134,18 @@ store-ci:
 dashboard-ci:
     cd {{dashboard_dir}} && just ci
 
+# The shared test-only crate (#233) is its own workspace, so the per-service
+# gates only compile it as a dependency — this runs its own fmt/clippy/tests.
+# Its self-tests spawn a broker, so it needs the pinned binary like the runtime
+# suite does.
+# Run the fq-test-support gate (fmt-check, clippy, test).
+test-support-ci:
+    cd {{test_support_dir}} && cargo fmt --check
+    cd {{test_support_dir}} && cargo clippy --all-targets -- -D warnings
+    cd {{test_support_dir}} && FQ_TEST_NATS_SERVER="${FQ_TEST_NATS_SERVER:-{{nats_bin}}}" cargo test
+
 # Run all Rust quality gates locally (fmt-check, clippy, doc, test).
-rust-ci: runtime-ci store-ci dashboard-ci
+rust-ci: runtime-ci store-ci dashboard-ci test-support-ci
 
 # The Go trigger adapters — standalone binaries that talk to factor-q only
 # through the trigger wire contract, never fq-runtime code.
@@ -234,6 +245,7 @@ ci:
     nats_down
     run_phase "store"       just store-ci
     run_phase "dashboard"   just dashboard-ci
+    run_phase "test-support" just test-support-ci
     run_phase "go-ci"       just go-ci
 
 # Build container images for all services

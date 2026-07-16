@@ -56,6 +56,9 @@ jobs:
             # getting a fourth filter that would duplicate the `runtime` globs.
             runtime:
               - 'services/fq-runtime/**'
+              # The shared test-only crate is a dev-dependency of the runtime
+              # workspace (#233); its gate runs in this job.
+              - 'services/fq-test-support/**'
               - 'justfile'
               - 'rust-toolchain.toml'
               - '.github/workflows/**'
@@ -147,6 +150,11 @@ jobs:
         run: just infra-wait
       - if: needs.changes.outputs.runtime == 'true'
         run: just runtime-ci
+      # The shared test-only crate's own gate (#233) — its own workspace, so the
+      # runtime gate only compiles it as a dep. Uses the nats-server installed
+      # above.
+      - if: needs.changes.outputs.runtime == 'true'
+        run: just test-support-ci
       - if: always() && needs.changes.outputs.runtime == 'true'
         run: just infra-down
       # Cache hit-rate for the keep/drop decision on sccache (see env note).
