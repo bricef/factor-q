@@ -217,6 +217,17 @@ fn invocation_detail() -> InvocationDetailView {
         invocation_id: "019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string(),
         agent_id: Some("m0-issue-fix".to_string()),
         summary: Some("Fixing #83: SECURITY.md drafted, running just ci".to_string()),
+        // Mid-run burn: the cost-so-far row on a live invocation.
+        cost: Some(fq_runtime::views::InvocationCostView {
+            invocation_id: "019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string(),
+            started_at_ms: NOW_MS - 600_000,
+            event_count: 52,
+            total_cost: 2.213_7,
+            total_input_tokens: 6_723_812,
+            total_output_tokens: 10_095,
+            total_cache_read_tokens: 6_554_327,
+            total_cache_write_tokens: 0,
+        }),
         owner: Some(invocation_rows().remove(0)),
         // No archive row: this fixture is the standout live case — an
         // in-flight invocation — and a real one is never archived while

@@ -641,6 +641,22 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
             esc(summary)
         ));
     }
+    // Cost so far: live regions morph this every tick while the run
+    // spends, so the row doubles as a burn meter on in-flight work.
+    if let Some(cost) = &d.cost {
+        b.push_str(&format!(
+            r#"<tr><th>cost so far</th><td>${:.4} <span class="muted">· {} llm calls · {} in / {} out{}</span></td></tr>"#,
+            cost.total_cost,
+            fmt_grouped(cost.event_count),
+            fmt_tokens(cost.total_input_tokens),
+            fmt_tokens(cost.total_output_tokens),
+            if cost.total_cache_read_tokens > 0 {
+                format!(" · {} cache read", fmt_tokens(cost.total_cache_read_tokens))
+            } else {
+                String::new()
+            },
+        ));
+    }
     if let Some(o) = &d.owner {
         b.push_str(&format!(
             "<tr><th>status</th><td>{}</td></tr><tr><th>worker</th><td>{}</td></tr>",
@@ -765,6 +781,18 @@ fn fmt_grouped(n: i64) -> String {
         out.push(c);
     }
     if n < 0 { format!("-{out}") } else { out }
+}
+
+/// Compact token count as bare text ("171.39M", "58.9K", "1,597") —
+/// the cell-less sibling of [`token_cell`] for inline copy.
+fn fmt_tokens(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.2}M", n as f64 / 1e6)
+    } else if n >= 10_000 {
+        format!("{:.1}K", n as f64 / 1e3)
+    } else {
+        fmt_grouped(n)
+    }
 }
 
 /// A right-aligned token-count cell: compact in the cell ("171.39M",
@@ -1434,6 +1462,16 @@ mod tests {
             live: None,
             recent_events: vec![],
             summary: Some("Fixing #83: <b>ci</b> running".into()),
+            cost: Some(fq_runtime::views::InvocationCostView {
+                invocation_id: "inv-1".into(),
+                started_at_ms: 0,
+                event_count: 52,
+                total_cost: 2.2137,
+                total_input_tokens: 6_723_812,
+                total_output_tokens: 10_095,
+                total_cache_read_tokens: 6_554_327,
+                total_cache_write_tokens: 0,
+            }),
         };
         let html = invocation_detail(&detail, 1_000);
         assert_eq!(
@@ -1446,6 +1484,16 @@ mod tests {
             "summary must be escaped: {html}"
         );
         assert!(!html.contains("<b>ci</b>"), "raw markup leaked: {html}");
+
+        // Cost so far renders with compact counts; absent when no
+        // priced call has landed yet.
+        assert!(
+            html.contains(r#"<th>cost so far</th><td>$2.2137 <span class="muted">· 52 llm calls · 6.72M in / 10.1K out · 6.55M cache read</span></td>"#),
+            "got: {html}"
+        );
+        let mut no_cost = detail.clone();
+        no_cost.cost = None;
+        assert!(!invocation_detail(&no_cost, 1_000).contains("cost so far"));
 
         let mut no_summary = detail.clone();
         no_summary.summary = None;
