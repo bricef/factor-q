@@ -28,16 +28,22 @@
 //! the fix's core protection) *reaches* S1-obj, proving the check is not vacuous.
 //!
 //! Fidelity note: the step sequences mirror `Repository::put` / `Repository::bind`
-//! and the object arm of `ReferenceCollector::collect`. Deferred (documented in
-//! `storage-concurrency-verification.md`): a `Crash` process (needs object
-//! reconcile, #243, so a crash-leaked reservation is recoverable rather than
-//! flagged), a second concurrent writer, the block arm, and per-step error
-//! injection — the `Proc`/step-machine structure extends to all of them.
+//! and the object arm of `ReferenceCollector::collect`. A `Crash` process (#248)
+//! halts the writer mid-flight running no cleanup — a process death that leaks its
+//! reservation — at every reserved-but-unbound point and against every collector
+//! interleaving; the reachability audit must then recover a clean, at-rest store
+//! (the object reconcile, #243). Still deferred (#253,
+//! `storage-concurrency-verification.md`): a second concurrent writer, the block
+//! arm, and per-step error injection — the `Proc`/step-machine extends to all.
 
 use std::collections::{HashSet, VecDeque};
+use std::time::Duration;
 
 use fq_store::fs::{ChunkParams, FilesystemStore};
-use fq_store::{BlockStore, Cid, ContentStore, NameIndex, Repository, SqliteNameIndex, verify};
+use fq_store::{
+    AuditReport, BlockStore, Cid, ContentStore, NameIndex, ReachabilityAuditor, Repository,
+    SqliteNameIndex, verify,
+};
 
 const CONTENT: &[u8] = b"gc-exhaustive-object"; // small: one block
 
@@ -74,6 +80,11 @@ impl StoreBackend for FsSqlite {
 enum Proc {
     Writer,
     Collector,
+    /// A process death mid-put: halt the writer where it stands, running no
+    /// cleanup — a crash does not release its reservation, and that leak is
+    /// exactly what the audit must recover. Enabled only while the writer is
+    /// reserved-but-unbound; committed state is what survives.
+    Crash,
 }
 
 /// The writer program: a re-`put` (writes the manifest) or an `alias` (trusts
@@ -120,12 +131,29 @@ struct AbstractState {
     w: WPc,
     w_prev: i64,
     c: CPc,
+    /// The writer died mid-flight (a `Crash` step ran). Distinguishes a
+    /// crash-leaked terminal state from a cleanly completed one, for dedup.
+    crashed: bool,
 }
 
 struct RunOut {
     state: AbstractState,
     /// The first always-invariant violation observed, with the step index.
     violation: Option<(usize, Vec<verify::Violation>)>,
+    /// Present iff the writer crashed: the outcome of the post-crash recovery
+    /// audit — whether the crash left a real at-rest leak, and whether the audit
+    /// then restored a clean, converged store.
+    recovery: Option<Recovery>,
+}
+
+#[derive(Clone, Copy)]
+struct Recovery {
+    /// The crashed store failed the strict at-rest oracle *before* recovery —
+    /// there really was a leaked reservation to recover (non-vacuity).
+    dirty_before: bool,
+    /// *After* the audit: the at-rest oracle is clean and a second audit is a
+    /// no-op (the store converged).
+    clean_after: bool,
 }
 
 /// Run `sched` from a fresh store, one process step per entry, asserting the
@@ -161,6 +189,7 @@ async fn run<B: StoreBackend>(
     let mut w = WPc::Reserve;
     let mut c = CPc::Claim;
     let mut w_prev = 0i64;
+    let mut crashed = false;
     let mut violation = None;
 
     for (i, &p) in sched.iter().enumerate() {
@@ -228,6 +257,14 @@ async fn run<B: StoreBackend>(
                 }
                 CPc::Done | CPc::Skipped => {}
             },
+            Proc::Crash => {
+                // Process death: halt the writer, run no cleanup. Every primitive
+                // committed in its own txn, so the surviving store is exactly what
+                // we hold — no reopen is needed at this layer (the DST covers the
+                // on-disk reopen); the leaked reservation persists for recovery.
+                crashed = true;
+                w = WPc::Done;
+            }
         }
 
         let v = verify::check_index_in_flight(repo.index(), repo.content())
@@ -241,16 +278,48 @@ async fn run<B: StoreBackend>(
     let obj = object_kind(&repo, &cid).await;
     let manifest = repo.content().has(&cid).await.unwrap();
     let name_bound = repo.index().resolve("b").await.unwrap() == Some(cid);
+    let state = AbstractState {
+        obj,
+        manifest,
+        name_bound,
+        w,
+        w_prev,
+        c,
+        crashed,
+    };
+
+    // After a crash the online collector cannot reclaim a still-reserved leak
+    // (claim needs refcount 0) — the reachability audit is the backstop. It must
+    // reconcile the leaked reservation past the grace and reclaim, restoring a
+    // clean at-rest store (a second audit then finds nothing). The strict at-rest
+    // oracle is dirty *before* (there is a real leak) and clean *after*.
+    let recovery = if crashed {
+        let before = verify::check_index(repo.index(), repo.content())
+            .await
+            .unwrap();
+        ReachabilityAuditor
+            .audit(&repo, Duration::ZERO)
+            .await
+            .unwrap();
+        let residual = ReachabilityAuditor
+            .audit(&repo, Duration::ZERO)
+            .await
+            .unwrap();
+        let after = verify::check_index(repo.index(), repo.content())
+            .await
+            .unwrap();
+        Some(Recovery {
+            dirty_before: !before.is_empty(),
+            clean_after: after.is_empty() && residual == AuditReport::default(),
+        })
+    } else {
+        None
+    };
+
     RunOut {
-        state: AbstractState {
-            obj,
-            manifest,
-            name_bound,
-            w,
-            w_prev,
-            c,
-        },
+        state,
         violation,
+        recovery,
     }
 }
 
@@ -272,7 +341,7 @@ async fn object_kind<C: BlockStore, N: NameIndex>(repo: &Repository<C, N>, cid: 
     }
 }
 
-fn enabled(s: &AbstractState) -> Vec<Proc> {
+fn enabled(s: &AbstractState, allow_crash: bool) -> Vec<Proc> {
     let mut v = Vec::new();
     if s.w != WPc::Done {
         v.push(Proc::Writer);
@@ -280,65 +349,144 @@ fn enabled(s: &AbstractState) -> Vec<Proc> {
     if s.c != CPc::Done && s.c != CPc::Skipped {
         v.push(Proc::Collector);
     }
+    // A crash matters only once the writer has reserved (there is a reservation to
+    // leak) and before it binds (after bind the put is complete — nothing to
+    // recover): exactly WPc::Write / WPc::Bind. Fires at most once per schedule.
+    if allow_crash && !s.crashed && matches!(s.w, WPc::Write | WPc::Bind) {
+        v.push(Proc::Crash);
+    }
     v
 }
 
+/// Aggregate outcome of a full BFS exploration.
+struct Explored {
+    states: usize,
+    first_violation: Option<(Vec<Proc>, usize, Vec<verify::Violation>)>,
+    /// Crash schedules run, how many left a real at-rest leak, and the first
+    /// schedule (if any) whose post-crash recovery failed.
+    crashes: usize,
+    crashes_dirty: usize,
+    recovery_failure: Option<Vec<Proc>>,
+}
+
+/// Fold one run's outcome into the aggregate.
+fn fold(ex: &mut Explored, out: &RunOut, sched: &[Proc]) {
+    if let Some((i, v)) = &out.violation {
+        ex.first_violation
+            .get_or_insert_with(|| (sched.to_vec(), *i, v.clone()));
+    }
+    if let Some(r) = &out.recovery {
+        ex.crashes += 1;
+        if r.dirty_before {
+            ex.crashes_dirty += 1;
+        }
+        if !r.clean_after {
+            ex.recovery_failure.get_or_insert_with(|| sched.to_vec());
+        }
+    }
+}
+
 /// BFS over abstract states; every successor replays its schedule from a fresh
-/// store. Returns the distinct-state count and the first violation found.
+/// store. Checks every run's outcome (violation, and recovery for crash steps),
+/// returning the distinct-state count and the aggregated findings.
 async fn explore<B: StoreBackend>(
     backend: &B,
     kind: WriterKind,
     buggy: bool,
-) -> (usize, Option<(Vec<Proc>, usize, Vec<verify::Violation>)>) {
+    allow_crash: bool,
+) -> Explored {
     let mut seen = HashSet::new();
     let mut queue = VecDeque::new();
-    let mut first_violation = None;
+    let mut ex = Explored {
+        states: 0,
+        first_violation: None,
+        crashes: 0,
+        crashes_dirty: 0,
+        recovery_failure: None,
+    };
 
     let init = run(backend, &[], kind, buggy).await;
-    if let Some((i, v)) = init.violation {
-        first_violation.get_or_insert((Vec::new(), i, v));
-    }
+    fold(&mut ex, &init, &[]);
     seen.insert(init.state.clone());
     queue.push_back((init.state, Vec::<Proc>::new()));
 
     while let Some((state, sched)) = queue.pop_front() {
-        for p in enabled(&state) {
+        for p in enabled(&state, allow_crash) {
             let mut sched2 = sched.clone();
             sched2.push(p);
             let out = run(backend, &sched2, kind, buggy).await;
-            if let Some((i, v)) = out.violation {
-                first_violation.get_or_insert((sched2.clone(), i, v));
-            }
+            fold(&mut ex, &out, &sched2);
             if seen.insert(out.state.clone()) {
                 queue.push_back((out.state, sched2));
             }
         }
     }
-    (seen.len(), first_violation)
+    ex.states = seen.len();
+    ex
 }
 
 /// The clean bar: no interleaving of `kind` vs the collector reaches S1-obj.
 async fn assert_clean<B: StoreBackend>(backend: &B, kind: WriterKind, label: &str) {
-    let (states, violation) = explore(backend, kind, false).await;
+    let ex = explore(backend, kind, false, false).await;
     assert!(
-        violation.is_none(),
-        "{label}: S1-obj is reachable under back-off — the fix is incomplete: {violation:#?}"
+        ex.first_violation.is_none(),
+        "{label}: S1-obj is reachable under back-off — the fix is incomplete: {:#?}",
+        ex.first_violation
     );
     assert!(
-        states >= 8,
-        "{label}: expected a non-trivial state space, explored only {states}"
+        ex.states >= 8,
+        "{label}: expected a non-trivial state space, explored only {}",
+        ex.states
     );
-    eprintln!("exhaustive {label}: {states} distinct states, no reachable S1-obj");
+    eprintln!(
+        "exhaustive {label}: {} distinct states, no reachable S1-obj",
+        ex.states
+    );
 }
 
 /// The non-vacuity meta-check: with the claim CAS removed, S1-obj IS reachable.
 async fn assert_sabotage_reaches_s1<B: StoreBackend>(backend: &B, kind: WriterKind, label: &str) {
-    let (states, violation) = explore(backend, kind, true).await;
+    let ex = explore(backend, kind, true, false).await;
     assert!(
-        violation.is_some(),
-        "{label}: the sabotaged collector should reach S1-obj, but found none across {states} states"
+        ex.first_violation.is_some(),
+        "{label}: the sabotaged collector should reach S1-obj, but found none across {} states",
+        ex.states
     );
-    eprintln!("exhaustive {label} (sabotaged): reached S1-obj ({states} states)");
+    eprintln!(
+        "exhaustive {label} (sabotaged): reached S1-obj ({} states)",
+        ex.states
+    );
+}
+
+/// The crash-recovery bar: a writer that dies reserved-but-unbound — at every
+/// such point, against every collector interleaving — leaves a store the audit
+/// restores to clean and at-rest. Non-vacuous: every such crash really did leak
+/// (the strict at-rest oracle flagged it before recovery), and the always-
+/// invariants hold at every step of the crash interleavings too.
+async fn assert_crash_recovers<B: StoreBackend>(backend: &B, kind: WriterKind, label: &str) {
+    let ex = explore(backend, kind, false, true).await;
+    assert!(
+        ex.first_violation.is_none(),
+        "{label}: an always-invariant was violated during a crash interleaving: {:#?}",
+        ex.first_violation
+    );
+    assert!(
+        ex.crashes > 0,
+        "{label}: no crash schedules were explored — the Crash process never fired"
+    );
+    assert_eq!(
+        ex.crashes_dirty, ex.crashes,
+        "{label}: a crash left no at-rest leak — the recovery check would be vacuous"
+    );
+    assert!(
+        ex.recovery_failure.is_none(),
+        "{label}: a crash-leaked reservation was not recovered by the audit: {:#?}",
+        ex.recovery_failure
+    );
+    eprintln!(
+        "exhaustive {label} (crash): {} crash schedules recovered to a clean at-rest store ({} states)",
+        ex.crashes, ex.states
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -359,4 +507,14 @@ async fn exhaustive_alias_backoff_has_no_reachable_s1() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exhaustive_alias_sabotaged_reaches_s1() {
     assert_sabotage_reaches_s1(&FsSqlite, WriterKind::Alias, "alias").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhaustive_put_crash_is_recovered_by_audit() {
+    assert_crash_recovers(&FsSqlite, WriterKind::Put, "put").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhaustive_alias_crash_is_recovered_by_audit() {
+    assert_crash_recovers(&FsSqlite, WriterKind::Alias, "alias").await;
 }
