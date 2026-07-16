@@ -4061,9 +4061,9 @@ fn trigger_from_state_row(row: &crate::worker::store::InvocationStateRow) -> Tri
 #[cfg(test)]
 mod tests {
     //! Behavioural-equivalence and end-to-end tests for the
-    //! reducer host loop. These need NATS, so they skip when
-    //! `FQ_NATS_URL` is unset — same pattern as the legacy
-    //! executor's tests.
+    //! reducer host loop. Each NATS-backed test spawns its own
+    //! private `nats-server` (#233) — nothing shared, nothing
+    //! skipped.
     //!
     //! The point of these tests is the *equivalence* claim:
     //! given the same scripted LLM responses and the same
