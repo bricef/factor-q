@@ -84,6 +84,21 @@ impl ReachabilityAuditor {
             }
         }
 
+        // Objects reconcile the same way, against the name-version count — the
+        // object twin (#243). A crash mid-`put` after `reserve_object` but before
+        // `bind` leaks an object refcount above its live name count, so it never
+        // returns to 0 and its manifest is pinned forever. Reduce it to truth,
+        // again only where the object has gone untouched past the grace so a live
+        // in-flight reserve is left alone. An object reconciled to 0 (a reserve
+        // that never bound a name) becomes dead and is reclaimed in phase 2.
+        let name_truth: HashMap<Cid, i64> = snapshot.name_refs.iter().copied().collect();
+        for (cid, refcount) in &snapshot.objects {
+            let want = name_truth.get(cid).copied().unwrap_or(0);
+            if *refcount > want && index.reconcile_object(cid, want, cutoff).await? {
+                reconciled += 1;
+            }
+        }
+
         // Phase 2 — systematic reclaim. Running the collector to completion is the
         // strong-fairness guarantee: every dead block/object and every orphaned
         // claim (a crash mid-reclaim), including a block reconcile just freed, is
@@ -119,8 +134,13 @@ impl ReachabilityAuditor {
 
         // Phase 4 — alarm. Anything the oracle still flags is a fault the audit
         // will not auto-repair: the forbidden state (a live object missing a
-        // block) or a refcount below truth. An empty list means a healthy store.
-        let alarms = verify::check_index(index, content).await?;
+        // block, a name resolving to a missing object) or a refcount below truth.
+        // The *in-flight* oracle is right here because the audit runs on a live
+        // store: an object mid-`put` (reserved, not yet bound) legitimately sits
+        // above its name count, so it is tolerated (dominance), not alarmed — a
+        // reservation genuinely leaked past the grace was already reconciled in
+        // phase 1. An empty list means a healthy store.
+        let alarms = verify::check_index_in_flight(index, content).await?;
 
         Ok(AuditReport {
             reclaimed,
@@ -179,6 +199,22 @@ mod tests {
             .iter()
             .find(|b| &b.hash == block && b.generation == 0)
             .map(|b| b.refcount)
+            .unwrap_or(0)
+    }
+
+    /// The stored refcount of object `cid`, or 0 if absent.
+    async fn object_refcount(
+        repo: &Repository<FilesystemStore, SqliteNameIndex>,
+        cid: &Cid,
+    ) -> i64 {
+        repo.index()
+            .snapshot()
+            .await
+            .unwrap()
+            .objects
+            .iter()
+            .find(|(c, _)| c == cid)
+            .map(|(_, rc)| *rc)
             .unwrap_or(0)
     }
 
@@ -263,6 +299,83 @@ mod tests {
         let report = ReachabilityAuditor.audit(&repo, LONG_GRACE).await.unwrap();
         assert_eq!(report.reconciled, 0, "{report:?}");
         assert_eq!(block_refcount(&repo, &block).await, 2);
+    }
+
+    #[tokio::test]
+    async fn reconciles_a_leaked_object_reservation_past_grace() {
+        let (_d, repo) = crate::test_support::repo().await;
+        let content = b"one object, one live name";
+        let cid = repo.put("a", content).await.unwrap();
+
+        // Simulate a crash mid-`put` after reserving the object: a second
+        // reservation lands but never binds, inflating the object refcount above
+        // its single live name.
+        assert_eq!(
+            repo.index().reserve_object(&cid, true).await.unwrap(),
+            Some(1)
+        );
+        assert_eq!(object_refcount(&repo, &cid).await, 2);
+
+        // Past grace → reconciled down to the truth (1). The object is still live
+        // (name "a" resolves to it), so it is healed, not reclaimed.
+        let report = ReachabilityAuditor.audit(&repo, NO_GRACE).await.unwrap();
+        assert_eq!(report.reconciled, 1, "{report:?}");
+        assert_eq!(object_refcount(&repo, &cid).await, 1);
+        assert_eq!(repo.get("a").await.unwrap(), content);
+        verify::assert_clean(repo.index(), repo.content()).await;
+    }
+
+    #[tokio::test]
+    async fn reconciles_and_reclaims_a_fully_leaked_object() {
+        let (_d, repo) = crate::test_support::repo().await;
+        let content = b"an object whose put crashed before binding";
+        let cid = repo.put("a", content).await.unwrap();
+        // Drop the only name, then re-reserve without binding: refcount 1 but no
+        // live name — exactly a `put` that reserved (and wrote the manifest) then
+        // crashed before `bind`. The manifest is pinned with nothing pointing at it.
+        repo.unbind("a").await.unwrap();
+        assert_eq!(
+            repo.index().reserve_object(&cid, true).await.unwrap(),
+            Some(0)
+        );
+        assert_eq!(object_refcount(&repo, &cid).await, 1);
+        assert!(repo.content().has(&cid).await.unwrap());
+
+        // Past grace → reconciled to 0 (no live name), then reclaimed by the same
+        // pass: the row is gone and the manifest is unlinked.
+        let report = ReachabilityAuditor.audit(&repo, NO_GRACE).await.unwrap();
+        assert_eq!(report.reconciled, 1, "{report:?}");
+        assert!(
+            repo.index()
+                .unreferenced_objects()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !repo.content().has(&cid).await.unwrap(),
+            "manifest reclaimed"
+        );
+        verify::assert_clean(repo.index(), repo.content()).await;
+    }
+
+    #[tokio::test]
+    async fn spares_a_fresh_object_reservation_within_grace() {
+        let (_d, repo) = crate::test_support::repo().await;
+        let content = b"an object with a fresh, unbound reservation";
+        let cid = repo.put("a", content).await.unwrap();
+        repo.index().reserve_object(&cid, true).await.unwrap(); // refcount 2, touched now
+
+        // Touched just now: it could be a live in-flight put, so a long grace
+        // leaves the reservation untouched — and the in-flight alarm tolerates the
+        // drift rather than flagging it (the audit runs on a live store).
+        let report = ReachabilityAuditor.audit(&repo, LONG_GRACE).await.unwrap();
+        assert_eq!(report.reconciled, 0, "{report:?}");
+        assert_eq!(object_refcount(&repo, &cid).await, 2);
+        assert!(
+            report.alarms.is_empty(),
+            "a live in-flight reserve must not alarm: {report:?}"
+        );
     }
 
     #[tokio::test]
