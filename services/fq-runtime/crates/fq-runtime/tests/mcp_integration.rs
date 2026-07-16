@@ -1393,8 +1393,13 @@ async fn roots_derived_from_sandbox_are_advertised_and_updatable() {
     let grant = fq_runtime::RootsGrant {
         servers: vec!["everything".to_string()],
     };
-    let roots = fq_runtime::advertised_roots(
-        &sandbox,
+    // Static paths materialise unchanged with no workspace bound —
+    // the pre-#179 behaviour, preserved.
+    let bound = sandbox
+        .to_tool_sandbox(None)
+        .expect("static paths bind without a workspace");
+    let roots = fq_runtime::advertised_roots_from_tool_sandbox(
+        &bound,
         Some(&grant),
         "everything",
         &ValidatorChain::<Vec<Root>>::new(),
@@ -1446,6 +1451,76 @@ async fn roots_derived_from_sandbox_are_advertised_and_updatable() {
     manager.shutdown().await;
 }
 
+/// #179 acceptance: a `${workspace}` sandbox root advertises the
+/// CONCRETE bound workspace path — verified end-to-end through the
+/// everything server's roots/list echo — and an unresolvable
+/// placeholder fails at materialisation, before any server could
+/// start.
+#[tokio::test]
+async fn workspace_placeholder_roots_advertise_the_bound_path() {
+    use fq_runtime::Sandbox;
+    use fq_runtime::validation::ValidatorChain;
+
+    let sandbox = Sandbox::new()
+        .fs_read("${workspace}")
+        .fs_write("${workspace}");
+    let grant = fq_runtime::RootsGrant {
+        servers: vec!["everything".to_string()],
+    };
+
+    // Unresolvable placeholder: fails loud at materialisation (the
+    // runner runs this before MCP startup), never advertising the
+    // literal token.
+    assert!(
+        sandbox.to_tool_sandbox(None).is_err(),
+        "unbound ${{workspace}} must fail materialisation"
+    );
+
+    // Bound: the advertised root is the concrete absolute path, with
+    // read+write of the same path deduplicated to one root.
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let bound = sandbox
+        .to_tool_sandbox(Some(workspace.path()))
+        .expect("workspace binds");
+    let roots = fq_runtime::advertised_roots_from_tool_sandbox(
+        &bound,
+        Some(&grant),
+        "everything",
+        &ValidatorChain::<Vec<Root>>::new(),
+    );
+    let expected_uri = format!("file://{}", workspace.path().display());
+    assert_eq!(
+        roots.iter().map(|r| r.uri.as_str()).collect::<Vec<_>>(),
+        vec![expected_uri.as_str()],
+        "one deduplicated root with the concrete bound path"
+    );
+    assert!(
+        !roots.iter().any(|r| r.uri.contains("${")),
+        "no unresolved placeholder may ever be advertised"
+    );
+
+    // End-to-end: the server sees the concrete path on roots/list.
+    if !require_npx() {
+        eprintln!("skipping echo half: npx not found");
+        return;
+    }
+    let mut manager = McpClientManager::new();
+    let (tools, _rx, _handle) = manager
+        .start_server_with_requests(everything_config(), roots, AdvertisedCapabilities::all())
+        .await
+        .expect("start server-everything (per-invocation)");
+    let get_roots: Arc<dyn Tool> = tools
+        .into_iter()
+        .find(|t| t.name() == "everything__get-roots-list")
+        .expect("everything server exposes get-roots-list when roots is advertised");
+    let listed = read_roots_list(&get_roots).await;
+    assert!(
+        listed.contains(expected_uri.as_str()),
+        "server must see the bound workspace root, got: {listed}"
+    );
+    manager.shutdown().await;
+}
+
 /// Ungranted: roots are nothing-by-default, so a server not in the
 /// grant is advertised an empty set.
 #[tokio::test]
@@ -1454,10 +1529,13 @@ async fn roots_not_advertised_without_a_grant() {
     use fq_runtime::validation::ValidatorChain;
 
     let sandbox = Sandbox::new().fs_read("/tmp/factorq-roots-read");
+    let bound = sandbox
+        .to_tool_sandbox(None)
+        .expect("static path binds without a workspace");
 
     // No grant at all → empty.
-    let none = fq_runtime::advertised_roots(
-        &sandbox,
+    let none = fq_runtime::advertised_roots_from_tool_sandbox(
+        &bound,
         None,
         "everything",
         &ValidatorChain::<Vec<Root>>::new(),
@@ -1468,8 +1546,8 @@ async fn roots_not_advertised_without_a_grant() {
     let grant = fq_runtime::RootsGrant {
         servers: vec!["some-other-server".to_string()],
     };
-    let other = fq_runtime::advertised_roots(
-        &sandbox,
+    let other = fq_runtime::advertised_roots_from_tool_sandbox(
+        &bound,
         Some(&grant),
         "everything",
         &ValidatorChain::<Vec<Root>>::new(),

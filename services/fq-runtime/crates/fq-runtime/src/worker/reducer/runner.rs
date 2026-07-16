@@ -675,13 +675,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // Start grant-bearing MCP servers only after the sandbox has been
         // materialised, so roots use the same bound paths tools enforce.
         let mut manager = McpClientManager::new();
-        let mut invocation_tools = (*tools).clone();
-        let mut channels = sampling.map_or_else(Vec::new, |channel| channel.channels);
-        for decl in agent
+        let grant_decls: Vec<_> = agent
             .mcp_servers()
             .iter()
             .filter(|decl| agent.grants_inbound_capability(&decl.server))
-        {
+            .collect();
+        // The common no-grants invocation keeps the shared registry —
+        // no clone, no per-invocation registry (the pre-#179 fast
+        // path). `Some` only when a grant server will layer tools on.
+        let mut invocation_tools: Option<ToolRegistry> =
+            (!grant_decls.is_empty()).then(|| (*tools).clone());
+        let mut channels = sampling.map_or_else(Vec::new, |channel| channel.channels);
+        for decl in grant_decls {
             let capabilities = AdvertisedCapabilities {
                 sampling: agent
                     .sampling_grant()
@@ -710,7 +715,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             {
                 Ok((server_tools, rx, _)) => {
                     for tool in server_tools {
-                        if let Err(error) = invocation_tools.register(tool) {
+                        let registry = invocation_tools
+                            .as_mut()
+                            .expect("cloned above: grant_decls is non-empty on this path");
+                        if let Err(error) = registry.register(tool) {
                             warn!(server = %decl.server, %error, "refusing per-invocation MCP tool registration");
                         }
                     }
@@ -722,9 +730,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
         }
         let sampling = (!channels.is_empty()).then(|| SamplingChannel::merged(channels));
+        // From here on, `tools` is the effective registry for this
+        // invocation: the base one, or the clone with server tools
+        // layered on.
+        let tools = invocation_tools.as_ref().unwrap_or(tools);
         warn_on_deprecated_bare_grants(&agent_id, agent.tools());
         let allowed_tool_names = canonical_tool_names(agent.tools());
-        let tool_schemas = invocation_tools.build_schemas(&allowed_tool_names);
+        let tool_schemas = tools.build_schemas(&allowed_tool_names);
         // A tool the agent declares but the registry has no
         // implementation for is dropped silently by `build_schemas` —
         // the model is simply never offered it, with no other signal.
@@ -734,7 +746,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // registry for this invocation (base + any per-invocation MCP
         // tools), so a name missing at this point is genuinely
         // unavailable, not merely unresolved.
-        let missing = invocation_tools.missing_tools(&allowed_tool_names);
+        let missing = tools.missing_tools(&allowed_tool_names);
         if !missing.is_empty() {
             warn!(
                 agent_id = %agent_id,
@@ -794,6 +806,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             )
             .await
         {
+            // The grant servers started above must not outlive the
+            // failed invocation either — same #116-class lesson as the
+            // workspace reclaim below: McpClientManager has no Drop, so
+            // without this their child processes leak on the pre-WAL
+            // publish-failure path.
+            manager.shutdown().await;
             let outcome = Err(err);
             self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
                 .await;
@@ -841,7 +859,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 &agent_config,
                 &trigger,
                 &sandbox,
-                &invocation_tools,
+                tools,
                 workspace.as_deref(),
                 state,
                 last_result,
