@@ -1,0 +1,90 @@
+[
+  {
+    "event_id": "00000000-0000-7000-8000-000000001008",
+    "timestamp": "2026-01-02T03:04:35+00:00",
+    "agent_id": "fixer",
+    "invocation_id": "4e000000-0000-7000-8000-000000000004",
+    "event_type": "triggered",
+    "model": "claude-haiku",
+    "total_cost": null,
+    "error_kind": null,
+    "duration_ms": null
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001007",
+    "timestamp": "2026-01-02T03:04:25+00:00",
+    "agent_id": "researcher",
+    "invocation_id": "3a000000-0000-7000-8000-000000000003",
+    "event_type": "triggered",
+    "model": "claude-haiku",
+    "total_cost": null,
+    "error_kind": null,
+    "duration_ms": null
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001006",
+    "timestamp": "2026-01-02T03:04:17+00:00",
+    "agent_id": "fixer",
+    "invocation_id": "2f000000-0000-7000-8000-000000000002",
+    "event_type": "failed",
+    "model": null,
+    "total_cost": 0.0031,
+    "error_kind": "tool_error",
+    "duration_ms": 2000
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001005",
+    "timestamp": "2026-01-02T03:04:16+00:00",
+    "agent_id": "fixer",
+    "invocation_id": "2f000000-0000-7000-8000-000000000002",
+    "event_type": "llm_response",
+    "model": "claude-haiku",
+    "total_cost": 0.0031,
+    "error_kind": null,
+    "duration_ms": null
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001004",
+    "timestamp": "2026-01-02T03:04:15+00:00",
+    "agent_id": "fixer",
+    "invocation_id": "2f000000-0000-7000-8000-000000000002",
+    "event_type": "triggered",
+    "model": "claude-haiku",
+    "total_cost": null,
+    "error_kind": null,
+    "duration_ms": null
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001003",
+    "timestamp": "2026-01-02T03:04:10+00:00",
+    "agent_id": "researcher",
+    "invocation_id": "1c000000-0000-7000-8000-000000000001",
+    "event_type": "completed",
+    "model": null,
+    "total_cost": 0.0125,
+    "error_kind": null,
+    "duration_ms": 5000
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001002",
+    "timestamp": "2026-01-02T03:04:06+00:00",
+    "agent_id": "researcher",
+    "invocation_id": "1c000000-0000-7000-8000-000000000001",
+    "event_type": "llm_response",
+    "model": "claude-haiku",
+    "total_cost": 0.0125,
+    "error_kind": null,
+    "duration_ms": null
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001001",
+    "timestamp": "2026-01-02T03:04:05+00:00",
+    "agent_id": "researcher",
+    "invocation_id": "1c000000-0000-7000-8000-000000000001",
+    "event_type": "triggered",
+    "model": "claude-haiku",
+    "total_cost": null,
+    "error_kind": null,
+    "duration_ms": null
+  }
+]

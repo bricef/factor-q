@@ -1,0 +1,44 @@
+{
+  "agents": [
+    {
+      "agent_id": "researcher",
+      "event_count": 1,
+      "total_cost": 0.0125,
+      "total_input_tokens": 1200,
+      "total_output_tokens": 340,
+      "total_cache_read_tokens": 0,
+      "total_cache_write_tokens": 0,
+      "invocation_count": 1
+    },
+    {
+      "agent_id": "fixer",
+      "event_count": 1,
+      "total_cost": 0.0031,
+      "total_input_tokens": 1200,
+      "total_output_tokens": 340,
+      "total_cache_read_tokens": 0,
+      "total_cache_write_tokens": 0,
+      "invocation_count": 1
+    }
+  ],
+  "buckets": [
+    {
+      "bucket": "2026-01-02",
+      "total_cost": 0.015600000000000001
+    }
+  ],
+  "models": [
+    {
+      "model": "claude-haiku",
+      "event_count": 2,
+      "total_cost": 0.015600000000000001,
+      "total_input_tokens": 2400,
+      "total_output_tokens": 680
+    }
+  ],
+  "total_cost": 0.015600000000000001,
+  "total_input_tokens": 2400,
+  "total_output_tokens": 680,
+  "total_cache_read_tokens": 0,
+  "total_cache_write_tokens": 0
+}

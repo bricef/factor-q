@@ -1,0 +1,9 @@
+timestamp            agent                                    event          cost         invocation
+2026-01-02T03:04:35  fixer                                    triggered      -            4e000000
+2026-01-02T03:04:25  researcher                               triggered      -            3a000000
+2026-01-02T03:04:17  fixer                                    failed         $0.003100    2f000000
+2026-01-02T03:04:16  fixer                                    llm_response   $0.003100    2f000000
+2026-01-02T03:04:15  fixer                                    triggered      -            2f000000
+2026-01-02T03:04:10  researcher                               completed      $0.012500    1c000000
+2026-01-02T03:04:06  researcher                               llm_response   $0.012500    1c000000
+2026-01-02T03:04:05  researcher                               triggered      -            1c000000

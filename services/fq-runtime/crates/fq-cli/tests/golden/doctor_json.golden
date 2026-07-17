@@ -1,0 +1,29 @@
+{
+  "workers": {
+    "alive": 1,
+    "stale": 1,
+    "shutdown": 1,
+    "stale_ids": [
+      "worker-alpha"
+    ]
+  },
+  "executions": {
+    "in_flight": 1,
+    "working": 0,
+    "working_ids": [],
+    "stuck": 1,
+    "stuck_ids": [
+      "3a000000"
+    ]
+  },
+  "ambiguous": 0,
+  "failures": [
+    {
+      "error_kind": "tool_error",
+      "count": 1
+    }
+  ],
+  "dead_letters": {
+    "exhausted_triggers": 0
+  }
+}

@@ -1,0 +1,5 @@
+agent                          events     input_tokens   output_tokens  cache_read     cache_write    total_cost
+researcher                     1          1200           340            0              0              $0.012500
+fixer                          1          1200           340            0              0              $0.003100
+
+Total across all agents: $0.015600

@@ -1,0 +1,20 @@
+── prompt ─────────────────────────────────
+system:
+    You are a deterministic fixture.
+user:
+    Summarise the fixture, then read a file.
+── assistant (model=claude-haiku cost=$0.012500) ──
+    Reading the fixture file first.
+  → tool call: read_file (id=tc-1)
+    {
+      "path": "fixture.txt"
+    }
+── tool result: read_file ──
+  parameters:
+    {
+      "path": "fixture.txt"
+    }
+  output:
+    {"bytes":42,"content":"deterministic"}
+── assistant (model=claude-haiku cost=$0.012500) ──
+    The fixture file says: deterministic.
