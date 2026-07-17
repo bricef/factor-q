@@ -126,9 +126,15 @@ pub enum NextAction {
     CallModel(ModelRequest),
     CallTool(ToolCallRequest),
     CallToolsParallel(Vec<ToolCallRequest>),
-    /// The invocation has completed successfully. The string is
-    /// the agent's final output.
-    Complete(String),
+    /// The invocation has completed. `text` is the agent's final
+    /// output; `task_status` is the agent's own declaration of how the
+    /// task went (#125) — `Success` for the implicit terminal (a turn
+    /// with no tool calls), the declared value when the turn called
+    /// `report_outcome`.
+    Complete {
+        text: String,
+        task_status: crate::events::TaskStatus,
+    },
     /// The invocation has failed terminally.
     Failed(HarnessError),
 }

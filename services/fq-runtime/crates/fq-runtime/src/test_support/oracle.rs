@@ -29,7 +29,7 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::events::{Event, EventPayload};
+use crate::events::{Event, EventPayload, TaskStatus};
 
 /// One way a trace failed the canonical-sequence claim.
 #[derive(Debug)]
@@ -653,6 +653,7 @@ mod tests {
 
     fn completed() -> EventPayload {
         EventPayload::Completed(CompletedPayload {
+            task_status: TaskStatus::default(),
             result_summary: None,
             total_llm_calls: 1,
             total_tool_calls: 0,
