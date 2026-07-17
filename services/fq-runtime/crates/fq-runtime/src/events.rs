@@ -1166,6 +1166,9 @@ pub enum FailureKind {
 #[serde(rename_all = "snake_case")]
 pub enum FailurePhase {
     Setup,
+    Reducer,
+    HostStepBudget,
+    Budget,
     LlmRequest,
     LlmResponse,
     ToolCall,

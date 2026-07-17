@@ -77,8 +77,6 @@ use crate::llm::{ChatResponse, LlmClient, LlmError};
 #[derive(Debug, Default)]
 pub struct DurableStart {
     tx: Option<oneshot::Sender<()>>,
-    /// JetStream delivery count (one on the original delivery).
-    attempt: u64,
 }
 
 impl DurableStart {
@@ -86,22 +84,13 @@ impl DurableStart {
     /// to the worker and the receiver the caller awaits.
     pub fn channel() -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
-        (
-            Self {
-                tx: Some(tx),
-                attempt: 1,
-            },
-            rx,
-        )
+        (Self { tx: Some(tx) }, rx)
     }
 
     /// A signal nobody is listening on — firing it does nothing. For
     /// the direct-run paths that do not ack a trigger.
     pub fn noop() -> Self {
-        Self {
-            tx: None,
-            attempt: 1,
-        }
+        Self { tx: None }
     }
 
     /// Signal that the invocation has durably started. Idempotent: the
@@ -112,16 +101,6 @@ impl DurableStart {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(());
         }
-    }
-
-    /// Set the one-based JetStream delivery attempt for this invocation.
-    pub fn set_attempt(&mut self, attempt: u64) {
-        self.attempt = attempt.max(1);
-    }
-
-    /// One-based delivery attempt supplied by the trigger dispatcher.
-    pub fn attempt(&self) -> u64 {
-        self.attempt
     }
 }
 

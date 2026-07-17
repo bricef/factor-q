@@ -1240,7 +1240,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     "cost ${:.6} exceeded budget ${budget:.2} (detected on resume)",
                     totals.total_cost
                 ),
-                FailurePhase::LlmResponse,
+                FailurePhase::Budget,
                 totals,
                 &mut cursor,
             )
@@ -1449,7 +1449,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         invocation_id,
                         kind,
                         message.clone(),
-                        FailurePhase::LlmResponse,
+                        FailurePhase::Reducer,
                         totals,
                         cursor,
                     )
@@ -1564,7 +1564,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         invocation_id,
                         kind,
                         err.message.clone(),
-                        FailurePhase::LlmResponse,
+                        FailurePhase::Reducer,
                         totals,
                         cursor,
                     )
@@ -1667,7 +1667,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             invocation_id,
             kind,
             message.clone(),
-            FailurePhase::LlmResponse,
+            FailurePhase::HostStepBudget,
             totals,
             cursor,
         )
@@ -4056,18 +4056,9 @@ fn now_ms() -> u64 {
 }
 
 fn rand_u64() -> u64 {
-    // Cheap host-side randomness. The reducer is not allowed to
-    // read time/randomness directly, but that's enforced by the
-    // boundary: it can only see what we put in `StepInput`.
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-        .hash(&mut h);
-    h.finish()
+    let mut bytes = [0_u8; 8];
+    getrandom::fill(&mut bytes).expect("OS entropy unavailable");
+    u64::from_ne_bytes(bytes)
 }
 
 fn trigger_source_label(kind: &TriggerSourceKind) -> &'static str {
@@ -6485,7 +6476,7 @@ mod tests {
             ),
             Arc::new(
                 RunnerConfig::builder()
-                    .bus(bus)
+                    .bus(bus.clone())
                     .pricing(test_pricing())
                     .store(store.clone())
                     .worker_id(test_worker_id())
@@ -6493,6 +6484,12 @@ mod tests {
             ),
             Harness::new(),
         );
+
+        let mut sub = bus
+            .subscribe(format!("fq.agent.{}.>", agent.id().as_str()))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // The post-resume model turn (reached after the synthetic
         // tool error is fed back to the reducer).
@@ -6522,6 +6519,17 @@ mod tests {
                 );
             }
             other => panic!("expected BudgetExceeded from lifetime spend, got {other:?}"),
+        }
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), sub.next())
+                .await
+                .expect("timeout")
+                .expect("stream closed")
+                .expect("deserialise");
+            if let EventPayload::Failed(payload) = event.payload {
+                assert!(matches!(payload.phase, FailurePhase::Budget));
+                break;
+            }
         }
     }
 

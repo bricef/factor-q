@@ -28,17 +28,8 @@
 //!   only additive migrations land, so this is a no-op past
 //!   `CREATE TABLE IF NOT EXISTS`).
 //!
-//! ## What this module does NOT do yet
-//!
-//! - The reducer-state persistence integration (planned in
-//!   step 5 of the data-architecture-v1 plan).
-//! - The actual three-state WAL writes from the
-//!   [`crate::worker::ReducerRunner`] (step 4).
-//! - The recovery-categorisation queries (step 6).
-//!
-//! Step 2 lands the schema, the migration mechanism, the
-//! version-compatibility check, and the basic CRUD that the
-//! later steps will build on.
+//! This module owns the worker's durable state: schema migrations,
+//! reducer-state persistence, three-state WAL writes, and recovery queries.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -521,44 +512,21 @@ impl WorkerStore {
     /// version; re-running on an up-to-date DB is a no-op past
     /// `IF NOT EXISTS`.
     async fn run_migrations(&self, from: u32, to: u32) -> Result<(), WorkerStoreError> {
-        if from < 1 && to >= 1 {
-            for stmt in split_sql(WORKER_TABLES_V1_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
-            }
-        }
-        if from < 2 && to >= 2 {
-            for stmt in split_sql(WORKER_MIGRATION_V2_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
-            }
-        }
-        if from < 3 && to >= 3 {
-            for stmt in split_sql(WORKER_MIGRATION_V3_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
-            }
-        }
-        if from < 4 && to >= 4 {
-            for stmt in split_sql(WORKER_MIGRATION_V4_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
-            }
-        }
-        if from < 5 && to >= 5 {
-            for stmt in split_sql(WORKER_MIGRATION_V5_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
-            }
-        }
-        if from < 6 && to >= 6 {
-            for stmt in split_sql(WORKER_MIGRATION_V6_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
-            }
-        }
-        if from < 7 && to >= 7 {
-            for stmt in split_sql(WORKER_MIGRATION_V7_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
-            }
-        }
-        if from < 8 && to >= 8 {
-            for stmt in split_sql(WORKER_MIGRATION_V8_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
+        const MIGRATIONS: &[(u32, &str)] = &[
+            (1, WORKER_TABLES_V1_SQL),
+            (2, WORKER_MIGRATION_V2_SQL),
+            (3, WORKER_MIGRATION_V3_SQL),
+            (4, WORKER_MIGRATION_V4_SQL),
+            (5, WORKER_MIGRATION_V5_SQL),
+            (6, WORKER_MIGRATION_V6_SQL),
+            (7, WORKER_MIGRATION_V7_SQL),
+            (8, WORKER_MIGRATION_V8_SQL),
+        ];
+        for &(version, sql) in MIGRATIONS {
+            if from < version && to >= version {
+                for stmt in split_sql(sql) {
+                    sqlx::query(&stmt).execute(&self.pool).await?;
+                }
             }
         }
         if from < 9 && to >= 9 {
