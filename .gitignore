@@ -11,8 +11,11 @@ docs/design/states/
 
 # Claude Code agent scratch — git worktrees and write-tracking. Never
 # tracked; ignoring it also keeps the working tree clean so release
-# builds stamp a bare commit SHA (not "<sha>-dirty").
-.claude/
+# builds stamp a bare commit SHA (not "<sha>-dirty"). One tracked
+# exception: .claude/skills/ holds thin per-skill shims that defer to
+# the agent-agnostic meta/skills/ (see AGENTS.md and meta/README.md).
+.claude/*
+!.claude/skills/
 
 # Pinned dev/test tooling fetched by `just install-nats` (#233) — a binary,
 # and reproducible from .nats-version, so it is never committed.
