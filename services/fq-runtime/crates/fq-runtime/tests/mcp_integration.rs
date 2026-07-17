@@ -31,6 +31,33 @@ fn require_npx() -> bool {
 /// cache without hitting the npm registry. Bump deliberately.
 const EVERYTHING_SERVER: &str = "@modelcontextprotocol/server-everything@2026.1.26";
 
+/// Ensures panic and early-return paths kill the complete npx process tree.
+#[cfg(unix)]
+struct GroupedChild(tokio::process::Child);
+
+#[cfg(unix)]
+impl std::ops::Deref for GroupedChild {
+    type Target = tokio::process::Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(unix)]
+impl std::ops::DerefMut for GroupedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[cfg(unix)]
+impl Drop for GroupedChild {
+    fn drop(&mut self) {
+        fq_test_support::kill_group(&self.0);
+    }
+}
+
 fn everything_config() -> McpServerConfig {
     McpServerConfig {
         name: "everything".to_string(),
@@ -47,6 +74,7 @@ fn everything_config() -> McpServerConfig {
 /// drive a full discovery handshake over HTTP. Loopback TCP, so this
 /// runs under direct `cargo` (the `just` sandbox blocks it, same as
 /// NATS).
+#[cfg(unix)]
 #[tokio::test]
 async fn streamable_http_transport_discovers_tools_over_http() {
     use std::time::Duration;
@@ -63,14 +91,19 @@ async fn streamable_http_transport_discovers_tools_over_http() {
         .local_addr()
         .expect("local addr")
         .port();
-    let mut child = tokio::process::Command::new("npx")
+    let mut command = tokio::process::Command::new("npx");
+    command
         .args(["-y", EVERYTHING_SERVER, "streamableHttp"])
         .env("PORT", port.to_string())
         .kill_on_drop(true)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn streamable-http everything server");
+        .stderr(std::process::Stdio::null());
+    fq_test_support::spawn_grouped(&mut command);
+    let mut child = GroupedChild(
+        command
+            .spawn()
+            .expect("spawn streamable-http everything server"),
+    );
 
     // Wait until the server is listening (bounded), then give express a
     // beat to mount the `/mcp` route after the socket binds.
@@ -109,7 +142,50 @@ async fn streamable_http_transport_discovers_tools_over_http() {
     );
 
     manager.shutdown().await;
-    let _ = child.kill().await;
+    fq_test_support::kill_group(&child);
+    let _ = child.wait().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn grouped_everything_server_is_fully_reaped() {
+    use std::time::{Duration, Instant};
+
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let mut command = tokio::process::Command::new("npx");
+    command
+        .args(["-y", EVERYTHING_SERVER, "streamableHttp"])
+        .env("PORT", "0")
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    fq_test_support::spawn_grouped(&mut command);
+    let mut child = GroupedChild(command.spawn().expect("spawn grouped everything server"));
+    let pgid = child.id().expect("group leader pid") as i32;
+    // Give npx time to launch its shell and node descendants; the assertion
+    // below must cover the inherited group, not only the direct child.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    fq_test_support::kill_group(&child);
+    let _ = child.wait().await;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        // SAFETY: signal 0 only probes whether this process group exists.
+        let result = unsafe { libc::killpg(pgid, 0) };
+        if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "everything-server process group {pgid} survived teardown"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test]

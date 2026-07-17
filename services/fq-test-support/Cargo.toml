@@ -17,10 +17,10 @@ publish = false
 
 [dependencies]
 serde_json = "1"
+tokio = { version = "1", features = ["process"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# PR_SET_PDEATHSIG (see lib.rs): a SIGKILLed test runner never runs Drop,
-# so the kernel reaps the broker instead of leaving an orphan.
+[target.'cfg(unix)'.dependencies]
+# Process groups are Unix-wide; PR_SET_PDEATHSIG remains Linux-gated in code.
 libc = "0.2"
 
 [dev-dependencies]

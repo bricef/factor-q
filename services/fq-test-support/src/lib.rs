@@ -29,6 +29,42 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// Configure `cmd` to lead a fresh process group inherited by its descendants.
+///
+/// On Linux, the direct child also receives `SIGKILL` if its spawning thread
+/// dies. Call this before spawning the command.
+#[cfg(unix)]
+pub fn spawn_grouped(cmd: &mut tokio::process::Command) {
+    // SAFETY: this closure runs after fork and before exec. `setpgid` and
+    // Linux's `prctl` are async-signal-safe syscalls, and no allocation occurs.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            #[cfg(target_os = "linux")]
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Send `SIGKILL` to the process group led by `child`.
+///
+/// Call this before waiting for the child, because a reaped child has no PID.
+#[cfg(unix)]
+pub fn kill_group(child: &tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        // SAFETY: `killpg` accepts any process-group ID. Failure (including an
+        // already-exited group) is intentionally harmless during teardown.
+        unsafe {
+            libc::killpg(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
 /// Disambiguates two servers started within the same nanosecond.
 static SEQ: AtomicU64 = AtomicU64::new(0);
 

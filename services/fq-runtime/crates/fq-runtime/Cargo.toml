@@ -56,3 +56,6 @@ rmcp = { version = "1.7", default-features = false, features = ["client", "serve
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
