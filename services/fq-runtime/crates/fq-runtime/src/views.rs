@@ -929,6 +929,20 @@ impl Views {
         Ok(rows.into_iter().map(ArchiveView::from).collect())
     }
 
+    /// The agent that owns an invocation, resolved from the projection's
+    /// event rows. A thin point lookup for callers that need only the
+    /// subject token (e.g. `fq invocation transcript --follow`) without
+    /// paying for the full [`Views::invocation`] composition (#261).
+    pub async fn agent_id_for_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Option<String>, ViewsError> {
+        Ok(self
+            .projection
+            .agent_id_for_invocation(invocation_id)
+            .await?)
+    }
+
     /// Everything known about one invocation, composed across the projection,
     /// control-plane, and worker stores. Returns `None` when no store has any
     /// trace of the id.
