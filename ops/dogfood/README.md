@@ -31,7 +31,10 @@ fq-dogfood/
 ├── current -> releases/<sha>/   # the active build (symlink)
 ├── releases/<sha>/              # fq, fq-cas, fq-dashboard, github-watcher + launchers
 ├── fq.toml                      # instance config — host-side, `fq reload` to apply
-├── agents/                      # agent definitions — host-side
+├── agents/                      # agent definitions — host-side; canonical copies of
+│                                #   repo-tracked ones live in ops/dogfood/agents/ —
+│                                #   install with scp, e.g. backlog-groomer.md (weekly
+│                                #   groom: cron `fq trigger backlog-groomer` until #257)
 ├── .secrets/env                 # the single declared environment (chmod 600)
 ├── infra/                       # NATS compose + config (copied from ./infra)
 ├── logs/                        # fq-run.log, watcher.log
