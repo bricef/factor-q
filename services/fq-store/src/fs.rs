@@ -378,13 +378,27 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_file_name(format!(".tmp.{}.{n}", std::process::id()));
     let mut file = tokio::fs::File::create(&tmp).await?;
     file.write_all(bytes).await?;
-    // fsync the data before publishing the file: the bytes must be durable
-    // before any index row that references the block commits (I2 — see
-    // storage-gc-verification.md). The directory fsync that would also make the
-    // rename itself crash-durable is left to the crash-consistency tests.
+    // Fsync the data before publishing the file: bytes and the subsequent
+    // rename must be durable before an index row that references the block
+    // commits (I2 — see storage-gc-verification.md).
     file.sync_all().await?;
     drop(file);
     tokio::fs::rename(&tmp, path).await?;
+    if let Some(parent) = path.parent() {
+        fsync_dir(parent).await?;
+        // A newly-created shard directory also needs its entry in blocks/ or
+        // objects/ to be durable. This is harmless for established shards.
+        if let Some(grandparent) = parent.parent() {
+            fsync_dir(grandparent).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Fsync a directory so entries created, renamed, or removed within it survive
+/// a crash.
+async fn fsync_dir(path: &Path) -> Result<()> {
+    tokio::fs::File::open(path).await?.sync_all().await?;
     Ok(())
 }
 
