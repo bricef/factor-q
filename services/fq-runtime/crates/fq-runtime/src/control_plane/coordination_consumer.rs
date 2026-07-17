@@ -38,6 +38,7 @@ use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use crate::bus::{BusError, EventBus};
 use crate::events::{
@@ -94,6 +95,12 @@ pub struct CoordinationConsumer {
     /// cross-contaminate via the ack subject (one test's CP
     /// ack-then-delete races another test's sweeper).
     test_filter_subject: Option<String>,
+    /// Runtime id stamped (as trace/invocation id) on the system
+    /// events this consumer emits, so they correlate with the
+    /// daemon's other `Event::system` publishes. The daemon sets
+    /// it via [`Self::with_runtime_id`]; the constructor default
+    /// (a fresh uuid) only applies in tests.
+    runtime_id: Uuid,
 }
 
 impl CoordinationConsumer {
@@ -106,7 +113,15 @@ impl CoordinationConsumer {
             self_worker_id: None,
             test_consumer_name: None,
             test_filter_subject: None,
+            runtime_id: Uuid::now_v7(),
         }
+    }
+
+    /// Set the daemon's runtime id, stamped on emitted system
+    /// events (see the field doc).
+    pub fn with_runtime_id(mut self, runtime_id: Uuid) -> Self {
+        self.runtime_id = runtime_id;
+        self
     }
 
     /// Override the stale-worker threshold. Test-only.
@@ -463,6 +478,10 @@ impl CoordinationConsumer {
             if worker.status != WorkerStatus::Alive {
                 continue;
             }
+            // The conditional update consumes the alive→stale
+            // transition: only the sweep that flips the row wins the
+            // right to publish, so `worker.orphaned` fires once per
+            // transition (never per sweep tick).
             if !self.store.mark_worker_stale(&worker.worker_id).await? {
                 continue;
             }
@@ -474,12 +493,19 @@ impl CoordinationConsumer {
                 }
             };
             let event = Event::system(
-                uuid::Uuid::now_v7(),
+                self.runtime_id,
                 EventPayload::WorkerOrphaned(WorkerOrphanedPayload {
                     worker_id,
                     last_heartbeat_ms: worker.last_heartbeat,
                 }),
             );
+            // Deliberately at-most-once: the transition is already
+            // consumed, so a failed publish is logged and never
+            // retried. A lost signal here still leaves the worker
+            // visible via `fq workers list --stale-only`; the
+            // alternative (publish-then-mark) re-fires on every sweep
+            // tick whenever the store write fails, which is the
+            // unbounded-noise mode #64 rules out.
             if let Err(err) = self.bus.publish(&event).await {
                 error!(worker_id = %worker.worker_id, error = %err, "failed to publish worker.orphaned event");
             } else {
@@ -564,6 +590,62 @@ mod tests {
                 note: "test".to_string(),
             }),
         ),);
+    }
+
+    #[tokio::test]
+    async fn sweep_emits_worker_orphaned_once_per_transition() {
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ControlPlaneStore::open(&dir.path().join("cp.db"))
+                .await
+                .unwrap(),
+        );
+
+        // A worker whose last heartbeat (epoch 1s) is ancient
+        // against any threshold.
+        let worker_name = format!("orphan-test-{}", Uuid::now_v7().simple());
+        store
+            .register_worker(&worker_name, "host", 1_000)
+            .await
+            .unwrap();
+
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone())
+            .with_runtime_id(Uuid::now_v7())
+            .with_stale_threshold_ms(1);
+
+        let mut sub = bus
+            .subscribe(format!("fq.worker.{worker_name}.orphaned"))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        consumer.sweep_stale_workers().await.expect("first sweep");
+        let event = tokio::time::timeout(Duration::from_secs(5), sub.next())
+            .await
+            .expect("worker.orphaned within 5s")
+            .expect("stream open")
+            .expect("event deserialises");
+        match &event.payload {
+            EventPayload::WorkerOrphaned(p) => {
+                assert_eq!(p.worker_id.as_str(), worker_name);
+                assert_eq!(p.last_heartbeat_ms, 1_000);
+            }
+            other => panic!("expected worker.orphaned, got {other:?}"),
+        }
+
+        // Second sweep: the alive→stale transition is already
+        // consumed — the event must not re-fire.
+        consumer.sweep_stale_workers().await.expect("second sweep");
+        let quiet = tokio::time::timeout(Duration::from_millis(500), sub.next()).await;
+        assert!(
+            quiet.is_err(),
+            "second sweep must not re-emit worker.orphaned"
+        );
     }
 
     #[tokio::test]

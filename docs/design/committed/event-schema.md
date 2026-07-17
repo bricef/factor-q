@@ -4,9 +4,7 @@ This document specifies the event schema emitted by the factor-q runtime. It cov
 
 Events are the primary observability and audit surface of factor-q. Every meaningful action in the system is an event, published to NATS JetStream, and later projected into SQLite for querying.
 
-**Schema version: 2.**
-
-Recovery observability: `fq.agent.<agent>.invocation.ambiguous` is emitted both for ambiguous WAL recovery and automatic-resume failures (its `note` contains the error). `fq.worker.<worker>.orphaned` is emitted once when the coordination sweep transitions a worker from alive to stale; its payload includes `worker_id` and `last_heartbeat_ms`. Consumers should treat ambiguous invocations as requiring operator attention. See the [v1 → v2 changelog](#changelog-v1--v2) at the bottom for the breaking changes.
+**Schema version: 2.** See the [v1 → v2 changelog](#changelog-v1--v2) at the bottom for the breaking changes.
 
 ## The three-layer model
 
@@ -134,12 +132,13 @@ Concrete subjects:
 | `fq.agent.{agent_id}.tool.call` | Agent is invoking a tool |
 | `fq.agent.{agent_id}.tool.dispatched` | Tool has returned to the runtime (WAL middle-state) |
 | `fq.agent.{agent_id}.tool.result` | Tool invocation has completed (success or failure) |
-| `fq.agent.{agent_id}.invocation.ambiguous` | A worker found an `dispatched`-without-`completed` WAL row on restart and is surfacing it to the operator |
+| `fq.agent.{agent_id}.invocation.ambiguous` | An invocation is in recovery limbo — an ambiguous WAL row on restart, or a failed automatic resume — and needs operator attention |
 | `fq.agent.{agent_id}.invocation.archived` | Worker → control-plane: invocation reached terminal; hand off the final state |
 | `fq.agent.{agent_id}.invocation.operator_recovered` | Operator → control-plane: operator-issued terminal transition (`fq invocation drop`) |
 | `fq.agent.{agent_id}.completed` | Invocation has finished successfully |
 | `fq.agent.{agent_id}.failed` | Invocation has terminated with an error |
 | `fq.worker.{worker_id}.heartbeat` | Worker liveness signal (periodic) |
+| `fq.worker.{worker_id}.orphaned` | Worker heartbeat lapsed without clean shutdown — emitted once per alive→stale transition by the coordination sweep (#64); payload carries `worker_id` and `last_heartbeat_ms` |
 | `fq.worker.{worker_id}.invocation.archive_acked` | Control-plane → worker: archive row written; safe to delete local `invocation_state` |
 | `fq.system.startup` | Runtime lifecycle — startup |
 | `fq.system.shutdown` | Runtime lifecycle — shutdown |
@@ -151,7 +150,7 @@ Concrete subjects:
 - **Agent ID in the subject, not just the payload.** A consumer can subscribe to `fq.agent.researcher.>` to only see events from the researcher agent without filtering in application code.
 - **Hierarchical types** (`llm.request` vs `llm.response`). Allows wildcards: `fq.agent.*.llm.>` matches all LLM events across all agents.
 - **System events are a separate namespace.** Runtime lifecycle is not tied to any agent.
-- **Worker-scoped subjects (`fq.worker.>`)** for events whose audience is one specific worker rather than every consumer of the agent's lifecycle: heartbeats, and the control-plane → worker `invocation.archive_acked` reply. Worker-scoped subscriptions stay narrow with a single filter (`fq.worker.{worker_id}.>`) and avoid cross-worker delivery noise. The fan-out subjects (`fq.agent.>`) remain the canonical place for invocation lifecycle events the rest of the system should see.
+- **Worker-scoped subjects (`fq.worker.>`)** for events whose audience is one specific worker rather than every consumer of the agent's lifecycle: heartbeats, and the control-plane → worker `invocation.archive_acked` reply. Worker-scoped subscriptions stay narrow with a single filter (`fq.worker.{worker_id}.>`) and avoid cross-worker delivery noise. The fan-out subjects (`fq.agent.>`) remain the canonical place for invocation lifecycle events the rest of the system should see. `worker.orphaned` also rides this namespace — not because its audience is the (dead) worker, but because it is worker- not agent-scoped; system-wide reactors subscribe with the `fq.worker.*.orphaned` wildcard.
 - **WAL middle-state events** (`llm.dispatched`, `tool.dispatched`) sit between the request and result. They're an operational signal — recovery uses the SQLite WAL rows, not these events, but they let observers see "the call has returned, we're about to write the result."
 
 ## Event Types
@@ -310,19 +309,23 @@ Error case:
 
 ### `invocation.ambiguous`
 
-Published by the worker on startup when its WAL categorisation finds an invocation in the ambiguous state (a `dispatched`-without-`completed` row). See `docs/design/committed/data-architecture.md` §3.4.
+Published by the worker on startup for an invocation in recovery limbo (#64), in either of two modes:
+
+1. **Ambiguous WAL categorisation** — a `dispatched`-without-`completed` row. See `docs/design/committed/data-architecture.md` §3.4.
+2. **Failed automatic resume** — a safe-resume/safe-replay invocation whose `resume()` errored. `stuck_entity` is the sentinel `"recovery"`, `stuck_call_id` carries the invocation id, and `note` carries the resume error.
 
 ```json
 {
-  "stuck_entity": "tool_dispatch | llm_dispatch",
+  "stuck_entity": "tool_dispatch | llm_dispatch | recovery",
   "stuck_call_id": "tool-01HXJ...",
   "note": "Tool returned but no completion record"
 }
 ```
 
 **Design notes:**
-- **Operator-triage event.** The control-plane consumes this and surfaces the case via `fq recover` (a follow-up step in the data-architecture-v1 plan).
+- **Operator-triage event.** The control-plane consumes this and surfaces the case via `fq recover` (a follow-up step in the data-architecture-v1 plan); the github-watcher treats it as a failed, operator-attention outcome.
 - **Full context lives in the worker's WAL**, not on the wire. This payload is the minimum needed for an operator to find the row.
+- **Once per invocation, across restarts.** Emission is guarded by the worker store's `ambiguous_reported_at` stamp, so a persistently-broken invocation does not re-fire on every daemon restart.
 
 ### `completed`
 
@@ -492,9 +495,10 @@ The following invariants hold across the event stream and are assumed by consume
 4. **Every `tool.call` is followed by `tool.dispatched` then `tool.result`** in the reducer path. Tool failures surface as `tool.result` with `is_error: true`, not as missing results.
 5. **`envelope.cost` is present on `llm.response`** events that bill. There is no separate cost event.
 6. **`config_snapshot` in `triggered` is immutable for the invocation.** Config changes during an invocation are ignored; they apply to the next invocation.
-7. **`invocation.ambiguous` is emitted by the worker on startup** for any invocation whose WAL classification returns "ambiguous." The chain root for that emission is the new event itself (`parent_event_id` absent — recovery starts a fresh chain; see the recovery rationale in `data-architecture.md` §3.4).
+7. **`invocation.ambiguous` is emitted by the worker on startup** for any invocation whose WAL classification returns "ambiguous" — or whose automatic resume fails (`stuck_entity: "recovery"`). It fires at most once per invocation across restarts (the worker store's `ambiguous_reported_at` stamp). The chain root for that emission is the new event itself (`parent_event_id` absent — recovery starts a fresh chain; see the recovery rationale in `data-architecture.md` §3.4).
 8. **`invocation.archived` immediately follows the terminal lifecycle event** (`completed` or `failed`) in the same invocation chain. The worker's retry sweeper may republish `invocation.archived` if the control-plane ack does not arrive; republishes keep the same `invocation_id` and the control-plane's insert is idempotent on it. `invocation.archive_acked` is the control-plane's reply on the worker-scoped subject and closes the hand-off.
 9. **`invocation.operator_recovered` is operator-initiated** and rooted on its own envelope (the operator's `fq` process is not the original worker, so the chain is fresh). Terminal status set by this event is sticky — the coordination consumer's `invocation.archived` handler will not downgrade an already-terminal owner status if a still-alive worker emits `archived` after the operator's drop.
+10. **`worker.orphaned` fires exactly once per alive→stale transition** — the coordination sweep's conditional store update consumes the transition, and a publish failure after that is logged, not retried (at-most-once; the stale row remains visible via `fq workers list --stale-only`).
 
 ## Storage and Retention
 

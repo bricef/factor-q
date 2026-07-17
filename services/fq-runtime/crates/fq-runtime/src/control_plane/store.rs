@@ -1228,6 +1228,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mark_worker_stale_consumes_transition_exactly_once() {
+        let (store, _dir) = open_fresh().await;
+        store.register_worker("w-once", "h", 1_000).await.unwrap();
+
+        // The alive→stale flip is claimed by exactly one caller —
+        // the once-per-transition guarantee the orphan event
+        // publisher (#64) relies on.
+        assert!(store.mark_worker_stale("w-once").await.unwrap());
+        assert!(!store.mark_worker_stale("w-once").await.unwrap());
+
+        // Unknown workers and shutdown workers are never a transition.
+        assert!(!store.mark_worker_stale("w-missing").await.unwrap());
+        store.register_worker("w-down", "h", 1_000).await.unwrap();
+        store.mark_worker_shutdown("w-down").await.unwrap();
+        assert!(!store.mark_worker_stale("w-down").await.unwrap());
+    }
+
+    #[tokio::test]
     async fn prune_stale_workers_removes_only_stale_rows_idempotently() {
         let (store, _dir) = open_fresh().await;
         store.register_worker("alive", "h", 1).await.unwrap();

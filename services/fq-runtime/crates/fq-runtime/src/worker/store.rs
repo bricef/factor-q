@@ -77,6 +77,9 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   sweeper uses `archive_published_at` to decide when to
 ///   republish. On `invocation.archive_acked` the row is
 ///   deleted outright.
+/// - **v5** — adds `trigger_source`/`trigger_subject`/
+///   `trigger_payload` to `invocation_state` so resume replays
+///   the original invocation input (see the v5 const's doc).
 /// - **v6** — renames the `invocation_state.iteration` column to
 ///   `step_index`. The column always held the reducer *step*
 ///   counter (every model and tool step), not the model-turn
@@ -87,7 +90,13 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   messages injected into the conversation at reducer step
 ///   boundaries, keyed `(invocation_id, step_index, seq)` so a
 ///   resume replays them verbatim at the recorded positions.
-pub const WORKER_SCHEMA_VERSION: u32 = 7;
+/// - **v8** — adds `ambiguous_reported_at INTEGER NULL` to
+///   `invocation_state` (#64): the once-per-invocation guard for
+///   `invocation.ambiguous` emission. Set when the event is first
+///   published (recovery scan or failed auto-resume); a restart
+///   that re-classifies the same invocation as ambiguous sees the
+///   stamp and does not re-fire.
+pub const WORKER_SCHEMA_VERSION: u32 = 8;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -217,6 +226,13 @@ CREATE TABLE IF NOT EXISTS host_notice (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (invocation_id, step_index, seq)
 );
+"#;
+
+/// v8 migration: once-per-invocation guard for `invocation.ambiguous`
+/// emission (#64). `NULL` until the first publish; stamped with the
+/// publish time thereafter so restarts don't re-fire the event.
+const WORKER_MIGRATION_V8_SQL: &str = r#"
+ALTER TABLE invocation_state ADD COLUMN ambiguous_reported_at INTEGER;
 "#;
 
 /// One durable host notice.
@@ -524,7 +540,12 @@ impl WorkerStore {
                 sqlx::query(&stmt).execute(&self.pool).await?;
             }
         }
-        // Future migrations: 7 → 8, etc.
+        if from < 8 && to >= 8 {
+            for stmt in split_sql(WORKER_MIGRATION_V8_SQL) {
+                sqlx::query(&stmt).execute(&self.pool).await?;
+            }
+        }
+        // Future migrations: 8 → 9, etc.
         Ok(())
     }
 
@@ -955,6 +976,32 @@ impl WorkerStore {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
+    }
+
+    /// Claim the one-shot right to publish `invocation.ambiguous`
+    /// for this invocation (#64). Conditional on the stamp being
+    /// unset, so exactly one caller across all restarts wins:
+    /// `true` means "you claimed it — publish"; `false` means the
+    /// event was already reported (or the row no longer exists,
+    /// i.e. the invocation is not in recovery limbo anymore).
+    pub async fn mark_ambiguous_reported(
+        &self,
+        invocation_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, WorkerStoreError> {
+        let res = sqlx::query(
+            r#"
+            UPDATE invocation_state
+            SET ambiguous_reported_at = ?
+            WHERE invocation_id = ?
+              AND ambiguous_reported_at IS NULL
+            "#,
+        )
+        .bind(now_ms)
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// All rows in archive-flow: terminal but the
@@ -1625,6 +1672,52 @@ mod tests {
         store.upsert_invocation_state(&updated).await.unwrap();
         let back2 = store.get_invocation_state("inv-x").await.unwrap().unwrap();
         assert_eq!(back2, updated);
+    }
+
+    #[tokio::test]
+    async fn mark_ambiguous_reported_claims_exactly_once() {
+        let (store, _dir) = open_fresh().await;
+        let row = InvocationStateRow {
+            invocation_id: "inv-amb".to_string(),
+            agent_id: "agent-y".to_string(),
+            schema_version: 1,
+            phase: "awaiting_model".to_string(),
+            state_blob: b"{}".to_vec(),
+            step_index: 0,
+            started_at: 1_000,
+            updated_at: 1_000,
+            terminal_at: None,
+            workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
+        };
+        store.upsert_invocation_state(&row).await.unwrap();
+
+        // First claim wins; the second (a restart re-classifying the
+        // same invocation) must not re-fire.
+        assert!(
+            store
+                .mark_ambiguous_reported("inv-amb", 2_000)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .mark_ambiguous_reported("inv-amb", 3_000)
+                .await
+                .unwrap()
+        );
+
+        // No row → nothing in recovery limbo → no claim.
+        assert!(
+            !store
+                .mark_ambiguous_reported("inv-gone", 2_000)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
