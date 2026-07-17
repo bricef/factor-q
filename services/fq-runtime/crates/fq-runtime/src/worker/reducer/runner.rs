@@ -1061,10 +1061,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 llm_row_to_capability(r)?,
             ));
         }
-        completed.sort_by(|a, b| match (a.0.0, b.0.0) {
-            (Some(left), Some(right)) => left.cmp(&right),
-            _ => a.0.1.cmp(&b.0.1),
-        });
+        sort_into_replay_order(&mut completed);
 
         // Regroup each model turn's tool results into the single
         // capability the live loop produced. A turn with >1 tool call is
@@ -3860,11 +3857,37 @@ fn tool_row_to_result(row: &ToolDispatchRow) -> ToolCallResult {
     }
 }
 
-/// Order v9 WAL rows by their shared completion sequence. Legacy rows have no
-/// sequence, so they retain the pre-v9 timestamp ordering (including its
-/// same-millisecond limitation) and sort after sequenced rows.
+/// The two candidate orderings for one completed WAL row: the v9 shared
+/// completion `seq` (None on pre-v9 legacy rows) and the row's
+/// `completed_at` timestamp.
 fn replay_sort_key(seq: Option<i64>, completed_at: Option<i64>) -> (Option<i64>, i64) {
     (seq, completed_at.unwrap_or(0))
+}
+
+/// Sort completed WAL capabilities into replay order (#172).
+///
+/// The decision is made once for the whole list, never pairwise — a
+/// comparator that mixes two keys per-pair is not a total order (a
+/// seq-vs-seq comparison can contradict the timestamp comparisons made
+/// against a legacy row, which cycles, and `sort_by` may panic on an
+/// inconsistent comparator):
+///
+/// - Every row sequenced (post-v9 WAL): the shared completion sequence
+///   is the total order; timestamps are decoration.
+/// - Any legacy `NULL`-seq row present (WAL spanning the v8→v9
+///   migration): fall back to `completed_at` chronology for the whole
+///   list, preserving migration-era order. `seq` still breaks
+///   same-millisecond ties among the rows that have it (legacy rows
+///   sort after sequenced rows within a tied millisecond, and pure
+///   legacy ties keep insertion order via the stable sort — the pre-v9
+///   behaviour, tools before LLMs).
+fn sort_into_replay_order(completed: &mut [((Option<i64>, i64), CapabilityResult)]) {
+    let fully_sequenced = completed.iter().all(|((seq, _), _)| seq.is_some());
+    if fully_sequenced {
+        completed.sort_by_key(|((seq, _), _)| seq.expect("checked fully_sequenced"));
+    } else {
+        completed.sort_by_key(|((seq, at), _)| (*at, seq.unwrap_or(i64::MAX)));
+    }
 }
 
 /// Regroup a chronologically-ordered capability stream so each model
@@ -4153,23 +4176,81 @@ mod tests {
         assert!(matches!(replay[2], CapabilityResult::ToolResult(_)));
     }
 
-    #[test]
-    fn replay_sort_key_total_orders_same_millisecond_completions() {
-        let same_ms = 42;
-        let mut llm_then_tool = [
-            replay_sort_key(Some(2), Some(same_ms)),
-            replay_sort_key(Some(1), Some(same_ms)),
-        ];
-        llm_then_tool.sort();
-        assert_eq!(llm_then_tool[0], replay_sort_key(Some(1), Some(same_ms)));
+    /// Build a tagged capability so order assertions can identify rows
+    /// after sorting: the tool_call_id carries the tag.
+    fn tagged(tag: &str) -> CapabilityResult {
+        CapabilityResult::ToolResult(ToolCallResult {
+            tool_call_id: crate::events::ToolCallId::new(tag.to_string()).unwrap(),
+            output: String::new(),
+            is_error: false,
+            error_kind: None,
+            duration_ms: 0,
+        })
+    }
 
-        let mut tool_then_llm = [
-            replay_sort_key(Some(1), Some(same_ms)),
-            replay_sort_key(Some(2), Some(same_ms)),
+    fn tags(sorted: &[((Option<i64>, i64), CapabilityResult)]) -> Vec<String> {
+        sorted
+            .iter()
+            .map(|(_, c)| match c {
+                CapabilityResult::ToolResult(r) => r.tool_call_id.as_str().to_string(),
+                other => panic!("expected tagged ToolResult, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Fully-sequenced WALs total-order by seq in both directions,
+    /// through the production sort (not the tuple's natural `Ord`).
+    #[test]
+    fn replay_order_uses_seq_when_fully_sequenced() {
+        let same_ms = 42;
+        let mut llm_completed_first = vec![
+            (replay_sort_key(Some(2), Some(same_ms)), tagged("second")),
+            (replay_sort_key(Some(1), Some(same_ms)), tagged("first")),
         ];
-        tool_then_llm.sort();
-        assert_eq!(tool_then_llm[0], replay_sort_key(Some(1), Some(same_ms)));
-        assert_eq!(replay_sort_key(None, Some(same_ms)).1, same_ms);
+        sort_into_replay_order(&mut llm_completed_first);
+        assert_eq!(tags(&llm_completed_first), ["first", "second"]);
+
+        let mut tool_completed_first = vec![
+            (replay_sort_key(Some(1), Some(same_ms)), tagged("first")),
+            (replay_sort_key(Some(2), Some(same_ms)), tagged("second")),
+        ];
+        sort_into_replay_order(&mut tool_completed_first);
+        assert_eq!(tags(&tool_completed_first), ["first", "second"]);
+    }
+
+    /// A WAL spanning the v8→v9 migration falls back to timestamp
+    /// chronology for the whole list. This triple is the non-total-order
+    /// regression: under a pairwise seq/timestamp comparator it forms a
+    /// cycle (A<C by seq, B<A and C<B by timestamp) that `sort_by` may
+    /// panic on; the list-wide decision must order it by timestamp
+    /// without panicking.
+    #[test]
+    fn replay_order_falls_back_to_timestamps_when_legacy_rows_participate() {
+        let mut mixed = vec![
+            (replay_sort_key(Some(1), Some(100)), tagged("a-seq1-ts100")),
+            (replay_sort_key(None, Some(50)), tagged("b-legacy-ts50")),
+            (replay_sort_key(Some(2), Some(10)), tagged("c-seq2-ts10")),
+        ];
+        sort_into_replay_order(&mut mixed);
+        assert_eq!(
+            tags(&mixed),
+            ["c-seq2-ts10", "b-legacy-ts50", "a-seq1-ts100"]
+        );
+
+        // Within a tied millisecond, sequenced rows order by seq and
+        // precede legacy rows; pure-legacy ties keep insertion order
+        // (the pre-v9 behaviour) via the stable sort.
+        let mut tie = vec![
+            (replay_sort_key(None, Some(42)), tagged("legacy-first-in")),
+            (replay_sort_key(Some(2), Some(42)), tagged("seq2")),
+            (replay_sort_key(None, Some(42)), tagged("legacy-second-in")),
+            (replay_sort_key(Some(1), Some(42)), tagged("seq1")),
+        ];
+        sort_into_replay_order(&mut tie);
+        assert_eq!(
+            tags(&tie),
+            ["seq1", "seq2", "legacy-first-in", "legacy-second-in"]
+        );
     }
 
     /// Issue #9 precedence, checked at the boundary the runner uses to
@@ -6061,6 +6142,217 @@ mod tests {
         let row = store.get_invocation_state(&inv_str).await.unwrap().unwrap();
         assert!(row.terminal_at.is_some());
         assert_eq!(row.phase, "completed");
+    }
+
+    /// #172 end-to-end: seed a WAL whose middle turn is a tool call and
+    /// whose completion timestamps tie at the millisecond, then resume
+    /// through the real store. The rows are written in true execution
+    /// order (so the store assigns the v9 `seq` in that order); a resume
+    /// that replays them in any other order desyncs the reducer and
+    /// fails, so a clean `Completed` outcome is the assertion.
+    async fn resume_with_same_ms_interleave(
+        tag: &str,
+        llm0_completed_at: i64,
+        tool_completed_at: i64,
+        llm1_completed_at: i64,
+    ) {
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
+
+        use crate::worker::reducer::types::{
+            AgentConfig, StepInput, TriggerPayload, TriggerSourceKind,
+        };
+
+        let dir = tempdir().unwrap();
+        let store_path = dir.path().join("events.db");
+        let store = Arc::new(WorkerStore::open(&store_path).await.unwrap());
+
+        let agent_id_str = unique_agent_id(tag);
+        let agent = Agent::builder()
+            .id(&agent_id_str)
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .tools(["builtin__self_inspect"])
+            .budget(1.0)
+            .build()
+            .unwrap();
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        // A plausible step-0 state row; replay rebuilds from step 0, so
+        // the blob only needs to exist and be non-terminal.
+        let harness = Harness::new();
+        let s0_output = harness
+            .step(StepInput {
+                config: AgentConfig {
+                    agent_id: AgentId::new(&agent_id_str).unwrap(),
+                    model: "claude-haiku".to_string(),
+                    system_prompt: "You are a test agent.".to_string(),
+                    tools_available: vec![],
+                    allowed_tool_names: vec![],
+                    max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+                    effort: None,
+                },
+                trigger: TriggerPayload {
+                    source: TriggerSourceKind::Manual,
+                    subject: None,
+                    payload: json!("hello"),
+                },
+                state: vec![],
+                last_result: None,
+                now_ms: 0,
+                random_seed: 0,
+                step_index: 0,
+                static_resource_context: None,
+                host_notices: vec![],
+            })
+            .expect("step 0");
+        store
+            .upsert_invocation_state(&InvocationStateRow {
+                invocation_id: inv_str.clone(),
+                agent_id: agent_id_str.clone(),
+                schema_version: 1,
+                phase: "awaiting_model".to_string(),
+                state_blob: s0_output.state,
+                step_index: 0,
+                started_at: 1_000,
+                updated_at: 1_000,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
+            })
+            .await
+            .unwrap();
+
+        // True execution order: model turn 0 requests the tool, the tool
+        // completes, model turn 1 ends the invocation. Completion writes
+        // happen in this order, so the store's shared seq records it —
+        // regardless of how the timestamps tie.
+        let tool_use = ChatResponse {
+            content: None,
+            tool_calls: vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("tc-0").unwrap(),
+                tool_name: "builtin__self_inspect".to_string(),
+                parameters: json!({}),
+            }],
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage {
+                input_tokens: 50,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        };
+        let end_turn = ChatResponse {
+            content: Some("done.".to_string()),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 60,
+                output_tokens: 4,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        };
+        store
+            .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
+            .await
+            .unwrap();
+        store
+            .write_llm_dispatched(&inv_str, "req-0", 2)
+            .await
+            .unwrap();
+        store
+            .write_llm_completed(
+                &inv_str,
+                "req-0",
+                &serde_json::to_string(&tool_use).unwrap(),
+                false,
+                0.0001,
+                llm0_completed_at,
+            )
+            .await
+            .unwrap();
+        store
+            .write_tool_intent(&inv_str, "tc-0", "builtin__self_inspect", "{}", 2)
+            .await
+            .unwrap();
+        store
+            .write_tool_dispatched(&inv_str, "tc-0", 3)
+            .await
+            .unwrap();
+        store
+            .write_tool_completed(&inv_str, "tc-0", "{\"ok\":true}", false, tool_completed_at)
+            .await
+            .unwrap();
+        store
+            .write_llm_intent(&inv_str, "req-1", "claude-haiku", "{}", 4)
+            .await
+            .unwrap();
+        store
+            .write_llm_dispatched(&inv_str, "req-1", 5)
+            .await
+            .unwrap();
+        store
+            .write_llm_completed(
+                &inv_str,
+                "req-1",
+                &serde_json::to_string(&end_turn).unwrap(),
+                false,
+                0.0001,
+                llm1_completed_at,
+            )
+            .await
+            .unwrap();
+
+        let bus = EventBus::connect(&url).await.unwrap();
+        let runner = ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus)
+                    .pricing(test_pricing())
+                    .store(store.clone())
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
+            Harness::new(),
+        );
+        let llm = FixtureClient::new(); // WAL covers every turn — no live calls
+
+        let outcome = runner
+            .resume(&agent, &llm, invocation_id)
+            .await
+            .expect("resume replays the interleave in true order");
+        match outcome {
+            InvocationOutcome::Completed { response, .. } => {
+                assert_eq!(response.content.as_deref(), Some("done."));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// The regression direction: the model turn and the tool completion
+    /// tie at the same millisecond with the LLM first in true order —
+    /// the pre-v9 tools-first tiebreak replayed these backwards.
+    #[tokio::test]
+    async fn resume_replays_llm_then_tool_same_millisecond_in_true_order() {
+        resume_with_same_ms_interleave("seq-llm-tool", 5, 5, 9).await;
+    }
+
+    /// The other direction: the tool completion and the following model
+    /// turn tie at the same millisecond.
+    #[tokio::test]
+    async fn resume_replays_tool_then_llm_same_millisecond_in_true_order() {
+        resume_with_same_ms_interleave("seq-tool-llm", 3, 7, 7).await;
     }
 
     #[tokio::test]
