@@ -311,6 +311,11 @@ pub struct LlmDispatchRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenToolDispatchRow {
     pub tool_name: String,
+    /// The dispatch's parameters JSON — carried so read-model views
+    /// can surface the command an open exec/shell is running. Open
+    /// dispatches are bounded per invocation, so the extra column is
+    /// cheap here (unlike the full-history queries).
+    pub parameters: String,
     pub intent_at: i64,
     pub dispatched_at: Option<i64>,
 }
@@ -1119,7 +1124,7 @@ impl WorkerStore {
         invocation_id: &str,
     ) -> Result<Vec<OpenToolDispatchRow>, WorkerStoreError> {
         let rows = sqlx::query(
-            "SELECT tool_name, intent_at, dispatched_at FROM tool_dispatch \
+            "SELECT tool_name, parameters, intent_at, dispatched_at FROM tool_dispatch \
              WHERE invocation_id = ? AND status != 'completed' ORDER BY intent_at",
         )
         .bind(invocation_id)
@@ -1129,6 +1134,7 @@ impl WorkerStore {
             .map(|row| {
                 Ok(OpenToolDispatchRow {
                     tool_name: row.try_get("tool_name")?,
+                    parameters: row.try_get("parameters")?,
                     intent_at: row.try_get("intent_at")?,
                     dispatched_at: row.try_get("dispatched_at")?,
                 })
