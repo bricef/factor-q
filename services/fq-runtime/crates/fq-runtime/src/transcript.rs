@@ -746,7 +746,7 @@ mod tests {
     #[tokio::test]
     async fn store_round_trip_transcript_ordering_and_payloads() {
         // Full store-level exercise per the issue's acceptance
-        // criterion: build a temp events.db, write intent+completed
+        // criterion: build a temp worker.db, write intent+completed
         // rows into both dispatch tables (mirroring worker/store.rs
         // tests), read them back through the same list helpers the
         // CLI uses, and assert the collected transcript's ordering
@@ -755,7 +755,7 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("worker.db");
         let store = WorkerStore::open(&path).await.expect("open");
         let inv = "inv-rt";
 

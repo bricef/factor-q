@@ -810,14 +810,14 @@ mod tests {
     #[tokio::test]
     async fn pages_render_against_a_live_read_service() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = fq_runtime::RuntimeDbPaths::under(dir.path());
         {
-            let cp = ControlPlaneStore::open(&path).await.unwrap();
+            let cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
             cp.register_worker("w1", "localhost", 100).await.unwrap();
-            let _ws = WorkerStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
-        let views = Arc::new(Views::open(&path).await.unwrap());
+        let views = Arc::new(Views::open(&paths).await.unwrap());
         let js = async_nats_lazy().await;
         // A registry with one real parsed definition, so the agents
         // pages exercise the full wire path.
@@ -1095,13 +1095,13 @@ mod tests {
     #[tokio::test]
     async fn mismatched_builds_banner_but_still_render() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = fq_runtime::RuntimeDbPaths::under(dir.path());
         {
-            let _cp = ControlPlaneStore::open(&path).await.unwrap();
-            let _ws = WorkerStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
-        let views = Arc::new(Views::open(&path).await.unwrap());
+        let views = Arc::new(Views::open(&paths).await.unwrap());
         let js = async_nats_lazy().await;
         let registry = Arc::new(tokio::sync::RwLock::new(Arc::new(
             fq_runtime::AgentRegistry::new(),

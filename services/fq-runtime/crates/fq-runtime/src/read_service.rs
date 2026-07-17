@@ -521,6 +521,7 @@ mod tests {
     use crate::agent::AgentRegistry;
     use crate::control_plane::projection::ProjectionStore;
     use crate::control_plane::store::ControlPlaneStore;
+    use crate::db::RuntimeDbPaths;
     use crate::worker::store::WorkerStore;
 
     fn empty_registry() -> SharedRegistry {
@@ -535,15 +536,15 @@ mod tests {
     #[tokio::test]
     async fn db_reads_round_trip_over_the_wire() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
         {
-            let cp = ControlPlaneStore::open(&path).await.unwrap();
+            let cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
             cp.register_worker("w1", "localhost", 100).await.unwrap();
-            let _ws = WorkerStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
 
-        let views = Arc::new(Views::open(&path).await.unwrap());
+        let views = Arc::new(Views::open(&paths).await.unwrap());
         // The probe needs a jetstream context but health() is not called
         // here; connecting lazily means no broker is required.
         let js = async_nats::jetstream::new(
@@ -658,13 +659,13 @@ mod tests {
             .expect("connect to private broker");
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
         {
-            let _cp = ControlPlaneStore::open(&path).await.unwrap();
-            let _ws = WorkerStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
-        let views = Arc::new(Views::open(&path).await.unwrap());
+        let views = Arc::new(Views::open(&paths).await.unwrap());
 
         let (addr, serving) = bind(
             "127.0.0.1:0",
@@ -709,13 +710,13 @@ mod tests {
     #[tokio::test]
     async fn refuses_non_loopback_bind() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
         {
-            let _cp = ControlPlaneStore::open(&path).await.unwrap();
-            let _ws = WorkerStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
-        let views = Arc::new(Views::open(&path).await.unwrap());
+        let views = Arc::new(Views::open(&paths).await.unwrap());
         let js = async_nats::jetstream::new(
             async_nats::connect_with_options(
                 "nats://127.0.0.1:1",
@@ -746,13 +747,13 @@ mod tests {
     #[tokio::test]
     async fn agents_round_trip_from_a_seeded_registry() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
         {
-            let _cp = ControlPlaneStore::open(&path).await.unwrap();
-            let _ws = WorkerStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
-        let views = Arc::new(Views::open(&path).await.unwrap());
+        let views = Arc::new(Views::open(&paths).await.unwrap());
         let js = async_nats::jetstream::new(
             async_nats::connect_with_options(
                 "nats://127.0.0.1:1",

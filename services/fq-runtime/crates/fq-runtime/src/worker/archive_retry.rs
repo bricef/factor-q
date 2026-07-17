@@ -281,7 +281,7 @@ mod tests {
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
         let store = Arc::new(
-            WorkerStore::open(&dir.path().join("events.db"))
+            WorkerStore::open(&dir.path().join("worker.db"))
                 .await
                 .expect("worker store"),
         );
@@ -345,7 +345,7 @@ mod tests {
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
         let store = Arc::new(
-            WorkerStore::open(&dir.path().join("events.db"))
+            WorkerStore::open(&dir.path().join("worker.db"))
                 .await
                 .expect("worker store"),
         );

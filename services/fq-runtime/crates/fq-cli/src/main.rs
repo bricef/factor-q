@@ -938,14 +938,19 @@ async fn trigger_agent(
     let tools = Arc::new(tools);
     println!("Running agent...");
     // Tool/LLM dispatches are persisted through the worker
-    // WAL. The store opens against the same events.db the
+    // WAL. The store opens against the same worker.db the
     // daemon would use; if `fq run` is also active the same
     // file is shared (locks at the SQLite layer).
-    let db_path = projection_path(&config);
+    let db_paths = ensure_split_dbs(&config).await?;
     let worker_store = Arc::new(
-        fq_runtime::WorkerStore::open(&db_path)
+        fq_runtime::WorkerStore::open(&db_paths.worker)
             .await
-            .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
+            .with_context(|| {
+                format!(
+                    "failed to open worker store at {}",
+                    db_paths.worker.display()
+                )
+            })?,
     );
     // Each ad-hoc `fq trigger` is a one-shot worker instance.
     // The runtime-id-shaped worker_id matches the daemon's
@@ -1175,11 +1180,30 @@ fn print_event(event: &Event) {
     );
 }
 
-/// Default location for the SQLite projection database, relative to
-/// the configured cache directory. Stored next to the pricing JSON
-/// rather than in its own subdirectory — one file, one location.
-fn projection_path(config: &Config) -> PathBuf {
-    config.cache.directory.join("events.db")
+/// Per-store SQLite database paths under the configured cache
+/// directory (the #262 split layout: `worker.db`, `control-plane.db`,
+/// `projection.db`). Stored next to the pricing JSON rather than in
+/// their own subdirectory.
+fn runtime_db_paths(config: &Config) -> fq_runtime::RuntimeDbPaths {
+    fq_runtime::RuntimeDbPaths::under(&config.cache.directory)
+}
+
+/// Migrate a leftover v1 single-file `events.db` into the split
+/// layout, then hand back the per-store paths. Every command that
+/// opens a store for *writing* calls this first; read-only commands
+/// never mutate the state directory and surface a "run `fq run`"
+/// hint instead (see `open_views`).
+async fn ensure_split_dbs(config: &Config) -> anyhow::Result<fq_runtime::RuntimeDbPaths> {
+    match fq_runtime::split_legacy_events_db(&config.cache.directory).await? {
+        fq_runtime::SplitOutcome::Completed(stats) => {
+            println!(
+                "migrated legacy events.db into worker.db + control-plane.db + projection.db \
+                 ({stats}); events.db.pre-split kept as rollback"
+            );
+        }
+        fq_runtime::SplitOutcome::NotNeeded => {}
+    }
+    Ok(runtime_db_paths(config))
 }
 
 /// Best-effort host label for the worker registration row.
@@ -1218,7 +1242,12 @@ struct StatusReport {
     cache_dir: PathBuf,
     nats_connected: bool,
     streams: Vec<fq_runtime::health::StreamHealth>,
+    worker_path: PathBuf,
+    control_plane_path: PathBuf,
     projection_path: PathBuf,
+    /// A v1 single-file `events.db` still awaiting the split
+    /// migration (`fq run` performs it).
+    legacy_events_db: Option<PathBuf>,
     initialised: bool,
     projection_rows: Option<i64>,
     recovery: Option<fq_runtime::views::RecoveryView>,
@@ -1260,15 +1289,16 @@ async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Result<()> {
     };
     let js = jetstream::new(client);
     let streams = health::probe_core_streams(&js).await;
-    let db_path = projection_path(&config);
+    let db_paths = runtime_db_paths(&config);
+    let legacy = fq_runtime::db::legacy_db_path(&config.cache.directory);
 
     if json {
-        let initialised = db_path.exists();
+        let initialised = db_paths.all_exist();
         let mut projection_rows = None;
         let mut recovery = None;
         let mut store_error = None;
         if initialised {
-            match Views::open(&db_path).await {
+            match Views::open(&db_paths).await {
                 Ok(views) => {
                     match views.event_count().await {
                         Ok(count) => projection_rows = Some(count),
@@ -1292,7 +1322,10 @@ async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Result<()> {
             cache_dir: config.cache.directory.clone(),
             nats_connected: true,
             streams,
-            projection_path: db_path,
+            worker_path: db_paths.worker.clone(),
+            control_plane_path: db_paths.control_plane.clone(),
+            projection_path: db_paths.projection.clone(),
+            legacy_events_db: legacy.exists().then_some(legacy),
             initialised,
             projection_rows,
             recovery,
@@ -1306,22 +1339,30 @@ async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Result<()> {
         render_stream_health_human(stream);
     }
 
-    // Projection + recovery state, over the read views.
+    // Stores + recovery state, over the read views.
     println!();
-    println!("Projection");
-    println!("  path:             {}", db_path.display());
-    if !db_path.exists() {
+    println!("Stores");
+    println!("  worker db:        {}", db_paths.worker.display());
+    println!("  control-plane db: {}", db_paths.control_plane.display());
+    println!("  projection db:    {}", db_paths.projection.display());
+    if legacy.exists() {
+        println!(
+            "  legacy events.db: {} (pending split — run `fq run` to migrate)",
+            legacy.display()
+        );
+    }
+    if !db_paths.all_exist() {
         println!("  state:            not initialised (run `fq run` to create)");
         println!();
         println!("Recovery state");
         println!("  (no coordination data — `fq run` has not initialised the store)");
         return Ok(());
     }
-    match Views::open(&db_path).await {
+    match Views::open(&db_paths).await {
         Ok(views) => {
             match views.event_count().await {
-                Ok(count) => println!("  rows:             {count}"),
-                Err(err) => println!("  rows:             ✗ failed to query: {err}"),
+                Ok(count) => println!("  projection rows:  {count}"),
+                Err(err) => println!("  projection rows:  ✗ failed to query: {err}"),
             }
 
             // Recovery state (step 9). Points the operator at the
@@ -1868,24 +1909,36 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
 
-    // Open the three stores backing v1's single-file collapse.
+    // Open the three per-store databases (#262 split layout):
     // ProjectionStore (rebuildable from NATS), ControlPlaneStore
     // (coordination/schedules/archive — source of truth), and
     // WorkerStore (in-flight state and WAL — source of truth).
-    // See data-architecture.md §11 for the v1→v2 split path.
-    let db_path = projection_path(&config);
-    println!("  projection db:    {}", db_path.display());
+    // A leftover v1 single-file events.db is migrated first; see
+    // data-architecture.md §11 and fq_runtime::db.
+    let db_paths = ensure_split_dbs(&config).await?;
+    println!("  worker db:        {}", db_paths.worker.display());
+    println!("  control-plane db: {}", db_paths.control_plane.display());
+    println!("  projection db:    {}", db_paths.projection.display());
     let store = Arc::new(
-        ProjectionStore::open(&db_path)
+        ProjectionStore::open(&db_paths.projection)
             .await
-            .with_context(|| format!("failed to open projection at {}", db_path.display()))?,
+            .with_context(|| {
+                format!(
+                    "failed to open projection at {}",
+                    db_paths.projection.display()
+                )
+            })?,
     );
-    let cp_store = Arc::new(ControlPlaneStore::open(&db_path).await.with_context(|| {
-        format!(
-            "failed to open control-plane store at {}",
-            db_path.display()
-        )
-    })?);
+    let cp_store = Arc::new(
+        ControlPlaneStore::open(&db_paths.control_plane)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to open control-plane store at {}",
+                    db_paths.control_plane.display()
+                )
+            })?,
+    );
     // Pool ceiling scales with the fan-out bound (#70): each
     // dispatcher-run invocation is WAL-chatty, plus headroom for the
     // sweepers. Startup recovery is NOT covered — it spawns one resume
@@ -1895,9 +1948,14 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // the writes regardless; the ceiling only bounds waiting.
     let pool_ceiling = (config.worker.max_concurrent_invocations as u32 + 3).max(4);
     let worker_store = Arc::new(
-        fq_runtime::WorkerStore::open_with_pool(&db_path, pool_ceiling)
+        fq_runtime::WorkerStore::open_with_pool(&db_paths.worker, pool_ceiling)
             .await
-            .with_context(|| format!("failed to open worker store at {}", db_path.display()))?,
+            .with_context(|| {
+                format!(
+                    "failed to open worker store at {}",
+                    db_paths.worker.display()
+                )
+            })?,
     );
     println!(
         "  control plane:    v{}",
@@ -2611,7 +2669,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // take the runtime down; it logs and stays down until restart.
     let read_service_addr = if config.read_service.enabled {
         let views = Arc::new(
-            fq_runtime::views::Views::open(&projection_path(&config))
+            fq_runtime::views::Views::open(&db_paths)
                 .await
                 .context("read service: failed to open the read views")?,
         );
@@ -3437,11 +3495,22 @@ fn truncate_json(value: &serde_json::Value, max: usize) -> String {
 /// its own — see the operator-dashboard plan, layer 1).
 async fn open_views(global: &GlobalArgs) -> anyhow::Result<Views> {
     let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
-    Views::open(&db_path).await.with_context(|| {
+    let db_paths = runtime_db_paths(&config);
+    // Read commands never mutate the state directory, so a v1
+    // single-file layout is surfaced as a hint rather than migrated
+    // here — exactly the writable paths run the split.
+    let legacy = fq_runtime::db::legacy_db_path(&config.cache.directory);
+    if !db_paths.all_exist() && legacy.exists() {
+        anyhow::bail!(
+            "found legacy single-file database at {}: run `fq run` (or any writing \
+             command) once to migrate to the per-store layout",
+            legacy.display()
+        );
+    }
+    Views::open(&db_paths).await.with_context(|| {
         format!(
-            "failed to open stores at {}: has `fq run` been started?",
-            db_path.display()
+            "failed to open stores under {}: has `fq run` been started?",
+            config.cache.directory.display()
         )
     })
 }
@@ -3724,9 +3793,11 @@ async fn invocation_drop(
     json: bool,
 ) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
-    let proj_store = ProjectionStore::open_read_only(&db_path).await?;
-    let control_store = ControlPlaneStore::open(&db_path).await?;
+    // The drop writes to the control-plane store, so this path runs
+    // the legacy split if one is pending.
+    let db_paths = ensure_split_dbs(&config).await?;
+    let proj_store = ProjectionStore::open_read_only(&db_paths.projection).await?;
+    let control_store = ControlPlaneStore::open(&db_paths.control_plane).await?;
     let bus = EventBus::connect(&config.nats.url)
         .await
         .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
@@ -3751,7 +3822,7 @@ async fn invocation_drop(
 /// Render the full payload-bearing transcript for one invocation.
 ///
 /// Snapshot mode (default): open the worker WAL read-only against
-/// `events.db`, collect the ordered `llm_dispatch` + `tool_dispatch`
+/// `worker.db`, collect the ordered `llm_dispatch` + `tool_dispatch`
 /// rows for the invocation, and render them with payloads. Read-only
 /// and NATS-free. `--follow` additionally subscribes to the invocation's
 /// agent subject and appends new turns live until Ctrl-C.
@@ -3778,7 +3849,17 @@ async fn invocation_transcript(
     };
 
     let config = global.resolve_config()?;
-    let db_path = projection_path(&config);
+    let db_paths = runtime_db_paths(&config);
+    // Read-only command: a pending v1 single-file layout is a hint,
+    // not a migration (see `open_views`).
+    let legacy = fq_runtime::db::legacy_db_path(&config.cache.directory);
+    if !db_paths.worker.exists() && legacy.exists() {
+        anyhow::bail!(
+            "found legacy single-file database at {}: run `fq run` (or any writing \
+             command) once to migrate to the per-store layout",
+            legacy.display()
+        );
+    }
 
     // For --follow, subscribe to the invocation's agent subject BEFORE
     // reading the WAL snapshot, so a turn that completes in the gap
@@ -3787,7 +3868,7 @@ async fn invocation_transcript(
     // live stream, then deduped at the seam. Snapshot-only mode needs no
     // NATS. The returned stream owns its connection, so `bus` may drop.
     let follow_stream = if follow {
-        let proj_store = ProjectionStore::open_read_only(&db_path).await?;
+        let proj_store = ProjectionStore::open_read_only(&db_paths.projection).await?;
         let agent_id = proj_store
             .agent_id_for_invocation(id)
             .await?
@@ -3816,12 +3897,12 @@ async fn invocation_transcript(
 
     // Worker WAL snapshot, read-only. A missing DB is the actionable
     // NotInitialised error, never a panic.
-    let worker_store = fq_runtime::WorkerStore::open_read_only(&db_path)
+    let worker_store = fq_runtime::WorkerStore::open_read_only(&db_paths.worker)
         .await
         .with_context(|| {
             format!(
                 "failed to open worker store at {}: has `fq run`/`fq trigger` been run?",
-                db_path.display()
+                db_paths.worker.display()
             )
         })?;
 
@@ -4045,8 +4126,8 @@ mod invocation_tests {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("events.db");
-        let proj_store = ProjectionStore::open(&db_path).await.unwrap();
+        let db_paths = fq_runtime::RuntimeDbPaths::under(dir.path());
+        let proj_store = ProjectionStore::open(&db_paths.projection).await.unwrap();
 
         let agent_id = AgentId::new(format!("op-drop-cli-{}", Uuid::now_v7().simple())).unwrap();
         let invocation_id = Uuid::now_v7();
@@ -4072,7 +4153,9 @@ mod invocation_tests {
         );
         proj_store.insert_event(&seed).await.unwrap();
 
-        let control_store = ControlPlaneStore::open(&db_path).await.unwrap();
+        let control_store = ControlPlaneStore::open(&db_paths.control_plane)
+            .await
+            .unwrap();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let mut sub = bus
             .subscribe(format!(
@@ -4118,9 +4201,11 @@ mod invocation_tests {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("events.db");
-        let proj_store = ProjectionStore::open(&db_path).await.unwrap();
-        let control_store = ControlPlaneStore::open(&db_path).await.unwrap();
+        let db_paths = fq_runtime::RuntimeDbPaths::under(dir.path());
+        let proj_store = ProjectionStore::open(&db_paths.projection).await.unwrap();
+        let control_store = ControlPlaneStore::open(&db_paths.control_plane)
+            .await
+            .unwrap();
         let fake_inv = Uuid::now_v7().to_string();
         control_store
             .register_worker("orphan-worker", "test", 1)
@@ -4155,9 +4240,11 @@ mod invocation_tests {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("events.db");
-        let proj_store = ProjectionStore::open(&db_path).await.unwrap();
-        let control_store = ControlPlaneStore::open(&db_path).await.unwrap();
+        let db_paths = fq_runtime::RuntimeDbPaths::under(dir.path());
+        let proj_store = ProjectionStore::open(&db_paths.projection).await.unwrap();
+        let control_store = ControlPlaneStore::open(&db_paths.control_plane)
+            .await
+            .unwrap();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
 
         let fake_inv = Uuid::now_v7().to_string();
@@ -4273,7 +4360,10 @@ async fn workers_list(
 
 async fn workers_prune(global: &GlobalArgs, dry_run: bool) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
-    let store = ControlPlaneStore::open(&projection_path(&config)).await?;
+    // Prune deletes control-plane rows, so this path runs the
+    // legacy split if one is pending.
+    let db_paths = ensure_split_dbs(&config).await?;
+    let store = ControlPlaneStore::open(&db_paths.control_plane).await?;
     let stale: Vec<String> = store
         .list_workers()
         .await?

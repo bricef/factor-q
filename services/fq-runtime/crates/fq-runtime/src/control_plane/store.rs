@@ -7,11 +7,12 @@
 //! managed by [`crate::control_plane::projection::ProjectionStore`]
 //! remain rebuildable from NATS; the rows in this store are not.
 //!
-//! In v1 this store opens the same SQLite file as the projection
-//! store and the [`crate::worker::WorkerStore`]. The three
-//! stores manage disjoint tables and coordinate version-ing
-//! through the shared `schema_meta` table. v2 splits the
-//! file with no schema redesign.
+//! This store owns its own SQLite file (`control-plane.db`, see
+//! [`crate::db::RuntimeDbPaths`]) with its own `schema_meta`
+//! version row. v1 collapsed all three runtime stores into a
+//! single `events.db`; the split (#262) moved each store to its
+//! own file with no schema redesign — a leftover v1 file is
+//! migrated by [`crate::db::split_legacy_events_db`].
 //!
 //! ## Schema versioning
 //!
@@ -1127,7 +1128,7 @@ mod tests {
 
     async fn open_fresh() -> (ControlPlaneStore, tempfile::TempDir) {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("control-plane.db");
         let store = ControlPlaneStore::open(&path).await.expect("open fresh");
         (store, dir)
     }
@@ -1159,7 +1160,7 @@ mod tests {
     #[tokio::test]
     async fn open_refuses_when_db_version_higher_than_binary() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("control-plane.db");
         let store = ControlPlaneStore::open(&path).await.unwrap();
         store
             .write_schema_version(CONTROL_PLANE_SCHEMA_VERSION + 1)
@@ -1413,32 +1414,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coexists_with_worker_store_in_same_file() {
-        // Both stores should be able to share the same SQLite
-        // file in v1 — they manage disjoint tables and use
-        // their own `schema_meta` row classes.
+    async fn per_file_bootstrap_isolates_schema_meta() {
+        // The split layout (#262): each store bootstraps its own
+        // file, and each file's `schema_meta` carries only that
+        // store's class row — the version handshake is per-file.
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let paths = crate::db::RuntimeDbPaths::under(dir.path());
 
-        let cp = ControlPlaneStore::open(&path).await.unwrap();
-        let worker = crate::worker::WorkerStore::open(&path).await.unwrap();
-
-        cp.register_worker("w-coexist", "h", 1).await.unwrap();
-
-        // Worker store can write its own tables without
-        // disturbing the control-plane data.
-        worker
-            .write_tool_intent("inv-cox", "tc", "echo", "{}", 100)
+        let cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+        let worker = crate::worker::WorkerStore::open(&paths.worker)
             .await
             .unwrap();
 
-        assert!(cp.get_worker("w-coexist").await.unwrap().is_some());
+        cp.register_worker("w-split", "h", 1).await.unwrap();
+        worker
+            .write_tool_intent("inv-split", "tc", "echo", "{}", 100)
+            .await
+            .unwrap();
+
+        assert!(cp.get_worker("w-split").await.unwrap().is_some());
         assert!(
             worker
-                .get_tool_dispatch("inv-cox", "tc")
+                .get_tool_dispatch("inv-split", "tc")
                 .await
                 .unwrap()
                 .is_some()
         );
+
+        // Each file records exactly its own schema class.
+        for (path, class) in [
+            (&paths.control_plane, SCHEMA_CLASS),
+            (&paths.worker, crate::worker::store::SCHEMA_CLASS),
+        ] {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&format!("sqlite://{}", path.display()))
+                .await
+                .unwrap();
+            let classes: Vec<String> = sqlx::query_scalar("SELECT class FROM schema_meta")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(classes, vec![class.to_string()]);
+        }
     }
 }

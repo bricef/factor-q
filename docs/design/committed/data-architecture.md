@@ -683,8 +683,9 @@ Per role.
 | Artefact | Role | Critical? | Backup story |
 |---|---|---|---|
 | `<nats_data_dir>/` | shared | **Yes** | Standard JetStream backup; snapshot the data dir or `nats stream backup`. |
-| `<cache_dir>/control-plane.db` | control-plane | **Yes** | SQLite file holding projection, coordination, schedules, archive. `sqlite3 control-plane.db ".backup target.db"`. |
-| `<cache_dir>/worker-<id>.db` | per worker | **Yes** | One file per worker. Contains in-flight state and WAL. Backed up while the worker is running via SQLite online backup, or while stopped via copy. |
+| `<cache_dir>/control-plane.db` | control-plane | **Yes** | SQLite file holding coordination, schedules, archive. `sqlite3 control-plane.db ".backup target.db"`. |
+| `<cache_dir>/projection.db` | control-plane | No | Derived event read model, rebuildable by replaying the NATS stream. Deliberately its own file (#262) so its delete-and-replay lifecycle never touches a backup unit. |
+| `<cache_dir>/worker.db` (`worker-<id>.db` when workers split out) | per worker | **Yes** | One file per worker. Contains in-flight state and WAL. Backed up while the worker is running via SQLite online backup, or while stopped via copy. |
 | `<workspaces_dir>/` (per worker) | per worker | **Yes** | Critical: workspaces are core agent state. Backed up *together* with the worker SQLite (same point-in-time) so resume sees consistent state. |
 | `fq.toml`, `agents/` | operator | n/a | Operator-managed (typically git). |
 
@@ -692,8 +693,9 @@ Per role.
 
 Single-node (v1):
 
-> Back up `<nats_data_dir>/`, `<cache_dir>/store.db` (single
-> file, both roles), and `<workspaces_dir>/`. Three artefacts.
+> Back up `<nats_data_dir>/`, `<cache_dir>/worker.db` +
+> `<cache_dir>/control-plane.db`, and `<workspaces_dir>/`. Four
+> artefacts; `projection.db` is derived and needs no backup.
 
 Multi-node (v2):
 
@@ -946,8 +948,9 @@ What changes when an operator splits the deployment.
 ### 11.1 What stays the same
 
 - All contracts (§4).
-- All schemas (§9). Both SQLite stores' schemas already exist
-  in v1 — they just happen to live in the same file.
+- All schemas (§9). Every store's schema already exists in v1,
+  and since the #262 split each store already lives in its own
+  file (`worker.db`, `control-plane.db`, `projection.db`).
 - The reducer harness, the event bus shape, the audit log
   semantics.
 - All event types.
@@ -957,9 +960,18 @@ What changes when an operator splits the deployment.
 - **Process boundary.** v1's `fq run` becomes
   `fq run --role=control-plane` or `fq run --role=worker`
   (or `--role=both` for compatibility).
-- **SQLite split.** v1 has one file with both schema classes.
-  v2 splits into `control-plane.db` and `worker-<id>.db`. A
-  migration tool ports v1 → v2 by copying the relevant tables.
+- **SQLite split — done (#262), one file per store.** Landed
+  ahead of v2 as `worker.db`, `control-plane.db` and
+  `projection.db` — three files, not the two originally
+  sketched here: the projection's delete-and-replay lifecycle
+  is exactly what the split exists to separate from the
+  source-of-truth stores, so it gets its own file rather than
+  riding inside `control-plane.db`.
+  `fq_runtime::db::split_legacy_events_db` migrates a leftover
+  single-file `events.db` (crash-safe; the original is retired
+  as `events.db.pre-split`). v2's remaining piece is renaming
+  `worker.db` to `worker-<id>.db` when workers move to their
+  own processes.
 - **NATS coordination becomes load-bearing.** v1 has trivial
   coordination (one node claims itself). v2 has real worker
   registration, invocation ownership, ambiguous-case
@@ -978,8 +990,11 @@ What changes when an operator splits the deployment.
   roles in a way v2 has to undo.
 - The trigger dispatch path goes through the control-plane
   module even on a single-node deployment.
-- Configuration permits a per-role `state_db` path. v1 default
-  collapses both to one file; v2 separates them.
+- The per-store files are fixed names under the cache directory
+  (`fq_runtime::db::RuntimeDbPaths`), so the roles are already
+  physically separate (#262). A per-role `state_db` config
+  override (placing a role's file elsewhere) stays open as a
+  follow-up; it is no longer a v2 blocker.
 
 ## 12. What this doc leaves open
 

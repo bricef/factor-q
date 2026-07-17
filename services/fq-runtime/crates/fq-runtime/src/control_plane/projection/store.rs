@@ -848,7 +848,7 @@ mod tests {
     #[tokio::test]
     async fn agent_id_for_invocation_ignores_operator_only_tombstone() {
         let dir = tempdir().unwrap();
-        let store = ProjectionStore::open(&dir.path().join("events.db"))
+        let store = ProjectionStore::open(&dir.path().join("projection.db"))
             .await
             .unwrap();
         let inv = Uuid::now_v7();
@@ -877,7 +877,7 @@ mod tests {
     #[tokio::test]
     async fn agent_id_for_invocation_uses_first_real_agent_not_summary() {
         let dir = tempdir().unwrap();
-        let store = ProjectionStore::open(&dir.path().join("events.db"))
+        let store = ProjectionStore::open(&dir.path().join("projection.db"))
             .await
             .unwrap();
         let inv = Uuid::now_v7();
@@ -905,7 +905,7 @@ mod tests {
     #[tokio::test]
     async fn summary_events_are_costed_and_upsert_the_current_line() {
         let dir = tempdir().unwrap();
-        let store = ProjectionStore::open(&dir.path().join("events.db"))
+        let store = ProjectionStore::open(&dir.path().join("projection.db"))
             .await
             .unwrap();
         let inv = Uuid::now_v7();
@@ -1117,7 +1117,7 @@ mod tests {
 
     async fn open_store() -> (ProjectionStore, tempfile::TempDir) {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("projection.db");
         let store = ProjectionStore::open(&path).await.unwrap();
         (store, dir)
     }
@@ -1131,7 +1131,7 @@ mod tests {
     #[tokio::test]
     async fn migrates_existing_projection_with_cache_columns() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("projection.db");
         std::fs::File::create(&path).unwrap();
         let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
             .await
@@ -1220,7 +1220,7 @@ mod tests {
         .unwrap();
         assert_eq!(store.count().await.unwrap(), 2);
         drop(store);
-        let reopened = ProjectionStore::open(&dir.path().join("events.db"))
+        let reopened = ProjectionStore::open(&dir.path().join("projection.db"))
             .await
             .unwrap();
         assert_eq!(reopened.count().await.unwrap(), 1, "legacy heartbeat swept");
@@ -1633,7 +1633,7 @@ mod tests {
     #[tokio::test]
     async fn read_only_open_succeeds_after_write_open() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("projection.db");
         {
             let writer = ProjectionStore::open(&path).await.unwrap();
             writer
