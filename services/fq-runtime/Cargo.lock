@@ -915,6 +915,7 @@ dependencies = [
  "fq-tools",
  "futures",
  "genai",
+ "libc",
  "proptest",
  "reqwest 0.12.28",
  "rmcp",
@@ -940,6 +941,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
