@@ -88,7 +88,11 @@ or, preferably, through the repo's scripts.
    fix changes; state verification expectations explicitly, forbidding
    impossible-test substitutes by name; name the actual next
    schema-version slot as of this run; add sequencing cautions against
-   in-flight issues touching the same functions.
+   in-flight issues touching the same functions. An issue that passes
+   this bar gets the `fleet:refined` label (the refinement date lives
+   in the body, not the label). Conversely: a `fleet:refined` issue in
+   the pre-filter's PRIORITY list must be re-verified — refresh the
+   body's stamp, or remove the label until it is refreshed.
 
 6. **Report.** Your final message is the run report: closed (with
    evidence), rescoped, re-grounded, labels fixed, recommend-close
@@ -104,6 +108,8 @@ or, preferably, through the repo's scripts.
   fix code in this run.
 - Mutating operations are `gh issue edit/close/comment` only. You do
   not push code, open PRs, or touch labels beyond
-  `status:blocked`/`status:in-progress` corrections.
+  `status:blocked`/`status:in-progress` corrections and
+  `fleet:refined` (apply after a passing refinement pass; remove when
+  a refined body has gone stale and was not re-verified this run).
 - If the pre-filter script fails, stop and report — do not fall back
   to sweeping blind.

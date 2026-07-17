@@ -141,6 +141,14 @@ dispatching, verify:
   that it was checked and when — so the agent doesn't re-derive or,
   worse, distrust it.
 
+When an issue passes this bar, apply the **`fleet:refined`** label. The
+label asserts "the body was verified in-depth against main as of the
+date stamped in the body" — the date lives in the body's re-ground/
+rescope line, not the label. Refinement rots like everything else: a
+`fleet:refined` issue appearing in a later pre-filter PRIORITY list
+gets re-verified, and either the stamp is refreshed or the label comes
+off until it is.
+
 ## 4. Report
 
 End with a summary the maintainer can act on in one read: closed (with
