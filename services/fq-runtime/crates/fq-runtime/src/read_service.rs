@@ -173,7 +173,13 @@ pub trait ReadService {
         since: Option<String>,
         limit: i64,
     ) -> Result<Vec<EventView>, WireError>;
-    async fn costs(agent: Option<String>, since: Option<String>) -> Result<CostReport, WireError>;
+    /// `hourly_buckets` picks the time-series granularity the report's
+    /// `buckets` carry (hourly for a day window, else daily).
+    async fn costs(
+        agent: Option<String>,
+        since: Option<String>,
+        hourly_buckets: bool,
+    ) -> Result<CostReport, WireError>;
     /// One agent's cost drill-down: totals plus per-model and
     /// per-invocation breakdowns (invocations newest first, capped at
     /// `invocation_limit`). `None` when the agent has no cost events
@@ -360,8 +366,12 @@ impl ReadService for ReadServer {
         _: context::Context,
         agent: Option<String>,
         since: Option<String>,
+        hourly_buckets: bool,
     ) -> Result<CostReport, WireError> {
-        Ok(self.views.costs(agent.as_deref(), since.as_deref()).await?)
+        Ok(self
+            .views
+            .costs(agent.as_deref(), since.as_deref(), hourly_buckets)
+            .await?)
     }
 
     async fn agent_costs(
@@ -604,7 +614,7 @@ mod tests {
         assert!(events.is_empty());
 
         let costs = client
-            .costs(context::current(), None, None)
+            .costs(context::current(), None, None, false)
             .await
             .expect("rpc")
             .expect("costs");

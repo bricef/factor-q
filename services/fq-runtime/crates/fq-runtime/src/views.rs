@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use crate::agent::AgentId;
 use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::projection::store::{
-    CostSummary, EventFilter, EventRow, FailureSummary, InvocationCostSummary, ModelCostSummary,
-    StoreError,
+    CostBucketSummary, CostSummary, EventFilter, EventRow, FailureSummary, InvocationCostSummary,
+    ModelCostSummary, StoreError,
 };
 use crate::control_plane::store::{
     ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerRow, OwnerStatus,
@@ -373,11 +373,33 @@ pub struct AgentCostDetailView {
     pub invocations: Vec<InvocationCostView>,
 }
 
+/// One time bucket's cost sum — a day or an hour, keyed by its
+/// fixed-width UTC timestamp prefix (`YYYY-MM-DD` / `YYYY-MM-DDTHH`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CostBucketView {
+    pub bucket: String,
+    pub total_cost: f64,
+}
+
+impl From<CostBucketSummary> for CostBucketView {
+    fn from(r: CostBucketSummary) -> Self {
+        CostBucketView {
+            bucket: r.bucket,
+            total_cost: r.total_cost,
+        }
+    }
+}
+
 /// Per-agent costs plus the per-model split and the grand totals, so a
 /// caller renders all three without re-summing.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct CostReport {
     pub agents: Vec<CostView>,
+    /// Spend over time within the window — daily buckets, or hourly
+    /// when the caller asked for them. Sparse: quiet buckets are
+    /// absent (display layers fill gaps). Oldest first.
+    #[serde(default)]
+    pub buckets: Vec<CostBucketView>,
     /// The same cost rows grouped by model, biggest spender first —
     /// spend by capability tier rather than by consumer.
     pub models: Vec<ModelCostView>,
@@ -556,6 +578,7 @@ impl Views {
         &self,
         agent: Option<&str>,
         since: Option<&str>,
+        hourly_buckets: bool,
     ) -> Result<CostReport, ViewsError> {
         let rows = self.projection.cost_summary(agent, since).await?;
         let mut report = CostReport::default();
@@ -573,6 +596,16 @@ impl Views {
             .await?
             .into_iter()
             .map(ModelCostView::from)
+            .collect();
+        // The time series ignores the agent filter deliberately: the
+        // chart answers "what is the fleet burning", the agent filter
+        // narrows the tables. Revisit if a per-agent chart is wanted.
+        report.buckets = self
+            .projection
+            .cost_by_time_bucket(hourly_buckets, since)
+            .await?
+            .into_iter()
+            .map(CostBucketView::from)
             .collect();
         Ok(report)
     }
@@ -1101,7 +1134,14 @@ mod tests {
         assert_eq!(views.event_count().await.unwrap(), 0);
         assert!(views.workers().await.unwrap().is_empty());
         assert!(views.events(None, None, None, 50).await.unwrap().is_empty());
-        assert!(views.costs(None, None).await.unwrap().agents.is_empty());
+        assert!(
+            views
+                .costs(None, None, false)
+                .await
+                .unwrap()
+                .agents
+                .is_empty()
+        );
         assert!(
             views
                 .agent_costs("no-such-agent", None, 10)

@@ -466,6 +466,43 @@ impl ProjectionStore {
         }))
     }
 
+    /// Cost-bearing events summed per time bucket, oldest first. The
+    /// bucket key is a fixed-width prefix of the RFC3339 UTC timestamp
+    /// — `substr` instead of SQLite's date functions, which cannot
+    /// parse our nanosecond fractions: 10 chars = `YYYY-MM-DD` (day),
+    /// 13 chars = `YYYY-MM-DDTHH` (hour). Buckets with no cost events
+    /// simply don't appear; the caller fills gaps for display.
+    pub async fn cost_by_time_bucket(
+        &self,
+        hourly: bool,
+        since: Option<&str>,
+    ) -> Result<Vec<CostBucketSummary>, StoreError> {
+        let prefix_len = if hourly { 13 } else { 10 };
+        let mut sql = format!(
+            "SELECT substr(timestamp, 1, {prefix_len}) AS bucket, \
+             COALESCE(SUM(total_cost), 0.0) AS total_cost \
+             FROM events \
+             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL",
+        );
+        if since.is_some() {
+            sql.push_str(" AND timestamp >= ?");
+        }
+        sql.push_str(" GROUP BY bucket ORDER BY bucket ASC");
+
+        let mut q = sqlx::query(&sql);
+        if let Some(s) = since {
+            q = q.bind(s);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| CostBucketSummary {
+                bucket: row.get::<String, _>(0),
+                total_cost: row.get::<f64, _>(1),
+            })
+            .collect())
+    }
+
     /// Cost-bearing events grouped per model, biggest spender first —
     /// across every agent, or one agent when `agent` is set. See
     /// [`Self::cost_by_invocation`] for the shared filter rationale.
@@ -579,6 +616,15 @@ pub struct InvocationCostSummary {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
+}
+
+/// One time bucket's cost sum — a row from
+/// [`ProjectionStore::cost_by_time_bucket`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostBucketSummary {
+    /// `YYYY-MM-DD` (daily) or `YYYY-MM-DDTHH` (hourly), UTC.
+    pub bucket: String,
+    pub total_cost: f64,
 }
 
 /// One model's share of an agent's spend — a row from
@@ -1395,6 +1441,45 @@ mod tests {
         assert_eq!(all_models.len(), 1);
         assert_eq!(all_models[0].event_count, 4);
         assert!((all_models[0].total_cost - 9.35).abs() < 1e-9);
+    }
+
+    /// Bucketing invariants that hold whatever the wall clock says:
+    /// every cost event lands in exactly one bucket, bucket sums equal
+    /// the grand total, hourly refines daily, and keys carry the
+    /// fixed-width UTC prefix shape.
+    #[tokio::test]
+    async fn cost_buckets_partition_the_spend() {
+        let (store, _dir) = open_store().await;
+        for cost in [0.10, 0.05, 0.20] {
+            store
+                .insert_event(&sample_llm_response_with_cost(
+                    "alpha",
+                    Uuid::now_v7(),
+                    cost,
+                ))
+                .await
+                .unwrap();
+        }
+        let daily = store.cost_by_time_bucket(false, None).await.unwrap();
+        let hourly = store.cost_by_time_bucket(true, None).await.unwrap();
+        let day_sum: f64 = daily.iter().map(|b| b.total_cost).sum();
+        let hour_sum: f64 = hourly.iter().map(|b| b.total_cost).sum();
+        assert!((day_sum - 0.35).abs() < 1e-9, "{daily:?}");
+        assert!((hour_sum - 0.35).abs() < 1e-9, "{hourly:?}");
+        assert!(!daily.is_empty() && daily.len() <= hourly.len());
+        for b in &daily {
+            assert_eq!(b.bucket.len(), 10, "day key shape: {}", b.bucket);
+        }
+        for b in &hourly {
+            assert_eq!(b.bucket.len(), 13, "hour key shape: {}", b.bucket);
+            assert_eq!(b.bucket.as_bytes()[10], b'T');
+        }
+        // A `since` beyond every event excludes all buckets.
+        let none = store
+            .cost_by_time_bucket(false, Some("9999-01-01"))
+            .await
+            .unwrap();
+        assert!(none.is_empty());
     }
 
     #[tokio::test]

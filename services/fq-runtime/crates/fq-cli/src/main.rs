@@ -3423,7 +3423,7 @@ async fn show_costs(
     json: bool,
 ) -> anyhow::Result<()> {
     let views = open_views(global).await?;
-    let report = views.costs(agent, since).await?;
+    let report = views.costs(agent, since, false).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
