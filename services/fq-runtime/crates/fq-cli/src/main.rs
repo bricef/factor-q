@@ -1735,6 +1735,63 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Publish `invocation.ambiguous` at most once per invocation (#64).
+///
+/// Claims the worker store's one-shot stamp (`ambiguous_reported_at`)
+/// before publishing, so a restart that re-classifies the same
+/// invocation as ambiguous — or re-fails the same resume — does not
+/// re-fire the event. `stamp_key` is the store's invocation-id string
+/// (normally equal to `invocation_id`; the scan path passes the raw
+/// row id so a malformed stored uuid still stamps its own row).
+///
+/// Claim-then-publish is deliberately at-most-once: a publish failure
+/// after a successful claim is logged and not retried. A claim *error*
+/// (store unavailable) publishes anyway — it doesn't prove the event
+/// was already sent, and a possible duplicate beats re-silencing the
+/// failure mode #64 exists to make loud.
+async fn publish_ambiguous_once(
+    worker_store: &fq_runtime::WorkerStore,
+    bus: &EventBus,
+    agent_id: AgentId,
+    invocation_id: Uuid,
+    stamp_key: &str,
+    payload: fq_runtime::events::InvocationAmbiguousPayload,
+) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match worker_store
+        .mark_ambiguous_reported(stamp_key, now_ms)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                invocation_id = %invocation_id,
+                "invocation.ambiguous already reported for this invocation; not re-firing"
+            );
+            return;
+        }
+        Err(err) => {
+            tracing::error!(
+                invocation_id = %invocation_id,
+                error = %err,
+                "failed to claim ambiguous-report stamp; publishing anyway (may duplicate)"
+            );
+        }
+    }
+    let event = Event::new(
+        agent_id,
+        invocation_id,
+        EventPayload::InvocationAmbiguous(payload),
+    );
+    if let Err(err) = bus.publish(&event).await {
+        tracing::error!(
+            invocation_id = %invocation_id,
+            error = %err,
+            "failed to publish invocation.ambiguous (stamp already claimed; will not retry)"
+        );
+    }
+}
+
 /// Long-running foreground runtime. Connects to NATS, opens the
 /// projection store, spawns two tokio tasks — the projection
 /// consumer and the NATS trigger dispatcher — and waits for
@@ -1927,31 +1984,28 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                         continue;
                     }
                 };
-                let event = Event::new(
-                    agent_id,
-                    uuid::Uuid::parse_str(&inv.state.invocation_id).unwrap_or_else(|_| {
+                let event_invocation_id = uuid::Uuid::parse_str(&inv.state.invocation_id)
+                    .unwrap_or_else(|_| {
                         // Fall back to a fresh uuid if the
                         // stored id ever isn't valid (shouldn't
                         // happen — every id is a v7 uuid).
                         uuid::Uuid::now_v7()
-                    }),
-                    EventPayload::InvocationAmbiguous(
-                        fq_runtime::events::InvocationAmbiguousPayload {
-                            stuck_entity: entity.to_string(),
-                            stuck_call_id: call_id,
-                            note:
-                                "worker startup categorisation found a `dispatched` row without `completed`"
-                                    .to_string(),
-                        },
-                    ),
-                );
-                if let Err(err) = bus.publish(&event).await {
-                    tracing::warn!(
-                        invocation_id = %inv.state.invocation_id,
-                        error = %err,
-                        "failed to publish invocation.ambiguous"
-                    );
-                }
+                    });
+                publish_ambiguous_once(
+                    worker_store.as_ref(),
+                    &bus,
+                    agent_id,
+                    event_invocation_id,
+                    &inv.state.invocation_id,
+                    fq_runtime::events::InvocationAmbiguousPayload {
+                        stuck_entity: entity.to_string(),
+                        stuck_call_id: call_id,
+                        note:
+                            "worker startup categorisation found a `dispatched` row without `completed`"
+                                .to_string(),
+                    },
+                )
+                .await;
                 // The coordination consumer (spawned below)
                 // picks up the `invocation.ambiguous` event we
                 // just published and upserts the
@@ -2167,6 +2221,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         let runner = resume_runner.clone();
         let llm_arc = llm.clone();
         let bus = bus.clone();
+        let wstore = worker_store.clone();
         resume_handles.push(tokio::spawn(async move {
             match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
                 Ok(outcome) => tracing::info!(
@@ -2177,18 +2232,20 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 Err(err) => {
                     let note = format!("automatic resume failed: {err}");
                     tracing::error!(invocation_id = %inv_id, agent_id = %agent_id, error = %err, "resume failed; emitting invocation.ambiguous");
-                    let event = Event::new(
-                        agent_id, inv_id,
-                        EventPayload::InvocationAmbiguous(fq_runtime::events::InvocationAmbiguousPayload {
+                    publish_ambiguous_once(
+                        wstore.as_ref(),
+                        &bus,
+                        agent_id,
+                        inv_id,
+                        &inv_id.to_string(),
+                        fq_runtime::events::InvocationAmbiguousPayload {
                             stuck_entity: "recovery".to_string(),
                             stuck_call_id: inv_id.to_string(),
                             note,
-                        }),
-                    );
-                    if let Err(publish_err) = bus.publish(&event).await {
-                        tracing::error!(invocation_id = %inv_id, error = %publish_err, "failed to publish failed-resume invocation.ambiguous");
-                    }
-                },
+                        },
+                    )
+                    .await;
+                }
             }
         }));
     }
@@ -2235,6 +2292,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // state. Stale-worker sweep runs on a timer.
     let (coord_shutdown_tx, coord_shutdown_rx) = tokio::sync::oneshot::channel();
     let coord_consumer = fq_runtime::CoordinationConsumer::new(bus.clone(), cp_store.clone())
+        .with_runtime_id(runtime_id)
         .with_self_worker_id(worker_id.as_str().to_string());
     let mut coord_handle = tokio::spawn(async move { coord_consumer.run(coord_shutdown_rx).await });
 
@@ -4375,6 +4433,97 @@ mod workers_tests {
         assert_eq!(v["last_heartbeat_ms"], 1_700_000_000_000_i64);
         assert_eq!(v["in_flight_count"], 3);
         assert!(v.get("heartbeat_age_ms").is_none());
+    }
+}
+
+#[cfg(test)]
+mod ambiguous_once_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// The #64 idempotency AC: a persistently-failing recovery
+    /// (re-classified or re-failed on every daemon restart) emits
+    /// `invocation.ambiguous` exactly once, not once per restart.
+    #[tokio::test]
+    async fn publish_ambiguous_once_fires_exactly_once_per_invocation() {
+        let server = fq_test_support::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let dir = tempfile::tempdir().unwrap();
+        let wstore = fq_runtime::WorkerStore::open(&dir.path().join("worker.db"))
+            .await
+            .expect("open worker store");
+
+        let inv_id = Uuid::now_v7();
+        let agent = format!("amb-once-{}", Uuid::now_v7().simple());
+        wstore
+            .upsert_invocation_state(&fq_runtime::worker::InvocationStateRow {
+                invocation_id: inv_id.to_string(),
+                agent_id: agent.clone(),
+                schema_version: 1,
+                phase: "awaiting_model".to_string(),
+                state_blob: b"{}".to_vec(),
+                step_index: 0,
+                started_at: 1_000,
+                updated_at: 1_000,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
+            })
+            .await
+            .unwrap();
+
+        let mut sub = bus
+            .subscribe(format!("fq.agent.{agent}.invocation.ambiguous"))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let payload = || fq_runtime::events::InvocationAmbiguousPayload {
+            stuck_entity: "recovery".to_string(),
+            stuck_call_id: inv_id.to_string(),
+            note: "resume failed (test)".to_string(),
+        };
+        let agent_id = AgentId::new(agent.clone()).unwrap();
+
+        // First failure publishes…
+        publish_ambiguous_once(
+            &wstore,
+            &bus,
+            agent_id.clone(),
+            inv_id,
+            &inv_id.to_string(),
+            payload(),
+        )
+        .await;
+        let event = tokio::time::timeout(Duration::from_secs(5), sub.next())
+            .await
+            .expect("invocation.ambiguous within 5s")
+            .expect("stream open")
+            .expect("event deserialises");
+        assert!(matches!(
+            event.payload,
+            EventPayload::InvocationAmbiguous(_)
+        ));
+
+        // …the second (same invocation, "next restart") is stamped out.
+        publish_ambiguous_once(
+            &wstore,
+            &bus,
+            agent_id,
+            inv_id,
+            &inv_id.to_string(),
+            payload(),
+        )
+        .await;
+        let quiet = tokio::time::timeout(Duration::from_millis(500), sub.next()).await;
+        assert!(
+            quiet.is_err(),
+            "second failure must not re-publish invocation.ambiguous"
+        );
     }
 }
 

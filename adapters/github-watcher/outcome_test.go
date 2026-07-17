@@ -153,6 +153,24 @@ func TestReactZeroRetriesEscalatesOnFirstFailure(t *testing.T) {
 	}
 }
 
+func TestReactAmbiguousEscalatesToFailed(t *testing.T) {
+	src := &labelSource{}
+	r := NewOutcomeReactor(src, outcomeConfig(), discardLogger())
+	triggeredThen(r, "inv-9", 12, OutcomeEvent{Kind: OutcomeAmbiguous, InvocationID: "inv-9"})
+	// Straight to failed — recovery limbo needs an operator, not a
+	// retry — and never a false in-review.
+	want := []string{"relabel #12 in-progress->failed"}
+	if !slices.Equal(src.ops, want) {
+		t.Errorf("ops = %v, want %v", src.ops, want)
+	}
+	// The binding is forgotten on first reaction: a duplicate
+	// ambiguous event (replayed stream, daemon re-emit) is a no-op.
+	r.React(context.Background(), OutcomeEvent{Kind: OutcomeAmbiguous, InvocationID: "inv-9"})
+	if !slices.Equal(src.ops, want) {
+		t.Errorf("ops after duplicate = %v, want unchanged %v", src.ops, want)
+	}
+}
+
 // --- review sweep: merged PR -> done ---
 
 func TestSweepReviewMovesMergedToDone(t *testing.T) {
@@ -218,6 +236,11 @@ func TestOutcomeKindFromSubject(t *testing.T) {
 		"fq.agent.m0-issue-fix.failed":       {OutcomeFailed, true},
 		"fq.agent.m0-issue-fix.llm.response": {0, false},
 		"fq.agent.m0-issue-fix.tool.result":  {0, false},
+
+		"fq.agent.m0-issue-fix.invocation.ambiguous": {OutcomeAmbiguous, true},
+		// The full `.invocation.ambiguous` suffix is required — a
+		// bare trailing token must not match.
+		"fq.agent.m0-issue-fix.ambiguous": {0, false},
 	}
 	for subject, want := range cases {
 		got, ok := outcomeKindFromSubject(subject)

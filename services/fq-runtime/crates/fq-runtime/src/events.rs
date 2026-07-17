@@ -987,6 +987,13 @@ pub struct ToolDispatchedPayload {
 /// call_id it was on. The full context (parameters, request
 /// payload, etc.) is in the worker's WAL and surfaced via
 /// `fq recover` (step 9).
+///
+/// A failed automatic resume also rides this event (#64) with
+/// the sentinel `stuck_entity: "recovery"`; there is no stuck
+/// dispatch in that mode, so `stuck_call_id` carries the
+/// invocation id and `note` carries the resume error. Emission
+/// is guarded once-per-invocation by the worker store's
+/// `ambiguous_reported_at` stamp (see `mark_ambiguous_reported`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationAmbiguousPayload {
     /// Which entity in the WAL was stuck: `tool_dispatch` or
@@ -1344,6 +1351,11 @@ mod tests {
             "fq.agent.test-agent.completed"
         );
         assert_eq!(subjects::agent_failed(agent), "fq.agent.test-agent.failed");
+        assert_eq!(
+            subjects::agent_invocation_ambiguous(agent),
+            "fq.agent.test-agent.invocation.ambiguous"
+        );
+        assert_eq!(subjects::worker_orphaned("w1"), "fq.worker.w1.orphaned");
     }
 
     #[test]
@@ -2066,6 +2078,10 @@ mod tests {
             }),
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: crate::worker::WorkerId::new("w").unwrap(),
+            }),
+            EventPayload::WorkerOrphaned(WorkerOrphanedPayload {
+                worker_id: crate::worker::WorkerId::new("w").unwrap(),
+                last_heartbeat_ms: 0,
             }),
             EventPayload::McpServerLog(McpServerLogPayload {
                 server: String::new(),
