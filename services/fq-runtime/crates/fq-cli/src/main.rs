@@ -3848,7 +3848,6 @@ async fn invocation_transcript(
         Some(DEFAULT_TRUNCATE_BYTES)
     };
 
-    let config = global.resolve_config()?;
     let views = open_views(global).await?;
 
     // For --follow, subscribe to the invocation's agent subject BEFORE
@@ -3858,20 +3857,17 @@ async fn invocation_transcript(
     // live stream, then deduped at the seam. Snapshot-only mode needs no
     // NATS. The returned stream owns its connection, so `bus` may drop.
     let follow_stream = if follow {
-        let agent_id = views
-            .invocation(id)
-            .await?
-            .and_then(|invocation| invocation.agent_id)
-            .ok_or_else(|| {
-                let hint = if id.len() != 36 {
-                    " (not a full invocation id — see `fq invocation list --json`)"
-                } else {
-                    ""
-                };
-                anyhow::anyhow!(
-                    "cannot follow invocation {id}: no agent recorded for it in the projection{hint}"
-                )
-            })?;
+        let config = global.resolve_config()?;
+        let agent_id = views.agent_id_for_invocation(id).await?.ok_or_else(|| {
+            let hint = if id.len() != 36 {
+                " (not a full invocation id — see `fq invocation list --json`)"
+            } else {
+                ""
+            };
+            anyhow::anyhow!(
+                "cannot follow invocation {id}: no agent recorded for it in the projection{hint}"
+            )
+        })?;
         let bus = EventBus::connect(&config.nats.url)
             .await
             .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
