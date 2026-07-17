@@ -6,17 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 const DefaultStateBucket = "fq-cron-state"
-
-type FireState struct {
-	LastScheduled time.Time `json:"last_scheduled"`
-	PublishedAt   time.Time `json:"published_at"`
-}
 
 // StateStore persists the last acknowledged fire for each job.
 type StateStore interface {
