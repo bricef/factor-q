@@ -47,6 +47,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0006](draft/0006-api-design.md) | Runtime API design |
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
+| [0031](draft/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; shared-secret-over-TLS auth as swappable middleware |
 
 ## Related guides
 
