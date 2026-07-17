@@ -943,6 +943,7 @@ async fn trigger_agent(
     // file is shared (locks at the SQLite layer).
     let db_paths = ensure_split_dbs(&config).await?;
     let worker_store = Arc::new(
+        // allow-direct-store-open: `fq trigger` is a one-shot worker — it writes the WAL.
         fq_runtime::WorkerStore::open(&db_paths.worker)
             .await
             .with_context(|| {
@@ -1920,6 +1921,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("  control-plane db: {}", db_paths.control_plane.display());
     println!("  projection db:    {}", db_paths.projection.display());
     let store = Arc::new(
+        // allow-direct-store-open: run_daemon IS the runtime — it writes projections.
         ProjectionStore::open(&db_paths.projection)
             .await
             .with_context(|| {
@@ -1939,6 +1941,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 )
             })?,
     );
+    // allow-direct-store-open: run_daemon hosts the control plane (writer).
     // Pool ceiling scales with the fan-out bound (#70): each
     // dispatcher-run invocation is WAL-chatty, plus headroom for the
     // sweepers. Startup recovery is NOT covered — it spawns one resume
@@ -1948,6 +1951,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // the writes regardless; the ceiling only bounds waiting.
     let pool_ceiling = (config.worker.max_concurrent_invocations as u32 + 3).max(4);
     let worker_store = Arc::new(
+        // allow-direct-store-open: run_daemon owns the worker WAL (writer).
         fq_runtime::WorkerStore::open_with_pool(&db_paths.worker, pool_ceiling)
             .await
             .with_context(|| {
@@ -3793,6 +3797,8 @@ async fn invocation_drop(
     json: bool,
 ) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
+    // allow-direct-store-open: operator write path (`fq invocation drop`), not a read.
+    // allow-direct-store-open: operator write path (`fq invocation drop`), not a read.
     // The drop writes to the control-plane store, so this path runs
     // the legacy split if one is pending.
     let db_paths = ensure_split_dbs(&config).await?;
@@ -4344,6 +4350,7 @@ async fn workers_list(
 
 async fn workers_prune(global: &GlobalArgs, dry_run: bool) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
+    // allow-direct-store-open: operator write path (`fq workers prune` deletes rows).
     // Prune deletes control-plane rows, so this path runs the
     // legacy split if one is pending.
     let db_paths = ensure_split_dbs(&config).await?;
