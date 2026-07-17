@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/nats-io/nats.go v1.52.0
 	github.com/robfig/cron/v3 v3.0.1
 )
