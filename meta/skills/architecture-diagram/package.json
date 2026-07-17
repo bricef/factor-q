@@ -1,0 +1,9 @@
+{
+  "name": "fq-architecture-diagram-render",
+  "private": true,
+  "description": "WASM Graphviz fallback for render.mjs — installed on first use when no `dot` is on PATH",
+  "type": "module",
+  "dependencies": {
+    "@viz-js/viz": "^3"
+  }
+}

@@ -1,0 +1,4 @@
+# First-use install of the WASM Graphviz fallback (see render.mjs) — a
+# build artefact, reproducible from package.json.
+node_modules/
+package-lock.json
