@@ -364,7 +364,7 @@ Projection `error_kind` values use this same snake_case wire vocabulary. Rebuild
 {
   "error_kind": "budget_exceeded | llm_error | max_iterations | tool_error | sandbox_violation | runtime_error | trigger_exhausted",
   "error_message": "Agent budget of $0.50 exceeded after 5 LLM calls",
-  "phase": "llm_request | llm_response | tool_call | tool_result | setup",
+  "phase": "llm_request | llm_response | tool_call | tool_result | setup | reducer | host_step_budget | budget",
   "partial_totals": {
     "total_llm_calls": 5,
     "total_tool_calls": 3,
