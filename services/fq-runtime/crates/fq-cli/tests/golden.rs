@@ -177,6 +177,7 @@ async fn seed(dir: &Path) {
                 AgentId::new(AGENT_RESEARCHER).unwrap(),
                 inv(INV_COMPLETED),
                 EventPayload::Completed(fq_runtime::events::CompletedPayload {
+                    task_status: Default::default(),
                     result_summary: Some("Fixture complete.".into()),
                     total_llm_calls: 2,
                     total_tool_calls: 1,

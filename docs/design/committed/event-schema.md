@@ -329,10 +329,13 @@ Published by the worker on startup for an invocation in recovery limbo (#64), in
 
 ### `completed`
 
-Published when an invocation finishes successfully.
+Published when an invocation finishes without a runtime failure. Note
+that "the runtime finished cleanly" and "the task was achieved" are
+different axes — the latter is `task_status`.
 
 ```json
 {
+  "task_status": "success",
   "result_summary": "Completed research task and wrote findings to /project/output/report.md",
   "total_llm_calls": 4,
   "total_tool_calls": 7,
@@ -340,6 +343,16 @@ Published when an invocation finishes successfully.
   "total_duration_ms": 12345
 }
 ```
+
+**`task_status`** (#125): the agent's own declaration of how the *task*
+went — `success | failed | blocked | partial`, defaulting to `success`
+when absent (pre-#125 events, and runs that never declare). Orthogonal
+to the runtime axis: `failed` events with a `FailureKind` model runtime
+failure; `task_status` models "the runtime worked — was the goal
+achieved?". Declared via the terminal `report_outcome` tool, which the
+reducer harness intercepts as the terminal transition (never
+dispatched); a turn ending with no tool calls declares `success`
+implicitly.
 
 ### `failed`
 
