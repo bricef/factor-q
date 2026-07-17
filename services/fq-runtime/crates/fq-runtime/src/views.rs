@@ -164,8 +164,9 @@ pub struct ActiveInvocationView {
     pub started_at_ms: i64,
     /// Last WAL advance; long tool runs legitimately leave this old.
     pub updated_at_ms: i64,
-    /// Tool names with an open (non-completed) dispatch right now.
-    pub open_tools: Vec<String>,
+    /// Open (non-completed) tool dispatches right now — name plus
+    /// the command line when the tool is command-shaped.
+    pub open_tools: Vec<OpenToolView>,
     /// Models with an open (non-completed) LLM dispatch right now.
     pub open_llms: Vec<String>,
     /// One-line operator summary (#216), when the summariser has
@@ -173,6 +174,50 @@ pub struct ActiveInvocationView {
     /// the first line lands.
     #[serde(default)]
     pub summary: Option<String>,
+}
+
+/// One open tool dispatch on a live invocation: the tool's name, plus
+/// its command line when the parameters carry one — so the "doing"
+/// column can say WHAT is running, not just which tool has been open
+/// for four minutes.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OpenToolView {
+    pub tool_name: String,
+    /// The dispatch's command, when its parameters have a `command`
+    /// field: exec-style argv arrays join with spaces, shell-style
+    /// strings pass through. Capped server-side at
+    /// [`OPEN_TOOL_COMMAND_CAP`] chars; `None` for tools without one.
+    pub command: Option<String>,
+}
+
+/// Server-side cap on [`OpenToolView::command`] — long enough to read
+/// a real command, short enough that a pathological argv cannot bloat
+/// every active-table poll.
+pub const OPEN_TOOL_COMMAND_CAP: usize = 200;
+
+/// The command line carried by a tool dispatch's parameters, if any.
+/// Tool-agnostic on purpose: anything with a `command` field benefits
+/// (exec's argv array, shell's string), and tools without one return
+/// `None` naturally instead of needing a name allowlist.
+fn open_tool_command(parameters: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(parameters).ok()?;
+    let line = match value.get("command")? {
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        serde_json::Value::String(s) => s.clone(),
+        _ => return None,
+    };
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() > OPEN_TOOL_COMMAND_CAP {
+        let capped: String = line.chars().take(OPEN_TOOL_COMMAND_CAP).collect();
+        return Some(format!("{capped}…"));
+    }
+    Some(line)
 }
 
 /// One row in the invocation list: a coordination-ownership row, or (in
@@ -832,7 +877,10 @@ impl Views {
                 .open_tool_dispatches_for_invocation(&row.invocation_id)
                 .await?
                 .into_iter()
-                .map(|t| t.tool_name)
+                .map(|t| OpenToolView {
+                    command: open_tool_command(&t.parameters),
+                    tool_name: t.tool_name,
+                })
                 .collect();
             let open_llms = self
                 .worker
@@ -1125,6 +1173,29 @@ mod tests {
         assert_eq!(bad.started_at_ms, 0);
     }
 
+    /// The command gist: argv arrays join, strings pass through,
+    /// absent/odd shapes are None, and the cap truncates on a char
+    /// boundary with an ellipsis.
+    #[test]
+    fn open_tool_command_reads_both_shapes_and_caps() {
+        assert_eq!(
+            open_tool_command(r#"{"command":["cargo","test","--lib"],"cwd":"/w"}"#),
+            Some("cargo test --lib".to_string())
+        );
+        assert_eq!(
+            open_tool_command(r#"{"command":"[\"ls\", \"-la\"]","cwd":"/w"}"#),
+            Some("[\"ls\", \"-la\"]".to_string())
+        );
+        assert_eq!(open_tool_command(r#"{"path":"/tmp/x"}"#), None);
+        assert_eq!(open_tool_command(r#"{"command":42}"#), None);
+        assert_eq!(open_tool_command("not json"), None);
+        assert_eq!(open_tool_command(r#"{"command":[]}"#), None);
+        let long = format!(r#"{{"command":["{}"]}}"#, "x".repeat(300));
+        let capped = open_tool_command(&long).unwrap();
+        assert_eq!(capped.chars().count(), OPEN_TOOL_COMMAND_CAP + 1);
+        assert!(capped.ends_with('…'));
+    }
+
     // ---- DB wiring smoke test (empty, freshly-created stores) ----
 
     /// Create the three stores' schemas in one temp DB file, then open a
@@ -1395,7 +1466,9 @@ mod tests {
         assert_eq!(active[0].agent_id, "agent-a");
         assert_eq!(active[0].phase, "reducing");
         assert_eq!(active[0].step_index, 3);
-        assert_eq!(active[0].open_tools, vec!["exec"]);
+        assert_eq!(active[0].open_tools.len(), 1);
+        assert_eq!(active[0].open_tools[0].tool_name, "exec");
+        assert_eq!(active[0].open_tools[0].command, None);
     }
 
     /// An open LLM dispatch counts as working the same way a tool dispatch

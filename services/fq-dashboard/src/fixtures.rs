@@ -96,7 +96,10 @@ fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
             step_index: 165,
             started_at_ms: NOW_MS - 600_000,
             updated_at_ms: NOW_MS - 45_000,
-            open_tools: vec!["exec".to_string()],
+            open_tools: vec![fq_runtime::views::OpenToolView {
+                tool_name: "exec".to_string(),
+                command: Some("gh issue view 86 --repo bricef/factor-q".to_string()),
+            }],
             open_llms: vec![],
             summary: Some("Fixing #83: SECURITY.md drafted, running just ci".to_string()),
         },

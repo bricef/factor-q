@@ -547,7 +547,17 @@ pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
         let mut doing: Vec<String> = i
             .open_tools
             .iter()
-            .map(|t| format!("tool {}", esc(t)))
+            .map(|t| match t.command.as_deref() {
+                // The command is the operator's answer to "doing
+                // what?" — show it muted beside the tool name,
+                // display-capped (the wire already caps harder).
+                Some(command) => format!(
+                    r#"tool {} <span class="muted">— {}</span>"#,
+                    esc(&t.tool_name),
+                    esc(&display_cap(command, 72)),
+                ),
+                None => format!("tool {}", esc(&t.tool_name)),
+            })
             .collect();
         doing.extend(i.open_llms.iter().map(|m| format!("llm {}", esc(m))));
         let doing = if doing.is_empty() {
@@ -875,6 +885,17 @@ fn fmt_grouped(n: i64) -> String {
         out.push(c);
     }
     if n < 0 { format!("-{out}") } else { out }
+}
+
+/// Char-boundary display cap with an ellipsis — for one-line gists
+/// inside table cells (the wire may carry more than a cell should).
+fn display_cap(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let capped: String = s.chars().take(max_chars).collect();
+        format!("{capped}…")
+    }
 }
 
 /// Compact token count as bare text ("171.39M", "58.9K", "1,597") —
@@ -1704,14 +1725,22 @@ mod tests {
             step_index: 165,
             started_at_ms: 0,
             updated_at_ms: 540_000,
-            open_tools: vec!["exec".into()],
+            open_tools: vec![fq_runtime::views::OpenToolView {
+                tool_name: "exec".into(),
+                command: Some("gh issue view 86 --repo bricef/factor-q".into()),
+            }],
             open_llms: vec![],
             summary: None,
         }];
         let html = invocations_page(&active_rows, &[], InvocationFilters::default(), 600_000);
         assert!(html.contains("Active now"), "got: {html}");
         assert!(html.contains(r#"<a href="/invocations/0123456789abcdef">01234567</a>"#));
-        assert!(html.contains("tool exec"), "got: {html}");
+        assert!(
+            html.contains(
+                r#"tool exec <span class="muted">— gh issue view 86 --repo bricef/factor-q</span>"#
+            ),
+            "got: {html}"
+        );
         assert!(html.contains("<td>10m ago</td>"), "started age: {html}");
         assert!(html.contains("<td>1m ago</td>"), "advanced age: {html}");
         // The list below gains its heading only when active is present.
