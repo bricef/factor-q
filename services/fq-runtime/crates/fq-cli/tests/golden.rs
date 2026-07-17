@@ -161,8 +161,9 @@ fn state_row(
     }
 }
 
-async fn seed(db_path: &Path) {
-    let proj = ProjectionStore::open(db_path)
+async fn seed(dir: &Path) {
+    let paths = fq_runtime::db::RuntimeDbPaths::under(dir);
+    let proj = ProjectionStore::open(&paths.projection)
         .await
         .expect("open projection");
 
@@ -217,7 +218,9 @@ async fn seed(db_path: &Path) {
     // Worker WAL: a full llm+tool transcript for INV_COMPLETED, an open
     // (dispatched, uncompleted) LLM call for INV_INFLIGHT, and terminal
     // state for INV_FAILED.
-    let worker = WorkerStore::open(db_path).await.expect("open worker store");
+    let worker = WorkerStore::open(&paths.worker)
+        .await
+        .expect("open worker store");
     worker
         .upsert_invocation_state(&state_row(
             INV_COMPLETED,
@@ -389,7 +392,7 @@ async fn seed(db_path: &Path) {
 
     // Control plane: workers in each lifecycle state, ownership rows,
     // and one archived invocation with no surviving worker state.
-    let cp = ControlPlaneStore::open(db_path)
+    let cp = ControlPlaneStore::open(&paths.control_plane)
         .await
         .expect("open control plane");
     cp.register_worker("worker-alpha", "golden-host", BASE_MS)
@@ -460,10 +463,9 @@ fn fixture() -> &'static Fixture {
     static FIXTURE: OnceLock<Fixture> = OnceLock::new();
     FIXTURE.get_or_init(|| {
         let dir = tempfile::tempdir().expect("fixture tempdir");
-        let db_path = dir.path().join("events.db");
         tokio::runtime::Runtime::new()
             .expect("fixture runtime")
-            .block_on(seed(&db_path));
+            .block_on(seed(dir.path()));
         Fixture { dir }
     })
 }
@@ -624,6 +626,42 @@ fn check_golden(name: &str, args: &[&str], nats: Nats, volatile_markers: &[&str]
 // ------------------------------------------------------------------
 // The snapshots: every DB-backed read command, human + JSON.
 // ------------------------------------------------------------------
+
+/// A leftover v1 single-file layout is a migration hint, not a read:
+/// pin the refusal message so read commands never silently open (or
+/// worse, recreate) the legacy file.
+#[test]
+fn legacy_single_file_layout_is_a_hint_not_a_read() {
+    let dir = tempfile::tempdir().expect("legacy tempdir");
+    std::fs::write(dir.path().join("events.db"), b"not a real db").unwrap();
+    // RUST_LOG=error, not =off: fatal CLI errors currently render through
+    // the tracing filter (single exit point in main), so =off silences
+    // them entirely — that surface problem is #190's, not this test's.
+    let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+        .args(["invocation", "list"])
+        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_AGENTS_DIR", "/nonexistent/agents")
+        .env("FQ_CACHE_DIR", dir.path())
+        .env("FQ_NATS_URL", "nats://127.0.0.1:1")
+        .env("RUST_LOG", "error")
+        .output()
+        .expect("run fq binary");
+    let exit = out.status.code();
+    // The hint currently lands on *stdout*: fatal CLI errors render
+    // through the tracing fmt subscriber, which writes to stdout.
+    // Routing fatal errors to stderr is #190's cleanup; this test pins
+    // the message text and will move streams with it.
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(exit, Some(0), "a legacy layout must not read");
+    assert!(
+        rendered.contains("legacy single-file database"),
+        "output should carry the migration hint; got:\n{rendered}"
+    );
+}
 
 #[test]
 fn golden_status_human() {
