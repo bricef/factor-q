@@ -1,0 +1,11 @@
+{
+  "worker": {
+    "worker_id": "worker-alpha",
+    "host": "golden-host",
+    "registered_at_ms": 1767323045000,
+    "last_heartbeat_ms": 1767323045000,
+    "status": "stale",
+    "in_flight_count": 0
+  },
+  "owned": []
+}

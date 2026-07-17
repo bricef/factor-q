@@ -1,0 +1,24 @@
+factor-q status
+
+Config
+  NATS URL:         <NATS_URL>
+  agents dir:       /nonexistent/agents
+  cache dir:        <CACHE_DIR>
+
+NATS
+  connection:       ✓ connected at <NATS_URL>
+
+Stream: fq-events
+  state:            ✗ stream not found: jetstream error: 404 (code stream not found, error code 10059)
+
+Stream: fq-triggers
+  state:            ✗ stream not found: jetstream error: 404 (code stream not found, error code 10059)
+
+Projection
+  path:             <CACHE_DIR>/events.db
+  rows:             #
+
+Recovery state
+  Stale workers: 2
+    -> `fq workers list --stale-only` to inspect
+    -> `fq workers prune` to remove them (`--dry-run` to preview)

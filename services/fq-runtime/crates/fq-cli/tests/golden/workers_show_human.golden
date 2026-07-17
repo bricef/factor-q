@@ -1,0 +1,5 @@
+Worker: worker-alpha
+  host:      golden-host
+  status:    stale
+  hb-age:    stale
+  in-flight: 0

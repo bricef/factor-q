@@ -1,0 +1,26 @@
+[
+  {
+    "worker_id": "worker-alpha",
+    "host": "golden-host",
+    "registered_at_ms": 1767323045000,
+    "last_heartbeat_ms": 1767323045000,
+    "status": "stale",
+    "in_flight_count": 0
+  },
+  {
+    "worker_id": "worker-beta",
+    "host": "golden-host",
+    "registered_at_ms": 1767323046000,
+    "last_heartbeat_ms": 1767323046000,
+    "status": "alive",
+    "in_flight_count": 0
+  },
+  {
+    "worker_id": "worker-omega",
+    "host": "golden-host",
+    "registered_at_ms": 1767323047000,
+    "last_heartbeat_ms": 1767323047000,
+    "status": "shutdown",
+    "in_flight_count": 0
+  }
+]

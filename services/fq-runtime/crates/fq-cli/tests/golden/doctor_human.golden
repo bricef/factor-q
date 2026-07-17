@@ -1,0 +1,14 @@
+factor-q doctor
+
+Verdict: issues found — see below.
+
+Workers: 1 alive, 1 stale, 1 shutdown
+  -> `fq workers list --stale-only` to inspect
+Current executions: 1 in-flight (0 working, 1 stuck)
+  -> 1 not advanced in >30s: 3a000000
+  -> `fq invocation show <id>` to inspect, `fq invocation drop <id>` to triage
+Ambiguous invocations: 0
+Permanent failures: 1
+  tool_error: 1
+  -> `fq invocation list --status=failed` to inspect
+Dead-letters: none

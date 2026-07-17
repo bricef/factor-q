@@ -1,0 +1,4 @@
+worker                       status   hb-age     in-flight host
+worker-alpha                 stale    stale      0        golden-host
+worker-beta                  alive    stale      0        golden-host
+worker-omega                 shutdown stale      0        golden-host

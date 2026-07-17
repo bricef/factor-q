@@ -1,0 +1,45 @@
+[
+  {
+    "kind": "prompt",
+    "timestamp_ms": 1767323045000,
+    "system": "You are a deterministic fixture.",
+    "user": "Summarise the fixture, then read a file."
+  },
+  {
+    "kind": "assistant",
+    "timestamp_ms": 1767323045000,
+    "model": "claude-haiku",
+    "content": "Reading the fixture file first.",
+    "tool_calls": [
+      {
+        "tool_call_id": "tc-1",
+        "tool_name": "read_file",
+        "parameters": {
+          "path": "fixture.txt"
+        }
+      }
+    ],
+    "cost_usd": 0.0125,
+    "is_error": false
+  },
+  {
+    "kind": "tool_result",
+    "timestamp_ms": 1767323046500,
+    "tool_call_id": "tc-1",
+    "tool_name": "read_file",
+    "parameters": {
+      "path": "fixture.txt"
+    },
+    "output": "{\"bytes\":42,\"content\":\"deterministic\"}",
+    "is_error": false
+  },
+  {
+    "kind": "assistant",
+    "timestamp_ms": 1767323048000,
+    "model": "claude-haiku",
+    "content": "The fixture file says: deterministic.",
+    "tool_calls": [],
+    "cost_usd": 0.0125,
+    "is_error": false
+  }
+]

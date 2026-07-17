@@ -1,0 +1,42 @@
+[
+  {
+    "invocation_id": "4e000000-0000-7000-8000-000000000004",
+    "agent_id": "fixer",
+    "worker_id": "fixer",
+    "status": "completed",
+    "assigned_at_ms": 1767323076000,
+    "started_at_ms": 1767323076000,
+    "archived": false,
+    "summary": null
+  },
+  {
+    "invocation_id": "3a000000-0000-7000-8000-000000000003",
+    "agent_id": "researcher",
+    "worker_id": "researcher",
+    "status": "in_flight",
+    "assigned_at_ms": 1767323065000,
+    "started_at_ms": 1767323065000,
+    "archived": false,
+    "summary": null
+  },
+  {
+    "invocation_id": "2f000000-0000-7000-8000-000000000002",
+    "agent_id": "fixer",
+    "worker_id": "fixer",
+    "status": "failed",
+    "assigned_at_ms": 1767323057000,
+    "started_at_ms": 1767323057000,
+    "archived": false,
+    "summary": null
+  },
+  {
+    "invocation_id": "1c000000-0000-7000-8000-000000000001",
+    "agent_id": "researcher",
+    "worker_id": "researcher",
+    "status": "completed",
+    "assigned_at_ms": 1767323050000,
+    "started_at_ms": 1767323050000,
+    "archived": false,
+    "summary": null
+  }
+]

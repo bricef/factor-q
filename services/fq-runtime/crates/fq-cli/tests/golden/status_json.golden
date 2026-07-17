@@ -1,0 +1,32 @@
+{
+  "nats_url": "<NATS_URL>",
+  "agents_dir": "/nonexistent/agents",
+  "cache_dir": "<CACHE_DIR>",
+  "nats_connected": true,
+  "streams": [
+    {
+      "unavailable": {
+        "stream": "fq-events",
+        "error": "stream not found: jetstream error: 404 (code stream not found, error code 10059)"
+      }
+    },
+    {
+      "unavailable": {
+        "stream": "fq-triggers",
+        "error": "stream not found: jetstream error: 404 (code stream not found, error code 10059)"
+      }
+    }
+  ],
+  "projection_path": "<CACHE_DIR>/events.db",
+  "initialised": true,
+  "projection_rows": 8,
+  "recovery": {
+    "ambiguous": 0,
+    "stale_workers": 2,
+    "stale_worker_ids": [
+      "worker-alpha",
+      "worker-beta"
+    ]
+  },
+  "store_error": null
+}
