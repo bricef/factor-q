@@ -1120,6 +1120,7 @@ mod tests {
             intent_at: 1,
             dispatched_at: Some(2),
             completed_at: Some(3),
+            seq: None,
         };
         let view = ToolDispatchView::from(row);
         assert_eq!(view.tool_name, "file_read");

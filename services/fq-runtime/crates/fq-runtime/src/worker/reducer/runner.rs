@@ -44,7 +44,7 @@ use crate::events::{
     self, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
     HostNoticePayload, InvocationArchivedPayload, InvocationTotals, LlmCallOrigin,
     LlmRequestPayload, LlmResponsePayload, Message, MessageRole, RequestParams, StopReason,
-    ToolCallPayload, ToolErrorKind, ToolResultPayload, TriggerSource, TriggeredPayload,
+    ToolCallPayload, ToolErrorKind, ToolResultPayload, ToolSchema, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::mcp::{
@@ -756,18 +756,17 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             );
         }
 
-        let agent_config = AgentConfig {
-            agent_id: agent_id.clone(),
-            model: agent.model().to_string(),
-            system_prompt: agent.system_prompt().to_string(),
-            tools_available: tool_schemas.clone(),
-            allowed_tool_names: allowed_tool_names.clone(),
-            // Precedence: per-agent override (definition) -> daemon
-            // config default -> built-in fallback (baked into the
-            // config default). Issue #9 / Design Principle 8.
-            max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
-            effort: agent.effort(),
-        };
+        let started_at_ms = self.config.clock.unix_now_ms();
+        let (agent_config, static_context) = self
+            .build_invocation_setup(
+                agent,
+                workspace.as_deref(),
+                delivery_attempt,
+                started_at_ms,
+                tool_schemas.clone(),
+                allowed_tool_names.clone(),
+            )
+            .await;
 
         let trigger = TriggerPayload {
             source: match trigger_source {
@@ -820,7 +819,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         let state: Vec<u8> = Vec::new();
         let last_result: Option<CapabilityResult> = None;
-        let started_at_ms = self.config.clock.unix_now_ms();
         let step_index_start: u32 = 0;
 
         // Step-0 context: the workspace preamble (the agent is *told*
@@ -838,17 +836,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // is persisted and re-used verbatim on resume, so both paths
         // agree; a fresh `unix_now_ms()` here also perturbs the sim
         // clock sequence.
-        let static_context = merge_step0_context(
-            Some(invocation_preamble(
-                workspace.as_deref(),
-                &agent_id,
-                delivery_attempt,
-                agent.budget(),
-                agent_config.max_iterations,
-                started_at_ms,
-            )),
-            self.read_static_resources(agent).await,
-        );
 
         let outcome = self
             .run_loop_inner(
@@ -1029,10 +1016,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
 
         // Build chronological list of completed capabilities.
-        let mut completed: Vec<(i64, CapabilityResult)> = Vec::new();
+        let mut completed: Vec<((Option<i64>, i64), CapabilityResult)> = Vec::new();
         for r in &tools {
             if r.status == DispatchStatus::Completed {
-                completed.push((r.completed_at.unwrap_or(0), tool_row_to_capability(r)));
+                completed.push((
+                    replay_sort_key(r.seq, r.completed_at),
+                    tool_row_to_capability(r),
+                ));
             }
         }
         for r in &llms {
@@ -1066,9 +1056,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     message,
                 )));
             }
-            completed.push((r.completed_at.unwrap_or(0), llm_row_to_capability(r)?));
+            completed.push((
+                replay_sort_key(r.seq, r.completed_at),
+                llm_row_to_capability(r)?,
+            ));
         }
-        completed.sort_by_key(|x| x.0);
+        completed.sort_by(|a, b| match (a.0.0, b.0.0) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            _ => a.0.1.cmp(&b.0.1),
+        });
 
         // Regroup each model turn's tool results into the single
         // capability the live loop produced. A turn with >1 tool call is
@@ -1125,18 +1121,16 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         warn_on_deprecated_bare_grants(&agent_id, agent.tools());
         let allowed_tool_names = canonical_tool_names(agent.tools());
         let tool_schemas = base_tools.build_schemas(&allowed_tool_names);
-        let agent_config = AgentConfig {
-            agent_id: agent_id.clone(),
-            model: agent.model().to_string(),
-            system_prompt: agent.system_prompt().to_string(),
-            tools_available: tool_schemas,
-            allowed_tool_names: allowed_tool_names.clone(),
-            // Precedence: per-agent override (definition) -> daemon
-            // config default -> built-in fallback (baked into the
-            // config default). Issue #9 / Design Principle 8.
-            max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
-            effort: agent.effort(),
-        };
+        let (agent_config, step0_static_context) = self
+            .build_invocation_setup(
+                agent,
+                workspace.as_deref(),
+                None,
+                state_row.started_at,
+                tool_schemas,
+                allowed_tool_names.clone(),
+            )
+            .await;
         // Reconstruct the original trigger from the state row (v5).
         // Replay starts at step 0, and step 0 seeds the conversation
         // from the trigger — resuming with a null trigger would
@@ -1158,17 +1152,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // exact for the common case and the sim harness; a resumed run
         // of a redelivered trigger would show `attempt: 1` rather than
         // the original count (issue #87).
-        let step0_static_context = merge_step0_context(
-            Some(invocation_preamble(
-                workspace.as_deref(),
-                &agent_id,
-                None,
-                agent.budget(),
-                agent_config.max_iterations,
-                state_row.started_at,
-            )),
-            self.read_static_resources(agent).await,
-        );
 
         // Replay the reducer deterministically through every
         // completed action. The reducer is pure; reading the
@@ -1693,6 +1676,42 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         )
         .await?;
         Err(ExecutorError::InvocationFailed { kind, message })
+    }
+
+    /// Build reducer configuration and deterministic step-0 context for both
+    /// fresh and resumed invocations. Workspace provisioning/reattachment stays
+    /// path-specific, while the resulting binding is consumed here identically.
+    async fn build_invocation_setup(
+        &self,
+        agent: &Agent,
+        workspace: Option<&Path>,
+        delivery_attempt: Option<u32>,
+        started_at_ms: i64,
+        tool_schemas: Vec<ToolSchema>,
+        allowed_tool_names: Vec<String>,
+    ) -> (AgentConfig, Option<String>) {
+        let agent_id = agent.id().clone();
+        let config = AgentConfig {
+            agent_id: agent_id.clone(),
+            model: agent.model().to_string(),
+            system_prompt: agent.system_prompt().to_string(),
+            tools_available: tool_schemas,
+            allowed_tool_names,
+            max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
+            effort: agent.effort(),
+        };
+        let context = merge_step0_context(
+            Some(invocation_preamble(
+                workspace,
+                &agent_id,
+                delivery_attempt,
+                agent.budget(),
+                config.max_iterations,
+                started_at_ms,
+            )),
+            self.read_static_resources(agent).await,
+        );
+        (config, context)
     }
 
     /// Read the agent's `static_resources` pins through the MCP
@@ -3841,6 +3860,13 @@ fn tool_row_to_result(row: &ToolDispatchRow) -> ToolCallResult {
     }
 }
 
+/// Order v9 WAL rows by their shared completion sequence. Legacy rows have no
+/// sequence, so they retain the pre-v9 timestamp ordering (including its
+/// same-millisecond limitation) and sort after sequenced rows.
+fn replay_sort_key(seq: Option<i64>, completed_at: Option<i64>) -> (Option<i64>, i64) {
+    (seq, completed_at.unwrap_or(0))
+}
+
 /// Regroup a chronologically-ordered capability stream so each model
 /// turn's tool results collapse into the single capability the live
 /// loop emitted: a lone [`CapabilityResult::ToolResult`] for a
@@ -3854,7 +3880,9 @@ fn tool_row_to_result(row: &ToolDispatchRow) -> ToolCallResult {
 /// model call only starts once the turn's results are integrated — so
 /// each run becomes one capability. Non-tool capabilities pass through
 /// in place.
-fn coalesce_tool_results(ordered: Vec<(i64, CapabilityResult)>) -> Vec<CapabilityResult> {
+fn coalesce_tool_results(
+    ordered: Vec<((Option<i64>, i64), CapabilityResult)>,
+) -> Vec<CapabilityResult> {
     let mut out: Vec<CapabilityResult> = Vec::with_capacity(ordered.len());
     let mut batch: Vec<ToolCallResult> = Vec::new();
     for (_, capability) in ordered {
@@ -3893,7 +3921,9 @@ fn flush_tool_batch(batch: &mut Vec<ToolCallResult>, out: &mut Vec<CapabilityRes
 /// the final batch is whole, or there is no pending batch). Only the
 /// final batch can be partial: earlier batches are whole, or the
 /// invocation could not have progressed past them.
-fn truncate_incomplete_final_batch(completed: &mut Vec<(i64, CapabilityResult)>) -> usize {
+fn truncate_incomplete_final_batch(
+    completed: &mut Vec<((Option<i64>, i64), CapabilityResult)>,
+) -> usize {
     let Some(last_model) = completed
         .iter()
         .rposition(|(_, c)| matches!(c, CapabilityResult::ModelResult(_)))
@@ -4093,6 +4123,54 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn sequence_order_preserves_tool_batch_boundaries_across_timestamp_ties() {
+        let tool = |id: &str| {
+            CapabilityResult::ToolResult(ToolCallResult {
+                tool_call_id: crate::events::ToolCallId::new(id.to_string()).unwrap(),
+                output: String::new(),
+                is_error: false,
+                error_kind: None,
+                duration_ms: 0,
+            })
+        };
+        let model = CapabilityResult::ModelResult(ModelResponse {
+            content: Some("next".to_string()),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        });
+        let ordered = vec![
+            (replay_sort_key(Some(1), Some(42)), tool("first")),
+            (replay_sort_key(Some(2), Some(42)), model),
+            (replay_sort_key(Some(3), Some(42)), tool("second")),
+        ];
+        let replay = coalesce_tool_results(ordered);
+        assert_eq!(replay.len(), 3);
+        assert!(matches!(replay[0], CapabilityResult::ToolResult(_)));
+        assert!(matches!(replay[1], CapabilityResult::ModelResult(_)));
+        assert!(matches!(replay[2], CapabilityResult::ToolResult(_)));
+    }
+
+    #[test]
+    fn replay_sort_key_total_orders_same_millisecond_completions() {
+        let same_ms = 42;
+        let mut llm_then_tool = [
+            replay_sort_key(Some(2), Some(same_ms)),
+            replay_sort_key(Some(1), Some(same_ms)),
+        ];
+        llm_then_tool.sort();
+        assert_eq!(llm_then_tool[0], replay_sort_key(Some(1), Some(same_ms)));
+
+        let mut tool_then_llm = [
+            replay_sort_key(Some(1), Some(same_ms)),
+            replay_sort_key(Some(2), Some(same_ms)),
+        ];
+        tool_then_llm.sort();
+        assert_eq!(tool_then_llm[0], replay_sort_key(Some(1), Some(same_ms)));
+        assert_eq!(replay_sort_key(None, Some(same_ms)).1, same_ms);
+    }
 
     /// Issue #9 precedence, checked at the boundary the runner uses to
     /// fill `AgentConfig.max_iterations`: per-agent override (if the

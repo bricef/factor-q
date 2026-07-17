@@ -245,6 +245,7 @@ mod tests {
             } else {
                 None
             },
+            seq: None,
         }
     }
 
@@ -277,6 +278,7 @@ mod tests {
             } else {
                 None
             },
+            seq: None,
         }
     }
 

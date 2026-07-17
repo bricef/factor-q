@@ -96,7 +96,10 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   published (recovery scan or failed auto-resume); a restart
 ///   that re-classifies the same invocation as ambiguous sees the
 ///   stamp and does not re-fire.
-pub const WORKER_SCHEMA_VERSION: u32 = 8;
+/// - **v9** — adds a nullable per-invocation completion `seq` to both
+///   dispatch tables, providing one total replay order across tool and
+///   LLM results. Pre-v9 rows remain `NULL` and use timestamp fallback.
+pub const WORKER_SCHEMA_VERSION: u32 = 9;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -235,6 +238,12 @@ const WORKER_MIGRATION_V8_SQL: &str = r#"
 ALTER TABLE invocation_state ADD COLUMN ambiguous_reported_at INTEGER;
 "#;
 
+/// v9 migration: total completion order shared by both WAL tables.
+const WORKER_MIGRATION_V9_SQL: &str = r#"
+ALTER TABLE tool_dispatch ADD COLUMN seq INTEGER;
+ALTER TABLE llm_dispatch ADD COLUMN seq INTEGER;
+"#;
+
 /// One durable host notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostNoticeRow {
@@ -286,6 +295,7 @@ pub struct ToolDispatchRow {
     pub intent_at: i64,
     pub dispatched_at: Option<i64>,
     pub completed_at: Option<i64>,
+    pub seq: Option<i64>,
 }
 
 /// One in-flight LLM-dispatch row.
@@ -305,6 +315,7 @@ pub struct LlmDispatchRow {
     pub intent_at: i64,
     pub dispatched_at: Option<i64>,
     pub completed_at: Option<i64>,
+    pub seq: Option<i64>,
 }
 
 /// Minimal fields for an open tool dispatch used by read-model views.
@@ -550,7 +561,12 @@ impl WorkerStore {
                 sqlx::query(&stmt).execute(&self.pool).await?;
             }
         }
-        // Future migrations: 8 → 9, etc.
+        if from < 9 && to >= 9 {
+            for stmt in split_sql(WORKER_MIGRATION_V9_SQL) {
+                sqlx::query(&stmt).execute(&self.pool).await?;
+            }
+        }
+        // Future migrations: 9 → 10, etc.
         Ok(())
     }
 
@@ -638,7 +654,11 @@ impl WorkerStore {
         let res = sqlx::query(
             r#"
             UPDATE tool_dispatch
-            SET status = ?, result = ?, is_error = ?, completed_at = ?
+            SET status = ?, result = ?, is_error = ?, completed_at = ?,
+                seq = 1 + MAX(
+                    COALESCE((SELECT MAX(seq) FROM tool_dispatch WHERE invocation_id = ?), 0),
+                    COALESCE((SELECT MAX(seq) FROM llm_dispatch WHERE invocation_id = ?), 0)
+                )
             WHERE invocation_id = ? AND tool_call_id = ? AND status = ?
             "#,
         )
@@ -646,6 +666,8 @@ impl WorkerStore {
         .bind(result)
         .bind(is_error as i64)
         .bind(completed_at)
+        .bind(invocation_id)
+        .bind(invocation_id)
         .bind(invocation_id)
         .bind(tool_call_id)
         .bind(DispatchStatus::Dispatched.as_str())
@@ -671,7 +693,7 @@ impl WorkerStore {
         let row = sqlx::query(
             r#"
             SELECT invocation_id, tool_call_id, tool_name, status, parameters,
-                   result, is_error, intent_at, dispatched_at, completed_at
+                   result, is_error, intent_at, dispatched_at, completed_at, seq
             FROM tool_dispatch
             WHERE invocation_id = ? AND tool_call_id = ?
             "#,
@@ -694,7 +716,7 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, tool_call_id, tool_name, status, parameters,
-                   result, is_error, intent_at, dispatched_at, completed_at
+                   result, is_error, intent_at, dispatched_at, completed_at, seq
             FROM tool_dispatch
             WHERE status = ?
             ORDER BY dispatched_at
@@ -785,7 +807,11 @@ impl WorkerStore {
         let res = sqlx::query(
             r#"
             UPDATE llm_dispatch
-            SET status = ?, response = ?, is_error = ?, cost_usd = ?, completed_at = ?
+            SET status = ?, response = ?, is_error = ?, cost_usd = ?, completed_at = ?,
+                seq = 1 + MAX(
+                    COALESCE((SELECT MAX(seq) FROM tool_dispatch WHERE invocation_id = ?), 0),
+                    COALESCE((SELECT MAX(seq) FROM llm_dispatch WHERE invocation_id = ?), 0)
+                )
             WHERE invocation_id = ? AND request_id = ? AND status = ?
             "#,
         )
@@ -794,6 +820,8 @@ impl WorkerStore {
         .bind(is_error as i64)
         .bind(cost_usd)
         .bind(completed_at)
+        .bind(invocation_id)
+        .bind(invocation_id)
         .bind(invocation_id)
         .bind(request_id)
         .bind(DispatchStatus::Dispatched.as_str())
@@ -818,7 +846,7 @@ impl WorkerStore {
         let row = sqlx::query(
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
-                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at
+                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq
             FROM llm_dispatch
             WHERE invocation_id = ? AND request_id = ?
             "#,
@@ -839,7 +867,7 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
-                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at
+                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq
             FROM llm_dispatch
             WHERE status = ?
             ORDER BY dispatched_at
@@ -1106,7 +1134,7 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, tool_call_id, tool_name, status, parameters,
-                   result, is_error, intent_at, dispatched_at, completed_at
+                   result, is_error, intent_at, dispatched_at, completed_at, seq
             FROM tool_dispatch
             WHERE invocation_id = ?
             ORDER BY intent_at
@@ -1174,7 +1202,7 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
-                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at
+                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq
             FROM llm_dispatch
             WHERE invocation_id = ?
             ORDER BY intent_at
@@ -1239,6 +1267,7 @@ fn row_to_tool_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<ToolDispatchRow,
         intent_at: row.get("intent_at"),
         dispatched_at: row.get("dispatched_at"),
         completed_at: row.get("completed_at"),
+        seq: row.get("seq"),
     })
 }
 
@@ -1259,6 +1288,7 @@ fn row_to_llm_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<LlmDispatchRow, W
         intent_at: row.get("intent_at"),
         dispatched_at: row.get("dispatched_at"),
         completed_at: row.get("completed_at"),
+        seq: row.get("seq"),
     })
 }
 
@@ -2390,5 +2420,80 @@ mod tests {
             .await
             .expect_err("missing file");
         assert!(matches!(err, WorkerStoreError::NotInitialised(_)));
+    }
+    #[tokio::test]
+    async fn v8_to_v9_migration_preserves_rows_and_adds_shared_sequence() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("worker-v8.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let opts = SqliteConnectOptions::from_str(&url).unwrap();
+        let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+        for stmt in split_sql(SCHEMA_META_SQL) {
+            sqlx::query(&stmt).execute(&pool).await.unwrap();
+        }
+        for stmt in split_sql(WORKER_TABLES_V1_SQL) {
+            sqlx::query(&stmt).execute(&pool).await.unwrap();
+        }
+        for migration in [
+            WORKER_MIGRATION_V2_SQL,
+            WORKER_MIGRATION_V3_SQL,
+            WORKER_MIGRATION_V4_SQL,
+            WORKER_MIGRATION_V5_SQL,
+            WORKER_MIGRATION_V6_SQL,
+            WORKER_MIGRATION_V7_SQL,
+            WORKER_MIGRATION_V8_SQL,
+        ] {
+            for stmt in split_sql(migration) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+        }
+        sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, 8, 0)")
+            .bind(SCHEMA_CLASS)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO tool_dispatch (invocation_id, tool_call_id, tool_name, status, parameters, intent_at) VALUES ('inv', 'old', 't', 'intent', '{}', 1)")
+            .execute(&pool).await.unwrap();
+        pool.close().await;
+
+        let store = WorkerStore::open(&path).await.unwrap();
+        let old = store
+            .get_tool_dispatch("inv", "old")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.seq, None, "pre-v9 rows use timestamp fallback");
+        store
+            .write_llm_intent("inv", "llm", "m", "{}", 2)
+            .await
+            .unwrap();
+        store.write_llm_dispatched("inv", "llm", 3).await.unwrap();
+        store
+            .write_llm_completed("inv", "llm", "{}", false, 0.0, 4)
+            .await
+            .unwrap();
+        store.write_tool_dispatched("inv", "old", 5).await.unwrap();
+        store
+            .write_tool_completed("inv", "old", "{}", false, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_llm_dispatch("inv", "llm")
+                .await
+                .unwrap()
+                .unwrap()
+                .seq,
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .get_tool_dispatch("inv", "old")
+                .await
+                .unwrap()
+                .unwrap()
+                .seq,
+            Some(2)
+        );
     }
 }
