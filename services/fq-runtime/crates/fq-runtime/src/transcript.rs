@@ -485,6 +485,7 @@ mod tests {
             intent_at,
             dispatched_at: Some(intent_at + 1),
             completed_at: Some(completed_at),
+            seq: None,
         }
     }
 
@@ -506,6 +507,7 @@ mod tests {
             intent_at,
             dispatched_at: Some(intent_at + 1),
             completed_at: Some(completed_at),
+            seq: None,
         }
     }
 
