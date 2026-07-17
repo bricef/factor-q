@@ -520,6 +520,18 @@ The following invariants hold across the event stream and are assumed by consume
 - Events are projected into SQLite for complex queries.
 - The projection store is a read-optimised view, not the source of truth. Events can be re-projected from the NATS stream at any time.
 
+### Retention and the trail's lifetime
+
+The event trail has no payload-bearing system of record beyond JetStream retention. The projection is a long-lived but lossy, derived view, while the CAS archive preserves invocation outcomes rather than their event trail.
+
+| Surface | Lifetime | What survives and record status |
+|---|---|---|
+| NATS `fq-events` | 30 days by default | Complete payload-bearing event trail; deleted after retention. Trigger and advisory streams retain messages for 24 hours by default. |
+| SQLite projection (`events`) | Not currently pruned | Typed columns only, without event payloads. This is a derived, rebuildable view rather than a system of record; rebuilding from NATS can recover only retained events. |
+| CAS archive (`fq-cas`) | Archive retention policy | Invocation final-state blobs only, not the event trail. ADR-0026 designates these invocation outcomes as the system of record. |
+
+Events older than stream retention are available only as the projection's typed rows (no payloads); the payload-bearing trail is gone by design. ADR-0026's system-of-record guarantee covers invocation outcomes, not the trail. A stronger re-projection guarantee is tracked in [#139](https://github.com/bricef/factor-q/issues/139) and [#163](https://github.com/bricef/factor-q/issues/163).
+
 ## Open Questions
 
 - **Cross-incarnation chain stitching.** Recovery re-emits start a fresh chain (`parent_event_id` absent). If audit code ever needs to thread the pre-crash and post-recovery chains together, an optional `envelope.recovered_from_event_id: Uuid` could be added.

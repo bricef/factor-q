@@ -301,7 +301,8 @@ enum WorkerCommands {
 
 #[derive(Subcommand)]
 enum DeadLetterCommands {
-    /// List dead-lettered triggers (from the event stream, newest first)
+    /// List dead-lettered triggers (from the event stream, newest first).
+    /// Visibility is bounded by event-stream retention (30 days by default).
     List {
         /// Filter by agent
         #[arg(long)]
@@ -314,6 +315,7 @@ enum DeadLetterCommands {
         json: bool,
     },
     /// Re-publish a dead-lettered trigger as a fresh trigger.
+    /// Payloads are recoverable only within trigger-stream retention (24 hours by default).
     /// NOT idempotent: requeueing twice triggers the agent twice.
     Requeue {
         /// Agent whose dead letter to requeue
