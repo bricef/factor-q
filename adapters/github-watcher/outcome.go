@@ -39,13 +39,15 @@ const (
 //
 // Issue is the GitHub issue number this invocation is working, recovered
 // from the `triggered` event's trigger_payload; it is 0 (unknown) on
-// completed/failed events, which carry only the invocation id. ErrorKind is
-// set on OutcomeFailed and classifies transient vs terminal failures.
+// completed/failed events, which carry only the invocation id. TaskStatus is
+// set on OutcomeCompleted (empty for older runtimes). ErrorKind is set on
+// OutcomeFailed and classifies transient vs terminal failures.
 type OutcomeEvent struct {
 	Kind         OutcomeKind
 	InvocationID string
 	Issue        int    // known on OutcomeTriggered; 0 otherwise
 	ErrorKind    string // set on OutcomeFailed
+	TaskStatus   string // set on OutcomeCompleted; empty means success
 }
 
 // OutcomeSource is the seam over the runtime's event stream: it delivers
@@ -154,12 +156,15 @@ func (r *OutcomeReactor) React(ctx context.Context, ev OutcomeEvent) {
 		if !ok {
 			return
 		}
-		r.relabel(ctx, issue, r.Config.InProgressLabel, r.Config.InReviewLabel,
-			"invocation completed; issue awaiting review")
-		// Stamp after the relabel: the label transition is the
-		// load-bearing state machine and must never wait on (or be
-		// blocked by) the cosmetic provenance write.
-		r.stampProvenance(ctx, issue, ev.InvocationID)
+		if ev.TaskStatus == "failed" || ev.TaskStatus == "blocked" {
+			r.reactFailed(ctx, issue, "task_"+ev.TaskStatus)
+		} else {
+			r.relabel(ctx, issue, r.Config.InProgressLabel, r.Config.InReviewLabel,
+				"invocation completed; issue awaiting review")
+			// Stamp only reviewable outcomes, after the load-bearing label
+			// transition; the cosmetic write must never block it.
+			r.stampProvenance(ctx, issue, ev.InvocationID)
+		}
 		r.forget(ev.InvocationID)
 	case OutcomeFailed:
 		issue, ok := r.lookup(ev.InvocationID)
