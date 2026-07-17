@@ -1486,10 +1486,8 @@ struct DoctorDeadLetters {
 }
 
 /// The projection's failure-kind string for a dead-lettered trigger —
-/// `FailureKind::TriggerExhausted` as the projection renders kinds
-/// (`format!("{:?}").to_lowercase()`, see the projection store's
-/// failure mapping).
-const DEAD_LETTER_KIND: &str = "triggerexhausted";
+/// `FailureKind::TriggerExhausted` serialized with the wire vocabulary.
+const DEAD_LETTER_KIND: &str = "trigger_exhausted";
 
 /// The full doctor report. Serialisable for `--json`; built by the
 /// pure [`build_doctor_report`] so the checks are unit-testable
@@ -4653,16 +4651,16 @@ mod doctor_tests {
     }
 
     /// #49: dead-lettered triggers surface as their own doctor line,
-    /// counted from the `triggerexhausted` failures bucket.
+    /// counted from the `trigger_exhausted` failures bucket.
     #[test]
     fn dead_lettered_triggers_are_counted_and_rendered() {
         let failures = vec![
             FailureView {
-                error_kind: "triggerexhausted".to_string(),
+                error_kind: "trigger_exhausted".to_string(),
                 count: 2,
             },
             FailureView {
-                error_kind: "toolerror".to_string(),
+                error_kind: "tool_error".to_string(),
                 count: 1,
             },
         ];
@@ -4702,11 +4700,11 @@ mod doctor_tests {
     fn permanent_failures_grouped_by_kind() {
         let failures = vec![
             FailureView {
-                error_kind: "budgetexceeded".to_string(),
+                error_kind: "budget_exceeded".to_string(),
                 count: 2,
             },
             FailureView {
-                error_kind: "toolerror".to_string(),
+                error_kind: "tool_error".to_string(),
                 count: 1,
             },
         ];
@@ -4717,8 +4715,8 @@ mod doctor_tests {
 
         let out = render_doctor_report_human(&report);
         assert!(out.contains("Permanent failures: 3"), "got: {out}");
-        assert!(out.contains("budgetexceeded: 2"), "got: {out}");
-        assert!(out.contains("toolerror: 1"), "got: {out}");
+        assert!(out.contains("budget_exceeded: 2"), "got: {out}");
+        assert!(out.contains("tool_error: 1"), "got: {out}");
         assert!(
             out.contains("fq invocation list --status=failed"),
             "got: {out}"

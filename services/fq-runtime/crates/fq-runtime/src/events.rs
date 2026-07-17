@@ -318,37 +318,7 @@ impl Event {
 
     /// Return the NATS subject this event should be published on.
     pub fn subject(&self) -> String {
-        let agent = self.envelope.agent_id.as_str();
-        match &self.payload {
-            EventPayload::Triggered(_) => subjects::agent_triggered(agent),
-            EventPayload::LlmRequest(_) => subjects::agent_llm_request(agent),
-            EventPayload::LlmResponse(_) => subjects::agent_llm_response(agent),
-            EventPayload::ToolCall(_) => subjects::agent_tool_call(agent),
-            EventPayload::ToolDispatched(_) => subjects::agent_tool_dispatched(agent),
-            EventPayload::ToolResult(_) => subjects::agent_tool_result(agent),
-            EventPayload::LlmDispatched(_) => subjects::agent_llm_dispatched(agent),
-            EventPayload::InvocationAmbiguous(_) => subjects::agent_invocation_ambiguous(agent),
-            EventPayload::InvocationArchived(_) => subjects::agent_invocation_archived(agent),
-            EventPayload::InvocationOperatorRecovered(_) => {
-                subjects::agent_invocation_operator_recovered(agent)
-            }
-            EventPayload::Completed(_) => subjects::agent_completed(agent),
-            EventPayload::Failed(_) => subjects::agent_failed(agent),
-            EventPayload::HostNotice(_) => subjects::agent_host_notice(agent),
-            EventPayload::InvocationSummary(_) => subjects::agent_invocation_summary(agent),
-            EventPayload::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
-            EventPayload::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
-            EventPayload::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
-            EventPayload::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
-            EventPayload::McpServerLog(_) => subjects::SYSTEM_MCP_LOG.to_string(),
-            // Worker events read their subject token from the
-            // payload's `worker_id`, not from `envelope.agent_id`
-            // (which is the system sentinel for non-agent events).
-            EventPayload::WorkerHeartbeat(p) => subjects::worker_heartbeat(p.worker_id.as_str()),
-            EventPayload::InvocationArchiveAcked(p) => {
-                subjects::worker_invocation_archive_acked(p.worker_id.as_str())
-            }
-        }
+        self.payload.subject(self.envelope.agent_id.as_str())
     }
 }
 
@@ -445,33 +415,78 @@ impl<'de> Deserialize<'de> for ToolCallId {
     }
 }
 
-/// Stable identifier for an event's payload schema. Versioned from
-/// day one so payloads can evolve without becoming an archaeological
-/// dig — see decision §4 of `inter-node-contracts-and-event-layers.md`.
-pub fn schema_id_for(payload: &EventPayload) -> &'static str {
-    match payload {
-        EventPayload::Triggered(_) => "factor-q/triggered@1",
-        EventPayload::LlmRequest(_) => "factor-q/llm_request@1",
-        EventPayload::LlmDispatched(_) => "factor-q/llm_dispatched@1",
-        EventPayload::LlmResponse(_) => "factor-q/llm_response@1",
-        EventPayload::ToolCall(_) => "factor-q/tool_call@1",
-        EventPayload::ToolDispatched(_) => "factor-q/tool_dispatched@1",
-        EventPayload::ToolResult(_) => "factor-q/tool_result@1",
-        EventPayload::InvocationSummary(_) => "factor-q/invocation_summary@1",
-        EventPayload::Completed(_) => "factor-q/completed@1",
-        EventPayload::Failed(_) => "factor-q/failed@1",
-        EventPayload::HostNotice(_) => "factor-q/host_notice@1",
-        EventPayload::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
-        EventPayload::InvocationArchived(_) => "factor-q/invocation_archived@1",
-        EventPayload::InvocationArchiveAcked(_) => "factor-q/invocation_archive_acked@1",
-        EventPayload::InvocationOperatorRecovered(_) => "factor-q/invocation_operator_recovered@1",
-        EventPayload::SystemStartup(_) => "factor-q/system_startup@1",
-        EventPayload::SystemShutdown(_) => "factor-q/system_shutdown@1",
-        EventPayload::SystemTaskFailed(_) => "factor-q/system_task_failed@1",
-        EventPayload::SystemRecovery(_) => "factor-q/system_recovery@1",
-        EventPayload::WorkerHeartbeat(_) => "factor-q/worker_heartbeat@1",
-        EventPayload::McpServerLog(_) => "factor-q/mcp_server_log@1",
+/// Stable event metadata, co-located so a payload variant has one
+/// exhaustive definition for its subject and schema. The projection event type
+/// is derived from the schema id rather than maintained as a fourth mapping.
+impl EventPayload {
+    pub fn subject(&self, agent: &str) -> String {
+        match self {
+            Self::Triggered(_) => subjects::agent_triggered(agent),
+            Self::LlmRequest(_) => subjects::agent_llm_request(agent),
+            Self::LlmResponse(_) => subjects::agent_llm_response(agent),
+            Self::ToolCall(_) => subjects::agent_tool_call(agent),
+            Self::ToolDispatched(_) => subjects::agent_tool_dispatched(agent),
+            Self::ToolResult(_) => subjects::agent_tool_result(agent),
+            Self::LlmDispatched(_) => subjects::agent_llm_dispatched(agent),
+            Self::InvocationAmbiguous(_) => subjects::agent_invocation_ambiguous(agent),
+            Self::InvocationArchived(_) => subjects::agent_invocation_archived(agent),
+            Self::InvocationOperatorRecovered(_) => {
+                subjects::agent_invocation_operator_recovered(agent)
+            }
+            Self::Completed(_) => subjects::agent_completed(agent),
+            Self::Failed(_) => subjects::agent_failed(agent),
+            Self::HostNotice(_) => subjects::agent_host_notice(agent),
+            Self::InvocationSummary(_) => subjects::agent_invocation_summary(agent),
+            Self::SystemStartup(_) => subjects::SYSTEM_STARTUP.to_string(),
+            Self::SystemShutdown(_) => subjects::SYSTEM_SHUTDOWN.to_string(),
+            Self::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
+            Self::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
+            Self::McpServerLog(_) => subjects::SYSTEM_MCP_LOG.to_string(),
+            Self::WorkerHeartbeat(p) => subjects::worker_heartbeat(p.worker_id.as_str()),
+            Self::InvocationArchiveAcked(p) => {
+                subjects::worker_invocation_archive_acked(p.worker_id.as_str())
+            }
+        }
     }
+
+    pub fn schema_id(&self) -> &'static str {
+        match self {
+            Self::Triggered(_) => "factor-q/triggered@1",
+            Self::LlmRequest(_) => "factor-q/llm_request@1",
+            Self::LlmDispatched(_) => "factor-q/llm_dispatched@1",
+            Self::LlmResponse(_) => "factor-q/llm_response@1",
+            Self::ToolCall(_) => "factor-q/tool_call@1",
+            Self::ToolDispatched(_) => "factor-q/tool_dispatched@1",
+            Self::ToolResult(_) => "factor-q/tool_result@1",
+            Self::InvocationSummary(_) => "factor-q/invocation_summary@1",
+            Self::Completed(_) => "factor-q/completed@1",
+            Self::Failed(_) => "factor-q/failed@1",
+            Self::HostNotice(_) => "factor-q/host_notice@1",
+            Self::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
+            Self::InvocationArchived(_) => "factor-q/invocation_archived@1",
+            Self::InvocationArchiveAcked(_) => "factor-q/invocation_archive_acked@1",
+            Self::InvocationOperatorRecovered(_) => "factor-q/invocation_operator_recovered@1",
+            Self::SystemStartup(_) => "factor-q/system_startup@1",
+            Self::SystemShutdown(_) => "factor-q/system_shutdown@1",
+            Self::SystemTaskFailed(_) => "factor-q/system_task_failed@1",
+            Self::SystemRecovery(_) => "factor-q/system_recovery@1",
+            Self::WorkerHeartbeat(_) => "factor-q/worker_heartbeat@1",
+            Self::McpServerLog(_) => "factor-q/mcp_server_log@1",
+        }
+    }
+
+    pub fn event_type(&self) -> &'static str {
+        self.schema_id()
+            .strip_prefix("factor-q/")
+            .unwrap()
+            .strip_suffix("@1")
+            .unwrap()
+    }
+}
+
+/// Stable identifier for an event's payload schema. Versioned from day one.
+pub fn schema_id_for(payload: &EventPayload) -> &'static str {
+    payload.schema_id()
 }
 
 /// System-generated metadata. Closed schema — if a new field is

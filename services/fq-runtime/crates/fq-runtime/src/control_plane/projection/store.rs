@@ -13,6 +13,7 @@ use sqlx::{Pool, Row, Sqlite};
 
 use crate::agent::AgentId;
 use crate::events::{Event, EventPayload};
+use serde::Serialize;
 
 /// Schema — migrations live inline for phase 1. When the schema
 /// evolves beyond trivial additions, switch to `sqlx::migrate!`.
@@ -160,7 +161,7 @@ impl ProjectionStore {
             return Ok(());
         }
         let fields = extract_fields(event);
-        let event_type = event_type_name(&event.payload);
+        let event_type = event.payload.event_type();
 
         sqlx::query(
             r#"
@@ -514,7 +515,7 @@ impl ProjectionStore {
     /// Aggregate terminal `failed` events into per-`FailureKind`
     /// counts. Symmetric with [`Self::cost_summary`]: the DB stores
     /// the failure kind in the denormalised `error_kind` column
-    /// (lowercased `Debug` of the `FailureKind`, e.g. `budgetexceeded`),
+    /// (the serde snake_case form, e.g. `budget_exceeded`),
     /// so this groups by that column for a stable typed-ish shape the
     /// `fq doctor` command can render without re-reading payloads.
     pub async fn failure_summary(&self) -> Result<Vec<FailureSummary>, StoreError> {
@@ -600,8 +601,8 @@ pub struct ModelCostSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureSummary {
     /// Lowercased failure kind as stored in the projection
-    /// (`budgetexceeded`, `llmerror`, `maxiterations`, `toolerror`,
-    /// `sandboxviolation`, `runtimeerror`), or `unknown` for a
+    /// (`budget_exceeded`, `llm_error`, `max_iterations`, `tool_error`,
+    /// `sandbox_violation`, `runtime_error`), or `unknown` for a
     /// `failed` row with no recorded kind.
     pub error_kind: String,
     pub count: i64,
@@ -651,6 +652,14 @@ struct Fields {
     total_cost: Option<f64>,
     error_kind: Option<String>,
     duration_ms: Option<i64>,
+}
+
+fn serialized_name<T: Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .expect("failure kinds serialize")
+        .as_str()
+        .expect("failure kinds serialize as strings")
+        .to_owned()
 }
 
 fn extract_fields(event: &Event) -> Fields {
@@ -705,7 +714,7 @@ fn extract_fields(event: &Event) -> Fields {
         EventPayload::InvocationArchived(_) => Fields::default(),
         EventPayload::InvocationArchiveAcked(_) => Fields::default(),
         EventPayload::ToolResult(p) => Fields {
-            error_kind: p.error_kind.map(|k| format!("{k:?}").to_lowercase()),
+            error_kind: p.error_kind.map(serialized_name),
             duration_ms: Some(p.duration_ms as i64),
             ..Default::default()
         },
@@ -715,7 +724,7 @@ fn extract_fields(event: &Event) -> Fields {
             ..Default::default()
         },
         EventPayload::Failed(p) => Fields {
-            error_kind: Some(format!("{:?}", p.error_kind).to_lowercase()),
+            error_kind: Some(serialized_name(p.error_kind)),
             duration_ms: Some(p.partial_totals.total_duration_ms as i64),
             total_cost: Some(p.partial_totals.total_cost),
             ..Default::default()
@@ -740,32 +749,6 @@ fn summary_kind_name(kind: crate::events::SummaryKind) -> &'static str {
         crate::events::SummaryKind::Start => "start",
         crate::events::SummaryKind::Progress => "progress",
         crate::events::SummaryKind::Outcome => "outcome",
-    }
-}
-
-fn event_type_name(payload: &EventPayload) -> &'static str {
-    match payload {
-        EventPayload::Triggered(_) => "triggered",
-        EventPayload::LlmRequest(_) => "llm_request",
-        EventPayload::LlmDispatched(_) => "llm_dispatched",
-        EventPayload::LlmResponse(_) => "llm_response",
-        EventPayload::ToolCall(_) => "tool_call",
-        EventPayload::ToolDispatched(_) => "tool_dispatched",
-        EventPayload::ToolResult(_) => "tool_result",
-        EventPayload::Completed(_) => "completed",
-        EventPayload::Failed(_) => "failed",
-        EventPayload::HostNotice(_) => "host_notice",
-        EventPayload::InvocationSummary(_) => "invocation_summary",
-        EventPayload::InvocationAmbiguous(_) => "invocation_ambiguous",
-        EventPayload::InvocationArchived(_) => "invocation_archived",
-        EventPayload::InvocationArchiveAcked(_) => "invocation_archive_acked",
-        EventPayload::InvocationOperatorRecovered(_) => "invocation_operator_recovered",
-        EventPayload::SystemStartup(_) => "system_startup",
-        EventPayload::SystemShutdown(_) => "system_shutdown",
-        EventPayload::SystemTaskFailed(_) => "system_task_failed",
-        EventPayload::SystemRecovery(_) => "system_recovery",
-        EventPayload::WorkerHeartbeat(_) => "worker_heartbeat",
-        EventPayload::McpServerLog(_) => "mcp_server_log",
     }
 }
 
@@ -1432,6 +1415,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn projected_failure_kinds_match_wire_serialization() {
+        let (store, _dir) = open_store().await;
+        let kinds = [
+            FailureKind::BudgetExceeded,
+            FailureKind::LlmError,
+            FailureKind::MaxIterations,
+            FailureKind::ToolError,
+            FailureKind::SandboxViolation,
+            FailureKind::RuntimeError,
+            FailureKind::TriggerExhausted,
+        ];
+        for kind in kinds {
+            let event = sample_failed_kind("a", Uuid::now_v7(), kind);
+            let wire = serde_json::to_value(kind)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned();
+            store.insert_event(&event).await.unwrap();
+            let projected = store
+                .query_events(&EventFilter::default(), 100)
+                .await
+                .unwrap();
+            assert!(
+                projected
+                    .iter()
+                    .any(|row| row.error_kind.as_deref() == Some(&wire))
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn failure_summary_groups_by_kind() {
         let (store, _dir) = open_store().await;
         store
@@ -1469,12 +1484,12 @@ mod tests {
         assert_eq!(total, 3);
         let budget = summary
             .iter()
-            .find(|s| s.error_kind == "budgetexceeded")
+            .find(|s| s.error_kind == "budget_exceeded")
             .unwrap();
         assert_eq!(budget.count, 2);
         let tool = summary
             .iter()
-            .find(|s| s.error_kind == "toolerror")
+            .find(|s| s.error_kind == "tool_error")
             .unwrap();
         assert_eq!(tool.count, 1);
     }
