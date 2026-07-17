@@ -28,7 +28,23 @@ gh issue list -R <owner>/<repo> --state open --limit 200 --json number,title,lab
 Record the pinned SHA — every close comment, rescope, and re-ground note
 cites it ("verified vs main @ <sha>"). Remove the worktree when done.
 
-## 1. Sweep — classify every open issue
+Then run the deterministic pre-filter from the pinned checkout:
+
+```sh
+bash meta/skills/backlog-grooming/prefilter.sh            # last 7 days
+bash meta/skills/backlog-grooming/prefilter.sh --from <last-groom-sha>
+```
+
+It intersects the paths each issue body cites with the files changed in
+the window, and reports PRIORITY (deep-verify these), LABEL-CHECK
+(status labels to test against reality), MISSING-PATH (cited paths gone
+at HEAD — hard-stale), and QUIET (ground truth can't have moved via
+code; skip unless doing a full sweep). This is the cost reducer: most
+weeks only PRIORITY + LABEL-CHECK + MISSING-PATH need model-grade
+verification. Bare-filename cites match broadly by design —
+recall-oriented; triage the hits.
+
+## 1. Sweep — classify every open issue in scope
 
 For scale, partition issues by subsystem and fan out read-only subagents,
 each instructed to fetch the issue body (`gh issue view N --json title,body`)
