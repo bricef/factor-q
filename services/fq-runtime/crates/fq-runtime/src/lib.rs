@@ -19,6 +19,7 @@
 pub mod agent;
 pub mod bus;
 pub mod config;
+pub mod db;
 pub mod events;
 pub mod health;
 pub mod llm;
@@ -65,6 +66,7 @@ pub use control_plane::{
     ControlPlaneStoreError, CoordinationConsumer, CoordinationConsumerError, HeartbeatConsumer,
     HeartbeatConsumerError, OwnerStatus, SummaryConsumer, SummaryConsumerError,
 };
+pub use db::{RuntimeDbPaths, SplitOutcome, split_legacy_events_db};
 pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
 pub use mcp::{
     AdvertisedCapabilities, McpClientManager, McpError, McpResourceReader, McpServerConfig,

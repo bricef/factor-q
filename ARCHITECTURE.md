@@ -224,10 +224,13 @@ controls apply (ADR-0021). See the [MCP guide](docs/guide/mcp.md).
 ### Projection consumer (`fq-runtime/src/control_plane/projection/`)
 
 A durable JetStream consumer on `fq.agent.>` + `fq.system.>` that
-materialises every event into a SQLite database. Only envelope
-fields and denormalised columns (model, tokens, cost, error_kind,
-duration) are stored — no full payloads. NATS is the source of
-truth; the projection is rebuildable by replaying from the stream.
+materialises every event into its own SQLite database
+(`projection.db` — one file per store since the #262 split; the
+worker WAL and control-plane state live in `worker.db` and
+`control-plane.db`). Only envelope fields and denormalised columns
+(model, tokens, cost, error_kind, duration) are stored — no full
+payloads. NATS is the source of truth; the projection is
+rebuildable by deleting the file and replaying from the stream.
 
 ### Trigger dispatcher (`fq-runtime/src/control_plane/dispatcher.rs`)
 

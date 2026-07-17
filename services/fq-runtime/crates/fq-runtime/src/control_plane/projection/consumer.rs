@@ -212,7 +212,7 @@ mod tests {
 
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("events.db");
+        let db_path = dir.path().join("projection.db");
         let store = Arc::new(ProjectionStore::open(&db_path).await.expect("open store"));
 
         // Publish a couple of events BEFORE starting the consumer

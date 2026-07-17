@@ -947,7 +947,7 @@ You are a test agent."#
 
         // Projection store, so we can verify events landed.
         let store = Arc::new(
-            ProjectionStore::open(&dir.path().join("events.db"))
+            ProjectionStore::open(&dir.path().join("control-plane.db"))
                 .await
                 .unwrap(),
         );

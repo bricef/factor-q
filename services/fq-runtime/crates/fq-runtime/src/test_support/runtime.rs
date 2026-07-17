@@ -143,19 +143,17 @@ impl TestRuntimeBuilder {
         let worker_id = WorkerId::new(format!("e2e-worker-{}", Uuid::now_v7().simple()))
             .map_err(|e| format!("worker id: {e}"))?;
 
-        // Control-plane store and projection store share a
-        // SQLite file in production (`show_status` opens both
-        // on the same path); mirror that here so the harness
-        // reflects the real layout.
+        // One SQLite file per store in production (the #262 split
+        // layout); mirror that here so the harness reflects the
+        // real layout.
         let cp_dir = tempfile::tempdir().map_err(|e| format!("cp tempdir: {e}"))?;
-        let cp_path = cp_dir.path().join("cp.db");
         let cp_store = Arc::new(
-            ControlPlaneStore::open(&cp_path)
+            ControlPlaneStore::open(&cp_dir.path().join("control-plane.db"))
                 .await
                 .map_err(|e| format!("ControlPlaneStore::open: {e}"))?,
         );
         let proj_store = Arc::new(
-            ProjectionStore::open(&cp_path)
+            ProjectionStore::open(&cp_dir.path().join("projection.db"))
                 .await
                 .map_err(|e| format!("ProjectionStore::open: {e}"))?,
         );

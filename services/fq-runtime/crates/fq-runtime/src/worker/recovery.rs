@@ -377,7 +377,7 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let store = WorkerStore::open(&dir.path().join("events.db"))
+        let store = WorkerStore::open(&dir.path().join("worker.db"))
             .await
             .unwrap();
 

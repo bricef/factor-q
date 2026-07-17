@@ -4,8 +4,8 @@
 //! CLI read commands (as a formatter over these DTOs) and, later, the
 //! read-only tarpc service that backs the operator dashboard
 //! (`docs/plans/active/2026-07-10-operator-dashboard.md`). It opens the
-//! projection, control-plane, and worker-WAL stores read-only against the one
-//! SQLite file and returns typed, `Serialize` view DTOs whose shape is owned
+//! projection, control-plane, and worker-WAL stores read-only against their
+//! per-store SQLite files and returns typed, `Serialize` view DTOs whose shape is owned
 //! here — deliberately decoupled from the internal `*Row` types so the wire /
 //! JSON shape can evolve without leaking storage internals.
 //!
@@ -17,8 +17,6 @@
 //! (stream depth / consumer lag) is a separate concern that composes the
 //! DB-backed counts from here with a NATS probe at the daemon layer; it lands
 //! with the tarpc service, not here.
-
-use std::path::Path;
 
 // DTOs are Deserialize as well as Serialize so they can travel over the
 // read service's bincode wire (#105 layer 2), not just out as JSON.
@@ -34,6 +32,7 @@ use crate::control_plane::store::{
     ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerRow, OwnerStatus,
     WorkerRow, is_stale,
 };
+use crate::db::RuntimeDbPaths;
 use crate::worker::store::{LlmDispatchRow, ToolDispatchRow, WorkerStore, WorkerStoreError};
 
 /// How many recent events to scan / retain when assembling an invocation
@@ -526,9 +525,10 @@ pub struct InvocationDetailView {
 // Views — the read handle.
 // ============================================================
 
-/// Read-only handle over the runtime's three SQLite-backed stores (all one
-/// file, opened `?mode=ro`). Cheap to construct relative to the queries it
-/// serves; a caller can hold one for the lifetime of a request loop.
+/// Read-only handle over the runtime's three SQLite-backed stores (one file
+/// per store, each opened `?mode=ro` — see [`crate::db::RuntimeDbPaths`]).
+/// Cheap to construct relative to the queries it serves; a caller can hold
+/// one for the lifetime of a request loop.
 pub struct Views {
     projection: ProjectionStore,
     control_plane: ControlPlaneStore,
@@ -536,14 +536,14 @@ pub struct Views {
 }
 
 impl Views {
-    /// Open all three stores read-only against `db_path`. Errors if the file
-    /// does not exist or a store's schema is incompatible; callers that want
-    /// to distinguish "not initialised" should check for the file first (as
-    /// the CLI does).
-    pub async fn open(db_path: &Path) -> Result<Self, ViewsError> {
-        let projection = ProjectionStore::open_read_only(db_path).await?;
-        let control_plane = ControlPlaneStore::open_read_only(db_path).await?;
-        let worker = WorkerStore::open_read_only(db_path).await?;
+    /// Open all three stores read-only against their per-store files. Errors
+    /// if a file does not exist or a store's schema is incompatible; callers
+    /// that want to distinguish "not initialised" should check the files
+    /// first (as the CLI does).
+    pub async fn open(paths: &RuntimeDbPaths) -> Result<Self, ViewsError> {
+        let projection = ProjectionStore::open_read_only(&paths.projection).await?;
+        let control_plane = ControlPlaneStore::open_read_only(&paths.control_plane).await?;
+        let worker = WorkerStore::open_read_only(&paths.worker).await?;
         Ok(Views {
             projection,
             control_plane,
@@ -1119,17 +1119,17 @@ mod tests {
     #[tokio::test]
     async fn open_and_query_empty_db() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
 
         // Open each store in write mode once to create its tables in the
         // shared file, then drop the write handles.
         {
-            let _cp = ControlPlaneStore::open(&path).await.unwrap();
-            let _ws = WorkerStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
 
-        let views = Views::open(&path).await.unwrap();
+        let views = Views::open(&paths).await.unwrap();
 
         assert_eq!(views.event_count().await.unwrap(), 0);
         assert!(views.workers().await.unwrap().is_empty());
@@ -1177,9 +1177,9 @@ mod tests {
     #[tokio::test]
     async fn invocation_index_hides_sentinel_archive_agents() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
         {
-            let cp = ControlPlaneStore::open(&path).await.unwrap();
+            let cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
             for (id, agent_id) in [("tombstone", AgentId::OPERATOR_STR), ("real", "agent-a")] {
                 cp.insert_archive(&InvocationArchiveRow {
                     invocation_id: id.into(),
@@ -1193,11 +1193,11 @@ mod tests {
                 .await
                 .unwrap();
             }
-            let _ws = WorkerStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
 
-        let index = Views::open(&path)
+        let index = Views::open(&paths)
             .await
             .unwrap()
             .invocation_index(None, true, 50)
@@ -1231,12 +1231,12 @@ mod tests {
         use crate::events::{Event, EventPayload, InvocationSummaryPayload, SummaryKind};
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
         let inv = uuid::Uuid::now_v7();
         {
-            let cp = ControlPlaneStore::open(&path).await.unwrap();
-            let ws = WorkerStore::open(&path).await.unwrap();
-            let proj = ProjectionStore::open(&path).await.unwrap();
+            let cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let ws = WorkerStore::open(&paths.worker).await.unwrap();
+            let proj = ProjectionStore::open(&paths.projection).await.unwrap();
             cp.register_worker("w1", "host", 100).await.unwrap();
             cp.assign_invocation(&inv.to_string(), "w1", 100)
                 .await
@@ -1271,7 +1271,7 @@ mod tests {
             .unwrap();
         }
 
-        let views = Views::open(&path).await.unwrap();
+        let views = Views::open(&paths).await.unwrap();
 
         let active = views.active_invocations().await.unwrap();
         assert_eq!(active.len(), 1);
@@ -1293,13 +1293,13 @@ mod tests {
     #[tokio::test]
     async fn reads_back_seeded_worker_and_invocation() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
 
         {
-            let cp = ControlPlaneStore::open(&path).await.unwrap();
+            let cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
             cp.register_worker("w1", "localhost", 100).await.unwrap();
 
-            let ws = WorkerStore::open(&path).await.unwrap();
+            let ws = WorkerStore::open(&paths.worker).await.unwrap();
             let row = InvocationStateRow {
                 invocation_id: "inv-1".into(),
                 agent_id: "agent-a".into(),
@@ -1324,10 +1324,10 @@ mod tests {
             ws.write_tool_dispatched("inv-1", "call-1", 170)
                 .await
                 .unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
 
-        let views = Views::open(&path).await.unwrap();
+        let views = Views::open(&paths).await.unwrap();
 
         let workers = views.workers().await.unwrap();
         assert_eq!(workers.len(), 1);
@@ -1389,11 +1389,11 @@ mod tests {
     #[tokio::test]
     async fn open_llm_dispatch_counts_as_working() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
 
         {
-            let _cp = ControlPlaneStore::open(&path).await.unwrap();
-            let ws = WorkerStore::open(&path).await.unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let ws = WorkerStore::open(&paths.worker).await.unwrap();
             let row = InvocationStateRow {
                 invocation_id: "inv-llm".into(),
                 agent_id: "agent-a".into(),
@@ -1418,10 +1418,10 @@ mod tests {
             ws.write_llm_dispatched("inv-llm", "req-1", 170)
                 .await
                 .unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
 
-        let views = Views::open(&path).await.unwrap();
+        let views = Views::open(&paths).await.unwrap();
 
         // WAL is stale past the stuck threshold, but the LLM dispatch is
         // fresh — working, not stuck.
@@ -1449,9 +1449,9 @@ mod tests {
     #[tokio::test]
     async fn transcript_outcome_reflects_terminality() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
         {
-            let ws = WorkerStore::open(&path).await.unwrap();
+            let ws = WorkerStore::open(&paths.worker).await.unwrap();
             for (inv, terminal_at) in [("inv-done", Some(150_i64)), ("inv-live", None)] {
                 ws.write_llm_intent(inv, "req-1", "m", "{}", 100)
                     .await
@@ -1483,11 +1483,11 @@ mod tests {
                 };
                 ws.upsert_invocation_state(&row).await.unwrap();
             }
-            let _cp = ControlPlaneStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
 
-        let views = Views::open(&path).await.unwrap();
+        let views = Views::open(&paths).await.unwrap();
 
         let done = views.transcript("inv-done").await.unwrap().expect("some");
         match done.last().expect("entries") {
@@ -1517,11 +1517,11 @@ mod tests {
     #[tokio::test]
     async fn executions_ignore_clock_skew() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let paths = RuntimeDbPaths::under(dir.path());
 
         const NOW: i64 = 1_000_000;
         {
-            let ws = WorkerStore::open(&path).await.unwrap();
+            let ws = WorkerStore::open(&paths.worker).await.unwrap();
             let row = InvocationStateRow {
                 invocation_id: "inv-future".into(),
                 agent_id: "agent-a".into(),
@@ -1540,11 +1540,11 @@ mod tests {
                 trigger_payload: None,
             };
             ws.upsert_invocation_state(&row).await.unwrap();
-            let _cp = ControlPlaneStore::open(&path).await.unwrap();
-            let _proj = ProjectionStore::open(&path).await.unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
 
-        let views = Views::open(&path).await.unwrap();
+        let views = Views::open(&paths).await.unwrap();
         let execs = views
             .executions(NOW, 30_000, DEFAULT_LONG_DISPATCH_THRESHOLD_MS)
             .await

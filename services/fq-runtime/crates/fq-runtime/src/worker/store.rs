@@ -6,12 +6,12 @@
 //! owns. Each row is non-rebuildable from NATS — losing this
 //! file means losing in-flight state.
 //!
-//! In v1 this store opens the same SQLite file as the
-//! [`crate::control_plane::projection::ProjectionStore`]. The two
-//! stores manage disjoint tables, share the connection pool's
-//! locking, and coordinate version-ing through a shared
-//! `schema_meta` table. When v2 splits the deployment, each
-//! store moves to its own file with no schema redesign.
+//! This store owns its own SQLite file (`worker.db`, see
+//! [`crate::db::RuntimeDbPaths`]) with its own `schema_meta`
+//! version row. v1 collapsed all three runtime stores into a
+//! single `events.db`; the split (#262) moved each store to its
+//! own file with no schema redesign — a leftover v1 file is
+//! migrated by [`crate::db::split_legacy_events_db`].
 //!
 //! ## Schema versioning
 //!
@@ -1395,7 +1395,7 @@ mod tests {
 
     async fn open_fresh() -> (WorkerStore, tempfile::TempDir) {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("worker.db");
         let store = WorkerStore::open(&path).await.expect("open fresh");
         (store, dir)
     }
@@ -1422,7 +1422,7 @@ mod tests {
     #[tokio::test]
     async fn open_against_existing_db_is_idempotent() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("worker.db");
 
         let _ = WorkerStore::open(&path).await.expect("first open");
         // Second open should not fail and should not re-run migrations.
@@ -1434,7 +1434,7 @@ mod tests {
     #[tokio::test]
     async fn open_refuses_when_db_version_higher_than_binary() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("worker.db");
 
         // Bring the DB up to current version, then bump it
         // beyond what the binary supports.
@@ -1466,7 +1466,7 @@ mod tests {
         // tables and stamp the version row, leaving the
         // projection tables intact.
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("worker.db");
 
         // Create an existing-but-empty SQLite file with a
         // pre-existing unrelated table to stand in for a
@@ -1873,7 +1873,7 @@ mod tests {
         // it with the current binary and verify the migration
         // adds the column without disturbing existing rows.
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("worker.db");
 
         // Manually construct a v1 DB.
         {
@@ -1984,7 +1984,7 @@ mod tests {
         // verify the v3 migration adds workspace_ref without
         // disturbing existing rows.
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("worker.db");
 
         {
             let url = format!("sqlite://{}?mode=rwc", path.display());
@@ -2058,7 +2058,7 @@ mod tests {
         // verify the v4 migration adds the archive columns
         // without disturbing existing rows.
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("worker.db");
 
         {
             let url = format!("sqlite://{}?mode=rwc", path.display());
@@ -2143,7 +2143,7 @@ mod tests {
         // binary; verify the v7 migration creates the table without
         // disturbing existing rows.
         let dir = tempdir().unwrap();
-        let path = dir.path().join("events.db");
+        let path = dir.path().join("worker.db");
 
         {
             let url = format!("sqlite://{}?mode=rwc", path.display());
@@ -2225,7 +2225,7 @@ mod tests {
     #[tokio::test]
     async fn host_notice_round_trip_orders_by_step_then_seq() {
         let dir = tempdir().unwrap();
-        let store = WorkerStore::open(&dir.path().join("events.db"))
+        let store = WorkerStore::open(&dir.path().join("worker.db"))
             .await
             .unwrap();
 

@@ -499,7 +499,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let store = Arc::new(
-            ControlPlaneStore::open(&dir.path().join("events.db"))
+            ControlPlaneStore::open(&dir.path().join("control-plane.db"))
                 .await
                 .unwrap(),
         );
@@ -557,7 +557,7 @@ mod tests {
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
         let store = Arc::new(
-            ControlPlaneStore::open(&dir.path().join("events.db"))
+            ControlPlaneStore::open(&dir.path().join("control-plane.db"))
                 .await
                 .unwrap(),
         );
@@ -645,7 +645,7 @@ mod tests {
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
         let store = Arc::new(
-            ControlPlaneStore::open(&dir.path().join("events.db"))
+            ControlPlaneStore::open(&dir.path().join("control-plane.db"))
                 .await
                 .unwrap(),
         );
@@ -752,7 +752,7 @@ mod tests {
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
         let store = Arc::new(
-            ControlPlaneStore::open(&dir.path().join("events.db"))
+            ControlPlaneStore::open(&dir.path().join("control-plane.db"))
                 .await
                 .unwrap(),
         );
@@ -845,7 +845,7 @@ mod tests {
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
         let store = Arc::new(
-            ControlPlaneStore::open(&dir.path().join("events.db"))
+            ControlPlaneStore::open(&dir.path().join("control-plane.db"))
                 .await
                 .unwrap(),
         );
@@ -917,7 +917,7 @@ mod tests {
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let dir = tempdir().unwrap();
         let store = Arc::new(
-            ControlPlaneStore::open(&dir.path().join("events.db"))
+            ControlPlaneStore::open(&dir.path().join("control-plane.db"))
                 .await
                 .unwrap(),
         );

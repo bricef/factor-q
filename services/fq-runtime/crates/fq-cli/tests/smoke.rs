@@ -180,8 +180,8 @@ fn fq_invocation_transcript_help_parses() {
 
 #[test]
 fn fq_invocation_transcript_missing_db_exits_nonzero_without_panic() {
-    // FQ_CACHE_DIR points at a nonexistent path, so events.db is
-    // absent. The command must exit non-zero with an actionable
+    // FQ_CACHE_DIR points at a nonexistent path, so the per-store
+    // databases are absent. The command must exit non-zero with an actionable
     // error, not panic.
     let (exit, _stdout, stderr) = run_fq(
         &[
@@ -220,8 +220,8 @@ fn fq_doctor_help_lists_flags() {
 
 #[test]
 fn fq_doctor_missing_db_exits_nonzero_without_panic() {
-    // FQ_CACHE_DIR points at a nonexistent path, so the projection
-    // events.db is absent. `fq doctor` is DB-backed and needs no
+    // FQ_CACHE_DIR points at a nonexistent path, so the per-store
+    // databases are absent. `fq doctor` is DB-backed and needs no
     // NATS; with no DB it must exit non-zero with an actionable
     // error rather than panic or hang.
     let (exit, _stdout, stderr) = run_fq(&["doctor"], Duration::from_secs(5));
