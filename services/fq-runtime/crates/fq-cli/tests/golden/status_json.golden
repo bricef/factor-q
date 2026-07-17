@@ -17,7 +17,10 @@
       }
     }
   ],
-  "projection_path": "<CACHE_DIR>/events.db",
+  "worker_path": "<CACHE_DIR>/worker.db",
+  "control_plane_path": "<CACHE_DIR>/control-plane.db",
+  "projection_path": "<CACHE_DIR>/projection.db",
+  "legacy_events_db": null,
   "initialised": true,
   "projection_rows": 8,
   "recovery": {

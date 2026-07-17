@@ -14,9 +14,11 @@ Stream: fq-events
 Stream: fq-triggers
   state:            ✗ stream not found: jetstream error: 404 (code stream not found, error code 10059)
 
-Projection
-  path:             <CACHE_DIR>/events.db
-  rows:             #
+Stores
+  worker db:        <CACHE_DIR>/worker.db
+  control-plane db: <CACHE_DIR>/control-plane.db
+  projection db:    <CACHE_DIR>/projection.db
+  projection rows:  #
 
 Recovery state
   Stale workers: 2

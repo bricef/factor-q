@@ -1932,6 +1932,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             })?,
     );
     let cp_store = Arc::new(
+        // allow-direct-store-open: run_daemon hosts the control plane (writer).
         ControlPlaneStore::open(&db_paths.control_plane)
             .await
             .with_context(|| {
@@ -3797,12 +3798,12 @@ async fn invocation_drop(
     json: bool,
 ) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
-    // allow-direct-store-open: operator write path (`fq invocation drop`), not a read.
-    // allow-direct-store-open: operator write path (`fq invocation drop`), not a read.
     // The drop writes to the control-plane store, so this path runs
     // the legacy split if one is pending.
     let db_paths = ensure_split_dbs(&config).await?;
+    // allow-direct-store-open: operator write path (`fq invocation drop`), not a read.
     let proj_store = ProjectionStore::open_read_only(&db_paths.projection).await?;
+    // allow-direct-store-open: operator write path (`fq invocation drop`), not a read.
     let control_store = ControlPlaneStore::open(&db_paths.control_plane).await?;
     let bus = EventBus::connect(&config.nats.url)
         .await
@@ -4350,10 +4351,10 @@ async fn workers_list(
 
 async fn workers_prune(global: &GlobalArgs, dry_run: bool) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
-    // allow-direct-store-open: operator write path (`fq workers prune` deletes rows).
     // Prune deletes control-plane rows, so this path runs the
     // legacy split if one is pending.
     let db_paths = ensure_split_dbs(&config).await?;
+    // allow-direct-store-open: operator write path (`fq workers prune` deletes rows).
     let store = ControlPlaneStore::open(&db_paths.control_plane).await?;
     let stale: Vec<String> = store
         .list_workers()
