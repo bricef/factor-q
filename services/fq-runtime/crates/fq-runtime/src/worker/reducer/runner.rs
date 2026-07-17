@@ -2084,6 +2084,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         let tool_start = Instant::now();
         let stats = HostInvocationStats {
+            invocation_id: inv_str,
             agent_id: agent_id.as_str(),
             model: agent.model(),
             allowed_tool_names: agent.tools(),
@@ -4954,6 +4955,7 @@ mod tests {
         // while we were suspended" case.
         let tool_output = synthesize_self_inspect(
             &HostInvocationStats {
+                invocation_id: "suspend-invocation",
                 agent_id: "suspend-tools",
                 model: "claude-haiku",
                 allowed_tool_names: &["builtin__self_inspect".to_string()],

@@ -39,7 +39,14 @@ pub const SELF_INSPECT_TOOL_NAME: &str = "self_inspect";
 
 /// All known include-filter values for `self_inspect`'s
 /// `include` parameter. The host honours these strings.
-pub const SELF_INSPECT_SECTIONS: &[&str] = &["budget", "context", "iterations", "model", "tools"];
+pub const SELF_INSPECT_SECTIONS: &[&str] = &[
+    "budget",
+    "context",
+    "identity",
+    "iterations",
+    "model",
+    "tools",
+];
 
 /// Built-in `self_inspect` tool. Schema-only; the actual data
 /// fulfilment happens in the host (see module docs).
