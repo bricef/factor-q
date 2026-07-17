@@ -8,7 +8,7 @@ use fq_runtime::health::{ConsumerHealth, StreamHealth};
 use fq_runtime::read_service::{AgentDetailView, AgentsView, HealthReport};
 use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
 use fq_runtime::views::{
-    ActiveInvocationView, AgentCostDetailView, CostReport, CostView, EventView,
+    ActiveInvocationView, AgentCostDetailView, CostBucketView, CostReport, CostView, EventView,
     InvocationDetailView, InvocationSummaryView, ModelCostView,
 };
 
@@ -104,6 +104,14 @@ td.n {{ text-align: right; font-variant-numeric: tabular-nums; }}
 .bar {{ display: inline-block; vertical-align: baseline; width: 72px; height: 7px; background: #21252b; margin-right: 0.5rem; }}
 .bar i {{ display: block; height: 100%; background: #7aa2e8; opacity: 0.55; }}
 tr.sub td, tr.sub th {{ border-top: 2px solid #3a3f47; }}
+/* Spend-over-time bars (costs page). Single series, one hue; the
+   value lives in the hover title and on the tallest bar's label —
+   quiet buckets render as gaps, not lies. */
+.chart {{ display: flex; align-items: flex-end; gap: 3px; margin: 0.6rem 0 0.2rem; }}
+.chart .cslot {{ display: flex; flex-direction: column; align-items: center; justify-content: flex-end; flex: 1; max-width: 36px; }}
+.chart .cslot i {{ display: block; width: 100%; background: #7aa2e8; opacity: 0.55; }}
+.chart .cslot b {{ font-size: 0.75rem; margin-bottom: 2px; }}
+.chart .cslot span {{ font-size: 0.7rem; color: #7d838c; margin-top: 3px; }}
 pre {{ background: #1c2026; border: 1px solid #333941; padding: 0.5rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3rem 0; max-width: 72rem; }}
 details {{ margin: 0.3rem 0; }} summary {{ cursor: pointer; color: #9aa1ab; }}
 .turn {{ border-left: 3px solid #3a3f47; padding-left: 0.8rem; margin: 1.2rem 0; }}
@@ -1007,6 +1015,78 @@ fn by_model_table(models: &[ModelCostView], total: f64) -> String {
     b
 }
 
+/// The spend-over-time bar chart: one bar per slot, hourly slots for
+/// the day window and daily otherwise, oldest on the left, ending at
+/// "now". Slots are generated from the clock so quiet buckets render
+/// as real gaps; the projection's sparse buckets are joined in by
+/// their fixed-width UTC key. Bar heights are pixel-computed against
+/// the window's max; the tallest bar carries its value, every bar
+/// carries the exact figure in its hover title.
+fn cost_chart(buckets: &[CostBucketView], window: Window, now_ms: i64) -> String {
+    const BAR_MAX_PX: f64 = 72.0;
+    let Some(now) = chrono::DateTime::from_timestamp_millis(now_ms) else {
+        return String::new();
+    };
+    // (key, label) per slot, oldest first. The "all" window shows its
+    // most recent 30 days — the tables below still cover everything.
+    let hourly = window == Window::Day;
+    let slots: Vec<(String, String)> = if hourly {
+        (0..24)
+            .rev()
+            .map(|i| {
+                let t = now - chrono::Duration::hours(i);
+                (
+                    t.format("%Y-%m-%dT%H").to_string(),
+                    t.format("%H").to_string(),
+                )
+            })
+            .collect()
+    } else {
+        let days: i64 = match window {
+            Window::Days7 => 8,
+            _ => 30,
+        };
+        (0..days)
+            .rev()
+            .map(|i| {
+                let t = now - chrono::Duration::days(i);
+                (t.format("%Y-%m-%d").to_string(), t.format("%d").to_string())
+            })
+            .collect()
+    };
+    let by_key: std::collections::HashMap<&str, f64> = buckets
+        .iter()
+        .map(|b| (b.bucket.as_str(), b.total_cost))
+        .collect();
+    let costs: Vec<f64> = slots
+        .iter()
+        .map(|(key, _)| by_key.get(key.as_str()).copied().unwrap_or(0.0))
+        .collect();
+    let max = costs.iter().cloned().fold(0.0_f64, f64::max);
+    if max <= 0.0 {
+        return String::new();
+    }
+    let mut b = String::from(r#"<div id="cost-chart" class="chart">"#);
+    for ((key, label), cost) in slots.iter().zip(&costs) {
+        let px = (cost / max * BAR_MAX_PX).round() as i64;
+        let value = if (*cost - max).abs() < f64::EPSILON {
+            format!("<b>${cost:.2}</b>")
+        } else {
+            String::new()
+        };
+        b.push_str(&format!(
+            r#"<div class="cslot" title="{} · ${:.4}">{}<i style="height:{}px"></i><span>{}</span></div>"#,
+            esc(key),
+            cost,
+            value,
+            px,
+            esc(label),
+        ));
+    }
+    b.push_str("</div>");
+    b
+}
+
 /// The costs page body: named agents as rows (the operator's
 /// spend-watch), one-shot test instances folded into per-family lines
 /// under a `<details>`, and totals split named vs one-shot so synthetic
@@ -1014,12 +1094,13 @@ fn by_model_table(models: &[ModelCostView], total: f64) -> String {
 /// inflate "what did we actually spend". `day` is the same report
 /// bounded to the last 24h — the per-agent spend-velocity column;
 /// `window` bounds `report` itself and drives the selector row.
-pub fn costs(report: &CostReport, day: &CostReport, window: Window) -> String {
+pub fn costs(report: &CostReport, day: &CostReport, window: Window, now_ms: i64) -> String {
     let mut b = window_links(window, "/costs");
     if report.agents.is_empty() {
         b.push_str(r#"<p class="muted">no cost events recorded.</p>"#);
         return b;
     }
+    b.push_str(&cost_chart(&report.buckets, window, now_ms));
     let day_costs: std::collections::HashMap<&str, f64> = day
         .agents
         .iter()
@@ -1658,6 +1739,7 @@ mod tests {
             total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
             total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
             agents,
+            buckets: vec![],
             models: vec![],
         }
     }
@@ -1686,7 +1768,7 @@ mod tests {
                 total_output_tokens: 60_000,
             },
         ];
-        let html = costs(&report, &CostReport::default(), Window::All);
+        let html = costs(&report, &CostReport::default(), Window::All, TEST_NOW_MS);
         assert!(html.contains("<h2>By agent</h2>"), "got: {html}");
         assert!(html.contains("<h2>By model</h2>"), "got: {html}");
         assert!(html.contains("claude-opus-4-8"), "got: {html}");
@@ -1734,8 +1816,11 @@ mod tests {
     /// `costs()` with an unbounded window and an empty day report — the
     /// shape most render assertions want.
     fn costs_all(report: &CostReport) -> String {
-        costs(report, &CostReport::default(), Window::All)
+        costs(report, &CostReport::default(), Window::All, TEST_NOW_MS)
     }
+
+    /// 2026-07-16T12:00:00Z — a fixed clock for chart-slot tests.
+    const TEST_NOW_MS: i64 = 1_784_203_200_000;
 
     #[test]
     fn costs_collapse_one_shot_agents_into_families() {
@@ -1807,6 +1892,7 @@ mod tests {
             &cost_report(vec![cost_view("a", 1, 1.0)]),
             &CostReport::default(),
             Window::Days7,
+            TEST_NOW_MS,
         );
         assert!(html.contains("<b>7d</b>"), "got: {html}");
         assert!(html.contains(r#"<a href="/costs">all</a>"#), "got: {html}");
@@ -1816,7 +1902,12 @@ mod tests {
         );
         // An empty windowed report still renders the selector — the way
         // back out of a quiet window.
-        let empty = costs(&CostReport::default(), &CostReport::default(), Window::Day);
+        let empty = costs(
+            &CostReport::default(),
+            &CostReport::default(),
+            Window::Day,
+            TEST_NOW_MS,
+        );
         assert!(empty.contains("<b>24h</b>"), "got: {empty}");
         assert!(empty.contains("no cost events"), "got: {empty}");
     }
@@ -1830,7 +1921,7 @@ mod tests {
             cost_view("m0-loop", 5, 6.0),
         ]);
         let day = cost_report(vec![cost_view("m0-issue-fix", 2, 13.16)]);
-        let html = costs(&report, &day, Window::All);
+        let html = costs(&report, &day, Window::All, TEST_NOW_MS);
         assert!(
             html.contains("<th class=\"n\">last 24h</th>"),
             "got: {html}"
@@ -2133,6 +2224,60 @@ mod tests {
         assert!(
             html.contains("no invocations match the filters"),
             "got: {html}"
+        );
+    }
+
+    /// The spend chart: continuous slots from the clock, sparse
+    /// buckets joined by key, quiet slots as zero-height gaps, the
+    /// max bar labeled, hourly granularity on the day window.
+    #[test]
+    fn cost_chart_fills_slots_and_labels_the_max() {
+        let bucket = |key: &str, cost: f64| CostBucketView {
+            bucket: key.to_string(),
+            total_cost: cost,
+        };
+        // TEST_NOW_MS is 2026-07-16T12:00Z: 30 daily slots end there.
+        let buckets = vec![
+            bucket("2026-07-14", 4.0),
+            bucket("2026-07-16", 8.0),
+            // Outside the 30-day pane — must be ignored, not drawn.
+            bucket("2020-01-01", 99.0),
+        ];
+        let html = cost_chart(&buckets, Window::All, TEST_NOW_MS);
+        assert_eq!(html.matches("cslot").count(), 30, "got: {html}");
+        // Max bar: full height and labeled; half-cost bar: half height.
+        assert!(
+            html.contains(r#"title="2026-07-16 · $8.0000"><b>$8.00</b><i style="height:72px""#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"title="2026-07-14 · $4.0000"><i style="height:36px""#),
+            "got: {html}"
+        );
+        // A quiet day renders a gap, not a bar.
+        assert!(
+            html.contains(r#"title="2026-07-15 · $0.0000"><i style="height:0px""#),
+            "got: {html}"
+        );
+        assert!(!html.contains("2020-01-01"), "stale bucket drawn: {html}");
+
+        // Day window: 24 hourly slots, keys carry the hour.
+        let html = cost_chart(&[bucket("2026-07-16T09", 1.5)], Window::Day, TEST_NOW_MS);
+        assert_eq!(html.matches("cslot").count(), 24, "got: {html}");
+        assert!(
+            html.contains(r#"title="2026-07-16T09 · $1.5000""#),
+            "got: {html}"
+        );
+
+        // 7d window: 8 daily slots.
+        let html = cost_chart(&[bucket("2026-07-12", 2.0)], Window::Days7, TEST_NOW_MS);
+        assert_eq!(html.matches("cslot").count(), 8, "got: {html}");
+
+        // No spend in the pane → no chart at all.
+        assert_eq!(cost_chart(&[], Window::All, TEST_NOW_MS), "");
+        assert_eq!(
+            cost_chart(&[bucket("2020-01-01", 9.0)], Window::All, TEST_NOW_MS),
+            ""
         );
     }
 

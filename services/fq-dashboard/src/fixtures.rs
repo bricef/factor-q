@@ -397,6 +397,23 @@ fn cost_report() -> CostReport {
         total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
         total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
         agents,
+        // A week of daily spend ending at the frozen "now" — the
+        // page-top bar chart in the screenshot.
+        buckets: vec![
+            ("2026-07-05", 11.20),
+            ("2026-07-06", 19.85),
+            ("2026-07-07", 8.13),
+            ("2026-07-08", 24.90),
+            ("2026-07-09", 3.41),
+            ("2026-07-10", 21.06),
+            ("2026-07-11", 14.81),
+        ]
+        .into_iter()
+        .map(|(bucket, total_cost)| fq_runtime::views::CostBucketView {
+            bucket: bucket.to_string(),
+            total_cost,
+        })
+        .collect(),
         // The same spend split by model — the page's "By model" table.
         models: vec![
             ModelCostView {
@@ -457,6 +474,7 @@ fn day_cost_report() -> CostReport {
         total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
         agents,
         // Unused by the last-24h merge — only per-agent costs are read.
+        buckets: vec![],
         models: vec![],
     }
 }
@@ -688,7 +706,12 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
             render::live_page(
                 "costs",
                 REFRESH_SECS,
-                &render::costs(&cost_report(), &day_cost_report(), render::Window::All),
+                &render::costs(
+                    &cost_report(),
+                    &day_cost_report(),
+                    render::Window::All,
+                    NOW_MS,
+                ),
             ),
         ),
         (

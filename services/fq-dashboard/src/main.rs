@@ -527,7 +527,9 @@ async fn costs_page(
         Err(page) => return page,
     };
     let since = window.since_ms().map(rfc3339_ago);
-    let report = match client.costs(context::current(), None, since).await {
+    // Hourly bars for the day window, daily otherwise.
+    let hourly = window == render::Window::Day;
+    let report = match client.costs(context::current(), None, since, hourly).await {
         Ok(Ok(report)) => report,
         Ok(Err(err)) => return unreachable_page(&state, "costs", &err.to_string()),
         Err(err) => return unreachable_page(&state, "costs", &format!("rpc: {err}")),
@@ -543,7 +545,7 @@ async fn costs_page(
                 .expect("day window is bounded"),
         );
         match client
-            .costs(context::current(), None, Some(day_since))
+            .costs(context::current(), None, Some(day_since), false)
             .await
         {
             Ok(Ok(day)) => day,
@@ -551,7 +553,11 @@ async fn costs_page(
             Err(err) => return unreachable_page(&state, "costs", &format!("rpc: {err}")),
         }
     };
-    ok_page(&state, "costs", &render::costs(&report, &day, window))
+    ok_page(
+        &state,
+        "costs",
+        &render::costs(&report, &day, window, now_ms()),
+    )
 }
 
 /// How many per-invocation rows the drill-down shows; the totals row
