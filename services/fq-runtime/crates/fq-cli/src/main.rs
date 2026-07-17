@@ -3834,8 +3834,8 @@ async fn invocation_transcript(
     full: bool,
 ) -> anyhow::Result<()> {
     use fq_runtime::transcript::{
-        DEFAULT_TRUNCATE_BYTES, assistant_entry, collect_transcript, dedup_key, render_pretty,
-        snapshot_keys, tool_result_entry,
+        DEFAULT_TRUNCATE_BYTES, assistant_entry, dedup_key, render_pretty, snapshot_keys,
+        tool_result_entry,
     };
 
     let as_json = matches!(format, TranscriptFormat::Json);
@@ -3849,17 +3849,7 @@ async fn invocation_transcript(
     };
 
     let config = global.resolve_config()?;
-    let db_paths = runtime_db_paths(&config);
-    // Read-only command: a pending v1 single-file layout is a hint,
-    // not a migration (see `open_views`).
-    let legacy = fq_runtime::db::legacy_db_path(&config.cache.directory);
-    if !db_paths.worker.exists() && legacy.exists() {
-        anyhow::bail!(
-            "found legacy single-file database at {}: run `fq run` (or any writing \
-             command) once to migrate to the per-store layout",
-            legacy.display()
-        );
-    }
+    let views = open_views(global).await?;
 
     // For --follow, subscribe to the invocation's agent subject BEFORE
     // reading the WAL snapshot, so a turn that completes in the gap
@@ -3868,10 +3858,10 @@ async fn invocation_transcript(
     // live stream, then deduped at the seam. Snapshot-only mode needs no
     // NATS. The returned stream owns its connection, so `bus` may drop.
     let follow_stream = if follow {
-        let proj_store = ProjectionStore::open_read_only(&db_paths.projection).await?;
-        let agent_id = proj_store
-            .agent_id_for_invocation(id)
+        let agent_id = views
+            .invocation(id)
             .await?
+            .and_then(|invocation| invocation.agent_id)
             .ok_or_else(|| {
                 let hint = if id.len() != 36 {
                     " (not a full invocation id — see `fq invocation list --json`)"
@@ -3895,40 +3885,38 @@ async fn invocation_transcript(
         None
     };
 
-    // Worker WAL snapshot, read-only. A missing DB is the actionable
-    // NotInitialised error, never a panic.
-    let worker_store = fq_runtime::WorkerStore::open_read_only(&db_paths.worker)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to open worker store at {}: has `fq run`/`fq trigger` been run?",
-                db_paths.worker.display()
-            )
-        })?;
-
-    let llm_rows = worker_store.list_llm_dispatches_for_invocation(id).await?;
-    let tool_rows = worker_store.list_tool_dispatches_for_invocation(id).await?;
-
     // An empty snapshot is a hard error only for the one-shot view; under
     // --follow it is valid (tailing an invocation that has not dispatched
     // anything yet), so fall through to the live loop.
-    if llm_rows.is_empty() && tool_rows.is_empty() && !follow {
-        eprintln!(
-            "no transcript found for invocation id={id} (no LLM or tool dispatches recorded)"
-        );
-        // A full invocation id is 36 chars; `fq invocation list` shows an
-        // abbreviated one, so a copied id often won't match. Point at the
-        // machine-readable form that carries the full id.
-        if id.len() != 36 {
+    let mut entries = match views.transcript(id).await? {
+        Some(entries) => entries,
+        None if follow => Vec::new(),
+        None => {
             eprintln!(
-                "note: `{id}` is not a full invocation id — `fq invocation list` abbreviates it; \
-                 use `fq invocation list --json` to get the full id."
+                "no transcript found for invocation id={id} (no LLM or tool dispatches recorded)"
             );
+            // A full invocation id is 36 chars; `fq invocation list` shows an
+            // abbreviated one, so a copied id often won't match. Point at the
+            // machine-readable form that carries the full id.
+            if id.len() != 36 {
+                eprintln!(
+                    "note: `{id}` is not a full invocation id — `fq invocation list` abbreviates it; \
+                     use `fq invocation list --json` to get the full id."
+                );
+            }
+            std::process::exit(1);
         }
-        std::process::exit(1);
-    }
+    };
 
-    let entries = collect_transcript(&llm_rows, &tool_rows);
+    // `Views::transcript` also exposes terminal outcomes. This CLI command's
+    // established snapshot contract predates that entry, so retain its
+    // byte-identical LLM/tool-only output during the reader migration.
+    entries.retain(|entry| {
+        !matches!(
+            entry,
+            fq_runtime::transcript::TranscriptEntry::Outcome { .. }
+        )
+    });
 
     if as_json {
         println!("{}", serde_json::to_string_pretty(&entries)?);
