@@ -117,11 +117,21 @@ Two configuration planes, deliberately separate:
 
 ### D4 — Hot reload: watch, validate wholesale, diff by job name
 
-- **Detection.** `fsnotify` on the config file's *directory* (editors
-  save via atomic rename, which orphans a watch on the file itself), a
-  short debounce to coalesce write bursts, a low-frequency mtime poll as
-  a fallback for filesystems where fsnotify is unreliable, and `SIGHUP`
-  as an explicit operator override.
+- **Detection: a polling guarantee, an fsnotify accelerator.** The
+  *guarantee* is a low-frequency poll (default 30s): read the file —
+  it is a few KB — and compare a content hash against the config in
+  force; on difference, run the normal reload path. Content hash, not
+  mtime: mtime has 1-second granularity on some filesystems and tools
+  can preserve timestamps. The *accelerator* is `fsnotify` on the
+  config file's *directory* (editors save via atomic rename, which
+  orphans a watch on the file's inode), debounced to coalesce write
+  bursts. inotify's real-world failures are all silent — events do not
+  cross NFS or container bind-mount namespaces, watch registration
+  fails when `max_user_watches` is exhausted, an overflowed event
+  queue drops — and a silent miss would leave an operator believing an
+  edited job is live. With the poll as the floor, every one of those
+  degrades to "reload lands within one interval", never "reload never
+  happens". `SIGHUP` forces an immediate check.
 - **Validation is all-or-nothing.** A reload parses and validates the
   whole file; any error (bad TOML, duplicate name, invalid cron
   expression, invalid subject, unknown timezone) is logged with the
@@ -191,7 +201,7 @@ overnight must not greet the morning by firing N agent invocations. The
 cautious default is `skip`; jobs whose work is cumulative-and-idempotent
 ("run the nightly sweep") opt into `once`.
 
-Two guard rails, same principle:
+Three guard rails, same principle:
 
 - A job with **no recorded state** (first appearance in config, or state
   lost) never catches up — it waits for its next scheduled time. Adding
@@ -199,6 +209,15 @@ Two guard rails, same principle:
 - **Minimum interval is 1 minute**, enforced at validation. Standard
   five-field cron expressions plus `@every`/`@daily`-style descriptors;
   seconds-resolution schedules are rejected.
+- A **global fire valve**: `[limits] max_fires_per_hour` (default 120)
+  is a sliding-window ceiling over *all* fires in the file — durable or
+  not, catch-ups included. A fire over the ceiling is suppressed with a
+  loud log line and then treated as any other missed fire (this
+  section's policy governs), so a runaway schedule is clamped to the
+  valve rate rather than trusted to its own floor. The 1-minute floor
+  bounds each job; the valve bounds the file
+  ([ADR-0004](../../docs/adrs/accepted/0004-cost-controls-from-day-one.md):
+  cost controls from day one).
 
 Timezones are per-job (`tz`, IANA name, default `"UTC"`), evaluated by
 the cron library; the usual DST caveats (skipped/repeated wall-clock
@@ -215,6 +234,9 @@ reads as part of the `fqd` / `fq` family
 
 ```toml
 # fq-cron.toml — hot-reloaded; connection settings live on the command line.
+
+[limits]            # optional
+max_fires_per_hour = 120    # sliding-window ceiling across every job (D6)
 
 [defaults]          # optional; each key overridable per job
 tz = "UTC"
@@ -292,6 +314,7 @@ a reload event, call `plan`, execute the returned fires.
 | Durable job whose subject no stream matches | Configuration error: logged, job unhealthy until reload; not retried (D5). |
 | Trigger for an unknown agent id | Not detectable by fq-cron (the contract stores it durably, undelivered); operator checks the agent id against the fleet. |
 | Scheduler down across fires | Per-job catch-up policy: `skip` or one `once` fire (D6). |
+| Fire rate exceeds `max_fires_per_hour` | Fire suppressed, logged loudly, treated as missed; the valve clamps runaway schedules (D6). |
 
 ## Operations
 
@@ -303,6 +326,19 @@ define exactly what a restart can and cannot re-fire. Observability in v1
 is structured logs — one line per fire attempt with job, scheduled slot,
 publish outcome, stream sequence, and attempt count — plus a loud line
 for every reload (accepted or rejected, with the diff).
+
+On the dogfood instance, fq-cron lands along the two planes it already
+separates ([ops/dogfood](../../ops/dogfood/README.md)):
+
+- The **binary** joins the CI artifact bundle beside `github-watcher`
+  (built by `main-artifacts.yml`, launched by a `cron.sh` launcher that
+  ships *inside* the bundle like the other launchers), so it is
+  versioned with each release and rolls back with the same `current`
+  symlink flip.
+- The **jobs file** is host-side state at `~/fq-dogfood/fq-cron.toml` —
+  the same tier as `fq.toml` and `agents/`, which deploys never touch.
+  Unlike `fq.toml` it needs no explicit reload command: editing the
+  file *is* the deploy.
 
 ## Testing
 
@@ -331,15 +367,8 @@ for every reload (accepted or rejected, with the diff).
   payload computation beyond the two template variables.
 - **No daemon-side awareness.** The daemon neither knows nor cares that
   fq-cron exists; everything crosses the public wire contracts.
-
-## Open questions
-
-1. **Rate guard.** Is the 1-minute floor enough, or should a global
-   `max_fires_per_hour` valve exist from day one? (Agent-side budgets
-   already bound spend; this would bound trigger *count*.)
-2. **Own status subject.** Should fires/misses also be published on an
-   `fq.cron.>` observability subject, or are logs enough until something
-   needs to consume scheduler state?
-3. **Config in git.** The jobs file will likely live in the ops repo and
-   land via the existing deploy flow; confirm the path and ownership
-   when wiring up the dogfood instance.
+- **No status subject in v1.** Fires, misses, and reload outcomes are
+  structured log lines, not published events, until a consumer exists —
+  the dashboard is the plausible first customer. Internally every
+  outcome already funnels through one reporting point, so an `fq.cron.>`
+  status publisher is a later tee behind that seam, not a redesign.
