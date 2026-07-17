@@ -242,7 +242,7 @@ They need no `env` grant: they are facts the runtime owns about the
 invocation, not host environment passed through, and they expose
 nothing about the host. A same-named host variable never shadows them,
 even if allowlisted. They persist across suspend/resume with the same
-invocation id.
+invocation id. The `self_inspect` tool mirrors these values in its `identity` section.
 
 Use them for provenance on out-of-band work — for example, configuring
 the git author so commits attribute to the agent rather than the

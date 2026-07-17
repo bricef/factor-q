@@ -26,6 +26,7 @@ use crate::events::InvocationTotals;
 /// build this from their own tracked state and pass it in.
 #[derive(Debug, Clone)]
 pub struct HostInvocationStats<'a> {
+    pub invocation_id: &'a str,
     pub agent_id: &'a str,
     pub model: &'a str,
     pub allowed_tool_names: &'a [String],
@@ -76,6 +77,19 @@ pub fn synthesize_self_inspect(stats: &HostInvocationStats<'_>, parameters: Valu
     let want = section_filter(params.include.as_deref());
 
     let mut out = serde_json::Map::new();
+
+    // Mirrors the FQ_INVOCATION_ID, FQ_AGENT_ID, and FQ_MODEL ambient env;
+    // the runner feeds both surfaces from the same values, so they must never drift.
+    if want.contains(&"identity") {
+        out.insert(
+            "identity".to_string(),
+            json!({
+                "invocation_id": stats.invocation_id,
+                "agent_id": stats.agent_id,
+                "model": stats.model,
+            }),
+        );
+    }
 
     if want.contains(&"model") {
         out.insert("model".to_string(), json!(stats.model));
@@ -185,6 +199,7 @@ mod tests {
 
     fn stats() -> HostInvocationStats<'static> {
         HostInvocationStats {
+            invocation_id: "invocation-123",
             agent_id: "self-aware",
             model: "claude-haiku-4-5",
             allowed_tool_names: &[],
@@ -215,12 +230,33 @@ mod tests {
         };
         let raw = synthesize_self_inspect(&s, Value::Null);
         let v: Value = serde_json::from_str(&raw).unwrap();
+        assert!(v.get("identity").is_some());
         assert!(v.get("model").is_some());
         assert!(v.get("iterations").is_some());
         assert!(v.get("budget").is_some());
         assert!(v.get("tools").is_some());
+        assert_eq!(
+            v["identity"],
+            json!({"invocation_id": "invocation-123", "agent_id": "self-aware", "model": "claude-haiku-4-5"})
+        );
         assert_eq!(v["model"], "claude-haiku-4-5");
         assert_eq!(v["agent_id"], "self-aware");
+    }
+
+    #[test]
+    fn include_identity_returns_only_identity() {
+        let raw = synthesize_self_inspect(&stats(), json!({"include": ["identity"]}));
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "identity": {
+                    "invocation_id": "invocation-123",
+                    "agent_id": "self-aware",
+                    "model": "claude-haiku-4-5"
+                }
+            })
+        );
     }
 
     #[test]
