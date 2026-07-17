@@ -425,14 +425,16 @@ impl ControlPlaneStore {
     /// exit. The coordination-consumer's stale-worker sweep
     /// promotes alive→stale; only an explicit operator
     /// action or graceful exit moves to shutdown.
-    pub async fn mark_worker_stale(&self, worker_id: &str) -> Result<(), ControlPlaneStoreError> {
-        sqlx::query("UPDATE coordination_worker SET status = ? WHERE worker_id = ? AND status = ?")
-            .bind(WorkerStatus::Stale.as_str())
-            .bind(worker_id)
-            .bind(WorkerStatus::Alive.as_str())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    pub async fn mark_worker_stale(&self, worker_id: &str) -> Result<bool, ControlPlaneStoreError> {
+        let result = sqlx::query(
+            "UPDATE coordination_worker SET status = ? WHERE worker_id = ? AND status = ?",
+        )
+        .bind(WorkerStatus::Stale.as_str())
+        .bind(worker_id)
+        .bind(WorkerStatus::Alive.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn get_worker(

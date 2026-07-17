@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/nats-io/nats.go"
 )
@@ -74,8 +75,8 @@ type wireEvent struct {
 // skipped.
 func (s *NatsOutcomeSource) Outcomes(ctx context.Context, agentID string, handle func(OutcomeEvent)) error {
 	msgs := make(chan *nats.Msg, 64)
-	subs := make([]*nats.Subscription, 0, 3)
-	for _, kind := range []string{"triggered", "completed", "failed"} {
+	subs := make([]*nats.Subscription, 0, 4)
+	for _, kind := range []string{"triggered", "completed", "failed", "invocation.ambiguous"} {
 		subject := fmt.Sprintf("fq.agent.%s.%s", agentID, kind)
 		sub, err := s.nc.ChanSubscribe(subject, msgs)
 		if err != nil {
@@ -156,6 +157,8 @@ func outcomeKindFromSubject(subject string) (OutcomeKind, bool) {
 		return OutcomeCompleted, true
 	case hasSuffixToken(subject, "failed"):
 		return OutcomeFailed, true
+	case strings.HasSuffix(subject, ".invocation.ambiguous"):
+		return OutcomeAmbiguous, true
 	default:
 		return 0, false
 	}

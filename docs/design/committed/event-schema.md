@@ -4,7 +4,9 @@ This document specifies the event schema emitted by the factor-q runtime. It cov
 
 Events are the primary observability and audit surface of factor-q. Every meaningful action in the system is an event, published to NATS JetStream, and later projected into SQLite for querying.
 
-**Schema version: 2.** See the [v1 → v2 changelog](#changelog-v1--v2) at the bottom for the breaking changes.
+**Schema version: 2.**
+
+Recovery observability: `fq.agent.<agent>.invocation.ambiguous` is emitted both for ambiguous WAL recovery and automatic-resume failures (its `note` contains the error). `fq.worker.<worker>.orphaned` is emitted once when the coordination sweep transitions a worker from alive to stale; its payload includes `worker_id` and `last_heartbeat_ms`. Consumers should treat ambiguous invocations as requiring operator attention. See the [v1 → v2 changelog](#changelog-v1--v2) at the bottom for the breaking changes.
 
 ## The three-layer model
 

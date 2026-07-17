@@ -42,6 +42,7 @@ use tracing::{debug, error, info, warn};
 use crate::bus::{BusError, EventBus};
 use crate::events::{
     Event, EventPayload, InvocationArchiveAckedPayload, InvocationArchivedPayload,
+    WorkerOrphanedPayload,
 };
 
 use super::store::{
@@ -462,8 +463,28 @@ impl CoordinationConsumer {
             if worker.status != WorkerStatus::Alive {
                 continue;
             }
-            debug!(worker_id = %worker.worker_id, "marking worker stale");
-            self.store.mark_worker_stale(&worker.worker_id).await?;
+            if !self.store.mark_worker_stale(&worker.worker_id).await? {
+                continue;
+            }
+            let worker_id = match crate::worker::WorkerId::new(worker.worker_id.clone()) {
+                Ok(id) => id,
+                Err(err) => {
+                    error!(worker_id = %worker.worker_id, error = %err, "stale worker has invalid id");
+                    continue;
+                }
+            };
+            let event = Event::system(
+                uuid::Uuid::now_v7(),
+                EventPayload::WorkerOrphaned(WorkerOrphanedPayload {
+                    worker_id,
+                    last_heartbeat_ms: worker.last_heartbeat,
+                }),
+            );
+            if let Err(err) = self.bus.publish(&event).await {
+                error!(worker_id = %worker.worker_id, error = %err, "failed to publish worker.orphaned event");
+            } else {
+                warn!(worker_id = %worker.worker_id, "worker heartbeat lapsed; emitted worker.orphaned");
+            }
         }
         Ok(())
     }

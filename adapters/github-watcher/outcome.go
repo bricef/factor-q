@@ -28,6 +28,8 @@ const (
 	// OutcomeFailed is the `failed` event: the invocation terminated with
 	// an error.
 	OutcomeFailed
+	// OutcomeAmbiguous is a recovery failure requiring operator attention.
+	OutcomeAmbiguous
 )
 
 // OutcomeEvent is the minimal projection of a runtime lifecycle event the
@@ -165,6 +167,13 @@ func (r *OutcomeReactor) React(ctx context.Context, ev OutcomeEvent) {
 			return
 		}
 		r.reactFailed(ctx, issue, ev.ErrorKind)
+		r.forget(ev.InvocationID)
+	case OutcomeAmbiguous:
+		issue, ok := r.lookup(ev.InvocationID)
+		if !ok {
+			return
+		}
+		r.relabel(ctx, issue, r.Config.InProgressLabel, r.Config.FailedLabel, "invocation recovery is ambiguous; operator attention required")
 		r.forget(ev.InvocationID)
 	}
 }

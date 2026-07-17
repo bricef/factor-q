@@ -61,6 +61,7 @@ pub fn event_kind_of(payload: &EventPayload) -> &'static str {
         EventPayload::SystemTaskFailed(_) => "system_task_failed",
         EventPayload::SystemRecovery(_) => "system_recovery",
         EventPayload::WorkerHeartbeat(_) => "worker_heartbeat",
+        EventPayload::WorkerOrphaned(_) => "worker_orphaned",
         EventPayload::McpServerLog(_) => "mcp_server_log",
     }
 }

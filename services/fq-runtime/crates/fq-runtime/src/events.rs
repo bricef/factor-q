@@ -182,6 +182,11 @@ pub mod subjects {
         format!("fq.worker.{worker_id}.heartbeat")
     }
 
+    /// Worker liveness transition emitted once when a heartbeat lapses.
+    pub fn worker_orphaned(worker_id: &str) -> String {
+        format!("fq.worker.{worker_id}.orphaned")
+    }
+
     /// Control-plane → worker acknowledgement of an
     /// `invocation.archived` hand-off. Worker-scoped so a worker
     /// can subscribe to its own acks with a single filter
@@ -443,6 +448,7 @@ impl EventPayload {
             Self::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
             Self::McpServerLog(_) => subjects::SYSTEM_MCP_LOG.to_string(),
             Self::WorkerHeartbeat(p) => subjects::worker_heartbeat(p.worker_id.as_str()),
+            Self::WorkerOrphaned(p) => subjects::worker_orphaned(p.worker_id.as_str()),
             Self::InvocationArchiveAcked(p) => {
                 subjects::worker_invocation_archive_acked(p.worker_id.as_str())
             }
@@ -471,6 +477,7 @@ impl EventPayload {
             Self::SystemTaskFailed(_) => "factor-q/system_task_failed@1",
             Self::SystemRecovery(_) => "factor-q/system_recovery@1",
             Self::WorkerHeartbeat(_) => "factor-q/worker_heartbeat@1",
+            Self::WorkerOrphaned(_) => "factor-q/worker_orphaned@1",
             Self::McpServerLog(_) => "factor-q/mcp_server_log@1",
         }
     }
@@ -670,6 +677,9 @@ pub enum EventPayload {
     /// not in the payload, so there's only one source of
     /// truth for "when did this beat arrive."
     WorkerHeartbeat(WorkerHeartbeatPayload),
+    /// A worker heartbeat lapsed without a clean shutdown. Emitted once
+    /// for the alive-to-stale transition by the coordination consumer.
+    WorkerOrphaned(WorkerOrphanedPayload),
     /// A log record forwarded from a connected MCP server
     /// (`notifications/message`), bridged onto the bus by the daemon's
     /// notification drain (ADR-0020). Daemon-scoped — no agent or
@@ -1225,6 +1235,13 @@ pub struct SystemRecoveryPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerHeartbeatPayload {
     pub worker_id: crate::worker::WorkerId,
+}
+
+/// Payload for [`EventPayload::WorkerOrphaned`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerOrphanedPayload {
+    pub worker_id: crate::worker::WorkerId,
+    pub last_heartbeat_ms: i64,
 }
 
 /// A log record a connected MCP server emitted (`notifications/message`),
