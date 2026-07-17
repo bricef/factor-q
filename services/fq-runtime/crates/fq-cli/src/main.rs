@@ -1151,6 +1151,10 @@ fn print_event(event: &Event) {
             p.task_name, p.error_message
         ),
         EventPayload::WorkerHeartbeat(p) => format!("worker.heartbeat worker_id={}", p.worker_id),
+        EventPayload::WorkerOrphaned(p) => format!(
+            "worker.orphaned worker_id={} last_heartbeat_ms={}",
+            p.worker_id, p.last_heartbeat_ms
+        ),
         EventPayload::McpServerLog(p) => {
             format!("mcp.log server={} level={} {}", p.server, p.level, p.data)
         }
@@ -2162,6 +2166,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         let agent = loaded.agent.clone();
         let runner = resume_runner.clone();
         let llm_arc = llm.clone();
+        let bus = bus.clone();
         resume_handles.push(tokio::spawn(async move {
             match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
                 Ok(outcome) => tracing::info!(
@@ -2169,11 +2174,21 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                     ?outcome,
                     "resume completed"
                 ),
-                Err(err) => tracing::warn!(
-                    invocation_id = %inv_id,
-                    error = %err,
-                    "resume failed"
-                ),
+                Err(err) => {
+                    let note = format!("automatic resume failed: {err}");
+                    tracing::error!(invocation_id = %inv_id, agent_id = %agent_id, error = %err, "resume failed; emitting invocation.ambiguous");
+                    let event = Event::new(
+                        agent_id, inv_id,
+                        EventPayload::InvocationAmbiguous(fq_runtime::events::InvocationAmbiguousPayload {
+                            stuck_entity: "recovery".to_string(),
+                            stuck_call_id: inv_id.to_string(),
+                            note,
+                        }),
+                    );
+                    if let Err(publish_err) = bus.publish(&event).await {
+                        tracing::error!(invocation_id = %inv_id, error = %publish_err, "failed to publish failed-resume invocation.ambiguous");
+                    }
+                },
             }
         }));
     }

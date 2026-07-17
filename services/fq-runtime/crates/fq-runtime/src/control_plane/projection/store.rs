@@ -785,6 +785,7 @@ fn extract_fields(event: &Event) -> Fields {
         | EventPayload::SystemTaskFailed(_)
         | EventPayload::SystemRecovery(_)
         | EventPayload::WorkerHeartbeat(_)
+        | EventPayload::WorkerOrphaned(_)
         | EventPayload::McpServerLog(_)
         | EventPayload::InvocationOperatorRecovered(_) => Fields::default(),
     }
