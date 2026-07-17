@@ -50,6 +50,11 @@ type triggeredPayload struct {
 	TriggerPayload json.RawMessage `json:"trigger_payload"`
 }
 
+// completedPayload is the subset of the `completed` payload the watcher reads.
+type completedPayload struct {
+	TaskStatus string `json:"task_status"`
+}
+
 // failedPayload is the subset of the `failed` payload the watcher reads.
 type failedPayload struct {
 	ErrorKind string `json:"error_kind"`
@@ -122,6 +127,11 @@ func (s *NatsOutcomeSource) decode(msg *nats.Msg) (OutcomeEvent, bool) {
 		var tp triggeredPayload
 		if err := json.Unmarshal(we.Payload.Content, &tp); err == nil {
 			ev.Issue = issueFromTriggerPayload(s.taskTemplate, tp.TriggerPayload)
+		}
+	case OutcomeCompleted:
+		var cp completedPayload
+		if err := json.Unmarshal(we.Payload.Content, &cp); err == nil {
+			ev.TaskStatus = cp.TaskStatus
 		}
 	case OutcomeFailed:
 		var fp failedPayload

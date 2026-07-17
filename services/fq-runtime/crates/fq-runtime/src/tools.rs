@@ -29,7 +29,7 @@ use std::sync::Arc;
 use fq_tools::Tool;
 use fq_tools::builtin::{
     ExecConfig, ExecTool, FileListTool, FileReadTool, FileSearchTool, FileWriteTool,
-    SelfInspectTool,
+    ReportOutcomeTool, SelfInspectTool,
 };
 
 use crate::events::ToolSchema;
@@ -42,13 +42,14 @@ pub const BUILTIN_PREFIX: &str = "builtin__";
 /// [`ToolRegistry::with_builtins_exec`]; `builtins_cover_the_basename_list`
 /// pins the correspondence. The runner uses this list to map legacy bare
 /// grants and calls to canonical names for one release (#177).
-pub const BUILTIN_TOOL_BASENAMES: [&str; 6] = [
+pub const BUILTIN_TOOL_BASENAMES: [&str; 7] = [
     "file_read",
     "file_list",
     "file_search",
     "file_write",
     "exec",
     "self_inspect",
+    "report_outcome",
 ];
 
 /// Number of tools registered by [`ToolRegistry::with_builtins`].
@@ -60,6 +61,12 @@ pub const BUILTIN_TOOL_COUNT: usize = BUILTIN_TOOL_BASENAMES.len();
 /// [`Tool::execute`] (see `worker/reducer/runner.rs`); a unit test pins
 /// it to `BUILTIN_PREFIX` + fq-tools' `SELF_INSPECT_TOOL_NAME`.
 pub const SELF_INSPECT_CANONICAL_NAME: &str = "builtin__self_inspect";
+
+/// Canonical name of the terminal outcome-declaration tool (#125). The
+/// reducer harness intercepts calls to this name (or its bare form) as
+/// the terminal transition instead of dispatching them — see
+/// `worker/reducer/harness.rs`.
+pub const REPORT_OUTCOME_CANONICAL_NAME: &str = "builtin__report_outcome";
 
 /// A collection of tool implementations keyed by their canonical name.
 #[derive(Clone, Default)]
@@ -104,6 +111,9 @@ impl ToolRegistry {
             .expect("unique builtin");
         registry
             .register_builtin("self_inspect", Arc::new(SelfInspectTool::new()))
+            .expect("unique builtin");
+        registry
+            .register_builtin("report_outcome", Arc::new(ReportOutcomeTool::new()))
             .expect("unique builtin");
         debug_assert_eq!(registry.len(), BUILTIN_TOOL_COUNT);
         registry

@@ -329,10 +329,13 @@ Published by the worker on startup for an invocation in recovery limbo (#64), in
 
 ### `completed`
 
-Published when an invocation finishes successfully.
+Published when an invocation finishes without a runtime failure. Note
+that "the runtime finished cleanly" and "the task was achieved" are
+different axes — the latter is `task_status`.
 
 ```json
 {
+  "task_status": "success",
   "result_summary": "Completed research task and wrote findings to /project/output/report.md",
   "total_llm_calls": 4,
   "total_tool_calls": 7,
@@ -340,6 +343,16 @@ Published when an invocation finishes successfully.
   "total_duration_ms": 12345
 }
 ```
+
+**`task_status`** (#125): the agent's own declaration of how the *task*
+went — `success | failed | blocked | partial`, defaulting to `success`
+when absent (pre-#125 events, and runs that never declare). Orthogonal
+to the runtime axis: `failed` events with a `FailureKind` model runtime
+failure; `task_status` models "the runtime worked — was the goal
+achieved?". Declared via the terminal `report_outcome` tool, which the
+reducer harness intercepts as the terminal transition (never
+dispatched); a turn ending with no tool calls declares `success`
+implicitly.
 
 ### `failed`
 
@@ -506,6 +519,18 @@ The following invariants hold across the event stream and are assumed by consume
 - Retention policy is `LimitsPolicy` with a configurable `MaxAge` (default: 30 days).
 - Events are projected into SQLite for complex queries.
 - The projection store is a read-optimised view, not the source of truth. Events can be re-projected from the NATS stream at any time.
+
+### Retention and the trail's lifetime
+
+The event trail has no payload-bearing system of record beyond JetStream retention. The projection is a long-lived but lossy, derived view, while the CAS archive preserves invocation outcomes rather than their event trail.
+
+| Surface | Lifetime | What survives and record status |
+|---|---|---|
+| NATS `fq-events` | 30 days by default | Complete payload-bearing event trail; deleted after retention. Trigger and advisory streams retain messages for 24 hours by default. |
+| SQLite projection (`events`) | Not currently pruned | Typed columns only, without event payloads. This is a derived, rebuildable view rather than a system of record; rebuilding from NATS can recover only retained events. |
+| CAS archive (`fq-cas`) | Archive retention policy | Invocation final-state blobs only, not the event trail. ADR-0026 designates these invocation outcomes as the system of record. |
+
+Events older than stream retention are available only as the projection's typed rows (no payloads); the payload-bearing trail is gone by design. ADR-0026's system-of-record guarantee covers invocation outcomes, not the trail. A stronger re-projection guarantee is tracked in [#139](https://github.com/bricef/factor-q/issues/139) and [#163](https://github.com/bricef/factor-q/issues/163).
 
 ## Open Questions
 

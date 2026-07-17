@@ -255,14 +255,22 @@ impl SummaryConsumer {
                     ),
                 )
             }
-            EventPayload::Completed(_) => {
+            EventPayload::Completed(p) => {
                 let prior = self.take_summary(&invocation_id);
+                // The agent's own declaration (#125): a completed run
+                // may still have failed its task — the outcome line
+                // must say so.
+                let declared = match p.task_status {
+                    crate::events::TaskStatus::Success => "SUCCESS".to_string(),
+                    other => format!("{other:?}").to_uppercase(),
+                };
                 (
                     SummaryKind::Outcome,
                     format!(
                         "Prior status line: {prior}\n\
-                         The invocation just COMPLETED successfully. Write the final \
-                         one-line outcome (what was delivered)."
+                         The invocation just COMPLETED; the agent declared its task \
+                         outcome as {declared}. Write the final one-line outcome \
+                         (what was delivered, or what the agent said went wrong)."
                     ),
                 )
             }

@@ -1527,7 +1527,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             durable_start.fire();
 
             match output.next_action {
-                NextAction::Complete(text) => {
+                NextAction::Complete { text, task_status } => {
                     let duration_ms = start.elapsed().as_millis() as u64;
                     totals.total_duration_ms = duration_ms;
                     let summary = if text.is_empty() { None } else { Some(text) };
@@ -1537,6 +1537,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             agent_id.clone(),
                             invocation_id,
                             EventPayload::Completed(CompletedPayload {
+                                task_status,
                                 result_summary: summary.clone(),
                                 total_llm_calls: totals.total_llm_calls,
                                 total_tool_calls: totals.total_tool_calls,
@@ -2084,6 +2085,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         let tool_start = Instant::now();
         let stats = HostInvocationStats {
+            invocation_id: inv_str,
             agent_id: agent_id.as_str(),
             model: agent.model(),
             allowed_tool_names: agent.tools(),
@@ -3948,7 +3950,7 @@ fn llm_row_to_capability(row: &LlmDispatchRow) -> Result<CapabilityResult, Execu
 /// the reducer's opaque state blob.
 fn phase_and_terminal_from(action: &NextAction, now_ms: i64) -> (&'static str, Option<i64>) {
     match action {
-        NextAction::Complete(_) => ("completed", Some(now_ms)),
+        NextAction::Complete { .. } => ("completed", Some(now_ms)),
         NextAction::Failed(_) => ("failed", Some(now_ms)),
         NextAction::CallModel(_) => ("awaiting_model", None),
         NextAction::CallTool(_) | NextAction::CallToolsParallel(_) => ("dispatching_tools", None),
@@ -4641,7 +4643,7 @@ mod tests {
             .unwrap();
 
         match s1.next_action {
-            NextAction::Complete(text) => assert_eq!(text, "pong"),
+            NextAction::Complete { text, .. } => assert_eq!(text, "pong"),
             other => panic!("expected Complete after resume, got {other:?}"),
         }
     }
@@ -4954,6 +4956,7 @@ mod tests {
         // while we were suspended" case.
         let tool_output = synthesize_self_inspect(
             &HostInvocationStats {
+                invocation_id: "suspend-invocation",
                 agent_id: "suspend-tools",
                 model: "claude-haiku",
                 allowed_tool_names: &["builtin__self_inspect".to_string()],
@@ -5023,7 +5026,7 @@ mod tests {
             .unwrap();
 
         match s3.next_action {
-            NextAction::Complete(text) => assert_eq!(text, "inspected."),
+            NextAction::Complete { text, .. } => assert_eq!(text, "inspected."),
             other => panic!("expected Complete after resumed inspection, got {other:?}"),
         }
     }

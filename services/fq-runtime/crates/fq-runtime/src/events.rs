@@ -1086,8 +1086,45 @@ pub enum ToolErrorKind {
 }
 
 /// Published when an invocation finishes successfully.
+/// Agent-declared task outcome (#125). The serde spellings are the
+/// wire contract and must stay in lockstep with fq-tools'
+/// `TASK_STATUS_VALUES` (the `report_outcome` schema enum) — the
+/// harness parses those strings into this type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    #[default]
+    Success,
+    Failed,
+    Blocked,
+    Partial,
+}
+
+impl TaskStatus {
+    /// Parse a wire spelling; `None` for anything unrecognised (the
+    /// harness treats that as "not a valid declaration").
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "success" => Some(TaskStatus::Success),
+            "failed" => Some(TaskStatus::Failed),
+            "blocked" => Some(TaskStatus::Blocked),
+            "partial" => Some(TaskStatus::Partial),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletedPayload {
+    /// The agent's own declaration of how the *task* went (#125) —
+    /// orthogonal to the runtime axis (`FailedPayload`/`FailureKind`
+    /// model runtime failure; this models "the runtime worked, and
+    /// here is whether the goal was achieved"). Declared via the
+    /// terminal `report_outcome` tool; an invocation that never
+    /// declares defaults to `Success`, so pre-#125 events and
+    /// undeclared runs read exactly as before.
+    #[serde(default)]
+    pub task_status: TaskStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_summary: Option<String>,
     pub total_llm_calls: u32,
@@ -1269,6 +1306,29 @@ pub struct McpServerLogPayload {
 
 #[cfg(test)]
 mod tests {
+
+    /// #125 wire compat: a pre-task_status `completed` payload (no
+    /// field on the wire) deserializes to `Success` — undeclared runs
+    /// and historical events read exactly as before.
+    #[test]
+    fn completed_payload_without_task_status_defaults_to_success() {
+        let old_wire = serde_json::json!({
+            "result_summary": "done",
+            "total_llm_calls": 3,
+            "total_tool_calls": 2,
+            "total_cost": 0.01,
+            "total_duration_ms": 1000
+        });
+        let p: CompletedPayload = serde_json::from_value(old_wire).unwrap();
+        assert_eq!(p.task_status, TaskStatus::Success);
+        // And the declared spellings match the fq-tools schema enum.
+        for s in fq_tools::builtin::TASK_STATUS_VALUES {
+            assert!(
+                TaskStatus::parse(s).is_some(),
+                "schema value {s} must parse"
+            );
+        }
+    }
     use super::*;
     use serde_json::json;
 
@@ -2034,6 +2094,7 @@ mod tests {
                 duration_ms: 0,
             }),
             EventPayload::Completed(CompletedPayload {
+                task_status: TaskStatus::default(),
                 result_summary: None,
                 total_llm_calls: 0,
                 total_tool_calls: 0,

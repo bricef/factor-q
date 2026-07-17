@@ -26,8 +26,10 @@ those contracts, and the seed of a trigger-source SDK.
 The watcher drives an issue through a label state machine:
 
 ```
-ready ──trigger──▶ in-progress ──completed──▶ in-review ──PR merged──▶ done
+ready ──trigger──▶ in-progress ──completed (task success/partial)──▶ in-review ──PR merged──▶ done
                         │
+                        ├──completed (task failed/blocked, retries left)──▶ ready   (bounded retry)
+                        ├──completed (task failed/blocked, exhausted)──▶ failed
                         ├──failed (transient, retries left)──▶ ready   (bounded retry)
                         └──failed (terminal / retries exhausted)──▶ failed
 ```
@@ -48,7 +50,11 @@ watcher subscribes to the triggered agent's lifecycle events
 (`fq.agent.<agent>.triggered` / `.completed` / `.failed`), binds each
 invocation to its issue via the `triggered` event's payload, and reacts:
 
-- **completed** → `in-progress` → `in-review` (the agent opened its PR).
+- **completed** → routed by the agent's declared `task_status` (#125):
+  `success`/`partial`/absent → `in-progress` → `in-review`; `failed`/`blocked`
+  → the same bounded retry as a transient runtime failure (re-queue to
+  `ready`, then `failed` when exhausted) — an honest "done but failed"
+  never lands in review. On the in-review path,
   The watcher then stamps a **provenance footer** on the open PR closing
   the issue — agent id, invocation id, trigger issue, completion time
   (issue #162) — so any PR traces back to the exact invocation that

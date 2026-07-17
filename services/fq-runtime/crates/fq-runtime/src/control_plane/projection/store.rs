@@ -1042,6 +1042,7 @@ mod tests {
             aid(agent),
             inv,
             EventPayload::Completed(CompletedPayload {
+                task_status: crate::events::TaskStatus::default(),
                 result_summary: Some("done".to_string()),
                 total_llm_calls: 1,
                 total_tool_calls: 0,

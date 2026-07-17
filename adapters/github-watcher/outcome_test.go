@@ -97,6 +97,44 @@ func TestReactCompletedMovesToInReview(t *testing.T) {
 	}
 }
 
+func TestReactCompletedTaskStatuses(t *testing.T) {
+	for _, status := range []string{"", "success", "partial"} {
+		t.Run("reviewable_"+status, func(t *testing.T) {
+			src := &labelSource{}
+			r := NewOutcomeReactor(src, outcomeConfig(), discardLogger())
+			triggeredThen(r, "inv", 7, OutcomeEvent{Kind: OutcomeCompleted, InvocationID: "inv", TaskStatus: status})
+			want := []string{"relabel #7 in-progress->in-review"}
+			if !slices.Equal(src.ops, want) {
+				t.Errorf("status %q ops = %v, want %v", status, src.ops, want)
+			}
+		})
+	}
+
+	for _, status := range []string{"failed", "blocked"} {
+		t.Run("retryable_"+status, func(t *testing.T) {
+			src := &labelSource{}
+			r := NewOutcomeReactor(src, outcomeConfig(), discardLogger())
+			triggeredThen(r, "inv", 8, OutcomeEvent{Kind: OutcomeCompleted, InvocationID: "inv", TaskStatus: status})
+			want := []string{"relabel #8 in-progress->ready"}
+			if !slices.Equal(src.ops, want) {
+				t.Errorf("status %q ops = %v, want %v", status, src.ops, want)
+			}
+		})
+	}
+}
+
+func TestReactCompletedBlockedExhaustsRetries(t *testing.T) {
+	src := &labelSource{}
+	cfg := outcomeConfig()
+	cfg.MaxRetries = 0
+	r := NewOutcomeReactor(src, cfg, discardLogger())
+	triggeredThen(r, "inv", 8, OutcomeEvent{Kind: OutcomeCompleted, InvocationID: "inv", TaskStatus: "blocked"})
+	want := []string{"relabel #8 in-progress->failed"}
+	if !slices.Equal(src.ops, want) {
+		t.Errorf("ops = %v, want %v", src.ops, want)
+	}
+}
+
 func TestReactTransientFailureRetriesThenEscalates(t *testing.T) {
 	src := &labelSource{}
 	cfg := outcomeConfig() // MaxRetries = 2

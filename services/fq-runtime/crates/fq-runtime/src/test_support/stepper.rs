@@ -207,7 +207,7 @@ mod tests {
         let _ = stepper.step(None);
         let s1 = stepper.step(Some(CapabilityResult::ModelResult(end_turn("done."))));
         match s1.next_action {
-            NextAction::Complete(text) => assert_eq!(text, "done."),
+            NextAction::Complete { text, .. } => assert_eq!(text, "done."),
             other => panic!("expected Complete, got {other:?}"),
         }
     }
@@ -239,7 +239,7 @@ mod tests {
         ))));
 
         match final_step.next_action {
-            NextAction::Complete(text) => assert_eq!(text, "after-resume."),
+            NextAction::Complete { text, .. } => assert_eq!(text, "after-resume."),
             other => panic!("expected Complete, got {other:?}"),
         }
     }
@@ -258,7 +258,7 @@ mod tests {
         let _ = stepper.step(Some(CapabilityResult::ModelResult(end_turn("done."))));
         assert!(matches!(
             stepper.last_action(),
-            Some(NextAction::Complete(_))
+            Some(NextAction::Complete { .. })
         ));
     }
 
@@ -277,7 +277,10 @@ mod tests {
                 *self.seen.lock().unwrap() =
                     Some((input.now_ms, input.random_seed, input.step_index));
                 Ok(StepOutput {
-                    next_action: NextAction::Complete("ok".to_string()),
+                    next_action: NextAction::Complete {
+                        text: "ok".to_string(),
+                        task_status: Default::default(),
+                    },
                     state: vec![],
                     logs: vec![],
                     events: vec![],

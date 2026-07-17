@@ -16,7 +16,7 @@ use super::types::{
     AgentConfig, CapabilityResult, HarnessError, HarnessErrorKind, LogEntry, LogLevel,
     ModelRequest, NextAction, Reducer, StepInput, StepOutput, ToolCallRequest, TriggerPayload,
 };
-use crate::events::{Message, MessageRole, MessageToolCall, RequestParams, StopReason};
+use crate::events::{Message, MessageRole, MessageToolCall, RequestParams, StopReason, TaskStatus};
 
 /// Built-in fallback cap on LLM turns per invocation — a backstop
 /// against a wedged agent, distinct from and well below the host's
@@ -97,6 +97,14 @@ enum Phase {
 /// Validate a persisted state blob without exposing the state type:
 /// deserialises and runs the phase ↔ contents invariants. Used by the
 /// verification soak (slice 7) to check every archived blob in volume.
+/// Is this tool name the `report_outcome` declaration (#125)? Matches
+/// the canonical registered name and, for one release alongside the
+/// #177 legacy-grant mapping, the bare form.
+fn is_report_outcome(name: &str) -> bool {
+    name == crate::tools::REPORT_OUTCOME_CANONICAL_NAME
+        || name == fq_tools::builtin::REPORT_OUTCOME_TOOL_NAME
+}
+
 #[cfg(test)]
 pub(crate) fn validate_state_blob(bytes: &[u8]) -> Result<(), HarnessError> {
     HarnessState::load(bytes).map(|_| ())
@@ -286,7 +294,47 @@ fn model_response_step(
 
     if response.tool_calls.is_empty() {
         let final_text = response.content.clone().unwrap_or_default();
-        return terminal(state, NextAction::Complete(final_text));
+        return terminal(
+            state,
+            NextAction::Complete {
+                text: final_text,
+                task_status: TaskStatus::Success,
+            },
+        );
+    }
+
+    // The explicit, status-bearing terminal (#125): a turn that calls
+    // `report_outcome` ends the invocation with the declared status —
+    // a pure mapping to the terminal transition (ADR-0014), never a
+    // dispatch. The declaration wins over any sibling tool calls in
+    // the same turn (no post-declaration execution, applied within the
+    // turn). An unparseable declaration (unknown status, non-object
+    // args) is NOT terminal: it falls through to normal dispatch,
+    // where the schema-only tool's execute() error teaches the model
+    // to correct the call — a malformed declaration must never
+    // mis-stamp a terminal status.
+    if let Some(declared) = response.tool_calls.iter().find_map(|call| {
+        if !is_report_outcome(&call.tool_name) {
+            return None;
+        }
+        let status = call.parameters.get("status")?.as_str()?;
+        let status = TaskStatus::parse(status)?;
+        let summary = call
+            .parameters
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        Some((status, summary))
+    }) {
+        let (task_status, summary) = declared;
+        return terminal(
+            state,
+            NextAction::Complete {
+                text: summary,
+                task_status,
+            },
+        );
     }
 
     state.messages.push(Message {
@@ -608,8 +656,96 @@ mod tests {
             ))
             .unwrap();
         match s1.next_action {
-            NextAction::Complete(text) => assert_eq!(text, "done."),
+            NextAction::Complete { text, .. } => assert_eq!(text, "done."),
             other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    /// #125: a turn that calls `report_outcome` is terminal with the
+    /// declared status — the explicit sibling of the implicit
+    /// end-turn-⇒-success terminal.
+    #[test]
+    fn report_outcome_call_is_terminal_with_declared_status() {
+        let h = Harness::new();
+        let s0 = h.step(step_input(vec![], None, 0)).unwrap();
+        let s1 = h
+            .step(step_input(
+                s0.state,
+                Some(CapabilityResult::ModelResult(tool_use_response(
+                    crate::tools::REPORT_OUTCOME_CANONICAL_NAME,
+                    "c1",
+                    serde_json::json!({"status": "blocked", "summary": "CI is red and I cannot see why"}),
+                ))),
+                1,
+            ))
+            .unwrap();
+        match s1.next_action {
+            NextAction::Complete { text, task_status } => {
+                assert_eq!(task_status, TaskStatus::Blocked);
+                assert_eq!(text, "CI is red and I cannot see why");
+            }
+            other => panic!("expected terminal Complete, got {other:?}"),
+        }
+    }
+
+    /// #125: the declaration wins over sibling tool calls in the same
+    /// turn — no post-declaration execution, applied within the turn.
+    #[test]
+    fn report_outcome_wins_over_same_turn_siblings() {
+        let h = Harness::new();
+        let s0 = h.step(step_input(vec![], None, 0)).unwrap();
+        let mut response = tool_use_response(
+            "builtin__exec",
+            "c1",
+            serde_json::json!({"command": ["true"]}),
+        );
+        response.tool_calls.push(MessageToolCall {
+            tool_call_id: crate::events::ToolCallId::new("c2").unwrap(),
+            tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+            parameters: serde_json::json!({"status": "failed", "summary": "gave up"}),
+        });
+        let s1 = h
+            .step(step_input(
+                s0.state,
+                Some(CapabilityResult::ModelResult(response)),
+                1,
+            ))
+            .unwrap();
+        match s1.next_action {
+            NextAction::Complete { task_status, .. } => {
+                assert_eq!(task_status, TaskStatus::Failed);
+            }
+            other => panic!("declaration must win over siblings, got {other:?}"),
+        }
+    }
+
+    /// #125: an unparseable declaration is NOT terminal — it falls
+    /// through to normal dispatch, where the schema-only tool's
+    /// execute() error teaches the model. A malformed call must never
+    /// mis-stamp a terminal status.
+    #[test]
+    fn malformed_report_outcome_falls_through_to_dispatch() {
+        let h = Harness::new();
+        let s0 = h.step(step_input(vec![], None, 0)).unwrap();
+        let s1 = h
+            .step(step_input(
+                s0.state,
+                Some(CapabilityResult::ModelResult(tool_use_response(
+                    crate::tools::REPORT_OUTCOME_CANONICAL_NAME,
+                    "c1",
+                    serde_json::json!({"status": "shrug"}),
+                ))),
+                1,
+            ))
+            .unwrap();
+        match s1.next_action {
+            NextAction::CallTool(req) => {
+                assert_eq!(req.tool_name, crate::tools::REPORT_OUTCOME_CANONICAL_NAME);
+            }
+            NextAction::CallToolsParallel(reqs) => {
+                assert_eq!(reqs.len(), 1);
+            }
+            other => panic!("malformed declaration must dispatch, got {other:?}"),
         }
     }
 
@@ -978,7 +1114,7 @@ mod tests {
         ))));
 
         match final_step.next_action {
-            NextAction::Complete(text) => assert_eq!(text, "after-resume."),
+            NextAction::Complete { text, .. } => assert_eq!(text, "after-resume."),
             other => panic!("expected Complete after resume, got {other:?}"),
         }
     }
