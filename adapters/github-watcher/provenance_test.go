@@ -101,6 +101,20 @@ func stampReactor(src IssueSource, st ProvenanceStamper) *OutcomeReactor {
 	return r
 }
 
+func TestNonReviewableCompletedDoesNotStampProvenance(t *testing.T) {
+	for _, status := range []string{"failed", "blocked"} {
+		t.Run(status, func(t *testing.T) {
+			src := &labelSource{}
+			st := &fakeStamper{prsByIssue: map[int][]int{7: {41}}, bodies: map[int]string{41: "body"}}
+			r := stampReactor(src, st)
+			triggeredThen(r, "inv-1", 7, OutcomeEvent{Kind: OutcomeCompleted, InvocationID: "inv-1", TaskStatus: status})
+			if st.sets != 0 {
+				t.Fatalf("task status %q stamped provenance %d times, want none", status, st.sets)
+			}
+		})
+	}
+}
+
 func TestCompletedStampsProvenanceOnTheOpenPR(t *testing.T) {
 	src := &labelSource{}
 	st := &fakeStamper{

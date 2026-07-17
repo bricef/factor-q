@@ -67,12 +67,21 @@ func TestDecodeConventionPayloadUsesGitHubIssue(t *testing.T) {
 	}
 }
 
-func TestDecodeCompletedCarriesInvocationID(t *testing.T) {
+func TestDecodeCompletedCarriesTaskStatus(t *testing.T) {
 	s := &NatsOutcomeSource{taskTemplate: "issue #%d"}
-	data := wireEventJSON(t, "inv-3", "completed", map[string]any{})
+	data := wireEventJSON(t, "inv-3", "completed", map[string]any{"task_status": "blocked"})
 	ev, ok := s.decode(&nats.Msg{Subject: "fq.agent.a.completed", Data: data})
-	if !ok || ev.Kind != OutcomeCompleted || ev.InvocationID != "inv-3" {
-		t.Fatalf("completed decode = %+v ok=%v, want completed/inv-3", ev, ok)
+	if !ok || ev.Kind != OutcomeCompleted || ev.InvocationID != "inv-3" || ev.TaskStatus != "blocked" {
+		t.Fatalf("completed decode = %+v ok=%v, want completed/inv-3/blocked", ev, ok)
+	}
+}
+
+func TestDecodeCompletedWithoutTaskStatusIsCompatible(t *testing.T) {
+	s := &NatsOutcomeSource{taskTemplate: "issue #%d"}
+	data := wireEventJSON(t, "inv-old", "completed", map[string]any{})
+	ev, ok := s.decode(&nats.Msg{Subject: "fq.agent.a.completed", Data: data})
+	if !ok || ev.TaskStatus != "" {
+		t.Fatalf("legacy completed decode = %+v ok=%v, want empty task status", ev, ok)
 	}
 }
 
