@@ -292,17 +292,6 @@ fn model_response_step(
     // next request either way.
     append_host_notices(state, &input.host_notices);
 
-    if response.tool_calls.is_empty() {
-        let final_text = response.content.clone().unwrap_or_default();
-        return terminal(
-            state,
-            NextAction::Complete {
-                text: final_text,
-                task_status: TaskStatus::Success,
-            },
-        );
-    }
-
     // The explicit, status-bearing terminal (#125): a turn that calls
     // `report_outcome` ends the invocation with the declared status —
     // a pure mapping to the terminal transition (ADR-0014), never a
@@ -344,6 +333,15 @@ fn model_response_step(
         tool_call_id: None,
     });
 
+    // Bare text is not a stop signal. Persist a host notice in the
+    // transcript so replay produces the same corrective follow-up.
+    if response.tool_calls.is_empty() {
+        append_host_notices(
+            state,
+            &["No tool calls were made and the run is not over — continue working, or end it by calling `report_outcome` with success, failed, blocked, or partial.".to_string()],
+        );
+    }
+
     // `max_iterations` is literal. Zero is a valid stop signal —
     // the loop terminates immediately at iteration 1 (>= 0) and
     // the agent never runs another LLM turn. Producers that want
@@ -358,6 +356,19 @@ fn model_response_step(
                 message: format!("exceeded max iterations ({max_iter})"),
             }),
         );
+    }
+
+    if response.tool_calls.is_empty() {
+        let request = build_model_request(&input.config, &state.messages);
+        state.phase = Phase::AwaitingModel;
+        return Ok(StepOutput {
+            next_action: NextAction::CallModel(request),
+            state: state.save()?,
+            logs: vec![log_info(
+                "model made no tool calls; requesting another turn",
+            )],
+            events: vec![],
+        });
     }
 
     let pending: Vec<ToolCallRequest> = response
@@ -641,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn end_turn_response_completes_invocation() {
+    fn end_turn_response_is_nudged_until_outcome_is_reported() {
         let h = Harness::new();
         let s0 = h.step(step_input(vec![], None, 0)).unwrap();
         let s1 = h
@@ -651,15 +662,48 @@ mod tests {
                 1,
             ))
             .unwrap();
-        match s1.next_action {
-            NextAction::Complete { text, .. } => assert_eq!(text, "done."),
-            other => panic!("expected Complete, got {other:?}"),
+        match &s1.next_action {
+            NextAction::CallModel(request) => {
+                assert!(matches!(
+                    request.messages.last().unwrap().role,
+                    MessageRole::User
+                ));
+                assert!(
+                    request
+                        .messages
+                        .last()
+                        .unwrap()
+                        .content
+                        .as_deref()
+                        .unwrap()
+                        .contains("run is not over")
+                );
+            }
+            other => panic!("expected corrective CallModel, got {other:?}"),
         }
+
+        let s2 = h
+            .step(step_input(
+                s1.state,
+                Some(CapabilityResult::ModelResult(tool_use_response(
+                    crate::tools::REPORT_OUTCOME_CANONICAL_NAME,
+                    "c1",
+                    serde_json::json!({"status": "success", "summary": "done."}),
+                ))),
+                2,
+            ))
+            .unwrap();
+        assert!(matches!(
+            s2.next_action,
+            NextAction::Complete {
+                task_status: TaskStatus::Success,
+                ..
+            }
+        ));
     }
 
     /// #125: a turn that calls `report_outcome` is terminal with the
-    /// declared status — the explicit sibling of the implicit
-    /// end-turn-⇒-success terminal.
+    /// declared status — the only model-driven terminal.
     #[test]
     fn report_outcome_call_is_terminal_with_declared_status() {
         let h = Harness::new();
@@ -1105,8 +1149,10 @@ mod tests {
             error_kind: None,
             duration_ms: 1,
         })));
-        let final_step = s2.step(Some(CapabilityResult::ModelResult(end_turn_response(
-            "after-resume.",
+        let final_step = s2.step(Some(CapabilityResult::ModelResult(tool_use_response(
+            crate::tools::REPORT_OUTCOME_CANONICAL_NAME,
+            "final",
+            json!({"status": "success", "summary": "after-resume."}),
         ))));
 
         match final_step.next_action {

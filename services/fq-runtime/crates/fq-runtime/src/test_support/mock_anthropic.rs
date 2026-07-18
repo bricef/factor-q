@@ -82,6 +82,21 @@ impl MockResponse {
         }
     }
 
+    /// Build a successful explicit terminal response.
+    pub fn report_success(
+        summary: impl Into<String>,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Self {
+        Self::tool_use(
+            "report-outcome",
+            crate::tools::REPORT_OUTCOME_CANONICAL_NAME,
+            serde_json::json!({"status": "success", "summary": summary.into()}),
+            input_tokens,
+            output_tokens,
+        )
+    }
+
     /// Report prompt-cache activity in the response usage
     /// (`cache_read_input_tokens` / `cache_creation_input_tokens`).
     pub fn with_cache_usage(mut self, cache_read_tokens: u32, cache_write_tokens: u32) -> Self {

@@ -641,7 +641,7 @@ mod tests {
             .start()
             .await
             .expect("harness");
-        rt.push_llm_response(MockResponse::text("done.", 10, 4));
+        rt.push_llm_response(MockResponse::report_success("done.", 10, 4));
 
         // Subscribe to the archived subject to count
         // republishes.

@@ -61,6 +61,10 @@ This shape gives factor-q five properties for the price of one mechanism:
 
 The cost is one ergonomic constraint: the reducer is **synchronous** and writes its loop as an explicit state enum rather than a stack of `await`s. See [the closing report](../plans/closed/2026-04-25-native-reducer-prototype.md) for the assessment of how that worked out in practice.
 
+## Completion semantics
+
+A model ends an invocation only by calling the schema-only `report_outcome` tool with `success`, `failed`, `blocked`, or `partial`. Bare assistant text is recorded, followed by a durable host notice asking the model to continue or report an outcome, and then another model turn. A response containing neither non-whitespace content nor tool calls is rejected by the runner as an `LlmError`; iteration and budget ceilings remain error stops.
+
 ## The Rust API
 
 The reducer module is `fq_runtime::worker::reducer`. Three things to know about:

@@ -663,9 +663,13 @@ async fn static_resource_pin_appears_in_first_model_request() {
     // after exactly one model request — the one we inspect.
     let llm = FixtureClient::new();
     llm.push_response(ChatResponse {
-        content: Some("done.".to_string()),
-        tool_calls: vec![],
-        stop_reason: StopReason::EndTurn,
+        content: None,
+        tool_calls: vec![fq_runtime::events::MessageToolCall {
+            tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+            tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+            parameters: serde_json::json!({"status": "success", "summary": "done."}),
+        }],
+        stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -1166,7 +1170,21 @@ async fn run_sampling_scenario(
         llm.push_response(canned(judge));
     }
     llm.push_response(canned("SAMPLED-ANSWER"));
-    llm.push_response(canned("done."));
+    llm.push_response(ChatResponse {
+        content: None,
+        tool_calls: vec![fq_runtime::events::MessageToolCall {
+            tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+            tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+            parameters: serde_json::json!({"status": "success", "summary": "done."}),
+        }],
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
 
     // Host machinery (mirrors the static-resource e2e test).
     let bus = EventBus::connect(&nats_url).await.expect("connect to NATS");
@@ -1393,8 +1411,8 @@ async fn sampling_over_subbudget_is_declined_without_a_model_call() {
     );
     assert_eq!(
         requests.len(),
-        2,
-        "only the two agent turns should call the model, got {}",
+        3,
+        "the scripted bare-text turn must be followed by an explicit terminal turn, got {}",
         requests.len()
     );
 }
@@ -1418,8 +1436,8 @@ async fn sampling_ungranted_is_declined_without_a_model_call() {
     );
     assert_eq!(
         requests.len(),
-        2,
-        "only the two agent turns should call the model, got {}",
+        3,
+        "the scripted bare-text turn must be followed by an explicit terminal turn, got {}",
         requests.len()
     );
 }
@@ -1740,7 +1758,21 @@ async fn run_elicitation_scenario(
         llm.push_response(canned(answer, StopReason::EndTurn));
     }
     // (3) end the agent turn.
-    llm.push_response(canned("done.", StopReason::EndTurn));
+    llm.push_response(ChatResponse {
+        content: None,
+        tool_calls: vec![fq_runtime::events::MessageToolCall {
+            tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+            tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+            parameters: serde_json::json!({"status": "success", "summary": "done."}),
+        }],
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
 
     let bus = EventBus::connect(&nats_url).await.expect("connect to NATS");
     let store_dir = tempfile::tempdir().expect("tempdir");
@@ -1855,7 +1887,7 @@ async fn elicitation_ungranted_is_declined_without_a_model_call() {
         !saw_elicitation_call(&requests),
         "an ungranted elicitation request must not call the model"
     );
-    assert_eq!(requests.len(), 2, "got {}", requests.len());
+    assert_eq!(requests.len(), 3, "got {}", requests.len());
 }
 
 /// Over-budget: granted but the elicitation sub-budget is exhausted
@@ -1881,7 +1913,7 @@ async fn elicitation_over_subbudget_is_declined_without_a_model_call() {
         !saw_elicitation_call(&requests),
         "an over-budget elicitation request must not call the model"
     );
-    assert_eq!(requests.len(), 2, "got {}", requests.len());
+    assert_eq!(requests.len(), 3, "got {}", requests.len());
 }
 
 /// Retries exhausted: granted, but the model never produces a
@@ -2280,7 +2312,21 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
         },
     });
     llm.push_response(canned("SAMPLED-ANSWER"));
-    llm.push_response(canned("done."));
+    llm.push_response(ChatResponse {
+        content: None,
+        tool_calls: vec![fq_runtime::events::MessageToolCall {
+            tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+            tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+            parameters: serde_json::json!({"status": "success", "summary": "done."}),
+        }],
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    });
 
     let bus = EventBus::connect(&nats_url).await.expect("connect to NATS");
     let store_dir = tempfile::tempdir().expect("tempdir");
