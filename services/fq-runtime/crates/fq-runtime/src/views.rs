@@ -149,6 +149,55 @@ pub struct ExecutionsView {
 /// that value ever becomes load-bearing elsewhere.
 pub const DEFAULT_LONG_DISPATCH_THRESHOLD_MS: i64 = 600_000;
 
+/// The per-invocation liveness verdict the health page counts —
+/// shared by every surface that shows an in-flight row, so the health
+/// tile, the active table, and the detail page cannot drift apart.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Liveness {
+    /// A fresh open dispatch (tool or LLM) — long runs are fine as
+    /// long as the dispatch itself is younger than the long-dispatch
+    /// threshold (#130).
+    Working,
+    /// Nothing open, but the WAL row advanced recently: the reducer is
+    /// between steps. The quiet, healthy in-between.
+    Advancing,
+    /// No fresh dispatch AND the WAL row has not advanced within the
+    /// stuck threshold — the row the operator needs to look at.
+    Stuck,
+}
+
+impl Liveness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Liveness::Working => "working",
+            Liveness::Advancing => "advancing",
+            Liveness::Stuck => "stuck",
+        }
+    }
+}
+
+/// One verdict for one in-flight row — the single classification the
+/// health counts and the row views all flow through.
+fn classify_liveness(
+    newest_open_dispatch_at: Option<i64>,
+    updated_at: i64,
+    now_ms: i64,
+    stuck_threshold_ms: i64,
+    long_dispatch_threshold_ms: i64,
+) -> Liveness {
+    if let Some(open_at) = newest_open_dispatch_at
+        && !is_stale(open_at, now_ms, long_dispatch_threshold_ms)
+    {
+        return Liveness::Working;
+    }
+    if is_stale(updated_at, now_ms, stuck_threshold_ms) {
+        Liveness::Stuck
+    } else {
+        Liveness::Advancing
+    }
+}
+
 /// One currently-executing invocation, straight from the worker WAL —
 /// the row form of [`ExecutionsView`]'s counts, for the dashboard's
 /// "active" table. Sourced from the WAL rather than the ownership
@@ -164,6 +213,9 @@ pub struct ActiveInvocationView {
     pub started_at_ms: i64,
     /// Last WAL advance; long tool runs legitimately leave this old.
     pub updated_at_ms: i64,
+    /// The health page's verdict for this row, colour-coded on the
+    /// dashboard (see [`Liveness`]).
+    pub liveness: Liveness,
     /// Open (non-completed) tool dispatches right now — name plus
     /// the command line when the tool is command-shaped.
     pub open_tools: Vec<OpenToolView>,
@@ -533,6 +585,8 @@ impl From<LlmDispatchRow> for LlmDispatchView {
 /// has a WAL row (deleted on archive hand-off).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LiveExecutionView {
+    /// The health page's verdict for this run (see [`Liveness`]).
+    pub liveness: Liveness,
     pub phase: String,
     /// Reducer *step* counter (every model and tool step) — not the
     /// model-turn count that `max_iterations` gates (issue #109).
@@ -807,19 +861,22 @@ impl Views {
                 .into_iter()
                 .map(|d| d.dispatched_at.unwrap_or(d.intent_at))
                 .max();
-            if let Some(open_at) = open_tool_at.max(open_llm_at)
-                && !is_stale(open_at, now_ms, long_dispatch_threshold_ms)
-            {
-                view.working += 1;
-                view.working_ids.push(row.invocation_id);
-                continue;
-            }
-            // Reuse the same staleness predicate the control-plane uses for
-            // workers: "has not advanced in as long as the threshold" is the
-            // same not-making-progress signal.
-            if is_stale(row.updated_at, now_ms, stuck_threshold_ms) {
-                view.stuck += 1;
-                view.stuck_ids.push(row.invocation_id);
+            match classify_liveness(
+                open_tool_at.max(open_llm_at),
+                row.updated_at,
+                now_ms,
+                stuck_threshold_ms,
+                long_dispatch_threshold_ms,
+            ) {
+                Liveness::Working => {
+                    view.working += 1;
+                    view.working_ids.push(row.invocation_id);
+                }
+                Liveness::Stuck => {
+                    view.stuck += 1;
+                    view.stuck_ids.push(row.invocation_id);
+                }
+                Liveness::Advancing => {}
             }
         }
         Ok(view)
@@ -872,28 +929,48 @@ impl Views {
     /// [`Views::executions`]' counts), longest-running first, each with
     /// its open tool/LLM dispatches — the "what is running right now"
     /// table.
-    pub async fn active_invocations(&self) -> Result<Vec<ActiveInvocationView>, ViewsError> {
+    pub async fn active_invocations(
+        &self,
+        now_ms: i64,
+        stuck_threshold_ms: i64,
+        long_dispatch_threshold_ms: i64,
+    ) -> Result<Vec<ActiveInvocationView>, ViewsError> {
         let mut rows = self.worker.find_in_flight_invocations().await?;
         rows.sort_by_key(|r| r.started_at);
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let open_tools = self
+            let tool_rows = self
                 .worker
                 .open_tool_dispatches_for_invocation(&row.invocation_id)
-                .await?
+                .await?;
+            let llm_rows = self
+                .worker
+                .open_llm_dispatches_for_invocation(&row.invocation_id)
+                .await?;
+            let newest_open = tool_rows
+                .iter()
+                .map(|d| d.dispatched_at.unwrap_or(d.intent_at))
+                .chain(
+                    llm_rows
+                        .iter()
+                        .map(|d| d.dispatched_at.unwrap_or(d.intent_at)),
+                )
+                .max();
+            let liveness = classify_liveness(
+                newest_open,
+                row.updated_at,
+                now_ms,
+                stuck_threshold_ms,
+                long_dispatch_threshold_ms,
+            );
+            let open_tools = tool_rows
                 .into_iter()
                 .map(|t| OpenToolView {
                     command: open_tool_command(&t.parameters),
                     tool_name: t.tool_name,
                 })
                 .collect();
-            let open_llms = self
-                .worker
-                .open_llm_dispatches_for_invocation(&row.invocation_id)
-                .await?
-                .into_iter()
-                .map(|l| l.model)
-                .collect();
+            let open_llms = llm_rows.into_iter().map(|l| l.model).collect();
             out.push(ActiveInvocationView {
                 invocation_id: row.invocation_id,
                 agent_id: row.agent_id,
@@ -901,6 +978,7 @@ impl Views {
                 step_index: row.step_index,
                 started_at_ms: row.started_at,
                 updated_at_ms: row.updated_at,
+                liveness,
                 open_tools,
                 open_llms,
                 summary: None,
@@ -1002,6 +1080,9 @@ impl Views {
     pub async fn invocation(
         &self,
         invocation_id: &str,
+        now_ms: i64,
+        stuck_threshold_ms: i64,
+        long_dispatch_threshold_ms: i64,
     ) -> Result<Option<InvocationDetailView>, ViewsError> {
         let owner = self
             .control_plane
@@ -1028,7 +1109,24 @@ impl Views {
                     .worker
                     .list_llm_dispatches_for_invocation(invocation_id)
                     .await?;
+                let newest_open = tools
+                    .iter()
+                    .filter(|t| t.status != crate::worker::store::DispatchStatus::Completed)
+                    .map(|t| t.dispatched_at.unwrap_or(t.intent_at))
+                    .chain(
+                        llms.iter()
+                            .filter(|l| l.status != crate::worker::store::DispatchStatus::Completed)
+                            .map(|l| l.dispatched_at.unwrap_or(l.intent_at)),
+                    )
+                    .max();
                 Some(LiveExecutionView {
+                    liveness: classify_liveness(
+                        newest_open,
+                        s.updated_at,
+                        now_ms,
+                        stuck_threshold_ms,
+                        long_dispatch_threshold_ms,
+                    ),
                     phase: s.phase,
                     step_index: s.step_index,
                     started_at_ms: s.started_at,
@@ -1261,8 +1359,25 @@ mod tests {
                 .in_flight,
             0
         );
-        assert!(views.active_invocations().await.unwrap().is_empty());
-        assert!(views.invocation("no-such-id").await.unwrap().is_none());
+        assert!(
+            views
+                .active_invocations(1_000, 30_000, DEFAULT_LONG_DISPATCH_THRESHOLD_MS)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            views
+                .invocation(
+                    "no-such-id",
+                    1_000,
+                    30_000,
+                    DEFAULT_LONG_DISPATCH_THRESHOLD_MS
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(views.worker("no-such-worker").await.unwrap().is_none());
     }
 
@@ -1367,7 +1482,10 @@ mod tests {
 
         let views = Views::open(&paths).await.unwrap();
 
-        let active = views.active_invocations().await.unwrap();
+        let active = views
+            .active_invocations(200, 30_000, DEFAULT_LONG_DISPATCH_THRESHOLD_MS)
+            .await
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(
             active[0].summary.as_deref(),
@@ -1461,7 +1579,11 @@ mod tests {
         assert_eq!(execs_late.stuck_ids, vec!["inv-1".to_string()]);
 
         // The detail view composes the live WAL state.
-        let detail = views.invocation("inv-1").await.unwrap().unwrap();
+        let detail = views
+            .invocation("inv-1", 200, 30_000, DEFAULT_LONG_DISPATCH_THRESHOLD_MS)
+            .await
+            .unwrap()
+            .unwrap();
         let live = detail.live.expect("in-flight invocation has live state");
         assert_eq!(live.phase, "reducing");
         assert_eq!(live.step_index, 3);
@@ -1469,7 +1591,10 @@ mod tests {
         assert_eq!(live.tools[0].tool_name, "exec");
 
         // The active list carries the same WAL row, row-form.
-        let active = views.active_invocations().await.unwrap();
+        let active = views
+            .active_invocations(200, 30_000, DEFAULT_LONG_DISPATCH_THRESHOLD_MS)
+            .await
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].invocation_id, "inv-1");
         assert_eq!(active[0].agent_id, "agent-a");
@@ -1478,6 +1603,17 @@ mod tests {
         assert_eq!(active[0].open_tools.len(), 1);
         assert_eq!(active[0].open_tools[0].tool_name, "exec");
         assert_eq!(active[0].open_tools[0].command, None);
+        // Fresh open dispatch → the same verdict health counts.
+        assert_eq!(active[0].liveness, Liveness::Working);
+
+        // Same row viewed much later: the dispatch has gone stale and
+        // the WAL never advanced — the active table says stuck exactly
+        // when the health tile does.
+        let active_late = views
+            .active_invocations(1_000_000, 30_000, DEFAULT_LONG_DISPATCH_THRESHOLD_MS)
+            .await
+            .unwrap();
+        assert_eq!(active_late[0].liveness, Liveness::Stuck);
     }
 
     /// An open LLM dispatch counts as working the same way a tool dispatch

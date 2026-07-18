@@ -13,6 +13,7 @@
   },
   "archive": null,
   "live": {
+    "liveness": "stuck",
     "phase": "completed",
     "step_index": 2,
     "started_at_ms": 1767323045000,
