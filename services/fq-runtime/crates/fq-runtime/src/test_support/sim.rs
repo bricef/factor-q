@@ -638,9 +638,13 @@ mod tests {
 
     pub(super) fn end_turn(text: &str) -> ChatResponse {
         ChatResponse {
-            content: Some(text.to_string()),
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
+            content: None,
+            tool_calls: vec![MessageToolCall {
+                tool_call_id: ToolCallId::new("report-outcome").unwrap(),
+                tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: json!({"status": "success", "summary": text}),
+            }],
+            stop_reason: StopReason::ToolUse,
             usage: TokenUsage {
                 input_tokens: 120,
                 output_tokens: 8,

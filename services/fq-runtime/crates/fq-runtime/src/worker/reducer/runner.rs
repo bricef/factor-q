@@ -2675,6 +2675,35 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
         };
 
+        if response.tool_calls.is_empty()
+            && response
+                .content
+                .as_deref()
+                .is_none_or(|content| content.trim().is_empty())
+        {
+            let err = crate::llm::LlmError::RequestFailed(
+                "model returned an empty response (no content, no tool calls)".to_string(),
+            );
+            self.config
+                .store
+                .write_llm_dispatched(&inv_str, &req_str, self.config.clock.unix_now_ms())
+                .await
+                .map_err(map_store_err)?;
+            self.config
+                .store
+                .write_llm_completed(
+                    &inv_str,
+                    &req_str,
+                    &err.to_string(),
+                    true,
+                    0.0,
+                    self.config.clock.unix_now_ms(),
+                )
+                .await
+                .map_err(map_store_err)?;
+            return Ok(Err(err));
+        }
+
         totals.total_llm_calls += 1;
 
         // LLM returned control. Mark dispatched (ambiguous
@@ -4491,9 +4520,13 @@ mod tests {
 
     fn canned(text: &str, input: u32, output: u32) -> ChatResponse {
         ChatResponse {
-            content: Some(text.to_string()),
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
+            content: None,
+            tool_calls: vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("report-outcome").unwrap(),
+                tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: json!({"status": "success", "summary": text}),
+            }],
+            stop_reason: StopReason::ToolUse,
             usage: TokenUsage {
                 input_tokens: input,
                 output_tokens: output,
@@ -4779,9 +4812,9 @@ mod tests {
                 trigger: trig,
                 state: snapshot,
                 last_result: Some(CapabilityResult::ModelResult(ModelResponse {
-                    content: Some("pong".to_string()),
-                    tool_calls: vec![],
-                    stop_reason: StopReason::EndTurn,
+                    content: None,
+                    tool_calls: canned("pong", 10, 10).tool_calls,
+                    stop_reason: StopReason::ToolUse,
                     usage: TokenUsage::default(),
                 })),
                 now_ms: 1,
@@ -5166,9 +5199,9 @@ mod tests {
             .step(mk(
                 s2.state,
                 Some(CapabilityResult::ModelResult(ModelResponse {
-                    content: Some("inspected.".to_string()),
-                    tool_calls: vec![],
-                    stop_reason: StopReason::EndTurn,
+                    content: None,
+                    tool_calls: canned("inspected.", 10, 10).tool_calls,
+                    stop_reason: StopReason::ToolUse,
                     usage: TokenUsage::default(),
                 })),
                 3,
@@ -5286,17 +5319,7 @@ mod tests {
     }
 
     fn end_turn_response(text: &str) -> ChatResponse {
-        ChatResponse {
-            content: Some(text.to_string()),
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-            },
-        }
+        canned(text, 10, 20)
     }
 
     fn tool_call_response(tool: &str, call_id: &str, params: serde_json::Value) -> ChatResponse {
@@ -6067,17 +6090,7 @@ mod tests {
 
         // Pre-populate a completed LLM dispatch row whose
         // serialized response is end-turn.
-        let response = ChatResponse {
-            content: Some("done.".to_string()),
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage {
-                input_tokens: 50,
-                output_tokens: 5,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-            },
-        };
+        let response = canned("done.", 50, 5);
         let response_json = serde_json::to_string(&response).unwrap();
         store
             .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
@@ -6238,17 +6251,7 @@ mod tests {
                 cache_write_tokens: 0,
             },
         };
-        let end_turn = ChatResponse {
-            content: Some("done.".to_string()),
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage {
-                input_tokens: 60,
-                output_tokens: 4,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-            },
-        };
+        let end_turn = canned("done.", 60, 4);
         store
             .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
             .await

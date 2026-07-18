@@ -1083,7 +1083,7 @@ mod tests {
         use crate::{PricingTable, ReducerContext, ReducerRunner, RunnerConfig, ToolRegistry};
 
         let rt = TestRuntime::start().await.expect("harness");
-        rt.push_llm_response(MockResponse::text("done.", 12, 4));
+        rt.push_llm_response(MockResponse::report_success("done.", 12, 4));
 
         // Capture the agent's invocation chain on NATS for the
         // event-order assertion.

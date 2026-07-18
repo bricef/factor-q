@@ -734,9 +734,13 @@ mod tests {
 
     fn canned_response() -> ChatResponse {
         ChatResponse {
-            content: Some("Hello from the test agent.".to_string()),
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
+            content: None,
+            tool_calls: vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("report-outcome").unwrap(),
+                tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: serde_json::json!({"status": "success", "summary": "Hello from the test agent."}),
+            }],
+            stop_reason: StopReason::ToolUse,
             usage: TokenUsage {
                 input_tokens: 10,
                 output_tokens: 20,
