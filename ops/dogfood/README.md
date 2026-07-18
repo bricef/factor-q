@@ -4,7 +4,7 @@ Deploy tooling for the dogfood instance (issue #102). The contract:
 
 - **CI builds, the host fetches.** Every merge to main,
   [main-artifacts.yml](../../.github/workflows/main-artifacts.yml) builds
-  static musl binaries (`fq`, `fq-cas`, `github-watcher`) plus the
+  static musl binaries (`fq`, `fq-cas`, `github-watcher`, `fq-cron`) plus the
   launchers in this directory, packages them with a sha256
   ([package.sh](../../scripts/package.sh)), and publishes the bundle to
   the rolling `main-latest` pre-release. The dogfood host never compiles.
@@ -29,19 +29,20 @@ Deploy tooling for the dogfood instance (issue #102). The contract:
 ```text
 fq-dogfood/
 ├── current -> releases/<sha>/   # the active build (symlink)
-├── releases/<sha>/              # fq, fq-cas, fq-dashboard, github-watcher + launchers
+├── releases/<sha>/              # fq, fq-cas, fq-dashboard, github-watcher, fq-cron + launchers
 ├── fq.toml                      # instance config — host-side, `fq reload` to apply
+├── fq-cron.toml                 # scheduled jobs — host-side; editing deploys/reloads them
 ├── agents/                      # agent definitions — host-side; canonical copies of
 │                                #   repo-tracked ones live in ops/dogfood/agents/ —
 │                                #   install with scp, e.g. backlog-groomer.md (weekly
 │                                #   groom: cron `fq trigger backlog-groomer` until #257)
 ├── .secrets/env                 # the single declared environment (chmod 600)
 ├── infra/                       # NATS compose + config (copied from ./infra)
-├── logs/                        # fq-run.log, watcher.log
+├── logs/                        # fq-run.log, watcher.log, cron.log
 └── workspace/ cache/ reports/   # runtime state
 ```
 
-The launchers (`run.sh`, `watcher.sh`) ship *inside* the artifact bundle
+The launchers (`run.sh`, `watcher.sh`, `cron.sh`) ship *inside* the artifact bundle
 so they are versioned with the binaries they launch and roll back with
 them. `deploy.sh` itself runs from a repo checkout — it is the
 bootstrap, and can't live inside the thing it swaps.
@@ -53,13 +54,15 @@ mkdir -p ~/fq-dogfood/{releases,logs,agents,.secrets} && chmod 700 ~/fq-dogfood/
 cp -r ops/dogfood/infra ~/fq-dogfood/
 install -m 600 ops/dogfood/env.example ~/fq-dogfood/.secrets/env  # then edit
 # fq.toml: copy an existing instance config, or generate with `fq init`
+# fq-cron.toml: install the host job schedule before starting cron.sh
 ops/dogfood/deploy.sh
+setsid ~/fq-dogfood/current/cron.sh </dev/null &  # cron.sh appends to logs/cron.log
 ```
 
 Migrating an existing in-place instance (pre-#102: host-built binary,
-untracked `run.sh`/`watcher.sh`/`redeploy.sh`): fold any local secrets
+untracked `run.sh`/`watcher.sh`/`cron.sh`/`redeploy.sh`): fold any local secrets
 into `.secrets/env`, delete the legacy scripts, `bin/`, and `fq.rollback`,
-then run `deploy.sh`. State (`fq.toml`, `agents/`, `cache/`, `workspace/`,
+then run `deploy.sh`. State (`fq.toml`, `fq-cron.toml`, `agents/`, `cache/`, `workspace/`,
 the NATS volume) is untouched by deploys.
 
 ## Routine operations
