@@ -182,6 +182,7 @@ func (r *OutcomeReactor) React(ctx context.Context, ev OutcomeEvent) {
 			return
 		}
 		r.relabel(ctx, issue, r.Config.InProgressLabel, r.Config.FailedLabel, "invocation recovery is ambiguous; operator attention required")
+		r.resetAttempts(issue)
 		r.forget(ev.InvocationID)
 	}
 }
@@ -217,6 +218,12 @@ func (r *OutcomeReactor) reactFailed(ctx context.Context, issue int, errorKind s
 	retry := !terminal && prior < r.Config.MaxRetries
 	if retry {
 		r.attempts[issue] = prior + 1
+	} else {
+		// Escalation spends the budget. A failed-labeled issue only
+		// re-enters the loop via a deliberate operator re-queue, which
+		// deserves a fresh budget — and dropping the entry keeps the
+		// map from leaking issues that never complete.
+		delete(r.attempts, issue)
 	}
 	r.mu.Unlock()
 
