@@ -97,6 +97,13 @@ impl MockResponse {
         )
     }
 
+    /// Override the wire `stop_reason` (e.g. `"max_tokens"` for a
+    /// truncated response).
+    pub fn with_stop_reason(mut self, stop_reason: impl Into<String>) -> Self {
+        self.stop_reason = stop_reason.into();
+        self
+    }
+
     /// Report prompt-cache activity in the response usage
     /// (`cache_read_input_tokens` / `cache_creation_input_tokens`).
     pub fn with_cache_usage(mut self, cache_read_tokens: u32, cache_write_tokens: u32) -> Self {
