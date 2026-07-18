@@ -2424,9 +2424,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let mut archive_retry_handle =
         tokio::spawn(async move { archive_retry_sweeper.run(archive_retry_shutdown_rx).await });
 
-    // Spawn the control-plane retention sweep (step 10).
-    // Deletes invocation_archive rows older than
-    // state.retention_days. Setting retention_days < 0
+    // Spawn the retention sweep (step 10). Deletes
+    // invocation_archive rows and projected `events` rows older
+    // than state.retention_days. Setting retention_days < 0
     // disables the task (it exits immediately on startup);
     // see `[state]` in fq.toml.
     let (retention_shutdown_tx, retention_shutdown_rx) = tokio::sync::oneshot::channel();

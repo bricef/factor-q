@@ -155,15 +155,34 @@ impl ProjectionStore {
 
     /// Delete projected events older than `cutoff_ms` (Unix epoch milliseconds).
     /// Returns the number of rows deleted.
+    ///
+    /// Deletes in batches: the first sweep after an upgrade can face
+    /// months of backlog, and one unbounded DELETE would hold the
+    /// write lock against the projection consumer for the duration.
     pub async fn sweep_events(&self, cutoff_ms: i64) -> Result<u64, StoreError> {
+        const SWEEP_BATCH_ROWS: i64 = 10_000;
+        self.sweep_events_batched(cutoff_ms, SWEEP_BATCH_ROWS).await
+    }
+
+    async fn sweep_events_batched(&self, cutoff_ms: i64, batch: i64) -> Result<u64, StoreError> {
         let cutoff = chrono::DateTime::from_timestamp_millis(cutoff_ms)
             .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
             .to_rfc3339();
-        let result = sqlx::query("DELETE FROM events WHERE timestamp < ?")
-            .bind(cutoff)
+        let mut total = 0u64;
+        loop {
+            let result = sqlx::query(
+                "DELETE FROM events WHERE rowid IN \
+                 (SELECT rowid FROM events WHERE timestamp < ? LIMIT ?)",
+            )
+            .bind(&cutoff)
+            .bind(batch)
             .execute(&self.pool)
             .await?;
-        Ok(result.rows_affected())
+            total += result.rows_affected();
+            if result.rows_affected() < batch as u64 {
+                return Ok(total);
+            }
+        }
     }
 
     /// Insert an event into the store. Idempotent on `event_id` —
@@ -895,6 +914,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, fresh.envelope.event_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn sweep_events_batches_until_backlog_clear() {
+        let dir = tempdir().unwrap();
+        let store = ProjectionStore::open(&dir.path().join("projection.db"))
+            .await
+            .unwrap();
+        for name in ["old-a", "old-b", "old-c"] {
+            let event = sample_triggered(name, Uuid::now_v7());
+            store.insert_event(&event).await.unwrap();
+            sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
+                .bind("2020-01-01T00:00:00+00:00")
+                .bind(event.envelope.event_id.to_string())
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        let fresh = sample_triggered("fresh", Uuid::now_v7());
+        store.insert_event(&fresh).await.unwrap();
+
+        let cutoff = chrono::DateTime::parse_from_rfc3339("2021-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        // Batch size 1 forces one delete round per backlog row (plus
+        // the terminating short round): the loop must clear the whole
+        // backlog, count it accurately, and leave fresh rows alone.
+        assert_eq!(store.sweep_events_batched(cutoff, 1).await.unwrap(), 3);
+        assert_eq!(store.count().await.unwrap(), 1);
     }
 
     #[tokio::test]

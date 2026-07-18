@@ -532,6 +532,8 @@ The event trail has no payload-bearing system of record beyond JetStream retenti
 
 After a projection sweep, replaying the retained NATS stream is the supported recovery path and can recover only events still inside JetStream retention. Events older than stream retention are gone by design; the projection intentionally does not preserve typed rows past that boundary. ADR-0026's system-of-record guarantee covers invocation outcomes, not the trail. A stronger re-projection guarantee is tracked in [#139](https://github.com/bricef/factor-q/issues/139) and [#163](https://github.com/bricef/factor-q/issues/163).
 
+Two consumer consequences follow. First, aggregates computed from projected events — the dashboard cost pages and `fq costs` without `--since`, event counts, failure tallies — cover at most the retention window, not all time; cost figures for invocations older than the window disappear from those surfaces (ADR-0026 outcomes in CAS remain the durable record). Second, keep `[state].retention_days` at or below the NATS stream retention: a longer projection window re-creates the sole-holder inversion this sweep exists to remove — rows older than the stream survive only in the projection and can never be rebuilt by replay.
+
 ## Open Questions
 
 - **Cross-incarnation chain stitching.** Recovery re-emits start a fresh chain (`parent_event_id` absent). If audit code ever needs to thread the pre-crash and post-recovery chains together, an optional `envelope.recovered_from_event_id: Uuid` could be added.
