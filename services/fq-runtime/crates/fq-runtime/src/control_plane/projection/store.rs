@@ -153,6 +153,19 @@ impl ProjectionStore {
         Ok(())
     }
 
+    /// Delete projected events older than `cutoff_ms` (Unix epoch milliseconds).
+    /// Returns the number of rows deleted.
+    pub async fn sweep_events(&self, cutoff_ms: i64) -> Result<u64, StoreError> {
+        let cutoff = chrono::DateTime::from_timestamp_millis(cutoff_ms)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+            .to_rfc3339();
+        let result = sqlx::query("DELETE FROM events WHERE timestamp < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Insert an event into the store. Idempotent on `event_id` —
     /// re-delivery from a durable consumer is a no-op.
     ///
@@ -853,6 +866,35 @@ mod tests {
             cumulative_agent_cost: 0.0005,
             origin: Default::default(),
         })
+    }
+
+    #[tokio::test]
+    async fn sweep_events_deletes_old_rows_and_keeps_fresh_rows() {
+        let dir = tempdir().unwrap();
+        let store = ProjectionStore::open(&dir.path().join("projection.db"))
+            .await
+            .unwrap();
+        let old = sample_triggered("old", Uuid::now_v7());
+        let fresh = sample_triggered("fresh", Uuid::now_v7());
+        store.insert_event(&old).await.unwrap();
+        store.insert_event(&fresh).await.unwrap();
+        sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
+            .bind("2020-01-01T00:00:00+00:00")
+            .bind(old.envelope.event_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let cutoff = chrono::DateTime::parse_from_rfc3339("2021-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(store.sweep_events(cutoff).await.unwrap(), 1);
+        assert_eq!(store.count().await.unwrap(), 1);
+        let remaining: String = sqlx::query_scalar("SELECT event_id FROM events")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, fresh.envelope.event_id.to_string());
     }
 
     #[tokio::test]

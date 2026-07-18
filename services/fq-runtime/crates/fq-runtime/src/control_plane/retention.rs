@@ -23,6 +23,7 @@ use chrono::Utc;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
+use super::projection::ProjectionStore;
 use super::store::ControlPlaneStore;
 
 /// Number of milliseconds in one day. Used to convert
@@ -39,6 +40,7 @@ pub fn sweep_cutoff_ms(now_ms: i64, retention_days: i64) -> i64 {
 /// Periodic retention sweep task.
 pub struct RetentionSweeper {
     store: Arc<ControlPlaneStore>,
+    projection_store: Option<Arc<ProjectionStore>>,
     retention_days: i64,
     sweep_interval_seconds: u64,
 }
@@ -51,9 +53,16 @@ impl RetentionSweeper {
     ) -> Self {
         Self {
             store,
+            projection_store: None,
             retention_days,
             sweep_interval_seconds,
         }
+    }
+
+    /// Include the rebuildable event projection in each scheduled sweep.
+    pub fn with_projection_store(mut self, store: Arc<ProjectionStore>) -> Self {
+        self.projection_store = Some(store);
+        self
     }
 
     /// Run until `shutdown` fires. Exits immediately (with a
@@ -103,10 +112,22 @@ impl RetentionSweeper {
     async fn sweep_once(&self) -> Result<(), super::store::ControlPlaneStoreError> {
         let now_ms = Utc::now().timestamp_millis();
         let cutoff_ms = sweep_cutoff_ms(now_ms, self.retention_days);
-        let deleted = self.store.sweep_archive(cutoff_ms).await?;
+        let archive_deleted = self.store.sweep_archive(cutoff_ms).await?;
+        let event_deleted = if let Some(store) = &self.projection_store {
+            store.sweep_events(cutoff_ms).await.map_err(|err| {
+                super::store::ControlPlaneStoreError::Backend(format!(
+                    "projection retention sweep failed: {err}"
+                ))
+            })?
+        } else {
+            0
+        };
+        let deleted = archive_deleted + event_deleted;
         if deleted > 0 {
             info!(
                 deleted_rows = deleted,
+                archive_deleted_rows = archive_deleted,
+                event_deleted_rows = event_deleted,
                 cutoff_ms,
                 retention_days = self.retention_days,
                 "retention sweep deleted rows"

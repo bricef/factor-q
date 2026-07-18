@@ -527,10 +527,10 @@ The event trail has no payload-bearing system of record beyond JetStream retenti
 | Surface | Lifetime | What survives and record status |
 |---|---|---|
 | NATS `fq-events` | 30 days by default | Complete payload-bearing event trail; deleted after retention. Trigger and advisory streams retain messages for 24 hours by default. |
-| SQLite projection (`events`) | Not currently pruned | Typed columns only, without event payloads. This is a derived, rebuildable view rather than a system of record; rebuilding from NATS can recover only retained events. |
+| SQLite projection (`events`) | 30 days by default (`[state].retention_days`) | Typed columns only, without event payloads. The daemon prunes it on the scheduled retention sweep. This is a derived view, not a system of record. |
 | CAS archive (`fq-cas`) | Archive retention policy | Invocation final-state blobs only, not the event trail. ADR-0026 designates these invocation outcomes as the system of record. |
 
-Events older than stream retention are available only as the projection's typed rows (no payloads); the payload-bearing trail is gone by design. ADR-0026's system-of-record guarantee covers invocation outcomes, not the trail. A stronger re-projection guarantee is tracked in [#139](https://github.com/bricef/factor-q/issues/139) and [#163](https://github.com/bricef/factor-q/issues/163).
+After a projection sweep, replaying the retained NATS stream is the supported recovery path and can recover only events still inside JetStream retention. Events older than stream retention are gone by design; the projection intentionally does not preserve typed rows past that boundary. ADR-0026's system-of-record guarantee covers invocation outcomes, not the trail. A stronger re-projection guarantee is tracked in [#139](https://github.com/bricef/factor-q/issues/139) and [#163](https://github.com/bricef/factor-q/issues/163).
 
 ## Open Questions
 
