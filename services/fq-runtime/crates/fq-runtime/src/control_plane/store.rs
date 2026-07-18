@@ -1135,9 +1135,11 @@ mod tests {
 
     #[tokio::test]
     async fn control_plane_ladder_upgrades_populated_database() {
-        // v1 is currently the only historical schema. Seed through the public
-        // writer, mark it as v0, then exercise the NeedsUpgrade path. The loop
-        // becomes the per-step harness when v2 is added.
+        // v1 is currently the only historical schema, and its DDL is all
+        // CREATE TABLE IF NOT EXISTS — so stamping v0 and reopening replays
+        // a no-op ladder. This pins the NeedsUpgrade dispatch, the version
+        // restamp, and row survival; when v2 adds real DDL, grow this into
+        // the per-step harness the worker store has.
         let dir = tempdir().unwrap();
         let path = dir.path().join("control-plane.db");
         let store = ControlPlaneStore::open(&path).await.unwrap();
@@ -1150,7 +1152,7 @@ mod tests {
 
         let store = ControlPlaneStore::open(&path)
             .await
-            .expect("upgrade populated v0");
+            .expect("reopen a v0-stamped store");
         let worker = store
             .get_worker("migration-worker")
             .await
