@@ -51,7 +51,7 @@ watcher subscribes to the triggered agent's lifecycle events
 invocation to its issue via the `triggered` event's payload, and reacts:
 
 - **completed** → routed by the agent's declared `task_status` (#125):
-  `success`/`partial`/absent → `in-progress` → `in-review`; `failed`/`blocked`
+  `success`/`partial`/absent → `in-progress` → `in-review` only after verifying an open PR closes the issue (otherwise bounded retry); `failed`/`blocked`
   → the same bounded retry as a transient runtime failure (re-queue to
   `ready`, then `failed` when exhausted) — an honest "done but failed"
   never lands in review. On the in-review path,

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -92,6 +95,53 @@ func TestReactCompletedMovesToInReview(t *testing.T) {
 	r := NewOutcomeReactor(src, outcomeConfig(), discardLogger())
 	triggeredThen(r, "inv-1", 7, OutcomeEvent{Kind: OutcomeCompleted, InvocationID: "inv-1"})
 	want := []string{"relabel #7 in-progress->in-review"}
+	if !slices.Equal(src.ops, want) {
+		t.Errorf("ops = %v, want %v", src.ops, want)
+	}
+}
+
+func TestReactCompletedDeliverableGate(t *testing.T) {
+	tests := []struct {
+		name    string
+		stamper ProvenanceStamper
+		want    string
+		wantLog string
+	}{
+		{"open PR", &fakeStamper{prsByIssue: map[int][]int{7: {41}}, bodies: map[int]string{41: "body"}}, "relabel #7 in-progress->in-review", "pr_count=1"},
+		{"no PR", &fakeStamper{prsByIssue: map[int][]int{}}, "relabel #7 in-progress->ready", "pr_count=0"},
+		{"lookup error fails open", &fakeStamper{listErr: errors.New("graphql down")}, "relabel #7 in-progress->in-review", "level=WARN"},
+		{"nil stamper fails open", nil, "relabel #7 in-progress->in-review", "level=WARN"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &labelSource{}
+			var logs bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&logs, nil))
+			r := NewOutcomeReactor(src, outcomeConfig(), log)
+			r.Stamper = tt.stamper
+			triggeredThen(r, "inv", 7, OutcomeEvent{Kind: OutcomeCompleted, InvocationID: "inv"})
+			if !slices.Equal(src.ops, []string{tt.want}) {
+				t.Errorf("ops = %v, want %q", src.ops, tt.want)
+			}
+			if got := logs.String(); !strings.Contains(got, "issue=7") || !strings.Contains(got, "invocation=inv") || !strings.Contains(got, tt.wantLog) {
+				t.Errorf("gate log = %q, want issue, invocation, and %q", got, tt.wantLog)
+			}
+		})
+	}
+}
+
+func TestCompletedWithoutPRSharesRetryBudget(t *testing.T) {
+	src := &labelSource{}
+	r := NewOutcomeReactor(src, outcomeConfig(), discardLogger())
+	r.Stamper = &fakeStamper{prsByIssue: map[int][]int{}}
+	triggeredThen(r, "llm", 9, OutcomeEvent{Kind: OutcomeFailed, InvocationID: "llm", ErrorKind: "llm_error"})
+	triggeredThen(r, "no-pr-1", 9, OutcomeEvent{Kind: OutcomeCompleted, InvocationID: "no-pr-1"})
+	triggeredThen(r, "no-pr-2", 9, OutcomeEvent{Kind: OutcomeCompleted, InvocationID: "no-pr-2"})
+	want := []string{
+		"relabel #9 in-progress->ready",
+		"relabel #9 in-progress->ready",
+		"relabel #9 in-progress->failed",
+	}
 	if !slices.Equal(src.ops, want) {
 		t.Errorf("ops = %v, want %v", src.ops, want)
 	}
