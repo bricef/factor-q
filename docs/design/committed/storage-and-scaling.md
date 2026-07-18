@@ -109,8 +109,9 @@ event carried.
 
 SQLite is genuinely happy into the hundreds of GB as long as queries
 hit indexes. Growth at moderate use is comfortable for years without
-intervention; heavy-use deployments should plan retention within
-months.
+intervention. The daemon applies `[state].retention_days` to projected
+events on its hourly retention schedule (30 days by default), keeping
+projection growth bounded and aligned with the default NATS window.
 
 ### Recommended schema
 

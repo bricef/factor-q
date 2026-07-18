@@ -149,12 +149,11 @@ impl ExecToolConfig {
     }
 }
 
-/// Control-plane state-retention knobs. Drives the
-/// `invocation_archive` retention sweep (step 10 of
-/// data-architecture-v1).
+/// Runtime retention knobs. Drives the scheduled sweeps for the
+/// `invocation_archive` and rebuildable projection `events` tables.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StateConfig {
-    /// How long to keep `invocation_archive` rows before the
+    /// How long to keep archive and projected event rows before the
     /// retention sweep deletes them. Default 30 days. Set to
     /// `-1` to disable the sweep entirely.
     #[serde(default = "default_retention_days")]

@@ -2434,7 +2434,8 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         cp_store.clone(),
         config.state.retention_days,
         config.state.sweep_interval_seconds,
-    );
+    )
+    .with_projection_store(store.clone());
     let mut retention_handle =
         tokio::spawn(async move { retention_sweeper.run(retention_shutdown_rx).await });
 
