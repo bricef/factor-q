@@ -155,7 +155,8 @@ impl ExecToolConfig {
 pub struct StateConfig {
     /// How long to keep archive and projected event rows before the
     /// retention sweep deletes them. Default 30 days. Set to
-    /// `-1` to disable the sweep entirely.
+    /// `-1` to disable the sweep entirely. Cost-bearing event rows
+    /// are exempt and kept indefinitely regardless of this setting.
     #[serde(default = "default_retention_days")]
     pub retention_days: i64,
     /// How often the retention sweep runs, in seconds.

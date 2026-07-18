@@ -2426,9 +2426,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
 
     // Spawn the retention sweep (step 10). Deletes
     // invocation_archive rows and projected `events` rows older
-    // than state.retention_days. Setting retention_days < 0
-    // disables the task (it exits immediately on startup);
-    // see `[state]` in fq.toml.
+    // than state.retention_days — except cost-bearing event rows,
+    // which are kept indefinitely (spend figures must survive
+    // retention). Setting retention_days < 0 disables the task
+    // (it exits immediately on startup); see `[state]` in fq.toml.
     let (retention_shutdown_tx, retention_shutdown_rx) = tokio::sync::oneshot::channel();
     let retention_sweeper = fq_runtime::control_plane::retention::RetentionSweeper::new(
         cp_store.clone(),

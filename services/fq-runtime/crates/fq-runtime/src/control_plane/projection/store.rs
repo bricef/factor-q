@@ -153,8 +153,16 @@ impl ProjectionStore {
         Ok(())
     }
 
-    /// Delete projected events older than `cutoff_ms` (Unix epoch milliseconds).
-    /// Returns the number of rows deleted.
+    /// Delete projected events older than `cutoff_ms` (Unix epoch
+    /// milliseconds), except cost-bearing rows. Returns the number of
+    /// rows deleted.
+    ///
+    /// Cost accounting is a primary platform concern: rows with
+    /// `total_cost` set (`llm_response`, `invocation_summary`) are
+    /// retained indefinitely so all-time spend figures and
+    /// per-invocation cost display survive retention. Everything the
+    /// cost queries read filters on `total_cost IS NOT NULL`, so the
+    /// exemption preserves them exactly.
     ///
     /// Deletes in batches: the first sweep after an upgrade can face
     /// months of backlog, and one unbounded DELETE would hold the
@@ -172,7 +180,8 @@ impl ProjectionStore {
         loop {
             let result = sqlx::query(
                 "DELETE FROM events WHERE rowid IN \
-                 (SELECT rowid FROM events WHERE timestamp < ? LIMIT ?)",
+                 (SELECT rowid FROM events \
+                  WHERE timestamp < ? AND total_cost IS NULL LIMIT ?)",
             )
             .bind(&cutoff)
             .bind(batch)
@@ -943,6 +952,41 @@ mod tests {
         // backlog, count it accurately, and leave fresh rows alone.
         assert_eq!(store.sweep_events_batched(cutoff, 1).await.unwrap(), 3);
         assert_eq!(store.count().await.unwrap(), 1);
+    }
+
+    /// Cost information outlives retention: a cost-bearing row older
+    /// than the cutoff survives the sweep and still feeds the spend
+    /// figures, while a non-cost row of the same age is deleted.
+    #[tokio::test]
+    async fn sweep_events_preserves_cost_bearing_rows() {
+        let dir = tempdir().unwrap();
+        let store = ProjectionStore::open(&dir.path().join("projection.db"))
+            .await
+            .unwrap();
+        let costed = sample_llm_response_with_cost("biller", Uuid::now_v7(), 0.25);
+        let uncosted = sample_triggered("biller", Uuid::now_v7());
+        store.insert_event(&costed).await.unwrap();
+        store.insert_event(&uncosted).await.unwrap();
+        for event in [&costed, &uncosted] {
+            sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
+                .bind("2020-01-01T00:00:00+00:00")
+                .bind(event.envelope.event_id.to_string())
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+
+        let cutoff = chrono::DateTime::parse_from_rfc3339("2021-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        // Only the uncosted row is swept.
+        assert_eq!(store.sweep_events(cutoff).await.unwrap(), 1);
+        assert_eq!(store.count().await.unwrap(), 1);
+
+        // The all-time spend figure is intact after the sweep.
+        let summary = store.cost_summary(Some("biller"), None).await.unwrap();
+        assert_eq!(summary.len(), 1);
+        assert!((summary[0].total_cost - 0.25).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
