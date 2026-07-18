@@ -1,7 +1,7 @@
 name: Main artifacts
 
 # Hermetic deploy artifacts (#102): every merge to main publishes a
-# checksummed, SHA-stamped bundle (fq, fq-cas, github-watcher — static
+# checksummed, SHA-stamped bundle (fq, fq-cas, github-watcher, fq-cron — static
 # x86_64 musl — plus the dogfood launchers) to the rolling `main-latest`
 # pre-release. Deploy hosts fetch + verify + swap and never compile
 # (ops/dogfood/deploy.sh). Rollback history lives on the hosts as
@@ -51,6 +51,7 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
       - run: just build-watcher x86_64-unknown-linux-musl
+      - run: just build-cron x86_64-unknown-linux-musl
       - run: just package-main x86_64-unknown-linux-musl
       - run: just publish-main "${GITHUB_SHA}"
         env:

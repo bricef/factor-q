@@ -348,12 +348,16 @@ build-watcher target:
     cd adapters/github-watcher
     CGO_ENABLED=0 go build -o "target/{{target}}/release/github-watcher" .
 
+# Build fq-cron for the target triple.
+build-cron target:
+    cd adapters/fq-cron && CGO_ENABLED=0 go build -o "target/{{target}}/release/fq-cron" .
+
 # Every deployable plus the dogfood launchers, so a deployed
 # releases/<sha>/ dir is self-contained (ops/dogfood/deploy.sh extracts it
 # verbatim).
 # Package the rolling main-branch deploy bundle into dist/.
 package-main target:
-    bash scripts/package.sh {{target}} {{runtime_dir}}:fq {{dashboard_dir}}:fq-dashboard {{store_dir}}:fq-cas adapters/github-watcher:github-watcher ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh
+    bash scripts/package.sh {{target}} {{runtime_dir}}:fq {{dashboard_dir}}:fq-dashboard {{store_dir}}:fq-cas adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh ops/dogfood/cron.sh
 
 # Recreates both the release and its tag so tag, assets, and notes always
 # point at the same commit. The channel keeps no history by design —
