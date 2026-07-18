@@ -380,11 +380,10 @@ fn fq_down_fast_fails_when_no_daemon_running() {
         !down.status.success(),
         "`fq down` must fail when no daemon is running:\nstdout={out}\nstderr={err}"
     );
-    // The CLI logs its error through `tracing` (to stdout, like its other
-    // output), not to stderr — so accept it on either stream.
+    assert!(out.is_empty(), "fatal error must not pollute stdout: {out}");
     assert!(
-        out.contains("no running `fq run` daemon") || err.contains("no running `fq run` daemon"),
-        "expected a 'no daemon' error, got:\nstdout={out}\nstderr={err}"
+        err.contains("no running `fq run` daemon"),
+        "expected a 'no daemon' error on stderr, got:\n{err}"
     );
     // Fast-fail: well inside the ~20s liveness window, nowhere near the
     // full ~130s drain-deadline ceiling. Generous slack for CI.

@@ -621,9 +621,9 @@ where
 }
 
 /// Human-readable byte size, e.g. `3.4 MiB`, `100.0 KiB`, `512 B`.
-fn human_bytes(n: usize) -> String {
-    const KIB: usize = 1024;
-    const MIB: usize = 1024 * 1024;
+pub fn human_bytes(n: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
     if n >= MIB {
         format!("{}.{} MiB", n / MIB, (n % MIB) * 10 / MIB)
     } else if n >= KIB {
@@ -661,8 +661,8 @@ fn render_stream(bytes: &[u8], total: usize, limit: LineLimit) -> (String, Optio
                 format!(
                     "truncated at the byte cap: kept {} of {} — use max_lines / \
                      tail_lines to choose what you keep",
-                    human_bytes(bytes.len()),
-                    human_bytes(total),
+                    human_bytes(bytes.len() as u64),
+                    human_bytes(total as u64),
                 )
             });
             (text.into_owned(), note)
