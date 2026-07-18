@@ -9,7 +9,7 @@ use fq_runtime::read_service::{AgentDetailView, AgentsView, HealthReport};
 use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
 use fq_runtime::views::{
     ActiveInvocationView, AgentCostDetailView, CostBucketView, CostReport, CostView, EventView,
-    InvocationDetailView, InvocationSummaryView, ModelCostView,
+    InvocationDetailView, InvocationSummaryView, Liveness, ModelCostView,
 };
 
 /// Minimal HTML escape for text and attribute positions.
@@ -212,6 +212,29 @@ fn summary_cell(summary: Option<&str>) -> String {
     match summary {
         Some(line) => format!(r#"<span class="muted">{}</span>"#, esc(line)),
         None => r#"<span class="muted">—</span>"#.to_string(),
+    }
+}
+
+/// A colour-coded invocation status cell: terminal outcomes carry the
+/// health palette (completed ok / failed bad / ambiguous warn); other
+/// statuses render plain.
+fn status_span(status: &str) -> String {
+    let class = match status {
+        "completed" => "ok",
+        "failed" => "bad",
+        "ambiguous" => "warn",
+        _ => return esc(status),
+    };
+    format!(r#"<span class="{class}">{}</span>"#, esc(status))
+}
+
+/// The health page's liveness verdict as a colour-coded badge — the
+/// same vocabulary and palette as the health tile, per row.
+fn liveness_badge(liveness: Liveness) -> String {
+    match liveness {
+        Liveness::Working => r#"<span class="ok">✓ working</span>"#.to_string(),
+        Liveness::Advancing => r#"<span class="muted">advancing</span>"#.to_string(),
+        Liveness::Stuck => r#"<span class="bad">✗ stuck</span>"#.to_string(),
     }
 }
 
@@ -542,7 +565,7 @@ pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
         return String::new();
     }
     let mut b = String::new();
-    b.push_str("<h2>Active now</h2><table><tr><th>invocation</th><th>agent</th><th>summary</th><th>phase</th><th>step</th><th>started</th><th>last advanced</th><th>doing</th></tr>");
+    b.push_str("<h2>Active now</h2><table><tr><th>invocation</th><th>agent</th><th>summary</th><th>phase</th><th>state</th><th>step</th><th>started</th><th>last advanced</th><th>doing</th></tr>");
     for i in items {
         let mut doing: Vec<String> = i
             .open_tools
@@ -566,11 +589,12 @@ pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
             doing.join(", ")
         };
         b.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             inv_link(&i.invocation_id),
             agent_link(&i.agent_id),
             summary_cell(i.summary.as_deref()),
             esc(&i.phase),
+            liveness_badge(i.liveness),
             i.step_index,
             esc(&age(i.started_at_ms, now_ms)),
             esc(&age(i.updated_at_ms, now_ms)),
@@ -709,7 +733,7 @@ pub fn invocations(
         b.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             inv_link(&i.invocation_id),
-            esc(&i.status),
+            status_span(&i.status),
             summary_cell(i.summary.as_deref()),
             esc(&age(i.started_at_ms, now_ms)),
             match i.agent_id.as_deref() {
@@ -764,7 +788,7 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
     if let Some(o) = &d.owner {
         b.push_str(&format!(
             "<tr><th>status</th><td>{}</td></tr><tr><th>worker</th><td>{}</td></tr>",
-            esc(&o.status),
+            status_span(&o.status),
             esc(&o.worker_id)
         ));
     }
@@ -797,8 +821,9 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
     if let Some(live) = &d.live {
         b.push_str("<h2>Live execution</h2><table>");
         b.push_str(&format!(
-            "<tr><th>phase</th><td>{}</td></tr><tr><th>step</th><td>{}</td></tr><tr><th>last advanced</th><td>{}</td></tr>",
+            "<tr><th>phase</th><td>{} · {}</td></tr><tr><th>step</th><td>{}</td></tr><tr><th>last advanced</th><td>{}</td></tr>",
             esc(&live.phase),
+            liveness_badge(live.liveness),
             live.step_index,
             esc(&age(live.updated_at_ms, now_ms))
         ));
@@ -1642,6 +1667,7 @@ mod tests {
             step_index: 1,
             started_at_ms: 0,
             updated_at_ms: 0,
+            liveness: Liveness::Advancing,
             open_tools: vec![],
             open_llms: vec![],
             summary: Some("Editing widget.rs".into()),
@@ -1763,6 +1789,7 @@ mod tests {
             step_index: 165,
             started_at_ms: 0,
             updated_at_ms: 540_000,
+            liveness: Liveness::Working,
             open_tools: vec![fq_runtime::views::OpenToolView {
                 tool_name: "exec".into(),
                 command: Some("gh issue view 86 --repo bricef/factor-q".into()),
@@ -2209,6 +2236,7 @@ mod tests {
             step_index: 1,
             started_at_ms: 0,
             updated_at_ms: 0,
+            liveness: Liveness::Advancing,
             open_tools: vec![],
             open_llms: vec![],
             summary: None,
@@ -2345,6 +2373,79 @@ mod tests {
         assert_eq!(
             cost_chart(&[bucket("2020-01-01", 9.0)], Window::All, TEST_NOW_MS),
             ""
+        );
+    }
+
+    /// The health page's palette lands on the row surfaces: liveness
+    /// badges on active rows, terminal-status colours on the list and
+    /// detail — same vocabulary everywhere.
+    #[test]
+    fn liveness_and_status_carry_the_health_palette() {
+        let mk = |liveness| fq_runtime::views::ActiveInvocationView {
+            invocation_id: "inv-a".into(),
+            agent_id: "a".into(),
+            phase: "reducing".into(),
+            step_index: 1,
+            started_at_ms: 0,
+            updated_at_ms: 0,
+            liveness,
+            open_tools: vec![],
+            open_llms: vec![],
+            summary: None,
+        };
+        let html = active(&[mk(Liveness::Working)], 1_000);
+        assert!(
+            html.contains(r#"<span class="ok">✓ working</span>"#),
+            "got: {html}"
+        );
+        let html = active(&[mk(Liveness::Stuck)], 1_000);
+        assert!(
+            html.contains(r#"<span class="bad">✗ stuck</span>"#),
+            "got: {html}"
+        );
+        let html = active(&[mk(Liveness::Advancing)], 1_000);
+        assert!(
+            html.contains(r#"<span class="muted">advancing</span>"#),
+            "got: {html}"
+        );
+
+        // Terminal statuses colour the list; in_flight stays plain.
+        assert_eq!(
+            status_span("completed"),
+            r#"<span class="ok">completed</span>"#
+        );
+        assert_eq!(status_span("failed"), r#"<span class="bad">failed</span>"#);
+        assert_eq!(
+            status_span("ambiguous"),
+            r#"<span class="warn">ambiguous</span>"#
+        );
+        assert_eq!(status_span("in_flight"), "in_flight");
+
+        // The detail page's live block carries the badge on the phase.
+        let detail = fq_runtime::views::InvocationDetailView {
+            invocation_id: "inv-1".into(),
+            agent_id: None,
+            owner: None,
+            archive: None,
+            live: Some(fq_runtime::views::LiveExecutionView {
+                liveness: Liveness::Stuck,
+                phase: "reducing".into(),
+                step_index: 3,
+                started_at_ms: 0,
+                updated_at_ms: 0,
+                terminal_at_ms: None,
+                tools: vec![],
+                llms: vec![],
+            }),
+            recent_events: vec![],
+            summary: None,
+            cost: None,
+            has_transcript: false,
+        };
+        let html = invocation_detail(&detail, 1_000);
+        assert!(
+            html.contains(r#"<td>reducing · <span class="bad">✗ stuck</span></td>"#),
+            "got: {html}"
         );
     }
 

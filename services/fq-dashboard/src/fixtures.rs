@@ -96,6 +96,7 @@ fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
             step_index: 165,
             started_at_ms: NOW_MS - 600_000,
             updated_at_ms: NOW_MS - 45_000,
+            liveness: fq_runtime::views::Liveness::Working,
             open_tools: vec![fq_runtime::views::OpenToolView {
                 tool_name: "exec".to_string(),
                 command: Some("gh issue view 86 --repo bricef/factor-q".to_string()),
@@ -110,6 +111,7 @@ fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
             step_index: 44,
             started_at_ms: NOW_MS - 300_000,
             updated_at_ms: NOW_MS - 8_000,
+            liveness: fq_runtime::views::Liveness::Working,
             open_tools: vec![],
             open_llms: vec!["claude-opus-4-8".to_string()],
             summary: None,
@@ -239,6 +241,7 @@ fn invocation_detail() -> InvocationDetailView {
         // its WAL row is live (caught by looking at the screenshot).
         archive: None,
         live: Some(LiveExecutionView {
+            liveness: fq_runtime::views::Liveness::Working,
             phase: "dispatching_tools".to_string(),
             step_index: 165,
             started_at_ms: NOW_MS - 600_000,

@@ -267,7 +267,15 @@ impl ReadService for ReadServer {
         self,
         _: context::Context,
     ) -> Result<Vec<ActiveInvocationView>, WireError> {
-        Ok(self.views.active_invocations().await?)
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        Ok(self
+            .views
+            .active_invocations(
+                now_ms,
+                HEALTH_THRESHOLD_MS,
+                crate::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+            )
+            .await?)
     }
 
     async fn workers(self, _: context::Context) -> Result<Vec<WorkerView>, WireError> {
@@ -301,7 +309,16 @@ impl ReadService for ReadServer {
         _: context::Context,
         id: String,
     ) -> Result<Option<InvocationDetailView>, WireError> {
-        Ok(self.views.invocation(&id).await?)
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        Ok(self
+            .views
+            .invocation(
+                &id,
+                now_ms,
+                HEALTH_THRESHOLD_MS,
+                crate::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+            )
+            .await?)
     }
 
     async fn transcript(

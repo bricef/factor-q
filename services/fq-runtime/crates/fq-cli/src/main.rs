@@ -3598,7 +3598,15 @@ async fn invocation_list(
 
 async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::Result<()> {
     let views = open_views(global).await?;
-    let Some(detail) = views.invocation(id).await? else {
+    let Some(detail) = views
+        .invocation(
+            id,
+            chrono::Utc::now().timestamp_millis(),
+            fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS,
+            fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+        )
+        .await?
+    else {
         eprintln!("no invocation found with id={id}");
         std::process::exit(1);
     };
