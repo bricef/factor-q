@@ -635,32 +635,26 @@ fn check_golden(name: &str, args: &[&str], nats: Nats, volatile_markers: &[&str]
 fn legacy_single_file_layout_is_a_hint_not_a_read() {
     let dir = tempfile::tempdir().expect("legacy tempdir");
     std::fs::write(dir.path().join("events.db"), b"not a real db").unwrap();
-    // RUST_LOG=error, not =off: fatal CLI errors currently render through
-    // the tracing filter (single exit point in main), so =off silences
-    // them entirely — that surface problem is #190's, not this test's.
     let out = Command::new(env!("CARGO_BIN_EXE_fq"))
         .args(["invocation", "list"])
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_AGENTS_DIR", "/nonexistent/agents")
         .env("FQ_CACHE_DIR", dir.path())
         .env("FQ_NATS_URL", "nats://127.0.0.1:1")
-        .env("RUST_LOG", "error")
+        .env("RUST_LOG", "off")
         .output()
         .expect("run fq binary");
     let exit = out.status.code();
-    // The hint currently lands on *stdout*: fatal CLI errors render
-    // through the tracing fmt subscriber, which writes to stdout.
-    // Routing fatal errors to stderr is #190's cleanup; this test pins
-    // the message text and will move streams with it.
-    let rendered = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert_ne!(exit, Some(0), "a legacy layout must not read");
     assert!(
-        rendered.contains("legacy single-file database"),
-        "output should carry the migration hint; got:\n{rendered}"
+        stdout.is_empty(),
+        "fatal error must not pollute stdout; got:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("legacy single-file database"),
+        "stderr should carry the migration hint even with RUST_LOG=off; got:\n{stderr}"
     );
 }
 
@@ -783,13 +777,7 @@ fn golden_transcript_full_human() {
 fn golden_transcript_json() {
     check_golden(
         "transcript_json",
-        &[
-            "invocation",
-            "transcript",
-            INV_COMPLETED,
-            "--format",
-            "json",
-        ],
+        &["invocation", "transcript", INV_COMPLETED, "--json"],
         Nats::Closed,
         &[],
     );

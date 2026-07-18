@@ -5,7 +5,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use fq_runtime::agent::{AgentId, AgentRegistry, definition::parse_agent};
-use fq_runtime::control_plane::store::WorkerStatus;
+use fq_runtime::control_plane::{
+    coordination_consumer::DEFAULT_STALE_THRESHOLD_MS, store::WorkerStatus,
+};
 use fq_runtime::events::{
     Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
     TriggerSource,
@@ -19,7 +21,6 @@ use fq_runtime::{
 };
 use futures::StreamExt;
 use serde_json::Value;
-use tracing::error;
 use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
@@ -273,14 +274,14 @@ enum WorkerCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Show one worker's detail: host, status, heartbeat age,
-    /// and current in-flight invocation count.
     /// Remove stale worker registrations; alive and shutdown workers are untouched.
     Prune {
         /// Report workers that would be removed without changing the store.
         #[arg(long)]
         dry_run: bool,
     },
+    /// Show one worker's detail: host, status, heartbeat age,
+    /// and current in-flight invocation count.
     Show {
         /// Worker id to inspect.
         id: String,
@@ -396,9 +397,12 @@ enum InvocationCommands {
         /// live from `fq.agent.<agent_id>.>` until Ctrl-C.
         #[arg(long, short = 'f')]
         follow: bool,
-        /// Output format.
-        #[arg(long, value_enum, default_value = "pretty")]
-        format: TranscriptFormat,
+        /// Emit machine-readable JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Deprecated output-format alias; use `--json`.
+        #[arg(long, value_enum)]
+        format: Option<TranscriptFormat>,
         /// Do not truncate large payloads (alias: --no-truncate).
         #[arg(long, visible_alias = "no-truncate")]
         full: bool,
@@ -422,6 +426,9 @@ enum EventCommands {
         /// Subject filter (defaults to all factor-q events)
         #[arg(long, default_value = "fq.>")]
         subject: String,
+        /// Emit one JSON event per line.
+        #[arg(long)]
+        json: bool,
     },
     /// Query the event history from the SQLite projection
     Query {
@@ -490,7 +497,9 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            error!("{err:#}");
+            // Fatal CLI errors are an unconditional stderr contract: they must
+            // neither pollute machine-readable stdout nor vanish under RUST_LOG=off.
+            eprintln!("{err:#}");
             ExitCode::FAILURE
         }
     }
@@ -528,7 +537,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             AgentCommands::Validate { path } => validate_agent(&path)?,
         },
         Commands::Events { command } => match command {
-            EventCommands::Tail { subject } => tail_events(&cli.global, &subject).await?,
+            EventCommands::Tail { subject, json } => {
+                tail_events(&cli.global, &subject, json).await?
+            }
             EventCommands::Query {
                 agent,
                 event_type,
@@ -580,9 +591,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             InvocationCommands::Transcript {
                 id,
                 follow,
+                json,
                 format,
                 full,
-            } => invocation_transcript(&cli.global, &id, follow, format, full).await?,
+            } => invocation_transcript(&cli.global, &id, follow, json, format, full).await?,
         },
         Commands::Workers { command } => match command {
             WorkerCommands::List {
@@ -1044,17 +1056,21 @@ async fn trigger_agent(
 
 /// Tail the event stream from NATS, formatting each event as a single
 /// readable line.
-async fn tail_events(global: &GlobalArgs, subject: &str) -> anyhow::Result<()> {
+async fn tail_events(global: &GlobalArgs, subject: &str, json: bool) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
 
-    println!("Connecting to NATS at {}...", config.nats.url);
+    if !json {
+        println!("Connecting to NATS at {}...", config.nats.url);
+    }
     let bus = EventBus::connect(&config.nats.url)
         .await
         .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
 
-    println!("Subscribing to {subject}");
-    println!("Press Ctrl-C to exit.");
-    println!();
+    if !json {
+        println!("Subscribing to {subject}");
+        println!("Press Ctrl-C to exit.");
+        println!();
+    }
 
     let mut stream = bus
         .subscribe(subject.to_string())
@@ -1063,7 +1079,13 @@ async fn tail_events(global: &GlobalArgs, subject: &str) -> anyhow::Result<()> {
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(event) => print_event(&event),
+            Ok(event) => {
+                if json {
+                    println!("{}", serde_json::to_string(&event)?);
+                } else {
+                    print_event(&event);
+                }
+            }
             Err(err) => eprintln!("deserialise error: {err}"),
         }
     }
@@ -1298,7 +1320,7 @@ async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Result<()> {
                         Err(err) => store_error = Some(format!("failed to query rows: {err}")),
                     }
                     let now_ms = chrono::Utc::now().timestamp_millis();
-                    match views.recovery(now_ms, 30_000).await {
+                    match views.recovery(now_ms, DEFAULT_STALE_THRESHOLD_MS).await {
                         Ok(r) => recovery = Some(r),
                         Err(err) => {
                             store_error
@@ -1364,7 +1386,7 @@ async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Result<()> {
             println!();
             println!("Recovery state");
             let now_ms = chrono::Utc::now().timestamp_millis();
-            match views.recovery(now_ms, 30_000).await {
+            match views.recovery(now_ms, DEFAULT_STALE_THRESHOLD_MS).await {
                 Ok(r) => print!("{}", render_recovery_guidance(r.ambiguous, r.stale_workers)),
                 Err(err) => println!("  ✗ failed to read recovery state: {err}"),
             }
@@ -1397,7 +1419,10 @@ fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) {
             ..
         } => {
             println!("  messages:         {messages}");
-            println!("  bytes:            {}", human_bytes(*bytes));
+            println!(
+                "  bytes:            {}",
+                fq_tools::builtin::exec::human_bytes(*bytes)
+            );
             println!("  first seq:        {first_seq}");
             println!("  last seq:         {last_seq}");
             match consumer {
@@ -1478,7 +1503,7 @@ fn render_recovery_guidance(ambiguous_count: i64, stale_worker_count: i64) -> St
 /// hard-coded constant — an invocation that has not touched its
 /// WAL row in as long as a worker has not heartbeated is the same
 /// order of "not making progress" signal.
-const DOCTOR_STUCK_THRESHOLD_MS: i64 = 30_000;
+const DOCTOR_STUCK_THRESHOLD_MS: i64 = DEFAULT_STALE_THRESHOLD_MS;
 
 /// Worker liveness counts plus the ids of any stale workers so
 /// the operator can act without a second `fq workers list` call.
@@ -1752,21 +1777,6 @@ async fn doctor(global: &GlobalArgs, json: bool, fail_on_issues: bool) -> anyhow
         anyhow::bail!("doctor found issues (see report above)");
     }
     Ok(())
-}
-
-fn human_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 /// Publish `invocation.ambiguous` at most once per invocation (#64).
@@ -3742,7 +3752,8 @@ async fn invocation_transcript(
     global: &GlobalArgs,
     id: &str,
     follow: bool,
-    format: TranscriptFormat,
+    json: bool,
+    format: Option<TranscriptFormat>,
     full: bool,
 ) -> anyhow::Result<()> {
     use fq_runtime::transcript::{
@@ -3750,9 +3761,12 @@ async fn invocation_transcript(
         tool_result_entry,
     };
 
-    let as_json = matches!(format, TranscriptFormat::Json);
+    let as_json = json || matches!(format, Some(TranscriptFormat::Json));
+    if json && matches!(format, Some(TranscriptFormat::Pretty)) {
+        anyhow::bail!("--json conflicts with --format pretty");
+    }
     if follow && as_json {
-        anyhow::bail!("--follow is not supported with --format json (json emits a snapshot array)");
+        anyhow::bail!("--follow is not supported with --json (json emits a snapshot array)");
     }
     let truncate_bytes = if full {
         None
@@ -4224,7 +4238,7 @@ async fn workers_list(
     // The threshold the CP uses to flip a worker from alive
     // to stale; this is the same DEFAULT_STALE_THRESHOLD_MS
     // used by the coordination consumer.
-    let stale_threshold_ms = 30_000_i64;
+    let stale_threshold_ms = DEFAULT_STALE_THRESHOLD_MS;
 
     let views = open_views(global).await?;
     let items: Vec<_> = views
@@ -4288,7 +4302,7 @@ async fn workers_prune(global: &GlobalArgs, dry_run: bool) -> anyhow::Result<()>
 }
 
 async fn workers_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::Result<()> {
-    let stale_threshold_ms = 30_000_i64;
+    let stale_threshold_ms = DEFAULT_STALE_THRESHOLD_MS;
     let views = open_views(global).await?;
     let Some(detail) = views.worker(id).await? else {
         eprintln!("no worker found with id={id}");
