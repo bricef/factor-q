@@ -313,8 +313,11 @@ check-links:
 # rejects include_str!/include_bytes! aimed at .rs files — embedding
 # source as data is the same splice one step removed; scanners read the
 # tree at runtime instead (see fq-cli tests/store_open_gate.rs). Data
-# embeds (templates, web assets) stay fine. Deliberately exception-free:
-# no allow-marker, matching lines are hard failures.
+# embeds (templates, web assets) stay fine. No allow-marker: matching
+# lines are hard failures. The absolute ban is include! code splicing;
+# if a future include_str! use is genuinely valid and trips this gate,
+# allow it case by case — narrow the pattern or exempt that path here,
+# in a reviewed change — never contort the code around the lint.
 # Reject include!-family macros that splice Rust source (tracked *.rs).
 lint-sources:
     #!/usr/bin/env bash
