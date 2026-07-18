@@ -111,11 +111,17 @@ SQLite is genuinely happy into the hundreds of GB as long as queries
 hit indexes. Growth at moderate use is comfortable for years without
 intervention. The daemon applies `[state].retention_days` to projected
 events on its hourly retention schedule (30 days by default), keeping
-projection growth bounded and aligned with the default NATS window.
-Keep it at or below the stream retention — a longer projection window
-makes the projection the sole holder of the older rows, which replay
-cannot rebuild. Aggregates sourced from the projection (dashboard
-costs, `fq costs`, event counts) cover at most this window.
+projection growth bounded and aligned with the default NATS window —
+with one deliberate exemption: cost-bearing rows (`total_cost` set)
+are never swept, because spend accounting is a primary platform
+concern and all-time cost figures must survive retention. Growth of
+the exempt set is one row per priced LLM call, typed columns only.
+Keep `retention_days` at or below the stream retention — a longer
+window makes the projection the sole holder of older non-cost rows,
+which replay cannot rebuild. Non-cost aggregates sourced from the
+projection (event counts, failure tallies) cover at most this window;
+back up `projection.db`, since swept-past cost rows exist nowhere
+else.
 
 ### Recommended schema
 
