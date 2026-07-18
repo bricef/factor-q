@@ -2,11 +2,11 @@
 
 ## Status
 
-Draft (2026-07-17). Design for a new adapter; nothing here is implemented
-yet. This doc records the foundational choices — language, durability
-layer, configuration and reload, delivery semantics, missed-fire policy —
-and the reasoning behind each, so implementation can proceed against
-settled decisions.
+Implemented (2026-07-18) — built through the #283 tracker (#284–#289);
+every decision below shipped as designed. This doc records the
+foundational choices — language, durability layer, configuration and
+reload, delivery semantics, missed-fire policy — and the reasoning behind
+each; it remains the reference for how fq-cron behaves.
 
 Related: [trigger wire contract](../../docs/design/committed/trigger-wire-contract.md)
 (the boundary this adapter publishes across),
