@@ -112,6 +112,10 @@ hit indexes. Growth at moderate use is comfortable for years without
 intervention. The daemon applies `[state].retention_days` to projected
 events on its hourly retention schedule (30 days by default), keeping
 projection growth bounded and aligned with the default NATS window.
+Keep it at or below the stream retention — a longer projection window
+makes the projection the sole holder of the older rows, which replay
+cannot rebuild. Aggregates sourced from the projection (dashboard
+costs, `fq costs`, event counts) cover at most this window.
 
 ### Recommended schema
 

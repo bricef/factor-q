@@ -222,6 +222,86 @@ mod tests {
         assert!(store.get_archive("recent").await.unwrap().is_some());
     }
 
+    /// With a projection store attached, one scheduled sweep prunes
+    /// both stores — covers the daemon wiring, the combined
+    /// accounting, and the projection error-mapping path (#175).
+    #[tokio::test]
+    async fn sweep_with_projection_store_prunes_both_stores() {
+        use super::super::projection::ProjectionStore;
+        use super::super::store::InvocationArchiveRow;
+        use crate::agent::AgentId;
+        use crate::events::{
+            ConfigSnapshot, Event, EventPayload, SandboxSnapshot, TriggerSource, TriggeredPayload,
+        };
+        use chrono::Utc;
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        fn triggered(agent: &str) -> Event {
+            Event::new(
+                AgentId::new(agent).expect("test agent id must be valid"),
+                Uuid::now_v7(),
+                EventPayload::Triggered(TriggeredPayload {
+                    trigger_source: TriggerSource::Manual,
+                    trigger_subject: None,
+                    trigger_payload: serde_json::json!({}),
+                    config_snapshot: ConfigSnapshot {
+                        name: agent.to_string(),
+                        model: "claude-haiku-4-5".to_string(),
+                        system_prompt: "You are a test.".to_string(),
+                        tools: vec![],
+                        sandbox: SandboxSnapshot::default(),
+                        budget: None,
+                        ..Default::default()
+                    },
+                }),
+            )
+        }
+
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ControlPlaneStore::open(&dir.path().join("cp.db"))
+                .await
+                .unwrap(),
+        );
+        let projection = Arc::new(
+            ProjectionStore::open(&dir.path().join("projection.db"))
+                .await
+                .unwrap(),
+        );
+
+        let now_ms = Utc::now().timestamp_millis();
+        store
+            .insert_archive(&InvocationArchiveRow {
+                invocation_id: "old".to_string(),
+                agent_id: "a".to_string(),
+                final_phase: "completed".to_string(),
+                final_state_blob: vec![],
+                started_at: now_ms - 3 * MS_PER_DAY,
+                terminal_at: now_ms - 3 * MS_PER_DAY,
+                archived_at: now_ms - 3 * MS_PER_DAY,
+            })
+            .await
+            .unwrap();
+
+        // One projected event backdated past the 1-day cutoff (the
+        // insert binds the envelope timestamp), one fresh.
+        let mut old_event = triggered("old-agent");
+        old_event.envelope.timestamp = Utc::now() - chrono::Duration::days(3);
+        projection.insert_event(&old_event).await.unwrap();
+        projection
+            .insert_event(&triggered("fresh-agent"))
+            .await
+            .unwrap();
+
+        let sweeper =
+            RetentionSweeper::new(store.clone(), 1, 3600).with_projection_store(projection.clone());
+        sweeper.sweep_now().await.unwrap();
+
+        assert!(store.get_archive("old").await.unwrap().is_none());
+        assert_eq!(projection.count().await.unwrap(), 1);
+    }
+
     #[tokio::test]
     async fn sweep_handles_empty_archive() {
         use tempfile::tempdir;
