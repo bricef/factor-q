@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -171,11 +172,25 @@ func TestConfigFromArgsValidation(t *testing.T) {
 	if _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "no placeholder"}); err == nil {
 		t.Error("a task template lacking the issue-number placeholder should be rejected")
 	}
+	if _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "fix #%d and %s"}); err == nil {
+		t.Error("a task template with another format verb should be rejected")
+	}
 	cfg, _, err := configFromArgs([]string{"--repo", "owner/repo", "--poll", "90s"})
 	if err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 	if cfg.PollInterval != 90*time.Second || cfg.Repo != "owner/repo" {
 		t.Errorf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestConfigFromArgsRejectsMalformedEnv(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{{"GHW_POLL", "soon"}, {"GHW_MAX_PER_POLL", "many"}, {"GHW_MAX_RETRIES", "several"}} {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Setenv(tc.key, tc.value)
+			if _, _, err := configFromArgs([]string{"--repo", "owner/repo"}); err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("error = %v, want clear %s error", err, tc.key)
+			}
+		})
 	}
 }

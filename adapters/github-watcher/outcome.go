@@ -166,6 +166,7 @@ func (r *OutcomeReactor) React(ctx context.Context, ev OutcomeEvent) {
 			// Stamp only reviewable outcomes, after the load-bearing label
 			// transition; the cosmetic write must never block it.
 			r.stampProvenance(ctx, issue, ev.InvocationID, prs)
+			r.resetAttempts(issue)
 		}
 		r.forget(ev.InvocationID)
 	case OutcomeFailed:
@@ -272,6 +273,12 @@ func (r *OutcomeReactor) lookup(invocationID string) (int, bool) {
 	defer r.mu.Unlock()
 	issue, ok := r.binding[invocationID]
 	return issue, ok
+}
+
+func (r *OutcomeReactor) resetAttempts(issue int) {
+	r.mu.Lock()
+	delete(r.attempts, issue)
+	r.mu.Unlock()
 }
 
 func (r *OutcomeReactor) forget(invocationID string) {

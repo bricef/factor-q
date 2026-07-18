@@ -95,7 +95,7 @@ func run(args []string) error {
 	// Stamp invocation provenance on the PR the agent opened (issue
 	// #162) — same gh-backed source, optional and best-effort.
 	reactor.Stamper = source
-	outcomes := NewNatsOutcomeSource(pub.Conn(), cfg.TaskTemplate)
+	outcomes := NewNatsOutcomeSource(pub.Conn(), cfg.TaskTemplate, log)
 	go func() {
 		if err := reactor.Run(ctx, outcomes); err != nil && ctx.Err() == nil {
 			log.Error("outcome observer stopped", "err", err)
@@ -113,6 +113,18 @@ func run(args []string) error {
 // Returns the Config and the NATS URL.
 func configFromArgs(args []string) (Config, string, error) {
 	fs := flag.NewFlagSet("github-watcher", flag.ContinueOnError)
+	pollDefault, err := envDurationOr("GHW_POLL", 60*time.Second)
+	if err != nil {
+		return Config{}, "", err
+	}
+	maxPerPollDefault, err := envIntOr("GHW_MAX_PER_POLL", 3)
+	if err != nil {
+		return Config{}, "", err
+	}
+	maxRetriesDefault, err := envIntOr("GHW_MAX_RETRIES", 2)
+	if err != nil {
+		return Config{}, "", err
+	}
 	repo := fs.String("repo", envOr("GHW_REPO", ""), "GitHub repo owner/name (env GHW_REPO)")
 	agent := fs.String("agent", envOr("GHW_AGENT", "m0-issue-fix"), "target factor-q agent id (env GHW_AGENT)")
 	natsURL := fs.String("nats-url", envOr("GHW_NATS_URL", "nats://127.0.0.1:4222"), "NATS URL (env GHW_NATS_URL)")
@@ -121,9 +133,9 @@ func configFromArgs(args []string) (Config, string, error) {
 	inReview := fs.String("in-review-label", envOr("GHW_IN_REVIEW_LABEL", "status:in-review"), "label applied when the agent completes / opens its PR (env GHW_IN_REVIEW_LABEL)")
 	failed := fs.String("failed-label", envOr("GHW_FAILED_LABEL", "status:failed"), "label applied when retries are exhausted or the failure is terminal (env GHW_FAILED_LABEL)")
 	done := fs.String("done-label", envOr("GHW_DONE_LABEL", "status:done"), "label applied when the proposed PR merges (env GHW_DONE_LABEL)")
-	poll := fs.Duration("poll", envDurationOr("GHW_POLL", 60*time.Second), "poll interval, >= 60s (env GHW_POLL)")
-	maxPerPoll := fs.Int("max-per-poll", envIntOr("GHW_MAX_PER_POLL", 3), "max triggers per poll, 0 = unbounded (env GHW_MAX_PER_POLL)")
-	maxRetries := fs.Int("max-retries", envIntOr("GHW_MAX_RETRIES", 2), "bounded auto-retry budget for a transiently-failed issue (env GHW_MAX_RETRIES)")
+	poll := fs.Duration("poll", pollDefault, "poll interval, >= 60s (env GHW_POLL)")
+	maxPerPoll := fs.Int("max-per-poll", maxPerPollDefault, "max triggers per poll, 0 = unbounded (env GHW_MAX_PER_POLL)")
+	maxRetries := fs.Int("max-retries", maxRetriesDefault, "bounded auto-retry budget for a transiently-failed issue (env GHW_MAX_RETRIES)")
 	template := fs.String("task-template", envOr("GHW_TASK_TEMPLATE", "Implement the fix described in GitHub issue #%d."), "trigger payload template; %d is the issue number (env GHW_TASK_TEMPLATE)")
 
 	if err := fs.Parse(args); err != nil {
@@ -141,8 +153,8 @@ func configFromArgs(args []string) (Config, string, error) {
 	if *maxRetries < 0 {
 		return Config{}, "", fmt.Errorf("--max-retries must be >= 0, got %d", *maxRetries)
 	}
-	if !strings.Contains(*template, "%d") {
-		return Config{}, "", fmt.Errorf("--task-template must contain %%d for the issue number, got %q", *template)
+	if err := validateTaskTemplate(*template); err != nil {
+		return Config{}, "", err
 	}
 	return Config{
 		Repo:               *repo,
@@ -166,20 +178,50 @@ func envOr(key, def string) string {
 	return def
 }
 
-func envIntOr(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+func envIntOr(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
 	}
-	return def
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s=%q: expected integer: %w", key, v, err)
+	}
+	return n, nil
 }
 
-func envDurationOr(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
+func envDurationOr(key string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s=%q: expected duration: %w", key, v, err)
+	}
+	return d, nil
+}
+
+func validateTaskTemplate(template string) error {
+	placeholders := 0
+	for i := 0; i < len(template); i++ {
+		if template[i] != '%' {
+			continue
+		}
+		if i+1 >= len(template) {
+			return fmt.Errorf("--task-template has invalid format verb in %q", template)
+		}
+		i++
+		switch template[i] {
+		case '%':
+		case 'd':
+			placeholders++
+		default:
+			return fmt.Errorf("--task-template may only contain one %%d verb, got %q", template)
 		}
 	}
-	return def
+	if placeholders != 1 {
+		return fmt.Errorf("--task-template must contain exactly one %%d for the issue number, got %q", template)
+	}
+	return nil
 }

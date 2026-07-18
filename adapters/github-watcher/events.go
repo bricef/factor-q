@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 
 	"github.com/nats-io/nats.go"
 )
@@ -27,21 +29,24 @@ import (
 // the next poll), and observing outcomes must not compete with the
 // runtime's own durable JetStream consumers on the events stream.
 type NatsOutcomeSource struct {
-	nc           *nats.Conn
-	taskTemplate string
+	nc                      *nats.Conn
+	taskTemplate            string
+	log                     *slog.Logger
+	schemaVersionMismatches atomic.Uint64
 }
 
 // NewNatsOutcomeSource opens a core-NATS subscription seam over an existing
 // connection. It reuses the publisher's connection rather than opening its
 // own.
-func NewNatsOutcomeSource(nc *nats.Conn, taskTemplate string) *NatsOutcomeSource {
-	return &NatsOutcomeSource{nc: nc, taskTemplate: taskTemplate}
+func NewNatsOutcomeSource(nc *nats.Conn, taskTemplate string, log *slog.Logger) *NatsOutcomeSource {
+	return &NatsOutcomeSource{nc: nc, taskTemplate: taskTemplate, log: log}
 }
 
 // eventEnvelope is the subset of the event-schema envelope the watcher
 // reads.
 type eventEnvelope struct {
-	InvocationID string `json:"invocation_id"`
+	SchemaVersion int    `json:"schema_version"`
+	InvocationID  string `json:"invocation_id"`
 }
 
 // triggeredPayload is the subset of the `triggered` payload the watcher
@@ -119,6 +124,15 @@ func (s *NatsOutcomeSource) decode(msg *nats.Msg) (OutcomeEvent, bool) {
 	}
 	var we wireEvent
 	if err := json.Unmarshal(msg.Data, &we); err != nil {
+		return OutcomeEvent{}, false
+	}
+	if we.Envelope.SchemaVersion != 2 {
+		s.schemaVersionMismatches.Add(1)
+		log := s.log
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("skipping event with unsupported schema version", "schema_version", we.Envelope.SchemaVersion, "want", 2)
 		return OutcomeEvent{}, false
 	}
 	ev := OutcomeEvent{Kind: kind, InvocationID: we.Envelope.InvocationID}
