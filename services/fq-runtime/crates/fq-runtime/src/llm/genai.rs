@@ -401,11 +401,7 @@ fn from_provider_response(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let stop_reason = if !tool_calls.is_empty() {
-        StopReason::ToolUse
-    } else {
-        StopReason::EndTurn
-    };
+    let stop_reason = convert_stop_reason(response.stop_reason.as_ref(), !tool_calls.is_empty());
 
     Ok(ChatResponse {
         content: content_text,
@@ -413,6 +409,47 @@ fn from_provider_response(
         stop_reason,
         usage,
     })
+}
+
+fn convert_stop_reason(
+    provider_reason: Option<&provider::chat::StopReason>,
+    has_tool_calls: bool,
+) -> StopReason {
+    use provider::chat::StopReason as ProviderStopReason;
+
+    if has_tool_calls {
+        if !matches!(provider_reason, Some(ProviderStopReason::ToolCall(_))) {
+            tracing::warn!(
+                provider_stop_reason = provider_reason.map(ProviderStopReason::raw),
+                "provider stop reason disagrees with parsed tool calls; trusting parsed content"
+            );
+        }
+        return StopReason::ToolUse;
+    }
+
+    match provider_reason {
+        Some(ProviderStopReason::Completed(_)) => StopReason::EndTurn,
+        Some(ProviderStopReason::MaxTokens(_)) => StopReason::MaxTokens,
+        Some(ProviderStopReason::StopSequence(_)) => StopReason::StopSequence,
+        Some(reason @ ProviderStopReason::ToolCall(_)) => {
+            tracing::warn!(
+                provider_stop_reason = reason.raw(),
+                "provider stop reason reports a tool call but none were parsed; trusting parsed content"
+            );
+            StopReason::EndTurn
+        }
+        Some(reason @ (ProviderStopReason::ContentFilter(_) | ProviderStopReason::Other(_))) => {
+            tracing::warn!(
+                provider_stop_reason = reason.raw(),
+                "unsupported provider stop reason; inferring from parsed tool calls"
+            );
+            StopReason::EndTurn
+        }
+        None => {
+            tracing::warn!("provider omitted stop reason; inferring from parsed tool calls");
+            StopReason::EndTurn
+        }
+    }
 }
 
 fn convert_usage(usage: &provider::chat::Usage) -> TokenUsage {
@@ -482,6 +519,75 @@ mod tests {
                 max_tokens: Some(64),
             },
         }
+    }
+
+    #[test]
+    fn maps_every_provider_stop_reason() {
+        use provider::chat::StopReason as ProviderStopReason;
+
+        let cases = [
+            (
+                Some(ProviderStopReason::Completed("end_turn".into())),
+                false,
+                StopReason::EndTurn,
+            ),
+            (
+                Some(ProviderStopReason::MaxTokens("max_tokens".into())),
+                false,
+                StopReason::MaxTokens,
+            ),
+            (
+                Some(ProviderStopReason::ToolCall("tool_use".into())),
+                true,
+                StopReason::ToolUse,
+            ),
+            (
+                Some(ProviderStopReason::StopSequence("stop_sequence".into())),
+                false,
+                StopReason::StopSequence,
+            ),
+            (
+                Some(ProviderStopReason::ContentFilter("SAFETY".into())),
+                false,
+                StopReason::EndTurn,
+            ),
+            (
+                Some(ProviderStopReason::Other("unknown".into())),
+                false,
+                StopReason::EndTurn,
+            ),
+            (None, false, StopReason::EndTurn),
+        ];
+
+        for (provider_reason, has_tool_calls, expected) in cases {
+            assert_eq!(
+                std::mem::discriminant(&convert_stop_reason(
+                    provider_reason.as_ref(),
+                    has_tool_calls,
+                )),
+                std::mem::discriminant(&expected)
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_tool_calls_override_disagreeing_provider_label() {
+        use provider::chat::StopReason as ProviderStopReason;
+
+        assert!(matches!(
+            convert_stop_reason(
+                Some(&ProviderStopReason::ToolCall("tool_use".into())),
+                false
+            ),
+            StopReason::EndTurn
+        ));
+        assert!(matches!(
+            convert_stop_reason(
+                Some(&ProviderStopReason::Completed("end_turn".into())),
+                true
+            ),
+            StopReason::ToolUse
+        ));
     }
 
     #[test]
@@ -558,6 +664,24 @@ mod tests {
             })
             .collect();
         assert_eq!(marked, vec![true, false, false, true]);
+    }
+
+    #[tokio::test]
+    async fn max_tokens_stop_reason_round_trips_from_provider() {
+        use crate::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
+
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+        let server = MockAnthropicServer::start().await;
+        let mut mock = MockResponse::text("truncated", 10, 5);
+        mock.stop_reason = "max_tokens".to_string();
+        server.push_response(mock);
+
+        let response = GenAiClient::with_base_url(server.base_url())
+            .chat(request_with_system_and_user("claude-sonnet-4-5"))
+            .await
+            .expect("chat via mock");
+
+        assert!(matches!(response.stop_reason, StopReason::MaxTokens));
     }
 
     /// End-to-end through the mock Anthropic server: the wire request
