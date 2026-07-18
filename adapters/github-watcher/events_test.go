@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/nats-io/nats.go"
@@ -16,7 +19,7 @@ import (
 func wireEventJSON(t *testing.T, invID, eventType string, inner any) []byte {
 	t.Helper()
 	b, err := json.Marshal(map[string]any{
-		"envelope": map[string]any{"invocation_id": invID},
+		"envelope": map[string]any{"schema_version": 2, "invocation_id": invID},
 		"payload": map[string]any{
 			"event_type": eventType,
 			"payload":    inner,
@@ -91,5 +94,18 @@ func TestDecodeFailedUnwrapsErrorKind(t *testing.T) {
 	ev, ok := s.decode(&nats.Msg{Subject: "fq.agent.a.failed", Data: data})
 	if !ok || ev.Kind != OutcomeFailed || ev.ErrorKind != "llm_error" {
 		t.Fatalf("failed decode = %+v ok=%v, want failed/llm_error (error_kind too shallow?)", ev, ok)
+	}
+}
+
+func TestDecodeRejectsUnsupportedSchemaVersion(t *testing.T) {
+	var logs bytes.Buffer
+	s := &NatsOutcomeSource{taskTemplate: "issue #%d", log: slog.New(slog.NewTextHandler(&logs, nil))}
+	data := wireEventJSON(t, "inv-new", "completed", map[string]any{})
+	data = bytes.Replace(data, []byte(`"schema_version":2`), []byte(`"schema_version":3`), 1)
+	if ev, ok := s.decode(&nats.Msg{Subject: "fq.agent.a.completed", Data: data}); ok {
+		t.Fatalf("schema version 3 decoded unexpectedly: %+v", ev)
+	}
+	if s.schemaVersionMismatches.Load() != 1 || !strings.Contains(logs.String(), "unsupported schema version") {
+		t.Fatalf("mismatch count/log = %d/%q", s.schemaVersionMismatches.Load(), logs.String())
 	}
 }

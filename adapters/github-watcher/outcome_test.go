@@ -337,3 +337,29 @@ func TestOutcomeKindFromSubject(t *testing.T) {
 		}
 	}
 }
+
+func TestReactCompletionResetsRetryBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		priorFailures int
+	}{{"after one failure", 1}, {"after exhausted budget", 2}} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &labelSource{}
+			r := NewOutcomeReactor(src, outcomeConfig(), discardLogger())
+			for i := 0; i < tc.priorFailures; i++ {
+				inv := fmt.Sprintf("failed-%d", i)
+				triggeredThen(r, inv, 9, OutcomeEvent{Kind: OutcomeFailed, InvocationID: inv, ErrorKind: "llm_error"})
+			}
+			triggeredThen(r, "complete", 9, OutcomeEvent{Kind: OutcomeCompleted, InvocationID: "complete"})
+			if _, ok := r.attempts[9]; ok {
+				t.Fatal("attempts entry survived completion")
+			}
+			// A later re-queue starts with a fresh budget: its first transient
+			// failure records attempt one rather than escalating immediately.
+			triggeredThen(r, "fresh", 9, OutcomeEvent{Kind: OutcomeFailed, InvocationID: "fresh", ErrorKind: "llm_error"})
+			if got := r.attempts[9]; got != 1 {
+				t.Fatalf("fresh failure attempts = %d, want 1", got)
+			}
+		})
+	}
+}
