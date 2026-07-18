@@ -8,12 +8,37 @@
 //! direct open without a marker fails this test, and adding a marker is
 //! a reviewable, greppable act — the gate makes bypasses loud, not
 //! impossible.
+//!
+//! Sources are discovered by walking `src/` at runtime, so a file added
+//! to the tree joins the gate automatically. A compile-time embed (the
+//! old `include_str!` of main.rs) or a hardcoded file list would let a
+//! module split silently shrink the scan (#189) — and embedding `.rs`
+//! sources is itself rejected by `just lint-sources`.
 
-const MAIN_RS: &str = include_str!("../src/main.rs");
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Marker a sanctioned direct open must carry on its line or the line
 /// above.
 const ALLOW: &str = "allow-direct-store-open:";
+
+/// Every `.rs` file under `dir`, recursively, in a stable order.
+fn rust_sources(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).expect("read source dir") {
+            let path = entry.expect("read source dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
 
 /// Strip `#[cfg(test)]`-gated `mod` blocks by brace counting, so test
 /// fixtures (which seed stores read-write by design) are exempt.
@@ -51,26 +76,42 @@ fn strip_test_modules(source: &str) -> Vec<(usize, String)> {
 
 #[test]
 fn read_handlers_never_open_stores_directly() {
-    let production = strip_test_modules(MAIN_RS);
+    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let files = rust_sources(&src_root);
+    assert!(
+        !files.is_empty(),
+        "no .rs files found under {} — the gate is scanning nothing",
+        src_root.display()
+    );
 
     let mut violations = Vec::new();
     let mut sanctioned = 0usize;
-    for (i, (line_no, line)) in production.iter().enumerate() {
-        let is_open = [
-            "ProjectionStore::open",
-            "WorkerStore::open",
-            "ControlPlaneStore::open",
-        ]
-        .iter()
-        .any(|needle| line.contains(needle));
-        if !is_open {
-            continue;
-        }
-        let marked = line.contains(ALLOW) || i > 0 && production[i - 1].1.contains(ALLOW);
-        if marked {
-            sanctioned += 1;
-        } else {
-            violations.push(format!("  main.rs:{line_no}: {}", line.trim()));
+    for path in &files {
+        let source =
+            fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        let rel = path
+            .strip_prefix(&src_root)
+            .expect("source path is under src/")
+            .display()
+            .to_string();
+        let production = strip_test_modules(&source);
+        for (i, (line_no, line)) in production.iter().enumerate() {
+            let is_open = [
+                "ProjectionStore::open",
+                "WorkerStore::open",
+                "ControlPlaneStore::open",
+            ]
+            .iter()
+            .any(|needle| line.contains(needle));
+            if !is_open {
+                continue;
+            }
+            let marked = line.contains(ALLOW) || i > 0 && production[i - 1].1.contains(ALLOW);
+            if marked {
+                sanctioned += 1;
+            } else {
+                violations.push(format!("  {rel}:{line_no}: {}", line.trim()));
+            }
         }
     }
 

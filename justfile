@@ -228,6 +228,7 @@ ci:
     #    so there is no shared broker to bring up, wait for, or tear down. --
     run_phase "lint-docs"   just lint-docs
     run_phase "check-links" just check-links
+    run_phase "lint-sources" just lint-sources
     run_phase "runtime"     just runtime-ci
     run_phase "store"       just store-ci
     run_phase "dashboard"   just dashboard-ci
@@ -299,6 +300,35 @@ lint-docs *args:
 # Check that relative links in all repo markdown resolve.
 check-links:
     python3 scripts/check-links.py
+
+# === Source policy ===
+
+# No include!-based code splicing (postmortem of
+# https://github.com/bricef/factor-q/pull/322): include! splices source
+# files into one translation unit behind the tooling's back — rustfmt
+# only discovers files through `mod` declarations, so a spliced file is
+# silently never formatted again, and clippy's `disallowed-macros`
+# cannot see include! at all (verified empirically; include_str! it can
+# see, include! it cannot). Real module trees only. The same gate
+# rejects include_str!/include_bytes! aimed at .rs files — embedding
+# source as data is the same splice one step removed; scanners read the
+# tree at runtime instead (see fq-cli tests/store_open_gate.rs). Data
+# embeds (templates, web assets) stay fine. Deliberately exception-free:
+# no allow-marker, matching lines are hard failures.
+# Reject include!-family macros that splice Rust source (tracked *.rs).
+lint-sources:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    fail=0
+    if git grep -nE '(^|[^[:alnum:]_])include!\(' -- '*.rs'; then
+        echo "error: include! splices source outside the module tree; use real modules (justfile: lint-sources)" >&2
+        fail=1
+    fi
+    if git grep -nE '(^|[^[:alnum:]_])include_(str|bytes)!\([[:space:]]*"[^"]*\.rs"' -- '*.rs'; then
+        echo "error: embedding .rs files via include_str!/include_bytes!; read the tree at runtime instead (justfile: lint-sources)" >&2
+        fail=1
+    fi
+    exit "$fail"
 
 # === Release ===
 
