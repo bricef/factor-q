@@ -1447,14 +1447,34 @@ mod tests {
         (store, dir)
     }
 
+    /// A worker database down-projected to one historical schema version,
+    /// populated from a HEAD SimWorld run with all three WAL shapes #44
+    /// names (completed, crashed mid-flight, budget-failed).
+    struct PopulatedDb {
+        _dir: tempfile::TempDir,
+        path: std::path::PathBuf,
+        fixture: crate::test_support::sim::MigrationFixture,
+        /// Rows projected per table, so the ladder test can assert
+        /// nothing the old schema could hold is lost.
+        source_counts: Vec<(&'static str, i64)>,
+    }
+
     /// Copy the SimWorld-generated HEAD rows into the columns present at `version`.
     /// This is deliberately mechanical: the migration history remains the schema fixture.
-    async fn populated_db_at(version: u32) -> (tempfile::TempDir, std::path::PathBuf, String) {
-        use crate::test_support::sim::SimWorld;
+    /// The meta bootstrap below mirrors `open()`'s fresh-install path
+    /// (`SCHEMA_META_SQL`, then the ladder) — keep the two in sync.
+    async fn populated_db_at(version: u32) -> PopulatedDb {
+        use crate::test_support::sim::{
+            MIGRATION_FIXTURE_BUDGET, SimWorld, migration_fixture_pricing,
+        };
 
-        let world = SimWorld::new(44 + version as u64, 5.0).await;
-        world.populate_for_migration_test().await;
-        let invocation_id = world.invocation_id().to_string();
+        let world = SimWorld::with_pricing(
+            44 + version as u64,
+            MIGRATION_FIXTURE_BUDGET,
+            migration_fixture_pricing(),
+        )
+        .await;
+        let fixture = world.populate_for_migration_test().await;
         let source = world.worker_db_path();
 
         let dir = tempdir().unwrap();
@@ -1479,6 +1499,7 @@ mod tests {
             .await
             .unwrap();
 
+        let mut source_counts: Vec<(&'static str, i64)> = Vec::new();
         for table in [
             "invocation_state",
             "tool_dispatch",
@@ -1519,6 +1540,11 @@ mod tests {
                 .execute(&store.pool)
                 .await
                 .unwrap();
+                let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM main.{table}"))
+                    .fetch_one(&store.pool)
+                    .await
+                    .unwrap();
+                source_counts.push((table, count));
             }
         }
         // Preserve the renamed counter when projecting HEAD back before v6.
@@ -1531,47 +1557,105 @@ mod tests {
             .await
             .unwrap();
         store.pool.close().await;
-        (dir, path, invocation_id)
+        PopulatedDb {
+            _dir: dir,
+            path,
+            fixture,
+            source_counts,
+        }
     }
 
     #[tokio::test]
     async fn every_worker_migration_upgrades_populated_sim_data() {
         for from in 1..WORKER_SCHEMA_VERSION {
-            let (_dir, path, invocation_id) = populated_db_at(from).await;
-            let store = WorkerStore::open(&path)
+            let db = populated_db_at(from).await;
+            let store = WorkerStore::open(&db.path)
                 .await
                 .unwrap_or_else(|e| panic!("v{from} migration failed: {e}"));
             assert_eq!(
                 store.read_schema_version().await.unwrap(),
                 Some(WORKER_SCHEMA_VERSION)
             );
+
+            // Row preservation: nothing the old schema could hold is lost.
+            for (table, expected) in &db.source_counts {
+                let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                    .fetch_one(&store.pool)
+                    .await
+                    .unwrap();
+                assert_eq!(count, *expected, "v{from} lost rows in {table}");
+            }
+
+            // Every WAL shape stays readable through the current readers:
+            // terminal state for the completed and budget-failed rows,
+            // recoverable in-flight state (with its finished LLM span)
+            // for the crashed row, and the completed row's tool span.
+            let ids = &db.fixture;
+            for id in [&ids.completed, &ids.crashed, &ids.budget_failed] {
+                assert!(
+                    store.get_invocation_state(id).await.unwrap().is_some(),
+                    "v{from}: state row {id} unreadable after migration"
+                );
+            }
+            let in_flight: Vec<String> = store
+                .find_in_flight_invocations()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.invocation_id)
+                .collect();
             assert!(
-                store
-                    .get_invocation_state(&invocation_id)
+                in_flight.contains(&ids.crashed),
+                "v{from}: crashed row no longer recoverable"
+            );
+            assert!(
+                !in_flight.contains(&ids.completed),
+                "v{from}: completed row regressed to in-flight"
+            );
+            assert!(
+                !in_flight.contains(&ids.budget_failed),
+                "v{from}: budget-failed row regressed to in-flight"
+            );
+            assert!(
+                !store
+                    .list_tool_dispatches_for_invocation(&ids.completed)
                     .await
                     .unwrap()
-                    .is_some(),
-                "v{from} lost invocation"
+                    .is_empty(),
+                "v{from}: completed tool WAL unreadable"
             );
-            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tool_dispatch")
-                .fetch_one(&store.pool)
-                .await
-                .unwrap();
-            assert_eq!(count, 1, "v{from} lost tool WAL rows");
+            assert!(
+                !store
+                    .list_llm_dispatches_for_invocation(&ids.crashed)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "v{from}: crashed LLM WAL unreadable"
+            );
+
             let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
                 .fetch_one(&store.pool)
                 .await
                 .unwrap();
             assert_eq!(integrity, "ok", "v{from} integrity check");
+            let fk_violations = sqlx::query("PRAGMA foreign_key_check")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+            assert!(
+                fk_violations.is_empty(),
+                "v{from}: {} foreign key violation(s)",
+                fk_violations.len()
+            );
         }
     }
 
     #[tokio::test]
     async fn full_worker_ladder_preserves_populated_database() {
-        use crate::test_support::sim::SimWorld;
-        let world = SimWorld::new(144, 5.0).await;
-        world.populate_for_migration_test().await;
-        let simulated_id = world.invocation_id().to_string();
+        // At v0 none of the worker tables exist yet, so "populated" for
+        // the 0→current ladder means a foreign table the migrations must
+        // leave untouched.
+        let legacy_value = "pre-ladder value";
         let dir = tempdir().unwrap();
         let path = dir.path().join("worker.db");
         let options = SqliteConnectOptions::new()
@@ -1587,7 +1671,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("INSERT INTO legacy_data VALUES (?)")
-            .bind(&simulated_id)
+            .bind(legacy_value)
             .execute(&pool)
             .await
             .unwrap();
@@ -1598,7 +1682,7 @@ mod tests {
                 .fetch_one(&store.pool)
                 .await
                 .unwrap(),
-            simulated_id
+            legacy_value
         );
         assert_eq!(
             sqlx::query_scalar::<_, String>("PRAGMA integrity_check")

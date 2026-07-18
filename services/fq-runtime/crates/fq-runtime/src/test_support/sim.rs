@@ -427,44 +427,102 @@ impl SimWorld {
         )
     }
 
-    /// Generate a small, realistic current-schema WAL for migration tests.
+    /// Generate a realistic current-schema WAL for migration tests: one
+    /// completed invocation, one crashed mid-flight at the tool-span
+    /// boundary (left in-flight, not resumed), and one budget-failed —
+    /// the three shapes #44 names. The world must be built with
+    /// [`migration_fixture_pricing`] and [`MIGRATION_FIXTURE_BUDGET`];
+    /// under zero-cost pricing the third run would complete instead of
+    /// tripping the budget (the assertion below catches that loudly).
     #[cfg(test)]
-    pub(crate) async fn populate_for_migration_test(&self) {
+    pub(crate) async fn populate_for_migration_test(&self) -> MigrationFixture {
         use crate::events::{MessageToolCall, StopReason, TokenUsage, ToolCallId};
         use crate::llm::ChatResponse;
 
+        // Every turn costs $1.00 under `migration_fixture_pricing`
+        // (100 input tokens at $10k per million).
+        fn turn(call_id: &str, tool_name: &str, parameters: Value) -> ChatResponse {
+            ChatResponse {
+                content: None,
+                tool_calls: vec![MessageToolCall {
+                    tool_call_id: ToolCallId::new(call_id).unwrap(),
+                    tool_name: tool_name.to_string(),
+                    parameters,
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+            }
+        }
+        let last_triggered = |sink: &RecordingSink| {
+            sink.events()
+                .iter()
+                .rfind(|e| matches!(e.payload, EventPayload::Triggered(_)))
+                .map(|e| e.envelope.invocation_id.to_string())
+                .expect("no triggered event captured")
+        };
+
+        // Shape 1 — completed: one tool span, then a reported outcome
+        // ($2.00 total, under budget).
         let llm = FixtureClient::new();
-        llm.push_response(ChatResponse {
-            content: None,
-            tool_calls: vec![MessageToolCall {
-                tool_call_id: ToolCallId::new("migration-call").unwrap(),
-                tool_name: SIM_TOOL.to_string(),
-                parameters: json!({"fixture": "migration"}),
-            }],
-            stop_reason: StopReason::ToolUse,
-            usage: TokenUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-            },
-        });
-        llm.push_response(ChatResponse {
-            content: None,
-            tool_calls: vec![MessageToolCall {
-                tool_call_id: ToolCallId::new("report-outcome").unwrap(),
-                tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-                parameters: json!({"status": "success", "summary": "migration fixture"}),
-            }],
-            stop_reason: StopReason::ToolUse,
-            usage: TokenUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-            },
-        });
-        self.run(&llm).await.expect("populate migration fixture");
+        llm.push_response(turn(
+            "migration-call",
+            SIM_TOOL,
+            json!({"fixture": "migration"}),
+        ));
+        llm.push_response(turn(
+            "report-outcome",
+            crate::tools::REPORT_OUTCOME_CANONICAL_NAME,
+            json!({"status": "success", "summary": "migration fixture"}),
+        ));
+        let outcome = self.run(&llm).await.expect("completed fixture");
+        assert!(
+            matches!(outcome, InvocationOutcome::Completed { .. }),
+            "completed fixture ended as {outcome:?}"
+        );
+        let completed = last_triggered(&self.sink);
+
+        // Shape 2 — crashed at the tool-span boundary: per-invocation
+        // publish 4 is the tool request (0 triggered, then 3 per span),
+        // so the LLM span's WAL rows are complete and the invocation
+        // stays in-flight. Deliberately not resumed.
+        let llm = FixtureClient::new();
+        llm.push_response(turn("crash-call", SIM_TOOL, json!({"fixture": "crash"})));
+        self.sink.fail_publish_at_invocation_count(4);
+        let err = self.run(&llm).await.expect_err("crash fixture must fail");
+        assert!(
+            matches!(err, ExecutorError::Bus(_)),
+            "expected the injected publish fault, got {err:?}"
+        );
+        self.sink.clear_fault();
+        let crashed = last_triggered(&self.sink);
+
+        // Shape 3 — budget-failed: $1.00 tool turns cross the $2.50
+        // budget on the third call (the fourth response goes unused).
+        let llm = FixtureClient::new();
+        for i in 0..4 {
+            llm.push_response(turn(
+                &format!("budget-{i}"),
+                SIM_TOOL,
+                json!({"fixture": "budget"}),
+            ));
+        }
+        let outcome = self.run(&llm).await.expect("budget fixture outcome");
+        assert!(
+            matches!(outcome, InvocationOutcome::BudgetExceeded { .. }),
+            "budget fixture ended as {outcome:?} — was the world built with migration_fixture_pricing?"
+        );
+        let budget_failed = last_triggered(&self.sink);
+
+        MigrationFixture {
+            completed,
+            crashed,
+            budget_failed,
+        }
     }
 
     /// Path to the generated worker database, for schema down-projection tests.
@@ -651,6 +709,39 @@ impl SimWorld {
             .map(|e| e.envelope.invocation_id)
             .expect("no triggered event captured yet")
     }
+}
+
+/// Invocation ids for the three WAL shapes written by
+/// [`SimWorld::populate_for_migration_test`].
+#[cfg(test)]
+pub(crate) struct MigrationFixture {
+    pub(crate) completed: String,
+    pub(crate) crashed: String,
+    pub(crate) budget_failed: String,
+}
+
+/// The per-invocation budget under which the migration fixture's third
+/// run trips the post-call budget check ($1.00/turn, crossed on turn 3)
+/// while the completed run ($2.00) stays under it.
+#[cfg(test)]
+pub(crate) const MIGRATION_FIXTURE_BUDGET: f64 = 2.5;
+
+/// Pricing that makes each migration-fixture turn cost exactly $1.00
+/// (100 input tokens at $10k per million, output free). Pair with
+/// [`MIGRATION_FIXTURE_BUDGET`] via [`SimWorld::with_pricing`].
+#[cfg(test)]
+pub(crate) fn migration_fixture_pricing() -> Arc<PricingTable> {
+    let mut entries = std::collections::HashMap::new();
+    entries.insert(
+        "claude-sim".to_string(),
+        crate::pricing::ModelPricing {
+            input_per_million: 10_000.0,
+            output_per_million: 0.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    );
+    Arc::new(PricingTable::from_map(entries))
 }
 
 #[cfg(test)]
