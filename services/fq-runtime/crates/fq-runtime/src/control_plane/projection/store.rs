@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS events (
     cache_write_tokens INTEGER,
     total_cost      REAL,
     error_kind      TEXT,
+    error_message   TEXT,
     duration_ms     INTEGER
 );
 
@@ -131,9 +132,13 @@ impl ProjectionStore {
             sqlx::query_scalar("SELECT name FROM pragma_table_info('events')")
                 .fetch_all(&self.pool)
                 .await?;
-        for column in ["cache_read_tokens", "cache_write_tokens"] {
+        for (column, ty) in [
+            ("cache_read_tokens", "INTEGER"),
+            ("cache_write_tokens", "INTEGER"),
+            ("error_message", "TEXT"),
+        ] {
             if !columns.iter().any(|c| c == column) {
-                sqlx::query(&format!("ALTER TABLE events ADD COLUMN {column} INTEGER"))
+                sqlx::query(&format!("ALTER TABLE events ADD COLUMN {column} {ty}"))
                     .execute(&self.pool)
                     .await?;
             }
@@ -167,8 +172,8 @@ impl ProjectionStore {
             r#"
             INSERT OR IGNORE INTO events
                 (event_id, timestamp, agent_id, invocation_id, event_type,
-                 model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_cost, error_kind, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_cost, error_kind, error_message, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(event.envelope.event_id.to_string())
@@ -183,6 +188,7 @@ impl ProjectionStore {
         .bind(fields.cache_write_tokens)
         .bind(fields.total_cost)
         .bind(fields.error_kind)
+        .bind(fields.error_message)
         .bind(fields.duration_ms)
         .execute(&self.pool)
         .await?;
@@ -253,7 +259,7 @@ impl ProjectionStore {
         // condition uses a placeholder.
         let mut sql = String::from(
             "SELECT event_id, timestamp, agent_id, invocation_id, event_type, \
-             model, total_cost, error_kind, duration_ms \
+             model, total_cost, error_kind, error_message, duration_ms \
              FROM events",
         );
         let mut clauses: Vec<&str> = Vec::new();
@@ -296,7 +302,8 @@ impl ProjectionStore {
                 model: row.get::<Option<String>, _>(5),
                 total_cost: row.get::<Option<f64>, _>(6),
                 error_kind: row.get::<Option<String>, _>(7),
-                duration_ms: row.get::<Option<i64>, _>(8),
+                error_message: row.get::<Option<String>, _>(8),
+                duration_ms: row.get::<Option<i64>, _>(9),
             })
             .collect();
         Ok(events)
@@ -585,6 +592,7 @@ pub struct EventRow {
     pub model: Option<String>,
     pub total_cost: Option<f64>,
     pub error_kind: Option<String>,
+    pub error_message: Option<String>,
     pub duration_ms: Option<i64>,
 }
 
@@ -697,6 +705,7 @@ struct Fields {
     cache_write_tokens: Option<i64>,
     total_cost: Option<f64>,
     error_kind: Option<String>,
+    error_message: Option<String>,
     duration_ms: Option<i64>,
 }
 
@@ -771,6 +780,7 @@ fn extract_fields(event: &Event) -> Fields {
         },
         EventPayload::Failed(p) => Fields {
             error_kind: Some(serialized_name(p.error_kind)),
+            error_message: Some(p.error_message.clone()),
             duration_ms: Some(p.partial_totals.total_duration_ms as i64),
             total_cost: Some(p.partial_totals.total_cost),
             ..Default::default()
@@ -1621,6 +1631,23 @@ mod tests {
             .unwrap();
         // No panic, all inserts succeed.
         assert_eq!(store.count().await.unwrap(), 6);
+    }
+
+    #[tokio::test]
+    async fn failed_event_error_message_is_projected_and_returned() {
+        let (store, _dir) = open_store().await;
+        let invocation_id = Uuid::now_v7();
+        store
+            .insert_event(&sample_failed("alpha", invocation_id))
+            .await
+            .unwrap();
+
+        let rows = store
+            .query_events(&EventFilter::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].error_kind.as_deref(), Some("budget_exceeded"));
+        assert_eq!(rows[0].error_message.as_deref(), Some("blew the budget"));
     }
 
     #[tokio::test]

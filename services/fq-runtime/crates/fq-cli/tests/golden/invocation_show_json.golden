@@ -62,6 +62,7 @@
       "model": null,
       "total_cost": 0.0125,
       "error_kind": null,
+      "error_message": null,
       "duration_ms": 5000
     },
     {
@@ -73,6 +74,7 @@
       "model": "claude-haiku",
       "total_cost": 0.0125,
       "error_kind": null,
+      "error_message": null,
       "duration_ms": null
     },
     {
@@ -84,9 +86,11 @@
       "model": "claude-haiku",
       "total_cost": null,
       "error_kind": null,
+      "error_message": null,
       "duration_ms": null
     }
   ],
+  "has_transcript": true,
   "summary": null,
   "cost": {
     "invocation_id": "1c000000-0000-7000-8000-000000000001",
