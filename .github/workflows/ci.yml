@@ -101,6 +101,17 @@ jobs:
       # preinstalled on the runner).
       - run: just check-links
 
+  source-policy:
+    name: Source policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+      # git-grep source scan: rejects include!-based code splicing and
+      # .rs-targeted include_str!/include_bytes! (see justfile:
+      # lint-sources for the full rationale — PR #322 postmortem).
+      - run: just lint-sources
+
   runtime-ci:
     name: Runtime CI
     needs: changes
