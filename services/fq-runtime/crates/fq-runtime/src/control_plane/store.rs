@@ -1134,6 +1134,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_plane_ladder_upgrades_populated_database() {
+        // v1 is currently the only historical schema. Seed through the public
+        // writer, mark it as v0, then exercise the NeedsUpgrade path. The loop
+        // becomes the per-step harness when v2 is added.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("control-plane.db");
+        let store = ControlPlaneStore::open(&path).await.unwrap();
+        store
+            .register_worker("migration-worker", "sim-host", 1_000)
+            .await
+            .unwrap();
+        store.write_schema_version(0).await.unwrap();
+        drop(store);
+
+        let store = ControlPlaneStore::open(&path)
+            .await
+            .expect("upgrade populated v0");
+        let worker = store
+            .get_worker("migration-worker")
+            .await
+            .unwrap()
+            .expect("row preserved");
+        assert_eq!(worker.host, "sim-host");
+        assert_eq!(
+            store.read_schema_version().await.unwrap(),
+            Some(CONTROL_PLANE_SCHEMA_VERSION)
+        );
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(integrity, "ok");
+
+        // Current must not re-run the ladder. Future ALTER migrations are not
+        // necessarily idempotent, so this remains an explicit guard.
+        drop(store);
+        let reopened = ControlPlaneStore::open(&path)
+            .await
+            .expect("reopen current");
+        assert!(
+            reopened
+                .get_worker("migration-worker")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn open_creates_tables_and_records_version() {
         let (store, _dir) = open_fresh().await;
         assert_eq!(

@@ -1447,6 +1447,168 @@ mod tests {
         (store, dir)
     }
 
+    /// Copy the SimWorld-generated HEAD rows into the columns present at `version`.
+    /// This is deliberately mechanical: the migration history remains the schema fixture.
+    async fn populated_db_at(version: u32) -> (tempfile::TempDir, std::path::PathBuf, String) {
+        use crate::test_support::sim::SimWorld;
+
+        let world = SimWorld::new(44 + version as u64, 5.0).await;
+        world.populate_for_migration_test().await;
+        let invocation_id = world.invocation_id().to_string();
+        let source = world.worker_db_path();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("worker.db");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let store = WorkerStore { pool };
+        for stmt in split_sql(SCHEMA_META_SQL) {
+            sqlx::query(&stmt).execute(&store.pool).await.unwrap();
+        }
+        store.run_migrations(0, version).await.unwrap();
+        store.write_schema_version(version).await.unwrap();
+        sqlx::query("ATTACH DATABASE ? AS sim")
+            .bind(source.to_string_lossy().as_ref())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        for table in [
+            "invocation_state",
+            "tool_dispatch",
+            "llm_dispatch",
+            "host_notice",
+        ] {
+            let exists: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?",
+            )
+            .bind(table)
+            .fetch_optional(&store.pool)
+            .await
+            .unwrap();
+            if exists.is_none() {
+                continue;
+            }
+            let old: Vec<String> =
+                sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                    .fetch_all(&store.pool)
+                    .await
+                    .unwrap();
+            let current: Vec<String> = sqlx::query_scalar(&format!(
+                "SELECT name FROM pragma_table_info('{table}', 'sim')"
+            ))
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+            let common: Vec<&str> = old
+                .iter()
+                .map(String::as_str)
+                .filter(|c| current.iter().any(|n| n == c))
+                .collect();
+            if !common.is_empty() {
+                let columns = common.join(", ");
+                sqlx::query(&format!(
+                    "INSERT INTO main.{table} ({columns}) SELECT {columns} FROM sim.{table}"
+                ))
+                .execute(&store.pool)
+                .await
+                .unwrap();
+            }
+        }
+        // Preserve the renamed counter when projecting HEAD back before v6.
+        if version < 6 {
+            sqlx::query("UPDATE invocation_state SET iteration = (SELECT step_index FROM sim.invocation_state WHERE sim.invocation_state.invocation_id = invocation_state.invocation_id)")
+                .execute(&store.pool).await.unwrap();
+        }
+        sqlx::query("DETACH DATABASE sim")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store.pool.close().await;
+        (dir, path, invocation_id)
+    }
+
+    #[tokio::test]
+    async fn every_worker_migration_upgrades_populated_sim_data() {
+        for from in 1..WORKER_SCHEMA_VERSION {
+            let (_dir, path, invocation_id) = populated_db_at(from).await;
+            let store = WorkerStore::open(&path)
+                .await
+                .unwrap_or_else(|e| panic!("v{from} migration failed: {e}"));
+            assert_eq!(
+                store.read_schema_version().await.unwrap(),
+                Some(WORKER_SCHEMA_VERSION)
+            );
+            assert!(
+                store
+                    .get_invocation_state(&invocation_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "v{from} lost invocation"
+            );
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tool_dispatch")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 1, "v{from} lost tool WAL rows");
+            let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+            assert_eq!(integrity, "ok", "v{from} integrity check");
+        }
+    }
+
+    #[tokio::test]
+    async fn full_worker_ladder_preserves_populated_database() {
+        use crate::test_support::sim::SimWorld;
+        let world = SimWorld::new(144, 5.0).await;
+        world.populate_for_migration_test().await;
+        let simulated_id = world.invocation_id().to_string();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("worker.db");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE legacy_data (value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO legacy_data VALUES (?)")
+            .bind(&simulated_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let store = WorkerStore::open(&path).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT value FROM legacy_data")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            simulated_id
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            "ok"
+        );
+    }
+
     #[tokio::test]
     async fn open_creates_tables_and_records_version() {
         let (store, _dir) = open_fresh().await;
