@@ -9,7 +9,19 @@
 //! a reviewable, greppable act — the gate makes bypasses loud, not
 //! impossible.
 
-const MAIN_RS: &str = include_str!("../src/main.rs");
+const SOURCES: &[(&str, &str)] = &[
+    ("main.rs", include_str!("../src/main.rs")),
+    ("cli/args.rs", include_str!("../src/cli/args.rs")),
+    ("cli/core.rs", include_str!("../src/cli/core.rs")),
+    ("cli/daemon.rs", include_str!("../src/cli/daemon.rs")),
+    ("cli/doctor.rs", include_str!("../src/cli/doctor.rs")),
+    ("cli/events.rs", include_str!("../src/cli/events.rs")),
+    (
+        "cli/invocation.rs",
+        include_str!("../src/cli/invocation.rs"),
+    ),
+    ("cli/workers.rs", include_str!("../src/cli/workers.rs")),
+];
 
 /// Marker a sanctioned direct open must carry on its line or the line
 /// above.
@@ -51,11 +63,18 @@ fn strip_test_modules(source: &str) -> Vec<(usize, String)> {
 
 #[test]
 fn read_handlers_never_open_stores_directly() {
-    let production = strip_test_modules(MAIN_RS);
+    let production: Vec<_> = SOURCES
+        .iter()
+        .flat_map(|(path, source)| {
+            strip_test_modules(source)
+                .into_iter()
+                .map(move |(line, text)| (*path, line, text))
+        })
+        .collect();
 
     let mut violations = Vec::new();
     let mut sanctioned = 0usize;
-    for (i, (line_no, line)) in production.iter().enumerate() {
+    for (i, (path, line_no, line)) in production.iter().enumerate() {
         let is_open = [
             "ProjectionStore::open",
             "WorkerStore::open",
@@ -66,11 +85,11 @@ fn read_handlers_never_open_stores_directly() {
         if !is_open {
             continue;
         }
-        let marked = line.contains(ALLOW) || i > 0 && production[i - 1].1.contains(ALLOW);
+        let marked = line.contains(ALLOW) || i > 0 && production[i - 1].2.contains(ALLOW);
         if marked {
             sanctioned += 1;
         } else {
-            violations.push(format!("  main.rs:{line_no}: {}", line.trim()));
+            violations.push(format!("  {path}:{line_no}: {}", line.trim()));
         }
     }
 
