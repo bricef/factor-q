@@ -158,12 +158,14 @@ func (r *OutcomeReactor) React(ctx context.Context, ev OutcomeEvent) {
 		}
 		if ev.TaskStatus == "failed" || ev.TaskStatus == "blocked" {
 			r.reactFailed(ctx, issue, "task_"+ev.TaskStatus)
+		} else if prs, reviewable := r.openDeliverables(ctx, issue, ev.InvocationID); !reviewable {
+			r.reactFailed(ctx, issue, "no_pr")
 		} else {
 			r.relabel(ctx, issue, r.Config.InProgressLabel, r.Config.InReviewLabel,
-				"invocation completed; issue awaiting review")
+				"invocation completed; verified PR awaiting review")
 			// Stamp only reviewable outcomes, after the load-bearing label
 			// transition; the cosmetic write must never block it.
-			r.stampProvenance(ctx, issue, ev.InvocationID)
+			r.stampProvenance(ctx, issue, ev.InvocationID, prs)
 		}
 		r.forget(ev.InvocationID)
 	case OutcomeFailed:
@@ -181,6 +183,30 @@ func (r *OutcomeReactor) React(ctx context.Context, ev OutcomeEvent) {
 		r.relabel(ctx, issue, r.Config.InProgressLabel, r.Config.FailedLabel, "invocation recovery is ambiguous; operator attention required")
 		r.forget(ev.InvocationID)
 	}
+}
+
+// openDeliverables verifies that a completed invocation produced a reviewable PR.
+// Lookup failures fail open so a transient GitHub failure cannot strand an issue.
+func (r *OutcomeReactor) openDeliverables(ctx context.Context, issue int, invocationID string) ([]int, bool) {
+	if r.Stamper == nil {
+		r.Log.Warn("cannot verify completed invocation deliverable; failing open",
+			"issue", issue, "invocation", invocationID, "pr_count", -1)
+		return nil, true
+	}
+	prs, err := r.Stamper.OpenPRsClosingIssue(ctx, issue)
+	if err != nil {
+		r.Log.Warn("cannot verify completed invocation deliverable; failing open",
+			"issue", issue, "invocation", invocationID, "pr_count", -1, "err", err)
+		return nil, true
+	}
+	if len(prs) == 0 {
+		r.Log.Warn("completed invocation has no open PR closing issue",
+			"issue", issue, "invocation", invocationID, "pr_count", 0)
+		return nil, false
+	}
+	r.Log.Info("verified completed invocation deliverable",
+		"issue", issue, "invocation", invocationID, "pr_count", len(prs))
+	return prs, true
 }
 
 func (r *OutcomeReactor) reactFailed(ctx context.Context, issue int, errorKind string) {
@@ -212,19 +238,13 @@ func (r *OutcomeReactor) reactFailed(ctx context.Context, issue int, errorKind s
 // Best-effort throughout: errors are logged, never propagated — and a
 // PR already carrying the marker is left untouched, so re-observed
 // completions (watcher restarts, retriggers) cannot double-stamp.
-func (r *OutcomeReactor) stampProvenance(ctx context.Context, issue int, invocationID string) {
+func (r *OutcomeReactor) stampProvenance(ctx context.Context, issue int, invocationID string, prs []int) {
 	if r.Stamper == nil {
 		return
 	}
 	now := time.Now
 	if r.Now != nil {
 		now = r.Now
-	}
-	prs, err := r.Stamper.OpenPRsClosingIssue(ctx, issue)
-	if err != nil {
-		r.Log.Error("listing open PRs for provenance stamp failed; PR left unstamped",
-			"issue", issue, "invocation", invocationID, "err", err)
-		return
 	}
 	footer := provenanceFooter(r.Config.TargetAgent, invocationID, issue, r.Config.ReadyLabel, now())
 	for _, pr := range prs {
