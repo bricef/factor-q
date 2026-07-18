@@ -14,13 +14,13 @@
 # the active one, so rollback is `deploy.sh <previous-sha>` — local, no
 # network.
 #
-# Contract: exits 0 ONLY when all three processes (daemon, watcher,
-# dashboard) are confirmed running from releases/<sha>/ (checked via
-# /proc/<pid>/exe, not just log lines). The dashboard must move in
-# lockstep with the daemon: the read-service RPC uses a length-framed
-# binary codec, so a dashboard from another build fails to decode the
-# daemon's responses and renders "runtime unreachable" (the #154-skew
-# incident, 2026-07-14).
+# Contract: exits 0 ONLY when the daemon, watcher and dashboard — plus
+# fq-cron on hosts that have fq-cron.toml — are confirmed running from
+# releases/<sha>/ (checked via /proc/<pid>/exe, not just log lines).
+# The dashboard must move in lockstep with the daemon: the read-service
+# RPC uses a length-framed binary codec, so a dashboard from another
+# build fails to decode the daemon's responses and renders "runtime
+# unreachable" (the #154-skew incident, 2026-07-14).
 #
 # Bring-down is graceful (ADR-0027): `fq down` suspends in-flight
 # invocations at a step boundary (state on the WAL) and the process exits
@@ -80,7 +80,7 @@ if [ "$WANT" = "latest" ]; then
 
     mkdir "$tmp/x"
     tar -xzf "$tmp"/*.tar.gz -C "$tmp/x"
-    chmod +x "$tmp/x/fq" "$tmp/x/fq-cas" "$tmp/x/fq-dashboard" "$tmp/x/github-watcher" "$tmp/x"/*.sh
+    chmod +x "$tmp/x/fq" "$tmp/x/fq-cas" "$tmp/x/fq-dashboard" "$tmp/x/github-watcher" "$tmp/x/fq-cron" "$tmp/x"/*.sh
 
     SHA="$(fq_sha "$tmp/x/fq")"
     [ -n "$SHA" ] || die "could not read the embedded SHA from the downloaded fq"
@@ -138,6 +138,17 @@ if [ "$FORCE" != 1 ] && [ "$ACTIVE" = "$REL" ] && [ -n "$DAEMON_PID" ]; then
 fi
 
 # --- 3. graceful bring-down ----------------------------------------------
+# The scheduler goes down first so no new fires land mid-drain; anything
+# already published rides out the restart broker-side (fq-cron DESIGN
+# D5/D6).
+for cpid in $(pgrep -x fq-cron || true); do
+    log "Stopping cron (PID $cpid)"
+    kill -TERM "$cpid" 2>/dev/null || true
+    for _ in $(seq 1 15); do kill -0 "$cpid" 2>/dev/null || break; sleep 1; done
+    kill -0 "$cpid" 2>/dev/null && kill -KILL "$cpid" 2>/dev/null || true
+    ok "cron $cpid stopped"
+done
+
 if [ -n "$DAEMON_PID" ]; then
     log "Stopping daemon (PID $DAEMON_PID) via confirmed fq down"
     "$REL/fq" --config "$DOGFOOD/fq.toml" down \
@@ -165,14 +176,6 @@ if [ -n "$DAEMON_PID" ]; then
 else
     ok "no daemon running"
 fi
-
-for cpid in $(pgrep -x fq-cron || true); do
-    log "Stopping cron (PID $cpid)"
-    kill -TERM "$cpid" 2>/dev/null || true
-    for _ in $(seq 1 15); do kill -0 "$cpid" 2>/dev/null || break; sleep 1; done
-    kill -0 "$cpid" 2>/dev/null && kill -KILL "$cpid" 2>/dev/null || true
-    ok "cron $cpid stopped"
-done
 
 for wpid in $(pgrep -x github-watcher || true); do
     log "Stopping watcher (PID $wpid)"
@@ -283,5 +286,8 @@ printf '  DEPLOYED — factor-q dogfood stack @ %s\n' "$SHA"
 printf '    daemon    PID %-8s %s\n' "$NEW_DAEMON" "$("$REL/fq" --version)"
 printf '    watcher   PID %-8s %s\n' "$NEW_WATCHER" "$("$REL/github-watcher" --version 2>&1)"
 printf '    dashboard PID %-8s %s\n' "$NEW_DASHBOARD" "$("$REL/fq-dashboard" --version 2>/dev/null || echo 'fq-dashboard (predates --version)')"
+if [ -f fq-cron.toml ]; then
+    printf '    cron      PID %-8s %s\n' "$NEW_CRON" "$("$REL/fq-cron" --version 2>/dev/null || echo 'fq-cron (predates --version)')"
+fi
 printf '    rollback: ops/dogfood/deploy.sh <sha>   history: ls %s/releases\n' "$DOGFOOD"
 printf '════════════════════════════════════════════════════\033[0m\n'
