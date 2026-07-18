@@ -1,10 +1,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 type cliConfig struct {
@@ -37,18 +44,40 @@ func configFromArgs(args []string) (cliConfig, error) {
 }
 
 func run(args []string) error {
-	cfg, err := configFromArgs(args)
+	cli, err := configFromArgs(args)
 	if err != nil {
 		return err
 	}
-	if _, err := LoadConfig(cfg.ConfigPath); err != nil {
+	config, err := LoadConfig(cli.ConfigPath)
+	if err != nil {
 		return err
 	}
-	if cfg.Check {
-		fmt.Printf("configuration %s is valid\n", cfg.ConfigPath)
+	if cli.Check {
+		fmt.Printf("configuration %s is valid\n", cli.ConfigPath)
 		return nil
 	}
-	return fmt.Errorf("scheduling is not implemented; use --check")
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	nc, err := nats.Connect(cli.NATSURL)
+	if err != nil {
+		return fmt.Errorf("connect to NATS: %w", err)
+	}
+	defer nc.Close()
+	publisher, err := NewNATSPublisher(nc)
+	if err != nil {
+		return err
+	}
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return fmt.Errorf("create JetStream context: %w", err)
+	}
+	store, err := NewKVStateStore(ctx, js, cli.KVBucket)
+	if err != nil {
+		return err
+	}
+	watcher := NewConfigWatcher(cli.ConfigPath, config, ConfigWatcherOptions{Logger: log.Default()})
+	return runScheduler(ctx, config, watcher.Run(ctx), publisher, store, log.Default())
 }
 
 func main() {
