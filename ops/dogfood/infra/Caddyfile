@@ -1,4 +1,4 @@
-# TLS + basic-auth front for the fq dogfood operator dashboard (#105).
+# TLS + auth front for the fq dogfood operator dashboard (#105).
 #
 # The dashboard and the runtime's read service both refuse non-loopback
 # binds; this proxy is the single public door. TLS-only by owner
@@ -6,9 +6,17 @@
 # TLS-ALPN-01 challenge on :443, :80 stays closed, and a non-TLS
 # connection is refused outright, never redirected.
 #
-# Credentials come from ../.secrets/caddy.env (DASH_USER, DASH_HASH —
-# generate the bcrypt hash with `docker run --rm caddy:2 caddy
-# hash-password`), injected by docker-compose as env vars.
+# Auth is basic-auth plus a persistent session cookie so the browser
+# only prompts once: a successful basic-auth response sets a 90-day
+# `fq_dash` cookie holding the DASH_COOKIE secret verbatim (a static
+# bearer token — rotate by changing DASH_COOKIE), and requests
+# presenting it skip basic-auth. The matcher requires DASH_COOKIE to be
+# non-empty, so an env file without it fails closed to basic-auth on
+# every request, never open.
+#
+# Credentials come from ../.secrets/caddy.env (DASH_USER; DASH_HASH,
+# bcrypt via `docker run --rm caddy:2 caddy hash-password`; DASH_COOKIE,
+# `openssl rand -hex 32`), injected by docker-compose as env vars.
 {
 	auto_https disable_redirects
 }
@@ -19,8 +27,23 @@ dev.lambda.works {
 			disable_http_challenge
 		}
 	}
-	basic_auth {
-		{$DASH_USER} {$DASH_HASH}
+
+	@session expression `"{$DASH_COOKIE}" != "" && {http.request.header.Cookie}.contains("fq_dash={$DASH_COOKIE}")`
+
+	handle @session {
+		reverse_proxy 127.0.0.1:9472
 	}
-	reverse_proxy 127.0.0.1:9472
+
+	handle {
+		# route pins written order: a 401 stops at basic_auth, so the
+		# Set-Cookie below can never hand the secret to an
+		# unauthenticated client.
+		route {
+			basic_auth {
+				{$DASH_USER} {$DASH_HASH}
+			}
+			header Set-Cookie "fq_dash={$DASH_COOKIE}; Path=/; Max-Age=7776000; Secure; HttpOnly; SameSite=Lax"
+			reverse_proxy 127.0.0.1:9472
+		}
+	}
 }
