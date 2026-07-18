@@ -460,11 +460,22 @@ enum EventCommands {
 /// - [`LogFormat::Json`] emits one JSON object per log line so a log
 ///   aggregator (ELK, Loki, Datadog) can query the structured fields
 ///   directly instead of regex-scraping (issue #36).
+///
+/// Logs go to stderr in both modes: stdout is reserved for machine
+/// output (issue #190), and query-style commands log incidental INFO
+/// (e.g. the NATS connect) before their result is known.
 fn init_tracing(format: LogFormat) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     match format {
-        LogFormat::Text => fmt().with_env_filter(env_filter).init(),
-        LogFormat::Json => fmt().with_env_filter(env_filter).json().init(),
+        LogFormat::Text => fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .init(),
+        LogFormat::Json => fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .json()
+            .init(),
     }
 }
 
@@ -3147,22 +3158,25 @@ async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Result<()> {
         .await
         .context("failed to publish control down")?;
 
+    // Progress narration goes to stderr: it is printed before we know
+    // whether a daemon is even running, and stdout must stay clean for
+    // the final confirmation / a machine consumer (issue #190).
     if now {
-        println!(
+        eprintln!(
             "Published stop (--now) on {}.",
             fq_runtime::bus::CONTROL_DOWN_SUBJECT
         );
-        println!(
+        eprintln!(
             "A running `fq run` daemon will tear down cleanly, deregister its worker, \
              and exit immediately; in-flight invocations are resumed by recovery \
              on the next start."
         );
     } else {
-        println!(
+        eprintln!(
             "Published stop on {}.",
             fq_runtime::bus::CONTROL_DOWN_SUBJECT
         );
-        println!(
+        eprintln!(
             "A running `fq run` daemon will drain in-flight invocations to a step boundary, \
              deregister its worker, and exit."
         );
@@ -3180,7 +3194,7 @@ async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Result<()> {
     // the full wait), nothing is listening — fast-fail instead of blocking
     // out the whole deadline.
     let liveness_window = std::time::Duration::from_secs(20).min(wait);
-    println!(
+    eprintln!(
         "Waiting up to {}s for the daemon to confirm it has stopped...",
         wait.as_secs()
     );
