@@ -16,18 +16,20 @@ services:
       - nats-data:/data/nats
 
   # The single public door to the operator dashboard (#105): TLS +
-  # basic-auth in front of the loopback-bound fq-dashboard. Host
-  # networking so it can reach 127.0.0.1:9472; TLS-only — no plain-HTTP
-  # listener at all (see Caddyfile). Everything else on this host stays
-  # loopback-bound.
+  # basic-auth (with a persistent session cookie, see Caddyfile) in
+  # front of the loopback-bound fq-dashboard. Host networking so it can
+  # reach 127.0.0.1:9472; TLS-only — no plain-HTTP listener at all.
+  # Everything else on this host stays loopback-bound.
   caddy:
     image: caddy:2
     container_name: fq-dogfood-caddy
     restart: unless-stopped
     network_mode: host
-    # DASH_USER / DASH_HASH (bcrypt via `caddy hash-password`) — a
+    # DASH_USER / DASH_HASH (bcrypt via `caddy hash-password`) /
+    # DASH_COOKIE (session secret, `openssl rand -hex 32`) — a
     # host-side chmod-600 file, never committed. See the README's
-    # dashboard section for the two-line setup.
+    # dashboard section for the setup. Env edits need a container
+    # recreate (`up -d --force-recreate caddy`), not just a reload.
     env_file:
       - ../.secrets/caddy.env
     volumes:

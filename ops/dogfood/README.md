@@ -97,12 +97,20 @@ launch, if ever needed:
 `setsid ./current/dashboard.sh >> logs/dashboard.log 2>&1 </dev/null &`.
 Reach it via SSH tunnel to `127.0.0.1:9472`, or through the public
 door: the infra compose runs Caddy serving `https://dev.lambda.works`
-(basic-auth; TLS-only — plain HTTP is refused, not redirected; the
-dashboard itself stays loopback-bound). One-time setup: write
-`.secrets/caddy.env` (chmod 600) containing `DASH_USER=<user>` and
+(TLS-only — plain HTTP is refused, not redirected; the dashboard
+itself stays loopback-bound). Auth is basic-auth plus a persistent
+session: the first successful login sets a 90-day `fq_dash` cookie and
+later visits skip the password prompt; rotate the session secret (and
+so log every browser out) by changing `DASH_COOKIE`. One-time setup:
+write `.secrets/caddy.env` (chmod 600) containing `DASH_USER=<user>`,
 `DASH_HASH=<bcrypt>` (hash via `docker run --rm caddy:2 caddy
-hash-password`), then `docker compose -f infra/docker-compose.yml up
--d`. Caddy is the one process deploy.sh does not manage (it is
+hash-password`) and `DASH_COOKIE=<token>` (`openssl rand -hex 32`;
+leaving it unset is safe — cookie login fails closed and every request
+falls back to basic-auth), then `docker compose -f
+infra/docker-compose.yml up -d`. After editing `caddy.env`, recreate
+the container (`docker compose -f infra/docker-compose.yml up -d
+--force-recreate caddy`) — a config reload does not repick env vars.
+Caddy is the one process deploy.sh does not manage (it is
 docker-supervised, `restart: unless-stopped`).
 
 If the dashboard shows a **"⚠ build skew"** banner (#168), it detected —
