@@ -427,6 +427,52 @@ impl SimWorld {
         )
     }
 
+    /// Generate a small, realistic current-schema WAL for migration tests.
+    #[cfg(test)]
+    pub(crate) async fn populate_for_migration_test(&self) {
+        use crate::events::{MessageToolCall, StopReason, TokenUsage, ToolCallId};
+        use crate::llm::ChatResponse;
+
+        let llm = FixtureClient::new();
+        llm.push_response(ChatResponse {
+            content: None,
+            tool_calls: vec![MessageToolCall {
+                tool_call_id: ToolCallId::new("migration-call").unwrap(),
+                tool_name: SIM_TOOL.to_string(),
+                parameters: json!({"fixture": "migration"}),
+            }],
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        });
+        llm.push_response(ChatResponse {
+            content: None,
+            tool_calls: vec![MessageToolCall {
+                tool_call_id: ToolCallId::new("report-outcome").unwrap(),
+                tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: json!({"status": "success", "summary": "migration fixture"}),
+            }],
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        });
+        self.run(&llm).await.expect("populate migration fixture");
+    }
+
+    /// Path to the generated worker database, for schema down-projection tests.
+    #[cfg(test)]
+    pub(crate) fn worker_db_path(&self) -> std::path::PathBuf {
+        self._store_dir.path().join("sim.db")
+    }
+
     /// Run one invocation against a scripted LLM.
     pub async fn run(&self, llm: &FixtureClient) -> Result<InvocationOutcome, ExecutorError> {
         self.runner
