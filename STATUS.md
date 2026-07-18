@@ -26,6 +26,13 @@ milestone boundaries — **last: 2026-07-05** (M2 access control merged,
   grants with delegation/revocation, biscuit capability tokens, default-deny
   gate). Library + CLI (`put/get/object/gc/grant/token`). `fq-cas serve` is
   localhost-only and unauthenticated until M5.
+- **Scheduled triggers (`fq-cron`)** — a standalone durable scheduler
+  [adapter](adapters/fq-cron/README.md): reads cron jobs from a hot-reloaded
+  TOML file and publishes their payloads to NATS subjects (typically
+  `fq.trigger.<agent>` for time-driven agent runs). Durable fire state
+  survives restarts in a JetStream KV bucket with a per-job missed-fire
+  policy ([design](adapters/fq-cron/DESIGN.md)). Ships as a deployed
+  binary in the dogfood bundle.
 - **Infra** — NATS via `infrastructure/docker-compose.yml` (localhost;
   **no auth — don't expose the port beyond the host**). Build from source
   (`just up`, see [Quickstart](QUICKSTART.md)); `install.sh` awaits the
@@ -59,7 +66,7 @@ crash DST, budget properties, soak — seven real bugs found and fixed
 by it; `just soak` scales the lifecycle driver for deep local runs).
 The v0 dogfood loop is **live**: a `doc-drift` agent reviews this repo's
 commits daily on the local runtime (project at `~/fq-dogfood`, outside
-the repo) — its findings feed the
+the repo), now driven by the `fq-cron` scheduler — its findings feed the
 [backlog](docs/plans/backlog.md). That loop is read-and-report; the
 loop-first [M0 "close the loop" plan](docs/plans/active/2026-07-05-m0-close-the-loop.md)
 drives the next step — an agent that lands validated PRs against this
@@ -72,7 +79,7 @@ baseline) to keep the Q ladder honest. Open strategic questions
 
 API layer (ADR-0006, draft) · multi-agent orchestration (ADR-0007, draft) ·
 memory + skills services · context compaction · container isolation
-(ADR-0010, accepted but unbuilt) · scheduled triggers · observability floor
+(ADR-0010, accepted but unbuilt) · observability floor
 (JSON logs, metrics, alerting) · NATS auth · tagged binary releases (the
 rolling `main-latest` deploy channel is built — see
 [ops/dogfood](ops/dogfood/README.md) — but no `v*` release has shipped).
