@@ -202,6 +202,11 @@ func envDurationOr(key string, def time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
+// validateTaskTemplate enforces the outcome contract on the trigger
+// template: exactly one %d and no other % sequence. %% is rejected too:
+// fmt renders it as a literal percent, which issueNumberFromTemplate —
+// matching the template text literally — could never recover an issue
+// number across, silently stranding every triggered issue.
 func validateTaskTemplate(template string) error {
 	placeholders := 0
 	for i := 0; i < len(template); i++ {
@@ -212,13 +217,10 @@ func validateTaskTemplate(template string) error {
 			return fmt.Errorf("--task-template has invalid format verb in %q", template)
 		}
 		i++
-		switch template[i] {
-		case '%':
-		case 'd':
-			placeholders++
-		default:
-			return fmt.Errorf("--task-template may only contain one %%d verb, got %q", template)
+		if template[i] != 'd' {
+			return fmt.Errorf("--task-template allows no %% sequence other than a single %%d, got %q", template)
 		}
+		placeholders++
 	}
 	if placeholders != 1 {
 		return fmt.Errorf("--task-template must contain exactly one %%d for the issue number, got %q", template)

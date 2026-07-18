@@ -175,6 +175,9 @@ func TestConfigFromArgsValidation(t *testing.T) {
 	if _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "fix #%d and %s"}); err == nil {
 		t.Error("a task template with another format verb should be rejected")
 	}
+	if _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "fix 50%% of #%d"}); err == nil {
+		t.Error("a task template with a literal %% should be rejected — issue-number recovery cannot match its rendering")
+	}
 	cfg, _, err := configFromArgs([]string{"--repo", "owner/repo", "--poll", "90s"})
 	if err != nil {
 		t.Fatalf("valid config rejected: %v", err)

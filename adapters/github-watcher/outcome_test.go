@@ -363,3 +363,44 @@ func TestReactCompletionResetsRetryBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestEscalationResetsRetryBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		escalate func(r *OutcomeReactor)
+	}{
+		{"retries exhausted", func(r *OutcomeReactor) {
+			for i := 0; i < 3; i++ {
+				inv := fmt.Sprintf("transient-%d", i)
+				triggeredThen(r, inv, 7, OutcomeEvent{Kind: OutcomeFailed, InvocationID: inv, ErrorKind: "llm_error"})
+			}
+		}},
+		{"terminal error", func(r *OutcomeReactor) {
+			triggeredThen(r, "prior", 7, OutcomeEvent{Kind: OutcomeFailed, InvocationID: "prior", ErrorKind: "llm_error"})
+			triggeredThen(r, "term", 7, OutcomeEvent{Kind: OutcomeFailed, InvocationID: "term", ErrorKind: "budget_exceeded"})
+		}},
+		{"ambiguous recovery", func(r *OutcomeReactor) {
+			triggeredThen(r, "prior", 7, OutcomeEvent{Kind: OutcomeFailed, InvocationID: "prior", ErrorKind: "llm_error"})
+			triggeredThen(r, "amb", 7, OutcomeEvent{Kind: OutcomeAmbiguous, InvocationID: "amb"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &labelSource{}
+			r := NewOutcomeReactor(src, outcomeConfig(), discardLogger())
+			tc.escalate(r)
+			if _, ok := r.attempts[7]; ok {
+				t.Fatal("attempts entry survived escalation to the failed label")
+			}
+			// An operator re-queue after escalation starts with a fresh
+			// budget: the next transient failure re-queues for retry
+			// instead of escalating straight back to the failed label.
+			triggeredThen(r, "requeued", 7, OutcomeEvent{Kind: OutcomeFailed, InvocationID: "requeued", ErrorKind: "llm_error"})
+			if got := r.attempts[7]; got != 1 {
+				t.Fatalf("post-escalation failure attempts = %d, want 1", got)
+			}
+			if want := "relabel #7 in-progress->ready"; src.ops[len(src.ops)-1] != want {
+				t.Fatalf("last op = %q, want %q", src.ops[len(src.ops)-1], want)
+			}
+		})
+	}
+}
