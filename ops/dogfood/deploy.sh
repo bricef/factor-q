@@ -122,10 +122,16 @@ fi
 # --- 2. early exit when the target is already live -----------------------
 ACTIVE="$(readlink current 2>/dev/null || true)"
 DAEMON_PID="$(pgrep -x fq | head -1 || true)"
+CRON_OK=1
+if [ -f fq-cron.toml ]; then
+    CRON_PID="$(pgrep -x fq-cron | head -1 || true)"
+    cron_exe="$(readlink "/proc/$CRON_PID/exe" 2>/dev/null || true)"
+    [ "$cron_exe" = "$DOGFOOD/$REL/fq-cron" ] || CRON_OK=0
+fi
 if [ "$FORCE" != 1 ] && [ "$ACTIVE" = "$REL" ] && [ -n "$DAEMON_PID" ]; then
     exe="$(readlink "/proc/$DAEMON_PID/exe" 2>/dev/null || true)"
     if [ "$exe" = "$DOGFOOD/$REL/fq" ] && pgrep -x github-watcher >/dev/null \
-        && pgrep -x fq-dashboard >/dev/null; then
+        && pgrep -x fq-dashboard >/dev/null && [ "$CRON_OK" = 1 ]; then
         ok "already running $SHA — nothing to do (--force to restart anyway)"
         exit 0
     fi
@@ -160,6 +166,14 @@ else
     ok "no daemon running"
 fi
 
+for cpid in $(pgrep -x fq-cron || true); do
+    log "Stopping cron (PID $cpid)"
+    kill -TERM "$cpid" 2>/dev/null || true
+    for _ in $(seq 1 15); do kill -0 "$cpid" 2>/dev/null || break; sleep 1; done
+    kill -0 "$cpid" 2>/dev/null && kill -KILL "$cpid" 2>/dev/null || true
+    ok "cron $cpid stopped"
+done
+
 for wpid in $(pgrep -x github-watcher || true); do
     log "Stopping watcher (PID $wpid)"
     kill -TERM "$wpid" 2>/dev/null || true
@@ -184,7 +198,7 @@ ln -s "$REL" current.new
 mv -Tf current.new current
 ok "current -> $REL"
 
-# --- 5. relaunch all three (detached), verifying against fresh log lines --
+# --- 5. relaunch services (detached), verifying against fresh log lines --
 daemon_log_lines="$(wc -l < logs/fq-run.log 2>/dev/null || echo 0)"
 watcher_log_lines="$(wc -l < logs/watcher.log 2>/dev/null || echo 0)"
 
@@ -194,6 +208,12 @@ log "Relaunching watcher (current/watcher.sh)"
 setsid ./current/watcher.sh >> logs/watcher.log 2>&1 </dev/null &
 log "Relaunching dashboard (current/dashboard.sh)"
 setsid ./current/dashboard.sh >> logs/dashboard.log 2>&1 </dev/null &
+if [ -f fq-cron.toml ]; then
+    log "Relaunching cron (current/cron.sh)"
+    setsid ./current/cron.sh >> logs/cron.log 2>&1 </dev/null &
+else
+    log "Skipping cron relaunch (fq-cron.toml not found)"
+fi
 
 log "Verifying daemon startup (up to ${READY_WAIT}s)"
 ready=0
@@ -235,6 +255,16 @@ dexe="$(readlink "/proc/$NEW_DASHBOARD/exe" 2>/dev/null || true)"
 [ "$dexe" = "$DOGFOOD/$REL/fq-dashboard" ] \
     || die "dashboard PID $NEW_DASHBOARD runs $dexe, not $DOGFOOD/$REL/fq-dashboard"
 ok "dashboard up (PID $NEW_DASHBOARD) from $REL"
+
+if [ -f fq-cron.toml ]; then
+    log "Verifying cron startup"
+    NEW_CRON="$(pgrep -x fq-cron | head -1 || true)"
+    [ -n "$NEW_CRON" ] || die "cron not running after relaunch (see logs/cron.log)"
+    cexe="$(readlink "/proc/$NEW_CRON/exe" 2>/dev/null || true)"
+    [ "$cexe" = "$DOGFOOD/$REL/fq-cron" ] \
+        || die "cron PID $NEW_CRON runs $cexe, not $DOGFOOD/$REL/fq-cron"
+    ok "cron up (PID $NEW_CRON) from $REL"
+fi
 
 # --- 6. prune old releases (keep the newest KEEP_RELEASES, never $REL) ---
 i=0
