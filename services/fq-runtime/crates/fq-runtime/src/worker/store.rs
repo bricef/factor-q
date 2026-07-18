@@ -521,6 +521,7 @@ impl WorkerStore {
             (6, WORKER_MIGRATION_V6_SQL),
             (7, WORKER_MIGRATION_V7_SQL),
             (8, WORKER_MIGRATION_V8_SQL),
+            (9, WORKER_MIGRATION_V9_SQL),
         ];
         for &(version, sql) in MIGRATIONS {
             if from < version && to >= version {
@@ -529,12 +530,7 @@ impl WorkerStore {
                 }
             }
         }
-        if from < 9 && to >= 9 {
-            for stmt in split_sql(WORKER_MIGRATION_V9_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
-            }
-        }
-        // Future migrations: 9 → 10, etc.
+        // Future migrations: add a `(version, SQL)` row above.
         Ok(())
     }
 
