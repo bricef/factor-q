@@ -61,7 +61,7 @@ shutdown, and crash-recovery proven correct with *N* in flight.
   path already runs N in parallel — but the *steady-state* dispatcher path does
   not, and drain does **not** track dispatcher-run invocations (they're awaited
   inline). Fan-out must close that tracking gap.
-- **Drain already exists** (`fq drain`, ADR-0027): the dispatcher stops
+- **Drain already exists** (`fq down`, ADR-0027): the dispatcher stops
   consuming when `drain_status() == Draining` (`dispatcher.rs:134`) and in-flight
   work suspends at a step boundary via the shared drain signal the reducer polls.
 
@@ -131,7 +131,7 @@ only the serial dispatch loop and unaudited shared state stand in the way.
 
 **Non-goal — multiple processes.** We are *not* running N `fq run` instances.
 One executor with in-process concurrency means one thing to deploy
-(`redeploy.sh`), drain (`fq drain`), and observe (`fq status`); it is the
+(`redeploy.sh`), drain (`fq down`), and observe (`fq status`); it is the
 concurrency primitive the graph executor reuses; and it is the only shape that
 actually exercises the N-in-flight recovery/drain this plan gates on (N serial
 processes never would).
@@ -246,7 +246,7 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   daemon** (no `lag 1` wait), neither clobbers the other, and their WAL rows /
   events / costs stay separate; `fq status` shows both in-flight.
 - **Phase 2 — concurrent recovery/drain/shutdown (the gate).** The §3 DST sweep +
-  live `fq drain` / `fq down` with N in-flight on a scratch daemon. **Do not**
+  live `fq down` / `fq down` with N in-flight on a scratch daemon. **Do not**
   raise the dogfood `max_concurrent` until this is green.
 - **Phase 3 — enable on the box.** Set `max_concurrent = N` + worktrees on in the
   ops `fq.toml`; redeploy via `redeploy.sh`; watch cost + recovery state.
@@ -269,7 +269,7 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   sync-before-run.
 - **#70** — this *is* its in-executor concurrent execution (one instance, N
   jobs); keep the ticket for the cross-cutting notes (cost, ordering).
-- **ADR-0027** — reuses `fq drain`; extends its wait to N in-flight.
+- **ADR-0027** — reuses `fq down`; extends its wait to N in-flight.
 - **#63 (`fq down`)**, **#64 (loud non-terminal exits)** — exercised under
   concurrency by Phase 2.
 - **ADR-0028** — the safe-by-construction successor; this plan is the interim
@@ -330,7 +330,7 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   cross-contamination (E2), and a 16-case seeded sweep over (seed, N,
   script shapes). The shared-base-MCP concurrent-read smoke (H3) runs
   hermetically over the mock duplex transport. **Remaining before
-  raising the dogfood bound (Phase 3):** the live drill — `fq drain`
+  raising the dogfood bound (Phase 3):** the live drill — `fq down`
   and `fq down` on a scratch daemon with N real invocations in flight —
   and a decision on whether the D2/D3 dispatcher loop invariants need
   property-level coverage beyond the gated overlap/serial tests.
@@ -341,12 +341,12 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   plan's live leg reproducibly against a scratch daemon, real broker,
   and real LLM: the startup guard refuses `max_concurrent > 1` without
   per-invocation workspaces; 3 invocations run concurrently in their
-  own workspaces; `fq drain` suspends all 3 at step boundaries and the
+  own workspaces; `fq down` suspends all 3 at step boundaries and the
   daemon exits only after joining them (the JoinSet coverage, observed
   live); restart recovery resumes each exactly once and reclaims;
   SIGTERM drains identically; SIGKILL loses nothing across a restart.
   15/15 checks. One semantic pinned along the way: Ctrl-C is a fast
-  stop (crash-equivalent, recovery's job) — SIGTERM/`fq drain` are the
+  stop (crash-equivalent, recovery's job) — SIGTERM/`fq down` are the
   graceful path, which the drill asserts. **The gate before raising the
   dogfood bound is now fully green; what remains is Phase 3 itself:**
   ops `fq.toml` (per_invocation + the bound) and the m0 agent-def

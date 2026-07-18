@@ -1,3 +1,5 @@
+> **2026-07-18 note:** PR-3's `fq drain` verb was folded into `fq down` (#271). Read references below as `fq down` (drain mode); the mechanism is unchanged.
+
 # Graceful-drain deploys — execution plan for `fq drain` (ADR-0027)
 
 **Status:** draft (2026-07-08). The buildable execution plan for

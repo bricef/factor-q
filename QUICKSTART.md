@@ -150,7 +150,7 @@ just fq down --now
 
 Ctrl-C in the daemon's own terminal is still a fast clean stop. For a
 redeploy (suspend in-flight work for the next binary to resume), use
-`fq drain`. See [Operating the daemon](docs/guide/operating-the-daemon.md).
+`fq down`. See [Operating the daemon](docs/guide/operating-the-daemon.md).
 
 ## What to do next
 

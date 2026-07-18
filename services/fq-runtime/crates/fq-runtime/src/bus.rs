@@ -117,12 +117,8 @@ pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
 /// (ADR-0020 refresh-between-invocations precedent).
 pub const CONTROL_RELOAD_SUBJECT: &str = "fq.control.reload";
 
-/// Core-NATS subject a graceful drain is requested on (ADR-0027).
-/// Ephemeral like reload — no daemon listening is a silent no-op.
-pub const CONTROL_DRAIN_SUBJECT: &str = "fq.control.drain";
-
 /// Core-NATS subject an operator-initiated clean stop is requested on
-/// (`fq down`, issue #63). Ephemeral like reload/drain — no daemon
+/// (`fq down`, issue #63). Ephemeral like reload — no daemon
 /// listening is a silent no-op. The message body selects the mode:
 /// [`DOWN_MODE_DRAIN`] (drain in-flight work to a step boundary, then
 /// exit) or [`DOWN_MODE_NOW`] (clean infra teardown + deregister + exit
@@ -815,36 +811,6 @@ impl EventBus {
         Ok(sub)
     }
 
-    /// Request a graceful drain of a running daemon (ADR-0027). Publishes
-    /// on the core-NATS control-drain subject and flushes; a running
-    /// `fq run` daemon suspends its in-flight invocations at a step
-    /// boundary and exits. No daemon listening is a silent no-op.
-    pub async fn publish_control_drain(&self) -> Result<(), BusError> {
-        debug!(subject = CONTROL_DRAIN_SUBJECT, "publishing control drain");
-        self.client
-            .publish(CONTROL_DRAIN_SUBJECT, Bytes::new())
-            .await
-            .map_err(|err| BusError::Publish(err.to_string()))?;
-        // Flush so the message leaves the client before the short-lived
-        // CLI process exits.
-        self.client
-            .flush()
-            .await
-            .map_err(|err| BusError::Publish(err.to_string()))?;
-        Ok(())
-    }
-
-    /// Subscribe to the daemon control-drain subject. The daemon reacts
-    /// to the arrival of a message, not its contents.
-    pub async fn subscribe_control_drain(&self) -> Result<async_nats::Subscriber, BusError> {
-        debug!(
-            subject = CONTROL_DRAIN_SUBJECT,
-            "subscribing to control drain"
-        );
-        let sub = self.client.subscribe(CONTROL_DRAIN_SUBJECT).await?;
-        Ok(sub)
-    }
-
     /// Request an operator-initiated clean stop of a running daemon
     /// (`fq down`, issue #63). Publishes on the core-NATS control-down
     /// subject with a body of [`DOWN_MODE_DRAIN`] or [`DOWN_MODE_NOW`] and
@@ -872,7 +838,7 @@ impl EventBus {
         Ok(())
     }
 
-    /// Subscribe to the daemon control-down subject. Unlike reload/drain,
+    /// Subscribe to the daemon control-down subject. Unlike reload,
     /// the daemon reads the message *body* to pick the stop mode (see
     /// [`down_mode_now_from_body`]).
     pub async fn subscribe_control_down(&self) -> Result<async_nats::Subscriber, BusError> {

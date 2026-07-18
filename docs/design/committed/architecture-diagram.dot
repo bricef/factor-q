@@ -1,5 +1,5 @@
 digraph factorq {
-  label=<<b>factor-q — architecture as implemented</b><br/><font point-size="12">cleanroom read of source · 2026-07-16 · v1: a single `fq run` process hosts both control-plane and worker roles (boundary enforced by the worker::Worker trait)</font><br/><font point-size="11">solid = dataflow / requests&#160;&#160;·&#160;&#160;dashed = control &amp; secondary paths&#160;&#160;·&#160;&#160;①–⑧ = invocation lifecycle&#160;&#160;·&#160;&#160;grey dashed box = built but not yet wired in</font>>;
+  label=<<b>factor-q — architecture as implemented</b><br/><font point-size="12">cleanroom read of source · 2026-07-18 · v1: a single `fq run` process hosts both control-plane and worker roles (boundary enforced by the worker::Worker trait)</font><br/><font point-size="11">solid = dataflow / requests&#160;&#160;·&#160;&#160;dashed = control &amp; secondary paths&#160;&#160;·&#160;&#160;①–⑧ = invocation lifecycle&#160;&#160;·&#160;&#160;grey dashed box = built but not yet wired in</font>>;
   labelloc=t;
   fontname="Helvetica";
   fontsize=18;
@@ -15,7 +15,7 @@ digraph factorq {
   /* ── Top row: operator & trigger surfaces ────────── */
   github [label="GitHub API", shape=ellipse, fillcolor="#f2f2f2"];
   ghwatcher [label=<<b>github-watcher</b><br/><font point-size="9">Go adapter · polls issues labelled 'ready'<br/>labels: ready → in-progress → done/failed</font>>, fillcolor="#e8f4e8"];
-  fqcli [label=<<b>fq CLI</b><br/><font point-size="9">operator surface: init · run · trigger · reload · drain ·<br/>down · status · costs · events · doctor · dead-letters<br/><i>default `fq trigger` runs the invocation<br/>in-process against the same events.db</i></font>>, fillcolor="#e8f4e8"];
+  fqcli [label=<<b>fq CLI</b><br/><font point-size="9">operator surface: init · run · trigger · reload · down · status · costs · events · doctor · dead-letters<br/><i>default `fq trigger` runs the invocation<br/>in-process against the same events.db</i></font>>, fillcolor="#e8f4e8"];
   config [label=<<b>fq.toml + agents/*.md</b><br/><font point-size="9">config · agent definitions<br/>(Markdown + YAML frontmatter)</font>>, shape=note, fillcolor="#fdf6e3"];
   browser [label="Browser", shape=ellipse, fillcolor="#f2f2f2"];
 
@@ -26,7 +26,7 @@ digraph factorq {
     label=<<b>NATS</b>&#160;&#160;&#160;·&#160;&#160;&#160;nats://localhost:4222>;
     fontname="Helvetica"; fontsize=13;
     style="rounded,filled"; fillcolor="#f0ecfa"; color="#8a7bbf";
-    nats_control [label=<<b>core NATS</b><br/><font point-size="9">ephemeral control subjects:<br/>fq.control.reload / .drain / .down</font>>];
+    nats_control [label=<<b>core NATS</b><br/><font point-size="9">ephemeral control subjects:<br/>fq.control.reload / .down</font>>];
     nats_triggers [label=<<b>fq-triggers</b><br/><font point-size="9">JetStream work-queue stream<br/>fq.trigger.&lt;agent&gt; · 24h · max_deliver 5<br/>NAK backoff 1s/5s/30s/120s</font>>];
     nats_events [label=<<b>fq-events</b><br/><font point-size="9">JetStream stream, 30d retention<br/>fq.agent.&gt; · fq.system.&gt; · fq.worker.&gt;</font>>];
     nats_advisories [label=<<b>fq-advisories</b><br/><font point-size="9">JetStream stream<br/>$JS.EVENT…MAX_DELIVERIES.fq-triggers.&gt;</font>>];
@@ -88,7 +88,7 @@ digraph factorq {
   ghwatcher -> nats_triggers [label=<① publish fq.trigger.&lt;agent&gt;>];
   ghwatcher -> nats_events [dir=back, label="observe .completed / .failed", style=dashed];
   fqcli -> nats_triggers [label="fq trigger --via-nats"];
-  fqcli -> nats_control [label="fq reload / drain / down", style=dashed];
+  fqcli -> nats_control [label="fq reload / down", style=dashed];
   nats_control -> registry [label="reload → re-read agents\ndir, swap registry", style=dashed];
   config -> registry [label="loaded at boot / on reload"];
 

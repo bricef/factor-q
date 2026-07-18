@@ -87,6 +87,16 @@ fn fq_help_lists_expected_subcommands() {
 }
 
 #[test]
+fn fq_drain_is_an_unrecognized_subcommand() {
+    let (exit, _stdout, stderr) = run_fq(&["drain"], Duration::from_secs(5));
+    assert_ne!(exit, Some(0), "removed drain subcommand should fail");
+    assert!(
+        stderr.contains("unrecognized subcommand"),
+        "expected clap unrecognized-subcommand error; got: {stderr}"
+    );
+}
+
+#[test]
 fn fq_invocation_help_lists_subcommands() {
     let (exit, stdout, stderr) = run_fq(&["invocation", "--help"], Duration::from_secs(5));
     assert_eq!(

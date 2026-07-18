@@ -4,8 +4,7 @@
 //! developer's dev broker via `FQ_NATS_URL`, which made them lie to each other
 //! and to us:
 //!
-//! - `fq.control.*` subjects are **global**, so one test's `fq down` / `fq
-//!   drain` reached every daemon on the broker — including strays left behind
+//! - `fq.control.*` subjects are **global**, so one test's `fq down` reached every daemon on the broker — including strays left behind
 //!   by an interrupted run, which then poisoned every later run.
 //! - JetStream streams were shared, so state leaked between tests even though
 //!   each had its own scratch dir.

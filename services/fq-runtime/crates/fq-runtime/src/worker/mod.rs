@@ -278,7 +278,7 @@ impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for Redu
 
     async fn request_drain(&self, _req: DrainRequest) {
         // v1: flip the worker-local flag the reducer loop polls. The
-        // reason will feed the drain audit event once `fq drain` lands
+        // reason will feed the drain audit event once `fq down` lands
         // (PR-3); the suspend primitive itself only needs the flag.
         self.drain_signal().request();
     }
