@@ -2681,6 +2681,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 .as_deref()
                 .is_none_or(|content| content.trim().is_empty())
         {
+            // Deliberately skips `totals.total_llm_calls` and drops the
+            // usage: the turn produced nothing to bill against an
+            // outcome. If a provider ever bills tokens for empty
+            // completions this undercounts — revisit if that matters.
             let err = crate::llm::LlmError::RequestFailed(
                 "model returned an empty response (no content, no tool calls)".to_string(),
             );
@@ -5933,6 +5937,117 @@ mod tests {
                 assert!(message.contains("max iterations"), "got: {message}");
             }
             other => panic!("expected InvocationFailed, got {other:?}"),
+        }
+    }
+
+    /// #301: an empty model response — no tool calls and no
+    /// non-whitespace content — is an error stop, never an implicit
+    /// success. This is the live incident shape (invocation
+    /// `019f70d1`, 2026-07-17): a provider 200 with nothing in it must
+    /// fail the invocation as an `LlmError` and close the WAL row as an
+    /// error, so recovery and the fleet's retry loop see a failure
+    /// rather than a phantom success.
+    #[tokio::test]
+    async fn empty_model_response_fails_the_invocation_as_llm_error() {
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
+
+        let agent_id_str = unique_agent_id("empty-response");
+        let agent = Agent::builder()
+            .id(&agent_id_str)
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .budget(5.0)
+            .build()
+            .unwrap();
+
+        // Whitespace-only content pins the trim() semantics — this is
+        // "empty" exactly like `None` is.
+        let empty = ChatResponse {
+            content: Some("   \n".to_string()),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        };
+
+        let (store, events, outcome) =
+            run_with_wal_capturing_outcome(&url, agent, vec![empty], 2, None).await;
+
+        match outcome {
+            Err(ExecutorError::Llm(crate::llm::LlmError::RequestFailed(msg))) => {
+                assert!(msg.contains("empty response"), "got: {msg}");
+            }
+            other => panic!("expected Llm(RequestFailed) on an empty response, got {other:?}"),
+        }
+
+        // The WAL closed the dispatch as an error, cost 0 — never a
+        // completed-ok row for a turn that returned nothing.
+        let inv = events[0].envelope.invocation_id.to_string();
+        let rows = store
+            .list_llm_dispatches_for_invocation(&inv)
+            .await
+            .expect("list dispatches");
+        assert_eq!(rows.len(), 1, "one dispatch row for the one LLM call");
+        assert_eq!(rows[0].is_error, Some(true), "WAL row must close as error");
+        assert!(
+            rows[0]
+                .response
+                .as_deref()
+                .unwrap_or_default()
+                .contains("empty response"),
+            "WAL response records the synthetic error, got {:?}",
+            rows[0].response
+        );
+        assert_eq!(rows[0].cost_usd, Some(0.0));
+    }
+
+    /// #301: a model that only ever produces bare text — never a tool
+    /// call, never `report_outcome` — terminates via the iteration
+    /// ceiling as a failure. Text is not a stop signal; the ceiling is.
+    #[tokio::test]
+    async fn bare_text_only_model_fails_at_the_iteration_ceiling() {
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
+
+        let agent_id_str = unique_agent_id("bare-text-ceiling");
+        let agent = Agent::builder()
+            .id(&agent_id_str)
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .budget(5.0)
+            .max_iterations(3)
+            .build()
+            .unwrap();
+
+        let text_turn = || ChatResponse {
+            content: Some("still thinking out loud".to_string()),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        };
+        let responses: Vec<ChatResponse> = (0..5).map(|_| text_turn()).collect();
+
+        let (_store, _events, outcome) =
+            run_with_wal_capturing_outcome(&url, agent, responses, 1, None).await;
+
+        match outcome {
+            Err(ExecutorError::InvocationFailed { kind, message }) => {
+                assert!(
+                    matches!(kind, FailureKind::MaxIterations),
+                    "expected MaxIterations, got {kind:?}: {message}"
+                );
+            }
+            other => panic!("expected InvocationFailed(MaxIterations), got {other:?}"),
         }
     }
 
