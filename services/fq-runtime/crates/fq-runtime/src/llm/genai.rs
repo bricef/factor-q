@@ -401,11 +401,7 @@ fn from_provider_response(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let stop_reason = if !tool_calls.is_empty() {
-        StopReason::ToolUse
-    } else {
-        StopReason::EndTurn
-    };
+    let stop_reason = map_stop_reason(response.stop_reason.as_ref(), !tool_calls.is_empty());
 
     Ok(ChatResponse {
         content: content_text,
@@ -413,6 +409,63 @@ fn from_provider_response(
         stop_reason,
         usage,
     })
+}
+
+/// Map genai's reported stop reason onto our [`StopReason`].
+///
+/// `MaxTokens` and `StopSequence` pass through — the truncation signal
+/// must survive, or a cut-off answer records as a complete `EndTurn`.
+/// On the completed/tool-call axis the provider label can disagree with
+/// what we actually parsed; the reducer dispatches on parsed calls, so
+/// disagreements trust `has_tool_calls` and warn. `ContentFilter` and
+/// `Other` have no fq variant (adding one is an event-schema contract
+/// change) — they fall back to tool-call inference with a warning
+/// carrying the raw provider string.
+fn map_stop_reason(
+    reason: Option<&provider::chat::StopReason>,
+    has_tool_calls: bool,
+) -> StopReason {
+    use provider::chat::StopReason as Reported;
+
+    let inferred = if has_tool_calls {
+        StopReason::ToolUse
+    } else {
+        StopReason::EndTurn
+    };
+
+    match reason {
+        Some(Reported::ToolCall(raw)) => {
+            if !has_tool_calls {
+                tracing::warn!(
+                    raw = %raw,
+                    "provider reported a tool-call stop but no tool calls parsed; trusting parsed content"
+                );
+            }
+            inferred
+        }
+        Some(Reported::Completed(raw)) => {
+            if has_tool_calls {
+                tracing::warn!(
+                    raw = %raw,
+                    "provider reported a completed stop but tool calls were parsed; trusting parsed content"
+                );
+            }
+            inferred
+        }
+        Some(Reported::MaxTokens(_)) => StopReason::MaxTokens,
+        Some(Reported::StopSequence(_)) => StopReason::StopSequence,
+        Some(Reported::ContentFilter(raw)) | Some(Reported::Other(raw)) => {
+            tracing::warn!(
+                raw = %raw,
+                "unmapped provider stop reason; falling back to tool-call inference"
+            );
+            inferred
+        }
+        None => {
+            tracing::warn!("provider reported no stop reason; falling back to tool-call inference");
+            inferred
+        }
+    }
 }
 
 fn convert_usage(usage: &provider::chat::Usage) -> TokenUsage {
@@ -621,6 +674,116 @@ mod tests {
             "final message should carry cache_control, got {last_content:?}"
         );
 
+        server.shutdown().await;
+    }
+
+    /// Every genai stop-reason variant maps per the table in #178:
+    /// `MaxTokens` and `StopSequence` pass through, `Completed` /
+    /// `ToolCall` follow the parsed content, and `ContentFilter` /
+    /// `Other` / absent fall back to tool-call inference.
+    #[test]
+    fn maps_every_provider_stop_reason_variant() {
+        use provider::chat::StopReason as Reported;
+
+        let raw = |s: &str| s.to_string();
+        let cases: Vec<(Option<Reported>, bool, StopReason)> = vec![
+            (
+                Some(Reported::Completed(raw("end_turn"))),
+                false,
+                StopReason::EndTurn,
+            ),
+            (
+                Some(Reported::ToolCall(raw("tool_use"))),
+                true,
+                StopReason::ToolUse,
+            ),
+            (
+                Some(Reported::MaxTokens(raw("max_tokens"))),
+                false,
+                StopReason::MaxTokens,
+            ),
+            // Truncation mid-tool-use still surfaces as MaxTokens —
+            // the reducer dispatches on parsed calls, not the label.
+            (
+                Some(Reported::MaxTokens(raw("max_tokens"))),
+                true,
+                StopReason::MaxTokens,
+            ),
+            (
+                Some(Reported::StopSequence(raw("stop_sequence"))),
+                false,
+                StopReason::StopSequence,
+            ),
+            (
+                Some(Reported::ContentFilter(raw("SAFETY"))),
+                false,
+                StopReason::EndTurn,
+            ),
+            (
+                Some(Reported::ContentFilter(raw("SAFETY"))),
+                true,
+                StopReason::ToolUse,
+            ),
+            (
+                Some(Reported::Other(raw("cancelled"))),
+                false,
+                StopReason::EndTurn,
+            ),
+            (
+                Some(Reported::Other(raw("cancelled"))),
+                true,
+                StopReason::ToolUse,
+            ),
+            (None, false, StopReason::EndTurn),
+            (None, true, StopReason::ToolUse),
+        ];
+        for (reported, has_tool_calls, expected) in cases {
+            let got = map_stop_reason(reported.as_ref(), has_tool_calls);
+            assert_eq!(
+                got, expected,
+                "reported={reported:?} has_tool_calls={has_tool_calls}"
+            );
+        }
+    }
+
+    /// When the provider label and the parsed content disagree on the
+    /// completed/tool-call axis, the parsed content wins.
+    #[test]
+    fn stop_reason_label_disagreement_trusts_parsed_content() {
+        use provider::chat::StopReason as Reported;
+
+        // Label says tool_use, nothing parsed: EndTurn.
+        assert_eq!(
+            map_stop_reason(Some(&Reported::ToolCall("tool_use".to_string())), false),
+            StopReason::EndTurn
+        );
+        // Label says completed, but calls were parsed: ToolUse.
+        assert_eq!(
+            map_stop_reason(Some(&Reported::Completed("end_turn".to_string())), true),
+            StopReason::ToolUse
+        );
+    }
+
+    /// A max-tokens-truncated response must not read as a clean
+    /// `EndTurn` — end-to-end through the mock server, the wire
+    /// `stop_reason: "max_tokens"` surfaces as fq `MaxTokens`.
+    #[tokio::test]
+    async fn truncated_response_surfaces_max_tokens() {
+        use crate::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
+
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+        let server = MockAnthropicServer::start().await;
+        server.push_response(
+            MockResponse::text("an answer cut off mid-", 10, 64).with_stop_reason("max_tokens"),
+        );
+
+        let client = GenAiClient::with_base_url(server.base_url());
+        let response = client
+            .chat(request_with_system_and_user("claude-sonnet-4-5"))
+            .await
+            .expect("chat via mock");
+
+        assert_eq!(response.stop_reason, StopReason::MaxTokens);
         server.shutdown().await;
     }
 
