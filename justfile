@@ -173,11 +173,12 @@ rust-ci: runtime-ci store-ci dashboard-ci test-support-ci
 # The Go trigger adapters — standalone binaries that talk to factor-q only
 # through the trigger wire contract, never fq-runtime code.
 # Run the Go adapter gate (gofmt, vet, test, build).
-go-ci:
-    cd adapters/github-watcher && test -z "$(gofmt -l .)"
-    cd adapters/github-watcher && go vet ./...
-    cd adapters/github-watcher && go test ./...
-    cd adapters/github-watcher && go build ./...
+gate-adapters: install-nats
+    # Keep every standalone Go adapter on the same gate.
+    for module in adapters/*/go.mod; do dir="${module%/go.mod}"; (cd "$dir" && test -z "$(gofmt -l .)" && go vet ./... && FQ_TEST_NATS_SERVER="{{nats_bin}}" go test ./... && go build -o /dev/null .); done
+
+# Compatibility name used by CI.
+go-ci: gate-adapters
 
 # Run all quality checks — docs lint + link check + both Rust gates + the Go
 # adapters (the full local gate) — and print a per-phase wall-clock timing
