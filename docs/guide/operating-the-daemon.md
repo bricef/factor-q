@@ -48,23 +48,20 @@ for interactive use; SIGTERM (what `docker stop` / systemd send) runs a
 graceful drain (ADR-0027). `fq down` gives you the same clean paths as a
 scriptable, confirmable command from anywhere that can reach NATS.
 
-## Redeploying: `fq drain`
+## Redeploying with `fq down`
 
-For a **redeploy** — swap the binary, resume in-flight work under the new
-one — use `fq drain`, not `fq down`:
+For a **redeploy** — swap the binary and resume in-flight work under the
+new one — stop cleanly, deploy, then relaunch:
 
 ```sh
-fq drain     # suspend in-flight invocations to a step boundary, then exit
+fq down     # drain to a step boundary, confirm shutdown, and exit
 # ... deploy the new binary ...
-fq run       # recovery resumes the suspended invocations, no lost/re-run work
+fq run      # recovery resumes suspended invocations without lost/re-run work
 ```
 
-`fq drain` is the deploy-oriented *suspend-for-handoff* command (ADR-0027);
-`fq down` is the operator-facing *stop* command. `fq down` (drain mode)
-reuses the same drain-to-boundary machinery, so a plain `fq down` also
-leaves in-flight work recoverable — the difference is intent: `fq drain`
-expects another binary to pick the work back up promptly, `fq down` means
-"switch this daemon off".
+The default mode is the suspend-for-handoff mechanism specified by ADR-0027.
+The same command also serves when switching the daemon off; intent is the only
+difference. Use `--now` only when the drain must be skipped.
 
 ## Hot-reloading agents: `fq reload`
 
@@ -83,13 +80,12 @@ In-flight invocations keep the config they snapshotted at trigger time
 | --- | --- |
 | Stop the daemon (clean, confirmed) | `fq down` |
 | Stop now, skip the drain | `fq down --now` |
-| Redeploy (suspend for the next binary) | `fq drain` |
+| Redeploy (suspend for the next binary) | `fq down` |
 | Hot-reload agent definitions | `fq reload` |
 | Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` |
 
 ## See also
 
-- ADR-0027 — graceful drain for deploys (the machinery `fq drain` and
-  `fq down` drive).
+- ADR-0027 — graceful drain for deploys (the machinery used by `fq down`).
 - `fq status`, `fq doctor`, `fq workers list` — confirm the daemon and
   worker state after a stop or a deploy.

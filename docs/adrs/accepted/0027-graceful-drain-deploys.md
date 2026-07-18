@@ -145,3 +145,7 @@ event log for the audit of a deploy as a first-class event.
 - **Build order:** `fq drain` + a manual deploy script first, to exercise the
   graceful handoff under controlled conditions; containerisation and the
   auto-deploy watcher layered on once the roll is proven.
+
+## Addendum (2026-07-18)
+
+Issue #271 folded the `fq drain` CLI verb into `fq down` (drain mode). The drain mechanism specified by this ADR is unchanged.

@@ -158,24 +158,15 @@ enum Commands {
     /// — in-flight invocations keep the config they snapshotted at
     /// trigger time (ADR-0020 refresh-between-invocations).
     Reload,
-    /// Ask a running `fq run` daemon to drain gracefully and exit
-    /// (ADR-0027). Publishes a control message on `fq.control.drain`;
-    /// the daemon stops consuming new triggers and lets each in-flight
-    /// invocation suspend at its next step boundary — state already on
-    /// the WAL — then exits, so the next binary's recovery resumes them
-    /// with no lost or re-run work. Bounded by `drain_deadline_ms`; past
-    /// it the stragglers are hard-stopped and recovery picks them up.
-    Drain,
     /// Cleanly stop a running `fq run` daemon and confirm it exited
     /// (issue #63) — the operator-facing stop verb, so nobody reaches
     /// for `pkill -INT`. Publishes a control message on `fq.control.down`;
-    /// the daemon drains in-flight work to the next step boundary
-    /// (bounded by `drain_deadline_ms`, like `fq drain`), tears down its
+    /// by default the daemon drains in-flight work to the next step boundary
+    /// (bounded by `drain_deadline_ms`), then tears down its
     /// infrastructure, deregisters the worker, and exits. This command
     /// then waits — bounded — for the daemon's `fq.system.shutdown`
     /// event and reports the runtime that stopped, or a timeout error.
-    /// Use `fq drain` for a redeploy (suspend-for-handoff); use `fq down`
-    /// to switch the daemon off.
+    /// Use `--now` (or `--no-drain`) to skip the drain.
     Down {
         /// Skip the drain: clean infra teardown + worker deregister +
         /// immediate exit, accepting that in-flight invocations become
@@ -510,7 +501,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Init { force } => init_project(force)?,
         Commands::Run => run_daemon(&cli.global).await?,
         Commands::Reload => reload_daemon(&cli.global).await?,
-        Commands::Drain => drain_daemon(&cli.global).await?,
         Commands::Down { now } => down_daemon(&cli.global, now).await?,
         Commands::Trigger {
             agent,
@@ -2532,73 +2522,16 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     });
 
-    // Spawn the control-drain listener (ADR-0027). On a `fq.control.drain`
-    // message it flips the shared drain signal — suspending in-flight
-    // invocations at their next step boundary and stopping the dispatcher
-    // from consuming new triggers — then signals the main select to run
-    // the bounded drain and exit. Best-effort core-NATS like reload;
-    // non-fatal, so its handle is not watched in the select. `drain_probe`
-    // is a separate handle kept here to let the select classify a
-    // dispatcher-exit-while-draining as a clean drain.
     let drain_probe: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
-    let (drain_requested_tx, mut drain_requested_rx) = tokio::sync::oneshot::channel::<()>();
-    let (drain_listener_shutdown_tx, mut drain_listener_shutdown_rx) =
-        tokio::sync::oneshot::channel::<()>();
-    let drain_bus = bus.clone();
-    let drain_worker: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
-    let drain_handle = tokio::spawn(async move {
-        let mut drain_requested_tx = Some(drain_requested_tx);
-        'resubscribe: loop {
-            let mut sub = match drain_bus.subscribe_control_drain().await {
-                Ok(sub) => sub,
-                Err(err) => {
-                    tracing::error!(
-                        error = %err,
-                        "failed to subscribe to control drain; retrying in 5s"
-                    );
-                    tokio::select! {
-                        biased;
-                        _ = &mut drain_listener_shutdown_rx => break 'resubscribe,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
-                    }
-                }
-            };
-            tokio::select! {
-                biased;
-                _ = &mut drain_listener_shutdown_rx => break 'resubscribe,
-                msg = sub.next() => {
-                    match msg {
-                        Some(_) => {
-                            tracing::info!(
-                                "drain requested; suspending in-flight invocations at their \
-                                 next step boundary and no longer consuming new triggers"
-                            );
-                            drain_worker
-                                .request_drain(DrainRequest::new(DrainReason::Deploy))
-                                .await;
-                            if let Some(tx) = drain_requested_tx.take() {
-                                let _ = tx.send(());
-                            }
-                            break 'resubscribe;
-                        }
-                        None => {
-                            tracing::warn!("control-drain subscription ended; resubscribing");
-                            continue 'resubscribe;
-                        }
-                    }
-                }
-            }
-        }
-    });
 
     // Spawn the control-down listener (`fq down`, issue #63). On a
     // `fq.control.down` message it reads the body to pick the stop mode:
     // drain (suspend in-flight work to a step boundary, then exit) or
     // `now` (clean teardown + deregister + immediate exit). It requests
-    // the drain up front in drain mode — identical to the `fq drain`
-    // path — then signals the main select with the chosen mode so the
+    // the drain up front in drain mode using the existing drain machinery,
+    // then signals the main select with the chosen mode so the
     // teardown deregisters the worker and publishes `fq.system.shutdown`
-    // either way. Best-effort core-NATS like reload/drain; non-fatal, so
+    // either way. Best-effort core-NATS like reload; non-fatal, so
     // its handle is not watched in the select.
     let (down_requested_tx, mut down_requested_rx) = tokio::sync::oneshot::channel::<bool>();
     let (down_listener_shutdown_tx, mut down_listener_shutdown_rx) =
@@ -2706,7 +2639,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("  - projection consumer is materialising events into SQLite");
     println!("  - trigger dispatcher is listening on fq.trigger.*");
     println!("  - control-reload listener is listening on fq.control.reload");
-    println!("  - control-drain listener is listening on fq.control.drain");
     println!("  - control-down listener is listening on fq.control.down");
     if let Some(addr) = read_service_addr {
         println!("  - read service is listening on {addr}");
@@ -2733,7 +2665,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                     // graceful drain (ADR-0027): flip the shared drain signal
                     // — in-flight invocations suspend at their next step
                     // boundary, the dispatcher stops consuming — then run the
-                    // bounded-wait teardown below, exactly like `fq drain`. A
+                    // bounded-wait teardown below, exactly like `fq down`. A
                     // second SIGTERM restores the default disposition and
                     // hard-stops (the force-abort escape). Ctrl-C stays a fast
                     // stop for interactive use.
@@ -2749,12 +2681,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 other => (other, false, None),
             }
         }
-        // A `fq drain` control message asked for a graceful drain
-        // (ADR-0027). The listener has already flipped the shared drain
-        // signal — in-flight invocations are suspending and the dispatcher
-        // has stopped consuming — so exit the select and run the bounded
-        // drain in the teardown below.
-        _ = &mut drain_requested_rx => ("drain", true, None),
         // A `fq down` control message asked for an operator-initiated clean
         // stop (issue #63). `now == true` skips the drain (SIGINT-equivalent
         // clean stop); `now == false` drains to a step boundary first (the
@@ -2827,9 +2753,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             // drain signal is set (PR-2), so if we're draining, its exit
             // is the clean drain path — not a task failure. (This also
             // covers the race where the dispatcher finishes draining
-            // before the listener's `drain_requested` signal is polled.)
+            // before the listener's `down_requested` signal is polled.)
             if drain_probe.drain_status() == fq_runtime::worker::DrainState::Draining {
-                ("drain", true, None)
+                ("down", true, None)
             } else {
                 let err_msg = describe_task_result("trigger dispatcher", result);
                 ("task_failed", false, Some(("trigger_dispatcher", err_msg)))
@@ -2870,13 +2796,12 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // stop on their own because the drain signal is already set; past the
     // deadline the stragglers are hard-stopped and the next binary's
     // recovery resumes them.
-    // Both `fq drain` and SIGTERM run the bounded drain (SIGTERM flipped the
-    // drain signal in the select above); a signal-error or task failure does
-    // not.
+    // SIGTERM and `fq down` drain mode run the bounded drain; a signal-error
+    // or task failure does not.
     // `fq down` (drain mode) and `fq down --now` both exit cleanly and
     // deregister the worker; only the drain-mode variants wait out the
     // bounded drain. `down_now` is a fast clean stop like Ctrl-C.
-    let drained = matches!(shutdown_reason, "drain" | "sigterm" | "down");
+    let drained = matches!(shutdown_reason, "sigterm" | "down");
     let drain_deadline = drained.then(|| {
         tokio::time::Instant::now() + std::time::Duration::from_millis(config.drain_deadline_ms)
     });
@@ -2902,7 +2827,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = retention_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
     let _ = reload_shutdown_tx.send(());
-    let _ = drain_listener_shutdown_tx.send(());
     let _ = down_listener_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
@@ -3013,11 +2937,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Ok(Ok(())) => println!("  control-reload listener stopped cleanly."),
         Ok(Err(err)) => tracing::error!(error = %err, "control-reload listener task panicked"),
         Err(_) => tracing::warn!("control-reload listener did not shut down within 5s"),
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(5), drain_handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => tracing::error!(error = %err, "control-drain listener task panicked"),
-        Err(_) => tracing::warn!("control-drain listener did not shut down within 5s"),
     }
     match tokio::time::timeout(std::time::Duration::from_secs(5), down_handle).await {
         Ok(Ok(())) => {}
@@ -3174,32 +3093,6 @@ fn describe_task_result<E: std::fmt::Display>(
         Ok(Err(err)) => format!("{name} failed: {err}"),
         Err(join_err) => format!("{name} task panicked: {join_err}"),
     }
-}
-
-/// Publish a `fq.control.reload` control message so a running
-/// `fq run` daemon hot-reloads its agent definitions. Fire-and-
-/// forget: the message is ephemeral core-NATS, so if no daemon is
-/// listening it is a silent no-op (this command still reports
-/// success — it confirms the signal was published, not that a
-/// daemon acted on it). Watch `fq events tail` or the daemon logs
-/// to confirm the reload took effect.
-async fn drain_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
-    bus.publish_control_drain()
-        .await
-        .context("failed to publish control drain")?;
-    println!(
-        "Published drain signal on {}.",
-        fq_runtime::bus::CONTROL_DRAIN_SUBJECT
-    );
-    println!(
-        "A running `fq run` daemon will stop consuming triggers, suspend in-flight \
-         invocations at a step boundary, and exit; recovery resumes them on the next start."
-    );
-    Ok(())
 }
 
 /// `fq down` (issue #63): cleanly stop a running daemon and confirm it

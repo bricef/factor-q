@@ -36,7 +36,7 @@ Split into two binaries:
   No `sqlx`, no store handle, no direct NATS.
 
 The interface is one typed **`ControlService`** (tarpc), extending today's
-read-only `ReadService` with the command surface (`reload`, `drain`, `down`,
+read-only `ReadService` with the command surface (`reload`, `down`,
 `trigger`, `invocation drop`, `workers prune`, dead-letter `requeue`).
 Streaming reads (`events tail`, `invocation transcript --follow`) are
 re-expressed as **cursor-polling** over the interface (the existing

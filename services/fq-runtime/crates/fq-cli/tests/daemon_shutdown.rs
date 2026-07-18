@@ -1,5 +1,5 @@
 //! Subprocess tests for the daemon's shutdown paths — a signal
-//! (SIGINT/SIGTERM) and a graceful `fq drain` (ADR-0027).
+//! (SIGINT/SIGTERM) and a graceful `fq down` (ADR-0027).
 //!
 //! **SIGTERM:** what a process manager / `docker stop` / an orchestrator
 //! sends to stop a service — now triggers a **graceful drain** (ADR-0027),
@@ -8,14 +8,14 @@
 //! disposition (exit-by-signal 143) that orphans the worker and abandons
 //! in-flight work. (Ctrl-C stays a fast stop.)
 //!
-//! **Drain:** `fq drain` publishes on `fq.control.drain`; the daemon's
+//! **Drain:** `fq down` publishes on `fq.control.drain`; the daemon's
 //! control-drain listener flips the same shared drain signal (in-flight
 //! invocations suspend at a step boundary, the dispatcher stops consuming),
 //! waits up to `drain_deadline_ms`, then exits cleanly — the NATS-transport
 //! equivalent of the SIGTERM path.
 //!
 //! Each test spawns a full `fq run` daemon that subscribes to the *global*
-//! `fq.control.drain` / `fq.control.down` subjects. On a shared broker one
+//! `fq.control.down` subjects. On a shared broker one
 //! test's control message would reach another test's daemon, so these used
 //! to run under a process-wide lock and skip when `FQ_NATS_URL` was unset.
 //! Each test now spawns its **own** `nats-server` (#233), so they are
@@ -170,90 +170,6 @@ fn wait_with_timeout(
     }
 }
 
-/// `fq drain` makes a running daemon stop consuming, drain in-flight work
-/// at a step boundary, and exit cleanly — no signal needed (ADR-0027).
-/// Here the daemon is idle, so the bounded wait finds nothing to suspend
-/// and the drain completes at once; the suspend/resume of live invocations
-/// is proven at the unit level by the drain-equivalence property test.
-#[test]
-fn daemon_drains_and_exits_on_fq_drain() {
-    let server = fq_test_support::NatsServer::start();
-    let nats_url = server.url().to_string();
-
-    let scratch = unique_scratch();
-    let log_path = scratch.join("daemon.log");
-    let log = std::fs::File::create(&log_path).expect("create daemon log");
-    let log_err = log.try_clone().expect("clone daemon log handle");
-
-    let mut child = Command::new(fq_binary())
-        .arg("run")
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
-        .env("FQ_NATS_URL", &nats_url)
-        .env("FQ_CACHE_DIR", scratch.join("cache"))
-        .env("FQ_AGENTS_DIR", scratch.join("agents"))
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fq run");
-
-    // Wait for the daemon to reach steady state.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut ready = false;
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().expect("poll fq run") {
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
-        }
-        if std::fs::read_to_string(&log_path)
-            .unwrap_or_default()
-            .contains("Runtime ready")
-        {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(ready, "daemon never reached 'Runtime ready' within 30s");
-
-    // Ask it to drain — a separate `fq drain` invocation on the same broker.
-    let drain = Command::new(fq_binary())
-        .arg("drain")
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
-        .env("FQ_NATS_URL", &nats_url)
-        .env("FQ_CACHE_DIR", scratch.join("cache"))
-        .env("FQ_AGENTS_DIR", scratch.join("agents"))
-        .output()
-        .expect("run fq drain");
-    assert!(
-        drain.status.success(),
-        "`fq drain` failed: {}",
-        String::from_utf8_lossy(&drain.stderr)
-    );
-
-    // The daemon must drain and exit on its own — no signal sent.
-    let status = wait_with_timeout(&mut child, Duration::from_secs(15))
-        .expect("daemon did not exit within 15s of `fq drain` (drain hung?)");
-    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&scratch);
-
-    assert!(
-        status.success(),
-        "expected clean exit(0) after drain, got {status:?}\n--- log ---\n{log}"
-    );
-    assert!(
-        log.contains("drain requested"),
-        "daemon did not observe the drain control message\n--- log ---\n{log}"
-    );
-    assert!(
-        log.contains("Draining"),
-        "daemon did not run the bounded drain wait\n--- log ---\n{log}"
-    );
-    assert!(
-        log.contains("trigger dispatcher stopped cleanly"),
-        "dispatcher did not stop cleanly on drain\n--- log ---\n{log}"
-    );
-}
-
 /// `fq down` makes a running daemon drain in-flight work to a step
 /// boundary, deregister its worker, and exit — and the command
 /// *confirms* the exit by waiting for the daemon's `fq.system.shutdown`
@@ -346,6 +262,10 @@ fn daemon_stops_and_confirms_on_fq_down() {
     assert!(
         log.contains("down requested"),
         "daemon did not observe the down control message\n--- log ---\n{log}"
+    );
+    assert!(
+        log.contains("trigger dispatcher stopped cleanly"),
+        "dispatcher did not stop cleanly on down\n--- log ---\n{log}"
     );
     assert!(
         workers_out.contains("shutdown"),

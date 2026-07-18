@@ -40,7 +40,7 @@ pub struct Config {
     /// configuration, not code).
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
-    /// How long `fq drain` (ADR-0027) waits for in-flight invocations to
+    /// How long `fq down` (ADR-0027) waits for in-flight invocations to
     /// suspend at a step boundary before hard-stopping the stragglers and
     /// letting the next binary's recovery resume them. A bounded wait,
     /// never block-forever. Config, not code (Design Principle 8).
@@ -530,7 +530,7 @@ fn default_max_iterations() -> u32 {
 
 /// Default graceful-drain deadline: 120s. Long enough for a typical
 /// model/tool step to finish so the invocation suspends at the next
-/// boundary; past it, `fq drain` hard-stops and recovery takes over.
+/// boundary; past it, `fq down` hard-stops and recovery takes over.
 fn default_drain_deadline_ms() -> u64 {
     120_000
 }

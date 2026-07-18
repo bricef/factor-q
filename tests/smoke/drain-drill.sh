@@ -8,7 +8,7 @@
 #   0. the startup guard refuses max_concurrent > 1 without
 #      per-invocation workspaces (fails loud, not silent clobbering);
 #   1. N invocations run concurrently, each in its own provisioned
-#      workspace directory; `fq drain` suspends all N at step
+#      workspace directory; `fq down` suspends all N at step
 #      boundaries, the daemon exits cleanly, and the suspended
 #      workspaces survive;
 #   2. the next binary's recovery resumes each suspended invocation
@@ -182,7 +182,7 @@ trigger_n
 check "all ${N} invocations in flight (one workspace dir each)" \
     wait_for 60 "${N} workspace dirs" dirs_are "${N}"
 
-"${FQ_BIN}" drain >/dev/null
+"${FQ_BIN}" down >/dev/null
 check "daemon exits after the drain joins in-flight work" \
     wait_for 90 "daemon exit" daemon_exited
 check "dispatcher logged the drain" \

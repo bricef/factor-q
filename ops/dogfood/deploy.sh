@@ -22,7 +22,7 @@
 # daemon's responses and renders "runtime unreachable" (the #154-skew
 # incident, 2026-07-14).
 #
-# Bring-down is graceful (ADR-0027): `fq drain` suspends in-flight
+# Bring-down is graceful (ADR-0027): `fq down` suspends in-flight
 # invocations at a step boundary (state on the WAL) and the process exits
 # on its own; recovery resumes them under the new binary. Past the
 # bounded wait the fallback escalates: a *confirmed* stop via
@@ -133,22 +133,16 @@ fi
 
 # --- 3. graceful bring-down ----------------------------------------------
 if [ -n "$DAEMON_PID" ]; then
-    log "Draining daemon (PID $DAEMON_PID) via fq drain — up to ${DRAIN_WAIT}s"
-    "$REL/fq" --config "$DOGFOOD/fq.toml" drain \
-        || printf '    (drain publish returned non-zero; waiting for exit anyway)\n'
-    for _ in $(seq 1 "$DRAIN_WAIT"); do
-        kill -0 "$DAEMON_PID" 2>/dev/null || break
-        sleep 1
-    done
+    log "Stopping daemon (PID $DAEMON_PID) via confirmed fq down"
+    "$REL/fq" --config "$DOGFOOD/fq.toml" down \
+        || printf '    (confirmed drain failed; escalating)\n'
     if kill -0 "$DAEMON_PID" 2>/dev/null; then
-        # Escalation 1 — a *confirmed* stop (#63): `--now` skips the
-        # already-attempted drain; the daemon tears down cleanly,
+        # Escalation 1: `--now` skips the already-attempted drain;
+        # the daemon tears down cleanly,
         # DEREGISTERS its worker (no stale-worker cruft, #64/#65), and
         # `fq down` exits zero only after observing the daemon's own
-        # system.shutdown event. Against a daemon that predates
-        # `fq down`, or one too wedged to service control messages, it
-        # times out non-zero and we fall through to the signal.
-        printf '    drain deadline exceeded — requesting confirmed stop (fq down --now)\n'
+        # system.shutdown event. If wedged, fall through to the signal.
+        printf '    graceful stop failed — requesting immediate stop (fq down --now)\n'
         if "$REL/fq" --config "$DOGFOOD/fq.toml" down --now; then
             printf '    confirmed stop\n'
         else
