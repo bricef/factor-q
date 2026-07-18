@@ -776,10 +776,23 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
         ));
     }
     b.push_str("</table>");
-    b.push_str(&format!(
-        r#"<p><a href="/invocations/{}/transcript">transcript →</a></p>"#,
-        esc(&d.invocation_id)
-    ));
+    if let Some(failure) = d.recent_events.iter().find(|e| e.event_type == "failed") {
+        b.push_str(&format!(
+            "<p><strong>failure:</strong> {}{}</p>",
+            esc(failure.error_kind.as_deref().unwrap_or("unknown")),
+            failure
+                .error_message
+                .as_deref()
+                .map(|m| format!(": {}", esc(m)))
+                .unwrap_or_default()
+        ));
+    }
+    if d.has_transcript {
+        b.push_str(&format!(
+            r#"<p><a href="/invocations/{}/transcript">transcript →</a></p>"#,
+            esc(&d.invocation_id)
+        ));
+    }
 
     if let Some(live) = &d.live {
         b.push_str("<h2>Live execution</h2><table>");
@@ -1649,6 +1662,7 @@ mod tests {
             archive: None,
             live: None,
             recent_events: vec![],
+            has_transcript: false,
             summary: Some("Fixing #83: <b>ci</b> running".into()),
             cost: Some(fq_runtime::views::InvocationCostView {
                 invocation_id: "inv-1".into(),
@@ -1686,6 +1700,30 @@ mod tests {
         let mut no_summary = detail.clone();
         no_summary.summary = None;
         assert!(!invocation_detail(&no_summary, 1_000).contains("<th>summary</th>"));
+
+        // Failures remain useful without a transcript: the reason is inline and
+        // the dead transcript link is omitted. Both provider text fields are escaped.
+        let mut failed = detail.clone();
+        failed.recent_events = vec![fq_runtime::views::EventView {
+            event_id: "event-1".into(),
+            timestamp: "2026-07-18T00:00:00Z".into(),
+            agent_id: "m0-issue-fix".into(),
+            invocation_id: "inv-1".into(),
+            event_type: "failed".into(),
+            model: None,
+            total_cost: None,
+            error_kind: Some("llm_error".into()),
+            error_message: Some("provider <429>".into()),
+            duration_ms: Some(10),
+        }];
+        let html = invocation_detail(&failed, 1_000);
+        assert!(
+            html.contains("llm_error: provider &lt;429&gt;"),
+            "got: {html}"
+        );
+        assert!(!html.contains("transcript →"), "got: {html}");
+        failed.has_transcript = true;
+        assert!(invocation_detail(&failed, 1_000).contains("transcript →"));
 
         let html = transcript(&[], 1_000, false, "inv-1", Some("Fixing #83: ci running"));
         assert!(

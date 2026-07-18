@@ -280,9 +280,9 @@ impl SummaryConsumer {
                     SummaryKind::Outcome,
                     format!(
                         "Prior status line: {prior}\n\
-                         The invocation just FAILED ({:?}). Write the final one-line \
-                         outcome naming the failure.",
-                        p.error_kind
+                         The invocation just FAILED ({:?}): {}. Write the final one-line \
+                         outcome naming the real failure reason.",
+                        p.error_kind, p.error_message
                     ),
                 )
             }

@@ -174,6 +174,7 @@ fn event_rows() -> Vec<EventView> {
         model: Some("claude-sonnet-4-5".to_string()),
         total_cost: cost,
         error_kind: None,
+        error_message: None,
         duration_ms: Some(1_234),
     };
     vec![
@@ -219,6 +220,7 @@ fn invocation_detail() -> InvocationDetailView {
     InvocationDetailView {
         invocation_id: "019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string(),
         agent_id: Some("m0-issue-fix".to_string()),
+        has_transcript: true,
         summary: Some("Fixing #83: SECURITY.md drafted, running just ci".to_string()),
         // Mid-run burn: the cost-so-far row on a live invocation.
         cost: Some(fq_runtime::views::InvocationCostView {

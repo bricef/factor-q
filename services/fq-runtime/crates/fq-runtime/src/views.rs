@@ -300,6 +300,7 @@ pub struct EventView {
     pub model: Option<String>,
     pub total_cost: Option<f64>,
     pub error_kind: Option<String>,
+    pub error_message: Option<String>,
     pub duration_ms: Option<i64>,
 }
 
@@ -314,6 +315,7 @@ impl From<EventRow> for EventView {
             model: r.model,
             total_cost: r.total_cost,
             error_kind: r.error_kind,
+            error_message: r.error_message,
             duration_ms: r.duration_ms,
         }
     }
@@ -555,6 +557,9 @@ pub struct InvocationDetailView {
     pub live: Option<LiveExecutionView>,
     /// Most recent events for this invocation (newest first).
     pub recent_events: Vec<EventView>,
+    /// Whether the worker WAL contains dispatch rows for a transcript.
+    #[serde(default)]
+    pub has_transcript: bool,
     /// One-line operator summary (#216); see
     /// [`ActiveInvocationView::summary`].
     #[serde(default)]
@@ -1055,6 +1060,8 @@ impl Views {
             .map(EventView::from)
             .collect();
 
+        let has_transcript = self.transcript(invocation_id).await?.is_some();
+
         let summary = self
             .projection
             .summaries_for(&[invocation_id.to_string()])
@@ -1078,6 +1085,7 @@ impl Views {
             archive: archive.map(ArchiveView::from),
             live,
             recent_events,
+            has_transcript,
             summary,
             cost,
         }))
