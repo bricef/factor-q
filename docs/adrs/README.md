@@ -48,6 +48,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
 | [0031](draft/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; shared-secret-over-TLS auth as swappable middleware |
+| [0032](draft/0032-exactly-once-trigger-dispatch.md) | Trigger dispatch is exactly-once by durable claim (trigger inbox in NATS KV, CAS-arbitrated), not by ack timing; broker responsibility ends at the post-claim ack |
 
 ## Related guides
 
