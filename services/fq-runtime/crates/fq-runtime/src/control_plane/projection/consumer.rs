@@ -5,23 +5,27 @@
 //! acknowledged position), iterates over delivered events, inserts
 //! each into the [`ProjectionStore`], and acks.
 //!
-//! Delivery semantics:
+//! Delivery semantics (the loop and ack policy live in
+//! [`crate::control_plane::durable_consumer`]):
 //! - **At-least-once** from JetStream. The store's insert is
 //!   idempotent on `event_id`, so re-delivery is safe.
 //! - **Parse errors** are logged and acked. An event whose JSON we
 //!   can't decode will never become valid on retry, so leaving it
 //!   un-acked would just create a redelivery loop.
-//! - **DB errors** are logged and NAK'd so the message is
-//!   redelivered after the ack timeout. Transient errors recover;
-//!   persistent errors become visible in logs and metrics.
+//! - **DB errors** are transient handler errors: logged and NAK'd
+//!   so the message is redelivered after the ack timeout.
+//!   Transient errors recover; persistent errors become visible
+//!   in logs and metrics.
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use crate::bus::{BusError, EventBus};
+use crate::control_plane::durable_consumer::{
+    DeliverFrom, DurableConsumerConfig, DurableConsumerError, HandlerError, run_durable_consumer,
+};
 use crate::events::Event;
 
 use super::store::{ProjectionStore, StoreError};
@@ -49,80 +53,43 @@ impl ProjectionConsumer {
     /// and then follows the live stream. The `shutdown` receiver is
     /// a oneshot so the caller can send `()` to request a graceful
     /// exit.
-    pub async fn run(self, mut shutdown: oneshot::Receiver<()>) -> Result<(), ConsumerError> {
+    pub async fn run(self, shutdown: oneshot::Receiver<()>) -> Result<(), ConsumerError> {
+        // This exact line is a readiness contract:
+        // tests/smoke/smoke.sh greps the daemon log for it before
+        // driving the walking skeleton.
         info!("projection consumer starting");
-        let consumer = self.bus.durable_consumer(CONSUMER_NAME).await?;
-        let mut messages = consumer
-            .messages()
-            .await
-            .map_err(|err| ConsumerError::Stream(err.to_string()))?;
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => {
-                    info!("projection consumer received shutdown signal");
-                    break;
-                }
-                msg = messages.next() => {
-                    match msg {
-                        Some(Ok(msg)) => {
-                            self.handle(&msg).await;
-                        }
-                        Some(Err(err)) => {
-                            warn!(error = %err, "error reading next JetStream message");
-                        }
-                        None => {
-                            warn!("JetStream message stream ended unexpectedly");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("projection consumer stopped");
-        Ok(())
+        let config = DurableConsumerConfig {
+            durable_name: CONSUMER_NAME.to_string(),
+            filter_subjects: Vec::new(),
+            deliver_from: DeliverFrom::Beginning,
+        };
+        run_durable_consumer(&self.bus, config, shutdown, |event| {
+            self.handle_event(event)
+        })
+        .await
+        .map_err(ConsumerError::from)
     }
 
-    async fn handle(&self, msg: &async_nats::jetstream::Message) {
-        let event = match serde_json::from_slice::<Event>(&msg.payload) {
-            Ok(event) => event,
-            Err(err) => {
-                warn!(error = %err, "failed to deserialise event, acking to avoid redelivery loop");
-                if let Err(ack_err) = msg.ack().await {
-                    error!(error = %ack_err, "failed to ack malformed message");
-                }
-                return;
-            }
-        };
-
+    /// Insert one event into the projection. The shared loop owns
+    /// the ack: `Ok` acks, a transient error NAKs for redelivery.
+    async fn handle_event(&self, event: Event) -> Result<(), HandlerError> {
         debug!(
             event_id = %event.envelope.event_id,
             agent_id = %event.envelope.agent_id,
             "projecting event"
         );
+        self.store
+            .insert_event(&event)
+            .await
+            .map_err(HandlerError::transient)
+    }
+}
 
-        match self.store.insert_event(&event).await {
-            Ok(()) => {
-                if let Err(err) = msg.ack().await {
-                    error!(error = %err, event_id = %event.envelope.event_id, "failed to ack after insert");
-                }
-            }
-            Err(err) => {
-                error!(
-                    error = %err,
-                    event_id = %event.envelope.event_id,
-                    "failed to insert event — will be redelivered"
-                );
-                // Nak to trigger redelivery after the ack timeout.
-                if let Err(nak_err) = msg
-                    .ack_with(async_nats::jetstream::AckKind::Nak(None))
-                    .await
-                {
-                    error!(error = %nak_err, "failed to NAK message");
-                }
-            }
+impl From<DurableConsumerError> for ConsumerError {
+    fn from(err: DurableConsumerError) -> Self {
+        match err {
+            DurableConsumerError::Bus(err) => Self::Bus(err),
+            DurableConsumerError::Stream(err) => Self::Stream(err),
         }
     }
 }
@@ -203,9 +170,12 @@ mod tests {
         format!("fq-projector-test-{}", Uuid::now_v7().simple())
     }
 
-    /// End-to-end: publish events, spin up a consumer with a
-    /// unique durable name, verify events land in SQLite, then
-    /// shut down the consumer cleanly.
+    /// End-to-end: publish events, spin up the shared durable
+    /// loop over the projection's insert handler with a unique
+    /// durable name, verify events land in SQLite, then shut
+    /// down cleanly. Exercises the same loop code
+    /// `ProjectionConsumer::run` delegates to (#192), including
+    /// the catch-up-from-history semantics a restart relies on.
     #[tokio::test]
     async fn consumer_projects_events_into_store() {
         let server = crate::test_support::nats::test_nats();
@@ -227,20 +197,32 @@ mod tests {
             .await
             .expect("publish 2");
 
-        // Spin up the consumer with a fresh name so it starts from
-        // the beginning of the stream.
-        let consumer = ProjectionConsumerWithName {
-            bus: bus.clone(),
-            store: store.clone(),
-            consumer_name: unique_consumer_name(),
+        // Spin up the shared loop with a fresh durable name so it
+        // starts from the beginning of the stream.
+        let config = DurableConsumerConfig {
+            durable_name: unique_consumer_name(),
             // Narrow filter so the durable consumer doesn't
             // have to chew through every event the shared
-            // stream has accumulated across days of runs.
-            filter_subject: format!("fq.agent.{agent_id}.>"),
+            // stream has accumulated across days of runs (#118).
+            filter_subjects: vec![format!("fq.agent.{agent_id}.>")],
+            deliver_from: DeliverFrom::Beginning,
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let handle = tokio::spawn(async move { consumer.run(shutdown_rx).await });
+        let bus_for_loop = bus.clone();
+        let store_for_loop = store.clone();
+        let handle = tokio::spawn(async move {
+            run_durable_consumer(&bus_for_loop, config, shutdown_rx, |event| {
+                let store = store_for_loop.clone();
+                async move {
+                    store
+                        .insert_event(&event)
+                        .await
+                        .map_err(HandlerError::transient)
+                }
+            })
+            .await
+        });
 
         // Wait until *our* specific events have been projected.
         // A durable consumer starts from the beginning of the
@@ -279,57 +261,5 @@ mod tests {
         let types: Vec<&str> = rows.iter().map(|r| r.event_type.as_str()).collect();
         assert!(types.contains(&"triggered"));
         assert!(types.contains(&"completed"));
-    }
-
-    /// A variant of ProjectionConsumer that accepts a custom
-    /// durable name and filter so test runs don't step on
-    /// each other. The filter narrows the JetStream consumer
-    /// to a single agent's events; without it, a fresh test
-    /// consumer has to replay the whole stream's accumulated
-    /// history (thousands of events across days of test
-    /// runs) before reaching its own.
-    struct ProjectionConsumerWithName {
-        bus: EventBus,
-        store: Arc<ProjectionStore>,
-        consumer_name: String,
-        filter_subject: String,
-    }
-
-    impl ProjectionConsumerWithName {
-        async fn run(self, mut shutdown: oneshot::Receiver<()>) -> Result<(), ConsumerError> {
-            let consumer = self
-                .bus
-                .durable_consumer_with_filter(&self.consumer_name, &self.filter_subject)
-                .await?;
-            let mut messages = consumer
-                .messages()
-                .await
-                .map_err(|err| ConsumerError::Stream(err.to_string()))?;
-
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut shutdown => break,
-                    msg = messages.next() => {
-                        match msg {
-                            Some(Ok(msg)) => {
-                                let event: Event = match serde_json::from_slice(&msg.payload) {
-                                    Ok(e) => e,
-                                    Err(_) => { let _ = msg.ack().await; continue; }
-                                };
-                                if let Err(err) = self.store.insert_event(&event).await {
-                                    eprintln!("insert error: {err}");
-                                    let _ = msg.ack_with(async_nats::jetstream::AckKind::Nak(None)).await;
-                                } else {
-                                    let _ = msg.ack().await;
-                                }
-                            }
-                            Some(Err(_)) | None => break,
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
     }
 }

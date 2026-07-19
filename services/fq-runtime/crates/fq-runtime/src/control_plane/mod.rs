@@ -12,6 +12,12 @@
 //!
 //! Today's control-plane components:
 //!
+//! - [`durable_consumer`] — the shared durable JetStream
+//!   consumer loop (#192). Every event consumer below is a
+//!   durable name + subject filter + handler on this loop; new
+//!   consumers MUST be built on it rather than hand-rolling the
+//!   `select!`/ack plumbing. Its module doc is the ack-policy
+//!   reference.
 //! - [`dispatcher`] — the trigger dispatcher, which consumes
 //!   `fq.trigger.>` from NATS and hands invocations to a
 //!   [`crate::worker::Worker`].
@@ -41,6 +47,7 @@
 pub mod advisory_watch;
 pub mod coordination_consumer;
 pub mod dispatcher;
+pub mod durable_consumer;
 pub mod heartbeat_consumer;
 pub mod operator;
 pub mod projection;

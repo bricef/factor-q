@@ -21,12 +21,14 @@
 //! meaningful even if a worker process disappears without
 //! emitting a shutdown event.
 //!
-//! Delivery semantics:
+//! Delivery semantics (the loop and ack policy live in
+//! [`super::durable_consumer`]):
 //! - **At-least-once** from JetStream. Coordination updates
 //!   are idempotent (upsert by primary key), so re-delivery
 //!   is safe.
 //! - **Parse errors** are logged and acked.
-//! - **Store errors** are NAK'd to trigger redelivery.
+//! - **Store errors** are transient handler errors: NAK'd to
+//!   trigger redelivery.
 //!
 //! The consumer is single-process in v1; v2 splits it onto
 //! the dedicated control-plane node.
@@ -35,9 +37,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use futures::StreamExt;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::bus::{BusError, EventBus};
@@ -46,6 +47,10 @@ use crate::events::{
     WorkerOrphanedPayload,
 };
 
+use super::durable_consumer::{
+    DeliverFrom, DurableConsumerConfig, DurableConsumerError, HandlerError,
+    run_durable_consumer_with_tick,
+};
 use super::store::{
     ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerStatus, WorkerStatus,
 };
@@ -164,81 +169,51 @@ impl CoordinationConsumer {
         self
     }
 
-    /// Run the consumer loop until `shutdown` fires.
+    /// Run the consumer loop until `shutdown` fires. The
+    /// stale-worker sweep rides the loop's tick arm, serialised
+    /// with message handling on the same task.
     pub async fn run(
         self,
-        mut shutdown: oneshot::Receiver<()>,
+        shutdown: oneshot::Receiver<()>,
     ) -> Result<(), CoordinationConsumerError> {
-        let effective_filter = self
+        let filter = self
             .test_filter_subject
-            .as_deref()
-            .unwrap_or(FILTER_SUBJECT);
-        info!(filter = effective_filter, "coordination consumer starting");
-        let consumer = match &self.test_consumer_name {
-            Some(name) => {
-                self.bus
-                    .durable_consumer_with_filter_from_new(name, effective_filter)
-                    .await?
-            }
-            None => {
-                self.bus
-                    .durable_consumer_with_filter(CONSUMER_NAME, effective_filter)
-                    .await?
-            }
+            .clone()
+            .unwrap_or_else(|| FILTER_SUBJECT.to_string());
+        // A test-name override pairs with deliver-from-new so
+        // each test gets a fresh cursor on the shared stream
+        // (see [`Self::with_test_consumer_name`]).
+        let (durable_name, deliver_from) = match &self.test_consumer_name {
+            Some(name) => (name.clone(), DeliverFrom::New),
+            None => (CONSUMER_NAME.to_string(), DeliverFrom::Beginning),
         };
-        let mut messages = consumer
-            .messages()
-            .await
-            .map_err(|err| CoordinationConsumerError::Stream(err.to_string()))?;
-
-        let mut sweep_timer = tokio::time::interval(Duration::from_millis(self.sweep_interval_ms));
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => {
-                    info!("coordination consumer received shutdown signal");
-                    break;
+        let config = DurableConsumerConfig {
+            durable_name,
+            filter_subjects: vec![filter],
+            deliver_from,
+        };
+        let this = &self;
+        run_durable_consumer_with_tick(
+            &self.bus,
+            config,
+            shutdown,
+            |event| this.handle_event(event),
+            Duration::from_millis(self.sweep_interval_ms),
+            || async move {
+                if let Err(err) = this.sweep_stale_workers().await {
+                    warn!(error = %err, "stale-worker sweep failed");
                 }
-                msg = messages.next() => {
-                    match msg {
-                        Some(Ok(msg)) => {
-                            self.handle_message(&msg).await;
-                        }
-                        Some(Err(err)) => {
-                            warn!(error = %err, "error reading coordination message");
-                        }
-                        None => {
-                            warn!("coordination message stream ended unexpectedly");
-                            break;
-                        }
-                    }
-                }
-                _ = sweep_timer.tick() => {
-                    if let Err(err) = self.sweep_stale_workers().await {
-                        warn!(error = %err, "stale-worker sweep failed");
-                    }
-                }
-            }
-        }
-
-        info!("coordination consumer stopped");
-        Ok(())
+            },
+        )
+        .await
+        .map_err(CoordinationConsumerError::from)
     }
 
-    async fn handle_message(&self, msg: &async_nats::jetstream::Message) {
-        let event = match serde_json::from_slice::<Event>(&msg.payload) {
-            Ok(e) => e,
-            Err(err) => {
-                warn!(error = %err, "failed to deserialise coordination message; acking");
-                if let Err(e) = msg.ack().await {
-                    error!(error = %e, "failed to ack malformed coordination message");
-                }
-                return;
-            }
-        };
-
-        let result: Result<(), CoordinationConsumerError> = match &event.payload {
+    /// Dispatch one invocation lifecycle event to its handler.
+    /// The shared loop owns the ack: `Ok` acks, a transient
+    /// error NAKs for redelivery.
+    async fn handle_event(&self, event: Event) -> Result<(), HandlerError> {
+        let result = match &event.payload {
             EventPayload::InvocationAmbiguous(payload) => {
                 self.handle_invocation_ambiguous(&event, payload).await
             }
@@ -257,31 +232,7 @@ impl CoordinationConsumer {
                 Ok(())
             }
         };
-
-        match result {
-            Ok(()) => {
-                if let Err(err) = msg.ack().await {
-                    error!(
-                        error = %err,
-                        event_id = %event.envelope.event_id,
-                        "failed to ack coordination message"
-                    );
-                }
-            }
-            Err(err) => {
-                error!(
-                    error = %err,
-                    event_id = %event.envelope.event_id,
-                    "coordination handler failed; will be redelivered"
-                );
-                if let Err(e) = msg
-                    .ack_with(async_nats::jetstream::AckKind::Nak(None))
-                    .await
-                {
-                    error!(error = %e, "failed to NAK coordination message");
-                }
-            }
-        }
+        result.map_err(HandlerError::transient)
     }
 
     pub(crate) async fn handle_invocation_ambiguous(
@@ -528,10 +479,20 @@ pub enum CoordinationConsumerError {
     Stream(String),
 }
 
+impl From<DurableConsumerError> for CoordinationConsumerError {
+    fn from(err: DurableConsumerError) -> Self {
+        match err {
+            DurableConsumerError::Bus(err) => Self::Bus(err),
+            DurableConsumerError::Stream(err) => Self::Stream(err),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::AgentId;
+    use futures::StreamExt;
 
     // Pure unit test: handler-shape verification using a
     // wrapper that simulates dispatch without a real bus.
@@ -671,24 +632,16 @@ mod tests {
         let agent_id = AgentId::new(format!("coord-test-{}", Uuid::now_v7().simple())).unwrap();
         let consumer_name = format!("fq-coordination-test-{}", Uuid::now_v7().simple());
 
-        // Spawn the consumer with a custom durable name so
-        // we don't compete with the real fq-coordination
-        // consumer.
-        let bus_for_consumer = bus.clone();
-        let store_for_consumer = store.clone();
-        let agent_for_consumer = agent_id.clone();
+        // Spawn the production consumer with its test overrides:
+        // a unique durable name (deliver-from-new) so we don't
+        // compete with the real fq-coordination consumer, and an
+        // agent-scoped filter so parallel tests' events don't
+        // cross-contaminate.
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone())
+            .with_test_consumer_name(consumer_name)
+            .with_test_filter_subject(format!("fq.agent.{}.invocation.*", agent_id.as_str()));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let handle = tokio::spawn(async move {
-            run_test_consumer(
-                bus_for_consumer,
-                store_for_consumer,
-                consumer_name,
-                FILTER_SUBJECT,
-                agent_for_consumer,
-                shutdown_rx,
-            )
-            .await
-        });
+        let handle = tokio::spawn(consumer.run(shutdown_rx));
 
         // Give the consumer a moment to register.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1183,83 +1136,5 @@ mod tests {
         assert_eq!(received[0]["model"], "claude-haiku-4-5");
 
         rt.shutdown().await;
-    }
-
-    /// Test consumer with a custom durable name so parallel
-    /// test runs don't compete with each other or with the
-    /// production `fq-coordination` consumer.
-    ///
-    /// Dispatches both `invocation.ambiguous` (direct store
-    /// upsert) and `invocation.archived` (delegates to the
-    /// real handler, which writes the archive row and emits
-    /// the worker-scoped ack). Other event types are ack'd
-    /// and ignored.
-    async fn run_test_consumer(
-        bus: EventBus,
-        store: Arc<ControlPlaneStore>,
-        consumer_name: String,
-        filter_subject: &str,
-        _agent_filter: AgentId,
-        mut shutdown: oneshot::Receiver<()>,
-    ) -> Result<(), CoordinationConsumerError> {
-        // Start from new messages only: when the full lib
-        // suite runs against a shared NATS, the stream is
-        // crowded with `fq.agent.*.invocation.*` events from
-        // other tests. Default `DeliverPolicy::All` drains
-        // them all before reaching this test's published
-        // event and the 5s deadline below trips. Pairs with
-        // a unique consumer_name per test.
-        let consumer = bus
-            .durable_consumer_with_filter_from_new(&consumer_name, filter_subject)
-            .await?;
-        let mut messages = consumer
-            .messages()
-            .await
-            .map_err(|err| CoordinationConsumerError::Stream(err.to_string()))?;
-
-        // A real CoordinationConsumer wrapper so we can reuse
-        // its production handlers for the archived path.
-        let inner = CoordinationConsumer::new(bus.clone(), store.clone());
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => break,
-                msg = messages.next() => {
-                    match msg {
-                        Some(Ok(msg)) => {
-                            let event: Event = match serde_json::from_slice(&msg.payload) {
-                                Ok(e) => e,
-                                Err(_) => { let _ = msg.ack().await; continue; }
-                            };
-                            match &event.payload {
-                                EventPayload::InvocationAmbiguous(_) => {
-                                    let _ = store.upsert_invocation_ownership(
-                                        &event.envelope.invocation_id.to_string(),
-                                        event.envelope.agent_id.as_str(),
-                                        Utc::now().timestamp_millis(),
-                                        OwnerStatus::Ambiguous,
-                                    ).await;
-                                }
-                                EventPayload::InvocationArchived(payload) => {
-                                    let _ = inner
-                                        .handle_invocation_archived(&event, payload)
-                                        .await;
-                                }
-                                EventPayload::InvocationOperatorRecovered(payload) => {
-                                    let _ = inner
-                                        .handle_invocation_operator_recovered(&event, payload)
-                                        .await;
-                                }
-                                _ => {}
-                            }
-                            let _ = msg.ack().await;
-                        }
-                        Some(Err(_)) | None => break,
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 }
