@@ -39,9 +39,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use futures::StreamExt;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::agent::AgentId;
@@ -52,6 +51,10 @@ use crate::events::{
 };
 use crate::llm::{ChatRequest, LlmClient};
 use crate::pricing::PricingTable;
+
+use super::durable_consumer::{
+    DeliverFrom, DurableConsumerConfig, DurableConsumerError, HandlerError, run_durable_consumer,
+};
 
 /// Name of the durable JetStream consumer.
 pub const CONSUMER_NAME: &str = "fq-summary";
@@ -127,16 +130,9 @@ impl SummaryConsumer {
     }
 
     /// Run the consumer loop until `shutdown` fires.
-    pub async fn run(
-        self,
-        mut shutdown: oneshot::Receiver<()>,
-    ) -> Result<(), SummaryConsumerError> {
-        info!(
-            model = %self.model,
-            filters = ?FILTER_SUBJECTS,
-            "invocation summary consumer starting"
-        );
-        let filters: Vec<String> = match &self.test_agent_scope {
+    pub async fn run(self, shutdown: oneshot::Receiver<()>) -> Result<(), SummaryConsumerError> {
+        info!(model = %self.model, "invocation summary consumer starting");
+        let filter_subjects: Vec<String> = match &self.test_agent_scope {
             Some(agent) => vec![
                 subjects::agent_triggered(agent),
                 subjects::agent_llm_response(agent),
@@ -145,70 +141,36 @@ impl SummaryConsumer {
             ],
             None => FILTER_SUBJECTS.iter().map(|s| s.to_string()).collect(),
         };
-        let consumer = match &self.test_consumer_name {
-            Some(name) => {
-                self.bus
-                    .durable_consumer_with_filters_from_new(name, &filters)
-                    .await?
-            }
-            None => {
-                let refs: Vec<&str> = filters.iter().map(|s| s.as_str()).collect();
-                self.bus
-                    .durable_consumer_with_filters(CONSUMER_NAME, &refs)
-                    .await?
-            }
+        // A test-name override pairs with deliver-from-new so each
+        // test gets a fresh cursor on the shared stream (see
+        // [`Self::with_test_scope`]).
+        let (durable_name, deliver_from) = match &self.test_consumer_name {
+            Some(name) => (name.clone(), DeliverFrom::New),
+            None => (CONSUMER_NAME.to_string(), DeliverFrom::Beginning),
         };
-        let mut messages = consumer
-            .messages()
-            .await
-            .map_err(|err| SummaryConsumerError::Stream(err.to_string()))?;
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => {
-                    info!("invocation summary consumer received shutdown signal");
-                    break;
-                }
-                msg = messages.next() => {
-                    match msg {
-                        Some(Ok(msg)) => {
-                            self.handle_message(&msg).await;
-                        }
-                        Some(Err(err)) => {
-                            warn!(error = %err, "error reading summary-consumer message");
-                        }
-                        None => {
-                            warn!("summary-consumer message stream ended unexpectedly");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("invocation summary consumer stopped");
-        Ok(())
+        let config = DurableConsumerConfig {
+            durable_name,
+            filter_subjects,
+            deliver_from,
+        };
+        run_durable_consumer(&self.bus, config, shutdown, |event| {
+            self.handle_event(event)
+        })
+        .await
+        .map_err(SummaryConsumerError::from)
     }
 
-    async fn handle_message(&self, msg: &async_nats::jetstream::Message) {
-        let event = match serde_json::from_slice::<Event>(&msg.payload) {
-            Ok(e) => e,
-            Err(err) => {
-                warn!(error = %err, "failed to deserialise summary-consumer message; acking");
-                let _ = msg.ack().await;
-                return;
-            }
-        };
-
+    /// Summarise one lifecycle event. The shared loop owns the
+    /// ack: every skipped/best-effort path returns `Ok` (acked),
+    /// and only a failed publish is a transient error (NAK'd).
+    async fn handle_event(&self, event: Event) -> Result<(), HandlerError> {
         // Never react to our own (or any sentinel-agent) events —
         // belt-and-braces against a summarisation loop; the filters
         // are already narrower than this.
         if event.envelope.agent_id.as_str() == AgentId::SUMMARY_STR
             || event.envelope.agent_id.as_str() == AgentId::SYSTEM_STR
         {
-            let _ = msg.ack().await;
-            return;
+            return Ok(());
         }
 
         let invocation_id = event.envelope.invocation_id;
@@ -236,8 +198,7 @@ impl SummaryConsumer {
                 }
                 if latest.trim().is_empty() {
                     // Nothing new to fold in.
-                    let _ = msg.ack().await;
-                    return;
+                    return Ok(());
                 }
                 let prior = self
                     .summaries
@@ -288,8 +249,7 @@ impl SummaryConsumer {
             }
             other => {
                 debug!(event_type = ?std::mem::discriminant(other), "unexpected event on summary filter; ignoring");
-                let _ = msg.ack().await;
-                return;
+                return Ok(());
             }
         };
 
@@ -338,8 +298,7 @@ impl SummaryConsumer {
                     error = %err,
                     "summariser LLM call failed; skipping this summary"
                 );
-                let _ = msg.ack().await;
-                return;
+                return Ok(());
             }
         };
 
@@ -356,8 +315,7 @@ impl SummaryConsumer {
                 output_tokens = response.usage.output_tokens,
                 "summariser returned no content; skipping"
             );
-            let _ = msg.ack().await;
-            return;
+            return Ok(());
         }
 
         // Cost the call against the pricing table (mirrors the runner:
@@ -407,20 +365,11 @@ impl SummaryConsumer {
                         .insert(invocation_id, line);
                 }
                 debug!(invocation_id = %invocation_id, ?kind, "published invocation summary");
-                if let Err(err) = msg.ack().await {
-                    error!(error = %err, "failed to ack summarised event");
-                }
+                Ok(())
             }
-            Err(err) => {
-                error!(
-                    invocation_id = %invocation_id,
-                    error = %err,
-                    "failed to publish invocation summary; NAK for redelivery"
-                );
-                let _ = msg
-                    .ack_with(async_nats::jetstream::AckKind::Nak(None))
-                    .await;
-            }
+            // The summary was already paid for; a NAK'd
+            // redelivery only re-tries the publish.
+            Err(err) => Err(HandlerError::transient(err)),
         }
     }
 
@@ -462,6 +411,15 @@ pub enum SummaryConsumerError {
     Stream(String),
 }
 
+impl From<DurableConsumerError> for SummaryConsumerError {
+    fn from(err: DurableConsumerError) -> Self {
+        match err {
+            DurableConsumerError::Bus(err) => Self::Bus(err),
+            DurableConsumerError::Stream(err) => Self::Stream(err),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +431,7 @@ mod tests {
     use crate::llm::ChatResponse;
     use crate::llm::fixture::FixtureClient;
     use crate::pricing::ModelPricing;
+    use futures::StreamExt;
     use std::collections::HashMap as StdHashMap;
     use std::time::Duration;
 

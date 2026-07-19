@@ -13,23 +13,27 @@
 //! stay cohesive, and so the filter subjects don't need a
 //! multi-subject JetStream consumer.
 //!
-//! Delivery semantics:
+//! Delivery semantics (the loop and ack policy live in
+//! [`super::durable_consumer`]):
 //! - **At-least-once** from JetStream. The store update is
 //!   idempotent (a repeated `heartbeat_worker` call is a no-op
 //!   on already-current data), so re-delivery is safe.
 //! - **Parse errors** are logged and acked — a malformed
 //!   heartbeat event is not worth retrying.
-//! - **Store errors** are NAK'd to trigger redelivery.
+//! - **Store errors** are transient handler errors: NAK'd to
+//!   trigger redelivery.
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::debug;
 
 use crate::bus::{BusError, EventBus};
 use crate::events::{Event, EventPayload};
 
+use super::durable_consumer::{
+    DeliverFrom, DurableConsumerConfig, DurableConsumerError, HandlerError, run_durable_consumer,
+};
 use super::store::{ControlPlaneStore, ControlPlaneStoreError};
 
 /// Name of the durable JetStream consumer the heartbeat
@@ -54,63 +58,22 @@ impl HeartbeatConsumer {
     }
 
     /// Run the consumer loop until `shutdown` fires.
-    pub async fn run(
-        self,
-        mut shutdown: oneshot::Receiver<()>,
-    ) -> Result<(), HeartbeatConsumerError> {
-        info!(
-            filter = FILTER_SUBJECT,
-            "worker heartbeat consumer starting"
-        );
-        let consumer = self
-            .bus
-            .durable_consumer_with_filter(CONSUMER_NAME, FILTER_SUBJECT)
-            .await?;
-        let mut messages = consumer
-            .messages()
-            .await
-            .map_err(|err| HeartbeatConsumerError::Stream(err.to_string()))?;
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => {
-                    info!("worker heartbeat consumer received shutdown signal");
-                    break;
-                }
-                msg = messages.next() => {
-                    match msg {
-                        Some(Ok(msg)) => {
-                            self.handle_message(&msg).await;
-                        }
-                        Some(Err(err)) => {
-                            warn!(error = %err, "error reading heartbeat message");
-                        }
-                        None => {
-                            warn!("heartbeat message stream ended unexpectedly");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("worker heartbeat consumer stopped");
-        Ok(())
+    pub async fn run(self, shutdown: oneshot::Receiver<()>) -> Result<(), HeartbeatConsumerError> {
+        let config = DurableConsumerConfig {
+            durable_name: CONSUMER_NAME.to_string(),
+            filter_subjects: vec![FILTER_SUBJECT.to_string()],
+            deliver_from: DeliverFrom::Beginning,
+        };
+        run_durable_consumer(&self.bus, config, shutdown, |event| {
+            self.handle_event(event)
+        })
+        .await
+        .map_err(HeartbeatConsumerError::from)
     }
 
-    async fn handle_message(&self, msg: &async_nats::jetstream::Message) {
-        let event = match serde_json::from_slice::<Event>(&msg.payload) {
-            Ok(e) => e,
-            Err(err) => {
-                warn!(error = %err, "failed to deserialise heartbeat message; acking");
-                if let Err(e) = msg.ack().await {
-                    error!(error = %e, "failed to ack malformed heartbeat message");
-                }
-                return;
-            }
-        };
-
+    /// Handle one heartbeat event. The shared loop owns the ack:
+    /// `Ok` acks, a transient error NAKs for redelivery.
+    async fn handle_event(&self, event: Event) -> Result<(), HandlerError> {
         let payload = match &event.payload {
             EventPayload::WorkerHeartbeat(p) => p,
             _ => {
@@ -121,8 +84,7 @@ impl HeartbeatConsumer {
                     event_id = %event.envelope.event_id,
                     "non-heartbeat event arrived on heartbeat filter; ignoring"
                 );
-                let _ = msg.ack().await;
-                return;
+                return Ok(());
             }
         };
 
@@ -132,30 +94,24 @@ impl HeartbeatConsumer {
         let ts_ms = event.envelope.timestamp.timestamp_millis();
         let worker_id = payload.worker_id.as_str();
 
-        match self.store.heartbeat_worker(worker_id, ts_ms).await {
-            Ok(()) => {
-                debug!(
-                    worker_id = %worker_id,
-                    ts_ms,
-                    "updated coordination_worker.last_heartbeat"
-                );
-                if let Err(err) = msg.ack().await {
-                    error!(error = %err, worker_id = %worker_id, "failed to ack heartbeat");
-                }
-            }
-            Err(err) => {
-                error!(
-                    worker_id = %worker_id,
-                    error = %err,
-                    "heartbeat_worker store update failed; will be redelivered"
-                );
-                if let Err(e) = msg
-                    .ack_with(async_nats::jetstream::AckKind::Nak(None))
-                    .await
-                {
-                    error!(error = %e, "failed to NAK heartbeat message");
-                }
-            }
+        self.store
+            .heartbeat_worker(worker_id, ts_ms)
+            .await
+            .map_err(HandlerError::transient)?;
+        debug!(
+            worker_id = %worker_id,
+            ts_ms,
+            "updated coordination_worker.last_heartbeat"
+        );
+        Ok(())
+    }
+}
+
+impl From<DurableConsumerError> for HeartbeatConsumerError {
+    fn from(err: DurableConsumerError) -> Self {
+        match err {
+            DurableConsumerError::Bus(err) => Self::Bus(err),
+            DurableConsumerError::Stream(err) => Self::Stream(err),
         }
     }
 }
