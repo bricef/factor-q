@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft — proposed 2026-07-17.
+Accepted 2026-07-20 by Brice — proposed 2026-07-17.
 
 ## Context
 
@@ -35,12 +35,17 @@ Split into two binaries:
 - **`fq`** — the operator CLI. A thin client that speaks only that interface.
   No `sqlx`, no store handle, no direct NATS.
 
-The interface is one typed **`ControlService`** (tarpc), extending today's
-read-only `ReadService` with the command surface (`reload`, `down`,
-`trigger`, `invocation drop`, `workers prune`, dead-letter `requeue`).
+The interface is the **derived tarpc binding of the operation registry**
+(ADR-0006): a generic `invoke`/`next_batch` pair carrying
+schema-versioned, registry-defined operations, fronted by generated typed
+client wrappers in the shared wire crate. The command surface (`reload`,
+`down`, `trigger`, `invocation drop`, `workers prune`, dead-letter
+`requeue`) and the read surface are registry entries, not trait methods.
 Streaming reads (`events tail`, `invocation transcript --follow`) are
-re-expressed as **cursor-polling** over the interface (the existing
-`transcript_since` pattern), so `fq` needs no NATS connection at all.
+**sequence-addressed stream operations**; their tarpc binding is long-poll
+`next_batch(from_seq, max_wait)` — the cursor-polling previously described
+here, now as the transport binding of a native stream contract rather than
+the contract itself.
 
 Access is authenticated by a **shared secret over TLS**. `fqd` terminates TLS —
 encryption plus server authentication via a self-signed certificate the client
