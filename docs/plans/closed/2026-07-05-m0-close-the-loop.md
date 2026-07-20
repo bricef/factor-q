@@ -1,6 +1,19 @@
 # M0 — Close the loop: implementation plan
 
-**Status:** proposed (2026-07-05). Drives the **M0** milestone named in
+**Status: closed — M0 met (2026-07-20, maintainer judgement per the Done
+signal below).** The autonomous loop shipped as the
+[github-watcher](../../../adapters/github-watcher/README.md) adapter
+(issue intake via the `ready` label) triggering an `m0-issue-fix` agent
+(definition in `~/fq-dogfood`, outside this repo) that lands sandboxed,
+`just ci`-validated changes as PRs behind the human merge gate. Between
+2026-07-17 and 2026-07-19 it landed 20+ accepted PRs spanning features,
+fixes, tests, and docs (e.g. #270, #293, #306, #321) — more than one
+task type, non-trivial, all CI-validated. The proxy instrumentation,
+baseline stream, and trajectory plot ride on toward M1 as post-M0 work;
+the known duplicate-dispatch defect is tracked by the
+[exactly-once trigger dispatch plan](../active/2026-07-18-exactly-once-trigger-dispatch.md).
+
+Originally proposed 2026-07-05, driving the **M0** milestone named in
 [VISION.md](../../../VISION.md) ("factor-q can be used to work on factor-q
 itself") — which the
 [2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
@@ -29,7 +42,7 @@ on the capability alone.
 - **The runtime**, hardened over the 2026-07-05 verification arc: a
   reducer/WAL/budget/recovery path now covered by an oracle, a crash DST,
   and budget properties (see the
-  [reducer verification plan](../closed/2026-07-05-reducer-verification.md)). Crash
+  [reducer verification plan](2026-07-05-reducer-verification.md)). Crash
   recovery is WAL-based and independent of the event bus.
 - **The building blocks the loop needs**: MCP, shell/file tools, a
   nothing-by-default sandbox, per-invocation budgets, and triggers. The daily
@@ -239,7 +252,7 @@ proxies rather than reduced to them.
   §1 — the critique this plan answers.
 - [reference-workloads.md](../../design/committed/reference-workloads.md) —
   the touchstones this turns into a running load.
-- [reducer verification plan](../closed/2026-07-05-reducer-verification.md) — the
+- [reducer verification plan](2026-07-05-reducer-verification.md) — the
   hardened runtime the loop rides on.
 - [ADR-0026](../../adrs/accepted/0026-event-log-system-of-record.md) — the
   event-log system of record the proxies ultimately read from.

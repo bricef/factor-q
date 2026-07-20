@@ -1,8 +1,8 @@
 # Status
 
 One screen: what runs today, where we are, what's next. Updated at
-milestone boundaries — **last: 2026-07-05** (M2 access control merged,
-`627a5ec`). If this contradicts `git log`, trust the log and fix this file.
+milestone boundaries — **last: 2026-07-20** (M0 "close the loop" met).
+If this contradicts `git log`, trust the log and fix this file.
 
 ## What runs today
 
@@ -33,6 +33,12 @@ milestone boundaries — **last: 2026-07-05** (M2 access control merged,
   survives restarts in a JetStream KV bucket with a per-job missed-fire
   policy ([design](adapters/fq-cron/DESIGN.md)). Ships as a deployed
   binary in the dogfood bundle.
+- **GitHub watcher (`github-watcher`)** — a standalone Go
+  [trigger adapter](adapters/github-watcher/README.md): polls a repo for
+  issues labelled `ready`, triggers an agent per issue over the
+  documented wire contracts, then observes the run's lifecycle events
+  and moves the issue's label onward so nothing strands mid-flight. The
+  intake side of the M0 change loop; ships in the dogfood bundle.
 - **Infra** — NATS via `infrastructure/docker-compose.yml` (localhost;
   **no auth — don't expose the port beyond the host**). Build from source
   (`just up`, see [Quickstart](QUICKSTART.md)); `install.sh` awaits the
@@ -54,6 +60,12 @@ memory, and skills — is at its midpoint:
 | 5. Context window management | Not started |
 | 6. Agent-definition extensions | `mcp:` done; `skills:` pending |
 
+On the Q ladder, **M0 ("close the loop") is met** as of 2026-07-20: the
+autonomous change loop has landed 20+ accepted, `just ci`-validated PRs
+against this repo across multiple task types (features, fixes, tests,
+docs) — maintainer-confirmed per the done signal of the now-closed
+[M0 plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md).
+
 ## What's next
 
 M3, then M4, then M5, per the
@@ -64,14 +76,19 @@ is **complete** (claims R1–R7 all oracle-backed in the hermetic CI
 path: trace oracle, state validation, sim world, resume equivalence,
 crash DST, budget properties, soak — seven real bugs found and fixed
 by it; `just soak` scales the lifecycle driver for deep local runs).
-The v0 dogfood loop is **live**: a `doc-drift` agent reviews this repo's
-commits daily on the local runtime (project at `~/fq-dogfood`, outside
-the repo), now driven by the `fq-cron` scheduler — its findings feed the
-[backlog](docs/plans/backlog.md). That loop is read-and-report; the
-loop-first [M0 "close the loop" plan](docs/plans/active/2026-07-05-m0-close-the-loop.md)
-drives the next step — an agent that lands validated PRs against this
-repo — with a crude proxy-metric set (read relative to an expert+frontier
-baseline) to keep the Q ladder honest. Open strategic questions
+The dogfood loop **lands PRs**: alongside the daily read-and-report
+`doc-drift` agent (fq-cron-scheduled; findings feed the
+[backlog](docs/plans/backlog.md)), the `github-watcher` adapter triggers
+an `m0-issue-fix` agent on `ready`-labelled issues (agent definitions in
+`~/fq-dogfood`, outside the repo); the agent makes the change in a
+sandboxed working copy, validates with `just ci`, and opens a PR behind
+the human merge gate — the loop that met M0 (see the closed
+[M0 plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md)). Next on
+that track: exactly-once trigger dispatch
+([plan](docs/plans/active/2026-07-18-exactly-once-trigger-dispatch.md))
+to close the duplicate-PR redelivery storm, and the M0 plan's proxy
+instrumentation (read relative to an expert+frontier baseline) to make
+**M1 (Q1)** decidable. Open strategic questions
 (security sequencing, the API layer) are in the
 [2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
 

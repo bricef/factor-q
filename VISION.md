@@ -14,7 +14,7 @@ The name "factor-q" comes from the Q factor in fusion physics — the ratio of e
 
 | Milestone | Q ratio | Description |
 |---|---|---|
-| **M0: Close the loop** | — | factor-q can be used to work on factor-q itself. The system is capable enough for complex code comprehension, multi-file changes, test validation, and git workflows. This is the bootstrapping milestone. Driven by the [M0 "close the loop" plan](docs/plans/active/2026-07-05-m0-close-the-loop.md). |
+| **M0: Close the loop** | — | **Met 2026-07-20.** factor-q can be used to work on factor-q itself. The system is capable enough for complex code comprehension, multi-file changes, test validation, and git workflows. This is the bootstrapping milestone. Delivered by the [M0 "close the loop" plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md) (closed). |
 | **M1: Net zero** | Q1 | For every day of input, we get a day of work out. The system breaks even on productivity — it is no longer a net cost to operate. |
 | **M2: Parity** | Q20 | Leverage of 20x, roughly in line with the best AI harnesses available today. |
 | **M3: North star** | Q200 | The true target. Requires automated self-improvement, multi-agent orchestration, and minimal human intervention for routine work. |

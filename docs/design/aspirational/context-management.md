@@ -242,7 +242,7 @@ a commitment; the **default** is marked, the rest are pluggable, and one is
   Anthropic path) must land breakpoints on the immutable-prefix boundary the
   strategies preserve, so the stable prefix caches across turns and only the
   churning tail is uncached.
-- **M0 proxies ([M0 plan](../../plans/active/2026-07-05-m0-close-the-loop.md)).**
+- **M0 proxies ([M0 plan](../../plans/closed/2026-07-05-m0-close-the-loop.md)).**
   Compaction frequency and cost are part of cost-per-accepted-change; the
   `context.compacted` events feed the measurement.
 
@@ -294,5 +294,5 @@ model.
   retrieval layer.
 - [ADR-0007](../../adrs/accepted/0007-inter-agent-communication.md) — spawn as
   the coarse context boundary; per-traversal budget.
-- [M0 plan](../../plans/active/2026-07-05-m0-close-the-loop.md) — where
+- [M0 plan](../../plans/closed/2026-07-05-m0-close-the-loop.md) — where
   compaction cost shows up in the proxies.
