@@ -1,6 +1,6 @@
 # Registry-first API + daemon/CLI split — joint execution plan (ADR-0006 + ADR-0031)
 
-**Status:** draft (2026-07-20). Supersedes the
+**Status:** accepted (2026-07-20, via #335). Supersedes the
 [2026-07-17 ADR-0031 execution plan](2026-07-17-adr-0031-daemon-cli-split-execution.md):
 ADR-0006's Appendix A replaced that plan's central artifact — the
 hand-enumerated `ControlService` trait — with the derived tarpc binding of the
