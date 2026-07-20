@@ -1,6 +1,6 @@
 # Dashboard live regions — datastar poll-and-morph instead of page reloads
 
-**Status:** shipped with this plan's PR.
+**Status:** closed (2026-07-20) — shipped 2026-07-16 with this plan's PR (#245).
 
 ## Why
 

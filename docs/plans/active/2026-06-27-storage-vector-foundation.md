@@ -2,7 +2,7 @@
 
 ## Status
 
-Active (2026-06-27). Implements the design in
+Active — **paused** (noted 2026-07-20): M1a–M2 are landed and verified; M3 (extraction) is next, deprioritized behind the M0 loop-hardening track since ~2026-07-05. Implements the design in
 [ADR-0023](../../adrs/accepted/0023-storage-and-vector-foundation.md) +
 [ADR-0024](../../adrs/accepted/0024-separate-databases-storage-foundation.md).
 Design forks and implementation decisions are resolved.

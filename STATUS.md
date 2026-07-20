@@ -19,7 +19,7 @@ If this contradicts `git log`, trust the log and fix this file.
   dead-letters / doctor` (read commands take `--json`), plus a read-only
   web dashboard (`fq-dashboard` over the daemon's localhost tarpc read
   service — the
-  [operator-dashboard plan](docs/plans/active/2026-07-10-operator-dashboard.md)).
+  [operator-dashboard plan](docs/plans/closed/2026-07-10-operator-dashboard.md)).
 - **Store (`fq-cas`)** — [content-addressed storage](services/fq-store/README.md)
   (BLAKE3, FastCDC dedup) + named objects with version history + verified
   online GC + [access control](docs/guide/access-control.md) (event-sourced

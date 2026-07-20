@@ -21,7 +21,7 @@ others, then scored centrally against a rubric fixed before any code was
 written. Methodology, the full 8-axis scorecard, the controlled performance
 sweep, and per-crate verdicts live in the experiment record:
 
-- **Spec + methodology + results:** [FUSE VFS bake-off](../../plans/active/2026-07-09-fuse-vfs-bakeoff.md)
+- **Spec + methodology + results:** [FUSE VFS bake-off](../../plans/closed/2026-07-09-fuse-vfs-bakeoff.md)
   (see *Results & verdict*).
 - **Evidence trail:** branches `experiment/fuse-vfs-fuser`,
   `experiment/fuse-vfs-fuse3`, `experiment/fuse-vfs-easy_fuser`,
@@ -95,6 +95,6 @@ was never the question; fit was. Two factor-q-specific facts decided it:
 ## Alternatives considered
 
 The three other crates, above; scored in full against the 8-axis rubric in the
-[bake-off results](../../plans/active/2026-07-09-fuse-vfs-bakeoff.md). No
+[bake-off results](../../plans/closed/2026-07-09-fuse-vfs-bakeoff.md). No
 non-FUSE mechanism was considered here — ADR-0028 already decided FUSE as the
 host-binary VFS binding; this ADR only selects the crate.

@@ -4,7 +4,7 @@ A comparison spike: which Rust FUSE crate best fits factor-q's harness-owned
 virtual filesystem (ADR-0028, draft). One fixed spec, four **blind**
 implementations, one shared harness.
 
-- **Spec:** [`docs/plans/active/2026-07-09-fuse-vfs-bakeoff.md`](../../docs/plans/active/2026-07-09-fuse-vfs-bakeoff.md)
+- **Spec:** [`docs/plans/closed/2026-07-09-fuse-vfs-bakeoff.md`](../../docs/plans/closed/2026-07-09-fuse-vfs-bakeoff.md)
 - **Harness (the shared control):** [`harness/run.sh`](harness/run.sh)
 - **Implementations:** `impls/<crate>/` — one blind Cargo binary per crate
   (`fuser`, `fuse3`, `easy_fuser`, `fuse-backend-rs`).
