@@ -15,6 +15,10 @@ fmt-check:
 lint:
     cargo clippy --all-targets --all-features
 
+# Clean build artefacts
+clean:
+    cargo clean
+
 # Run tests, or forward cargo args (e.g. `just test conformance`). Hermetic:
 # `cli,service` builds the fq-cas binary and tarpc service without pulling in
 # the `bus` feature, whose grant-bus integration test needs a live NATS broker.
