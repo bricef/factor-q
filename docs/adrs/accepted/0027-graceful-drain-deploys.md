@@ -103,7 +103,7 @@ exerciser.
   CI-green change can still crash the live workload; a merge must not be able
   to take the daemon down irrecoverably. Deploy → health probe → roll back to
   the previous image on failure. This is the deploy-side mirror of the
-  trigger-side [cost-control gap](../../plans/backlog.md): *every place
+  trigger-side [cost-control gap](https://github.com/bricef/factor-q/issues/42): *every place
   autonomy replaces a human checkpoint needs a safety layer where the
   checkpoint was.* It is likely its own companion decision.
 - Packaging the daemon as a versioned container image (rather than a raw

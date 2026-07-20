@@ -45,7 +45,7 @@ Dockerfile, and installer all exist (with one hard caveat: NATS listens on
 blocked on: the API layer (ADR-0006, still draft; clients today talk to NATS
 and the projection SQLite directly), token-gated remote exposure of the store
 (M5's charter), container isolation (ADR-0010 accepted, unbuilt), the
-observability floor (deferred in the [backlog](../plans/backlog.md)), and
+observability floor (deferred in the backlog), and
 scheduled triggers. The API layer is the long pole and has no active plan.
 
 ## What the project gets right
@@ -104,7 +104,7 @@ against M4's search without waiting for M5 polish.
 
 Storage got the oracle treatment. The reducer harness — the path every
 invocation runs through — has flagged boundary-invariant gaps sitting in the
-[backlog](../plans/backlog.md) since mid-May (§ "Reducer boundary
+backlog since mid-May (§ "Reducer boundary
 invariants"), and context-window management — the thing that actually kills
 long-running autonomous agents — is unstarted with no design. It also
 couples to Memory ("store important context before compaction"), so its

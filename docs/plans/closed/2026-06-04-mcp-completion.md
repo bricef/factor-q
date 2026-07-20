@@ -31,8 +31,9 @@ All in-scope steps shipped on `main`:
 
 **Deferred (captured, not regressions):** mid-invocation tool hot-swap +
 cancellation trigger (ADR-0020), `includeContext` injection, non-`file://`
-roots, audio-in-prompts (upstream rmcp), legacy SSE — all tracked in
-`docs/plans/backlog.md` → *MCP full-spec follow-ups*. This closes the MCP
+roots, audio-in-prompts (upstream rmcp), legacy SSE — all tracked
+at the time in the backlog (since retired; the live remainder is the
+rmcp audio upgrade, #341). This closes the MCP
 pillar of Phase 2.
 
 ## Goal
@@ -169,7 +170,7 @@ with a pointer.
   **Confirmed scope (2026-06-04):** emit the bus event **and** wire the
   operator surface (surface MCP server logs / progress through the
   operator event consumer / CLI); the broader operator-observability
-  effort is tracked in `backlog.md` → *Observability*.
+  effort is now tracked in #342.
 - **B3 · `origin` on the llm trace — IN.** Spread `LlmCallOrigin` onto
   the `llm.request` / `llm.response` payloads (today only on
   `CostMetadata`). Mechanical: a field + construction sites.
@@ -323,7 +324,7 @@ resolves cleanly because the oracle already speaks the transport.
 ## Deferred — captured for the future
 
 Forward features, not loose ends. Tracked here **and** cross-linked from
-`docs/plans/backlog.md` → *MCP full-spec follow-ups*, so closing this
+the backlog's *MCP full-spec follow-ups* (since retired), so closing this
 plan doesn't lose them:
 
 - **`includeContext` injection + agent-context redaction** (C2) — a new
@@ -361,7 +362,7 @@ This plan closes when:
   the ConfigSnapshot.
 - The client passes the full suite over **both stdio and Streamable
   HTTP**; clippy + fmt clean.
-- Deferred items are captured here + in `backlog.md`.
+- Deferred items are captured here + in the issue tracker.
 - **Both** [`2026-05-28-mcp-client-full-spec.md`](2026-05-28-mcp-client-full-spec.md)
   and this plan move to `docs/plans/closed/`.
 

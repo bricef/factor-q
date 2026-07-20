@@ -34,7 +34,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - [ADRs](docs/adrs/) — architectural decision records ([accepted](docs/adrs/accepted/), [draft](docs/adrs/draft/))
 - [Phase 1 (closed)](docs/plans/closed/2026-04-02-phase-1-foundation.md) — what shipped in the walking skeleton
 - [Phase 2 (active)](docs/plans/active/2026-04-11-phase-2-mcp-and-memory.md) — MCP, memory, and skills
-- [Backlog](docs/plans/backlog.md) — deferred work
+- [Issues](https://github.com/bricef/factor-q/issues) — deferred work and the dispatch queue
 
 ## Technology
 
@@ -68,7 +68,7 @@ factor-q/
 │   ├── adrs/                  Architectural decision records
 │   ├── design/                Event schema, storage and scaling specs
 │   ├── guide/                 User-facing guides (agent authoring)
-│   └── plans/                 Phase plans, backlog
+│   └── plans/                 Phase plans (active + closed)
 │
 ├── VISION.md
 ├── ARCHITECTURE.md

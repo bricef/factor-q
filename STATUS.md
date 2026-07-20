@@ -78,7 +78,7 @@ crash DST, budget properties, soak — seven real bugs found and fixed
 by it; `just soak` scales the lifecycle driver for deep local runs).
 The dogfood loop **lands PRs**: alongside the daily read-and-report
 `doc-drift` agent (fq-cron-scheduled; findings feed the
-[backlog](docs/plans/backlog.md)), the `github-watcher` adapter triggers
+issue tracker), the `github-watcher` adapter triggers
 an `m0-issue-fix` agent on `ready`-labelled issues (agent definitions in
 `~/fq-dogfood`, outside the repo); the agent makes the change in a
 sandboxed working copy, validates with `just ci`, and opens a PR behind
@@ -105,5 +105,5 @@ rolling `main-latest` deploy channel is built — see
 
 [Quickstart](QUICKSTART.md) · [Architecture](ARCHITECTURE.md) ·
 [Vision](VISION.md) · [Active plans](docs/plans/active/) ·
-[Backlog](docs/plans/backlog.md) · [ADRs](docs/adrs/) ·
+[Issues](https://github.com/bricef/factor-q/issues) · [ADRs](docs/adrs/) ·
 [Guides](docs/guide/)

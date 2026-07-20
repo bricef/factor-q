@@ -314,5 +314,6 @@ These subsystems from the vision are not implemented:
 - Continuous learning
 - Container-level isolation (ADR-0010 accepted: containers by default, Kata+Firecracker upgrade path)
 - Scheduled triggers / internal job scheduler
-- Observability floor beyond `fq status` (JSON logs, metrics,
-  alerting — deferred in the [backlog](docs/plans/backlog.md))
+- Observability floor beyond `fq status` (JSON logs landed, #36;
+  metrics + lag alerting tracked in
+  [#342](https://github.com/bricef/factor-q/issues/342))

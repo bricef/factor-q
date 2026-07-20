@@ -276,7 +276,7 @@ definition). In-context injection into the current invocation
 is the fallback for agents without a spawn grant.
 
 *Forward-link, not in scope here.* Subagent spawning is
-unbuilt backlog (`backlog.md` → Agent concurrency primitives,
+unbuilt (`agent-orchestration-tools.md` → *Decided spawn semantics*,
 resolved 2026-05-28: parent-owned definitions, capabilities
 attenuate ⊆ parent, budget reserved from the parent). Step 4
 only needs to *produce* the seed value; the future Spawn
@@ -323,8 +323,7 @@ transcript.
   `PromptMessageContent` (through 1.7) and rejects it on the wire, so
   audio prompt content can't reach our capture layer yet. Our owned
   `PromptContent::Audio` is spec-canonical and ready. Reported +
-  fixed upstream (`rust-sdk#864` / PR `#865`); tracked in
-  `docs/plans/backlog.md`.
+  fixed upstream (`rust-sdk#864` / PR `#865`); tracked in #341.
 
 *`prompts/list_changed` handling* is folded into Step 7 (utilities /
 `list_changed` cache refresh) rather than duplicated here.

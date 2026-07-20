@@ -15,8 +15,8 @@ The motivation comes from two directions:
 
 - **Off-the-shelf types.** Once agents spawn typed sub-tasks
   (`spawn(definition, seed, [OutputType])`, see
-  [`backlog.md`](../../plans/backlog.md) → Agent concurrency
-  primitives), they need to *name* the types they pass and
+  [`agent-orchestration-tools.md`](agent-orchestration-tools.md) §
+  *Decided spawn semantics*), they need to *name* the types they pass and
   return. Reconstructing `ReportSummary` ad-hoc at every call
   site is wasteful and breaks composability — two agents'
   independently-built `ReportSummary` schemas may not match.
@@ -184,7 +184,7 @@ return.
   access-filtering and tool-not-prompt scaling discipline.
 - **Fragment registry** — the name/tag sibling and the
   reverse-index precedent.
-- **Typed spawn** (`backlog.md`) — the primary consumer:
+- **Typed spawn** (`agent-orchestration-tools.md` § *Decided spawn semantics*) — the primary consumer:
   off-the-shelf `OutputType`, and discover-which-to-spawn.
 - **ADR-0016 (typed operations, no free-form APIs)** — why
   discovery returns typed signatures, never prose matches.

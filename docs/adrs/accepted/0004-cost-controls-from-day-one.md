@@ -25,8 +25,8 @@ Autonomous agents spending money without human oversight is a first-order risk. 
 
 ## Budget conservation under delegation (added 2026-05-28)
 
-When agents spawn sub-agents (see `docs/plans/backlog.md` →
-Agent concurrency primitives), the cost model extends with one
+When agents spawn sub-agents (see [§ Decided spawn
+semantics](../../design/aspirational/agent-orchestration-tools.md)), the cost model extends with one
 invariant, stated here as the authoritative rule:
 
 > **A parent's budget bounds the total spend of its entire
