@@ -228,7 +228,7 @@ times) apply to non-UTC jobs and are on the operator.
 Directory `adapters/fq-cron`, binary `fq-cron`. Descriptive-by-function
 like `github-watcher`, distinctive enough to live on a `PATH`, and it
 reads as part of the `fqd` / `fq` family
-([draft ADR-0031](../../docs/adrs/draft/0031-daemon-cli-split.md)).
+([ADR-0031](../../docs/adrs/accepted/0031-daemon-cli-split.md)).
 
 ## Configuration reference
 

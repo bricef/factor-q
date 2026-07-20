@@ -1,6 +1,6 @@
 # Daemon / CLI split — execution plan for `fqd` + `fq` (ADR-0031)
 
-Turning [ADR-0031](../../adrs/draft/0031-daemon-cli-split.md) into PR-sized
+Turning [ADR-0031](../../adrs/accepted/0031-daemon-cli-split.md) into PR-sized
 slices: split the single `fq` binary into a daemon (`fqd`) and a thin operator
 CLI (`fq`) that speaks one typed tarpc **`ControlService`**, authenticated by a
 shared secret over TLS.

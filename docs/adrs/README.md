@@ -17,6 +17,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0003](accepted/0003-model-agnostic-per-agent.md) | Model-agnostic, per-agent model selection |
 | [0004](accepted/0004-cost-controls-from-day-one.md) | Cost controls from day one (per-invocation budget; sampling/elicitation sub-budget attribution) |
 | [0005](accepted/0005-agent-definition-format.md) | Agent definition format — Markdown + YAML frontmatter |
+| [0006](accepted/0006-registry-first-api.md) | Registry-first runtime API — typed operations, CQRS surface, derived interfaces; replaces the prior draft, amends ADR-0031 (Appendix A) |
 | [0009](accepted/0009-technology-choices.md) | Technology choices (Rust runtime) |
 | [0010](accepted/0010-agent-execution-isolation.md) | Agent execution isolation (containers by default; nothing-by-default sandbox) |
 | [0011](accepted/0011-event-bus-and-persistence.md) | Event bus and persistence (NATS + JetStream) — persistence/source-of-truth role partially superseded by [ADR-0026](accepted/0026-event-log-system-of-record.md); bus role stands |
@@ -39,15 +40,14 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0028](accepted/0028-tool-scoped-isolation-and-workspace.md) | Tool-scoped isolation + a harness-owned virtual filesystem (safe by construction); supersedes ADR-0010's agent-scoped unit of isolation |
 | [0029](accepted/0029-fuse-binding-crate.md) | FUSE binding crate for the harness-owned VFS is `fuse-backend-rs` (`fuse3` fallback), chosen by a blind bake-off; refines ADR-0028 |
 | [0030](accepted/0030-object-manifest-gc-back-off.md) | Object/manifest GC uses back-off (no generations) — objects get the block protocol's claim CAS + reserve-before-rely, but a writer meeting a claimed object retries rather than minting a generation; TLC-checked, refines ADR-0023 (F2) |
+| [0031](accepted/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; shared-secret-over-TLS auth as swappable middleware |
 
 ## Draft
 
 | ADR | Decision |
 |---|---|
-| [0006](draft/0006-api-design.md) | Runtime API design |
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
-| [0031](draft/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; shared-secret-over-TLS auth as swappable middleware |
 | [0032](draft/0032-exactly-once-trigger-dispatch.md) | Trigger dispatch is exactly-once by durable claim (trigger inbox in NATS KV, CAS-arbitrated), not by ack timing; broker responsibility ends at the post-claim ack |
 
 ## Related guides
