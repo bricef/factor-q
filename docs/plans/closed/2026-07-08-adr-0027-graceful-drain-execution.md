@@ -2,7 +2,18 @@
 
 # Graceful-drain deploys — execution plan for `fq drain` (ADR-0027)
 
-**Status:** draft (2026-07-08). The buildable execution plan for
+**Status:** closed (2026-07-20) — executed. PR-1..3 landed (the suspend
+primitive `0d95940`, dispatcher-stops-on-drain `bc94a84`, the drain
+command `9493720`; SIGTERM runs the bounded drain, `9cf781b`); PR-4's
+manual deploy script was deliberately dropped in favour of the hermetic
+CD pipeline that landed as #102, and the drain verb was since folded
+into `fq down` (#271). Of the deferred items below, the two with
+operational teeth are now tracked as issues —
+[#338](https://github.com/bricef/factor-q/issues/338) (versioned
+definition snapshots) and
+[#339](https://github.com/bricef/factor-q/issues/339) (deploy
+health-check + rollback); the rest stay recorded here as design notes
+for the v2 worker split. Originally the buildable execution plan for
 [ADR-0027](../../adrs/accepted/0027-graceful-drain-deploys.md) ("deploys are a
 graceful drain — suspend and resume, not kill-and-replace"). It grounds the
 ADR's decision in the current runtime, resolves the drain-signal mechanism
@@ -237,10 +248,11 @@ Notes:
   with. That requires durably **caching versioned graph and agent-definition
   snapshots** keyed per invocation — which we do not do today. **Captured here
   as deliberate tech-debt to revisit**, and it compounds once the
-  [graph executor](2026-07-07-graph-executor-two-node-vertical.md) lands (a
+  [graph executor](../active/2026-07-07-graph-executor-two-node-vertical.md) lands (a
   multi-node traversal spanning a deploy would otherwise mix definition
   versions mid-graph). Naive resume-with-new-config ships first; the versioned
-  snapshot cache is the follow-up.
+  snapshot cache is the follow-up — now tracked in
+  [#338](https://github.com/bricef/factor-q/issues/338).
 - **Step-boundary reachability.** A step wrapping a long tool call (a `just ci`
   build, a minutes-long model call) will not reach a boundary quickly; the
   deadline _T_ bounds the wait, and the mid-step case inherits crash-recovery's
@@ -255,7 +267,8 @@ Notes:
   worth a deliberate decision when v2 is built.
 - **Health-check + rollback.** Definition (consumers connected? a synthetic
   trigger round-trips?) and the rollback mechanism (image pinning, versions
-  retained) — likely the companion ADR named above.
+  retained) — likely the companion ADR named above. Now tracked in
+  [#339](https://github.com/bricef/factor-q/issues/339).
 
 ## Interlocks
 
@@ -266,6 +279,6 @@ ack-on-dispatch; composes with
 and reuses the
 [ADR-0026](../../adrs/accepted/0026-event-log-system-of-record.md) event log to
 record a deploy as a first-class event. The safety-layer theme mirrors the
-trigger-side cost-control gap noted in the [backlog](../backlog.md): every place
+trigger-side cost-control gap tracked in [#42](https://github.com/bricef/factor-q/issues/42): every place
 autonomy replaces a human checkpoint needs a safety layer where the checkpoint
 was.

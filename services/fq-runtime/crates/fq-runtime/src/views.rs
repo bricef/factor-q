@@ -3,7 +3,7 @@
 //! `views` is the single read model behind every operator surface: the `fq`
 //! CLI read commands (as a formatter over these DTOs) and, later, the
 //! read-only tarpc service that backs the operator dashboard
-//! (`docs/plans/active/2026-07-10-operator-dashboard.md`). It opens the
+//! (`docs/plans/closed/2026-07-10-operator-dashboard.md`). It opens the
 //! projection, control-plane, and worker-WAL stores read-only against their
 //! per-store SQLite files and returns typed, `Serialize` view DTOs whose shape is owned
 //! here — deliberately decoupled from the internal `*Row` types so the wire /

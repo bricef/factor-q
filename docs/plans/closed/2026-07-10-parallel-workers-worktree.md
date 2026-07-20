@@ -1,6 +1,6 @@
 # In-executor parallelism — the fast route (fan-out + per-invocation worktrees)
 
-Status: **active plan** (2026-07-10). The interim, "Route A" path to running
+Status: **closed** (2026-07-20) — executed through Phase 3; closing entry at the end of the decision log. The interim, "Route A" path to running
 agent invocations concurrently on the dogfood fleet. The concurrency lives
 **inside a single `fq run` executor** — one daemon runs N jobs in parallel — not
 across multiple `fq run` processes. That in-executor concurrency is issue
@@ -351,3 +351,14 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   dogfood bound is now fully green; what remains is Phase 3 itself:**
   ops `fq.toml` (per_invocation + the bound) and the m0 agent-def
   migration to `${workspace}` with clone-first prompts.
+
+- **2026-07-20 — Phase 3 confirmed live; the plan closes.** The dogfood
+  instance runs `per_invocation = true` with
+  `max_concurrent_invocations = 4` (`~/fq-dogfood/fq.toml`, verified on
+  the box), and the in-repo dogfood agent definitions use
+  `${workspace}` with clone-first prompts. Concurrency has been
+  exercised in production by the M0 fleet — the #327 redelivery storm
+  ran under exactly this fleet saturation. The fleet-level cost cap
+  stays out of scope, tracked by #70's remaining box (#42 / ADR-0004).
+  Per the retirement clause above, the plain-dir per-invocation
+  workspace mechanism itself stands until the ADR-0028 VFS lands.

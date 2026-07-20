@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared control harness for the FUSE VFS bake-off.
-# Spec: docs/plans/active/2026-07-09-fuse-vfs-bakeoff.md
+# Spec: docs/plans/closed/2026-07-09-fuse-vfs-bakeoff.md
 #
 # Usage:
 #   run.sh <impl-binary>                 # run the default ladder against an impl + baseline

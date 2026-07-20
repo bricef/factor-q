@@ -4,7 +4,7 @@
 //! in-flight invocation suspend at its next step boundary — its state
 //! already checkpointed to the WAL — so the next binary's recovery can
 //! resume it. See
-//! `docs/plans/active/2026-07-08-adr-0027-graceful-drain-execution.md`.
+//! `docs/plans/closed/2026-07-08-adr-0027-graceful-drain-execution.md`.
 //!
 //! This module is the *domain* vocabulary for that signal; it
 //! deliberately carries no transport. In v1 the control-plane flips the

@@ -1,6 +1,6 @@
 # FUSE VFS bake-off — experiment spec
 
-**Status:** active · **Date:** 2026-07-09
+**Status:** closed (2026-07-20) — bake-off complete; the scored verdict is recorded below (fuse-backend-rs primary, fuse3 fallback) and promoted to [ADR-0029](../../adrs/accepted/0029-fuse-binding-crate.md) · **Date:** 2026-07-09
 
 ## Purpose
 
