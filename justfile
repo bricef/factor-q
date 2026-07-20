@@ -418,3 +418,19 @@ down: infra-down
 [no-cd]
 run: infra-up build-runtime
     cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- run
+
+# Deliberately spares .tools/ (pinned tooling, not a build product — see
+# .gitignore; `just install-nats` reprovisions it anyway) and .ci-timings
+# (the only record of where a killed CI run spent its time, #223).
+# Remove all build artefacts: Cargo target dirs, Go adapter binaries, dist/, TLC scratch.
+clean:
+    cd {{runtime_dir}} && just clean
+    cd {{store_dir}} && just clean
+    cd {{dashboard_dir}} && just clean
+    # fq-test-support has no justfile; clean it directly, as test-support-ci does.
+    cd {{test_support_dir}} && cargo clean
+    # Keep every standalone Go adapter on the same sweep (mirrors gate-adapters):
+    # `go clean` drops the dev binary, target/ holds `build-watcher`/`build-cron` output.
+    for module in adapters/*/go.mod; do dir="${module%/go.mod}"; (cd "$dir" && go clean && rm -rf target); done
+    rm -rf dist
+    rm -rf docs/design/states docs/design/committed/states
