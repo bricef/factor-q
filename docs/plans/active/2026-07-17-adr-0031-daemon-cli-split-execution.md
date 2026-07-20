@@ -1,5 +1,11 @@
 # Daemon / CLI split — execution plan for `fqd` + `fq` (ADR-0031)
 
+**Status:** superseded (2026-07-20) by the
+[joint ADR-0006 + ADR-0031 execution plan](2026-07-20-registry-and-split-execution.md).
+ADR-0006's Appendix A replaced the hand-enumerated `ControlService` this plan
+builds around with the derived registry edge; the golden-master net, the
+split-last ordering, and the settled auth decisions carry forward there.
+
 Turning [ADR-0031](../../adrs/accepted/0031-daemon-cli-split.md) into PR-sized
 slices: split the single `fq` binary into a daemon (`fqd`) and a thin operator
 CLI (`fq`) that speaks one typed tarpc **`ControlService`**, authenticated by a
