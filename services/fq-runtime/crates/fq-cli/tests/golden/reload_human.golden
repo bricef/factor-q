@@ -1,0 +1,2 @@
+Published reload signal on fq.control.reload.
+A running `fq run` daemon will re-read <AGENTS_DIR> and swap its registry for the next trigger.

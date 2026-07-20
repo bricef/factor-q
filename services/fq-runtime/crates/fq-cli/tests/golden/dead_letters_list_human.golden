@@ -1,0 +1,10 @@
+2 dead-lettered trigger(s), newest first:
+
+  2026-01-02 03:04:06  researcher  seq=12 via advisory
+      trigger exhausted after 5 deliveries (limit 5) [advisory]
+      payload: {"n":2}
+  2026-01-02 03:04:05  researcher  seq=11 via inline
+      trigger exhausted after 5 deliveries (limit 5) [inline]
+      payload: {"n":1}
+
+-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one

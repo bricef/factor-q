@@ -1,0 +1,8 @@
+{
+  "agent_id": "researcher",
+  "trigger_payload": {
+    "n": 2
+  },
+  "new_trigger_seq": 1,
+  "source_event_id": "00000000-0000-7000-8000-000000001022"
+}
