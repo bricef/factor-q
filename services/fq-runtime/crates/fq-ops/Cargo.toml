@@ -1,0 +1,25 @@
+[package]
+name = "fq-ops"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
+
+# The operation-registry contract crate (ADR-0006) and the sqlx-free
+# wire crate ADR-0031 calls for. A LEAF by design: no sqlx, no NATS,
+# no tokio, no tarpc — `fq` the thin client will depend on this crate
+# alone, so anything heavier added here leaks into the client binary.
+# tests/leaf_gate.rs enforces the list.
+
+[dependencies]
+schemars = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true
