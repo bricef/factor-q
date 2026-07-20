@@ -128,9 +128,10 @@ pub enum NextAction {
     CallToolsParallel(Vec<ToolCallRequest>),
     /// The invocation has completed. `text` is the agent's final
     /// output; `task_status` is the agent's own declaration of how the
-    /// task went (#125) — `Success` for the implicit terminal (a turn
-    /// with no tool calls), the declared value when the turn called
-    /// `report_outcome`.
+    /// task went (#125), carried by the terminal `report_outcome`
+    /// call — the only completion path. A turn with no tool calls
+    /// does not complete: the harness answers it with a corrective
+    /// notice and another model turn.
     Complete {
         text: String,
         task_status: crate::events::TaskStatus,

@@ -46,9 +46,10 @@ impl Tool for ReportOutcomeTool {
          of whether the runtime worked: `success` (goal achieved), \
          `failed` (goal not achieved), `blocked` (could not proceed — \
          say what blocked you), `partial` (some of the goal delivered). \
-         Ending your turn with no tool calls is equivalent to declaring \
-         success; use this tool whenever the honest status is anything \
-         else, with a summary a human can act on."
+         This call is the only way to end your run: a turn with no \
+         tool calls does not finish anything — the harness asks you \
+         to continue. Every run ends with this call, whatever the \
+         status, with a summary a human can act on."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -82,8 +83,8 @@ impl Tool for ReportOutcomeTool {
         Err(ToolError::ExecutionFailed(format!(
             "report_outcome was not accepted as a terminal declaration — \
              check the arguments: `status` must be one of {TASK_STATUS_VALUES:?} \
-             and `summary` a string. Correct the call, or end your turn with \
-             no tool calls to finish as success."
+             and `summary` a string. Correct the call and declare again — \
+             the run does not end until a valid declaration is made."
         )))
     }
 }

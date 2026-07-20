@@ -346,13 +346,16 @@ different axes — the latter is `task_status`.
 
 **`task_status`** (#125): the agent's own declaration of how the *task*
 went — `success | failed | blocked | partial`, defaulting to `success`
-when absent (pre-#125 events, and runs that never declare). Orthogonal
+when absent (pre-#125 historical events; current runs cannot complete
+without declaring — an undeclared run ends as a `failed` event via
+budget/iteration exhaustion, not as `completed`). Orthogonal
 to the runtime axis: `failed` events with a `FailureKind` model runtime
 failure; `task_status` models "the runtime worked — was the goal
 achieved?". Declared via the terminal `report_outcome` tool, which the
 reducer harness intercepts as the terminal transition (never
-dispatched); a turn ending with no tool calls declares `success`
-implicitly.
+dispatched) — the only completion path; a turn ending with no tool
+calls is answered with a corrective host notice and another model
+turn, never an implicit `success`.
 
 ### `failed`
 
