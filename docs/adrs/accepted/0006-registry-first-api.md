@@ -305,7 +305,7 @@ fodder once the exemplars fix the pattern.
 
 ## References
 
-#84 · #166 · #183 · #190 · #200 · #261 · #264 · #139 ·
+See pul requests #84 · #166 · #183 · #190 · #200 · #261 · #264 · #139 ·
 ADR-0002 · ADR-0004 · ADR-0016 · ADR-0022 · ADR-0026 · ADR-0027 · ADR-0031 ·
 `docs/design/interface-inventory.md` (2026-07-18) ·
 github-watcher trigger wire contract · fq-store M2 access-control model.
