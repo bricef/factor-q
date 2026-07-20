@@ -8,7 +8,7 @@ graceful drain — suspend and resume, not kill-and-replace"). It grounds the
 ADR's decision in the current runtime, resolves the drain-signal mechanism
 against the real worker/control-plane boundary, and sequences the work into
 PR-sized steps. Prompted by the M0 flywheel
-([close-the-loop plan](2026-07-05-m0-close-the-loop.md)): the dogfood daemon is
+([close-the-loop plan](../closed/2026-07-05-m0-close-the-loop.md)): the dogfood daemon is
 redeployed by hand today — `pkill -INT` + rebuild + restart — a manual step
 that bottlenecks the loop as it accelerates and breaks the autonomy goal.
 
