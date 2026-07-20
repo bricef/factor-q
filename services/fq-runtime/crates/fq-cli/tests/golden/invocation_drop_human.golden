@@ -1,0 +1,3 @@
+Dropped invocation 3a000000-0000-7000-8000-000000000003 (agent=researcher, event_id=<UUID>).
+Reason: golden fixture drop
+Follow with `fq invocation show 3a000000-0000-7000-8000-000000000003` to confirm the archive row.

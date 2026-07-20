@@ -1,0 +1,26 @@
+[
+  {
+    "event_id": "00000000-0000-7000-8000-000000001022",
+    "timestamp": "2026-01-02T03:04:06Z",
+    "agent_id": "researcher",
+    "trigger_subject": "fq.trigger.researcher",
+    "trigger_stream_seq": 12,
+    "source": "advisory",
+    "trigger_payload": {
+      "n": 2
+    },
+    "error_message": "trigger exhausted after 5 deliveries (limit 5) [advisory]"
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001021",
+    "timestamp": "2026-01-02T03:04:05Z",
+    "agent_id": "researcher",
+    "trigger_subject": "fq.trigger.researcher",
+    "trigger_stream_seq": 11,
+    "source": "inline",
+    "trigger_payload": {
+      "n": 1
+    },
+    "error_message": "trigger exhausted after 5 deliveries (limit 5) [inline]"
+  }
+]

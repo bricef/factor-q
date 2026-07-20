@@ -1,0 +1,2 @@
+Published trigger for 'researcher' on fq.trigger.researcher
+A running `fq run` daemon will pick this up and dispatch it.
