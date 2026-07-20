@@ -131,7 +131,7 @@ impl ContentMeta {
 /// and reject it on the wire — so an audio prompt currently fails at
 /// fetch rather than reaching this layer. The variant is here so our
 /// representation is canonical and ready the day that gap closes
-/// (tracked in `docs/plans/backlog.md`).
+/// (tracked in issue #341).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PromptContent {

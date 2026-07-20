@@ -16,7 +16,7 @@ provider-errored WALs (6, deep soak), and synthetic tool errors
 invisible to replay (7, deep soak). Adopts critique 3 of the
 [2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
 and absorbs the "Round-trip invariants on `HarnessState`" thread of
-[backlog § Reducer boundary invariants](../backlog.md).
+backlog § Reducer boundary invariants (backlog since retired).
 
 The **"what"** and **"why"** live elsewhere — the reducer model in
 [ADR-0014](../../adrs/accepted/0014-agent-harness-as-reducer.md) and
@@ -344,7 +344,7 @@ slices 1–2 are immediately valuable even if later slices pause for M3.
 
 - [2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
   (critique 3) — why this, why now
-- [Backlog § Reducer boundary invariants](../backlog.md) — thread 2 absorbed
+- Backlog § Reducer boundary invariants (retired) — thread 2 absorbed
   here; threads 1 and 3 unchanged
 - [ADR-0014 — agent harness as reducer](../../adrs/accepted/0014-agent-harness-as-reducer.md)
   · [wasm-boundary-design](../../design/committed/wasm-boundary-design.md)

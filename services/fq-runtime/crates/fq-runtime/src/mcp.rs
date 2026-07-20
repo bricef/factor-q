@@ -1752,8 +1752,8 @@ pub fn render_resource_contents(result: &ReadResourceResult) -> String {
 /// rmcp 1.4–1.7 omit `Audio` from `PromptMessageContent` and reject
 /// it on the wire, so audio prompt content never reaches here (the
 /// fetch fails first). Our [`PromptContent`](crate::prompt::PromptContent)
-/// keeps the spec-canonical `Audio` variant regardless — see the
-/// `docs/plans/backlog.md` gap note.
+/// keeps the spec-canonical `Audio` variant regardless — the
+/// upgrade past rmcp 1.7 is issue #341.
 fn prompt_seed_from_rmcp(
     server: &str,
     name: &str,

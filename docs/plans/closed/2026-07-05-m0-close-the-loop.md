@@ -221,7 +221,7 @@ data.
    into the accept/reject step.
 3. **Run it** — on real scoped tasks, accumulate accepted changes, watch the
    proxies relative to the (concurrently accumulating) baseline. Feed the
-   gaps to the [backlog](../backlog.md), as the doc-drift loop already does.
+   gaps to the issue tracker, as the doc-drift loop already does.
 4. **The plot** — deferred until step 3 has produced enough points to be
    honest.
 

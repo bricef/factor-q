@@ -84,7 +84,7 @@ per the spec; the client never hangs.
   (`list`) and use (`get`) server prompts; there is no human
   menu. (A fetched prompt is a reusable seed value for a future
   sub-agent spawn — consumer side tracked in the plan and
-  [`backlog.md`](../../plans/backlog.md).)
+  [`agent-orchestration-tools.md` § Decided spawn semantics](../../design/aspirational/agent-orchestration-tools.md).)
 
 ### Cost attribution
 
@@ -103,7 +103,7 @@ reasoning.
 
 The sampling / elicitation / roots grants are capabilities, so
 they **attenuate ⊆ parent** when an agent spawns a sub-agent
-(per the spawn decisions in `backlog.md`). The sampling ceiling
+(per the spawn decisions in `agent-orchestration-tools.md`). The sampling ceiling
 is one line item inside the subtree budget bound established by
 ADR-0004 — a child can neither sample if its parent cannot, nor
 beyond the parent's ceiling.

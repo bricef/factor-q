@@ -44,8 +44,8 @@ what shipped, what was deferred, and where deferred items live.
 ### What was deferred
 
 The following items were in the original phase 1 scope as stretch
-goals and did not land. They are tracked in
-[`docs/plans/backlog.md`](../backlog.md):
+goals and did not land. They were parked in the backlog (since retired; the surviving
+residue lives in the issue tracker, e.g. #275):
 
 - **Hot-reload of agent definitions** — the runtime currently loads
   definitions once at start. Watching the agents directory and safely

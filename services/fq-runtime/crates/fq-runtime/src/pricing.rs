@@ -246,8 +246,8 @@ impl PricingTable {
                     // startup pricing guarantee still ensures declared
                     // models are *priced*; this flags that they may be
                     // *out of date* (runtime refresh is future work —
-                    // docs/plans/backlog.md, "Scheduled refresh of
-                    // pricing data").
+                    // issue #344, "Periodic LiteLLM pricing
+                    // refresh").
                     warn!(
                         entries = table.len(),
                         path = %cache_path.display(),

@@ -15,6 +15,94 @@ Three cross-cutting points worth calling out before the tool list:
 
 ---
 
+## Decided spawn semantics (2026-05-28)
+
+Recorded **decisions**, not wishlist — transplanted from the retired
+backlog (`docs/plans/backlog.md`, deleted 2026-07-20) where they were
+first written down, surfaced in the MCP prompt-as-subagent discussion
+(see
+[`2026-05-28-mcp-client-full-spec.md`](../../plans/closed/2026-05-28-mcp-client-full-spec.md)
+Step 4).
+[ADR-0004](../../adrs/accepted/0004-cost-controls-from-day-one.md) (the
+subtree budget bound) and
+[ADR-0017](../../adrs/accepted/0017-mcp-human-in-the-loop.md)
+(capability attenuation) cite this section as their authority;
+[`type-and-signature-discovery.md`](type-and-signature-discovery.md)
+builds on the typed spawn.
+
+- **The parent owns the child's definition.** A subagent is
+  spawned from a definition the parent supplies; an MCP server
+  declaration may pin a default definition for prompt-seeded
+  spawns. The agent's LLM may *choose* to spawn, but it does not
+  author privileges — it can only select from what the parent
+  already holds.
+- **Default definition: "same as me."** The common case is
+  delegating to a clone, so the parent's own definition is the
+  default child definition — same model, tools, MCP access, and
+  capability grants. Safe by construction: cloning cannot
+  escalate (the child's capability set equals the parent's, so
+  ⊆ holds trivially). Budget is the one field *not* cloned —
+  it's consumable, so it's apportioned per spawn (a sensible
+  default for the spawn-and-wait case is the parent's remaining
+  budget). An ergonomics shortcut, expected to dominate in
+  practice.
+- **Capabilities attenuate: child set ⊆ parent set**, across
+  every dimension — tools, MCP server access, the ADR-0017
+  sampling/elicitation/roots grants, and sandbox
+  (network/filesystem/env). A child can never hold a capability
+  its parent lacks. The relation is transitive, so any
+  descendant's capabilities ⊆ the root's.
+- **A parent's budget bounds its whole subtree's spend** —
+  children are *covered by* the parent, not independent. Parent
+  spend + all descendants' spend never exceeds the parent's
+  budget (recursively, the whole spawn tree ≤ the root budget). A
+  per-child cap of "≤ parent's remaining" alone does **not**
+  bound a fan-out (N children each capped at the parent's
+  remaining could collectively spend N×). Stated as the
+  authoritative rule in
+  [ADR-0004](../../adrs/accepted/0004-cost-controls-from-day-one.md).
+  The *enforcement mechanism* — reservation/escrow vs. the
+  aggregate-and-halt "Inheritance rule" (§ *Budgets on spawn*
+  below) — is an open choice deferred to spawn-build time. The
+  ADR-0017 sampling sub-budget is one line item inside the same
+  bound.
+- **Enforced by the runtime at spawn time, not by the LLM.** The
+  runtime rejects a child definition requesting budget or
+  capabilities exceeding the parent's — mirroring ADR-0017's
+  "the runtime is the only gate" principle.
+- **The spawn carries a typed deliverable:
+  `spawn(definition, seed, [OutputType])`.** A subagent is a
+  typed function, so its result must conform to a declared
+  schema — an untyped result would be the free-form API ADR-0016
+  forbids. **Rule: the deliverable must be typed at one end** —
+  either the agent definition's signature (`deliverable_schema`)
+  or the call-site `OutputType`. A specialized agent inherits its
+  definition's output; a generic / "same as me" clone is typed by
+  the caller — the dynamic analog of a typed graph edge,
+  `spawn::<T>(definition, seed) -> T`. If neither end types it,
+  that is a definition error, not a free-form escape hatch — so
+  `OutputType` is most load-bearing for the "same as me" case
+  above.
+- **Deliverable validation is harness-enforced, reusing existing
+  machinery.** The harness validates the subagent's deliverable
+  against the effective type; non-conformance drives the
+  retry-as-feedback loop (inter-node-contracts §3 /
+  storage-taxonomy §9) so the subagent self-corrects, and after N
+  failures it surfaces as a typed spawn failure the parent
+  handles. `OutputType` composes with the size-aware placement
+  wrappers — `Promoted<T>` auto-routes a large deliverable to the
+  artifact store so the parent receives an `ArtifactRef`.
+  Fire-and-forget spawns carry no `OutputType`; only the
+  result-bearing variants (Join / Pipeline / Fan-in) do.
+  Exploratory agents still type their deliverable, with a looser
+  schema.
+
+Still open: where scheduling lives, and how concurrency limits
+(max concurrent agents) are enforced — likely the same treatment
+as budget. Related: the task engine subsystem in
+[`ARCHITECTURE.md`](../../../ARCHITECTURE.md), which owns
+fan-out/fan-in and dependency graphs.
+
 ## Foundation
 
 The runtime executes one kind of thing: a graph of agent nodes. `AgentGraph` is the substrate; `AgentSpawn`, `AgentMap`, and `AgentLoop` are sugar that compiles to graph instances. Two other concerns live at this layer because they're orthogonal to which sugar you reached for: durable handles (how running work is identified and persisted) and result sinks (how completed work surfaces its output to the outside world).
