@@ -904,6 +904,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fq-ops"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "fq-runtime"
 version = "0.1.0"
 dependencies = [
