@@ -133,7 +133,7 @@ struct PublishInput {
 
 impl Command for TriggerPublish {
     const DOMAIN: Domain = Domain::Trigger;
-    const LEAF: &'static str = "publish";
+    const VERB: &'static str = "publish";
     type Input = PublishInput;
     const AUTHORITY: Authority = Authority {
         verb: Verb::Write,
@@ -166,7 +166,7 @@ impl Resource for ControlR {
 }
 
 /// invocation.drop: a domain verb — declared at one site: identity
-/// (resource + leaf), input, authority, and contract text all here.
+/// (resource + verb), input, authority, and contract text all here.
 struct InvocationDrop;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -177,7 +177,7 @@ struct DropInput {
 
 impl Command for InvocationDrop {
     const DOMAIN: Domain = Domain::Invocation;
-    const LEAF: &'static str = "drop";
+    const VERB: &'static str = "drop";
     type Input = DropInput;
     const AUTHORITY: Authority = Authority {
         verb: Verb::Write,
@@ -202,7 +202,7 @@ struct DownInput {
 
 impl Command for ControlDown {
     const DOMAIN: Domain = Domain::Control;
-    const LEAF: &'static str = "down";
+    const VERB: &'static str = "down";
     type Input = DownInput;
     const AUTHORITY: Authority = Authority {
         verb: Verb::Write,
@@ -313,14 +313,14 @@ fn duplicate_registration_is_refused() {
     );
 }
 
-/// A declared leaf that collides with a derived generic name is caught
-/// at registration — the one guarantee the leaf strings owe us.
+/// A declared verb that collides with a derived generic name is caught
+/// at registration — the one guarantee the verb strings owe us.
 #[test]
-fn leaf_collision_with_the_derived_surface_is_refused() {
+fn verb_collision_with_the_derived_surface_is_refused() {
     struct BadLeaf;
     impl Command for BadLeaf {
         const DOMAIN: Domain = Domain::Invocation;
-        const LEAF: &'static str = "get";
+        const VERB: &'static str = "get";
         type Input = DropInput;
         const AUTHORITY: Authority = InvocationDrop::AUTHORITY;
         const META: OpMeta = InvocationDrop::META;
@@ -428,10 +428,10 @@ fn wire_encoding_is_native_not_rendered() {
     let verb = ControlDown::op();
     assert_eq!(
         serde_json::to_string(&verb).unwrap(),
-        r#"{"verb":{"domain":"control","leaf":"down"}}"#
+        r#"{"verb":{"domain":"control","verb":"down"}}"#
     );
     assert_eq!(
-        serde_json::from_str::<OpId>(r#"{"verb":{"domain":"control","leaf":"down"}}"#).unwrap(),
+        serde_json::from_str::<OpId>(r#"{"verb":{"domain":"control","verb":"down"}}"#).unwrap(),
         verb
     );
     assert_eq!(verb.to_string(), "control.down");

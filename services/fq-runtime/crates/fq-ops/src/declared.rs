@@ -5,7 +5,7 @@
 //! would bury.
 //!
 //! A declaration is **one site**: the impl carries its own identity
-//! (the resource it attaches to and its leaf name, or a report's
+//! (the resource it attaches to and its verb name, or a report's
 //! name), its types, its authority, and its contract text. Adding a
 //! verb is writing the impl and registering it — no enum to extend,
 //! no match to update, nowhere else to touch. Identity collisions are
@@ -28,9 +28,9 @@ use crate::opid::OpId;
 /// derivation would get wrong.
 pub trait Command {
     const DOMAIN: Domain;
-    /// The verb's leaf name; renders as `{resource}.{leaf}`. Opaque
+    /// The verb word itself; renders as `{resource}.{verb}`. Opaque
     /// identity plus documentation — never parsed.
-    const LEAF: &'static str;
+    const VERB: &'static str;
     const VERSION: u32 = 1;
     type Input: Serialize + DeserializeOwned + JsonSchema;
     const AUTHORITY: Authority;
@@ -40,7 +40,7 @@ pub trait Command {
     fn op() -> OpId {
         OpId::Verb {
             domain: Self::DOMAIN,
-            leaf: Self::LEAF.to_string(),
+            verb: Self::VERB.to_string(),
         }
     }
 }
