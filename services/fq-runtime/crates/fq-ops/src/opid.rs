@@ -22,7 +22,6 @@ use crate::catalogue::Domain;
 pub enum OpId {
     Get(Domain),
     List(Domain),
-    Create(Domain),
     Stream(Domain),
     Verb { domain: Domain, leaf: String },
     Report { name: String },
@@ -38,7 +37,6 @@ pub enum OpId {
 pub enum OpCategory {
     Get,
     List,
-    Create,
     Stream,
     DomainVerb,
     Report,
@@ -49,7 +47,6 @@ impl OpId {
         match self {
             OpId::Get(_) => OpCategory::Get,
             OpId::List(_) => OpCategory::List,
-            OpId::Create(_) => OpCategory::Create,
             OpId::Stream(_) => OpCategory::Stream,
             OpId::Verb { .. } => OpCategory::DomainVerb,
             OpId::Report { .. } => OpCategory::Report,
@@ -62,7 +59,6 @@ impl std::fmt::Display for OpId {
         match self {
             OpId::Get(r) => write!(f, "{}.get", r.segment()),
             OpId::List(r) => write!(f, "{}.list", r.segment()),
-            OpId::Create(r) => write!(f, "{}.create", r.segment()),
             OpId::Stream(r) => write!(f, "{}.stream", r.segment()),
             OpId::Verb { domain, leaf } => write!(f, "{}.{leaf}", domain.segment()),
             OpId::Report { name } => f.write_str(name),

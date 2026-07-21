@@ -367,80 +367,6 @@
   },
   {
     "op": {
-      "create": "trigger"
-    },
-    "name": "trigger.create",
-    "category": "create",
-    "nature": null,
-    "version": 1,
-    "authority": [
-      {
-        "verb": "write",
-        "scope": "trigger"
-      }
-    ],
-    "description": "exemplar resource",
-    "stability": "experimental",
-    "caveats": "",
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "TriggerCreate",
-      "type": "object",
-      "properties": {
-        "agent_id": {
-          "type": "string"
-        },
-        "payload": true
-      },
-      "required": [
-        "agent_id",
-        "payload"
-      ]
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "Receipt",
-      "description": "A command's output: references to the atoms it appended, never\nstate (D3, P4). Freshness is the caller's to compose — a receipt's\nwatermark feeds the next read's `min_seq` for read-your-writes.",
-      "type": "object",
-      "properties": {
-        "events": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/EventRef"
-          }
-        }
-      },
-      "required": [
-        "events"
-      ],
-      "$defs": {
-        "EventRef": {
-          "description": "Reference to one atom a command appended (D3): subject, stream,\nand the event-log sequence — which is also the universal cursor\n(P5).",
-          "type": "object",
-          "properties": {
-            "seq": {
-              "type": "integer",
-              "format": "uint64",
-              "minimum": 0
-            },
-            "stream": {
-              "type": "string"
-            },
-            "subject": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "subject",
-            "stream",
-            "seq"
-          ]
-        }
-      }
-    }
-  },
-  {
-    "op": {
       "get": "trigger"
     },
     "name": "trigger.get",
@@ -544,6 +470,83 @@
         "agent_id",
         "payload"
       ]
+    }
+  },
+  {
+    "op": {
+      "verb": {
+        "domain": "trigger",
+        "leaf": "publish"
+      }
+    },
+    "name": "trigger.publish",
+    "category": "domain_verb",
+    "nature": null,
+    "version": 1,
+    "authority": [
+      {
+        "verb": "write",
+        "scope": "trigger"
+      }
+    ],
+    "description": "Dispatch a trigger to an agent via the durable trigger stream.",
+    "stability": "experimental",
+    "caveats": "at-least-once delivery with a bounded budget; the receipt references the appended trigger atom",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "PublishInput",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "payload": true
+      },
+      "required": [
+        "agent_id",
+        "payload"
+      ]
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "Receipt",
+      "description": "A command's output: references to the atoms it appended, never\nstate (D3, P4). Freshness is the caller's to compose — a receipt's\nwatermark feeds the next read's `min_seq` for read-your-writes.",
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventRef"
+          }
+        }
+      },
+      "required": [
+        "events"
+      ],
+      "$defs": {
+        "EventRef": {
+          "description": "Reference to one atom a command appended (D3): subject, stream,\nand the event-log sequence — which is also the universal cursor\n(P5).",
+          "type": "object",
+          "properties": {
+            "seq": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "stream": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "subject",
+            "stream",
+            "seq"
+          ]
+        }
+      }
     }
   },
   {
