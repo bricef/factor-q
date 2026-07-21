@@ -21,7 +21,13 @@ use serde::{Deserialize, Serialize};
 // edge (plan Phases 2–3); these pin the shape a definition takes.
 // ------------------------------------------------------------------
 
-/// Turn: an atom — Get/List/Stream derive.
+/// Turn: an atom — Get/List/Stream derive. Tabletop vocabulary
+/// (settled in review): a **Turn** is one action — an assistant
+/// output or a tool result — and a **Round** is the bundle of Turns
+/// in one agent-loop iteration (the ADR-0027 step boundary is a Round
+/// boundary). Rounds are not a resource: they are recoverable from
+/// the turn stream via the `round` grouping key, and become a view
+/// over Turns if round-level reads ever earn a catalogue row.
 struct TurnR;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -33,6 +39,7 @@ struct EntryKey {
 struct EntryState {
     seq: u64,
     invocation_id: String,
+    round: u64,
     role: String,
     content: String,
 }

@@ -645,6 +645,11 @@
         "role": {
           "type": "string"
         },
+        "round": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "seq": {
           "type": "integer",
           "format": "uint64",
@@ -654,6 +659,7 @@
       "required": [
         "seq",
         "invocation_id",
+        "round",
         "role",
         "content"
       ]
@@ -712,6 +718,11 @@
         "role": {
           "type": "string"
         },
+        "round": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "seq": {
           "type": "integer",
           "format": "uint64",
@@ -721,6 +732,7 @@
       "required": [
         "seq",
         "invocation_id",
+        "round",
         "role",
         "content"
       ]
@@ -779,6 +791,11 @@
         "role": {
           "type": "string"
         },
+        "round": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "seq": {
           "type": "integer",
           "format": "uint64",
@@ -788,6 +805,7 @@
       "required": [
         "seq",
         "invocation_id",
+        "round",
         "role",
         "content"
       ]
