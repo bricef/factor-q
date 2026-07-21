@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 
-use crate::catalogue::{AtomResource, CreatableResource, Nature, ResourceType};
+use crate::catalogue::{Atom, Creatable, Nature, Resource};
 use crate::declared::{Command, Report};
 use crate::meta::{Authority, Stability, Verb};
 use crate::opid::{OpCategory, OpId};
@@ -82,7 +82,7 @@ impl Registry {
         Ok(())
     }
 
-    fn insert_generic<R: ResourceType>(
+    fn insert_generic<R: Resource>(
         &mut self,
         op: OpId,
         nature: Option<Nature>,
@@ -102,7 +102,7 @@ impl Registry {
             version: R::VERSION,
             authority: vec![Authority {
                 verb: authority,
-                scope: R::ID,
+                scope: R::DOMAIN,
             }],
             description: docs.summary,
             stability: docs.stability,
@@ -112,20 +112,20 @@ impl Registry {
         })
     }
 
-    fn insert_read_surface<R: ResourceType>(
+    fn insert_read_surface<R: Resource>(
         &mut self,
         nature: Nature,
         docs: ResourceDocs,
     ) -> Result<(), RegistryError> {
         self.insert_generic::<R>(
-            OpId::Get(R::ID),
+            OpId::Get(R::DOMAIN),
             Some(nature),
             docs,
             schema_for!(R::Key),
             schema_for!(R::State),
         )?;
         self.insert_generic::<R>(
-            OpId::List(R::ID),
+            OpId::List(R::DOMAIN),
             Some(nature),
             docs,
             schema_for!(R::Filter),
@@ -135,23 +135,17 @@ impl Registry {
 
     /// Register a view: Get + List derive, answering as of a
     /// watermark. Views are never streamed — stream their atoms.
-    pub fn register_view<R: ResourceType>(
-        &mut self,
-        docs: ResourceDocs,
-    ) -> Result<(), RegistryError> {
+    pub fn register_view<R: Resource>(&mut self, docs: ResourceDocs) -> Result<(), RegistryError> {
         self.insert_read_surface::<R>(Nature::View, docs)
     }
 
     /// Register an atom: Get + List + Stream derive. The
-    /// [`AtomResource`] bound makes "only atoms stream" a compile-time
+    /// [`Atom`] bound makes "only atoms stream" a compile-time
     /// fact.
-    pub fn register_atom<R: AtomResource>(
-        &mut self,
-        docs: ResourceDocs,
-    ) -> Result<(), RegistryError> {
+    pub fn register_atom<R: Atom>(&mut self, docs: ResourceDocs) -> Result<(), RegistryError> {
         self.insert_read_surface::<R>(Nature::Atom, docs)?;
         self.insert_generic::<R>(
-            OpId::Stream(R::ID),
+            OpId::Stream(R::DOMAIN),
             Some(Nature::Atom),
             docs,
             schema_for!(R::Filter),
@@ -163,12 +157,12 @@ impl Registry {
     /// describing itself. Nothing else derives (no atoms behind it,
     /// nothing to list or stream); its verbs register separately as
     /// commands.
-    pub fn register_synthetic<R: ResourceType>(
+    pub fn register_synthetic<R: Resource>(
         &mut self,
         docs: ResourceDocs,
     ) -> Result<(), RegistryError> {
         self.insert_generic::<R>(
-            OpId::Get(R::ID),
+            OpId::Get(R::DOMAIN),
             Some(Nature::Synthetic),
             docs,
             schema_for!(R::Key),
@@ -178,12 +172,12 @@ impl Registry {
 
     /// Register Create for an opted-in resource (additive to its read
     /// surface; authority derives to Write on the resource).
-    pub fn register_create<R: CreatableResource>(
+    pub fn register_create<R: Creatable>(
         &mut self,
         docs: ResourceDocs,
     ) -> Result<(), RegistryError> {
         self.insert_generic::<R>(
-            OpId::Create(R::ID),
+            OpId::Create(R::DOMAIN),
             None,
             docs,
             schema_for!(R::CreateInput),

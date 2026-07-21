@@ -15,7 +15,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::catalogue::ResourceId;
+use crate::catalogue::Domain;
 use crate::meta::{Authority, OpMeta};
 use crate::opid::OpId;
 
@@ -27,7 +27,7 @@ use crate::opid::OpId;
 /// the semantics that make a verb bespoke are exactly what generic
 /// derivation would get wrong.
 pub trait Command {
-    const RESOURCE: ResourceId;
+    const DOMAIN: Domain;
     /// The verb's leaf name; renders as `{resource}.{leaf}`. Opaque
     /// identity plus documentation — never parsed.
     const LEAF: &'static str;
@@ -39,7 +39,7 @@ pub trait Command {
     /// This command's wire identity.
     fn op() -> OpId {
         OpId::Verb {
-            resource: Self::RESOURCE,
+            domain: Self::DOMAIN,
             leaf: Self::LEAF.to_string(),
         }
     }
@@ -58,7 +58,7 @@ pub trait Report {
     const VERSION: u32 = 1;
     type Params: Serialize + DeserializeOwned + JsonSchema;
     type Output: Serialize + DeserializeOwned + JsonSchema;
-    const READS: &'static [ResourceId];
+    const READS: &'static [Domain];
     const META: OpMeta;
 
     /// This report's wire identity.

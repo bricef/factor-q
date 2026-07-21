@@ -11,8 +11,8 @@
 //! and reads a home and a permission scope.
 //!
 //! Generic operations (Get, List, Create, and the Stream overlay)
-//! derive from a catalogue entry — one [`ResourceType`] impl buys a
-//! resource its whole read surface. Adding a resource to [`ResourceId`]
+//! derive from a catalogue entry — one [`Resource`] impl buys a
+//! resource its whole read surface. Adding a resource to [`Domain`]
 //! is the P11 curation gate.
 
 use schemars::JsonSchema;
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
-pub enum ResourceId {
+pub enum Domain {
     Agent,
     Control,
     DeadLetter,
@@ -49,7 +49,7 @@ pub enum ResourceId {
     Worker,
 }
 
-impl ResourceId {
+impl Domain {
     /// The rendered name segment (`transcript_entry`, `dead_letter`).
     pub fn segment(&self) -> &'static str {
         self.into()
@@ -75,10 +75,10 @@ pub enum Nature {
 ///
 /// The nature is not declared here: it is determined by how the
 /// resource is registered (`register_atom` vs `register_view`), with
-/// the [`AtomResource`] bound making "only atoms stream" a
+/// the [`Atom`] bound making "only atoms stream" a
 /// compile-time fact rather than a review rule.
-pub trait ResourceType {
-    const ID: ResourceId;
+pub trait Resource {
+    const DOMAIN: Domain;
     /// Schema version for this resource's wire types (P10): additive
     /// changes keep it, observable breaks bump it.
     const VERSION: u32 = 1;
@@ -90,11 +90,11 @@ pub trait ResourceType {
 /// Marker: this resource is an atom — immutable once created, and
 /// therefore streamable ("send me resources of type X, at or after
 /// sequence S, as soon as they exist").
-pub trait AtomResource: ResourceType {}
+pub trait Atom: Resource {}
 
 /// Marker: operators may create this resource (rare by design —
 /// Trigger today, Traversal when the graph executor lands). Create is
 /// per-resource opt-in where the read surface is uniform.
-pub trait CreatableResource: ResourceType {
+pub trait Creatable: Resource {
     type CreateInput: Serialize + DeserializeOwned + JsonSchema;
 }

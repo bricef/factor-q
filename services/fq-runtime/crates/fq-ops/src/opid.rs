@@ -13,18 +13,18 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::catalogue::ResourceId;
+use crate::catalogue::Domain;
 
 /// Every operation the surface can carry, natively serializable for
 /// the tarpc edge.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OpId {
-    Get(ResourceId),
-    List(ResourceId),
-    Create(ResourceId),
-    Stream(ResourceId),
-    Verb { resource: ResourceId, leaf: String },
+    Get(Domain),
+    List(Domain),
+    Create(Domain),
+    Stream(Domain),
+    Verb { domain: Domain, leaf: String },
     Report { name: String },
 }
 
@@ -64,7 +64,7 @@ impl std::fmt::Display for OpId {
             OpId::List(r) => write!(f, "{}.list", r.segment()),
             OpId::Create(r) => write!(f, "{}.create", r.segment()),
             OpId::Stream(r) => write!(f, "{}.stream", r.segment()),
-            OpId::Verb { resource, leaf } => write!(f, "{}.{leaf}", resource.segment()),
+            OpId::Verb { domain, leaf } => write!(f, "{}.{leaf}", domain.segment()),
             OpId::Report { name } => f.write_str(name),
         }
     }
