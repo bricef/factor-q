@@ -3,7 +3,7 @@
     "op": {
       "verb": {
         "domain": "control",
-        "leaf": "down"
+        "verb": "down"
       }
     },
     "name": "control.down",
@@ -174,7 +174,7 @@
     "op": {
       "verb": {
         "domain": "invocation",
-        "leaf": "drop"
+        "verb": "drop"
       }
     },
     "name": "invocation.drop",
@@ -476,7 +476,7 @@
     "op": {
       "verb": {
         "domain": "trigger",
-        "leaf": "publish"
+        "verb": "publish"
       }
     },
     "name": "trigger.publish",

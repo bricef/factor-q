@@ -10,7 +10,7 @@
 //! describing itself) and the input to client-wrapper codegen.
 //!
 //! Registration is where identity collisions surface (the one
-//! guarantee the declared leaf strings owe us), as [`RegistryError::Duplicate`].
+//! guarantee the declared verb strings owe us), as [`RegistryError::Duplicate`].
 
 use std::collections::BTreeMap;
 
@@ -171,7 +171,7 @@ impl Registry {
 
     /// Register a domain verb. Output is always a receipt (D3) — the
     /// trait has no output type to get wrong. Identity comes from the
-    /// impl itself; a leaf that collides with anything already
+    /// impl itself; a verb that collides with anything already
     /// registered (including a derived generic name) is refused here.
     pub fn register_command<C: Command>(&mut self) -> Result<(), RegistryError> {
         let op = C::op();

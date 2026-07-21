@@ -4,7 +4,7 @@
 //! declared. Rendered names derive from structure for
 //! self-documentation (MCP tool names, docs, List(Operation)) —
 //! nothing parses them, ever; equality is the only operation the
-//! declared leaf strings support.
+//! declared verb strings support.
 //!
 //! Machinery reads have no variant here: Control is a synthetic
 //! resource, so "ask the machinery about itself" is just
@@ -23,7 +23,7 @@ pub enum OpId {
     Get(Domain),
     List(Domain),
     Stream(Domain),
-    Verb { domain: Domain, leaf: String },
+    Verb { domain: Domain, verb: String },
     Report { name: String },
 }
 
@@ -60,7 +60,7 @@ impl std::fmt::Display for OpId {
             OpId::Get(r) => write!(f, "{}.get", r.segment()),
             OpId::List(r) => write!(f, "{}.list", r.segment()),
             OpId::Stream(r) => write!(f, "{}.stream", r.segment()),
-            OpId::Verb { domain, leaf } => write!(f, "{}.{leaf}", domain.segment()),
+            OpId::Verb { domain, verb } => write!(f, "{}.{verb}", domain.segment()),
             OpId::Report { name } => f.write_str(name),
         }
     }
