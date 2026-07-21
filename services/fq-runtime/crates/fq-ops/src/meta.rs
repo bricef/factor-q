@@ -4,7 +4,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::catalogue::ResourceId;
+use crate::catalogue::Domain;
 
 /// Permission verb vocabulary — mirrors fq-store's grant model
 /// (`grants.rs`: `Verb` × scope, enforced by biscuit tokens) so both
@@ -28,7 +28,7 @@ pub enum Verb {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Authority {
     pub verb: Verb,
-    pub scope: ResourceId,
+    pub scope: Domain,
 }
 
 /// Registry curation state (P11). Deprecation is a first-class

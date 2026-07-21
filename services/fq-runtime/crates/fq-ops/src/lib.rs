@@ -5,10 +5,10 @@
 //! Four categories of boundary promise, mirroring the domain model:
 //!
 //! - **Resources** ([`catalogue`]): atoms, views, and synthetic
-//!   resources. One [`ResourceType`] impl derives a resource's whole
+//!   resources. One [`Resource`] impl derives a resource's whole
 //!   generic read surface — Get + List, Stream for atoms
-//!   ([`AtomResource`]), Create where opted in
-//!   ([`CreatableResource`]) — with derived authority.
+//!   ([`Atom`]), Create where opted in
+//!   ([`Creatable`]) — with derived authority.
 //! - **Domain verbs** ([`declared`]): the bespoke commands whose
 //!   semantics are the contract; output is always a [`Receipt`] by
 //!   construction (D3). A declaration is one site — the impl carries
@@ -31,7 +31,7 @@ pub mod opid;
 pub mod registry;
 pub mod wire;
 
-pub use catalogue::{AtomResource, CreatableResource, Nature, ResourceId, ResourceType};
+pub use catalogue::{Atom, Creatable, Domain, Nature, Resource};
 pub use declared::{Command, Report};
 pub use meta::{Authority, OpMeta, Stability, Verb};
 pub use opid::{OpCategory, OpId};

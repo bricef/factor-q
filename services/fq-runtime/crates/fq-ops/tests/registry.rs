@@ -10,8 +10,8 @@
 //! with `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
 use fq_ops::{
-    AtomResource, Authority, Command, CreatableResource, Nature, OpCategory, OpId, OpMeta,
-    Registry, RegistryError, Report, ResourceDocs, ResourceId, ResourceType, Stability, Verb,
+    Atom, Authority, Command, Creatable, Domain, Nature, OpCategory, OpId, OpMeta, Registry,
+    RegistryError, Report, Resource, ResourceDocs, Stability, Verb,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,13 +44,13 @@ struct EntryFilter {
     limit: Option<u32>,
 }
 
-impl ResourceType for TranscriptEntryR {
-    const ID: ResourceId = ResourceId::TranscriptEntry;
+impl Resource for TranscriptEntryR {
+    const DOMAIN: Domain = Domain::TranscriptEntry;
     type Key = EntryKey;
     type State = EntryState;
     type Filter = EntryFilter;
 }
-impl AtomResource for TranscriptEntryR {}
+impl Atom for TranscriptEntryR {}
 
 /// Invocation: a view — Get/List derive; no Stream (stream its atoms).
 struct InvocationR;
@@ -75,8 +75,8 @@ struct InvocationFilter {
     limit: Option<u32>,
 }
 
-impl ResourceType for InvocationR {
-    const ID: ResourceId = ResourceId::Invocation;
+impl Resource for InvocationR {
+    const DOMAIN: Domain = Domain::Invocation;
     type Key = InvocationKey;
     type State = InvocationState;
     type Filter = InvocationFilter;
@@ -109,14 +109,14 @@ struct TriggerCreate {
     payload: serde_json::Value,
 }
 
-impl ResourceType for TriggerR {
-    const ID: ResourceId = ResourceId::Trigger;
+impl Resource for TriggerR {
+    const DOMAIN: Domain = Domain::Trigger;
     type Key = TriggerKey;
     type State = TriggerState;
     type Filter = TriggerFilter;
 }
-impl AtomResource for TriggerR {}
-impl CreatableResource for TriggerR {
+impl Atom for TriggerR {}
+impl Creatable for TriggerR {
     type CreateInput = TriggerCreate;
 }
 
@@ -131,8 +131,8 @@ struct ControlState {
     stream_ok: bool,
 }
 
-impl ResourceType for ControlR {
-    const ID: ResourceId = ResourceId::Control;
+impl Resource for ControlR {
+    const DOMAIN: Domain = Domain::Control;
     type Key = ();
     type State = ControlState;
     type Filter = ();
@@ -149,12 +149,12 @@ struct DropInput {
 }
 
 impl Command for InvocationDrop {
-    const RESOURCE: ResourceId = ResourceId::Invocation;
+    const DOMAIN: Domain = Domain::Invocation;
     const LEAF: &'static str = "drop";
     type Input = DropInput;
     const AUTHORITY: Authority = Authority {
         verb: Verb::Write,
-        scope: ResourceId::Invocation,
+        scope: Domain::Invocation,
     };
     const META: OpMeta = OpMeta {
         description: "Drop an in-flight invocation, archiving it as failed.",
@@ -174,12 +174,12 @@ struct DownInput {
 }
 
 impl Command for ControlDown {
-    const RESOURCE: ResourceId = ResourceId::Control;
+    const DOMAIN: Domain = Domain::Control;
     const LEAF: &'static str = "down";
     type Input = DownInput;
     const AUTHORITY: Authority = Authority {
         verb: Verb::Write,
-        scope: ResourceId::Control,
+        scope: Domain::Control,
     };
     const META: OpMeta = OpMeta {
         description: "Stop the daemon, draining in-flight work to a step boundary.",
@@ -207,7 +207,7 @@ impl Report for CostSummary {
     const NAME: &'static str = "cost.summary";
     type Params = CostParams;
     type Output = CostOutput;
-    const READS: &'static [ResourceId] = &[ResourceId::Event];
+    const READS: &'static [Domain] = &[Domain::Event];
     const META: OpMeta = OpMeta {
         description: "Aggregate cost across all agents.",
         stability: Stability::Experimental,
@@ -292,7 +292,7 @@ fn duplicate_registration_is_refused() {
 fn leaf_collision_with_the_derived_surface_is_refused() {
     struct BadLeaf;
     impl Command for BadLeaf {
-        const RESOURCE: ResourceId = ResourceId::Invocation;
+        const DOMAIN: Domain = Domain::Invocation;
         const LEAF: &'static str = "get";
         type Input = DropInput;
         const AUTHORITY: Authority = InvocationDrop::AUTHORITY;
@@ -318,27 +318,24 @@ fn authority_derivation() {
     };
     assert_eq!(
         registry
-            .get(&OpId::Stream(ResourceId::TranscriptEntry))
+            .get(&OpId::Stream(Domain::TranscriptEntry))
             .unwrap()
             .authority,
-        vec![read(ResourceId::TranscriptEntry)]
+        vec![read(Domain::TranscriptEntry)]
     );
     assert_eq!(
         registry
-            .get(&OpId::Create(ResourceId::Trigger))
+            .get(&OpId::Create(Domain::Trigger))
             .unwrap()
             .authority,
         vec![Authority {
             verb: Verb::Write,
-            scope: ResourceId::Trigger
+            scope: Domain::Trigger
         }]
     );
     assert_eq!(
-        registry
-            .get(&OpId::Get(ResourceId::Control))
-            .unwrap()
-            .authority,
-        vec![read(ResourceId::Control)]
+        registry.get(&OpId::Get(Domain::Control)).unwrap().authority,
+        vec![read(Domain::Control)]
     );
     assert_eq!(
         registry.get(&ControlDown::op()).unwrap().authority,
@@ -352,25 +349,18 @@ fn authority_derivation() {
 #[test]
 fn natures_and_categories() {
     let registry = exemplar_registry();
-    assert!(
-        registry
-            .get(&OpId::Stream(ResourceId::Invocation))
-            .is_none()
-    );
-    assert!(registry.get(&OpId::List(ResourceId::Control)).is_none());
-    assert!(registry.get(&OpId::Stream(ResourceId::Control)).is_none());
+    assert!(registry.get(&OpId::Stream(Domain::Invocation)).is_none());
+    assert!(registry.get(&OpId::List(Domain::Control)).is_none());
+    assert!(registry.get(&OpId::Stream(Domain::Control)).is_none());
     assert_eq!(
         registry
-            .get(&OpId::List(ResourceId::Invocation))
+            .get(&OpId::List(Domain::Invocation))
             .unwrap()
             .nature,
         Some(Nature::View)
     );
     assert_eq!(
-        registry
-            .get(&OpId::Get(ResourceId::Control))
-            .unwrap()
-            .nature,
+        registry.get(&OpId::Get(Domain::Control)).unwrap().nature,
         Some(Nature::Synthetic)
     );
     assert_eq!(
@@ -408,7 +398,7 @@ fn receipt_watermark_is_the_highest_appended_seq() {
 /// (which would break client/daemon compatibility) is a visible diff.
 #[test]
 fn wire_encoding_is_native_not_rendered() {
-    let op = OpId::Stream(ResourceId::TranscriptEntry);
+    let op = OpId::Stream(Domain::TranscriptEntry);
     let encoded = serde_json::to_string(&op).unwrap();
     assert_eq!(encoded, r#"{"stream":"transcript_entry"}"#);
     assert_eq!(serde_json::from_str::<OpId>(&encoded).unwrap(), op);
@@ -417,10 +407,10 @@ fn wire_encoding_is_native_not_rendered() {
     let verb = ControlDown::op();
     assert_eq!(
         serde_json::to_string(&verb).unwrap(),
-        r#"{"verb":{"resource":"control","leaf":"down"}}"#
+        r#"{"verb":{"domain":"control","leaf":"down"}}"#
     );
     assert_eq!(
-        serde_json::from_str::<OpId>(r#"{"verb":{"resource":"control","leaf":"down"}}"#).unwrap(),
+        serde_json::from_str::<OpId>(r#"{"verb":{"domain":"control","leaf":"down"}}"#).unwrap(),
         verb
     );
     assert_eq!(verb.to_string(), "control.down");

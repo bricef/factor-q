@@ -2,7 +2,7 @@
   {
     "op": {
       "verb": {
-        "resource": "control",
+        "domain": "control",
         "leaf": "down"
       }
     },
@@ -173,7 +173,7 @@
   {
     "op": {
       "verb": {
-        "resource": "invocation",
+        "domain": "invocation",
         "leaf": "drop"
       }
     },
