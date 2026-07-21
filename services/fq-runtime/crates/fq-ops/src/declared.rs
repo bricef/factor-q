@@ -1,91 +1,46 @@
 //! The declared surface: what stays hand-written because it is
-//! semantically bespoke — five domain verbs, three reports, three
-//! machinery reads. Everything else derives from the catalogue, and
-//! that division is the model's own line: what remains declared is
-//! exactly what a generic verb would bury.
+//! semantically bespoke — the domain verbs and the reports. Everything
+//! else derives from the catalogue, and that division is the model's
+//! own line: what remains declared is exactly what a generic verb
+//! would bury.
+//!
+//! A declaration is **one site**: the impl carries its own identity
+//! (the resource it attaches to and its leaf name, or a report's
+//! name), its types, its authority, and its contract text. Adding a
+//! verb is writing the impl and registering it — no enum to extend,
+//! no match to update, nowhere else to touch. Identity collisions are
+//! caught at registration (the trivial test the strings owe us).
 
 use schemars::JsonSchema;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 
 use crate::catalogue::ResourceId;
 use crate::meta::{Authority, OpMeta};
+use crate::opid::OpId;
 
-// ------------------------------------------------------------------
-// Domain verbs
-// ------------------------------------------------------------------
-
-/// Wire identity of each bespoke command. The `resource`/`leaf` pair
-/// is the declaration (compiler-exhaustive, colocated here), and the
-/// rendered name derives from it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DomainVerbId {
-    InvocationDrop,
-    DeadletterRequeue,
-    WorkerPrune,
-    ControlDown,
-    ControlReload,
-}
-
-impl DomainVerbId {
-    /// The resource this verb attaches to — verbs attach to resources
-    /// everywhere in the model, machinery verbs to the synthetic
-    /// `Control` resource.
-    pub fn resource(&self) -> ResourceId {
-        match self {
-            DomainVerbId::InvocationDrop => ResourceId::Invocation,
-            DomainVerbId::DeadletterRequeue => ResourceId::Trigger,
-            DomainVerbId::WorkerPrune => ResourceId::Worker,
-            DomainVerbId::ControlDown => ResourceId::Control,
-            DomainVerbId::ControlReload => ResourceId::Control,
-        }
-    }
-
-    pub fn leaf(&self) -> &'static str {
-        match self {
-            DomainVerbId::InvocationDrop => "drop",
-            DomainVerbId::DeadletterRequeue => "requeue",
-            DomainVerbId::WorkerPrune => "prune",
-            DomainVerbId::ControlDown => "down",
-            DomainVerbId::ControlReload => "reload",
-        }
-    }
-}
-
-/// A bespoke command. Its output is always a [`crate::wire::Receipt`]
-/// — commands return references to the atoms they appended, never
-/// state (D3); there is no `Output` to declare, so the rule cannot be
-/// broken. Authority is declared, not derived: the semantics that make
-/// a verb bespoke are exactly what generic derivation would get wrong.
+/// A bespoke command, attached to a resource — machinery verbs attach
+/// to the synthetic `Control` resource. Its output is always a
+/// [`crate::wire::Receipt`] — commands return references to the atoms
+/// they appended, never state (D3); there is no `Output` to declare,
+/// so the rule cannot be broken. Authority is declared, not derived:
+/// the semantics that make a verb bespoke are exactly what generic
+/// derivation would get wrong.
 pub trait Command {
-    const ID: DomainVerbId;
+    const RESOURCE: ResourceId;
+    /// The verb's leaf name; renders as `{resource}.{leaf}`. Opaque
+    /// identity plus documentation — never parsed.
+    const LEAF: &'static str;
     const VERSION: u32 = 1;
     type Input: Serialize + DeserializeOwned + JsonSchema;
     const AUTHORITY: Authority;
     const META: OpMeta;
-}
 
-// ------------------------------------------------------------------
-// Reports
-// ------------------------------------------------------------------
-
-/// Wire identity of each report. Reports are named computations, not
-/// resource reads, so their rendered names are declared here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ReportId {
-    CostSummary,
-    CostByAgent,
-    Doctor,
-}
-
-impl ReportId {
-    pub fn render(&self) -> &'static str {
-        match self {
-            ReportId::CostSummary => "cost.summary",
-            ReportId::CostByAgent => "cost.by_agent",
-            ReportId::Doctor => "runtime.doctor",
+    /// This command's wire identity.
+    fn op() -> OpId {
+        OpId::Verb {
+            resource: Self::RESOURCE,
+            leaf: Self::LEAF.to_string(),
         }
     }
 }
@@ -96,45 +51,20 @@ impl ReportId {
 /// declares the resource scopes the computation consumes; authority
 /// is Read on each.
 pub trait Report {
-    const ID: ReportId;
+    /// The report's full rendered name (`cost.summary`). Reports are
+    /// not resource-attached, so the name is free-standing — declared
+    /// here, never parsed.
+    const NAME: &'static str;
     const VERSION: u32 = 1;
     type Params: Serialize + DeserializeOwned + JsonSchema;
     type Output: Serialize + DeserializeOwned + JsonSchema;
     const READS: &'static [ResourceId];
     const META: OpMeta;
-}
 
-// ------------------------------------------------------------------
-// The meta surface
-// ------------------------------------------------------------------
-
-/// Wire identity of the machinery reads — a flat, closed set (bring
-/// taxonomy when it stops being closed). All scope to the synthetic
-/// `Control` resource for authority: Read control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum MetaReadId {
-    Health,
-    Status,
-    Version,
-}
-
-impl MetaReadId {
-    pub fn render(&self) -> &'static str {
-        match self {
-            MetaReadId::Health => "control.health",
-            MetaReadId::Status => "control.status",
-            MetaReadId::Version => "control.version",
+    /// This report's wire identity.
+    fn op() -> OpId {
+        OpId::Report {
+            name: Self::NAME.to_string(),
         }
     }
-}
-
-/// One machinery read: questions about the daemon itself, not the
-/// records — the old "Probe" misfit, now outside the resource model
-/// but behind the same edge and authority semantics.
-pub trait MetaRead {
-    const ID: MetaReadId;
-    const VERSION: u32 = 1;
-    type Output: Serialize + DeserializeOwned + JsonSchema;
-    const META: OpMeta;
 }

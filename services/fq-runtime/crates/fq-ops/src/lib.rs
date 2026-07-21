@@ -9,12 +9,13 @@
 //!   generic read surface — Get + List, Stream for atoms
 //!   ([`AtomResource`]), Create where opted in
 //!   ([`CreatableResource`]) — with derived authority.
-//! - **Domain verbs** ([`declared`]): the five bespoke commands whose
+//! - **Domain verbs** ([`declared`]): the bespoke commands whose
 //!   semantics are the contract; output is always a [`Receipt`] by
-//!   construction (D3).
+//!   construction (D3). A declaration is one site — the impl carries
+//!   its identity, types, authority, and contract text.
 //! - **Reports**: named, typed computations over resources.
-//! - **Machinery reads**: the flat meta surface, scoped to the
-//!   synthetic `Control` resource.
+//! - **Machinery reads**: `Get` on the synthetic `Control` resource —
+//!   no category of their own.
 //!
 //! This crate holds the *contract only* — the catalogue, the declared
 //! traits, the self-describing [`Registry`], and the generic wire
@@ -31,7 +32,7 @@ pub mod registry;
 pub mod wire;
 
 pub use catalogue::{AtomResource, CreatableResource, Nature, ResourceId, ResourceType};
-pub use declared::{Command, DomainVerbId, MetaRead, MetaReadId, Report, ReportId};
+pub use declared::{Command, Report};
 pub use meta::{Authority, OpMeta, Stability, Verb};
 pub use opid::{OpCategory, OpId};
 pub use registry::{OpDescriptor, Registry, RegistryError, ResourceDocs};

@@ -1,19 +1,23 @@
 //! The registry: the catalogue of promises, self-describing.
 //!
-//! Resources register once and receive their derived read surface
-//! (Get + List, Stream for atoms, Create where opted in) with derived
-//! authority; the declared surface (domain verbs, reports, machinery
-//! reads) registers per definition with declared authority. Every
-//! entry becomes an [`OpDescriptor`] — the payload of `Operation`'s
-//! own List (the surface describing itself) and the input to
-//! client-wrapper codegen.
+//! Resources register once and receive their derived surface: views
+//! Get + List, atoms Get + List + Stream, synthetic resources Get
+//! alone, Create where opted in — all with derived authority. The
+//! declared surface (domain verbs, reports) registers per definition
+//! with declared authority and identity, so adding a verb touches its
+//! impl and one register call, nothing else. Every entry becomes an
+//! [`OpDescriptor`] — the payload of List(Operation) (the surface
+//! describing itself) and the input to client-wrapper codegen.
+//!
+//! Registration is where identity collisions surface (the one
+//! guarantee the declared leaf strings owe us), as [`RegistryError::Duplicate`].
 
 use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 
-use crate::catalogue::{AtomResource, CreatableResource, Nature, ResourceId, ResourceType};
-use crate::declared::{Command, MetaRead, Report};
+use crate::catalogue::{AtomResource, CreatableResource, Nature, ResourceType};
+use crate::declared::{Command, Report};
 use crate::meta::{Authority, Stability, Verb};
 use crate::opid::{OpCategory, OpId};
 
@@ -46,16 +50,15 @@ pub enum RegistryError {
 }
 
 /// Descriptions for a resource's derived operations. The catalogue
-/// entry defines the types once; these strings let `describe` say what
-/// each derived op means for *this* resource.
+/// entry defines the types once; these strings let List(Operation)
+/// say what each derived op means for *this* resource.
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceDocs {
     pub stability: Stability,
-    /// Description for Get; List/Stream/Create descriptions derive
-    /// from it mechanically.
+    /// Description for the derived surface.
     pub summary: &'static str,
-    /// Caveats shared by the resource's whole read surface (retention
-    /// bounds, fold semantics). Empty means "none".
+    /// Caveats shared by the resource's whole derived surface
+    /// (retention bounds, fold semantics). Empty means "none".
     pub caveats: &'static str,
 }
 
@@ -79,41 +82,55 @@ impl Registry {
         Ok(())
     }
 
+    fn insert_generic<R: ResourceType>(
+        &mut self,
+        op: OpId,
+        nature: Option<Nature>,
+        docs: ResourceDocs,
+        input_schema: Schema,
+        output_schema: Schema,
+    ) -> Result<(), RegistryError> {
+        let authority = match op.category() {
+            OpCategory::Create => Verb::Write,
+            _ => Verb::Read,
+        };
+        self.insert(OpDescriptor {
+            name: op.to_string(),
+            category: op.category(),
+            op,
+            nature,
+            version: R::VERSION,
+            authority: vec![Authority {
+                verb: authority,
+                scope: R::ID,
+            }],
+            description: docs.summary,
+            stability: docs.stability,
+            caveats: docs.caveats,
+            input_schema,
+            output_schema,
+        })
+    }
+
     fn insert_read_surface<R: ResourceType>(
         &mut self,
         nature: Nature,
         docs: ResourceDocs,
     ) -> Result<(), RegistryError> {
-        let read = Authority {
-            verb: Verb::Read,
-            scope: R::ID,
-        };
-        self.insert(OpDescriptor {
-            op: OpId::Get(R::ID),
-            name: OpId::Get(R::ID).to_string(),
-            category: OpCategory::Get,
-            nature: Some(nature),
-            version: R::VERSION,
-            authority: vec![read],
-            description: docs.summary,
-            stability: docs.stability,
-            caveats: docs.caveats,
-            input_schema: schema_for!(R::Key),
-            output_schema: schema_for!(R::State),
-        })?;
-        self.insert(OpDescriptor {
-            op: OpId::List(R::ID),
-            name: OpId::List(R::ID).to_string(),
-            category: OpCategory::List,
-            nature: Some(nature),
-            version: R::VERSION,
-            authority: vec![read],
-            description: docs.summary,
-            stability: docs.stability,
-            caveats: docs.caveats,
-            input_schema: schema_for!(R::Filter),
-            output_schema: schema_for!(R::State),
-        })
+        self.insert_generic::<R>(
+            OpId::Get(R::ID),
+            Some(nature),
+            docs,
+            schema_for!(R::Key),
+            schema_for!(R::State),
+        )?;
+        self.insert_generic::<R>(
+            OpId::List(R::ID),
+            Some(nature),
+            docs,
+            schema_for!(R::Filter),
+            schema_for!(R::State),
+        )
     }
 
     /// Register a view: Get + List derive, answering as of a
@@ -133,22 +150,30 @@ impl Registry {
         docs: ResourceDocs,
     ) -> Result<(), RegistryError> {
         self.insert_read_surface::<R>(Nature::Atom, docs)?;
-        self.insert(OpDescriptor {
-            op: OpId::Stream(R::ID),
-            name: OpId::Stream(R::ID).to_string(),
-            category: OpCategory::Stream,
-            nature: Some(Nature::Atom),
-            version: R::VERSION,
-            authority: vec![Authority {
-                verb: Verb::Read,
-                scope: R::ID,
-            }],
-            description: docs.summary,
-            stability: docs.stability,
-            caveats: docs.caveats,
-            input_schema: schema_for!(R::Filter),
-            output_schema: schema_for!(R::State),
-        })
+        self.insert_generic::<R>(
+            OpId::Stream(R::ID),
+            Some(Nature::Atom),
+            docs,
+            schema_for!(R::Filter),
+            schema_for!(R::State),
+        )
+    }
+
+    /// Register a synthetic resource: Get alone — the machinery
+    /// describing itself. Nothing else derives (no atoms behind it,
+    /// nothing to list or stream); its verbs register separately as
+    /// commands.
+    pub fn register_synthetic<R: ResourceType>(
+        &mut self,
+        docs: ResourceDocs,
+    ) -> Result<(), RegistryError> {
+        self.insert_generic::<R>(
+            OpId::Get(R::ID),
+            Some(Nature::Synthetic),
+            docs,
+            schema_for!(R::Key),
+            schema_for!(R::State),
+        )
     }
 
     /// Register Create for an opted-in resource (additive to its read
@@ -157,31 +182,25 @@ impl Registry {
         &mut self,
         docs: ResourceDocs,
     ) -> Result<(), RegistryError> {
-        self.insert(OpDescriptor {
-            op: OpId::Create(R::ID),
-            name: OpId::Create(R::ID).to_string(),
-            category: OpCategory::Create,
-            nature: None,
-            version: R::VERSION,
-            authority: vec![Authority {
-                verb: Verb::Write,
-                scope: R::ID,
-            }],
-            description: docs.summary,
-            stability: docs.stability,
-            caveats: docs.caveats,
-            input_schema: schema_for!(R::CreateInput),
-            output_schema: schema_for!(crate::wire::Receipt),
-        })
+        self.insert_generic::<R>(
+            OpId::Create(R::ID),
+            None,
+            docs,
+            schema_for!(R::CreateInput),
+            schema_for!(crate::wire::Receipt),
+        )
     }
 
     /// Register a domain verb. Output is always a receipt (D3) — the
-    /// trait has no output type to get wrong.
+    /// trait has no output type to get wrong. Identity comes from the
+    /// impl itself; a leaf that collides with anything already
+    /// registered (including a derived generic name) is refused here.
     pub fn register_command<C: Command>(&mut self) -> Result<(), RegistryError> {
+        let op = C::op();
         self.insert(OpDescriptor {
-            op: OpId::Verb(C::ID),
-            name: OpId::Verb(C::ID).to_string(),
+            name: op.to_string(),
             category: OpCategory::DomainVerb,
+            op,
             nature: None,
             version: C::VERSION,
             authority: vec![C::AUTHORITY],
@@ -196,10 +215,11 @@ impl Registry {
     /// Register a report. Authority derives to Read on each consumed
     /// scope.
     pub fn register_report<R: Report>(&mut self) -> Result<(), RegistryError> {
+        let op = R::op();
         self.insert(OpDescriptor {
-            op: OpId::Report(R::ID),
-            name: OpId::Report(R::ID).to_string(),
+            name: op.to_string(),
             category: OpCategory::Report,
+            op,
             nature: None,
             version: R::VERSION,
             authority: R::READS
@@ -217,28 +237,7 @@ impl Registry {
         })
     }
 
-    /// Register a machinery read. Authority derives to Read on the
-    /// synthetic `Control` resource.
-    pub fn register_meta_read<M: MetaRead>(&mut self) -> Result<(), RegistryError> {
-        self.insert(OpDescriptor {
-            op: OpId::MetaRead(M::ID),
-            name: OpId::MetaRead(M::ID).to_string(),
-            category: OpCategory::MetaRead,
-            nature: None,
-            version: M::VERSION,
-            authority: vec![Authority {
-                verb: Verb::Read,
-                scope: ResourceId::Control,
-            }],
-            description: M::META.description,
-            stability: M::META.stability,
-            caveats: M::META.caveats,
-            input_schema: schema_for!(()),
-            output_schema: schema_for!(M::Output),
-        })
-    }
-
-    pub fn get(&self, op: OpId) -> Option<&OpDescriptor> {
+    pub fn get(&self, op: &OpId) -> Option<&OpDescriptor> {
         self.ops.get(&op.to_string())
     }
 

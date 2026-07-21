@@ -1,11 +1,84 @@
 [
   {
     "op": {
-      "meta_read": "health"
+      "verb": {
+        "resource": "control",
+        "leaf": "down"
+      }
     },
-    "name": "control.health",
-    "category": "meta_read",
+    "name": "control.down",
+    "category": "domain_verb",
     "nature": null,
+    "version": 1,
+    "authority": [
+      {
+        "verb": "write",
+        "scope": "control"
+      }
+    ],
+    "description": "Stop the daemon, draining in-flight work to a step boundary.",
+    "stability": "experimental",
+    "caveats": "confirmation is the shutdown event, not the ack",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "DownInput",
+      "type": "object",
+      "properties": {
+        "now": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "Receipt",
+      "description": "A command's output: references to the atoms it appended, never\nstate (D3, P4). Freshness is the caller's to compose — a receipt's\nwatermark feeds the next read's `min_seq` for read-your-writes.",
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EventRef"
+          }
+        }
+      },
+      "required": [
+        "events"
+      ],
+      "$defs": {
+        "EventRef": {
+          "description": "Reference to one atom a command appended (D3): subject, stream,\nand the event-log sequence — which is also the universal cursor\n(P5).",
+          "type": "object",
+          "properties": {
+            "seq": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "stream": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "subject",
+            "stream",
+            "seq"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "op": {
+      "get": "control"
+    },
+    "name": "control.get",
+    "category": "get",
+    "nature": "synthetic",
     "version": 1,
     "authority": [
       {
@@ -13,7 +86,7 @@
         "scope": "control"
       }
     ],
-    "description": "Liveness of the daemon's infrastructure (NATS, streams).",
+    "description": "exemplar resource",
     "stability": "experimental",
     "caveats": "",
     "input_schema": {
@@ -23,7 +96,7 @@
     },
     "output_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "HealthOutput",
+      "title": "ControlState",
       "type": "object",
       "properties": {
         "nats_connected": {
@@ -31,9 +104,13 @@
         },
         "stream_ok": {
           "type": "boolean"
+        },
+        "version": {
+          "type": "string"
         }
       },
       "required": [
+        "version",
         "nats_connected",
         "stream_ok"
       ]
@@ -41,7 +118,9 @@
   },
   {
     "op": {
-      "report": "cost_summary"
+      "report": {
+        "name": "cost.summary"
+      }
     },
     "name": "cost.summary",
     "category": "report",
@@ -93,7 +172,10 @@
   },
   {
     "op": {
-      "verb": "invocation_drop"
+      "verb": {
+        "resource": "invocation",
+        "leaf": "drop"
+      }
     },
     "name": "invocation.drop",
     "category": "domain_verb",
