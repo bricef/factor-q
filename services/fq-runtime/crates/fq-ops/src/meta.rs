@@ -22,9 +22,9 @@ pub enum Verb {
 }
 
 /// What an operation requires of its caller: a verb over a resource
-/// scope. Derived for the generic surface (reads ⇒ `Read` on the
-/// resource, Create ⇒ `Write`); declared manually by domain verbs and
-/// reports — always manually on the synthetic `Control` resource.
+/// scope. The generic surface derives `Read` on the resource — and
+/// nothing else, because it is read-only; every write on the surface
+/// belongs to a domain verb, which declares its authority manually.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Authority {
     pub verb: Verb,

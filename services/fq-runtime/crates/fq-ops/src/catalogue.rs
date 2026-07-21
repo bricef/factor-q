@@ -10,10 +10,12 @@
 //! nothing derives for them; they exist to give the machinery's verbs
 //! and reads a home and a permission scope.
 //!
-//! Generic operations (Get, List, Create, and the Stream overlay)
-//! derive from a catalogue entry — one [`Resource`] impl buys a
-//! resource its whole read surface. Adding a resource to [`Domain`]
-//! is the P11 curation gate.
+//! Generic operations (Get, List, and the Stream overlay) derive from
+//! a catalogue entry — one [`Resource`] impl buys a resource its
+//! whole read surface, and the generic surface is read-only: creation
+//! is not a generic verb (operators command the machinery; atoms
+//! appear in the log as receipts), so every mutation is a declared
+//! command. Adding a resource to [`Domain`] is the P11 curation gate.
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -91,10 +93,3 @@ pub trait Resource {
 /// therefore streamable ("send me resources of type X, at or after
 /// sequence S, as soon as they exist").
 pub trait Atom: Resource {}
-
-/// Marker: operators may create this resource (rare by design —
-/// Trigger today, Traversal when the graph executor lands). Create is
-/// per-resource opt-in where the read surface is uniform.
-pub trait Creatable: Resource {
-    type CreateInput: Serialize + DeserializeOwned + JsonSchema;
-}

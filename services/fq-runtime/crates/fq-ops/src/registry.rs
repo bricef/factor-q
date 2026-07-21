@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 
-use crate::catalogue::{Atom, Creatable, Nature, Resource};
+use crate::catalogue::{Atom, Nature, Resource};
 use crate::declared::{Command, Report};
 use crate::meta::{Authority, Stability, Verb};
 use crate::opid::{OpCategory, OpId};
@@ -90,10 +90,9 @@ impl Registry {
         input_schema: Schema,
         output_schema: Schema,
     ) -> Result<(), RegistryError> {
-        let authority = match op.category() {
-            OpCategory::Create => Verb::Write,
-            _ => Verb::Read,
-        };
+        // The generic surface is read-only: every mutation on the
+        // whole surface is a declared command. Derived authority is
+        // therefore always Read.
         self.insert(OpDescriptor {
             name: op.to_string(),
             category: op.category(),
@@ -101,7 +100,7 @@ impl Registry {
             nature,
             version: R::VERSION,
             authority: vec![Authority {
-                verb: authority,
+                verb: Verb::Read,
                 scope: R::DOMAIN,
             }],
             description: docs.summary,
@@ -167,21 +166,6 @@ impl Registry {
             docs,
             schema_for!(R::Key),
             schema_for!(R::State),
-        )
-    }
-
-    /// Register Create for an opted-in resource (additive to its read
-    /// surface; authority derives to Write on the resource).
-    pub fn register_create<R: Creatable>(
-        &mut self,
-        docs: ResourceDocs,
-    ) -> Result<(), RegistryError> {
-        self.insert_generic::<R>(
-            OpId::Create(R::DOMAIN),
-            None,
-            docs,
-            schema_for!(R::CreateInput),
-            schema_for!(crate::wire::Receipt),
         )
     }
 

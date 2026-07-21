@@ -6,9 +6,9 @@
 //!
 //! - **Resources** ([`catalogue`]): atoms, views, and synthetic
 //!   resources. One [`Resource`] impl derives a resource's whole
-//!   generic read surface — Get + List, Stream for atoms
-//!   ([`Atom`]), Create where opted in
-//!   ([`Creatable`]) — with derived authority.
+//!   generic read surface — Get + List, Stream for atoms ([`Atom`]) —
+//!   with derived Read authority. The generic surface is read-only:
+//!   every mutation on the whole surface is a declared command.
 //! - **Domain verbs** ([`declared`]): the bespoke commands whose
 //!   semantics are the contract; output is always a [`Receipt`] by
 //!   construction (D3). A declaration is one site — the impl carries
@@ -31,7 +31,7 @@ pub mod opid;
 pub mod registry;
 pub mod wire;
 
-pub use catalogue::{Atom, Creatable, Domain, Nature, Resource};
+pub use catalogue::{Atom, Domain, Nature, Resource};
 pub use declared::{Command, Report};
 pub use meta::{Authority, OpMeta, Stability, Verb};
 pub use opid::{OpCategory, OpId};

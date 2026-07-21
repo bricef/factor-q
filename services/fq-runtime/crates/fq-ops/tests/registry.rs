@@ -10,8 +10,8 @@
 //! with `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
 use fq_ops::{
-    Atom, Authority, Command, Creatable, Domain, Nature, OpCategory, OpId, OpMeta, Registry,
-    RegistryError, Report, Resource, ResourceDocs, Stability, Verb,
+    Atom, Authority, Command, Domain, Nature, OpCategory, OpId, OpMeta, Registry, RegistryError,
+    Report, Resource, ResourceDocs, Stability, Verb,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -110,12 +110,6 @@ struct TriggerFilter {
     agent_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct TriggerCreate {
-    agent_id: String,
-    payload: serde_json::Value,
-}
-
 impl Resource for TriggerR {
     const DOMAIN: Domain = Domain::Trigger;
     type Key = TriggerKey;
@@ -123,8 +117,32 @@ impl Resource for TriggerR {
     type Filter = TriggerFilter;
 }
 impl Atom for TriggerR {}
-impl Creatable for TriggerR {
-    type CreateInput = TriggerCreate;
+
+/// trigger.publish: creation is not a generic verb — dispatching work
+/// is a command with semantics (delivery budget, at-least-once), and
+/// its authority (Write trigger) stays separately grantable from the
+/// machinery's lifecycle authority (Write control).
+struct TriggerPublish;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct PublishInput {
+    agent_id: String,
+    payload: serde_json::Value,
+}
+
+impl Command for TriggerPublish {
+    const DOMAIN: Domain = Domain::Trigger;
+    const LEAF: &'static str = "publish";
+    type Input = PublishInput;
+    const AUTHORITY: Authority = Authority {
+        verb: Verb::Write,
+        scope: Domain::Trigger,
+    };
+    const META: OpMeta = OpMeta {
+        description: "Dispatch a trigger to an agent via the durable trigger stream.",
+        stability: Stability::Experimental,
+        caveats: "at-least-once delivery with a bounded budget; the receipt references the appended trigger atom",
+    };
 }
 
 /// Control: the synthetic resource — Get alone derives (the machinery
@@ -233,7 +251,7 @@ fn exemplar_registry() -> Registry {
     registry.register_atom::<TurnR>(DOCS).unwrap();
     registry.register_view::<InvocationR>(DOCS).unwrap();
     registry.register_atom::<TriggerR>(DOCS).unwrap();
-    registry.register_create::<TriggerR>(DOCS).unwrap();
+    registry.register_command::<TriggerPublish>().unwrap();
     registry.register_synthetic::<ControlR>(DOCS).unwrap();
     registry.register_command::<InvocationDrop>().unwrap();
     registry.register_command::<ControlDown>().unwrap();
@@ -265,9 +283,9 @@ fn derivation_yields_the_expected_surface() {
             "invocation.drop",
             "invocation.get",
             "invocation.list",
-            "trigger.create",
             "trigger.get",
             "trigger.list",
+            "trigger.publish",
             "trigger.stream",
             "turn.get",
             "turn.list",
@@ -328,10 +346,7 @@ fn authority_derivation() {
         vec![read(Domain::Turn)]
     );
     assert_eq!(
-        registry
-            .get(&OpId::Create(Domain::Trigger))
-            .unwrap()
-            .authority,
+        registry.get(&TriggerPublish::op()).unwrap().authority,
         vec![Authority {
             verb: Verb::Write,
             scope: Domain::Trigger
@@ -372,8 +387,8 @@ fn natures_and_categories() {
         OpCategory::DomainVerb
     );
     assert_eq!(
-        registry.get_named("trigger.create").unwrap().category,
-        OpCategory::Create
+        registry.get_named("trigger.publish").unwrap().category,
+        OpCategory::DomainVerb
     );
 }
 
