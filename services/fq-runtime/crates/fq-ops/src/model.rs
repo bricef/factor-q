@@ -120,11 +120,12 @@ pub struct Resource {
     pub domain: Domain,
     pub nature: Nature,
     pub version: u32,
-    /// Contract text for callers, inherited by the whole derived
-    /// surface. Convention: the first sentence is the one-line
-    /// summary (listings truncate there); anything the caller must
-    /// know — retention bounds, fold semantics — follows in the same
-    /// text.
+    /// The one-line summary, inherited by the whole derived surface
+    /// (listings, MCP tool lists).
+    pub summary: &'static str,
+    /// The fuller contract text — anything the caller must know:
+    /// retention bounds, fold semantics. Empty when the summary says
+    /// it all.
     pub description: &'static str,
     pub stability: Stability,
     pub key_schema: Schema,
@@ -140,7 +141,7 @@ impl Resource {
     pub fn new<Key, State, Filter>(
         domain: Domain,
         nature: Nature,
-        description: &'static str,
+        summary: &'static str,
         stability: Stability,
     ) -> Self
     where
@@ -152,12 +153,19 @@ impl Resource {
             domain,
             nature,
             version: 1,
-            description,
+            summary,
+            description: "",
             stability,
             key_schema: schema_for!(Key),
             state_schema: schema_for!(State),
             filter_schema: schema_for!(Filter),
         }
+    }
+
+    /// The fuller contract text, when the summary doesn't say it all.
+    pub fn description(mut self, description: &'static str) -> Self {
+        self.description = description;
+        self
     }
 
     /// Schema version (P10): additive changes keep it, observable
@@ -183,10 +191,11 @@ pub struct Command {
     pub verb: &'static str,
     pub version: u32,
     pub authority: Authority,
-    /// Contract text for callers. Convention: first sentence is the
-    /// summary; the semantics that make this verb bespoke —
-    /// idempotency, kill-switch behaviour, delivery guarantees —
-    /// follow in the same text.
+    /// The one-line summary (listings, MCP tool lists).
+    pub summary: &'static str,
+    /// The fuller contract text — the semantics that make this verb
+    /// bespoke: idempotency, kill-switch behaviour, delivery
+    /// guarantees. Empty when the summary says it all.
     pub description: &'static str,
     pub stability: Stability,
     pub input_schema: Schema,
@@ -200,7 +209,7 @@ impl Command {
         domain: Domain,
         verb: &'static str,
         authority: Authority,
-        description: &'static str,
+        summary: &'static str,
         stability: Stability,
     ) -> Self
     where
@@ -211,10 +220,17 @@ impl Command {
             verb,
             version: 1,
             authority,
-            description,
+            summary,
+            description: "",
             stability,
             input_schema: schema_for!(Input),
         }
+    }
+
+    /// The fuller contract text, when the summary doesn't say it all.
+    pub fn description(mut self, description: &'static str) -> Self {
+        self.description = description;
+        self
     }
 
     pub fn version(mut self, version: u32) -> Self {
@@ -244,7 +260,9 @@ pub struct Report {
     pub name: &'static str,
     pub version: u32,
     pub reads: &'static [Domain],
-    /// Contract text for callers; first sentence is the summary.
+    /// The one-line summary (listings, MCP tool lists).
+    pub summary: &'static str,
+    /// The fuller contract text. Empty when the summary says it all.
     pub description: &'static str,
     pub stability: Stability,
     pub params_schema: Schema,
@@ -257,7 +275,7 @@ impl Report {
     pub fn new<Params, Output>(
         name: &'static str,
         reads: &'static [Domain],
-        description: &'static str,
+        summary: &'static str,
         stability: Stability,
     ) -> Self
     where
@@ -268,11 +286,18 @@ impl Report {
             name,
             version: 1,
             reads,
-            description,
+            summary,
+            description: "",
             stability,
             params_schema: schema_for!(Params),
             output_schema: schema_for!(Output),
         }
+    }
+
+    /// The fuller contract text, when the summary doesn't say it all.
+    pub fn description(mut self, description: &'static str) -> Self {
+        self.description = description;
+        self
     }
 
     pub fn version(mut self, version: u32) -> Self {

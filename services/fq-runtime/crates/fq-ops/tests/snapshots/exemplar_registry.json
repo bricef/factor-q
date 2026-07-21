@@ -4,7 +4,8 @@
       "domain": "turn",
       "nature": "atom",
       "version": 1,
-      "description": "exemplar resource",
+      "summary": "exemplar resource",
+      "description": "",
       "stability": "experimental",
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -83,7 +84,8 @@
       "domain": "invocation",
       "nature": "view",
       "version": 1,
-      "description": "exemplar resource",
+      "summary": "exemplar resource",
+      "description": "",
       "stability": "experimental",
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -149,7 +151,8 @@
       "domain": "trigger",
       "nature": "atom",
       "version": 1,
-      "description": "exemplar resource",
+      "summary": "exemplar resource",
+      "description": "",
       "stability": "experimental",
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -208,7 +211,8 @@
       "domain": "control",
       "nature": "synthetic",
       "version": 1,
-      "description": "exemplar resource",
+      "summary": "exemplar resource",
+      "description": "",
       "stability": "experimental",
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -252,7 +256,8 @@
         "verb": "write",
         "scope": "invocation"
       },
-      "description": "Drop an in-flight invocation, archiving it as failed. Kill-switch semantics: workers observe the drop at their next step boundary.",
+      "summary": "Drop an in-flight invocation, archiving it as failed.",
+      "description": "Kill-switch semantics: workers observe the drop at their next step boundary.",
       "stability": "experimental",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -284,7 +289,8 @@
         "verb": "write",
         "scope": "control"
       },
-      "description": "Stop the daemon, draining in-flight work to a step boundary. Confirmation is the shutdown event, not the ack.",
+      "summary": "Stop the daemon, draining in-flight work to a step boundary.",
+      "description": "Confirmation is the shutdown event, not the ack.",
       "stability": "experimental",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -308,7 +314,8 @@
         "verb": "write",
         "scope": "trigger"
       },
-      "description": "Dispatch a trigger to an agent via the durable trigger stream. At-least-once delivery with a bounded budget; the receipt references the appended trigger atom.",
+      "summary": "Dispatch a trigger to an agent via the durable trigger stream.",
+      "description": "At-least-once delivery with a bounded budget; the receipt references the appended trigger atom.",
       "stability": "experimental",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -334,7 +341,8 @@
       "reads": [
         "event"
       ],
-      "description": "Aggregate cost across all agents. Cost figures are retained indefinitely; totals never window.",
+      "summary": "Aggregate cost across all agents.",
+      "description": "Cost figures are retained indefinitely; totals never window.",
       "stability": "experimental",
       "params_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
