@@ -150,10 +150,10 @@ fn invocation_drop() -> Command {
             verb: Verb::Write,
             scope: Domain::Invocation,
         },
-        "Drop an in-flight invocation, archiving it as failed.",
+        "Drop an in-flight invocation, archiving it as failed. Kill-switch semantics: \
+         workers observe the drop at their next step boundary.",
         Stability::Experimental,
     )
-    .caveats("kill-switch semantics: workers observe the drop at their next step boundary")
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -172,10 +172,10 @@ fn control_down() -> Command {
             verb: Verb::Write,
             scope: Domain::Control,
         },
-        "Stop the daemon, draining in-flight work to a step boundary.",
+        "Stop the daemon, draining in-flight work to a step boundary. Confirmation is \
+         the shutdown event, not the ack.",
         Stability::Experimental,
     )
-    .caveats("confirmation is the shutdown event, not the ack")
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -195,12 +195,9 @@ fn trigger_publish() -> Command {
             verb: Verb::Write,
             scope: Domain::Trigger,
         },
-        "Dispatch a trigger to an agent via the durable trigger stream.",
+        "Dispatch a trigger to an agent via the durable trigger stream. At-least-once \
+         delivery with a bounded budget; the receipt references the appended trigger atom.",
         Stability::Experimental,
-    )
-    .caveats(
-        "at-least-once delivery with a bounded budget; the receipt references the appended \
-         trigger atom",
     )
 }
 
@@ -221,10 +218,10 @@ fn cost_summary() -> Report {
     Report::new::<CostParams, CostOutput>(
         "cost.summary",
         &[Domain::Event],
-        "Aggregate cost across all agents.",
+        "Aggregate cost across all agents. Cost figures are retained indefinitely; \
+         totals never window.",
         Stability::Experimental,
     )
-    .caveats("cost figures are retained indefinitely; totals never window")
 }
 
 fn exemplar_registry() -> Registry {
