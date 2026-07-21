@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 
-use crate::catalogue::{Atom, Domain, Nature, Resource, Synthetic, View};
+use crate::catalogue::{Domain, Nature, Resource};
 use crate::declared::{Command, Report};
 use crate::meta::{Authority, Stability, Verb};
 use crate::opid::{OpCategory, OpId};
@@ -87,9 +87,8 @@ impl Registry {
     }
 
     /// Record the resource-level catalogue entry — a pure projection
-    /// of the impl (plus the bound-checked nature from the entry
-    /// point) — where nature lives.
-    fn insert_resource<R: Resource>(&mut self, nature: Nature) -> Result<(), RegistryError> {
+    /// of the impl.
+    fn insert_resource<R: Resource>(&mut self) -> Result<(), RegistryError> {
         let segment = R::DOMAIN.segment();
         if self.resources.contains_key(segment) {
             return Err(RegistryError::DuplicateResource { domain: R::DOMAIN });
@@ -98,7 +97,7 @@ impl Registry {
             segment,
             ResourceDescriptor {
                 domain: R::DOMAIN,
-                nature,
+                nature: R::NATURE,
                 version: R::VERSION,
                 description: R::META.description,
                 stability: R::META.stability,
@@ -147,38 +146,28 @@ impl Registry {
         )
     }
 
-    /// Register a view: Get + List derive, answering as of a
-    /// watermark. Views are never streamed — stream their atoms.
-    /// Everything comes from the impl; registration takes nothing.
-    pub fn register_view<R: View>(&mut self) -> Result<(), RegistryError> {
-        self.insert_resource::<R>(Nature::View)?;
-        self.insert_read_surface::<R>()
-    }
-
-    /// Register an atom: Get + List + Stream derive. The
-    /// [`Atom`] bound makes "only atoms stream" a compile-time
-    /// fact.
-    pub fn register_atom<R: Atom>(&mut self) -> Result<(), RegistryError> {
-        self.insert_resource::<R>(Nature::Atom)?;
-        self.insert_read_surface::<R>()?;
-        self.insert_generic::<R>(
-            OpId::Stream(R::DOMAIN),
-            schema_for!(R::Filter),
-            schema_for!(R::State),
-        )
-    }
-
-    /// Register a synthetic resource: Get alone — the machinery
-    /// describing itself. Nothing else derives (no atoms behind it,
-    /// nothing to list or stream); its verbs register separately as
-    /// commands.
-    pub fn register_synthetic<R: Synthetic>(&mut self) -> Result<(), RegistryError> {
-        self.insert_resource::<R>(Nature::Synthetic)?;
-        self.insert_generic::<R>(
-            OpId::Get(R::DOMAIN),
-            schema_for!(R::Key),
-            schema_for!(R::State),
-        )
+    /// Register a catalogue entry. Everything derives from the impl —
+    /// there is no registration-time choice to get wrong: atoms get
+    /// Get + List + Stream, views Get + List (stream their atoms),
+    /// synthetics Get alone (their verbs register as commands).
+    pub fn register_resource<R: Resource>(&mut self) -> Result<(), RegistryError> {
+        self.insert_resource::<R>()?;
+        match R::NATURE {
+            Nature::Atom => {
+                self.insert_read_surface::<R>()?;
+                self.insert_generic::<R>(
+                    OpId::Stream(R::DOMAIN),
+                    schema_for!(R::Filter),
+                    schema_for!(R::State),
+                )
+            }
+            Nature::View => self.insert_read_surface::<R>(),
+            Nature::Synthetic => self.insert_generic::<R>(
+                OpId::Get(R::DOMAIN),
+                schema_for!(R::Key),
+                schema_for!(R::State),
+            ),
+        }
     }
 
     /// Register a domain verb. Output is always a receipt (D3) — the

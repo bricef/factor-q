@@ -10,8 +10,8 @@
 //! with `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
 use fq_ops::{
-    Atom, Authority, Command, Domain, Nature, OpCategory, OpId, OpMeta, Registry, RegistryError,
-    Report, Resource, Stability, Synthetic, Verb, View,
+    Authority, Command, Domain, Nature, OpCategory, OpId, OpMeta, Registry, RegistryError, Report,
+    Resource, Stability, Verb,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -53,12 +53,12 @@ struct EntryFilter {
 
 impl Resource for TurnR {
     const DOMAIN: Domain = Domain::Turn;
+    const NATURE: Nature = Nature::Atom;
     type Key = EntryKey;
     type State = EntryState;
     type Filter = EntryFilter;
     const META: OpMeta = EXEMPLAR_META;
 }
-impl Atom for TurnR {}
 
 /// Invocation: a view — Get/List derive; no Stream (stream its atoms).
 struct InvocationR;
@@ -83,9 +83,9 @@ struct InvocationFilter {
     limit: Option<u32>,
 }
 
-impl View for InvocationR {}
 impl Resource for InvocationR {
     const DOMAIN: Domain = Domain::Invocation;
+    const NATURE: Nature = Nature::View;
     type Key = InvocationKey;
     type State = InvocationState;
     type Filter = InvocationFilter;
@@ -115,12 +115,12 @@ struct TriggerFilter {
 
 impl Resource for TriggerR {
     const DOMAIN: Domain = Domain::Trigger;
+    const NATURE: Nature = Nature::Atom;
     type Key = TriggerKey;
     type State = TriggerState;
     type Filter = TriggerFilter;
     const META: OpMeta = EXEMPLAR_META;
 }
-impl Atom for TriggerR {}
 
 /// trigger.publish: creation is not a generic verb — dispatching work
 /// is a command with semantics (delivery budget, at-least-once), and
@@ -160,9 +160,9 @@ struct ControlState {
     stream_ok: bool,
 }
 
-impl Synthetic for ControlR {}
 impl Resource for ControlR {
     const DOMAIN: Domain = Domain::Control;
+    const NATURE: Nature = Nature::Synthetic;
     type Key = ();
     type State = ControlState;
     type Filter = ();
@@ -256,11 +256,11 @@ const EXEMPLAR_META: OpMeta = OpMeta {
 
 fn exemplar_registry() -> Registry {
     let mut registry = Registry::new();
-    registry.register_atom::<TurnR>().unwrap();
-    registry.register_view::<InvocationR>().unwrap();
-    registry.register_atom::<TriggerR>().unwrap();
+    registry.register_resource::<TurnR>().unwrap();
+    registry.register_resource::<InvocationR>().unwrap();
+    registry.register_resource::<TriggerR>().unwrap();
     registry.register_command::<TriggerPublish>().unwrap();
-    registry.register_synthetic::<ControlR>().unwrap();
+    registry.register_resource::<ControlR>().unwrap();
     registry.register_command::<InvocationDrop>().unwrap();
     registry.register_command::<ControlDown>().unwrap();
     registry.register_report::<CostSummary>().unwrap();
@@ -308,7 +308,7 @@ fn duplicate_registration_is_refused() {
     // The resource-level entry is checked first: re-registering a
     // domain is a catalogue duplicate, before any op name collides.
     assert_eq!(
-        registry.register_view::<InvocationR>(),
+        registry.register_resource::<InvocationR>(),
         Err(RegistryError::DuplicateResource {
             domain: Domain::Invocation
         })
