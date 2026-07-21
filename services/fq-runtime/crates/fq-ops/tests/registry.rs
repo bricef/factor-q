@@ -1,13 +1,14 @@
 //! The registry exercised over an exemplar slice of the catalogue —
-//! one resource per nature and one declared op per category — plus
+//! one resource per nature and one declaration per category — plus
 //! the schema snapshot oracle.
 //!
 //! The snapshot (`tests/snapshots/exemplar_registry.json`) is this
-//! crate's golden master: the serialized `describe()` output. Any
-//! change to the descriptor shape, derived authority, or schemars'
-//! output is a visible diff to review against P10's additive-change
-//! rules — never silent drift. Regenerate after an intentional change
-//! with `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
+//! crate's golden master: the serialized `describe()` output — the
+//! declarations themselves. Any change to the value shapes or
+//! schemars' output is a visible diff to review against P10's
+//! additive-change rules — never silent drift. Regenerate after an
+//! intentional change with
+//! `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
 use fq_ops::{
     Authority, Command, Domain, Nature, OpCategory, OpId, Registry, RegistryError, Report,
@@ -17,18 +18,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 // ------------------------------------------------------------------
-// Exemplar catalogue slice. Contract only — handlers arrive with the
-// edge (plan Phases 2–3); these pin the shape a definition takes.
+// Exemplar declarations. Contract only — handlers arrive with the
+// edge (plan Phases 2–3); these pin the shape a declaration takes:
+// a constructor call whose generic parameters capture the schemas.
 // ------------------------------------------------------------------
-
-/// Turn: an atom — Get/List/Stream derive. Tabletop vocabulary
-/// (settled in review): a **Turn** is one action — an assistant
-/// output or a tool result — and a **Round** is the bundle of Turns
-/// in one agent-loop iteration (the ADR-0027 step boundary is a Round
-/// boundary). Rounds are not a resource: they are recoverable from
-/// the turn stream via the `round` grouping key, and become a view
-/// over Turns if round-level reads ever earn a catalogue row.
-struct TurnR;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct EntryKey {
@@ -51,18 +44,18 @@ struct EntryFilter {
     limit: Option<u32>,
 }
 
-impl Resource for TurnR {
-    const DOMAIN: Domain = Domain::Turn;
-    const NATURE: Nature = Nature::Atom;
-    type Key = EntryKey;
-    type State = EntryState;
-    type Filter = EntryFilter;
-    const DESCRIPTION: &'static str = "exemplar resource";
-    const STABILITY: Stability = Stability::Experimental;
+/// Turn: an atom — Get/List/Stream derive. A **Turn** is one action
+/// (assistant output or tool result); a **Round** is the bundle of
+/// Turns in one agent-loop iteration, recoverable via the `round`
+/// grouping key (the ADR-0027 step boundary is a Round boundary).
+fn turn() -> Resource {
+    Resource::new::<EntryKey, EntryState, EntryFilter>(
+        Domain::Turn,
+        Nature::Atom,
+        "exemplar resource",
+        Stability::Experimental,
+    )
 }
-
-/// Invocation: a view — Get/List derive; no Stream (stream its atoms).
-struct InvocationR;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct InvocationKey {
@@ -84,18 +77,15 @@ struct InvocationFilter {
     limit: Option<u32>,
 }
 
-impl Resource for InvocationR {
-    const DOMAIN: Domain = Domain::Invocation;
-    const NATURE: Nature = Nature::View;
-    type Key = InvocationKey;
-    type State = InvocationState;
-    type Filter = InvocationFilter;
-    const DESCRIPTION: &'static str = "exemplar resource";
-    const STABILITY: Stability = Stability::Experimental;
+/// Invocation: a view — Get/List derive; no Stream (stream its atoms).
+fn invocation() -> Resource {
+    Resource::new::<InvocationKey, InvocationState, InvocationFilter>(
+        Domain::Invocation,
+        Nature::View,
+        "exemplar resource",
+        Stability::Experimental,
+    )
 }
-
-/// Trigger: an atom that operators may create.
-struct TriggerR;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct TriggerKey {
@@ -115,45 +105,16 @@ struct TriggerFilter {
     agent_id: Option<String>,
 }
 
-impl Resource for TriggerR {
-    const DOMAIN: Domain = Domain::Trigger;
-    const NATURE: Nature = Nature::Atom;
-    type Key = TriggerKey;
-    type State = TriggerState;
-    type Filter = TriggerFilter;
-    const DESCRIPTION: &'static str = "exemplar resource";
-    const STABILITY: Stability = Stability::Experimental;
+/// Trigger: an atom. Not operator-creatable via a generic verb —
+/// dispatching work is `trigger.publish`, a command.
+fn trigger() -> Resource {
+    Resource::new::<TriggerKey, TriggerState, TriggerFilter>(
+        Domain::Trigger,
+        Nature::Atom,
+        "exemplar resource",
+        Stability::Experimental,
+    )
 }
-
-/// trigger.publish: creation is not a generic verb — dispatching work
-/// is a command with semantics (delivery budget, at-least-once), and
-/// its authority (Write trigger) stays separately grantable from the
-/// machinery's lifecycle authority (Write control).
-struct TriggerPublish;
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct PublishInput {
-    agent_id: String,
-    payload: serde_json::Value,
-}
-
-impl Command for TriggerPublish {
-    const DOMAIN: Domain = Domain::Trigger;
-    const VERB: &'static str = "publish";
-    type Input = PublishInput;
-    const AUTHORITY: Authority = Authority {
-        verb: Verb::Write,
-        scope: Domain::Trigger,
-    };
-    const DESCRIPTION: &'static str =
-        "Dispatch a trigger to an agent via the durable trigger stream.";
-    const STABILITY: Stability = Stability::Experimental;
-    const CAVEATS: &'static str = "at-least-once delivery with a bounded budget; the receipt references the appended trigger atom";
-}
-
-/// Control: the synthetic resource — Get alone derives (the machinery
-/// describing itself); its verbs register as commands.
-struct ControlR;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ControlState {
@@ -162,19 +123,16 @@ struct ControlState {
     stream_ok: bool,
 }
 
-impl Resource for ControlR {
-    const DOMAIN: Domain = Domain::Control;
-    const NATURE: Nature = Nature::Synthetic;
-    type Key = ();
-    type State = ControlState;
-    type Filter = ();
-    const DESCRIPTION: &'static str = "exemplar resource";
-    const STABILITY: Stability = Stability::Experimental;
+/// Control: the synthetic resource — Get alone derives (the machinery
+/// describing itself); its verbs register as commands.
+fn control() -> Resource {
+    Resource::new::<(), ControlState, ()>(
+        Domain::Control,
+        Nature::Synthetic,
+        "exemplar resource",
+        Stability::Experimental,
+    )
 }
-
-/// invocation.drop: a domain verb — declared at one site: identity
-/// (resource + verb), input, authority, and contract text all here.
-struct InvocationDrop;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DropInput {
@@ -182,23 +140,21 @@ struct DropInput {
     reason: Option<String>,
 }
 
-impl Command for InvocationDrop {
-    const DOMAIN: Domain = Domain::Invocation;
-    const VERB: &'static str = "drop";
-    type Input = DropInput;
-    const AUTHORITY: Authority = Authority {
-        verb: Verb::Write,
-        scope: Domain::Invocation,
-    };
-    const DESCRIPTION: &'static str = "Drop an in-flight invocation, archiving it as failed.";
-    const STABILITY: Stability = Stability::Experimental;
-    const CAVEATS: &'static str =
-        "kill-switch semantics: workers observe the drop at their next step boundary";
+/// invocation.drop: a command — the declaration is one constructor
+/// call carrying identity, input type, authority, and contract text.
+fn invocation_drop() -> Command {
+    Command::new::<DropInput>(
+        Domain::Invocation,
+        "drop",
+        Authority {
+            verb: Verb::Write,
+            scope: Domain::Invocation,
+        },
+        "Drop an in-flight invocation, archiving it as failed.",
+        Stability::Experimental,
+    )
+    .caveats("kill-switch semantics: workers observe the drop at their next step boundary")
 }
-
-/// control.down: a machinery verb on the synthetic resource — same
-/// one-site declaration, manual authority.
-struct ControlDown;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DownInput {
@@ -206,22 +162,47 @@ struct DownInput {
     now: bool,
 }
 
-impl Command for ControlDown {
-    const DOMAIN: Domain = Domain::Control;
-    const VERB: &'static str = "down";
-    type Input = DownInput;
-    const AUTHORITY: Authority = Authority {
-        verb: Verb::Write,
-        scope: Domain::Control,
-    };
-    const DESCRIPTION: &'static str =
-        "Stop the daemon, draining in-flight work to a step boundary.";
-    const STABILITY: Stability = Stability::Experimental;
-    const CAVEATS: &'static str = "confirmation is the shutdown event, not the ack";
+/// control.down: a machinery verb on the synthetic resource — manual
+/// authority, same one-site declaration.
+fn control_down() -> Command {
+    Command::new::<DownInput>(
+        Domain::Control,
+        "down",
+        Authority {
+            verb: Verb::Write,
+            scope: Domain::Control,
+        },
+        "Stop the daemon, draining in-flight work to a step boundary.",
+        Stability::Experimental,
+    )
+    .caveats("confirmation is the shutdown event, not the ack")
 }
 
-/// cost.summary: a report — a named computation, Read on its inputs.
-struct CostSummary;
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct PublishInput {
+    agent_id: String,
+    payload: serde_json::Value,
+}
+
+/// trigger.publish: creation is not a generic verb — dispatching work
+/// is a command, and its authority (Write trigger) stays separately
+/// grantable from the machinery's lifecycle authority (Write control).
+fn trigger_publish() -> Command {
+    Command::new::<PublishInput>(
+        Domain::Trigger,
+        "publish",
+        Authority {
+            verb: Verb::Write,
+            scope: Domain::Trigger,
+        },
+        "Dispatch a trigger to an agent via the durable trigger stream.",
+        Stability::Experimental,
+    )
+    .caveats(
+        "at-least-once delivery with a bounded budget; the receipt references the appended \
+         trigger atom",
+    )
+}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct CostParams {
@@ -235,26 +216,27 @@ struct CostOutput {
     total_llm_calls: u64,
 }
 
-impl Report for CostSummary {
-    const NAME: &'static str = "cost.summary";
-    type Params = CostParams;
-    type Output = CostOutput;
-    const READS: &'static [Domain] = &[Domain::Event];
-    const DESCRIPTION: &'static str = "Aggregate cost across all agents.";
-    const STABILITY: Stability = Stability::Experimental;
-    const CAVEATS: &'static str = "cost figures are retained indefinitely; totals never window";
+/// cost.summary: a report — a named computation, Read on its inputs.
+fn cost_summary() -> Report {
+    Report::new::<CostParams, CostOutput>(
+        "cost.summary",
+        &[Domain::Event],
+        "Aggregate cost across all agents.",
+        Stability::Experimental,
+    )
+    .caveats("cost figures are retained indefinitely; totals never window")
 }
 
 fn exemplar_registry() -> Registry {
     let mut registry = Registry::new();
-    registry.register_resource::<TurnR>().unwrap();
-    registry.register_resource::<InvocationR>().unwrap();
-    registry.register_resource::<TriggerR>().unwrap();
-    registry.register_command::<TriggerPublish>().unwrap();
-    registry.register_resource::<ControlR>().unwrap();
-    registry.register_command::<InvocationDrop>().unwrap();
-    registry.register_command::<ControlDown>().unwrap();
-    registry.register_report::<CostSummary>().unwrap();
+    registry.register(turn()).unwrap();
+    registry.register(invocation()).unwrap();
+    registry.register(trigger()).unwrap();
+    registry.register(control()).unwrap();
+    registry.register(invocation_drop()).unwrap();
+    registry.register(control_down()).unwrap();
+    registry.register(trigger_publish()).unwrap();
+    registry.register(cost_summary()).unwrap();
     registry
 }
 
@@ -262,19 +244,14 @@ fn exemplar_registry() -> Registry {
 // Invariants
 // ------------------------------------------------------------------
 
-/// One atom row buys three derived ops; a view two; a synthetic one;
-/// the declared surface registers one each. Names render structurally
-/// and describe() is name-ordered.
+/// One atom declaration claims three derived names; a view two; a
+/// synthetic one; commands and reports one each. Names render
+/// structurally, in order.
 #[test]
 fn derivation_yields_the_expected_surface() {
     let registry = exemplar_registry();
-    let names: Vec<&str> = registry
-        .describe()
-        .iter()
-        .map(|d| d.name.as_str())
-        .collect();
     assert_eq!(
-        names,
+        registry.names(),
         vec![
             "control.down",
             "control.get",
@@ -296,16 +273,14 @@ fn derivation_yields_the_expected_surface() {
 #[test]
 fn duplicate_registration_is_refused() {
     let mut registry = exemplar_registry();
-    // The resource-level entry is checked first: re-registering a
-    // domain is a catalogue duplicate, before any op name collides.
     assert_eq!(
-        registry.register_resource::<InvocationR>(),
+        registry.register(invocation()),
         Err(RegistryError::DuplicateResource {
             domain: Domain::Invocation
         })
     );
     assert_eq!(
-        registry.register_command::<InvocationDrop>(),
+        registry.register(invocation_drop()),
         Err(RegistryError::Duplicate {
             name: "invocation.drop".into()
         })
@@ -316,84 +291,94 @@ fn duplicate_registration_is_refused() {
 /// at registration — the one guarantee the verb strings owe us.
 #[test]
 fn verb_collision_with_the_derived_surface_is_refused() {
-    struct BadLeaf;
-    impl Command for BadLeaf {
-        const DOMAIN: Domain = Domain::Invocation;
-        const VERB: &'static str = "get";
-        type Input = DropInput;
-        const AUTHORITY: Authority = InvocationDrop::AUTHORITY;
-        const DESCRIPTION: &'static str = InvocationDrop::DESCRIPTION;
-        const STABILITY: Stability = Stability::Experimental;
-    }
+    let bad = Command::new::<DropInput>(
+        Domain::Invocation,
+        "get",
+        Authority {
+            verb: Verb::Write,
+            scope: Domain::Invocation,
+        },
+        "shadows a derived name",
+        Stability::Experimental,
+    );
     let mut registry = exemplar_registry();
     assert_eq!(
-        registry.register_command::<BadLeaf>(),
+        registry.register(bad),
         Err(RegistryError::Duplicate {
             name: "invocation.get".into()
         })
     );
 }
 
-/// Authority derives for the generic surface; declared ops carry what
-/// they declared.
+/// Authority derives for the generic surface (Read on the domain, and
+/// nothing else — the generic surface is read-only); declared ops
+/// carry what they declared.
 #[test]
 fn authority_derivation() {
     let registry = exemplar_registry();
-    let read = |scope| Authority {
-        verb: Verb::Read,
-        scope,
+    let read = |scope| {
+        vec![Authority {
+            verb: Verb::Read,
+            scope,
+        }]
     };
     assert_eq!(
-        registry.get(&OpId::Stream(Domain::Turn)).unwrap().authority,
-        vec![read(Domain::Turn)]
+        registry
+            .resolve(&OpId::Stream(Domain::Turn))
+            .unwrap()
+            .authority,
+        read(Domain::Turn)
     );
     assert_eq!(
-        registry.get(&TriggerPublish::op()).unwrap().authority,
-        vec![Authority {
-            verb: Verb::Write,
-            scope: Domain::Trigger
-        }]
+        registry
+            .resolve(&OpId::Get(Domain::Control))
+            .unwrap()
+            .authority,
+        read(Domain::Control)
     );
     assert_eq!(
-        registry.get(&OpId::Get(Domain::Control)).unwrap().authority,
-        vec![read(Domain::Control)]
+        registry.resolve(&control_down().op()).unwrap().authority,
+        vec![control_down().authority]
     );
     assert_eq!(
-        registry.get(&ControlDown::op()).unwrap().authority,
-        vec![ControlDown::AUTHORITY]
+        registry.resolve(&cost_summary().op()).unwrap().authority,
+        read(Domain::Event)
     );
 }
 
-/// Natures live on the catalogue's resource entries, not on ops:
-/// views and synthetics get no stream, synthetics get no list, and
+/// Natures live on the declarations; the derived surface follows
+/// them: views and synthetics get no stream, synthetics no list, and
 /// categories say which envelope an op rides.
 #[test]
 fn natures_and_categories() {
     let registry = exemplar_registry();
-    assert!(registry.get(&OpId::Stream(Domain::Invocation)).is_none());
-    assert!(registry.get(&OpId::List(Domain::Control)).is_none());
-    assert!(registry.get(&OpId::Stream(Domain::Control)).is_none());
+    assert!(
+        registry
+            .resolve(&OpId::Stream(Domain::Invocation))
+            .is_none()
+    );
+    assert!(registry.resolve(&OpId::List(Domain::Control)).is_none());
+    assert!(registry.resolve(&OpId::Stream(Domain::Control)).is_none());
     assert_eq!(
-        registry.get_resource(Domain::Invocation).unwrap().nature,
-        Nature::View
+        registry
+            .resolve(&OpId::List(Domain::Invocation))
+            .unwrap()
+            .category,
+        OpCategory::List
     );
     assert_eq!(
-        registry.get_resource(Domain::Control).unwrap().nature,
-        Nature::Synthetic
-    );
-    assert_eq!(
-        registry.get_resource(Domain::Turn).unwrap().nature,
-        Nature::Atom
-    );
-    assert!(registry.get_resource(Domain::Event).is_none());
-    assert_eq!(
-        registry.get(&InvocationDrop::op()).unwrap().category,
+        registry.resolve(&invocation_drop().op()).unwrap().category,
         OpCategory::DomainVerb
     );
     assert_eq!(
-        registry.get_named("trigger.publish").unwrap().category,
+        registry.resolve_named("trigger.publish").unwrap().category,
         OpCategory::DomainVerb
     );
+    assert_eq!(
+        registry.resolve_named("turn.stream").unwrap().category,
+        OpCategory::Stream
+    );
+    assert!(registry.resolve_named("invocation.frobnicate").is_none());
 }
 
 #[test]
@@ -427,7 +412,7 @@ fn wire_encoding_is_native_not_rendered() {
     assert_eq!(serde_json::from_str::<OpId>(&encoded).unwrap(), op);
     assert_eq!(op.to_string(), "turn.stream");
 
-    let verb = ControlDown::op();
+    let verb = control_down().op();
     assert_eq!(
         serde_json::to_string(&verb).unwrap(),
         r#"{"verb":{"domain":"control","verb":"down"}}"#
@@ -446,11 +431,7 @@ fn wire_encoding_is_native_not_rendered() {
 #[test]
 fn describe_matches_the_committed_snapshot() {
     let registry = exemplar_registry();
-    let payload = serde_json::json!({
-        "resources": registry.describe_resources(),
-        "ops": registry.describe(),
-    });
-    let actual = serde_json::to_string_pretty(&payload).unwrap() + "\n";
+    let actual = serde_json::to_string_pretty(registry.describe()).unwrap() + "\n";
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/snapshots/exemplar_registry.json");
@@ -468,7 +449,7 @@ fn describe_matches_the_committed_snapshot() {
     assert_eq!(
         actual, expected,
         "registry describe() drifted from the committed snapshot. If intentional, \
-         review the diff against P10's additive-change rules (does any resource or \
-         declared op need a version bump?), then UPDATE_SNAPSHOT=1 and commit."
+         review the diff against P10's additive-change rules (does any declaration \
+         need a version bump?), then UPDATE_SNAPSHOT=1 and commit."
     );
 }
