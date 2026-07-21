@@ -1,34 +1,38 @@
 //! Composite operation identity: the wire's native address for every
 //! promise on the surface. Generic operations are (verb, resource)
-//! pairs; declared operations carry their own identity. Rendered
-//! names derive from structure — nothing is parsed, and the rendering
-//! exists for self-documentation (MCP tool names, docs,
-//! `registry.describe`), not transport.
+//! pairs; declared operations carry the identity their definitions
+//! declared. Rendered names derive from structure for
+//! self-documentation (MCP tool names, docs, List(Operation)) —
+//! nothing parses them, ever; equality is the only operation the
+//! declared leaf strings support.
+//!
+//! Machinery reads have no variant here: Control is a synthetic
+//! resource, so "ask the machinery about itself" is just
+//! `Get(Control)`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::catalogue::ResourceId;
-use crate::declared::{DomainVerbId, MetaReadId, ReportId};
 
 /// Every operation the surface can carry, natively serializable for
 /// the tarpc edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OpId {
     Get(ResourceId),
     List(ResourceId),
     Create(ResourceId),
     Stream(ResourceId),
-    Verb(DomainVerbId),
-    Report(ReportId),
-    MetaRead(MetaReadId),
+    Verb { resource: ResourceId, leaf: String },
+    Report { name: String },
 }
 
 /// The category an operation belongs to — what replaced the old
 /// four-kind taxonomy. Recorded in descriptors; each category implies
-/// its envelope shape (streams ride `next_batch`, commands return
-/// receipts, reads answer at a watermark).
+/// its envelope shape (streams ride `next_batch`, verbs return
+/// receipts, reads answer at a watermark). This match is structural:
+/// it grows with categories, never with operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OpCategory {
@@ -38,7 +42,6 @@ pub enum OpCategory {
     Stream,
     DomainVerb,
     Report,
-    MetaRead,
 }
 
 impl OpId {
@@ -48,9 +51,8 @@ impl OpId {
             OpId::List(_) => OpCategory::List,
             OpId::Create(_) => OpCategory::Create,
             OpId::Stream(_) => OpCategory::Stream,
-            OpId::Verb(_) => OpCategory::DomainVerb,
-            OpId::Report(_) => OpCategory::Report,
-            OpId::MetaRead(_) => OpCategory::MetaRead,
+            OpId::Verb { .. } => OpCategory::DomainVerb,
+            OpId::Report { .. } => OpCategory::Report,
         }
     }
 }
@@ -62,9 +64,8 @@ impl std::fmt::Display for OpId {
             OpId::List(r) => write!(f, "{}.list", r.segment()),
             OpId::Create(r) => write!(f, "{}.create", r.segment()),
             OpId::Stream(r) => write!(f, "{}.stream", r.segment()),
-            OpId::Verb(v) => write!(f, "{}.{}", v.resource().segment(), v.leaf()),
-            OpId::Report(r) => f.write_str(r.render()),
-            OpId::MetaRead(m) => f.write_str(m.render()),
+            OpId::Verb { resource, leaf } => write!(f, "{}.{leaf}", resource.segment()),
+            OpId::Report { name } => f.write_str(name),
         }
     }
 }

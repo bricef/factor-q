@@ -10,9 +10,8 @@
 //! with `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
 use fq_ops::{
-    AtomResource, Authority, Command, CreatableResource, DomainVerbId, MetaRead, MetaReadId,
-    Nature, OpCategory, OpId, OpMeta, Registry, Report, ReportId, ResourceDocs, ResourceId,
-    ResourceType, Stability, Verb,
+    AtomResource, Authority, Command, CreatableResource, Nature, OpCategory, OpId, OpMeta,
+    Registry, RegistryError, Report, ResourceDocs, ResourceId, ResourceType, Stability, Verb,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -121,8 +120,26 @@ impl CreatableResource for TriggerR {
     type CreateInput = TriggerCreate;
 }
 
-/// invocation.drop: a domain verb — output is a Receipt by
-/// construction; authority declared.
+/// Control: the synthetic resource — Get alone derives (the machinery
+/// describing itself); its verbs register as commands.
+struct ControlR;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ControlState {
+    version: String,
+    nats_connected: bool,
+    stream_ok: bool,
+}
+
+impl ResourceType for ControlR {
+    const ID: ResourceId = ResourceId::Control;
+    type Key = ();
+    type State = ControlState;
+    type Filter = ();
+}
+
+/// invocation.drop: a domain verb — declared at one site: identity
+/// (resource + leaf), input, authority, and contract text all here.
 struct InvocationDrop;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -132,7 +149,8 @@ struct DropInput {
 }
 
 impl Command for InvocationDrop {
-    const ID: DomainVerbId = DomainVerbId::InvocationDrop;
+    const RESOURCE: ResourceId = ResourceId::Invocation;
+    const LEAF: &'static str = "drop";
     type Input = DropInput;
     const AUTHORITY: Authority = Authority {
         verb: Verb::Write,
@@ -142,6 +160,31 @@ impl Command for InvocationDrop {
         description: "Drop an in-flight invocation, archiving it as failed.",
         stability: Stability::Experimental,
         caveats: "kill-switch semantics: workers observe the drop at their next step boundary",
+    };
+}
+
+/// control.down: a machinery verb on the synthetic resource — same
+/// one-site declaration, manual authority.
+struct ControlDown;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct DownInput {
+    #[serde(default)]
+    now: bool,
+}
+
+impl Command for ControlDown {
+    const RESOURCE: ResourceId = ResourceId::Control;
+    const LEAF: &'static str = "down";
+    type Input = DownInput;
+    const AUTHORITY: Authority = Authority {
+        verb: Verb::Write,
+        scope: ResourceId::Control,
+    };
+    const META: OpMeta = OpMeta {
+        description: "Stop the daemon, draining in-flight work to a step boundary.",
+        stability: Stability::Experimental,
+        caveats: "confirmation is the shutdown event, not the ack",
     };
 }
 
@@ -161,7 +204,7 @@ struct CostOutput {
 }
 
 impl Report for CostSummary {
-    const ID: ReportId = ReportId::CostSummary;
+    const NAME: &'static str = "cost.summary";
     type Params = CostParams;
     type Output = CostOutput;
     const READS: &'static [ResourceId] = &[ResourceId::Event];
@@ -169,25 +212,6 @@ impl Report for CostSummary {
         description: "Aggregate cost across all agents.",
         stability: Stability::Experimental,
         caveats: "cost figures are retained indefinitely; totals never window",
-    };
-}
-
-/// control.health: a machinery read on the synthetic Control resource.
-struct Health;
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct HealthOutput {
-    nats_connected: bool,
-    stream_ok: bool,
-}
-
-impl MetaRead for Health {
-    const ID: MetaReadId = MetaReadId::Health;
-    type Output = HealthOutput;
-    const META: OpMeta = OpMeta {
-        description: "Liveness of the daemon's infrastructure (NATS, streams).",
-        stability: Stability::Experimental,
-        caveats: "",
     };
 }
 
@@ -203,9 +227,10 @@ fn exemplar_registry() -> Registry {
     registry.register_view::<InvocationR>(DOCS).unwrap();
     registry.register_atom::<TriggerR>(DOCS).unwrap();
     registry.register_create::<TriggerR>(DOCS).unwrap();
+    registry.register_synthetic::<ControlR>(DOCS).unwrap();
     registry.register_command::<InvocationDrop>().unwrap();
+    registry.register_command::<ControlDown>().unwrap();
     registry.register_report::<CostSummary>().unwrap();
-    registry.register_meta_read::<Health>().unwrap();
     registry
 }
 
@@ -213,8 +238,8 @@ fn exemplar_registry() -> Registry {
 // Invariants
 // ------------------------------------------------------------------
 
-/// One atom row buys three derived ops; one view row buys two; the
-/// declared surface registers one each. Names render structurally,
+/// One atom row buys three derived ops; a view two; a synthetic one;
+/// the declared surface registers one each. Names render structurally
 /// and describe() is name-ordered.
 #[test]
 fn derivation_yields_the_expected_surface() {
@@ -227,7 +252,8 @@ fn derivation_yields_the_expected_surface() {
     assert_eq!(
         names,
         vec![
-            "control.health",
+            "control.down",
+            "control.get",
             "cost.summary",
             "invocation.drop",
             "invocation.get",
@@ -248,20 +274,41 @@ fn duplicate_registration_is_refused() {
     let mut registry = exemplar_registry();
     assert_eq!(
         registry.register_view::<InvocationR>(DOCS),
-        Err(fq_ops::RegistryError::Duplicate {
+        Err(RegistryError::Duplicate {
             name: "invocation.get".into()
         })
     );
     assert_eq!(
         registry.register_command::<InvocationDrop>(),
-        Err(fq_ops::RegistryError::Duplicate {
+        Err(RegistryError::Duplicate {
             name: "invocation.drop".into()
         })
     );
 }
 
-/// Authority derives for the generic surface and the meta read;
-/// declared ops carry what they declared.
+/// A declared leaf that collides with a derived generic name is caught
+/// at registration — the one guarantee the leaf strings owe us.
+#[test]
+fn leaf_collision_with_the_derived_surface_is_refused() {
+    struct BadLeaf;
+    impl Command for BadLeaf {
+        const RESOURCE: ResourceId = ResourceId::Invocation;
+        const LEAF: &'static str = "get";
+        type Input = DropInput;
+        const AUTHORITY: Authority = InvocationDrop::AUTHORITY;
+        const META: OpMeta = InvocationDrop::META;
+    }
+    let mut registry = exemplar_registry();
+    assert_eq!(
+        registry.register_command::<BadLeaf>(),
+        Err(RegistryError::Duplicate {
+            name: "invocation.get".into()
+        })
+    );
+}
+
+/// Authority derives for the generic surface; declared ops carry what
+/// they declared.
 #[test]
 fn authority_derivation() {
     let registry = exemplar_registry();
@@ -271,14 +318,14 @@ fn authority_derivation() {
     };
     assert_eq!(
         registry
-            .get(OpId::Stream(ResourceId::TranscriptEntry))
+            .get(&OpId::Stream(ResourceId::TranscriptEntry))
             .unwrap()
             .authority,
         vec![read(ResourceId::TranscriptEntry)]
     );
     assert_eq!(
         registry
-            .get(OpId::Create(ResourceId::Trigger))
+            .get(&OpId::Create(ResourceId::Trigger))
             .unwrap()
             .authority,
         vec![Authority {
@@ -288,38 +335,46 @@ fn authority_derivation() {
     );
     assert_eq!(
         registry
-            .get(OpId::MetaRead(MetaReadId::Health))
+            .get(&OpId::Get(ResourceId::Control))
             .unwrap()
             .authority,
         vec![read(ResourceId::Control)]
     );
     assert_eq!(
-        registry
-            .get(OpId::Verb(DomainVerbId::InvocationDrop))
-            .unwrap()
-            .authority,
-        vec![InvocationDrop::AUTHORITY]
+        registry.get(&ControlDown::op()).unwrap().authority,
+        vec![ControlDown::AUTHORITY]
     );
 }
 
-/// Natures are recorded for the generic surface: views get no stream,
-/// and categories say which envelope an op rides.
+/// Natures are recorded for the generic surface: views and synthetics
+/// get no stream, synthetics get no list, and categories say which
+/// envelope an op rides.
 #[test]
 fn natures_and_categories() {
     let registry = exemplar_registry();
-    assert!(registry.get(OpId::Stream(ResourceId::Invocation)).is_none());
+    assert!(
+        registry
+            .get(&OpId::Stream(ResourceId::Invocation))
+            .is_none()
+    );
+    assert!(registry.get(&OpId::List(ResourceId::Control)).is_none());
+    assert!(registry.get(&OpId::Stream(ResourceId::Control)).is_none());
     assert_eq!(
         registry
-            .get(OpId::List(ResourceId::Invocation))
+            .get(&OpId::List(ResourceId::Invocation))
             .unwrap()
             .nature,
         Some(Nature::View)
     );
     assert_eq!(
         registry
-            .get(OpId::Verb(DomainVerbId::InvocationDrop))
+            .get(&OpId::Get(ResourceId::Control))
             .unwrap()
-            .category,
+            .nature,
+        Some(Nature::Synthetic)
+    );
+    assert_eq!(
+        registry.get(&InvocationDrop::op()).unwrap().category,
         OpCategory::DomainVerb
     );
     assert_eq!(
@@ -348,8 +403,8 @@ fn receipt_watermark_is_the_highest_appended_seq() {
     assert_eq!(fq_ops::Receipt { events: vec![] }.watermark(), None);
 }
 
-/// The wire form of an op identity is serde's native enum encoding,
-/// not the rendered string — pin one of each so an attribute change
+/// The wire form of an op identity is serde's native encoding, not
+/// the rendered string — pin one of each shape so an attribute change
 /// (which would break client/daemon compatibility) is a visible diff.
 #[test]
 fn wire_encoding_is_native_not_rendered() {
@@ -359,10 +414,14 @@ fn wire_encoding_is_native_not_rendered() {
     assert_eq!(serde_json::from_str::<OpId>(&encoded).unwrap(), op);
     assert_eq!(op.to_string(), "transcript_entry.stream");
 
-    let verb = OpId::Verb(DomainVerbId::ControlDown);
+    let verb = ControlDown::op();
     assert_eq!(
         serde_json::to_string(&verb).unwrap(),
-        r#"{"verb":"control_down"}"#
+        r#"{"verb":{"resource":"control","leaf":"down"}}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<OpId>(r#"{"verb":{"resource":"control","leaf":"down"}}"#).unwrap(),
+        verb
     );
     assert_eq!(verb.to_string(), "control.down");
 }
