@@ -51,7 +51,7 @@ pub struct ResourceDescriptor {
     pub nature: Nature,
     pub version: u32,
     pub stability: Stability,
-    pub summary: &'static str,
+    pub description: &'static str,
     pub caveats: &'static str,
 }
 
@@ -63,19 +63,6 @@ pub enum RegistryError {
     Duplicate { name: String },
     #[error("domain `{domain:?}` is already in the catalogue — one entry per resource")]
     DuplicateResource { domain: Domain },
-}
-
-/// Descriptions for a resource's derived operations. The catalogue
-/// entry defines the types once; these strings let List(Operation)
-/// say what each derived op means for *this* resource.
-#[derive(Debug, Clone, Copy)]
-pub struct ResourceDocs {
-    pub stability: Stability,
-    /// Description for the derived surface.
-    pub summary: &'static str,
-    /// Caveats shared by the resource's whole derived surface
-    /// (retention bounds, fold semantics). Empty means "none".
-    pub caveats: &'static str,
 }
 
 #[derive(Debug, Default)]
@@ -99,12 +86,10 @@ impl Registry {
         Ok(())
     }
 
-    /// Record the resource-level catalogue entry — where nature lives.
-    fn insert_resource<R: Resource>(
-        &mut self,
-        nature: Nature,
-        docs: ResourceDocs,
-    ) -> Result<(), RegistryError> {
+    /// Record the resource-level catalogue entry — a pure projection
+    /// of the impl (plus the bound-checked nature from the entry
+    /// point) — where nature lives.
+    fn insert_resource<R: Resource>(&mut self, nature: Nature) -> Result<(), RegistryError> {
         let segment = R::DOMAIN.segment();
         if self.resources.contains_key(segment) {
             return Err(RegistryError::DuplicateResource { domain: R::DOMAIN });
@@ -115,9 +100,9 @@ impl Registry {
                 domain: R::DOMAIN,
                 nature,
                 version: R::VERSION,
-                stability: docs.stability,
-                summary: docs.summary,
-                caveats: docs.caveats,
+                description: R::META.description,
+                stability: R::META.stability,
+                caveats: R::META.caveats,
             },
         );
         Ok(())
@@ -126,7 +111,6 @@ impl Registry {
     fn insert_generic<R: Resource>(
         &mut self,
         op: OpId,
-        docs: ResourceDocs,
         input_schema: Schema,
         output_schema: Schema,
     ) -> Result<(), RegistryError> {
@@ -142,27 +126,22 @@ impl Registry {
                 verb: Verb::Read,
                 scope: R::DOMAIN,
             }],
-            description: docs.summary,
-            stability: docs.stability,
-            caveats: docs.caveats,
+            description: R::META.description,
+            stability: R::META.stability,
+            caveats: R::META.caveats,
             input_schema,
             output_schema,
         })
     }
 
-    fn insert_read_surface<R: Resource>(
-        &mut self,
-        docs: ResourceDocs,
-    ) -> Result<(), RegistryError> {
+    fn insert_read_surface<R: Resource>(&mut self) -> Result<(), RegistryError> {
         self.insert_generic::<R>(
             OpId::Get(R::DOMAIN),
-            docs,
             schema_for!(R::Key),
             schema_for!(R::State),
         )?;
         self.insert_generic::<R>(
             OpId::List(R::DOMAIN),
-            docs,
             schema_for!(R::Filter),
             schema_for!(R::State),
         )
@@ -170,20 +149,20 @@ impl Registry {
 
     /// Register a view: Get + List derive, answering as of a
     /// watermark. Views are never streamed — stream their atoms.
-    pub fn register_view<R: View>(&mut self, docs: ResourceDocs) -> Result<(), RegistryError> {
-        self.insert_resource::<R>(Nature::View, docs)?;
-        self.insert_read_surface::<R>(docs)
+    /// Everything comes from the impl; registration takes nothing.
+    pub fn register_view<R: View>(&mut self) -> Result<(), RegistryError> {
+        self.insert_resource::<R>(Nature::View)?;
+        self.insert_read_surface::<R>()
     }
 
     /// Register an atom: Get + List + Stream derive. The
     /// [`Atom`] bound makes "only atoms stream" a compile-time
     /// fact.
-    pub fn register_atom<R: Atom>(&mut self, docs: ResourceDocs) -> Result<(), RegistryError> {
-        self.insert_resource::<R>(Nature::Atom, docs)?;
-        self.insert_read_surface::<R>(docs)?;
+    pub fn register_atom<R: Atom>(&mut self) -> Result<(), RegistryError> {
+        self.insert_resource::<R>(Nature::Atom)?;
+        self.insert_read_surface::<R>()?;
         self.insert_generic::<R>(
             OpId::Stream(R::DOMAIN),
-            docs,
             schema_for!(R::Filter),
             schema_for!(R::State),
         )
@@ -193,14 +172,10 @@ impl Registry {
     /// describing itself. Nothing else derives (no atoms behind it,
     /// nothing to list or stream); its verbs register separately as
     /// commands.
-    pub fn register_synthetic<R: Synthetic>(
-        &mut self,
-        docs: ResourceDocs,
-    ) -> Result<(), RegistryError> {
-        self.insert_resource::<R>(Nature::Synthetic, docs)?;
+    pub fn register_synthetic<R: Synthetic>(&mut self) -> Result<(), RegistryError> {
+        self.insert_resource::<R>(Nature::Synthetic)?;
         self.insert_generic::<R>(
             OpId::Get(R::DOMAIN),
-            docs,
             schema_for!(R::Key),
             schema_for!(R::State),
         )

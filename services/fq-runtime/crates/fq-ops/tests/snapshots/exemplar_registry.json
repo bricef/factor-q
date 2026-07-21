@@ -806,34 +806,34 @@
   "resources": [
     {
       "caveats": "",
+      "description": "exemplar resource",
       "domain": "control",
       "nature": "synthetic",
       "stability": "experimental",
-      "summary": "exemplar resource",
       "version": 1
     },
     {
       "caveats": "",
+      "description": "exemplar resource",
       "domain": "invocation",
       "nature": "view",
       "stability": "experimental",
-      "summary": "exemplar resource",
       "version": 1
     },
     {
       "caveats": "",
+      "description": "exemplar resource",
       "domain": "trigger",
       "nature": "atom",
       "stability": "experimental",
-      "summary": "exemplar resource",
       "version": 1
     },
     {
       "caveats": "",
+      "description": "exemplar resource",
       "domain": "turn",
       "nature": "atom",
       "stability": "experimental",
-      "summary": "exemplar resource",
       "version": 1
     }
   ]

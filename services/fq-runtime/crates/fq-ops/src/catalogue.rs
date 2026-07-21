@@ -21,6 +21,8 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::meta::OpMeta;
+
 /// Every resource the surface can speak about — including synthetic
 /// ones that exist only as verb carriers and permission scopes
 /// (`Control`). The rendered segment derives from the variant name;
@@ -88,6 +90,11 @@ pub trait Resource {
     type Key: Serialize + DeserializeOwned + JsonSchema;
     type State: Serialize + DeserializeOwned + JsonSchema;
     type Filter: Serialize + DeserializeOwned + JsonSchema;
+    /// Contract text for the whole derived surface — declared here,
+    /// like every other definition on the surface (one site), and
+    /// projected into the catalogue's descriptor at
+    /// registration.
+    const META: OpMeta;
 }
 
 /// Marker: this resource is an atom — immutable once created, and
