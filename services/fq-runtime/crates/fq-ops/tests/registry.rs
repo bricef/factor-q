@@ -299,10 +299,12 @@ fn derivation_yields_the_expected_surface() {
 #[test]
 fn duplicate_registration_is_refused() {
     let mut registry = exemplar_registry();
+    // The resource-level entry is checked first: re-registering a
+    // domain is a catalogue duplicate, before any op name collides.
     assert_eq!(
         registry.register_view::<InvocationR>(DOCS),
-        Err(RegistryError::Duplicate {
-            name: "invocation.get".into()
+        Err(RegistryError::DuplicateResource {
+            domain: Domain::Invocation
         })
     );
     assert_eq!(
@@ -364,9 +366,9 @@ fn authority_derivation() {
     );
 }
 
-/// Natures are recorded for the generic surface: views and synthetics
-/// get no stream, synthetics get no list, and categories say which
-/// envelope an op rides.
+/// Natures live on the catalogue's resource entries, not on ops:
+/// views and synthetics get no stream, synthetics get no list, and
+/// categories say which envelope an op rides.
 #[test]
 fn natures_and_categories() {
     let registry = exemplar_registry();
@@ -374,16 +376,18 @@ fn natures_and_categories() {
     assert!(registry.get(&OpId::List(Domain::Control)).is_none());
     assert!(registry.get(&OpId::Stream(Domain::Control)).is_none());
     assert_eq!(
-        registry
-            .get(&OpId::List(Domain::Invocation))
-            .unwrap()
-            .nature,
-        Some(Nature::View)
+        registry.get_resource(Domain::Invocation).unwrap().nature,
+        Nature::View
     );
     assert_eq!(
-        registry.get(&OpId::Get(Domain::Control)).unwrap().nature,
-        Some(Nature::Synthetic)
+        registry.get_resource(Domain::Control).unwrap().nature,
+        Nature::Synthetic
     );
+    assert_eq!(
+        registry.get_resource(Domain::Turn).unwrap().nature,
+        Nature::Atom
+    );
+    assert!(registry.get_resource(Domain::Event).is_none());
     assert_eq!(
         registry.get(&InvocationDrop::op()).unwrap().category,
         OpCategory::DomainVerb
@@ -444,7 +448,11 @@ fn wire_encoding_is_native_not_rendered() {
 #[test]
 fn describe_matches_the_committed_snapshot() {
     let registry = exemplar_registry();
-    let actual = serde_json::to_string_pretty(&registry.describe()).unwrap() + "\n";
+    let payload = serde_json::json!({
+        "resources": registry.describe_resources(),
+        "ops": registry.describe(),
+    });
+    let actual = serde_json::to_string_pretty(&payload).unwrap() + "\n";
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/snapshots/exemplar_registry.json");

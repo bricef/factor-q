@@ -35,7 +35,7 @@ pub use catalogue::{Atom, Domain, Nature, Resource, Synthetic, View};
 pub use declared::{Command, Report};
 pub use meta::{Authority, OpMeta, Stability, Verb};
 pub use opid::{OpCategory, OpId};
-pub use registry::{OpDescriptor, Registry, RegistryError, ResourceDocs};
+pub use registry::{OpDescriptor, Registry, RegistryError, ResourceDescriptor, ResourceDocs};
 pub use wire::{
     EventRef, InvokeRequest, InvokeResponse, NextBatchRequest, Receipt, StreamBatch, StreamItem,
     WireError,
