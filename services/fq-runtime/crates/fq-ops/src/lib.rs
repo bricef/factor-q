@@ -4,12 +4,12 @@
 //!
 //! Four categories of boundary promise, mirroring the domain model:
 //!
-//! - **Resources** ([`model`]): atoms, views, and synthetic
-//!   resources, declared as values — one [`Resource`] constructor
-//!   call derives the whole generic read surface (atoms Get + List +
-//!   Stream, views Get + List, synthetics Get) with derived Read
-//!   authority. The generic surface is read-only: every mutation on
-//!   the whole surface is a declared command.
+//! - **Resources** ([`model`]): [`Atom`], [`View`], and [`Synthetic`]
+//!   are explicit value types — the nature is the type, and one
+//!   constructor call derives the whole generic read surface (atoms
+//!   Get + List + Stream, views Get + List, synthetics Get) with
+//!   derived Read authority. The generic surface is read-only: every
+//!   mutation on the whole surface is a declared command.
 //! - **Domain verbs** ([`model`]): the bespoke commands whose
 //!   semantics are the contract; output is always a [`Receipt`] by
 //!   construction (D3). A declaration is one site — the impl carries
@@ -30,7 +30,7 @@ pub mod opid;
 pub mod registry;
 pub mod wire;
 
-pub use model::{Authority, Command, Domain, Nature, Report, Resource, Stability, Verb};
+pub use model::{Atom, Authority, Command, Domain, Report, Stability, Synthetic, Verb, View};
 pub use opid::{OpCategory, OpId};
 pub use registry::{Entry, Registry, RegistryError, Resolved};
 pub use wire::{

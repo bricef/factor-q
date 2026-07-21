@@ -11,8 +11,8 @@
 //! `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
 use fq_ops::{
-    Authority, Command, Domain, Nature, OpCategory, OpId, Registry, RegistryError, Report,
-    Resource, Stability, Verb,
+    Atom, Authority, Command, Domain, OpCategory, OpId, Registry, RegistryError, Report, Stability,
+    Synthetic, Verb, View,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -48,10 +48,9 @@ struct EntryFilter {
 /// (assistant output or tool result); a **Round** is the bundle of
 /// Turns in one agent-loop iteration, recoverable via the `round`
 /// grouping key (the ADR-0027 step boundary is a Round boundary).
-fn turn() -> Resource {
-    Resource::new::<EntryKey, EntryState, EntryFilter>(
+fn turn() -> Atom {
+    Atom::new::<EntryKey, EntryState, EntryFilter>(
         Domain::Turn,
-        Nature::Atom,
         "exemplar resource",
         Stability::Experimental,
     )
@@ -78,10 +77,9 @@ struct InvocationFilter {
 }
 
 /// Invocation: a view — Get/List derive; no Stream (stream its atoms).
-fn invocation() -> Resource {
-    Resource::new::<InvocationKey, InvocationState, InvocationFilter>(
+fn invocation() -> View {
+    View::new::<InvocationKey, InvocationState, InvocationFilter>(
         Domain::Invocation,
-        Nature::View,
         "exemplar resource",
         Stability::Experimental,
     )
@@ -107,10 +105,9 @@ struct TriggerFilter {
 
 /// Trigger: an atom. Not operator-creatable via a generic verb —
 /// dispatching work is `trigger.publish`, a command.
-fn trigger() -> Resource {
-    Resource::new::<TriggerKey, TriggerState, TriggerFilter>(
+fn trigger() -> Atom {
+    Atom::new::<TriggerKey, TriggerState, TriggerFilter>(
         Domain::Trigger,
-        Nature::Atom,
         "exemplar resource",
         Stability::Experimental,
     )
@@ -125,10 +122,9 @@ struct ControlState {
 
 /// Control: the synthetic resource — Get alone derives (the machinery
 /// describing itself); its verbs register as commands.
-fn control() -> Resource {
-    Resource::new::<(), ControlState, ()>(
+fn control() -> Synthetic {
+    Synthetic::new::<ControlState>(
         Domain::Control,
-        Nature::Synthetic,
         "exemplar resource",
         Stability::Experimental,
     )
@@ -377,6 +373,14 @@ fn natures_and_categories() {
     assert_eq!(
         registry.resolve_named("turn.stream").unwrap().category,
         OpCategory::Stream
+    );
+    // A machinery singleton has no key: its Get takes no input.
+    assert!(
+        registry
+            .resolve(&OpId::Get(Domain::Control))
+            .unwrap()
+            .input_schema
+            .is_none()
     );
     assert!(registry.resolve_named("invocation.frobnicate").is_none());
 }
