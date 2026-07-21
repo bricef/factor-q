@@ -17,6 +17,17 @@ use crate::model::Domain;
 
 /// Every operation the surface can carry, natively serializable for
 /// the tarpc edge.
+///
+/// This is **request vocabulary, not declaration vocabulary**:
+/// identity is the address space, and an address space must be able
+/// to express requests the daemon refuses — `Stream(d)` where `d` is
+/// registered as a view is constructable on purpose, and resolves to
+/// nothing (`WireError::NotRegistered` on the wire). Whether an
+/// address is served is a registry question, answered at resolve
+/// time; making invalid combinations undeserializable would turn
+/// graceful version skew into parse errors. Declarations, by
+/// contrast, keep invalid states unrepresentable — that split is the
+/// trust boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OpId {
