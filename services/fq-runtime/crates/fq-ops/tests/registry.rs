@@ -11,7 +11,7 @@
 
 use fq_ops::{
     Atom, Authority, Command, Domain, Nature, OpCategory, OpId, OpMeta, Registry, RegistryError,
-    Report, Resource, ResourceDocs, Stability, Synthetic, Verb, View,
+    Report, Resource, Stability, Synthetic, Verb, View,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,7 @@ impl Resource for TurnR {
     type Key = EntryKey;
     type State = EntryState;
     type Filter = EntryFilter;
+    const META: OpMeta = EXEMPLAR_META;
 }
 impl Atom for TurnR {}
 
@@ -88,6 +89,7 @@ impl Resource for InvocationR {
     type Key = InvocationKey;
     type State = InvocationState;
     type Filter = InvocationFilter;
+    const META: OpMeta = EXEMPLAR_META;
 }
 
 /// Trigger: an atom that operators may create.
@@ -116,6 +118,7 @@ impl Resource for TriggerR {
     type Key = TriggerKey;
     type State = TriggerState;
     type Filter = TriggerFilter;
+    const META: OpMeta = EXEMPLAR_META;
 }
 impl Atom for TriggerR {}
 
@@ -163,6 +166,7 @@ impl Resource for ControlR {
     type Key = ();
     type State = ControlState;
     type Filter = ();
+    const META: OpMeta = EXEMPLAR_META;
 }
 
 /// invocation.drop: a domain verb — declared at one site: identity
@@ -242,19 +246,21 @@ impl Report for CostSummary {
     };
 }
 
-const DOCS: ResourceDocs = ResourceDocs {
+/// Shared exemplar contract text — a real catalogue entry writes its
+/// own.
+const EXEMPLAR_META: OpMeta = OpMeta {
+    description: "exemplar resource",
     stability: Stability::Experimental,
-    summary: "exemplar resource",
     caveats: "",
 };
 
 fn exemplar_registry() -> Registry {
     let mut registry = Registry::new();
-    registry.register_atom::<TurnR>(DOCS).unwrap();
-    registry.register_view::<InvocationR>(DOCS).unwrap();
-    registry.register_atom::<TriggerR>(DOCS).unwrap();
+    registry.register_atom::<TurnR>().unwrap();
+    registry.register_view::<InvocationR>().unwrap();
+    registry.register_atom::<TriggerR>().unwrap();
     registry.register_command::<TriggerPublish>().unwrap();
-    registry.register_synthetic::<ControlR>(DOCS).unwrap();
+    registry.register_synthetic::<ControlR>().unwrap();
     registry.register_command::<InvocationDrop>().unwrap();
     registry.register_command::<ControlDown>().unwrap();
     registry.register_report::<CostSummary>().unwrap();
@@ -302,7 +308,7 @@ fn duplicate_registration_is_refused() {
     // The resource-level entry is checked first: re-registering a
     // domain is a catalogue duplicate, before any op name collides.
     assert_eq!(
-        registry.register_view::<InvocationR>(DOCS),
+        registry.register_view::<InvocationR>(),
         Err(RegistryError::DuplicateResource {
             domain: Domain::Invocation
         })
