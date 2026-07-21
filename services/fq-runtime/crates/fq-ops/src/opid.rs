@@ -13,7 +13,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::Domain;
+use crate::model::Domain;
 
 /// Every operation the surface can carry, natively serializable for
 /// the tarpc edge.
