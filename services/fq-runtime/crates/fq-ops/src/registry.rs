@@ -16,12 +16,15 @@ use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 
-use crate::catalogue::{Atom, Nature, Resource, Synthetic, View};
+use crate::catalogue::{Atom, Domain, Nature, Resource, Synthetic, View};
 use crate::declared::{Command, Report};
 use crate::meta::{Authority, Stability, Verb};
 use crate::opid::{OpCategory, OpId};
 
-/// One registered promise, described. `authority` is a list because a
+/// One registered promise, described. Operations have categories;
+/// natures belong to resources ([`ResourceDescriptor`]) — an op's
+/// semantics follow from its category plus, for generic ops, the
+/// nature of the domain it reads. `authority` is a list because a
 /// report reads several scopes; generic operations and verbs carry
 /// exactly one entry.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -29,9 +32,6 @@ pub struct OpDescriptor {
     pub op: OpId,
     pub name: String,
     pub category: OpCategory,
-    /// The resource's nature, for the generic surface (`None` for the
-    /// declared surface).
-    pub nature: Option<Nature>,
     pub version: u32,
     pub authority: Vec<Authority>,
     pub description: &'static str,
@@ -41,12 +41,28 @@ pub struct OpDescriptor {
     pub output_schema: Schema,
 }
 
+/// One catalogue entry, described: the resource-level half of the
+/// registry's payload, recorded once per registered resource — where
+/// nature lives, alongside the docs shared by the resource's whole
+/// derived surface.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResourceDescriptor {
+    pub domain: Domain,
+    pub nature: Nature,
+    pub version: u32,
+    pub stability: Stability,
+    pub summary: &'static str,
+    pub caveats: &'static str,
+}
+
 /// Why a registration was refused — a defect in the registering code,
 /// not a runtime condition to retry.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RegistryError {
     #[error("`{name}` is already registered — one registry, one description per operation (D1)")]
     Duplicate { name: String },
+    #[error("domain `{domain:?}` is already in the catalogue — one entry per resource")]
+    DuplicateResource { domain: Domain },
 }
 
 /// Descriptions for a resource's derived operations. The catalogue
@@ -64,6 +80,7 @@ pub struct ResourceDocs {
 
 #[derive(Debug, Default)]
 pub struct Registry {
+    resources: BTreeMap<&'static str, ResourceDescriptor>,
     ops: BTreeMap<String, OpDescriptor>,
 }
 
@@ -82,10 +99,33 @@ impl Registry {
         Ok(())
     }
 
+    /// Record the resource-level catalogue entry — where nature lives.
+    fn insert_resource<R: Resource>(
+        &mut self,
+        nature: Nature,
+        docs: ResourceDocs,
+    ) -> Result<(), RegistryError> {
+        let segment = R::DOMAIN.segment();
+        if self.resources.contains_key(segment) {
+            return Err(RegistryError::DuplicateResource { domain: R::DOMAIN });
+        }
+        self.resources.insert(
+            segment,
+            ResourceDescriptor {
+                domain: R::DOMAIN,
+                nature,
+                version: R::VERSION,
+                stability: docs.stability,
+                summary: docs.summary,
+                caveats: docs.caveats,
+            },
+        );
+        Ok(())
+    }
+
     fn insert_generic<R: Resource>(
         &mut self,
         op: OpId,
-        nature: Option<Nature>,
         docs: ResourceDocs,
         input_schema: Schema,
         output_schema: Schema,
@@ -97,7 +137,6 @@ impl Registry {
             name: op.to_string(),
             category: op.category(),
             op,
-            nature,
             version: R::VERSION,
             authority: vec![Authority {
                 verb: Verb::Read,
@@ -113,19 +152,16 @@ impl Registry {
 
     fn insert_read_surface<R: Resource>(
         &mut self,
-        nature: Nature,
         docs: ResourceDocs,
     ) -> Result<(), RegistryError> {
         self.insert_generic::<R>(
             OpId::Get(R::DOMAIN),
-            Some(nature),
             docs,
             schema_for!(R::Key),
             schema_for!(R::State),
         )?;
         self.insert_generic::<R>(
             OpId::List(R::DOMAIN),
-            Some(nature),
             docs,
             schema_for!(R::Filter),
             schema_for!(R::State),
@@ -135,17 +171,18 @@ impl Registry {
     /// Register a view: Get + List derive, answering as of a
     /// watermark. Views are never streamed — stream their atoms.
     pub fn register_view<R: View>(&mut self, docs: ResourceDocs) -> Result<(), RegistryError> {
-        self.insert_read_surface::<R>(Nature::View, docs)
+        self.insert_resource::<R>(Nature::View, docs)?;
+        self.insert_read_surface::<R>(docs)
     }
 
     /// Register an atom: Get + List + Stream derive. The
     /// [`Atom`] bound makes "only atoms stream" a compile-time
     /// fact.
     pub fn register_atom<R: Atom>(&mut self, docs: ResourceDocs) -> Result<(), RegistryError> {
-        self.insert_read_surface::<R>(Nature::Atom, docs)?;
+        self.insert_resource::<R>(Nature::Atom, docs)?;
+        self.insert_read_surface::<R>(docs)?;
         self.insert_generic::<R>(
             OpId::Stream(R::DOMAIN),
-            Some(Nature::Atom),
             docs,
             schema_for!(R::Filter),
             schema_for!(R::State),
@@ -160,9 +197,9 @@ impl Registry {
         &mut self,
         docs: ResourceDocs,
     ) -> Result<(), RegistryError> {
+        self.insert_resource::<R>(Nature::Synthetic, docs)?;
         self.insert_generic::<R>(
             OpId::Get(R::DOMAIN),
-            Some(Nature::Synthetic),
             docs,
             schema_for!(R::Key),
             schema_for!(R::State),
@@ -179,7 +216,6 @@ impl Registry {
             name: op.to_string(),
             category: OpCategory::DomainVerb,
             op,
-            nature: None,
             version: C::VERSION,
             authority: vec![C::AUTHORITY],
             description: C::META.description,
@@ -198,7 +234,6 @@ impl Registry {
             name: op.to_string(),
             category: OpCategory::Report,
             op,
-            nature: None,
             version: R::VERSION,
             authority: R::READS
                 .iter()
@@ -217,6 +252,18 @@ impl Registry {
 
     pub fn get(&self, op: &OpId) -> Option<&OpDescriptor> {
         self.ops.get(&op.to_string())
+    }
+
+    /// The catalogue entry for a registered domain — where its nature
+    /// and resource-level docs live.
+    pub fn get_resource(&self, domain: Domain) -> Option<&ResourceDescriptor> {
+        self.resources.get(domain.segment())
+    }
+
+    /// Every registered resource, in segment order — the catalogue
+    /// half of the registry's payload.
+    pub fn describe_resources(&self) -> Vec<&ResourceDescriptor> {
+        self.resources.values().collect()
     }
 
     /// Lookup by rendered name — for string-addressed adapters (MCP
