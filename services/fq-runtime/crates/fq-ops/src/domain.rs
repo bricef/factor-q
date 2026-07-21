@@ -1,4 +1,4 @@
-//! The resource catalogue: the heart of the domain model
+//! The domain model, declared in types — the heart of
 //! (`docs/design/aspirational/operator-surface-domain-model.md`).
 //!
 //! A resource has one of three natures. **Atoms** are immutable once

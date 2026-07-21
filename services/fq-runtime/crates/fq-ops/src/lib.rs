@@ -4,13 +4,13 @@
 //!
 //! Four categories of boundary promise, mirroring the domain model:
 //!
-//! - **Resources** ([`catalogue`]): atoms, views, and synthetic
+//! - **Resources** ([`domain`]): atoms, views, and synthetic
 //!   resources. One [`Resource`] impl — nature included — derives a
 //!   resource's whole generic read surface (atoms Get + List + Stream,
 //!   views Get + List, synthetics Get) with derived Read authority.
 //!   The generic surface is read-only: every mutation on the whole
 //!   surface is a declared command.
-//! - **Domain verbs** ([`catalogue`]): the bespoke commands whose
+//! - **Domain verbs** ([`domain`]): the bespoke commands whose
 //!   semantics are the contract; output is always a [`Receipt`] by
 //!   construction (D3). A declaration is one site — the impl carries
 //!   its identity, types, authority, and contract text.
@@ -25,12 +25,12 @@
 //! crate must stay a leaf (no sqlx, no NATS, no tokio; the thin `fq`
 //! client links it alone — `tests/leaf_gate.rs` enforces it).
 
-pub mod catalogue;
+pub mod domain;
 pub mod opid;
 pub mod registry;
 pub mod wire;
 
-pub use catalogue::{Authority, Command, Domain, Nature, Report, Resource, Stability, Verb};
+pub use domain::{Authority, Command, Domain, Nature, Report, Resource, Stability, Verb};
 pub use opid::{OpCategory, OpId};
 pub use registry::{OpDescriptor, Registry, RegistryError, ResourceDescriptor};
 pub use wire::{
