@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 // edge (plan Phases 2–3); these pin the shape a definition takes.
 // ------------------------------------------------------------------
 
-/// TranscriptEntry: an atom — Get/List/Stream derive.
-struct TranscriptEntryR;
+/// Turn: an atom — Get/List/Stream derive.
+struct TurnR;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct EntryKey {
@@ -44,13 +44,13 @@ struct EntryFilter {
     limit: Option<u32>,
 }
 
-impl Resource for TranscriptEntryR {
-    const DOMAIN: Domain = Domain::TranscriptEntry;
+impl Resource for TurnR {
+    const DOMAIN: Domain = Domain::Turn;
     type Key = EntryKey;
     type State = EntryState;
     type Filter = EntryFilter;
 }
-impl Atom for TranscriptEntryR {}
+impl Atom for TurnR {}
 
 /// Invocation: a view — Get/List derive; no Stream (stream its atoms).
 struct InvocationR;
@@ -223,7 +223,7 @@ const DOCS: ResourceDocs = ResourceDocs {
 
 fn exemplar_registry() -> Registry {
     let mut registry = Registry::new();
-    registry.register_atom::<TranscriptEntryR>(DOCS).unwrap();
+    registry.register_atom::<TurnR>(DOCS).unwrap();
     registry.register_view::<InvocationR>(DOCS).unwrap();
     registry.register_atom::<TriggerR>(DOCS).unwrap();
     registry.register_create::<TriggerR>(DOCS).unwrap();
@@ -258,13 +258,13 @@ fn derivation_yields_the_expected_surface() {
             "invocation.drop",
             "invocation.get",
             "invocation.list",
-            "transcript_entry.get",
-            "transcript_entry.list",
-            "transcript_entry.stream",
             "trigger.create",
             "trigger.get",
             "trigger.list",
             "trigger.stream",
+            "turn.get",
+            "turn.list",
+            "turn.stream",
         ]
     );
 }
@@ -317,11 +317,8 @@ fn authority_derivation() {
         scope,
     };
     assert_eq!(
-        registry
-            .get(&OpId::Stream(Domain::TranscriptEntry))
-            .unwrap()
-            .authority,
-        vec![read(Domain::TranscriptEntry)]
+        registry.get(&OpId::Stream(Domain::Turn)).unwrap().authority,
+        vec![read(Domain::Turn)]
     );
     assert_eq!(
         registry
@@ -398,11 +395,11 @@ fn receipt_watermark_is_the_highest_appended_seq() {
 /// (which would break client/daemon compatibility) is a visible diff.
 #[test]
 fn wire_encoding_is_native_not_rendered() {
-    let op = OpId::Stream(Domain::TranscriptEntry);
+    let op = OpId::Stream(Domain::Turn);
     let encoded = serde_json::to_string(&op).unwrap();
-    assert_eq!(encoded, r#"{"stream":"transcript_entry"}"#);
+    assert_eq!(encoded, r#"{"stream":"turn"}"#);
     assert_eq!(serde_json::from_str::<OpId>(&encoded).unwrap(), op);
-    assert_eq!(op.to_string(), "transcript_entry.stream");
+    assert_eq!(op.to_string(), "turn.stream");
 
     let verb = ControlDown::op();
     assert_eq!(

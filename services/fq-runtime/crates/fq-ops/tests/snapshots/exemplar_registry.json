@@ -367,200 +367,6 @@
   },
   {
     "op": {
-      "get": "transcript_entry"
-    },
-    "name": "transcript_entry.get",
-    "category": "get",
-    "nature": "atom",
-    "version": 1,
-    "authority": [
-      {
-        "verb": "read",
-        "scope": "transcript_entry"
-      }
-    ],
-    "description": "exemplar resource",
-    "stability": "experimental",
-    "caveats": "",
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "EntryKey",
-      "type": "object",
-      "properties": {
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "seq"
-      ]
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "EntryState",
-      "type": "object",
-      "properties": {
-        "content": {
-          "type": "string"
-        },
-        "invocation_id": {
-          "type": "string"
-        },
-        "role": {
-          "type": "string"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "seq",
-        "invocation_id",
-        "role",
-        "content"
-      ]
-    }
-  },
-  {
-    "op": {
-      "list": "transcript_entry"
-    },
-    "name": "transcript_entry.list",
-    "category": "list",
-    "nature": "atom",
-    "version": 1,
-    "authority": [
-      {
-        "verb": "read",
-        "scope": "transcript_entry"
-      }
-    ],
-    "description": "exemplar resource",
-    "stability": "experimental",
-    "caveats": "",
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "EntryFilter",
-      "type": "object",
-      "properties": {
-        "invocation_id": {
-          "type": "string"
-        },
-        "limit": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "default": null,
-          "minimum": 0
-        }
-      },
-      "required": [
-        "invocation_id"
-      ]
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "EntryState",
-      "type": "object",
-      "properties": {
-        "content": {
-          "type": "string"
-        },
-        "invocation_id": {
-          "type": "string"
-        },
-        "role": {
-          "type": "string"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "seq",
-        "invocation_id",
-        "role",
-        "content"
-      ]
-    }
-  },
-  {
-    "op": {
-      "stream": "transcript_entry"
-    },
-    "name": "transcript_entry.stream",
-    "category": "stream",
-    "nature": "atom",
-    "version": 1,
-    "authority": [
-      {
-        "verb": "read",
-        "scope": "transcript_entry"
-      }
-    ],
-    "description": "exemplar resource",
-    "stability": "experimental",
-    "caveats": "",
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "EntryFilter",
-      "type": "object",
-      "properties": {
-        "invocation_id": {
-          "type": "string"
-        },
-        "limit": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "default": null,
-          "minimum": 0
-        }
-      },
-      "required": [
-        "invocation_id"
-      ]
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "EntryState",
-      "type": "object",
-      "properties": {
-        "content": {
-          "type": "string"
-        },
-        "invocation_id": {
-          "type": "string"
-        },
-        "role": {
-          "type": "string"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "seq",
-        "invocation_id",
-        "role",
-        "content"
-      ]
-    }
-  },
-  {
-    "op": {
       "create": "trigger"
     },
     "name": "trigger.create",
@@ -790,6 +596,200 @@
         "seq",
         "agent_id",
         "payload"
+      ]
+    }
+  },
+  {
+    "op": {
+      "get": "turn"
+    },
+    "name": "turn.get",
+    "category": "get",
+    "nature": "atom",
+    "version": 1,
+    "authority": [
+      {
+        "verb": "read",
+        "scope": "turn"
+      }
+    ],
+    "description": "exemplar resource",
+    "stability": "experimental",
+    "caveats": "",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "EntryKey",
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "seq"
+      ]
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "EntryState",
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "invocation_id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "seq",
+        "invocation_id",
+        "role",
+        "content"
+      ]
+    }
+  },
+  {
+    "op": {
+      "list": "turn"
+    },
+    "name": "turn.list",
+    "category": "list",
+    "nature": "atom",
+    "version": 1,
+    "authority": [
+      {
+        "verb": "read",
+        "scope": "turn"
+      }
+    ],
+    "description": "exemplar resource",
+    "stability": "experimental",
+    "caveats": "",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "EntryFilter",
+      "type": "object",
+      "properties": {
+        "invocation_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "invocation_id"
+      ]
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "EntryState",
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "invocation_id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "seq",
+        "invocation_id",
+        "role",
+        "content"
+      ]
+    }
+  },
+  {
+    "op": {
+      "stream": "turn"
+    },
+    "name": "turn.stream",
+    "category": "stream",
+    "nature": "atom",
+    "version": 1,
+    "authority": [
+      {
+        "verb": "read",
+        "scope": "turn"
+      }
+    ],
+    "description": "exemplar resource",
+    "stability": "experimental",
+    "caveats": "",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "EntryFilter",
+      "type": "object",
+      "properties": {
+        "invocation_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "invocation_id"
+      ]
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "EntryState",
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "invocation_id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "seq",
+        "invocation_id",
+        "role",
+        "content"
       ]
     }
   }
