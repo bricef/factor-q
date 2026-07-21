@@ -1,8 +1,7 @@
 [
   {
-    "resource": {
+    "atom": {
       "domain": "turn",
-      "nature": "atom",
       "version": 1,
       "summary": "exemplar resource",
       "description": "",
@@ -80,9 +79,8 @@
     }
   },
   {
-    "resource": {
+    "view": {
       "domain": "invocation",
-      "nature": "view",
       "version": 1,
       "summary": "exemplar resource",
       "description": "",
@@ -147,9 +145,8 @@
     }
   },
   {
-    "resource": {
+    "atom": {
       "domain": "trigger",
-      "nature": "atom",
       "version": 1,
       "summary": "exemplar resource",
       "description": "",
@@ -207,18 +204,12 @@
     }
   },
   {
-    "resource": {
+    "synthetic": {
       "domain": "control",
-      "nature": "synthetic",
       "version": 1,
       "summary": "exemplar resource",
       "description": "",
       "stability": "experimental",
-      "key_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "null",
-        "type": "null"
-      },
       "state_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "ControlState",
@@ -239,11 +230,6 @@
           "nats_connected",
           "stream_ok"
         ]
-      },
-      "filter_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "null",
-        "type": "null"
       }
     }
   },

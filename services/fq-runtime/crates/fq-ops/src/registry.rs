@@ -19,22 +19,36 @@ use std::collections::BTreeMap;
 
 use schemars::Schema;
 
-use crate::model::{Authority, Command, Domain, Nature, Report, Resource, Verb};
+use crate::model::{Atom, Authority, Command, Domain, Report, Synthetic, Verb, View};
 use crate::opid::{OpCategory, OpId};
 
 /// One registered declaration — the heterogeneous collection is just
-/// the model's three value types behind an enum.
+/// the model's value types behind an enum. The resource variants ARE
+/// the natures: nature is structural, in code and in the serialized
+/// payload's variant tag alike.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Entry {
-    Resource(Resource),
+    Atom(Atom),
+    View(View),
+    Synthetic(Synthetic),
     Command(Command),
     Report(Report),
 }
 
-impl From<Resource> for Entry {
-    fn from(r: Resource) -> Self {
-        Entry::Resource(r)
+impl From<Atom> for Entry {
+    fn from(a: Atom) -> Self {
+        Entry::Atom(a)
+    }
+}
+impl From<View> for Entry {
+    fn from(v: View) -> Self {
+        Entry::View(v)
+    }
+}
+impl From<Synthetic> for Entry {
+    fn from(s: Synthetic) -> Self {
+        Entry::Synthetic(s)
     }
 }
 impl From<Command> for Entry {
@@ -45,6 +59,18 @@ impl From<Command> for Entry {
 impl From<Report> for Entry {
     fn from(r: Report) -> Self {
         Entry::Report(r)
+    }
+}
+
+impl Entry {
+    /// The domain a resource entry claims, if it is one.
+    fn resource_domain(&self) -> Option<Domain> {
+        match self {
+            Entry::Atom(a) => Some(a.domain),
+            Entry::View(v) => Some(v.domain),
+            Entry::Synthetic(s) => Some(s.domain),
+            Entry::Command(_) | Entry::Report(_) => None,
+        }
     }
 }
 
@@ -61,13 +87,16 @@ pub enum RegistryError {
 /// A per-operation view, computed on lookup from the owning entry —
 /// what the edge needs to dispatch one call: category (envelope
 /// shape), authority (authz middleware), schemas (validation).
+/// `input_schema` is `None` where the op takes no input (a synthetic
+/// Get — a machinery singleton has no key); `output_schema` is `None`
+/// where the output is a wire constant (a command's receipt).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolved<'a> {
     pub op: OpId,
     pub category: OpCategory,
     pub authority: Vec<Authority>,
     pub version: u32,
-    pub input_schema: &'a Schema,
+    pub input_schema: Option<&'a Schema>,
     pub output_schema: Option<&'a Schema>,
 }
 
@@ -86,16 +115,18 @@ impl Registry {
         Self::default()
     }
 
-    /// The rendered names a resource's derived surface claims.
-    fn derived_ops(resource: &Resource) -> Vec<OpId> {
-        match resource.nature {
-            Nature::Atom => vec![
-                OpId::Get(resource.domain),
-                OpId::List(resource.domain),
-                OpId::Stream(resource.domain),
+    /// The rendered names a resource entry's derived surface claims —
+    /// the verb set follows the type.
+    fn derived_ops(entry: &Entry) -> Vec<OpId> {
+        match entry {
+            Entry::Atom(a) => vec![
+                OpId::Get(a.domain),
+                OpId::List(a.domain),
+                OpId::Stream(a.domain),
             ],
-            Nature::View => vec![OpId::Get(resource.domain), OpId::List(resource.domain)],
-            Nature::Synthetic => vec![OpId::Get(resource.domain)],
+            Entry::View(v) => vec![OpId::Get(v.domain), OpId::List(v.domain)],
+            Entry::Synthetic(s) => vec![OpId::Get(s.domain)],
+            Entry::Command(_) | Entry::Report(_) => vec![],
         }
     }
 
@@ -105,17 +136,18 @@ impl Registry {
     pub fn register(&mut self, entry: impl Into<Entry>) -> Result<(), RegistryError> {
         let entry = entry.into();
         let claimed: Vec<String> = match &entry {
-            Entry::Resource(resource) => {
+            Entry::Atom(_) | Entry::View(_) | Entry::Synthetic(_) => {
+                let domain = entry
+                    .resource_domain()
+                    .expect("resource entry has a domain");
                 if self
                     .entries
                     .iter()
-                    .any(|e| matches!(e, Entry::Resource(r) if r.domain == resource.domain))
+                    .any(|e| e.resource_domain() == Some(domain))
                 {
-                    return Err(RegistryError::DuplicateResource {
-                        domain: resource.domain,
-                    });
+                    return Err(RegistryError::DuplicateResource { domain });
                 }
-                Self::derived_ops(resource)
+                Self::derived_ops(&entry)
                     .iter()
                     .map(ToString::to_string)
                     .collect()
@@ -147,28 +179,53 @@ impl Registry {
             }]
         };
         Some(match (entry, op) {
-            (Entry::Resource(r), OpId::Get(_)) => Resolved {
+            (Entry::Atom(a), OpId::Get(_)) => Resolved {
                 op: op.clone(),
                 category: OpCategory::Get,
-                authority: read(r.domain),
-                version: r.version,
-                input_schema: &r.key_schema,
-                output_schema: Some(&r.state_schema),
+                authority: read(a.domain),
+                version: a.version,
+                input_schema: Some(&a.key_schema),
+                output_schema: Some(&a.state_schema),
             },
-            (Entry::Resource(r), OpId::List(_) | OpId::Stream(_)) => Resolved {
+            (Entry::Atom(a), OpId::List(_) | OpId::Stream(_)) => Resolved {
                 op: op.clone(),
                 category: op.category(),
-                authority: read(r.domain),
-                version: r.version,
-                input_schema: &r.filter_schema,
-                output_schema: Some(&r.state_schema),
+                authority: read(a.domain),
+                version: a.version,
+                input_schema: Some(&a.filter_schema),
+                output_schema: Some(&a.state_schema),
+            },
+            (Entry::View(v), OpId::Get(_)) => Resolved {
+                op: op.clone(),
+                category: OpCategory::Get,
+                authority: read(v.domain),
+                version: v.version,
+                input_schema: Some(&v.key_schema),
+                output_schema: Some(&v.state_schema),
+            },
+            (Entry::View(v), OpId::List(_)) => Resolved {
+                op: op.clone(),
+                category: OpCategory::List,
+                authority: read(v.domain),
+                version: v.version,
+                input_schema: Some(&v.filter_schema),
+                output_schema: Some(&v.state_schema),
+            },
+            // A machinery singleton has no key: Get takes no input.
+            (Entry::Synthetic(s), OpId::Get(_)) => Resolved {
+                op: op.clone(),
+                category: OpCategory::Get,
+                authority: read(s.domain),
+                version: s.version,
+                input_schema: None,
+                output_schema: Some(&s.state_schema),
             },
             (Entry::Command(c), _) => Resolved {
                 op: op.clone(),
                 category: OpCategory::DomainVerb,
                 authority: vec![c.authority],
                 version: c.version,
-                input_schema: &c.input_schema,
+                input_schema: Some(&c.input_schema),
                 // A command's output is a Receipt by construction —
                 // its schema is a wire constant, not per-op data.
                 output_schema: None,
@@ -185,7 +242,7 @@ impl Registry {
                     })
                     .collect(),
                 version: r.version,
-                input_schema: &r.params_schema,
+                input_schema: Some(&r.params_schema),
                 output_schema: Some(&r.output_schema),
             },
             _ => return None,
@@ -201,7 +258,7 @@ impl Registry {
         // knows which of its ops the name denotes.
         let entry = &self.entries[*self.names.get(name)?];
         let op = match entry {
-            Entry::Resource(r) => Self::derived_ops(r)
+            Entry::Atom(_) | Entry::View(_) | Entry::Synthetic(_) => Self::derived_ops(entry)
                 .into_iter()
                 .find(|op| op.to_string() == name)?,
             Entry::Command(c) => c.op(),
