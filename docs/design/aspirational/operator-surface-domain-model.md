@@ -54,8 +54,8 @@ The initial catalogue:
 | Invocation | view | fold: phase, totals, archive status |
 | Worker | view | fold: registration + heartbeats + ownership |
 | Agent | view | the daemon's registry snapshot (reload swaps it) |
-| Operation | view | the surface describing itself: the catalogue of promises |
 | Control | synthetic | the daemon machinery itself — carries the lifecycle verbs (down, reload; room for future ones such as peer join) and scopes the machinery reads |
+| Operation | view | the surface describing itself: the catalogue of promises |
 
 That last row is deliberate self-similarity: "describe the registry" is
 just List(Operation) — the catalogue is a resource like any other, read
