@@ -37,6 +37,11 @@ distinguishes two natures, and the distinction is load-bearing:
   Stream(TranscriptEntry, invocation=I), not "stream the invocation." The
   dashboard's snapshot-then-cursor transcript already works exactly this
   way.)
+- **Synthetic** resources stand for live machinery rather than recorded
+  truth. There are no atoms behind them and nothing derives for them
+  automatically; they exist to give the machinery's bespoke verbs and
+  reads a home — and a permission scope. Authority on a synthetic
+  resource is always declared manually, given its nature.
 
 The initial catalogue:
 
@@ -50,6 +55,7 @@ The initial catalogue:
 | Worker | view | fold: registration + heartbeats + ownership |
 | Agent | view | the daemon's registry snapshot (reload swaps it) |
 | Operation | view | the surface describing itself: the catalogue of promises |
+| Control | synthetic | the daemon machinery itself — carries the lifecycle verbs (down, reload; room for future ones such as peer join) and scopes the machinery reads |
 
 That last row is deliberate self-similarity: "describe the registry" is
 just List(Operation) — the catalogue is a resource like any other, read
@@ -87,8 +93,8 @@ idempotency, caveats), never hidden behind a generic verb:
 | invocation.drop | Write invocation | kill-switch: archived as failed; workers observe at the next step boundary |
 | deadletter.requeue | Write trigger | selects the newest dead letter; **not idempotent**; fresh delivery budget |
 | worker.prune | Delete worker | evicts stale registrations; co-emits its events (no silent mutation) |
-| control.down | Write meta | drain-to-step-boundary then exit; confirmation is the shutdown event |
-| control.reload | Write meta | registry swap affects next trigger only |
+| control.down | Write control (manual) | drain-to-step-boundary then exit; confirmation is the shutdown event |
+| control.reload | Write control (manual) | registry swap affects next trigger only |
 
 (`deadletter.requeue` *could* be read as Create(Trigger, provenance=
 dead-letter) — it stays a domain verb precisely because that reading would
@@ -113,9 +119,9 @@ records. This was the misfit "Probe" kind: probes were never operations on
 this domain. They form a **flat surface**: a closed set of perhaps a dozen
 operations, no taxonomy (bring one when the set stops being closed — for
 now it is overkill), served behind the same edge with the **same access
-control semantics** as everything else. For permission modelling they
-scope to a `meta` pseudo-resource (Read meta for health/status/version;
-control.down/reload already write it).
+control semantics** as everything else. They scope to the synthetic
+**Control** resource (Read control), the same resource whose lifecycle
+verbs write it — one machinery scope, no separate pseudo-resource.
 
 ## Access control, uniformly
 
@@ -124,9 +130,10 @@ a resource type (or `meta`):
 
 - Get / List / Stream ⇒ Read on the resource's scope
 - Create ⇒ Write on the resource's scope
-- Domain verbs ⇒ declare their verb (see table)
+- Domain verbs ⇒ declare their verb (see table); verbs on the synthetic
+  Control resource always declare manually
 - Reports ⇒ Read on their input scope(s)
-- Meta ⇒ Read or Write on `meta`
+- Meta reads ⇒ Read control
 
 ## Deltas against ADR-0006 (to record on adoption)
 
@@ -191,9 +198,11 @@ Findings worth keeping:
   subject argument to `fq events tail` retires (D8 alignment).
 - **Authority mostly derives:** generic reads ⇒ Read-on-scope, Create ⇒
   Write-on-scope; only domain verbs and reports declare by hand.
-- **Known wobble, accepted:** `control.down`/`reload` are commands scoped
-  `meta` beside an otherwise-read meta surface; a "meta command" sub-kind
-  would be taxonomy for its own sake.
+- **The one wobble resolved itself:** `control.down`/`reload` initially
+  sat awkwardly beside a read-only meta surface — until Control became a
+  synthetic resource. Verbs attach to resources everywhere else in the
+  model; the machinery's verbs attach to the machinery's resource, with
+  manual authority, and future control verbs (peer join, …) have a home.
 - **Phase-7 preview:** CAS blobs/objects are atoms par excellence;
   object-version history is atoms under a named-view fold — the model
   extends to the fq-store registry instance without strain.
