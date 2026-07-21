@@ -99,9 +99,9 @@ impl Registry {
                 domain: R::DOMAIN,
                 nature: R::NATURE,
                 version: R::VERSION,
-                description: R::META.description,
-                stability: R::META.stability,
-                caveats: R::META.caveats,
+                description: R::DESCRIPTION,
+                stability: R::STABILITY,
+                caveats: R::CAVEATS,
             },
         );
         Ok(())
@@ -125,9 +125,9 @@ impl Registry {
                 verb: Verb::Read,
                 scope: R::DOMAIN,
             }],
-            description: R::META.description,
-            stability: R::META.stability,
-            caveats: R::META.caveats,
+            description: R::DESCRIPTION,
+            stability: R::STABILITY,
+            caveats: R::CAVEATS,
             input_schema,
             output_schema,
         })
@@ -182,9 +182,9 @@ impl Registry {
             op,
             version: C::VERSION,
             authority: vec![C::AUTHORITY],
-            description: C::META.description,
-            stability: C::META.stability,
-            caveats: C::META.caveats,
+            description: C::DESCRIPTION,
+            stability: C::STABILITY,
+            caveats: C::CAVEATS,
             input_schema: schema_for!(C::Input),
             output_schema: schema_for!(crate::wire::Receipt),
         })
@@ -206,9 +206,9 @@ impl Registry {
                     scope: *scope,
                 })
                 .collect(),
-            description: R::META.description,
-            stability: R::META.stability,
-            caveats: R::META.caveats,
+            description: R::DESCRIPTION,
+            stability: R::STABILITY,
+            caveats: R::CAVEATS,
             input_schema: schema_for!(R::Params),
             output_schema: schema_for!(R::Output),
         })

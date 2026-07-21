@@ -34,7 +34,7 @@ pub mod wire;
 
 pub use catalogue::{Domain, Nature, Resource};
 pub use declared::{Command, Report};
-pub use meta::{Authority, OpMeta, Stability, Verb};
+pub use meta::{Authority, Stability, Verb};
 pub use opid::{OpCategory, OpId};
 pub use registry::{OpDescriptor, Registry, RegistryError, ResourceDescriptor};
 pub use wire::{
