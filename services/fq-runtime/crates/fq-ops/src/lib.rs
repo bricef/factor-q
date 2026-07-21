@@ -31,7 +31,7 @@ pub mod opid;
 pub mod registry;
 pub mod wire;
 
-pub use catalogue::{Atom, Domain, Nature, Resource};
+pub use catalogue::{Atom, Domain, Nature, Resource, Synthetic, View};
 pub use declared::{Command, Report};
 pub use meta::{Authority, OpMeta, Stability, Verb};
 pub use opid::{OpCategory, OpId};

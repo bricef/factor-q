@@ -11,7 +11,7 @@
 
 use fq_ops::{
     Atom, Authority, Command, Domain, Nature, OpCategory, OpId, OpMeta, Registry, RegistryError,
-    Report, Resource, ResourceDocs, Stability, Verb,
+    Report, Resource, ResourceDocs, Stability, Synthetic, Verb, View,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,7 @@ struct InvocationFilter {
     limit: Option<u32>,
 }
 
+impl View for InvocationR {}
 impl Resource for InvocationR {
     const DOMAIN: Domain = Domain::Invocation;
     type Key = InvocationKey;
@@ -156,6 +157,7 @@ struct ControlState {
     stream_ok: bool,
 }
 
+impl Synthetic for ControlR {}
 impl Resource for ControlR {
     const DOMAIN: Domain = Domain::Control;
     type Key = ();
