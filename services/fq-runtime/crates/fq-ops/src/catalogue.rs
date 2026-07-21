@@ -11,11 +11,12 @@
 //! and reads a home and a permission scope.
 //!
 //! Generic operations (Get, List, and the Stream overlay) derive from
-//! a catalogue entry — one [`Resource`] impl buys a resource its
-//! whole read surface, and the generic surface is read-only: creation
-//! is not a generic verb (operators command the machinery; atoms
-//! appear in the log as receipts), so every mutation is a declared
-//! command. Adding a resource to [`Domain`] is the P11 curation gate.
+//! a catalogue entry — one [`Resource`] impl, nature included, buys a
+//! resource its whole read surface, and the generic surface is
+//! read-only: creation is not a generic verb (operators command the
+//! machinery; atoms appear in the log as receipts), so every mutation
+//! is a declared command. Adding a resource to [`Domain`] is the P11
+//! curation gate.
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -77,13 +78,13 @@ pub enum Nature {
 /// deliberately a struct, never a query language; `State` is what
 /// comes back (an atom's immutable content, or a view's fold).
 ///
-/// The nature is declared beside this impl as one of the three marker
-/// traits ([`Atom`], [`View`], [`Synthetic`]); the registry's
-/// per-nature registration bounds enforce agreement, making "only
-/// atoms stream" — and every other nature rule — a compile-time fact
-/// rather than a review rule.
+/// Everything about a resource is declared here, nature included:
+/// registration reads the impl and derives the surface, so there is
+/// no registration-time choice to get wrong — "only atoms stream" is
+/// enforced by derivation (non-atoms simply get no stream op).
 pub trait Resource {
     const DOMAIN: Domain;
+    const NATURE: Nature;
     /// Schema version for this resource's wire types (P10): additive
     /// changes keep it, observable breaks bump it.
     const VERSION: u32 = 1;
@@ -96,24 +97,3 @@ pub trait Resource {
     /// registration.
     const META: OpMeta;
 }
-
-/// Marker: this resource is an atom — immutable once created, and
-/// therefore streamable ("send me resources of type X, at or after
-/// sequence S, as soon as they exist").
-///
-/// The three nature markers ([`Atom`], [`View`], [`Synthetic`])
-/// partition the catalogue: every [`Resource`] impl declares exactly
-/// one, and the registry's per-nature registration bounds make a
-/// nature/registration mismatch a compile error, never a wrong
-/// descriptor.
-pub trait Atom: Resource {}
-
-/// Marker: this resource is a view — stable identity, state folded
-/// from atoms and read at a watermark; never streamed directly (you
-/// stream its atoms).
-pub trait View: Resource {}
-
-/// Marker: this resource is synthetic — it stands for live machinery,
-/// not recorded truth; Get alone derives, and its verbs register as
-/// commands with manual authority.
-pub trait Synthetic: Resource {}
