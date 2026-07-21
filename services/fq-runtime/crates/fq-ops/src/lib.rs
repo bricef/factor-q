@@ -26,13 +26,11 @@
 //! client links it alone — `tests/leaf_gate.rs` enforces it).
 
 pub mod catalogue;
-pub mod meta;
 pub mod opid;
 pub mod registry;
 pub mod wire;
 
-pub use catalogue::{Command, Domain, Nature, Report, Resource};
-pub use meta::{Authority, Stability, Verb};
+pub use catalogue::{Authority, Command, Domain, Nature, Report, Resource, Stability, Verb};
 pub use opid::{OpCategory, OpId};
 pub use registry::{OpDescriptor, Registry, RegistryError, ResourceDescriptor};
 pub use wire::{
