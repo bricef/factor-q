@@ -10,7 +10,7 @@
 //!   views Get + List, synthetics Get) with derived Read authority.
 //!   The generic surface is read-only: every mutation on the whole
 //!   surface is a declared command.
-//! - **Domain verbs** ([`declared`]): the bespoke commands whose
+//! - **Domain verbs** ([`catalogue`]): the bespoke commands whose
 //!   semantics are the contract; output is always a [`Receipt`] by
 //!   construction (D3). A declaration is one site — the impl carries
 //!   its identity, types, authority, and contract text.
@@ -26,14 +26,12 @@
 //! client links it alone — `tests/leaf_gate.rs` enforces it).
 
 pub mod catalogue;
-pub mod declared;
 pub mod meta;
 pub mod opid;
 pub mod registry;
 pub mod wire;
 
-pub use catalogue::{Domain, Nature, Resource};
-pub use declared::{Command, Report};
+pub use catalogue::{Command, Domain, Nature, Report, Resource};
 pub use meta::{Authority, Stability, Verb};
 pub use opid::{OpCategory, OpId};
 pub use registry::{OpDescriptor, Registry, RegistryError, ResourceDescriptor};

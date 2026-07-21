@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 
+use crate::catalogue::{Command, Report};
 use crate::catalogue::{Domain, Nature, Resource};
-use crate::declared::{Command, Report};
 use crate::meta::{Authority, Stability, Verb};
 use crate::opid::{OpCategory, OpId};
 
