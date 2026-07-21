@@ -153,3 +153,47 @@ Process lifecycle (`fq init`, `fq run`/`fqd`) and local pure functions
 built-ins converge on this model later (plan Phase 7); the graph
 executor's signature work should check itself against the Resource/Report
 split when it arrives.
+
+
+## Appendix — the roster, stress-tested
+
+Every operation from the
+[interface inventory](../../reviews/2026-07-20-interface-inventory.md)
+mapped into the model. Sixteen of twenty-seven dissolve into generic
+verbs over the catalogue; the rest are declared, on purpose.
+
+| Inventory op | In the model |
+|---|---|
+| `event.query` / `event.tail` | List(Event) / Stream(Event) |
+| `invocation.transcript` / `.tail` | List / Stream(TranscriptEntry, invocation=I) |
+| `deadletter.list` | List(DeadLetter) |
+| `invocation.list` / `.show` | List / Get(Invocation) |
+| `worker.list` / `.show` | List / Get(Worker) |
+| `agent.list` / `.show` | List / Get(Agent) |
+| `registry.describe` | List(Operation) |
+| `trigger.publish` | Create(Trigger) |
+| `traversal.run` / `.status` / `.tail` | Create(Traversal) / Get(Traversal) / Stream(TraversalEvent) |
+| `invocation.drop` · `deadletter.requeue` · `worker.prune` · `control.down` · `control.reload` | domain verbs |
+| `cost.summary` · `cost.by_agent` · `runtime.doctor` | reports |
+| `runtime.health` · `runtime.status` · `runtime.version` | meta surface |
+
+Findings worth keeping:
+
+- **Traversal is the proof of "born derived":** the whole trio costs one
+  catalogue row, not three op definitions — the original ADR-0006
+  motivation, now literal.
+- **The overlay mints unasked-for but useful surface:** Stream(DeadLetter)
+  ("tell me the moment something dead-letters") and List(Trigger)
+  (pending triggers) fall out free. Reads (Get/List, +Stream for atoms)
+  should be uniform across the catalogue; only Create is per-row opt-in.
+- **An ADR-0006 open question resolves:** streams share List's typed
+  per-resource filter — no subject-glob language, and today's raw NATS
+  subject argument to `fq events tail` retires (D8 alignment).
+- **Authority mostly derives:** generic reads ⇒ Read-on-scope, Create ⇒
+  Write-on-scope; only domain verbs and reports declare by hand.
+- **Known wobble, accepted:** `control.down`/`reload` are commands scoped
+  `meta` beside an otherwise-read meta surface; a "meta command" sub-kind
+  would be taxonomy for its own sake.
+- **Phase-7 preview:** CAS blobs/objects are atoms par excellence;
+  object-version history is atoms under a named-view fold — the model
+  extends to the fq-store registry instance without strain.
