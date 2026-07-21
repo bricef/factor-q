@@ -22,7 +22,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::meta::OpMeta;
+use crate::meta::Stability;
 
 /// Every resource the surface can speak about — including synthetic
 /// ones that exist only as verb carriers and permission scopes
@@ -91,9 +91,11 @@ pub trait Resource {
     type Key: Serialize + DeserializeOwned + JsonSchema;
     type State: Serialize + DeserializeOwned + JsonSchema;
     type Filter: Serialize + DeserializeOwned + JsonSchema;
-    /// Contract text for the whole derived surface — declared here,
-    /// like every other definition on the surface (one site), and
-    /// projected into the catalogue's descriptor at
-    /// registration.
-    const META: OpMeta;
+    /// One-line description of the resource, inherited by its whole
+    /// derived surface (List(Operation), MCP listings, docs).
+    const DESCRIPTION: &'static str;
+    const STABILITY: Stability;
+    /// What a caller must know about this resource's surface:
+    /// retention bounds, fold semantics. Defaults to "none".
+    const CAVEATS: &'static str = "";
 }

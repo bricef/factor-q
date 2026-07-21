@@ -10,7 +10,7 @@
 //! with `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
 use fq_ops::{
-    Authority, Command, Domain, Nature, OpCategory, OpId, OpMeta, Registry, RegistryError, Report,
+    Authority, Command, Domain, Nature, OpCategory, OpId, Registry, RegistryError, Report,
     Resource, Stability, Verb,
 };
 use schemars::JsonSchema;
@@ -57,7 +57,8 @@ impl Resource for TurnR {
     type Key = EntryKey;
     type State = EntryState;
     type Filter = EntryFilter;
-    const META: OpMeta = EXEMPLAR_META;
+    const DESCRIPTION: &'static str = "exemplar resource";
+    const STABILITY: Stability = Stability::Experimental;
 }
 
 /// Invocation: a view — Get/List derive; no Stream (stream its atoms).
@@ -89,7 +90,8 @@ impl Resource for InvocationR {
     type Key = InvocationKey;
     type State = InvocationState;
     type Filter = InvocationFilter;
-    const META: OpMeta = EXEMPLAR_META;
+    const DESCRIPTION: &'static str = "exemplar resource";
+    const STABILITY: Stability = Stability::Experimental;
 }
 
 /// Trigger: an atom that operators may create.
@@ -119,7 +121,8 @@ impl Resource for TriggerR {
     type Key = TriggerKey;
     type State = TriggerState;
     type Filter = TriggerFilter;
-    const META: OpMeta = EXEMPLAR_META;
+    const DESCRIPTION: &'static str = "exemplar resource";
+    const STABILITY: Stability = Stability::Experimental;
 }
 
 /// trigger.publish: creation is not a generic verb — dispatching work
@@ -142,11 +145,10 @@ impl Command for TriggerPublish {
         verb: Verb::Write,
         scope: Domain::Trigger,
     };
-    const META: OpMeta = OpMeta {
-        description: "Dispatch a trigger to an agent via the durable trigger stream.",
-        stability: Stability::Experimental,
-        caveats: "at-least-once delivery with a bounded budget; the receipt references the appended trigger atom",
-    };
+    const DESCRIPTION: &'static str =
+        "Dispatch a trigger to an agent via the durable trigger stream.";
+    const STABILITY: Stability = Stability::Experimental;
+    const CAVEATS: &'static str = "at-least-once delivery with a bounded budget; the receipt references the appended trigger atom";
 }
 
 /// Control: the synthetic resource — Get alone derives (the machinery
@@ -166,7 +168,8 @@ impl Resource for ControlR {
     type Key = ();
     type State = ControlState;
     type Filter = ();
-    const META: OpMeta = EXEMPLAR_META;
+    const DESCRIPTION: &'static str = "exemplar resource";
+    const STABILITY: Stability = Stability::Experimental;
 }
 
 /// invocation.drop: a domain verb — declared at one site: identity
@@ -187,11 +190,10 @@ impl Command for InvocationDrop {
         verb: Verb::Write,
         scope: Domain::Invocation,
     };
-    const META: OpMeta = OpMeta {
-        description: "Drop an in-flight invocation, archiving it as failed.",
-        stability: Stability::Experimental,
-        caveats: "kill-switch semantics: workers observe the drop at their next step boundary",
-    };
+    const DESCRIPTION: &'static str = "Drop an in-flight invocation, archiving it as failed.";
+    const STABILITY: Stability = Stability::Experimental;
+    const CAVEATS: &'static str =
+        "kill-switch semantics: workers observe the drop at their next step boundary";
 }
 
 /// control.down: a machinery verb on the synthetic resource — same
@@ -212,11 +214,10 @@ impl Command for ControlDown {
         verb: Verb::Write,
         scope: Domain::Control,
     };
-    const META: OpMeta = OpMeta {
-        description: "Stop the daemon, draining in-flight work to a step boundary.",
-        stability: Stability::Experimental,
-        caveats: "confirmation is the shutdown event, not the ack",
-    };
+    const DESCRIPTION: &'static str =
+        "Stop the daemon, draining in-flight work to a step boundary.";
+    const STABILITY: Stability = Stability::Experimental;
+    const CAVEATS: &'static str = "confirmation is the shutdown event, not the ack";
 }
 
 /// cost.summary: a report — a named computation, Read on its inputs.
@@ -239,20 +240,10 @@ impl Report for CostSummary {
     type Params = CostParams;
     type Output = CostOutput;
     const READS: &'static [Domain] = &[Domain::Event];
-    const META: OpMeta = OpMeta {
-        description: "Aggregate cost across all agents.",
-        stability: Stability::Experimental,
-        caveats: "cost figures are retained indefinitely; totals never window",
-    };
+    const DESCRIPTION: &'static str = "Aggregate cost across all agents.";
+    const STABILITY: Stability = Stability::Experimental;
+    const CAVEATS: &'static str = "cost figures are retained indefinitely; totals never window";
 }
-
-/// Shared exemplar contract text — a real catalogue entry writes its
-/// own.
-const EXEMPLAR_META: OpMeta = OpMeta {
-    description: "exemplar resource",
-    stability: Stability::Experimental,
-    caveats: "",
-};
 
 fn exemplar_registry() -> Registry {
     let mut registry = Registry::new();
@@ -331,7 +322,8 @@ fn verb_collision_with_the_derived_surface_is_refused() {
         const VERB: &'static str = "get";
         type Input = DropInput;
         const AUTHORITY: Authority = InvocationDrop::AUTHORITY;
-        const META: OpMeta = InvocationDrop::META;
+        const DESCRIPTION: &'static str = InvocationDrop::DESCRIPTION;
+        const STABILITY: Stability = Stability::Experimental;
     }
     let mut registry = exemplar_registry();
     assert_eq!(

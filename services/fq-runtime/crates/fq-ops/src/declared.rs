@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::catalogue::Domain;
-use crate::meta::{Authority, OpMeta};
+use crate::meta::{Authority, Stability};
 use crate::opid::OpId;
 
 /// A bespoke command, attached to a resource — machinery verbs attach
@@ -34,7 +34,12 @@ pub trait Command {
     const VERSION: u32 = 1;
     type Input: Serialize + DeserializeOwned + JsonSchema;
     const AUTHORITY: Authority;
-    const META: OpMeta;
+    /// One-line description of the command.
+    const DESCRIPTION: &'static str;
+    const STABILITY: Stability;
+    /// The contract text that makes this verb bespoke: idempotency,
+    /// kill-switch semantics, delivery guarantees. Defaults to "none".
+    const CAVEATS: &'static str = "";
 
     /// This command's wire identity.
     fn op() -> OpId {
@@ -59,7 +64,10 @@ pub trait Report {
     type Params: Serialize + DeserializeOwned + JsonSchema;
     type Output: Serialize + DeserializeOwned + JsonSchema;
     const READS: &'static [Domain];
-    const META: OpMeta;
+    /// One-line description of the report.
+    const DESCRIPTION: &'static str;
+    const STABILITY: Stability;
+    const CAVEATS: &'static str = "";
 
     /// This report's wire identity.
     fn op() -> OpId {

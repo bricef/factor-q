@@ -40,16 +40,3 @@ pub enum Stability {
     Stable,
     Deprecated,
 }
-
-/// Human-facing contract text, colocated with the definition it
-/// describes and inherited by every derived surface: `description` is
-/// the one-liner (`registry.describe`, MCP tool listings); `caveats`
-/// is what the caller must know (retention bounds, idempotency,
-/// semantics — requeue's non-idempotency, drop's kill-switch). Empty
-/// caveats means "none".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
-pub struct OpMeta {
-    pub description: &'static str,
-    pub stability: Stability,
-    pub caveats: &'static str,
-}
