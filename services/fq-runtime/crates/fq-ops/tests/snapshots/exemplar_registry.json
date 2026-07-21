@@ -6,7 +6,6 @@
       "version": 1,
       "description": "exemplar resource",
       "stability": "experimental",
-      "caveats": "",
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "EntryKey",
@@ -86,7 +85,6 @@
       "version": 1,
       "description": "exemplar resource",
       "stability": "experimental",
-      "caveats": "",
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "InvocationKey",
@@ -153,7 +151,6 @@
       "version": 1,
       "description": "exemplar resource",
       "stability": "experimental",
-      "caveats": "",
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "TriggerKey",
@@ -213,7 +210,6 @@
       "version": 1,
       "description": "exemplar resource",
       "stability": "experimental",
-      "caveats": "",
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "null",
@@ -256,9 +252,8 @@
         "verb": "write",
         "scope": "invocation"
       },
-      "description": "Drop an in-flight invocation, archiving it as failed.",
+      "description": "Drop an in-flight invocation, archiving it as failed. Kill-switch semantics: workers observe the drop at their next step boundary.",
       "stability": "experimental",
-      "caveats": "kill-switch semantics: workers observe the drop at their next step boundary",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "DropInput",
@@ -289,9 +284,8 @@
         "verb": "write",
         "scope": "control"
       },
-      "description": "Stop the daemon, draining in-flight work to a step boundary.",
+      "description": "Stop the daemon, draining in-flight work to a step boundary. Confirmation is the shutdown event, not the ack.",
       "stability": "experimental",
-      "caveats": "confirmation is the shutdown event, not the ack",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "DownInput",
@@ -314,9 +308,8 @@
         "verb": "write",
         "scope": "trigger"
       },
-      "description": "Dispatch a trigger to an agent via the durable trigger stream.",
+      "description": "Dispatch a trigger to an agent via the durable trigger stream. At-least-once delivery with a bounded budget; the receipt references the appended trigger atom.",
       "stability": "experimental",
-      "caveats": "at-least-once delivery with a bounded budget; the receipt references the appended trigger atom",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "PublishInput",
@@ -341,9 +334,8 @@
       "reads": [
         "event"
       ],
-      "description": "Aggregate cost across all agents.",
+      "description": "Aggregate cost across all agents. Cost figures are retained indefinitely; totals never window.",
       "stability": "experimental",
-      "caveats": "cost figures are retained indefinitely; totals never window",
       "params_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "CostParams",

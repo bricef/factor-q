@@ -120,9 +120,13 @@ pub struct Resource {
     pub domain: Domain,
     pub nature: Nature,
     pub version: u32,
+    /// Contract text for callers, inherited by the whole derived
+    /// surface. Convention: the first sentence is the one-line
+    /// summary (listings truncate there); anything the caller must
+    /// know — retention bounds, fold semantics — follows in the same
+    /// text.
     pub description: &'static str,
     pub stability: Stability,
-    pub caveats: &'static str,
     pub key_schema: Schema,
     pub state_schema: Schema,
     pub filter_schema: Schema,
@@ -150,18 +154,10 @@ impl Resource {
             version: 1,
             description,
             stability,
-            caveats: "",
             key_schema: schema_for!(Key),
             state_schema: schema_for!(State),
             filter_schema: schema_for!(Filter),
         }
-    }
-
-    /// What a caller must know about this resource's surface:
-    /// retention bounds, fold semantics.
-    pub fn caveats(mut self, caveats: &'static str) -> Self {
-        self.caveats = caveats;
-        self
     }
 
     /// Schema version (P10): additive changes keep it, observable
@@ -187,9 +183,12 @@ pub struct Command {
     pub verb: &'static str,
     pub version: u32,
     pub authority: Authority,
+    /// Contract text for callers. Convention: first sentence is the
+    /// summary; the semantics that make this verb bespoke —
+    /// idempotency, kill-switch behaviour, delivery guarantees —
+    /// follow in the same text.
     pub description: &'static str,
     pub stability: Stability,
-    pub caveats: &'static str,
     pub input_schema: Schema,
 }
 
@@ -214,16 +213,8 @@ impl Command {
             authority,
             description,
             stability,
-            caveats: "",
             input_schema: schema_for!(Input),
         }
-    }
-
-    /// The contract text that makes this verb bespoke: idempotency,
-    /// kill-switch semantics, delivery guarantees.
-    pub fn caveats(mut self, caveats: &'static str) -> Self {
-        self.caveats = caveats;
-        self
     }
 
     pub fn version(mut self, version: u32) -> Self {
@@ -253,9 +244,9 @@ pub struct Report {
     pub name: &'static str,
     pub version: u32,
     pub reads: &'static [Domain],
+    /// Contract text for callers; first sentence is the summary.
     pub description: &'static str,
     pub stability: Stability,
-    pub caveats: &'static str,
     pub params_schema: Schema,
     pub output_schema: Schema,
 }
@@ -279,15 +270,9 @@ impl Report {
             reads,
             description,
             stability,
-            caveats: "",
             params_schema: schema_for!(Params),
             output_schema: schema_for!(Output),
         }
-    }
-
-    pub fn caveats(mut self, caveats: &'static str) -> Self {
-        self.caveats = caveats;
-        self
     }
 
     pub fn version(mut self, version: u32) -> Self {
