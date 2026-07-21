@@ -1,56 +1,129 @@
-//! Registry invariants and the schema snapshot oracle.
+//! The registry exercised over an exemplar slice of the catalogue —
+//! one resource per nature and one declared op per category — plus
+//! the schema snapshot oracle.
 //!
-//! With names as types, most of what the old string grammar policed is
-//! unrepresentable — what's left to test is the one value-level
-//! invariant (no double registration), lookup and ordering, and the
-//! snapshot (`tests/snapshots/exemplar_registry.json`): the serialized
-//! `describe()` output for three exemplar ops, one per kind shape.
-//! Any change to the descriptor shape, the metadata contract, or
-//! schemars' derived output is a visible diff to review against P10's
-//! additive-change rules — never silent drift. Regenerate after an
-//! intentional change with
-//! `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
+//! The snapshot (`tests/snapshots/exemplar_registry.json`) is this
+//! crate's golden master: the serialized `describe()` output. Any
+//! change to the descriptor shape, derived authority, or schemars'
+//! output is a visible diff to review against P10's additive-change
+//! rules — never silent drift. Regenerate after an intentional change
+//! with `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
-use fq_ops::name::{InvocationOp, OpName};
 use fq_ops::{
-    OpDescriptor, OpMeta, OpPermission, Operation, Registry, RegistryError, Stability, Verb,
+    AtomResource, Authority, Command, CreatableResource, DomainVerbId, MetaRead, MetaReadId,
+    Nature, OpCategory, OpId, OpMeta, Registry, Report, ReportId, ResourceDocs, ResourceId,
+    ResourceType, Stability, Verb,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 // ------------------------------------------------------------------
-// Exemplar operations — the ADR-0006 Phase-1 trio, contract only.
-// The real handlers arrive with the edge (plan Phases 2–3); these
-// pin the *shape* a definition takes.
+// Exemplar catalogue slice. Contract only — handlers arrive with the
+// edge (plan Phases 2–3); these pin the shape a definition takes.
 // ------------------------------------------------------------------
 
+/// TranscriptEntry: an atom — Get/List/Stream derive.
+struct TranscriptEntryR;
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct ShowInput {
+struct EntryKey {
+    seq: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct EntryState {
+    seq: u64,
+    invocation_id: String,
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct EntryFilter {
+    invocation_id: String,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+impl ResourceType for TranscriptEntryR {
+    const ID: ResourceId = ResourceId::TranscriptEntry;
+    type Key = EntryKey;
+    type State = EntryState;
+    type Filter = EntryFilter;
+}
+impl AtomResource for TranscriptEntryR {}
+
+/// Invocation: a view — Get/List derive; no Stream (stream its atoms).
+struct InvocationR;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct InvocationKey {
     invocation_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct ShowOutput {
+struct InvocationState {
     invocation_id: String,
     agent_id: String,
     phase: String,
 }
 
-struct InvocationShow;
-
-impl Operation for InvocationShow {
-    const NAME: OpName = OpName::Invocation(InvocationOp::Show);
-    type Input = ShowInput;
-    type Output = ShowOutput;
-    const META: OpMeta = OpMeta {
-        permission: OpPermission {
-            verb: Verb::Read,
-            scope: "invocation",
-        },
-        stability: Stability::Experimental,
-        caveats: "",
-    };
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct InvocationFilter {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
 }
+
+impl ResourceType for InvocationR {
+    const ID: ResourceId = ResourceId::Invocation;
+    type Key = InvocationKey;
+    type State = InvocationState;
+    type Filter = InvocationFilter;
+}
+
+/// Trigger: an atom that operators may create.
+struct TriggerR;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct TriggerKey {
+    seq: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct TriggerState {
+    seq: u64,
+    agent_id: String,
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct TriggerFilter {
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct TriggerCreate {
+    agent_id: String,
+    payload: serde_json::Value,
+}
+
+impl ResourceType for TriggerR {
+    const ID: ResourceId = ResourceId::Trigger;
+    type Key = TriggerKey;
+    type State = TriggerState;
+    type Filter = TriggerFilter;
+}
+impl AtomResource for TriggerR {}
+impl CreatableResource for TriggerR {
+    type CreateInput = TriggerCreate;
+}
+
+/// invocation.drop: a domain verb — output is a Receipt by
+/// construction; authority declared.
+struct InvocationDrop;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct DropInput {
@@ -58,55 +131,81 @@ struct DropInput {
     reason: Option<String>,
 }
 
-struct InvocationDrop;
-
-impl Operation for InvocationDrop {
-    const NAME: OpName = OpName::Invocation(InvocationOp::Drop);
+impl Command for InvocationDrop {
+    const ID: DomainVerbId = DomainVerbId::InvocationDrop;
     type Input = DropInput;
-    type Output = fq_ops::Receipt;
+    const AUTHORITY: Authority = Authority {
+        verb: Verb::Write,
+        scope: ResourceId::Invocation,
+    };
     const META: OpMeta = OpMeta {
-        permission: OpPermission {
-            verb: Verb::Write,
-            scope: "invocation",
-        },
+        description: "Drop an in-flight invocation, archiving it as failed.",
         stability: Stability::Experimental,
-        caveats: "kill-switch semantics: the invocation is archived as failed; \
-                  workers observe the drop at their next step boundary",
+        caveats: "kill-switch semantics: workers observe the drop at their next step boundary",
     };
 }
 
+/// cost.summary: a report — a named computation, Read on its inputs.
+struct CostSummary;
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct TranscriptTailInput {
-    invocation_id: String,
+struct CostParams {
+    #[serde(default)]
+    since: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct TranscriptEntry {
-    role: String,
-    content: String,
+struct CostOutput {
+    total_cost: f64,
+    total_llm_calls: u64,
 }
 
-struct TranscriptTail;
-
-impl Operation for TranscriptTail {
-    const NAME: OpName = OpName::Invocation(InvocationOp::TranscriptTail);
-    type Input = TranscriptTailInput;
-    type Output = TranscriptEntry;
+impl Report for CostSummary {
+    const ID: ReportId = ReportId::CostSummary;
+    type Params = CostParams;
+    type Output = CostOutput;
+    const READS: &'static [ResourceId] = &[ResourceId::Event];
     const META: OpMeta = OpMeta {
-        permission: OpPermission {
-            verb: Verb::Read,
-            scope: "invocation",
-        },
+        description: "Aggregate cost across all agents.",
+        stability: Stability::Experimental,
+        caveats: "cost figures are retained indefinitely; totals never window",
+    };
+}
+
+/// control.health: a machinery read on the synthetic Control resource.
+struct Health;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct HealthOutput {
+    nats_connected: bool,
+    stream_ok: bool,
+}
+
+impl MetaRead for Health {
+    const ID: MetaReadId = MetaReadId::Health;
+    type Output = HealthOutput;
+    const META: OpMeta = OpMeta {
+        description: "Liveness of the daemon's infrastructure (NATS, streams).",
         stability: Stability::Experimental,
         caveats: "",
     };
 }
 
+const DOCS: ResourceDocs = ResourceDocs {
+    stability: Stability::Experimental,
+    summary: "exemplar resource",
+    caveats: "",
+};
+
 fn exemplar_registry() -> Registry {
     let mut registry = Registry::new();
-    registry.register::<TranscriptTail>().unwrap();
-    registry.register::<InvocationShow>().unwrap();
-    registry.register::<InvocationDrop>().unwrap();
+    registry.register_atom::<TranscriptEntryR>(DOCS).unwrap();
+    registry.register_view::<InvocationR>(DOCS).unwrap();
+    registry.register_atom::<TriggerR>(DOCS).unwrap();
+    registry.register_create::<TriggerR>(DOCS).unwrap();
+    registry.register_command::<InvocationDrop>().unwrap();
+    registry.register_report::<CostSummary>().unwrap();
+    registry.register_meta_read::<Health>().unwrap();
     registry
 }
 
@@ -114,16 +213,32 @@ fn exemplar_registry() -> Registry {
 // Invariants
 // ------------------------------------------------------------------
 
+/// One atom row buys three derived ops; one view row buys two; the
+/// declared surface registers one each. Names render structurally,
+/// and describe() is name-ordered.
 #[test]
-fn describe_is_name_ordered_regardless_of_registration_order() {
+fn derivation_yields_the_expected_surface() {
     let registry = exemplar_registry();
-    let names: Vec<&str> = registry.describe().iter().map(|d| d.name).collect();
+    let names: Vec<&str> = registry
+        .describe()
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
     assert_eq!(
         names,
         vec![
+            "control.health",
+            "cost.summary",
             "invocation.drop",
-            "invocation.show",
-            "invocation.transcript.tail"
+            "invocation.get",
+            "invocation.list",
+            "transcript_entry.get",
+            "transcript_entry.list",
+            "transcript_entry.stream",
+            "trigger.create",
+            "trigger.get",
+            "trigger.list",
+            "trigger.stream",
         ]
     );
 }
@@ -132,45 +247,84 @@ fn describe_is_name_ordered_regardless_of_registration_order() {
 fn duplicate_registration_is_refused() {
     let mut registry = exemplar_registry();
     assert_eq!(
-        registry.register::<InvocationShow>(),
-        Err(RegistryError::Duplicate {
-            name: "invocation.show"
+        registry.register_view::<InvocationR>(DOCS),
+        Err(fq_ops::RegistryError::Duplicate {
+            name: "invocation.get".into()
+        })
+    );
+    assert_eq!(
+        registry.register_command::<InvocationDrop>(),
+        Err(fq_ops::RegistryError::Duplicate {
+            name: "invocation.drop".into()
         })
     );
 }
 
+/// Authority derives for the generic surface and the meta read;
+/// declared ops carry what they declared.
 #[test]
-fn lookup_works_by_op_and_by_rendered_name() {
+fn authority_derivation() {
     let registry = exemplar_registry();
-    let by_op = registry
-        .get(OpName::Invocation(InvocationOp::Show))
-        .expect("lookup by OpName");
-    let by_name = registry
-        .get_named("invocation.show")
-        .expect("lookup by rendered name");
-    assert_eq!(by_op.name, by_name.name);
-    assert_eq!(by_op.version, 1);
-    assert!(registry.get_named("invocation.frobnicate").is_none());
-}
-
-/// The kind in a descriptor comes from the name itself — there is no
-/// second declaration to disagree with.
-#[test]
-fn descriptor_kind_is_derived_from_the_name() {
-    let registry = exemplar_registry();
+    let read = |scope| Authority {
+        verb: Verb::Read,
+        scope,
+    };
     assert_eq!(
         registry
-            .get(OpName::Invocation(InvocationOp::Drop))
+            .get(OpId::Stream(ResourceId::TranscriptEntry))
             .unwrap()
-            .kind,
-        fq_ops::OpKind::Command
+            .authority,
+        vec![read(ResourceId::TranscriptEntry)]
     );
     assert_eq!(
         registry
-            .get(OpName::Invocation(InvocationOp::TranscriptTail))
+            .get(OpId::Create(ResourceId::Trigger))
             .unwrap()
-            .kind,
-        fq_ops::OpKind::Stream
+            .authority,
+        vec![Authority {
+            verb: Verb::Write,
+            scope: ResourceId::Trigger
+        }]
+    );
+    assert_eq!(
+        registry
+            .get(OpId::MetaRead(MetaReadId::Health))
+            .unwrap()
+            .authority,
+        vec![read(ResourceId::Control)]
+    );
+    assert_eq!(
+        registry
+            .get(OpId::Verb(DomainVerbId::InvocationDrop))
+            .unwrap()
+            .authority,
+        vec![InvocationDrop::AUTHORITY]
+    );
+}
+
+/// Natures are recorded for the generic surface: views get no stream,
+/// and categories say which envelope an op rides.
+#[test]
+fn natures_and_categories() {
+    let registry = exemplar_registry();
+    assert!(registry.get(OpId::Stream(ResourceId::Invocation)).is_none());
+    assert_eq!(
+        registry
+            .get(OpId::List(ResourceId::Invocation))
+            .unwrap()
+            .nature,
+        Some(Nature::View)
+    );
+    assert_eq!(
+        registry
+            .get(OpId::Verb(DomainVerbId::InvocationDrop))
+            .unwrap()
+            .category,
+        OpCategory::DomainVerb
+    );
+    assert_eq!(
+        registry.get_named("trigger.create").unwrap().category,
+        OpCategory::Create
     );
 }
 
@@ -194,6 +348,25 @@ fn receipt_watermark_is_the_highest_appended_seq() {
     assert_eq!(fq_ops::Receipt { events: vec![] }.watermark(), None);
 }
 
+/// The wire form of an op identity is serde's native enum encoding,
+/// not the rendered string — pin one of each so an attribute change
+/// (which would break client/daemon compatibility) is a visible diff.
+#[test]
+fn wire_encoding_is_native_not_rendered() {
+    let op = OpId::Stream(ResourceId::TranscriptEntry);
+    let encoded = serde_json::to_string(&op).unwrap();
+    assert_eq!(encoded, r#"{"stream":"transcript_entry"}"#);
+    assert_eq!(serde_json::from_str::<OpId>(&encoded).unwrap(), op);
+    assert_eq!(op.to_string(), "transcript_entry.stream");
+
+    let verb = OpId::Verb(DomainVerbId::ControlDown);
+    assert_eq!(
+        serde_json::to_string(&verb).unwrap(),
+        r#"{"verb":"control_down"}"#
+    );
+    assert_eq!(verb.to_string(), "control.down");
+}
+
 // ------------------------------------------------------------------
 // The schema snapshot oracle
 // ------------------------------------------------------------------
@@ -201,8 +374,7 @@ fn receipt_watermark_is_the_highest_appended_seq() {
 #[test]
 fn describe_matches_the_committed_snapshot() {
     let registry = exemplar_registry();
-    let descriptors: Vec<&OpDescriptor> = registry.describe();
-    let actual = serde_json::to_string_pretty(&descriptors).unwrap() + "\n";
+    let actual = serde_json::to_string_pretty(&registry.describe()).unwrap() + "\n";
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/snapshots/exemplar_registry.json");
@@ -220,7 +392,7 @@ fn describe_matches_the_committed_snapshot() {
     assert_eq!(
         actual, expected,
         "registry describe() drifted from the committed snapshot. If intentional, \
-         review the diff against P10's additive-change rules (does any op need a \
-         version bump?), then UPDATE_SNAPSHOT=1 and commit."
+         review the diff against P10's additive-change rules (does any resource or \
+         declared op need a version bump?), then UPDATE_SNAPSHOT=1 and commit."
     );
 }

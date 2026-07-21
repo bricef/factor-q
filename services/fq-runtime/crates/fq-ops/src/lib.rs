@@ -1,33 +1,40 @@
-//! The operation registry contract (ADR-0006) — and the sqlx-free wire
-//! crate ADR-0031 calls for.
+//! The operator-surface contract crate (ADR-0006, as refined by
+//! `docs/design/aspirational/operator-surface-domain-model.md`) — and
+//! the sqlx-free wire crate ADR-0031 calls for.
 //!
-//! Every operator- or system-facing capability is defined exactly once
-//! as an [`Operation`]: a name that parses under the P8 grammar, a
-//! CQRS kind, typed input/output with derived JSON schemas, and
-//! [`OpMeta`] carrying the contract metadata (permission, audit class,
-//! stability, caveats) every derived surface inherits. Surface code
-//! that hand-describes an operation is, per the ADR, a defect.
+//! Four categories of boundary promise, mirroring the domain model:
 //!
-//! This crate holds the *contract only*: the trait, the registry with
-//! its registration-time invariants, and the generic wire envelopes
-//! the tarpc edge carries. Handlers, transports, and auth middleware
-//! live daemon-side (execution-plan Phases 2–3) — which is exactly why
-//! this crate must stay a leaf (no sqlx, no NATS, no tokio; the thin
-//! `fq` client links it alone).
+//! - **Resources** ([`catalogue`]): atoms, views, and synthetic
+//!   resources. One [`ResourceType`] impl derives a resource's whole
+//!   generic read surface — Get + List, Stream for atoms
+//!   ([`AtomResource`]), Create where opted in
+//!   ([`CreatableResource`]) — with derived authority.
+//! - **Domain verbs** ([`declared`]): the five bespoke commands whose
+//!   semantics are the contract; output is always a [`Receipt`] by
+//!   construction (D3).
+//! - **Reports**: named, typed computations over resources.
+//! - **Machinery reads**: the flat meta surface, scoped to the
+//!   synthetic `Control` resource.
+//!
+//! This crate holds the *contract only* — the catalogue, the declared
+//! traits, the self-describing [`Registry`], and the generic wire
+//! envelopes. Handlers, transports, and auth middleware live
+//! daemon-side (execution-plan Phases 2–3), which is exactly why this
+//! crate must stay a leaf (no sqlx, no NATS, no tokio; the thin `fq`
+//! client links it alone — `tests/leaf_gate.rs` enforces it).
 
+pub mod catalogue;
+pub mod declared;
 pub mod meta;
-pub mod name;
-pub mod operation;
+pub mod opid;
 pub mod registry;
 pub mod wire;
 
-pub use meta::{OpKind, OpMeta, OpPermission, Stability, Verb};
-pub use name::{
-    AgentOp, ControlOp, CostOp, DeadletterOp, DomainTag, EventOp, InvocationOp, OpName, RegistryOp,
-    RuntimeOp, TraversalOp, TriggerOp, WorkerOp,
-};
-pub use operation::{OpDescriptor, Operation};
-pub use registry::{Registry, RegistryError};
+pub use catalogue::{AtomResource, CreatableResource, Nature, ResourceId, ResourceType};
+pub use declared::{Command, DomainVerbId, MetaRead, MetaReadId, Report, ReportId};
+pub use meta::{Authority, OpMeta, Stability, Verb};
+pub use opid::{OpCategory, OpId};
+pub use registry::{OpDescriptor, Registry, RegistryError, ResourceDocs};
 pub use wire::{
     EventRef, InvokeRequest, InvokeResponse, NextBatchRequest, Receipt, StreamBatch, StreamItem,
     WireError,
