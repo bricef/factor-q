@@ -75,10 +75,11 @@ pub enum Nature {
 /// deliberately a struct, never a query language; `State` is what
 /// comes back (an atom's immutable content, or a view's fold).
 ///
-/// The nature is not declared here: it is determined by how the
-/// resource is registered (`register_atom` vs `register_view`), with
-/// the [`Atom`] bound making "only atoms stream" a
-/// compile-time fact rather than a review rule.
+/// The nature is declared beside this impl as one of the three marker
+/// traits ([`Atom`], [`View`], [`Synthetic`]); the registry's
+/// per-nature registration bounds enforce agreement, making "only
+/// atoms stream" — and every other nature rule — a compile-time fact
+/// rather than a review rule.
 pub trait Resource {
     const DOMAIN: Domain;
     /// Schema version for this resource's wire types (P10): additive
@@ -92,4 +93,20 @@ pub trait Resource {
 /// Marker: this resource is an atom — immutable once created, and
 /// therefore streamable ("send me resources of type X, at or after
 /// sequence S, as soon as they exist").
+///
+/// The three nature markers ([`Atom`], [`View`], [`Synthetic`])
+/// partition the catalogue: every [`Resource`] impl declares exactly
+/// one, and the registry's per-nature registration bounds make a
+/// nature/registration mismatch a compile error, never a wrong
+/// descriptor.
 pub trait Atom: Resource {}
+
+/// Marker: this resource is a view — stable identity, state folded
+/// from atoms and read at a watermark; never streamed directly (you
+/// stream its atoms).
+pub trait View: Resource {}
+
+/// Marker: this resource is synthetic — it stands for live machinery,
+/// not recorded truth; Get alone derives, and its verbs register as
+/// commands with manual authority.
+pub trait Synthetic: Resource {}

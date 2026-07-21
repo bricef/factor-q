@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 
-use crate::catalogue::{Atom, Nature, Resource};
+use crate::catalogue::{Atom, Nature, Resource, Synthetic, View};
 use crate::declared::{Command, Report};
 use crate::meta::{Authority, Stability, Verb};
 use crate::opid::{OpCategory, OpId};
@@ -134,7 +134,7 @@ impl Registry {
 
     /// Register a view: Get + List derive, answering as of a
     /// watermark. Views are never streamed — stream their atoms.
-    pub fn register_view<R: Resource>(&mut self, docs: ResourceDocs) -> Result<(), RegistryError> {
+    pub fn register_view<R: View>(&mut self, docs: ResourceDocs) -> Result<(), RegistryError> {
         self.insert_read_surface::<R>(Nature::View, docs)
     }
 
@@ -156,7 +156,7 @@ impl Registry {
     /// describing itself. Nothing else derives (no atoms behind it,
     /// nothing to list or stream); its verbs register separately as
     /// commands.
-    pub fn register_synthetic<R: Resource>(
+    pub fn register_synthetic<R: Synthetic>(
         &mut self,
         docs: ResourceDocs,
     ) -> Result<(), RegistryError> {
