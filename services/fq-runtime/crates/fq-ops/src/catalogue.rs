@@ -44,13 +44,13 @@ pub enum Domain {
     Event,
     Invocation,
     Operation,
-    TranscriptEntry,
+    Turn,
     Trigger,
     Worker,
 }
 
 impl Domain {
-    /// The rendered name segment (`transcript_entry`, `dead_letter`).
+    /// The rendered name segment (`turn`, `dead_letter`).
     pub fn segment(&self) -> &'static str {
         self.into()
     }
