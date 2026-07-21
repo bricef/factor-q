@@ -22,6 +22,10 @@ pub mod registry;
 pub mod wire;
 
 pub use meta::{OpKind, OpMeta, OpPermission, Stability, Verb};
+pub use name::{
+    AgentOp, ControlOp, CostOp, DeadletterOp, DomainTag, EventOp, InvocationOp, OpName, RegistryOp,
+    RuntimeOp, TraversalOp, TriggerOp, WorkerOp,
+};
 pub use operation::{OpDescriptor, Operation};
 pub use registry::{Registry, RegistryError};
 pub use wire::{

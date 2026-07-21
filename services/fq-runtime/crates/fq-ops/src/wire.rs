@@ -7,6 +7,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::name::OpName;
+
 /// Reference to one event a command appended (D3): subject, stream,
 /// and the event-log sequence — which is also the universal cursor
 /// (P5).
@@ -33,13 +35,16 @@ impl Receipt {
     }
 }
 
-/// One `invoke` call: an operation addressed as `name@version` (P10),
-/// its input as schema'd JSON, and — for queries — the optional D4
-/// watermark. `min_seq` lives on the envelope, not per-op input, so
-/// every derived surface inherits watermarking without per-op plumbing.
+/// One `invoke` call: the operation as its native [`OpName`] (tarpc
+/// carries enums; rendered names are documentation, not transport),
+/// the schema version beside it (P10), its input as schema'd JSON,
+/// and — for queries — the optional D4 watermark. `min_seq` lives on
+/// the envelope, not per-op input, so every derived surface inherits
+/// watermarking without per-op plumbing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InvokeRequest {
-    pub op: String,
+    pub op: OpName,
+    pub version: u32,
     pub input: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_seq: Option<u64>,
@@ -55,7 +60,8 @@ pub struct InvokeResponse {
 /// work, resumable by construction because sequence is the cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NextBatchRequest {
-    pub op: String,
+    pub op: OpName,
+    pub version: u32,
     pub input: serde_json::Value,
     pub from_seq: u64,
     pub max_wait_ms: u64,
@@ -79,13 +85,19 @@ pub struct StreamBatch {
 }
 
 /// The wire-level failure vocabulary. Domain failures are op outputs;
-/// these are the envelope's own: addressing, schema, authorisation,
-/// and the daemon-side catch-all.
+/// these are the envelope's own: registration, schema, authorisation,
+/// and the daemon-side catch-all. `op` fields carry the rendered name
+/// (these errors are for humans and logs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireError {
-    #[error("unknown operation `{op}` — `registry.describe` lists what this daemon serves")]
-    UnknownOp { op: String },
+    /// The name is valid (it type-checked) but this daemon has no
+    /// handler registered for it — client/daemon version skew.
+    #[error(
+        "operation `{op}` is not registered on this daemon — version skew? \
+             `registry.describe` lists what it serves"
+    )]
+    NotRegistered { op: String },
     #[error("input rejected by `{op}`'s schema: {message}")]
     InvalidInput { op: String, message: String },
     #[error("denied: {message}")]

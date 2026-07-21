@@ -1,15 +1,19 @@
 //! Registry invariants and the schema snapshot oracle.
 //!
-//! The snapshot (`tests/snapshots/exemplar_registry.json`) is this
-//! crate's golden master: the serialized `describe()` output for three
-//! exemplar ops, one per kind shape. Any change to the descriptor
-//! shape, the metadata contract, or schemars' derived output is a
-//! visible diff to review against P10's additive-change rules — never
-//! silent drift. Regenerate after an intentional change with
+//! With names as types, most of what the old string grammar policed is
+//! unrepresentable — what's left to test is the one value-level
+//! invariant (no double registration), lookup and ordering, and the
+//! snapshot (`tests/snapshots/exemplar_registry.json`): the serialized
+//! `describe()` output for three exemplar ops, one per kind shape.
+//! Any change to the descriptor shape, the metadata contract, or
+//! schemars' derived output is a visible diff to review against P10's
+//! additive-change rules — never silent drift. Regenerate after an
+//! intentional change with
 //! `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
+use fq_ops::name::{InvocationOp, OpName};
 use fq_ops::{
-    OpDescriptor, OpKind, OpMeta, OpPermission, Operation, Registry, RegistryError, Stability, Verb,
+    OpDescriptor, OpMeta, OpPermission, Operation, Registry, RegistryError, Stability, Verb,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -35,8 +39,7 @@ struct ShowOutput {
 struct InvocationShow;
 
 impl Operation for InvocationShow {
-    const NAME: &'static str = "invocation.show";
-    const KIND: OpKind = OpKind::Query;
+    const NAME: OpName = OpName::Invocation(InvocationOp::Show);
     type Input = ShowInput;
     type Output = ShowOutput;
     const META: OpMeta = OpMeta {
@@ -44,7 +47,6 @@ impl Operation for InvocationShow {
             verb: Verb::Read,
             scope: "invocation",
         },
-        read_audit: false,
         stability: Stability::Experimental,
         caveats: "",
     };
@@ -59,8 +61,7 @@ struct DropInput {
 struct InvocationDrop;
 
 impl Operation for InvocationDrop {
-    const NAME: &'static str = "invocation.drop";
-    const KIND: OpKind = OpKind::Command;
+    const NAME: OpName = OpName::Invocation(InvocationOp::Drop);
     type Input = DropInput;
     type Output = fq_ops::Receipt;
     const META: OpMeta = OpMeta {
@@ -68,7 +69,6 @@ impl Operation for InvocationDrop {
             verb: Verb::Write,
             scope: "invocation",
         },
-        read_audit: false,
         stability: Stability::Experimental,
         caveats: "kill-switch semantics: the invocation is archived as failed; \
                   workers observe the drop at their next step boundary",
@@ -89,8 +89,7 @@ struct TranscriptEntry {
 struct TranscriptTail;
 
 impl Operation for TranscriptTail {
-    const NAME: &'static str = "invocation.transcript.tail";
-    const KIND: OpKind = OpKind::Stream;
+    const NAME: OpName = OpName::Invocation(InvocationOp::TranscriptTail);
     type Input = TranscriptTailInput;
     type Output = TranscriptEntry;
     const META: OpMeta = OpMeta {
@@ -98,7 +97,6 @@ impl Operation for TranscriptTail {
             verb: Verb::Read,
             scope: "invocation",
         },
-        read_audit: false,
         stability: Stability::Experimental,
         caveats: "",
     };
@@ -106,9 +104,9 @@ impl Operation for TranscriptTail {
 
 fn exemplar_registry() -> Registry {
     let mut registry = Registry::new();
+    registry.register::<TranscriptTail>().unwrap();
     registry.register::<InvocationShow>().unwrap();
     registry.register::<InvocationDrop>().unwrap();
-    registry.register::<TranscriptTail>().unwrap();
     registry
 }
 
@@ -136,58 +134,43 @@ fn duplicate_registration_is_refused() {
     assert_eq!(
         registry.register::<InvocationShow>(),
         Err(RegistryError::Duplicate {
-            name: "invocation.show".into()
-        })
-    );
-}
-
-/// An op whose declared kind contradicts its parsed name is refused —
-/// misclassification is a reviewable defect (P8), caught at
-/// registration, not in review archaeology.
-#[test]
-fn kind_mismatch_is_refused() {
-    struct DropMislabelled;
-    impl Operation for DropMislabelled {
-        const NAME: &'static str = "invocation.drop";
-        const KIND: OpKind = OpKind::Query;
-        type Input = DropInput;
-        type Output = fq_ops::Receipt;
-        const META: OpMeta = InvocationDrop::META;
-    }
-    let mut registry = Registry::new();
-    assert_eq!(
-        registry.register::<DropMislabelled>(),
-        Err(RegistryError::KindMismatch {
-            name: "invocation.drop".into(),
-            declared: OpKind::Query,
-            expected: OpKind::Command,
+            name: "invocation.show"
         })
     );
 }
 
 #[test]
-fn unparseable_names_are_refused() {
-    struct Frobnicate;
-    impl Operation for Frobnicate {
-        const NAME: &'static str = "invocation.frobnicate";
-        const KIND: OpKind = OpKind::Command;
-        type Input = DropInput;
-        type Output = fq_ops::Receipt;
-        const META: OpMeta = InvocationDrop::META;
-    }
-    let mut registry = Registry::new();
-    assert!(matches!(
-        registry.register::<Frobnicate>(),
-        Err(RegistryError::Name(_))
-    ));
+fn lookup_works_by_op_and_by_rendered_name() {
+    let registry = exemplar_registry();
+    let by_op = registry
+        .get(OpName::Invocation(InvocationOp::Show))
+        .expect("lookup by OpName");
+    let by_name = registry
+        .get_named("invocation.show")
+        .expect("lookup by rendered name");
+    assert_eq!(by_op.name, by_name.name);
+    assert_eq!(by_op.version, 1);
+    assert!(registry.get_named("invocation.frobnicate").is_none());
 }
 
+/// The kind in a descriptor comes from the name itself — there is no
+/// second declaration to disagree with.
 #[test]
-fn wire_names_carry_the_version() {
+fn descriptor_kind_is_derived_from_the_name() {
     let registry = exemplar_registry();
     assert_eq!(
-        registry.get("invocation.show").unwrap().wire_name(),
-        "invocation.show@1"
+        registry
+            .get(OpName::Invocation(InvocationOp::Drop))
+            .unwrap()
+            .kind,
+        fq_ops::OpKind::Command
+    );
+    assert_eq!(
+        registry
+            .get(OpName::Invocation(InvocationOp::TranscriptTail))
+            .unwrap()
+            .kind,
+        fq_ops::OpKind::Stream
     );
 }
 
