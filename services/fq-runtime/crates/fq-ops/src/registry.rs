@@ -16,9 +16,9 @@ use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 
+use crate::catalogue::{Authority, Stability, Verb};
 use crate::catalogue::{Command, Report};
 use crate::catalogue::{Domain, Nature, Resource};
-use crate::meta::{Authority, Stability, Verb};
 use crate::opid::{OpCategory, OpId};
 
 /// One registered promise, described. Operations have categories;
