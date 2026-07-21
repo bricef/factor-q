@@ -1,4 +1,4 @@
-//! The domain model, declared in types — the heart of
+//! The domain model, declared in types
 //! (`docs/design/aspirational/operator-surface-domain-model.md`).
 //!
 //! A resource has one of three natures. **Atoms** are immutable once
