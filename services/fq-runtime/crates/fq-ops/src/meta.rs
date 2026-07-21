@@ -55,13 +55,14 @@ pub enum Stability {
 
 /// The per-operation contract metadata (P9): promoted from help-text
 /// lore to contract, so every derived surface inherits it.
+///
+/// Read auditing is deliberately absent: the edge middleware observes
+/// every invocation (identity, op, allow/deny) and can log uniformly —
+/// per-op audit metadata returns only if the audit middleware phase
+/// proves a real need for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct OpMeta {
     pub permission: OpPermission,
-    /// D7: commands are audited by their own events, so this flag is
-    /// meaningful for `Query`/`Stream`/`Probe` only — read audit is
-    /// opt-in, not noise.
-    pub read_audit: bool,
     pub stability: Stability,
     /// Contract caveats the caller must know: retention bounds,
     /// idempotency, semantics (e.g. requeue's non-idempotency, the

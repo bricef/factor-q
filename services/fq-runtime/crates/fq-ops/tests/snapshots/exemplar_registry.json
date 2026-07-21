@@ -1,5 +1,8 @@
 [
   {
+    "op": {
+      "invocation": "drop"
+    },
     "name": "invocation.drop",
     "version": 1,
     "kind": "command",
@@ -8,7 +11,6 @@
         "verb": "write",
         "scope": "invocation"
       },
-      "read_audit": false,
       "stability": "experimental",
       "caveats": "kill-switch semantics: the invocation is archived as failed; workers observe the drop at their next step boundary"
     },
@@ -74,6 +76,9 @@
     }
   },
   {
+    "op": {
+      "invocation": "show"
+    },
     "name": "invocation.show",
     "version": 1,
     "kind": "query",
@@ -82,7 +87,6 @@
         "verb": "read",
         "scope": "invocation"
       },
-      "read_audit": false,
       "stability": "experimental",
       "caveats": ""
     },
@@ -122,6 +126,9 @@
     }
   },
   {
+    "op": {
+      "invocation": "transcript_tail"
+    },
     "name": "invocation.transcript.tail",
     "version": 1,
     "kind": "stream",
@@ -130,7 +137,6 @@
         "verb": "read",
         "scope": "invocation"
       },
-      "read_audit": false,
       "stability": "experimental",
       "caveats": ""
     },
