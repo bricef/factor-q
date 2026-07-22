@@ -74,14 +74,35 @@ impl Domain {
 /// registries speak one authz language. A mirror rather than a
 /// dependency: fq-store is a separate workspace and this crate is a
 /// leaf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Verb {
     Read,
     Write,
     Delete,
     List,
     Grant,
+}
+
+impl Verb {
+    /// The rendered verb segment — one source of truth for the authz
+    /// wire word, kept equal to the serde encoding by
+    /// `tests/verb_encoding.rs`.
+    pub fn segment(&self) -> &'static str {
+        self.into()
+    }
 }
 
 /// What an operation requires of its caller: a verb over a resource

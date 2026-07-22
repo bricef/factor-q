@@ -126,7 +126,7 @@ impl VerifiedToken {
     /// domain each equal the requirement or `"*"`.
     pub fn allows(&self, required: &[Authority]) -> bool {
         required.iter().all(|authority| {
-            let verb = format!("{:?}", authority.verb).to_lowercase();
+            let verb = authority.verb.segment();
             let domain = authority.scope.segment();
             let mut az = match authorizer!(
                 r#"
@@ -135,7 +135,7 @@ impl VerifiedToken {
                     ($v == "*" || $v == $ov),
                     ($d == "*" || $d == $od);
                 "#,
-                verb = verb.as_str(),
+                verb = verb,
                 domain = domain,
             )
             .build(&self.token)
