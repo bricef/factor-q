@@ -104,13 +104,15 @@ pub enum Stability {
     Deprecated,
 }
 
-/// Reference to one atom a command appended (D3): subject, stream,
-/// and the event-log sequence — which is also the universal cursor
-/// (P5).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct EventRef {
-    pub subject: String,
-    pub stream: String,
+/// Reference to one atom a command appended (D3): the domain it
+/// belongs to and its sequence — the universal cursor (P5), the same
+/// number that cursors streams and watermarks reads. Deliberately
+/// model-native: bus coordinates (subjects, stream names) are
+/// internal infrastructure (D8), mapped by the edge, never exposed in
+/// a receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AtomRef {
+    pub domain: Domain,
     pub seq: u64,
 }
 
@@ -119,14 +121,20 @@ pub struct EventRef {
 /// watermark feeds the next read's `min_seq` for read-your-writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Receipt {
-    pub events: Vec<EventRef>,
+    pub atoms: Vec<AtomRef>,
 }
 
 impl Receipt {
-    /// The highest appended sequence — what a caller passes as
-    /// `min_seq` to compose read-your-writes (D4).
-    pub fn watermark(&self) -> Option<u64> {
-        self.events.iter().map(|e| e.seq).max()
+    /// The highest appended sequence in one domain — what a caller
+    /// passes as `min_seq` to watermark a read of that domain (D4).
+    /// Per-domain because sequences from different domains are not
+    /// comparable.
+    pub fn watermark(&self, domain: Domain) -> Option<u64> {
+        self.atoms
+            .iter()
+            .filter(|a| a.domain == domain)
+            .map(|a| a.seq)
+            .max()
     }
 }
 
