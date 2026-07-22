@@ -27,6 +27,7 @@
 //! must stay a leaf (no sqlx, no NATS, no tokio; the thin `fq` client
 //! links it alone — `tests/forbidden_dependency_gate.rs` enforces it).
 
+pub mod fixtures;
 pub mod model;
 pub mod opid;
 pub mod registry;

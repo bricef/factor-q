@@ -8,8 +8,22 @@
 //! dashboard) come from offline attenuation of the admin token — no
 //! daemon round-trip.
 
+use std::time::Duration;
+
+use biscuit_auth::datalog::RunLimits;
 use biscuit_auth::macros::authorizer;
 use biscuit_auth::{Biscuit, KeyPair, PublicKey};
+
+/// Biscuit's default datalog budget is ~1ms of wall time — small
+/// enough that scheduler jitter under load fails valid tokens. Our
+/// programs are tiny; give them real headroom and keep failure
+/// closed.
+fn run_limits() -> RunLimits {
+    RunLimits {
+        max_time: Duration::from_millis(250),
+        ..RunLimits::default()
+    }
+}
 use fq_ops::Authority;
 use sha2::{Digest, Sha256};
 
@@ -97,7 +111,8 @@ pub fn verify_token(presented: &str, root: PublicKey) -> anyhow::Result<Verified
         "#
     )
     .build(&token)?;
-    let principals: Vec<(String,)> = az.query("data($p) <- principal($p)")?;
+    let principals: Vec<(String,)> =
+        az.query_with_limits("data($p) <- principal($p)", run_limits())?;
     let principal = principals
         .first()
         .map(|(p,)| p.clone())
@@ -128,7 +143,7 @@ impl VerifiedToken {
                 Ok(az) => az,
                 Err(_) => return false,
             };
-            az.authorize().is_ok()
+            az.authorize_with_limits(run_limits()).is_ok()
         })
     }
 }
