@@ -178,8 +178,7 @@ fmt:
 
 # NATS-backed tests spawn their own broker (#233) from the pinned nats-server,
 # provisioned by the `install-nats` dependency; the MCP integration tests need
-# Node/npx. The doctest phase selects the library crates only — fq-cli is
-# bin-only, and `cargo test --doc` hard-errors on a package with no lib.
+# Node/npx.
 # Run the runtime Rust gate (fmt-check, clippy, doc, test).
 runtime-ci: install-nats
     #!/usr/bin/env bash
@@ -195,7 +194,7 @@ runtime-ci: install-nats
     run_phase "doc"       env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps {{runtime_pkgs}}
     run_phase "build"     cargo build --tests {{runtime_pkgs}}
     run_phase "test"      cargo test --tests {{runtime_pkgs}}
-    run_phase "doctest"   cargo test --doc -p fq-ops -p fq-runtime -p fq-tools
+    run_phase "doctest"   cargo test --doc {{runtime_pkgs}}
 
 # No Node needed; the grant-bus test spawns its own private broker (#233) from
 # the pinned nats-server, provisioned by the `install-nats` dependency.
