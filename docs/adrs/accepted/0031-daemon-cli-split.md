@@ -124,3 +124,66 @@ local-store fallback (that would re-link `sqlx` into `fq`).
   transport-auth layer, or those stay separate; likely unify, sequencing TBD.
 - The rest of the M5 posture (NATS authentication) — a separate ADR/plan.
 - Migration to mTLS when the multi-operator/fleet story lands.
+
+---
+
+## Appendix A — Amendment: capability tokens and the wire-crate split (2026-07-22)
+
+Recorded ahead of the Phase-2 edge implementation
+([execution plan](../../plans/active/2026-07-20-registry-and-split-execution.md)),
+superseding two details of the original decision. TLS with a pinned
+self-signed certificate, the auth-beneath-the-RPC-contract seam, the
+required daemon, and everything else stand unchanged.
+
+### Capability tokens replace the shared secret
+
+The original decision authenticated with a single shared secret,
+reasoning that per-client identity was a multi-operator fleet concern.
+That premise was already false at the time of writing: the surface has
+multiple *clients* with different privilege needs today — the
+operator CLI (full authority), `fq-dashboard` (a strictly read-only
+service), and the MCP face to come (capability-filtered per
+declaration). One secret collapses every caller into "the secret
+holder", which:
+
+- makes the registry's declared authority (`Verb` × domain, derived
+  Read on the generic surface, own-scoped reports) unenforceable at
+  the edge — a read-only dashboard would hold a credential that can
+  invoke `control.down`;
+- leaves D7's "envelopes carry the authenticated operator identity"
+  with a constant where an identity should be.
+
+Access is therefore authenticated by a **bearer biscuit capability
+token**, presented at connection establishment after the TLS
+handshake — the same transport mechanics the secret would have used,
+but the bytes are a verifiable, attenuable capability carrying
+`(verb, domain)` grants and a principal identity fact. This is reuse,
+not invention: fq-store already ships biscuit mint/verify/attenuate
+(Ed25519) over the same `Verb` × scope vocabulary the registry's
+authority declarations mirror. The edge middleware verifies the token
+and subset-checks the resolved operation's required authority against
+the token's grants; audit identity comes from the token's principal.
+
+Bootstrap keeps the one-line UX the secret promised: on first run the
+daemon mints a root keypair and prints an **admin token** alongside
+the certificate fingerprint. Scoped clients come from **offline
+attenuation** — the operator attenuates their admin token down to,
+e.g., Read-everything for the dashboard, with no daemon round-trip; a
+minting/rotation verb can follow when needed. Revocation is the known
+bearer-capability cost: expiry caveats and root-key rotation (the
+shared secret had the same cost, without the blast-radius reduction
+of scoped tokens). mTLS-later remains available behind the unchanged
+middleware seam, though per-client identity no longer depends on it.
+
+### The wire crate is two crates
+
+ADR-0006's Appendix A declared the sqlx-free wire-types + client
+crate **is** `fq-ops`. Realizing ADR-0006 (its Appendix B) made
+`fq-ops` a deliberately transport-free leaf — its dependency gate
+forbids tarpc itself — so the transport half lives in a sibling:
+**`fq-edge`** (the tarpc service trait, the generic
+`invoke`/`next_batch` envelopes, the wire-error vocabulary, and the
+client with TLS, pinning, and token presentation), depending on
+`fq-ops` and still free of sqlx and NATS. The thin `fq` of the split
+links `fq-edge` → `fq-ops`. This supersedes the corresponding
+sentence of ADR-0006 Appendix A.
