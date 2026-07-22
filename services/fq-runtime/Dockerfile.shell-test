@@ -44,14 +44,16 @@ COPY services/fq-dashboard/Cargo.toml services/fq-dashboard/
 COPY services/fq-store/Cargo.toml services/fq-store/
 COPY services/fq-test-support/Cargo.toml services/fq-test-support/
 
-RUN mkdir -p services/fq-runtime/crates/fq-cli/src \
+RUN mkdir -p services/fq-runtime/crates/fq-cli/src/bin \
              services/fq-runtime/crates/fq-ops/src \
              services/fq-runtime/crates/fq-runtime/src \
              services/fq-runtime/crates/fq-tools/src \
              services/fq-dashboard/src \
              services/fq-store/src/bin services/fq-store/benches \
              services/fq-test-support/src \
-    && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/main.rs \
+    && echo '' > services/fq-runtime/crates/fq-cli/src/lib.rs \
+    && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/bin/fq.rs \
+    && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/bin/fqd.rs \
     && echo '' > services/fq-runtime/crates/fq-ops/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-runtime/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-tools/src/lib.rs \

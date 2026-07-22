@@ -45,14 +45,16 @@ COPY services/fq-test-support/Cargo.toml services/fq-test-support/
 # dependency graph before any real source is present. Every declared target
 # needs a file behind it or cargo rejects the manifest — hence the store's
 # bin and bench stubs.
-RUN mkdir -p services/fq-runtime/crates/fq-cli/src \
+RUN mkdir -p services/fq-runtime/crates/fq-cli/src/bin \
              services/fq-runtime/crates/fq-ops/src \
              services/fq-runtime/crates/fq-runtime/src \
              services/fq-runtime/crates/fq-tools/src \
              services/fq-dashboard/src \
              services/fq-store/src/bin services/fq-store/benches \
              services/fq-test-support/src \
-    && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/main.rs \
+    && echo '' > services/fq-runtime/crates/fq-cli/src/lib.rs \
+    && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/bin/fq.rs \
+    && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/bin/fqd.rs \
     && echo '' > services/fq-runtime/crates/fq-ops/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-runtime/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-tools/src/lib.rs \
