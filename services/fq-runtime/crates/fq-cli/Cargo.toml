@@ -6,9 +6,21 @@ description.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[lib]
+name = "fq_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fq"
-path = "src/main.rs"
+path = "src/bin/fq.rs"
+
+# The daemon's own binary, born with the Phase-2 edge as its named
+# home. Shares every line of daemon code with `fq run` (a
+# compatibility alias until the ADR-0031 Phase-5 split strips `run`
+# and slims `fq` to the thin client).
+[[bin]]
+name = "fqd"
+path = "src/bin/fqd.rs"
 
 # cargo-binstall: fetch the pre-built `fq` binary from GitHub Releases
 # instead of compiling. Must match the release artifact naming (see

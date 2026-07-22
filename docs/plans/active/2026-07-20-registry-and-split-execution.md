@@ -55,7 +55,7 @@ the substrate the ADRs bet on:
  fq (thin client: fq-ops types + generated wrappers, no sqlx/NATS)
   │
   │  tarpc: invoke(name, input) / next_batch(from_seq, max_wait)
-  │  TLS (pinned self-signed cert) + shared secret — the one audited edge
+  │  TLS (pinned self-signed cert) + capability token — the one audited edge
   ▼
  fqd (fq-runtime: stores + NATS + registry handlers + auth middleware)
   ├─ fq-dashboard ──▶ same edge, generated client
@@ -117,20 +117,29 @@ gates green.
 
 ### Phase 2 — the authenticated generic edge
 
-The tarpc `invoke`/`next_batch` service hosted by the daemon (still
-`fq run` at this point), alongside the untouched `ReadService`:
+The tarpc `invoke`/`next_batch` service hosted by the shared daemon
+path — `fqd` is born early as the edge's named home (a thin second
+binary over the same daemon code; `fq run` stays a compatibility
+alias until Phase 5 strips it), alongside the untouched `ReadService`:
 
-- **2a — transport + secret.** `fqd` auto-provisions a self-signed cert and
-  mints a shared secret on first run (no operator crypto toil); TLS
-  termination; bearer-secret check as middleware *beneath* the RPC contract
-  (the mTLS-later seam). Non-loopback bind allowed only with auth
-  configured; loopback remains the default. The generic
-  `invoke`/`next_batch` envelopes and the wire-error vocabulary are
-  designed here, against the real tarpc service (deferred from
-  Phase 1 by review).
+- **2a — transport + tokens.** `fqd` auto-provisions a self-signed cert
+  and a root keypair on first run, printing an **admin biscuit token**
+  and the cert fingerprint (no operator crypto toil); TLS termination;
+  token verification as middleware *beneath* the RPC contract, with the
+  edge subset-checking each resolved operation's required authority
+  against the token's `(verb, domain)` grants (ADR-0031 Appendix A —
+  scoped clients like the read-only dashboard come from offline
+  attenuation). Non-loopback bind allowed only with auth configured;
+  loopback remains the default. The generic `invoke`/`next_batch`
+  envelopes, the wire-error vocabulary, and the tarpc service trait
+  live in the new **`fq-edge`** crate (fq-ops stays a transport-free
+  leaf), designed here against the real service.
 - **2b — client + pinning.** Client-side connect with TOFU pin persisted to
-  config, overridable by explicit fingerprint; wrong/absent secret refused
-  with a distinct, tested error.
+  config, overridable by explicit fingerprint; token presented at
+  connection establishment; absent, invalid, and **insufficient-scope**
+  tokens each refused with a distinct, tested error (insufficient scope
+  exercises resolved authority against token grants — the dashboard
+  read-only case).
 - **2c — first op: `List(Operation)`.** The registry describing itself —
   `describe()` already returns the payload (the declarations, in the
   model's own halves) — proving the edge end-to-end without touching
@@ -273,10 +282,11 @@ audit events carry the MCP caller identity. *(1–2 PRs.)*
   `registry.describe` output vs. build.rs vs. macro. Leaning: a small
   generator binary checked against `registry.describe` in CI (no proc-macro
   layer; keeps the schema the single source).
-- **D-4 (Phase 2 detail): secret bootstrap/rotation UX and TOFU-vs-
-  fingerprint default.** Leaning: print secret + fingerprint on first
-  `fqd` run, store client-side in config; rotation becomes a
-  `control.secret.rotate` op later.
+- **D-4 — resolved (2026-07-22, ADR-0031 Appendix A):** first `fqd`
+  run mints a root keypair and prints an admin token + cert
+  fingerprint; the client stores both. TOFU and explicit-fingerprint
+  pinning are both supported. Scoped tokens come from offline
+  attenuation; minting/rotation becomes a token verb later.
 - **D-5 (Phase 4.1 detail):** which of `failures`/`recovery`/`executions`/
   `event_count` are ops vs. internals of `runtime.doctor`. Leaning:
   internal until a consumer outside doctor/status exists (P11: curate).
