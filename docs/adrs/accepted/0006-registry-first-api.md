@@ -332,3 +332,48 @@ Replace the paragraph beginning "The interface is one typed
 All transport, TLS, shared-secret, binding, and distribution decisions of
 ADR-0031 stand unchanged. The sqlx-free "wire-types + client crate" it
 introduces **is** `fq-ops`.
+
+---
+
+## Appendix B — Refinements from the operator-surface domain model (2026-07-21)
+
+Adopted with the `fq-ops` contract crate (#346), whose design review
+produced
+[the committed domain model](../../design/committed/operator-surface-domain-model.md)
+(review distilled in
+[the design-review learnings](../../reviews/2026-07-21-fq-ops-design-review-learnings.md)).
+Decisions D1–D8 stand; the *production method* they specify is refined:
+
+- **D1's registry holds value declarations.** The `Operation` trait
+  sketched in D1 became five value types — `Atom`, `View`, `Synthetic`
+  (resources, whose nature is the type and whose generic read surface
+  derives from one registration), `Command`, and `Report` — with
+  constructors generic over each declaration's Rust types, capturing
+  schemas at the single declaration site. The value registered **is**
+  the definition; there is no descriptor projection.
+- **D2's kinds become derived categories.** Get / List / Stream over
+  catalogue resources, plus declared Commands and Reports. `Probe`
+  dissolves into `control.get` — the synthetic Control resource
+  describing the machinery in one generic read. **Create does not
+  exist**: the generic surface is read-only, and every mutation is a
+  declared command (`trigger.publish`, not `trigger.create`), keeping
+  work-dispatch authority separately grantable from lifecycle
+  authority.
+- **Reports scope to their own domain** (`cost.summary` → Read on
+  `Cost`), never to their inputs — aggregates are a privilege
+  boundary, grantable without the raw data they compute from. Domains
+  may exist purely as scopes.
+- **D3's receipts are model-native.** `Receipt` carries
+  `AtomRef { domain, seq }` — the universal cursor (P5) — with
+  per-domain watermarks; bus coordinates (subjects, stream names)
+  never appear in receipts, per D8.
+- **P8 inverts.** Names derive from structure for documentation and
+  string-addressed adapters; nothing parses them, and identity is
+  native on the wire. Wire identity is *request vocabulary*: invalid
+  combinations (a stream of a view-registered domain) remain
+  representable and are refused at resolve time — version skew
+  answers "not registered", never a parse error. Declarations, by
+  contrast, keep invalid states unrepresentable.
+- **D6's generic `invoke`/`next_batch` envelopes are edge artifacts**,
+  designed with the Phase-2 tarpc service rather than speculatively in
+  the contract crate.

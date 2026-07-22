@@ -1,5 +1,5 @@
 //! The operator-surface contract crate (ADR-0006, as refined by
-//! `docs/design/aspirational/operator-surface-domain-model.md`) — and
+//! `docs/design/committed/operator-surface-domain-model.md`) — and
 //! the sqlx-free wire crate ADR-0031 calls for.
 //!
 //! Four categories of boundary promise, mirroring the domain model:
