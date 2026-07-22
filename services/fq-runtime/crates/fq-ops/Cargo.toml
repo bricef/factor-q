@@ -10,7 +10,7 @@ license.workspace = true
 # wire crate ADR-0031 calls for. A LEAF by design: no sqlx, no NATS,
 # no tokio, no tarpc — `fq` the thin client will depend on this crate
 # alone, so anything heavier added here leaks into the client binary.
-# tests/leaf_gate.rs enforces the list.
+# tests/forbidden_dependency_gate.rs enforces the list.
 
 [dependencies]
 schemars = { version = "1", features = ["derive"] }

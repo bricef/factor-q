@@ -1,4 +1,4 @@
-//! Source-level gate: fq-ops stays a leaf.
+//! Source-level gate: forbidden dependencies stay out of fq-ops.
 //!
 //! ADR-0031's thin `fq` client links this crate alone, so any runtime
 //! dependency added here ships in the client binary. This gate fails
@@ -15,7 +15,7 @@
 const FORBIDDEN: &[&str] = &["sqlx", "async-nats", "tokio", "tarpc", "axum", "reqwest"];
 
 #[test]
-fn dependencies_stay_leaf() {
+fn forbidden_dependencies_stay_out() {
     let manifest = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
     )
