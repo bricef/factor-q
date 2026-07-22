@@ -1,0 +1,47 @@
+[package]
+name = "fq-edge"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
+
+# The authenticated generic edge (ADR-0031 as amended by its Appendix A):
+# the tarpc service trait, the generic invoke/next_batch envelopes, the
+# wire-error vocabulary, identity provisioning (cert + root keypair +
+# tokens), and the client with TLS pinning and token presentation. The
+# transport half of the wire crate — fq-ops stays the transport-free
+# contract half. No sqlx, no NATS: the thin `fq` of the split links
+# fq-edge -> fq-ops alone. (Client/server feature split can come with
+# Phase 5 if binary size warrants it.)
+
+[dependencies]
+fq-ops = { path = "../fq-ops" }
+anyhow = "1"
+biscuit-auth = "6"
+futures = "0.3"
+rcgen = "0.13"
+rustls = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tarpc = { version = "0.37", features = [
+    "tokio1",
+    "serde1",
+    "serde-transport",
+    "serde-transport-bincode",
+    "serde-transport-json",
+    "tcp",
+] }
+thiserror = "2"
+tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time"] }
+tokio-rustls = "0.26"
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[dev-dependencies]
+schemars = { version = "1", features = ["derive"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true
