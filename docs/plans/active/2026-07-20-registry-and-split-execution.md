@@ -1,6 +1,12 @@
 # Registry-first API + daemon/CLI split — joint execution plan (ADR-0006 + ADR-0031)
 
-**Status:** accepted (2026-07-20, via #335). Supersedes the
+**Status:** accepted (2026-07-20, via #335). **Progress:** Phase 0 done
+(#337); Phase 1 done (#346) — shipped as the value-type realization of
+[the committed domain model](../../design/committed/operator-surface-domain-model.md)
+rather than this plan's original Phase-1 sketch (deltas recorded in
+ADR-0006 Appendix B; the review is distilled in
+[the design-review learnings](../../reviews/2026-07-21-fq-ops-design-review-learnings.md)).
+Phase texts below are updated to the realized vocabulary. Supersedes the
 [2026-07-17 ADR-0031 execution plan](2026-07-17-adr-0031-daemon-cli-split-execution.md):
 ADR-0006's Appendix A replaced that plan's central artifact — the
 hand-enumerated `ControlService` trait — with the derived tarpc binding of the
@@ -79,7 +85,7 @@ the substrate the ADRs bet on:
 
 ## Phased plan (PR-sized slices)
 
-### Phase 0 — close the net: golden-master over commands
+### Phase 0 — close the net: golden-master over commands ✅ #337
 
 Extend the golden harness to the write/control verbs it does not cover:
 `reload`, `down [--now]`, `trigger --via-nats`, `invocation drop`,
@@ -92,21 +98,22 @@ IDs, normalised timing) is the real work, as it was for reads.
 **Acceptance:** every CLI verb has golden coverage in both formats;
 `just ci` green. *(1–2 PRs.)*
 
-### Phase 1 — `fq-ops`: the contract crate
+### Phase 1 — `fq-ops`: the contract crate ✅ #346
 
-New leaf crate `services/fq-runtime/crates/fq-ops` (also the ADR-0031 wire
-crate; sqlx-free as a build fact, like #264's gate). Contents: `OpKind`,
-the `Operation` trait, `OpMeta` (permission = fq-store's `Verb` × scope
-vocabulary; audit class; stability; caveat text), `Receipt`, the registry
-(duplicate-name rejection, P8 name-grammar validation at registration),
-`WireError`, the generic `invoke`/`next_batch` envelope types, and
-`name@version` schema-versioning rules with schemars integration.
-**Tests set the bar for the whole migration:** property tests for the name
-grammar (P8: `<domain>.<imperative>` ⇒ Command, `<domain>.<noun>` ⇒ Query,
-`.tail` ⇒ Stream — an op whose name misparses must fail registration),
-registry invariants, and schema snapshots as the compatibility oracle.
-**Acceptance:** crate builds with no sqlx/NATS in its tree; contract tests
-green; zero behaviour change anywhere else. *(1–2 PRs.)*
+**Done**, shipped as the type foundation of the committed domain model
+(which the #346 review produced — thirteen revisions from this plan's
+original sketch). What landed: value-type declarations (`Atom` /
+`View` / `Synthetic` / `Command` / `Report`, constructors generic over
+each declaration's Rust types), a registry holding the declarations
+themselves (collision refusal at registration; per-op dispatch views
+computed on lookup; `describe()` = the List(Operation) payload),
+native wire identity (`OpId` — refusable request vocabulary, derived
+rendering, nothing parses), model-native receipts
+(`AtomRef { domain, seq }`, per-domain watermarks), and the
+forbidden-dependency gate keeping the crate a leaf. The generic
+envelopes this phase originally scoped moved to Phase 2, designed
+against the real edge. Oracles: the `describe()` schema snapshot; all
+gates green.
 
 ### Phase 2 — the authenticated generic edge
 
@@ -117,43 +124,54 @@ The tarpc `invoke`/`next_batch` service hosted by the daemon (still
   mints a shared secret on first run (no operator crypto toil); TLS
   termination; bearer-secret check as middleware *beneath* the RPC contract
   (the mTLS-later seam). Non-loopback bind allowed only with auth
-  configured; loopback remains the default.
+  configured; loopback remains the default. The generic
+  `invoke`/`next_batch` envelopes and the wire-error vocabulary are
+  designed here, against the real tarpc service (deferred from
+  Phase 1 by review).
 - **2b — client + pinning.** Client-side connect with TOFU pin persisted to
   config, overridable by explicit fingerprint; wrong/absent secret refused
   with a distinct, tested error.
-- **2c — first op: `registry.describe`.** The registry describing itself
-  (names, kinds, schemas, meta) — proves the edge end-to-end without
-  touching domain logic, and every later phase's tooling (docs, codegen,
-  drift checks) wants it anyway.
+- **2c — first op: `List(Operation)`.** The registry describing itself —
+  `describe()` already returns the payload (the declarations, in the
+  model's own halves) — proving the edge end-to-end without touching
+  domain logic; every later phase's tooling (docs, codegen, drift
+  checks) wants it anyway. Registration here becomes the one-call
+  typed form: declaration + handler through the same generic slot.
 
 **Acceptance:** a non-loopback client authenticates against a test daemon;
 negative-auth tests pass; golden untouched. *(2–3 PRs.)*
 
-### Phase 3 — exemplars: one op per kind
+### Phase 3 — exemplars: one declaration per category
 
 The pattern-fixing slices, with full review scrutiny:
 
 - **3a — watermark plumbing.** The projection tracks its applied event-log
-  sequence (shared with #139); queries gain bounded `min_seq` waiting.
+  sequence (shared with #139); reads gain bounded `min_seq` waiting.
   Prerequisite for D4 composition.
-- **3b — Query: `invocation.show`.** Transplant the `Views::invocation`
-  body; typed client wrapper; CLI verb flips behind golden.
+- **3b — a view's read surface: `Invocation`.** One catalogue
+  registration buys `invocation.get`/`invocation.list`; transplant the
+  `Views::invocation`/`invocations` bodies as its handlers; typed
+  client wrapper; CLI verbs flip behind golden.
 - **3c — Command: `invocation.drop`.** Transplant
-  `operator::drop_invocation`; returns a `Receipt` (subject, stream,
-  sequence), never state; envelope carries operator identity.
-  Integration test: `drop` → `show(min_seq = receipt.seq)` composes
-  read-your-writes through the public surface alone.
-- **3d — Stream: `invocation.transcript.tail`.** Ephemeral JetStream
-  consumer from `from_seq`; every item carries its sequence; tarpc binding
-  is long-poll `next_batch`. `--follow` flips to it behind golden.
+  `operator::drop_invocation`; returns a `Receipt` of
+  `AtomRef { domain, seq }`, never state; envelope carries operator
+  identity. Integration test: `drop` →
+  `get(min_seq = receipt.watermark(domain))` composes read-your-writes
+  through the public surface alone.
+- **3d — an atom with Stream: `Turn`.** Registration buys
+  `turn.get`/`turn.list`/`turn.stream`; ephemeral JetStream consumer
+  from `from_seq`; every item carries its sequence; tarpc binding is
+  long-poll `next_batch`. `--follow` flips to `turn.stream` behind
+  golden. Pins the Round/Turn state shape (the `round` grouping key).
 - **3e — wrapper codegen.** Decide and land the generation mechanism for
   typed client wrappers (D-3 below). This phase is also the checkpoint for
   ADR-0006's held fallback: if generic-invoke ergonomics disappoint,
-  macro-expanding to a per-method trait is the named alternative — decide
-  here, not after seventeen migrations.
+  per-method generation is the named alternative — decide here, not
+  after the fleet.
 
-**Acceptance:** three ops live end-to-end through the authenticated edge;
-flipped verbs golden-identical; read-your-writes test green. *(3–5 PRs.)*
+**Acceptance:** a view, a command, and an atom live end-to-end through
+the authenticated edge; flipped verbs golden-identical;
+read-your-writes test green. *(3–5 PRs.)*
 
 ### Phase 4 — fleet migration (~17 near-identical PRs)
 
@@ -163,22 +181,25 @@ transplant handler → flip CLI verb behind golden → delete the old path.
 This is deliberately fleet-fodder — each PR is tightly specced, oracle-backed,
 and independent. Order:
 
-1. **Queries** (lowest risk, highest count): `invocation.list`,
-   `worker.list/show`, `event.query`, `cost.summary/by_agent`,
-   `agent.list/show`, `deadletter.list`, `runtime.version`,
-   `runtime.doctor`, and Probes `runtime.health`/`runtime.status`
-   (JetStream introspection moves daemon-side — it cannot live in a thin
-   client). Per-method call on `failures`/`recovery`/`executions`/
-   `event_count`: op vs. internal to the doctor/status composites.
-2. **Commands:** `trigger.publish`, `deadletter.requeue` (non-idempotency
-   → `OpMeta` caveat), `control.reload`/`control.down` (become in-process
-   handlers; the NATS control-subject hop retires from the operator path —
-   `daemon_shutdown.rs` re-targets the RPC), and the three bypass-path
-   resolutions: `worker.prune` becomes an evented command (co-emitted
-   events, audit for free), `agent.list` answers from the daemon's
-   `SharedRegistry`, in-process trigger retires (D-1).
-3. **Streams:** `event.tail` (upgrades from silent-drop core-NATS subscribe
-   to sequence-resumable), transcript follow already done in 3d.
+1. **Catalogue registrations** (lowest risk — each buys a whole read
+   surface): `Worker`, `Agent`, `Event` (its atom registration
+   includes `event.stream`, upgrading today's silent-drop core-NATS
+   `events tail` to sequence-resumable), `DeadLetter`, and the
+   synthetic `Control` (`control.get` absorbs `runtime.version`/
+   `health`/`status` — JetStream introspection moves daemon-side; it
+   cannot live in a thin client). Per-method call on `failures`/
+   `recovery`/`executions`/`event_count`: report input vs. internal to
+   the `control.doctor` composite.
+2. **Commands:** `trigger.publish`, `deadletter.requeue`
+   (non-idempotency in its description), `control.reload`/`control.down`
+   (become in-process handlers; the NATS control-subject hop retires
+   from the operator path — `daemon_shutdown.rs` re-targets the RPC),
+   and the three bypass-path resolutions: `worker.prune` becomes an
+   evented command (co-emitted events, audit for free), `agent.list`
+   answers from the daemon's `SharedRegistry`, in-process trigger
+   retires (D-1).
+3. **Reports:** `cost.summary`/`cost.by_agent` (scope `Cost`) and
+   `control.doctor`.
 4. **Deletions:** dashboard re-points to the generated client (its in-crate
    tests pin the old wire and re-point with it); then delete `ReadService`,
    its forwarding layer, and per-command JSON plumbing (#190 dissolves;

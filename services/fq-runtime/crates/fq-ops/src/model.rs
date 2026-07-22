@@ -1,5 +1,5 @@
 //! The domain model, declared as values
-//! (`docs/design/aspirational/operator-surface-domain-model.md`).
+//! (`docs/design/committed/operator-surface-domain-model.md`).
 //!
 //! [`Atom`], [`View`], [`Synthetic`], [`Command`], and [`Report`]
 //! are **value types**: a declaration is a constructor call, and the
