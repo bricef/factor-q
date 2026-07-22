@@ -479,8 +479,10 @@ fn init_tracing(format: LogFormat) {
     }
 }
 
+/// The `fq` entry point: the operator CLI (and, until the Phase-5
+/// split completes, the daemon via `fq run`).
 #[tokio::main]
-async fn main() -> ExitCode {
+pub async fn fq_main() -> ExitCode {
     let cli = Cli::parse();
 
     // Initialise the tracing subscriber now that args are parsed, so
@@ -514,6 +516,34 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The `fqd` entry point: the daemon and nothing else. `fq run`
+/// remains a compatibility alias until the Phase-5 split completes;
+/// both drive the same `run_daemon` path, so the edge and every other
+/// daemon behaviour land once, in shared code.
+#[tokio::main]
+pub async fn fqd_main() -> ExitCode {
+    let args = FqdArgs::parse();
+    init_tracing(args.global.log_format);
+    // The daemon keeps SIGPIPE ignored (Rust's startup default): a
+    // long-running process must not be killable by a closed stdout —
+    // the same disposition `fq run` runs under.
+    match run_daemon(&args.global).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `fqd` takes the global connection/config flags and no subcommands.
+#[derive(clap::Parser)]
+#[command(name = "fqd", about = "The factor-q daemon", version)]
+struct FqdArgs {
+    #[command(flatten)]
+    global: GlobalArgs,
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
