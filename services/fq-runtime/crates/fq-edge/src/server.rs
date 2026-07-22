@@ -40,7 +40,7 @@ const MAX_TOKEN_BYTES: u32 = 64 * 1024;
 /// stops a stalled anonymous connection from pinning a task + fd +
 /// rustls session indefinitely (slowloris-style resource exhaustion):
 /// `MAX_TOKEN_BYTES` caps space, this caps time.
-const DEFAULT_PREAMBLE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_PREAMBLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct EdgeServer {
