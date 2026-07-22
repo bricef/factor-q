@@ -63,8 +63,15 @@ impl From<Report> for Entry {
 }
 
 impl Entry {
-    /// The domain a resource entry claims, if it is one.
-    fn resource_domain(&self) -> Option<Domain> {
+    /// The domain this entry **occupies in the catalogue**, if it is a
+    /// resource — the input to the one-resource-per-domain check.
+    ///
+    /// Commands and reports also carry a domain, deliberately ignored
+    /// here: they *attach to* a domain (for identity and permission
+    /// scope) without occupying it — `invocation.drop` coexists with
+    /// the Invocation view entry, and `cost.summary` scopes to a
+    /// domain that has no resource at all.
+    fn occupied_domain(&self) -> Option<Domain> {
         match self {
             Entry::Atom(a) => Some(a.domain),
             Entry::View(v) => Some(v.domain),
@@ -138,12 +145,12 @@ impl Registry {
         let claimed: Vec<String> = match &entry {
             Entry::Atom(_) | Entry::View(_) | Entry::Synthetic(_) => {
                 let domain = entry
-                    .resource_domain()
+                    .occupied_domain()
                     .expect("resource entry has a domain");
                 if self
                     .entries
                     .iter()
-                    .any(|e| e.resource_domain() == Some(domain))
+                    .any(|e| e.occupied_domain() == Some(domain))
                 {
                     return Err(RegistryError::DuplicateResource { domain });
                 }
@@ -230,17 +237,13 @@ impl Registry {
                 // its schema is a wire constant, not per-op data.
                 output_schema: None,
             },
+            // A report's authority is Read on its own scope — what
+            // makes aggregates a privilege boundary: grantable without
+            // granting the raw inputs they compute from.
             (Entry::Report(r), _) => Resolved {
                 op: op.clone(),
                 category: OpCategory::Report,
-                authority: r
-                    .reads
-                    .iter()
-                    .map(|scope| Authority {
-                        verb: Verb::Read,
-                        scope: *scope,
-                    })
-                    .collect(),
+                authority: read(r.domain),
                 version: r.version,
                 input_schema: Some(&r.params_schema),
                 output_schema: Some(&r.output_schema),

@@ -35,7 +35,7 @@ pub enum OpId {
     List(Domain),
     Stream(Domain),
     Verb { domain: Domain, verb: String },
-    Report { name: String },
+    Report { domain: Domain, name: String },
 }
 
 /// The category an operation belongs to — what replaced the old
@@ -72,7 +72,7 @@ impl std::fmt::Display for OpId {
             OpId::List(r) => write!(f, "{}.list", r.segment()),
             OpId::Stream(r) => write!(f, "{}.stream", r.segment()),
             OpId::Verb { domain, verb } => write!(f, "{}.{verb}", domain.segment()),
-            OpId::Report { name } => f.write_str(name),
+            OpId::Report { domain, name } => write!(f, "{}.{name}", domain.segment()),
         }
     }
 }

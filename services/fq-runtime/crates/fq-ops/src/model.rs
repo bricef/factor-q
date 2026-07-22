@@ -52,6 +52,7 @@ use crate::opid::OpId;
 pub enum Domain {
     Agent,
     Control,
+    Cost,
     DeadLetter,
     Event,
     Invocation,
@@ -344,16 +345,22 @@ impl Command {
 /// A named, typed computation over resources, as a value — the kind
 /// the original taxonomy was missing. Not a Get on a pretend-resource
 /// and not a query language: few by design, watermarked like any
-/// read. `reads` declares the resource scopes consumed; authority is
-/// Read on each.
+/// read.
+///
+/// A report attaches to a [`Domain`] as its **permission scope** —
+/// authority is Read on that scope, which is what makes aggregates a
+/// privilege boundary: `cost.summary` is grantable without granting
+/// the raw event log it computes from. The domain needn't carry a
+/// catalogue resource (`Cost` carries only reports, as `Control`
+/// carries the machinery); handlers read their inputs with system
+/// authority regardless.
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
-    /// The report's full rendered name (`cost.summary`). Reports are
-    /// not resource-attached, so the name is free-standing — declared
-    /// here, never parsed.
+    pub domain: Domain,
+    /// The report's name word; renders as `{domain}.{name}`. Opaque
+    /// identity plus documentation — never parsed.
     pub name: &'static str,
     pub version: u32,
-    pub reads: &'static [Domain],
     /// The one-line summary (listings, MCP tool lists).
     pub summary: &'static str,
     /// The fuller contract text. Empty when the summary says it all.
@@ -367,8 +374,8 @@ impl Report {
     /// Declare a report. `Params` and `Output` are the declaration's
     /// types; their schemas are captured here.
     pub fn new<Params, Output>(
+        domain: Domain,
         name: &'static str,
-        reads: &'static [Domain],
         summary: &'static str,
         stability: Stability,
     ) -> Self
@@ -377,9 +384,9 @@ impl Report {
         Output: Serialize + DeserializeOwned + JsonSchema,
     {
         Report {
+            domain,
             name,
             version: 1,
-            reads,
             summary,
             description: "",
             stability,
@@ -402,6 +409,7 @@ impl Report {
     /// This report's wire identity.
     pub fn op(&self) -> OpId {
         OpId::Report {
+            domain: self.domain,
             name: self.name.to_string(),
         }
     }

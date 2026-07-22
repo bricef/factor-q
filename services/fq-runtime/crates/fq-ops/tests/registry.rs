@@ -213,10 +213,13 @@ struct CostOutput {
 }
 
 /// cost.summary: a report — a named computation, Read on its inputs.
+/// cost.summary scopes to Domain::Cost — a domain carrying only
+/// reports, so the aggregate is grantable without granting the raw
+/// event log it computes from.
 fn cost_summary() -> Report {
     Report::new::<CostParams, CostOutput>(
-        "cost.summary",
-        &[Domain::Event],
+        Domain::Cost,
+        "summary",
         "Aggregate cost across all agents.",
         Stability::Experimental,
     )
@@ -338,7 +341,7 @@ fn authority_derivation() {
     );
     assert_eq!(
         registry.resolve(&cost_summary().op()).unwrap().authority,
-        read(Domain::Event)
+        read(Domain::Cost)
     );
 }
 

@@ -322,11 +322,9 @@
   },
   {
     "report": {
-      "name": "cost.summary",
+      "domain": "cost",
+      "name": "summary",
       "version": 1,
-      "reads": [
-        "event"
-      ],
       "summary": "Aggregate cost across all agents.",
       "description": "Cost figures are retained indefinitely; totals never window.",
       "stability": "experimental",
