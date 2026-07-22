@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/fq-cli",
+    "crates/fq-edge",
     "crates/fq-ops",
     "crates/fq-runtime",
     "crates/fq-tools",
