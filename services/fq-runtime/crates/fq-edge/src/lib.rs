@@ -26,6 +26,7 @@ pub mod wire;
 pub use auth::EdgeIdentity;
 pub use client::EdgeClient;
 pub use registry::EdgeRegistry;
+pub use server::DEFAULT_PREAMBLE_TIMEOUT;
 pub use server::bind;
 pub use server::bind_with_timeout;
 pub use wire::{
