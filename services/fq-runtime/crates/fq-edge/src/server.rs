@@ -20,6 +20,7 @@ use futures::future::BoxFuture;
 use tarpc::server::{BaseChannel, Channel};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::time::{Duration, timeout};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_util::codec::LengthDelimitedCodec;
@@ -32,6 +33,14 @@ use crate::wire::{InvokeRequest, InvokeResponse, NextBatchRequest, StreamBatch, 
 /// Tokens are small; anything larger than this in the preamble is not
 /// a token.
 const MAX_TOKEN_BYTES: u32 = 64 * 1024;
+
+/// A pre-auth client gets this long to complete the whole preamble —
+/// TLS handshake, length prefix, token bytes. A few seconds is plenty
+/// for a <=64 KiB token over local TLS; 10s is generous. Bounding it
+/// stops a stalled anonymous connection from pinning a task + fd +
+/// rustls session indefinitely (slowloris-style resource exhaustion):
+/// `MAX_TOKEN_BYTES` caps space, this caps time.
+const DEFAULT_PREAMBLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct EdgeServer {
@@ -139,11 +148,25 @@ impl Edge for EdgeServer {
 
 /// Bind the edge on `addr`, returning the bound address and the
 /// serving future. Every connection must present a token minted under
-/// `identity`'s root key.
+/// `identity`'s root key. The preamble is bounded by
+/// [`DEFAULT_PREAMBLE_TIMEOUT`]; use [`bind_with_timeout`] to choose.
 pub async fn bind(
     addr: &str,
     identity: &EdgeIdentity,
     registry: Arc<EdgeRegistry>,
+) -> anyhow::Result<(SocketAddr, BoxFuture<'static, ()>)> {
+    bind_with_timeout(addr, identity, registry, DEFAULT_PREAMBLE_TIMEOUT).await
+}
+
+/// [`bind`], but with an explicit bound on the per-connection preamble
+/// — the TLS handshake and token exchange each get `preamble_timeout`;
+/// a client that stalls in any of them is dropped rather than left
+/// pinning resources pre-auth.
+pub async fn bind_with_timeout(
+    addr: &str,
+    identity: &EdgeIdentity,
+    registry: Arc<EdgeRegistry>,
+    preamble_timeout: Duration,
 ) -> anyhow::Result<(SocketAddr, BoxFuture<'static, ()>)> {
     let cert = CertificateDer::from(identity.cert_der.clone());
     let key = PrivateKeyDer::try_from(identity.key_der.clone())
@@ -170,12 +193,16 @@ pub async fn bind(
             let acceptor = acceptor.clone();
             let registry = registry.clone();
             let root_public = root_public;
+            let preamble_timeout = preamble_timeout;
             tokio::spawn(async move {
-                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                // Every pre-auth await is time-bounded: a client that
+                // stalls the handshake or dribbles the token is dropped
+                // rather than pinning a task + fd + rustls session.
+                let Ok(Ok(mut tls)) = timeout(preamble_timeout, acceptor.accept(tcp)).await else {
                     return;
                 };
                 // Token preamble: length-prefixed base64 token bytes.
-                let Ok(len) = tls.read_u32().await else {
+                let Ok(Ok(len)) = timeout(preamble_timeout, tls.read_u32()).await else {
                     return;
                 };
                 if len > MAX_TOKEN_BYTES {
@@ -183,9 +210,9 @@ pub async fn bind(
                     return;
                 }
                 let mut buf = vec![0u8; len as usize];
-                if tls.read_exact(&mut buf).await.is_err() {
+                let Ok(Ok(_)) = timeout(preamble_timeout, tls.read_exact(&mut buf)).await else {
                     return;
-                }
+                };
                 let presented = String::from_utf8_lossy(&buf).into_owned();
                 let token = match verify_token(&presented, root_public) {
                     Ok(token) => token,
