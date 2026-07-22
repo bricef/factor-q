@@ -49,6 +49,8 @@ pub struct Config {
     #[serde(default)]
     pub read_service: ReadServiceConfig,
     #[serde(default)]
+    pub edge: EdgeConfig,
+    #[serde(default)]
     pub tools: ToolsConfig,
     #[serde(default)]
     pub summary: SummaryConfig,
@@ -84,6 +86,35 @@ impl Default for ReadServiceConfig {
 
 fn default_read_service_bind() -> String {
     "127.0.0.1:9471".to_string()
+}
+
+/// The authenticated operator edge (ADR-0006 + ADR-0031): the tarpc
+/// `invoke`/`next_batch` surface operator clients speak. Born
+/// authenticated — every connection presents a capability token — so
+/// unlike `[read_service]` a non-loopback bind is the operator's
+/// choice, not a refusal. Off by default while the surface grows its
+/// exemplar ops (plan Phase 3); Phase 5 makes it the default surface.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EdgeConfig {
+    /// Start the edge with the daemon.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bind address for the TLS listener.
+    #[serde(default = "default_edge_bind")]
+    pub bind: String,
+}
+
+impl Default for EdgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_edge_bind(),
+        }
+    }
+}
+
+fn default_edge_bind() -> String {
+    "127.0.0.1:9472".to_string()
 }
 
 fn default_read_service_probe_timeout_ms() -> u64 {
@@ -592,6 +623,7 @@ impl Default for Config {
             max_iterations: default_max_iterations(),
             drain_deadline_ms: default_drain_deadline_ms(),
             read_service: ReadServiceConfig::default(),
+            edge: EdgeConfig::default(),
             tools: ToolsConfig::default(),
         }
     }

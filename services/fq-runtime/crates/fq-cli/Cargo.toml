@@ -31,6 +31,9 @@ pkg-fmt = "tgz"
 bin-dir = "fq"
 
 [dependencies]
+# edge: the daemon hosts the authenticated operator edge (ADR-0006 +
+# ADR-0031); whether the listener starts is `[edge]` in fq.toml.
+fq-edge = { path = "../fq-edge" }
 # read-service: the daemon hosts the read-only tarpc surface (#105
 # layer 2); whether the listener starts is `[read_service]` in fq.toml.
 fq-runtime = { workspace = true, features = ["read-service"] }
@@ -53,10 +56,13 @@ uuid = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+# The op vocabulary, for the edge_wiring integration test's requests.
+fq-ops = { workspace = true }
 # The shared private-broker guard, for the daemon_shutdown integration
 # tests (#233).
 fq-test-support = { workspace = true }
 libc = { workspace = true }
+tarpc = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

@@ -2687,6 +2687,51 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         None
     };
 
+    // The authenticated operator edge (ADR-0006 + ADR-0031, plan
+    // Phase 2): TLS + capability tokens over tarpc
+    // `invoke`/`next_batch`. Identity (certificate + token root)
+    // persists under the cache dir; the first run mints it and prints
+    // the admin token exactly once. Same supervision posture as the
+    // read service: outside the supervised set — an operator surface
+    // dying must not take the runtime down.
+    let edge_addr = if config.edge.enabled {
+        let identity_dir = config.cache.directory.join("edge");
+        let (identity, fresh) = fq_edge::EdgeIdentity::load_or_provision(&identity_dir)
+            .context("edge: failed to load or provision identity (check [edge] in fq.toml)")?;
+        if fresh {
+            let fp: String = identity
+                .fingerprint()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let admin = identity
+                .mint_admin_token()
+                .context("edge: failed to mint the admin token")?;
+            println!();
+            println!(
+                "edge: first run — identity provisioned under {}",
+                identity_dir.display()
+            );
+            println!("edge: certificate fingerprint (clients pin this): {fp}");
+            println!("edge: admin token (printed once; store it securely):");
+            println!("  {admin}");
+        }
+        // Empty until Phase 3 transplants the exemplar ops; the edge
+        // still serves `List(Operation)` — the surface describing
+        // itself — so an authenticated client can see what exists.
+        let edge_registry = Arc::new(fq_edge::EdgeRegistry::new());
+        let (edge_addr, edge_serving) = fq_edge::bind(&config.edge.bind, &identity, edge_registry)
+            .await
+            .context("edge: failed to bind (check [edge] in fq.toml)")?;
+        tokio::spawn(async move {
+            edge_serving.await;
+            tracing::warn!("edge exited; the operator edge is down until the daemon restarts");
+        });
+        Some(edge_addr)
+    } else {
+        None
+    };
+
     println!();
     println!("Runtime ready. Press Ctrl-C to stop.");
     println!("  - projection consumer is materialising events into SQLite");
@@ -2695,6 +2740,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("  - control-down listener is listening on fq.control.down");
     if let Some(addr) = read_service_addr {
         println!("  - read service is listening on {addr}");
+    }
+    if let Some(addr) = edge_addr {
+        println!("  - edge is listening on {addr}");
     }
 
     // Wait for either a shutdown signal (Ctrl-C / SIGTERM) or one of
