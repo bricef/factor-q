@@ -1,59 +1,19 @@
-//! The edge round-trip and its authentication matrix: a live server
-//! with a provisioned identity, a typed command registered in one
-//! call, and clients across the full spectrum of credentials — the
-//! born-authenticated acceptance criteria as tests.
+//! The edge round-trip and its authentication matrix, exercised
+//! through the shared test support (`fq_edge::testing`): the mock
+//! domain service serving the fixture catalogue, and clients across
+//! the full spectrum of credentials — the born-authenticated
+//! acceptance criteria as tests.
 
-use std::sync::Arc;
-
-use fq_edge::{EdgeClient, EdgeIdentity, EdgeRegistry, InvokeRequest, WireError, bind};
-use fq_ops::{Authority, Command, Domain, OpId, Receipt, Stability, Verb};
-use serde::{Deserialize, Serialize};
+use fq_edge::testing::spawn_edge;
+use fq_edge::{EdgeClient, EdgeIdentity, InvokeRequest, WireError};
+use fq_ops::fixtures::{InvocationState, invocation_drop};
+use fq_ops::{Domain, OpId, Receipt};
 use serde_json::json;
 
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-struct DropInput {
-    invocation_id: String,
-}
-
-fn drop_command() -> Command {
-    Command::new::<DropInput>(
-        Domain::Invocation,
-        "drop",
-        Authority {
-            verb: Verb::Write,
-            scope: Domain::Invocation,
-        },
-        "Exemplar drop.",
-        Stability::Experimental,
-    )
-}
-
-async fn serve() -> (std::net::SocketAddr, EdgeIdentity) {
-    let identity = EdgeIdentity::provision().expect("provision identity");
-    let mut registry = EdgeRegistry::new();
-    registry
-        .command::<DropInput, _, _>(drop_command(), |input| async move {
-            assert!(!input.invocation_id.is_empty());
-            Ok(Receipt {
-                atoms: vec![fq_ops::AtomRef {
-                    domain: Domain::Event,
-                    seq: 42,
-                }],
-            })
-        })
-        .expect("register command");
-    let (addr, serving) = bind("127.0.0.1:0", &identity, Arc::new(registry))
-        .await
-        .expect("bind edge");
-    tokio::spawn(serving);
-    (addr, identity)
-}
-
 #[tokio::test]
-async fn admin_token_invokes_describe_and_commands() {
-    let (addr, identity) = serve().await;
-    let token = identity.mint_admin_token().unwrap();
-    let client = EdgeClient::connect(&addr.to_string(), identity.fingerprint(), &token)
+async fn admin_token_drives_the_mock_domain_observably() {
+    let edge = spawn_edge().await.unwrap();
+    let client = EdgeClient::connect(&edge.addr.to_string(), edge.fingerprint, &edge.admin_token)
         .await
         .expect("connect with admin token");
 
@@ -72,19 +32,16 @@ async fn admin_token_invokes_describe_and_commands() {
         .await
         .expect("rpc")
         .expect("describe");
-    let listed = describe.output.to_string();
-    assert!(
-        listed.contains("invocation"),
-        "describe lists the command: {listed}"
-    );
+    assert!(describe.output.to_string().contains("invocation"));
 
-    // The typed command round-trips; the receipt is model-native.
-    let receipt = client
+    // Get before, drop, Get after — the mutation is observable
+    // through the public surface alone.
+    let before = client
         .rpc
         .invoke(
             tarpc::context::current(),
             InvokeRequest {
-                op: drop_command().op(),
+                op: OpId::Get(Domain::Invocation),
                 version: 1,
                 input: json!({"invocation_id": "inv-1"}),
                 min_seq: None,
@@ -92,43 +49,83 @@ async fn admin_token_invokes_describe_and_commands() {
         )
         .await
         .expect("rpc")
-        .expect("drop");
-    let receipt: Receipt = serde_json::from_value(receipt.output).unwrap();
-    assert_eq!(receipt.watermark(Domain::Event), Some(42));
-}
+        .expect("get");
+    let before: InvocationState = serde_json::from_value(before.output).unwrap();
+    assert_eq!(before.phase, "running");
 
-#[tokio::test]
-async fn read_only_token_is_denied_the_command_but_reads_describe() {
-    let (addr, identity) = serve().await;
-    // The dashboard case: an offline-attenuable read-everything token.
-    let token = identity.mint_token("dashboard", &[("read", "*")]).unwrap();
-    let client = EdgeClient::connect(&addr.to_string(), identity.fingerprint(), &token)
-        .await
-        .expect("connect with read token");
-
-    let describe = client
+    let receipt = client
         .rpc
         .invoke(
             tarpc::context::current(),
             InvokeRequest {
-                op: OpId::List(Domain::Operation),
+                op: invocation_drop().op(),
                 version: 1,
-                input: json!({}),
+                input: json!({"invocation_id": "inv-1", "reason": null}),
+                min_seq: None,
+            },
+        )
+        .await
+        .expect("rpc")
+        .expect("drop");
+    let receipt: Receipt = serde_json::from_value(receipt.output).unwrap();
+    assert!(receipt.watermark(Domain::Event).is_some());
+
+    let after = client
+        .rpc
+        .invoke(
+            tarpc::context::current(),
+            InvokeRequest {
+                op: OpId::Get(Domain::Invocation),
+                version: 1,
+                input: json!({"invocation_id": "inv-1"}),
+                min_seq: None,
+            },
+        )
+        .await
+        .expect("rpc")
+        .expect("get after drop");
+    let after: InvocationState = serde_json::from_value(after.output).unwrap();
+    assert_eq!(after.phase, "failed", "the drop is observable via Get");
+
+    // And directly via the mock handle, for consumers that assert on
+    // state rather than surface.
+    assert_eq!(edge.domain.invocation("inv-1").unwrap().phase, "failed");
+}
+
+#[tokio::test]
+async fn read_only_token_is_denied_the_command_but_reads_the_surface() {
+    let edge = spawn_edge().await.unwrap();
+    let token = edge
+        .identity
+        .mint_token("dashboard", &[("read", "*")])
+        .unwrap();
+    let client = EdgeClient::connect(&edge.addr.to_string(), edge.fingerprint, &token)
+        .await
+        .expect("connect with read token");
+
+    let get = client
+        .rpc
+        .invoke(
+            tarpc::context::current(),
+            InvokeRequest {
+                op: OpId::Get(Domain::Invocation),
+                version: 1,
+                input: json!({"invocation_id": "inv-2"}),
                 min_seq: None,
             },
         )
         .await
         .expect("rpc");
-    assert!(describe.is_ok(), "read token reads describe: {describe:?}");
+    assert!(get.is_ok(), "read token reads the surface: {get:?}");
 
     let denied = client
         .rpc
         .invoke(
             tarpc::context::current(),
             InvokeRequest {
-                op: drop_command().op(),
+                op: invocation_drop().op(),
                 version: 1,
-                input: json!({"invocation_id": "inv-1"}),
+                input: json!({"invocation_id": "inv-2", "reason": null}),
                 min_seq: None,
             },
         )
@@ -142,19 +139,18 @@ async fn read_only_token_is_denied_the_command_but_reads_describe() {
 
 #[tokio::test]
 async fn garbage_and_foreign_tokens_are_rejected_at_the_preamble() {
-    let (addr, identity) = serve().await;
+    let edge = spawn_edge().await.unwrap();
 
     let garbage =
-        EdgeClient::connect(&addr.to_string(), identity.fingerprint(), "not-a-token").await;
+        EdgeClient::connect(&edge.addr.to_string(), edge.fingerprint, "not-a-token").await;
     assert!(
         matches!(garbage, Err(fq_edge::client::ConnectError::TokenRejected)),
         "garbage token must be rejected: {garbage:?}"
     );
 
-    // A token minted under a DIFFERENT root fails signature check.
     let foreign_identity = EdgeIdentity::provision().unwrap();
     let foreign = foreign_identity.mint_admin_token().unwrap();
-    let rejected = EdgeClient::connect(&addr.to_string(), identity.fingerprint(), &foreign).await;
+    let rejected = EdgeClient::connect(&edge.addr.to_string(), edge.fingerprint, &foreign).await;
     assert!(
         matches!(rejected, Err(fq_edge::client::ConnectError::TokenRejected)),
         "foreign-root token must be rejected: {rejected:?}"
@@ -163,10 +159,8 @@ async fn garbage_and_foreign_tokens_are_rejected_at_the_preamble() {
 
 #[tokio::test]
 async fn wrong_fingerprint_refuses_the_connection() {
-    let (addr, identity) = serve().await;
-    let token = identity.mint_admin_token().unwrap();
-    let wrong = [0u8; 32];
-    let refused = EdgeClient::connect(&addr.to_string(), wrong, &token).await;
+    let edge = spawn_edge().await.unwrap();
+    let refused = EdgeClient::connect(&edge.addr.to_string(), [0u8; 32], &edge.admin_token).await;
     assert!(
         matches!(
             refused,
@@ -178,9 +172,8 @@ async fn wrong_fingerprint_refuses_the_connection() {
 
 #[tokio::test]
 async fn unregistered_ops_resolve_to_not_registered() {
-    let (addr, identity) = serve().await;
-    let token = identity.mint_admin_token().unwrap();
-    let client = EdgeClient::connect(&addr.to_string(), identity.fingerprint(), &token)
+    let edge = spawn_edge().await.unwrap();
+    let client = EdgeClient::connect(&edge.addr.to_string(), edge.fingerprint, &edge.admin_token)
         .await
         .unwrap();
     let missing = client
