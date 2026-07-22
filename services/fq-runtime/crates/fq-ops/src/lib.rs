@@ -23,7 +23,7 @@
 //! envelopes. Handlers, transports, and auth middleware live
 //! daemon-side (execution-plan Phases 2–3), which is exactly why this
 //! crate must stay a leaf (no sqlx, no NATS, no tokio; the thin `fq`
-//! client links it alone — `tests/leaf_gate.rs` enforces it).
+//! client links it alone — `tests/forbidden_dependency_gate.rs` enforces it).
 
 pub mod model;
 pub mod opid;
