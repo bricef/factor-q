@@ -35,10 +35,16 @@ pub enum ConnectError {
     TokenRejected,
 }
 
-/// Pin verifier: accept exactly the certificate whose SHA-256 matches.
+/// Pin verifier: accept exactly the certificate whose SHA-256
+/// matches — and still verify the TLS handshake signatures against
+/// that certificate's key, because the pin only proves the peer
+/// *presented* our certificate; the signature check proves it *holds
+/// the private key* (without it, a replayed certificate would
+/// suffice to impersonate the daemon).
 #[derive(Debug)]
 struct PinnedCert {
     expected: [u8; 32],
+    provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
 impl ServerCertVerifier for PinnedCert {
@@ -59,30 +65,36 @@ impl ServerCertVerifier for PinnedCert {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::RSA_PSS_SHA256,
-        ]
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -106,12 +118,13 @@ impl EdgeClient {
         // Explicit provider — see the server-side note: process-default
         // resolution breaks under workspace feature unions.
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider)
+        let config = rustls::ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
             .map_err(|_| ConnectError::FingerprintMismatch)?
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(PinnedCert {
                 expected: pinned_fingerprint,
+                provider,
             }))
             .with_no_client_auth();
         let connector = TlsConnector::from(Arc::new(config));
