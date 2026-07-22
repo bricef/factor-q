@@ -117,8 +117,10 @@ gates green.
 
 ### Phase 2 — the authenticated generic edge
 
-The tarpc `invoke`/`next_batch` service hosted by the daemon (still
-`fq run` at this point), alongside the untouched `ReadService`:
+The tarpc `invoke`/`next_batch` service hosted by the shared daemon
+path — `fqd` is born early as the edge's named home (a thin second
+binary over the same daemon code; `fq run` stays a compatibility
+alias until Phase 5 strips it), alongside the untouched `ReadService`:
 
 - **2a — transport + tokens.** `fqd` auto-provisions a self-signed cert
   and a root keypair on first run, printing an **admin biscuit token**
