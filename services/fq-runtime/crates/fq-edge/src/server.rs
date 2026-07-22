@@ -148,7 +148,12 @@ pub async fn bind(
     let cert = CertificateDer::from(identity.cert_der.clone());
     let key = PrivateKeyDer::try_from(identity.key_der.clone())
         .map_err(|e| anyhow::anyhow!("edge key: {e}"))?;
-    let tls_config = tokio_rustls::rustls::ServerConfig::builder()
+    // Explicit provider: the workspace unions rustls features across
+    // crates (reqwest pulls `ring`), and relying on the process
+    // default panics the moment two providers are enabled.
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let tls_config = tokio_rustls::rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
         .with_no_client_auth()
         .with_single_cert(vec![cert], key)?;
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));

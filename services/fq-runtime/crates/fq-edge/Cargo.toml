@@ -21,7 +21,7 @@ anyhow = "1"
 biscuit-auth = "6"
 futures = "0.3"
 rcgen = "0.13"
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -35,7 +35,7 @@ tarpc = { version = "0.37", features = [
 ] }
 thiserror = "2"
 tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time"] }
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 
 [dev-dependencies]
