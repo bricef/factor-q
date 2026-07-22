@@ -103,7 +103,12 @@ impl EdgeClient {
     ) -> Result<Self, ConnectError> {
         let tcp = TcpStream::connect(addr).await?;
 
-        let config = rustls::ClientConfig::builder()
+        // Explicit provider — see the server-side note: process-default
+        // resolution breaks under workspace feature unions.
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|_| ConnectError::FingerprintMismatch)?
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(PinnedCert {
                 expected: pinned_fingerprint,
