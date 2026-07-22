@@ -25,15 +25,17 @@ permissions:
 # is nothing to build), so branch protection is never left waiting on a
 # check that never arrives — the reason we gate steps, not the whole job.
 #
-# The Rust gate is independent per-workspace jobs — `runtime-ci` (installs the
-# pinned nats-server the per-test brokers use, plus Node for the MCP integration
-# tests), `store-ci` (its grant-bus test spawns private brokers likewise), and
-# `dashboard-ci` (hermetic) — so a red in one never masks another's
-# results (#38). Each is triggered by its own `changes` path filter
-# (`runtime`/`store`/`dashboard`), so a store-only PR no longer rebuilds the
-# runtime suite (or spins up NATS/Node), and vice versa. `rust-ci` is a thin
-# aggregate that fails iff any half fails; it keeps the "Rust CI"
-# required-status-check name, so the split needs no branch-protection edit.
+# The Rust gate is independent per-suite jobs over the single workspace
+# (#194) — `runtime-ci` (installs the pinned nats-server the per-test brokers
+# use, plus Node for the MCP integration tests), `store-ci` (its grant-bus
+# test spawns private brokers likewise), and `dashboard-ci` (hermetic) — so a
+# red in one never masks another's results (#38). Each is triggered by its own
+# `changes` path filter (`runtime`/`store`/`dashboard`), so a store-only PR no
+# longer rebuilds the runtime suite (or spins up NATS/Node), and vice versa.
+# The shared root Cargo.toml/Cargo.lock conservatively trigger every suite.
+# `rust-ci` is a thin aggregate that fails iff any half fails; it keeps the
+# "Rust CI" required-status-check name, so the split needs no
+# branch-protection edit.
 jobs:
   changes:
     name: Detect changes
@@ -58,8 +60,12 @@ jobs:
             runtime:
               - 'services/fq-runtime/**'
               # The shared test-only crate is a dev-dependency of the runtime
-              # workspace (#233); its gate runs in this job.
+              # crates (#233); its gate runs in this job.
               - 'services/fq-test-support/**'
+              # The workspace root: a manifest or lock change re-resolves
+              # every suite (#194).
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - 'justfile'
               - 'rust-toolchain.toml'
               - '.nats-version'
@@ -70,6 +76,9 @@ jobs:
               # grant_bus dev-depends on the shared broker guard and the
               # pinned nats-server it spawns (#233).
               - 'services/fq-test-support/**'
+              # The workspace root re-resolves every suite (#194).
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - 'justfile'
               - 'rust-toolchain.toml'
               - '.nats-version'
@@ -141,10 +150,10 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
+      # Caches the unified workspace target/ at the repo root (#194) —
+      # rust-cache's default workspace.
       - if: needs.changes.outputs.runtime == 'true'
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: services/fq-runtime
       # Installs sccache and points it at the GHA cache (reads SCCACHE_GHA_*).
       - if: needs.changes.outputs.runtime == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -161,9 +170,8 @@ jobs:
         run: just install-nats
       - if: needs.changes.outputs.runtime == 'true'
         run: just runtime-ci
-      # The shared test-only crate's own gate (#233) — its own workspace, so the
-      # runtime gate only compiles it as a dep. Uses the nats-server installed
-      # above.
+      # The shared test-only crate's own gate (#233) — the runtime gate only
+      # compiles it as a dep. Uses the nats-server installed above.
       - if: needs.changes.outputs.runtime == 'true'
         run: just test-support-ci
       # Cache hit-rate for the keep/drop decision on sccache (see env note).
@@ -189,10 +197,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
+      # Unified workspace at the repo root (#194) — rust-cache's default.
       - if: needs.changes.outputs.store == 'true'
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: services/fq-store
       - if: needs.changes.outputs.store == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
       - if: needs.changes.outputs.store == 'true'
@@ -247,10 +254,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
+      # Unified workspace at the repo root (#194) — rust-cache's default.
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: services/fq-dashboard
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
@@ -287,12 +293,9 @@ jobs:
       # Keep in lockstep with rust-toolchain.toml (#102).
       - if: needs.changes.outputs.dashboard == 'true'
         uses: dtolnay/rust-toolchain@1.95.0
+      # Unified workspace at the repo root (#194) — rust-cache's default.
       - if: needs.changes.outputs.dashboard == 'true'
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            services/fq-dashboard
-            services/fq-runtime
       - if: needs.changes.outputs.dashboard == 'true'
         uses: extractions/setup-just@v3
       # ubuntu-latest ships google-chrome; the script resolves it.

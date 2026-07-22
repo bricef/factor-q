@@ -1,3 +1,10 @@
+# Cargo build output for the unified workspace (#194) — never tracked
+# (an untracked target/ would also make release builds stamp -dirty).
+# The services/** pattern grandfathers stale per-service target/ dirs
+# left behind by checkouts that built before the workspace merge.
+/target/
+services/**/target/
+
 # Release packaging output (`just package` / scripts/package.sh).
 /dist/
 

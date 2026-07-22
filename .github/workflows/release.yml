@@ -40,9 +40,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
+      # Unified workspace at the repo root (#194) — rust-cache's default.
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: services/fq-runtime
       - uses: extractions/setup-just@v3
       # musl needs its C toolchain for the bundled SQLite.
       - if: contains(matrix.target, 'linux-musl')

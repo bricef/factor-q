@@ -12,42 +12,66 @@
 # workspace manifests and running `cargo fetch`, so the subsequent
 # offline run has every dependency it needs.
 #
+# Build context is the REPO ROOT (`just test-shell-sandbox` passes `-f`
+# with this path): the unified workspace (#194) needs the root
+# Cargo.toml/Cargo.lock and every member manifest to resolve, and
+# rust-toolchain.toml rides along so the container compiles with the
+# pinned toolchain (#102) — keep the base image tag in lockstep.
+#
 # This Dockerfile copies just the manifests and stub source files
-# to populate the cache, then at runtime the real source is mounted
+# to populate the cache, then at runtime the real repo is mounted
 # at /src read-only and cargo reuses the primed `~/.cargo` and
 # `/target` caches. See `just test-shell-sandbox` at the repo root
 # for the run command.
 
-FROM rust:1.85-slim-bookworm
+FROM rust:1.95-slim-bookworm
 
 ENV CARGO_TARGET_DIR=/target
 
 WORKDIR /build
 
 # Prime the cargo registry by fetching dependencies at build time.
-# Copy manifests first, populate empty source files so cargo is
-# happy, fetch, then throw away the build staging area — the
-# registry lives in $CARGO_HOME (~/.cargo by default) and sticks
-# around.
-COPY Cargo.toml Cargo.lock ./
-COPY crates/fq-cli/Cargo.toml crates/fq-cli/
-COPY crates/fq-runtime/Cargo.toml crates/fq-runtime/
-COPY crates/fq-tools/Cargo.toml crates/fq-tools/
+# Copy manifests first, populate stub source files so cargo is happy
+# (every declared target needs a file behind it), fetch, then throw
+# away the build staging area — the registry lives in $CARGO_HOME
+# (~/.cargo by default) and sticks around.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY services/fq-runtime/crates/fq-cli/Cargo.toml services/fq-runtime/crates/fq-cli/
+COPY services/fq-runtime/crates/fq-ops/Cargo.toml services/fq-runtime/crates/fq-ops/
+COPY services/fq-runtime/crates/fq-runtime/Cargo.toml services/fq-runtime/crates/fq-runtime/
+COPY services/fq-runtime/crates/fq-tools/Cargo.toml services/fq-runtime/crates/fq-tools/
+COPY services/fq-dashboard/Cargo.toml services/fq-dashboard/
+COPY services/fq-store/Cargo.toml services/fq-store/
+COPY services/fq-test-support/Cargo.toml services/fq-test-support/
 
-RUN mkdir -p crates/fq-cli/src crates/fq-runtime/src crates/fq-tools/src \
-    && echo 'fn main() {}' > crates/fq-cli/src/main.rs \
-    && echo '' > crates/fq-runtime/src/lib.rs \
-    && echo '' > crates/fq-tools/src/lib.rs \
+RUN mkdir -p services/fq-runtime/crates/fq-cli/src \
+             services/fq-runtime/crates/fq-ops/src \
+             services/fq-runtime/crates/fq-runtime/src \
+             services/fq-runtime/crates/fq-tools/src \
+             services/fq-dashboard/src \
+             services/fq-store/src/bin services/fq-store/benches \
+             services/fq-test-support/src \
+    && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/main.rs \
+    && echo '' > services/fq-runtime/crates/fq-ops/src/lib.rs \
+    && echo '' > services/fq-runtime/crates/fq-runtime/src/lib.rs \
+    && echo '' > services/fq-runtime/crates/fq-tools/src/lib.rs \
+    && echo 'fn main() {}' > services/fq-dashboard/src/main.rs \
+    && echo '' > services/fq-store/src/lib.rs \
+    && echo 'fn main() {}' > services/fq-store/src/bin/fq-cas.rs \
+    && echo 'fn main() {}' > services/fq-store/benches/throughput.rs \
+    && echo '' > services/fq-test-support/src/lib.rs \
     && cargo fetch
 
 # Do an initial build so /target is pre-warmed with compiled
 # dependencies. This takes a minute or two at image-build time but
 # makes every subsequent test run nearly instant.
 RUN cargo build --package fq-tools \
-    && rm -rf crates/fq-cli/src crates/fq-runtime/src crates/fq-tools/src
+    && rm -rf services/fq-runtime/crates/*/src services/fq-dashboard/src \
+              services/fq-store/src services/fq-store/benches \
+              services/fq-test-support/src
 
-# At runtime the real workspace is mounted at /src read-only. The
-# named volume at /target carries compiled artefacts across runs.
+# At runtime the real repo is mounted at /src read-only. The
+# /target dir carries compiled artefacts across runs.
 WORKDIR /src
 
 # Default command: run the fq-tools shell tests. Every test uses

@@ -74,10 +74,6 @@ tokio = { version = "1", features = ["full"] }
 name = "throughput"
 harness = false
 
-# Mirror the fq-runtime workspace lint policy: a clean build has zero
-# warnings, and that is enforced.
-[lints.rust]
-warnings = "deny"
-
-[lints.clippy]
-all = "deny"
+# The house zero-warnings policy, from the workspace root.
+[lints]
+workspace = true

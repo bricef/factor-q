@@ -1,6 +1,6 @@
-# Single pinned Rust toolchain for both workspaces (services/fq-runtime,
-# services/fq-store). rustup discovers this file from any subdirectory, so
-# local builds, CI, and release builds all compile with the same compiler —
+# Single pinned Rust toolchain for the unified workspace (#194). rustup
+# discovers this file from any subdirectory, so local builds, CI, container
+# builds, and release builds all compile with the same compiler —
 # "same commit" implies "same binary" (#102).
 #
 # Keep the CI/release workflows' `dtolnay/rust-toolchain@<version>` refs in

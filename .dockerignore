@@ -1,0 +1,20 @@
+# Docker build context = the repo root (#194): both Dockerfiles are passed
+# with `-f services/fq-runtime/Dockerfile*` from `just docker-build` /
+# `just test-shell-sandbox`. Keep the context lean — build output and
+# repo-local tooling never belong in an image.
+
+# Build output — built inside the container, never copied in.
+**/target/
+dist/
+
+# Repo-local tooling, scratch, and VCS.
+.git/
+.claude/
+.tools/
+.ci-timings
+
+# Editor and OS junk.
+.idea/
+.vscode/
+*.swp
+.DS_Store

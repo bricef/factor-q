@@ -27,7 +27,7 @@ set -euo pipefail
 # --- configuration -----------------------------------------------------
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-FQ_BIN="${REPO_ROOT}/services/fq-runtime/target/debug/fq"
+FQ_BIN="${REPO_ROOT}/target/debug/fq"
 TMP_ROOT="$(mktemp -d -t fq-smoke-XXXXXX)"
 TESTS_RUN=0
 TESTS_FAILED=0
