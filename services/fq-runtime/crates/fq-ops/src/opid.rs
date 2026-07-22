@@ -22,7 +22,7 @@ use crate::model::Domain;
 /// identity is the address space, and an address space must be able
 /// to express requests the daemon refuses — `Stream(d)` where `d` is
 /// registered as a view is constructable on purpose, and resolves to
-/// nothing (`WireError::NotRegistered` on the wire). Whether an
+/// nothing — the edge refuses it as not-registered. Whether an
 /// address is served is a registry question, answered at resolve
 /// time; making invalid combinations undeserializable would turn
 /// graceful version skew into parse errors. Declarations, by
