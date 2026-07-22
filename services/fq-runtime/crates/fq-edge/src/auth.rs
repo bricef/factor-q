@@ -8,11 +8,13 @@
 //! dashboard) come from offline attenuation of the admin token — no
 //! daemon round-trip.
 
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 use biscuit_auth::datalog::RunLimits;
 use biscuit_auth::macros::authorizer;
-use biscuit_auth::{Biscuit, KeyPair, PublicKey};
+use biscuit_auth::{Algorithm, Biscuit, KeyPair, PrivateKey, PublicKey};
 
 /// Biscuit's default datalog budget is ~1ms of wall time — small
 /// enough that scheduler jitter under load fails valid tokens. Our
@@ -84,6 +86,76 @@ impl EdgeIdentity {
     pub fn public_key(&self) -> PublicKey {
         self.root.public()
     }
+
+    /// Load the identity persisted under `dir`, or provision a fresh
+    /// one and persist it. The `bool` is `true` exactly when the
+    /// identity was freshly minted — the caller prints the admin token
+    /// on that run and never again.
+    pub fn load_or_provision(dir: &Path) -> anyhow::Result<(Self, bool)> {
+        if dir.join(CERT_FILE).exists() {
+            return Ok((Self::load(dir)?, false));
+        }
+        let identity = Self::provision()?;
+        identity.save(dir)?;
+        Ok((identity, true))
+    }
+
+    /// Persist the identity under `dir` (created if absent). Private
+    /// material — the TLS key and the token root — is written 0600 on
+    /// unix.
+    pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
+        fs::create_dir_all(dir)?;
+        write_secret(&dir.join(KEY_FILE), &self.key_der)?;
+        write_secret(
+            &dir.join(ROOT_FILE),
+            self.root.private().to_bytes_hex().as_bytes(),
+        )?;
+        // The certificate is public; written last so its presence
+        // marks a complete identity (`load_or_provision` keys on it).
+        fs::write(dir.join(CERT_FILE), &self.cert_der)?;
+        Ok(())
+    }
+
+    /// Load an identity previously [`save`](Self::save)d under `dir`.
+    pub fn load(dir: &Path) -> anyhow::Result<Self> {
+        let cert_der = fs::read(dir.join(CERT_FILE))?;
+        let key_der = fs::read(dir.join(KEY_FILE))?;
+        let root_hex = fs::read_to_string(dir.join(ROOT_FILE))?;
+        let private = PrivateKey::from_bytes_hex(root_hex.trim(), Algorithm::Ed25519)
+            .map_err(|e| anyhow::anyhow!("edge token root key: {e}"))?;
+        Ok(EdgeIdentity {
+            cert_der,
+            key_der,
+            root: KeyPair::from(&private),
+        })
+    }
+}
+
+const CERT_FILE: &str = "cert.der";
+const KEY_FILE: &str = "key.der";
+const ROOT_FILE: &str = "root.key";
+
+/// Write private key material with owner-only permissions from the
+/// first byte — created 0600 rather than chmodded after, so there is
+/// no world-readable window.
+#[cfg(unix)]
+fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    fs::write(path, bytes)?;
+    Ok(())
 }
 
 /// SHA-256 fingerprint of a DER certificate.
