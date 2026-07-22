@@ -32,7 +32,7 @@ pub mod opid;
 pub mod registry;
 
 pub use model::{
-    Atom, Authority, Command, Domain, EventRef, Receipt, Report, Stability, Synthetic, Verb, View,
+    Atom, AtomRef, Authority, Command, Domain, Receipt, Report, Stability, Synthetic, Verb, View,
 };
 pub use opid::{OpCategory, OpId};
 pub use registry::{Entry, Registry, RegistryError, Resolved};

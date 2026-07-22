@@ -388,24 +388,34 @@ fn natures_and_categories() {
     assert!(registry.resolve_named("invocation.frobnicate").is_none());
 }
 
+/// Watermarks are per-domain: sequences from different domains are
+/// not comparable, and read-your-writes watermarks a read of one
+/// domain.
 #[test]
-fn receipt_watermark_is_the_highest_appended_seq() {
+fn receipt_watermark_is_per_domain() {
     let receipt = fq_ops::Receipt {
-        events: vec![
-            fq_ops::EventRef {
-                subject: "fq.agent.researcher.failed".into(),
-                stream: "fq-events".into(),
+        atoms: vec![
+            fq_ops::AtomRef {
+                domain: Domain::Event,
                 seq: 41,
             },
-            fq_ops::EventRef {
-                subject: "fq.agent.researcher.archived".into(),
-                stream: "fq-events".into(),
+            fq_ops::AtomRef {
+                domain: Domain::Event,
                 seq: 43,
+            },
+            fq_ops::AtomRef {
+                domain: Domain::Turn,
+                seq: 7,
             },
         ],
     };
-    assert_eq!(receipt.watermark(), Some(43));
-    assert_eq!(fq_ops::Receipt { events: vec![] }.watermark(), None);
+    assert_eq!(receipt.watermark(Domain::Event), Some(43));
+    assert_eq!(receipt.watermark(Domain::Turn), Some(7));
+    assert_eq!(receipt.watermark(Domain::Worker), None);
+    assert_eq!(
+        fq_ops::Receipt { atoms: vec![] }.watermark(Domain::Event),
+        None
+    );
 }
 
 /// The wire form of an op identity is serde's native encoding, not
