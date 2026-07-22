@@ -104,6 +104,32 @@ pub enum Stability {
     Deprecated,
 }
 
+/// Reference to one atom a command appended (D3): subject, stream,
+/// and the event-log sequence — which is also the universal cursor
+/// (P5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EventRef {
+    pub subject: String,
+    pub stream: String,
+    pub seq: u64,
+}
+
+/// A command's output: references to the atoms it appended, never
+/// state (D3, P4). Freshness is the caller's to compose — a receipt's
+/// watermark feeds the next read's `min_seq` for read-your-writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Receipt {
+    pub events: Vec<EventRef>,
+}
+
+impl Receipt {
+    /// The highest appended sequence — what a caller passes as
+    /// `min_seq` to compose read-your-writes (D4).
+    pub fn watermark(&self) -> Option<u64> {
+        self.events.iter().map(|e| e.seq).max()
+    }
+}
+
 /// An atom: a resource immutable once created — the only streamable
 /// kind. Derives Get + List + Stream. `key_schema` addresses one atom
 /// (Get); `filter_schema` is the typed, per-resource selection for
@@ -273,7 +299,7 @@ impl Synthetic {
 
 /// A bespoke command, as a value — attached to a resource (machinery
 /// verbs attach to the synthetic `Control` resource). Its output is
-/// always a [`crate::wire::Receipt`]: commands return references to
+/// always a [`Receipt`]: commands return references to
 /// the atoms they appended, never state (D3) — there is no output to
 /// declare, so the rule cannot be broken. Authority is declared, not
 /// derived: the semantics that make a verb bespoke are exactly what

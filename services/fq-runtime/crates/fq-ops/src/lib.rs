@@ -18,22 +18,21 @@
 //! - **Machinery reads**: `Get` on the synthetic `Control` resource —
 //!   no category of their own.
 //!
-//! This crate holds the *contract only* — the catalogue, the declared
-//! traits, the self-describing [`Registry`], and the generic wire
-//! envelopes. Handlers, transports, and auth middleware live
-//! daemon-side (execution-plan Phases 2–3), which is exactly why this
-//! crate must stay a leaf (no sqlx, no NATS, no tokio; the thin `fq`
-//! client links it alone — `tests/forbidden_dependency_gate.rs` enforces it).
+//! This crate holds the *type foundation only* — the model's value
+//! types, the wire identity, and the self-describing [`Registry`].
+//! Handlers, transports, auth middleware, and the generic
+//! invoke/next_batch envelopes live with the daemon's edge
+//! (execution-plan Phase 2), designed against the real tarpc service
+//! rather than speculatively here — which is exactly why this crate
+//! must stay a leaf (no sqlx, no NATS, no tokio; the thin `fq` client
+//! links it alone — `tests/forbidden_dependency_gate.rs` enforces it).
 
 pub mod model;
 pub mod opid;
 pub mod registry;
-pub mod wire;
 
-pub use model::{Atom, Authority, Command, Domain, Report, Stability, Synthetic, Verb, View};
+pub use model::{
+    Atom, Authority, Command, Domain, EventRef, Receipt, Report, Stability, Synthetic, Verb, View,
+};
 pub use opid::{OpCategory, OpId};
 pub use registry::{Entry, Registry, RegistryError, Resolved};
-pub use wire::{
-    EventRef, InvokeRequest, InvokeResponse, NextBatchRequest, Receipt, StreamBatch, StreamItem,
-    WireError,
-};
