@@ -1,16 +1,17 @@
 # factor-q top-level task runner
-# Orchestrates services and infrastructure. Build details live in each service.
-# See https://github.com/casey/just
+# Orchestrates services and infrastructure for the single Cargo workspace
+# rooted here (#194). See https://github.com/casey/just
 
 # Enable "$@" in recipe bodies so variadic *args preserve the original
 # shell quoting. Without this, `just fq trigger sample-agent "hello world"`
 # loses the quotes and fq receives four arguments instead of two.
 set positional-arguments
 
-runtime_dir := "services/fq-runtime"
-store_dir := "services/fq-store"
-dashboard_dir := "services/fq-dashboard"
-test_support_dir := "services/fq-test-support"
+# All Rust crates live in the single workspace at this justfile's directory
+# (#194); recipes scope their suite with `-p` filters instead of cd'ing into
+# per-service workspaces. The runtime suite is these four crates (fq-edge
+# joins the list when it lands).
+runtime_pkgs := "-p fq-cli -p fq-ops -p fq-runtime -p fq-tools"
 infra_dir := "infrastructure"
 
 # Show available recipes
@@ -24,6 +25,18 @@ default:
 # buried in code (#233). Bump the file, not this.
 nats_version := trim(read(".nats-version"))
 nats_bin := justfile_directory() / ".tools" / "nats-server"
+
+# The bus/integration tests need a NATS endpoint. Default to the local
+# dev instance (`just infra-up`); override by exporting FQ_NATS_URL in
+# the environment before invoking just.
+# The dev broker requires token auth (infrastructure/nats/nats.conf);
+# the credential rides in the URL userinfo (see bus.rs url_credentials).
+export FQ_NATS_URL := env_var_or_default("FQ_NATS_URL", "nats://fq-dev-token@127.0.0.1:4222")
+
+# Tests that spawn a private broker (#233) find nats-server here — the pinned
+# binary `just install-nats` drops in .tools/, so a plain `just test` works
+# without a PATH tweak. Override by exporting it yourself.
+export FQ_TEST_NATS_SERVER := env_var_or_default("FQ_TEST_NATS_SERVER", nats_bin)
 
 # Tests spawn their own private broker rather than sharing the dev one, so they
 # need the binary — NATS is otherwise Docker-only here. Idempotent: re-running
@@ -96,76 +109,154 @@ infra-status:
 infra-wait:
     timeout 60 sh -c 'until curl -sf http://127.0.0.1:8222/healthz >/dev/null 2>&1; do sleep 1; done'
 
-# === Services (delegate to per-service justfiles) ===
+# === Services (one workspace, per-suite package filters) ===
 
-# Fans out across all three Rust projects rather than delegating to fq-runtime
-# alone, so the docstring is true (#196).
 # Build every Rust service.
 build: build-runtime build-store build-dashboard
 
-# Build the runtime (fq-runtime workspace — includes fq-cli).
+# Build the runtime crates (includes the fq CLI).
 build-runtime:
-    cd {{runtime_dir}} && just build
+    cargo build {{runtime_pkgs}}
 
-# Build the store.
+# Build the store. `cli,service` matches the hermetic test path: the fq-cas
+# binary and tarpc service, without the NATS-backed `bus` feature.
 build-store:
-    cd {{store_dir}} && just build
+    cargo build -p fq-store --features cli,service
 
 # Build the dashboard.
 build-dashboard:
-    cd {{dashboard_dir}} && just build
+    cargo build -p fq-dashboard
 
-# To filter, use the per-suite recipe — e.g.
-# `just test-runtime -p fq-runtime --lib agent::definition` — since a cargo
-# filter is only meaningful against a single workspace (#196).
+# One workspace (#194), so plain cargo filters work from the root too —
+# e.g. `cargo test -p fq-runtime --lib agent::definition`. The per-suite
+# recipes below scope the run and carry each suite's feature set.
 # Run every Rust service's tests.
 test: test-runtime test-store test-dashboard
 
 # Run the runtime tests, or forward cargo args to filter.
 test-runtime *args:
-    cd {{runtime_dir}} && just test "$@"
+    cargo test {{runtime_pkgs}} "$@"
 
 # Run the store tests (hermetic), or forward cargo args to filter.
 test-store *args:
-    cd {{store_dir}} && just test "$@"
+    cargo test -p fq-store --features cli,service "$@"
 
 # Run the dashboard tests (hermetic), or forward cargo args to filter.
 test-dashboard *args:
-    cd {{dashboard_dir}} && just test "$@"
+    cargo test -p fq-dashboard "$@"
 
-# The three Rust suites run as independent CI jobs (.github/workflows/ci.yml)
-# so a red in one never masks the others (#38); these targets are the local
-# equivalents, and `rust-ci` runs all three in one command. `ci` invokes these
-# same targets, so the local gate cannot drift from CI (#196).
+# Type-check the whole workspace without building. --all-targets covers
+# tests and examples, matching the workspace lint policy.
+check:
+    cargo check --workspace --all-targets
+
+# Format the whole workspace.
+fmt:
+    cargo fmt
+
+# The Rust suites run as independent CI jobs (.github/workflows/ci.yml) so a
+# red in one never masks the others (#38); these targets are the local
+# equivalents, and `rust-ci` runs them all in one command. `ci` invokes these
+# same targets, so the local gate cannot drift from CI (#196). Every suite
+# builds into the single workspace target/ (#194), scoped by `-p` filters.
+#
+# Phases are timed individually (#223) so a slow run says *which* step is
+# slow — clippy, rustdoc, and test codegen are separately actionable.
+#
+# `build` front-loads the test-binary codegen that `cargo test` would do
+# anyway, so `test` measures test *execution*. It adds no net work.
+#
+# `doctest` is split out because it cannot be front-loaded — doctests are
+# compiled by rustdoc at run time and `--no-run` does not apply to them, so
+# their build cost is irreducible. Left inside `test` it masquerades as test
+# execution; its own phase makes it visible instead.
+#
+# `--tests` selects every target with `test = true` — lib and bin unittests
+# plus integration tests — which is `cargo test`'s default set minus doctests.
+# NOT --all-targets: that adds --benches, and fq-store's throughput bench is
+# harness = false, so cargo would run a benchmark as part of the gate.
 
 # NATS-backed tests spawn their own broker (#233) from the pinned nats-server,
 # provisioned by the `install-nats` dependency; the MCP integration tests need
-# Node/npx.
+# Node/npx. The doctest phase selects the library crates only — fq-cli is
+# bin-only, and `cargo test --doc` hard-errors on a package with no lib.
 # Run the runtime Rust gate (fmt-check, clippy, doc, test).
 runtime-ci: install-nats
-    cd {{runtime_dir}} && just ci
+    #!/usr/bin/env bash
+    set -uo pipefail
+    # Anchor the phase log on the justfile's own directory, not the caller's
+    # cwd. An inherited value wins: nested under the root gate, append to its
+    # log rather than start our own (#223).
+    export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
+    source {{justfile_directory()}}/scripts/ci-timing.sh
+    ci_timing_init
+    run_phase "fmt-check" cargo fmt --check {{runtime_pkgs}}
+    run_phase "lint"      cargo clippy --all-targets {{runtime_pkgs}} -- -D warnings
+    run_phase "doc"       env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps {{runtime_pkgs}}
+    run_phase "build"     cargo build --tests {{runtime_pkgs}}
+    run_phase "test"      cargo test --tests {{runtime_pkgs}}
+    run_phase "doctest"   cargo test --doc -p fq-ops -p fq-runtime -p fq-tools
 
 # No Node needed; the grant-bus test spawns its own private broker (#233) from
 # the pinned nats-server, provisioned by the `install-nats` dependency.
+# `--all-features` on lint/doc covers cli/service/bus/failpoints; `build` and
+# `test` carry `cli,service` — the hermetic path. The final phases compile the
+# failpoint seams and the bus feed only where they are actually driven.
 # Run the store Rust gate (fmt-check, clippy, doc, test).
 store-ci: install-nats
-    cd {{store_dir}} && just ci
+    #!/usr/bin/env bash
+    set -uo pipefail
+    # Same phase-log anchoring as runtime-ci (#223).
+    export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
+    source {{justfile_directory()}}/scripts/ci-timing.sh
+    ci_timing_init
+    run_phase "fmt-check" cargo fmt --check -p fq-store
+    run_phase "lint"      cargo clippy -p fq-store --all-targets --all-features
+    run_phase "doc"       env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p fq-store --all-features
+    run_phase "build"     cargo build --tests -p fq-store --features cli,service
+    run_phase "test"      cargo test --tests -p fq-store --features cli,service
+    run_phase "doctest"   cargo test --doc -p fq-store --features cli,service
+    run_phase "failpoints" just test-failpoints
+    run_phase "test-bus"  just test-bus
 
-# Hermetic — the dashboard's router tests spin their own read service
-# over a temp DB; no broker needed.
+# The NATS-backed grant-bus integration test (#233) — spawns its own private
+# nats-server from the pinned binary. Part of `store-ci`; kept callable on its
+# own for a quick bus-only loop.
+test-bus:
+    cargo test -p fq-store --features bus --test grant_bus
+
+# Adversarial interleaving tests driven through the fail-crate seams (the
+# concurrency verification plan). Hermetic, but separate from `test-store` so
+# the `failpoints` feature — which activates the protocol-step seams — is only
+# compiled in where they're actually driven.
+test-failpoints:
+    cargo test -p fq-store --features failpoints --test gc_interleaving
+
+# Hermetic — the dashboard's router tests spin their own read service over a
+# temp DB; no broker needed. No doctest phase: doctests only exist for library
+# targets and this crate is bin-only (`cargo test --doc` would hard-error).
 # Run the dashboard Rust gate (fmt-check, clippy, doc, test).
 dashboard-ci:
-    cd {{dashboard_dir}} && just ci
+    #!/usr/bin/env bash
+    set -uo pipefail
+    # Same phase-log anchoring as runtime-ci (#223).
+    export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
+    source {{justfile_directory()}}/scripts/ci-timing.sh
+    ci_timing_init
+    run_phase "fmt-check" cargo fmt --check -p fq-dashboard
+    run_phase "lint"      cargo clippy -p fq-dashboard --all-targets
+    run_phase "doc"       env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p fq-dashboard
+    run_phase "build"     cargo build --tests -p fq-dashboard
+    run_phase "test"      cargo test --tests -p fq-dashboard
 
-# The shared test-only crate (#233) is its own workspace, so the per-service
-# gates only compile it as a dependency — this runs its own fmt/clippy/tests.
-# Its self-tests spawn a broker; the `install-nats` dependency provisions the
-# pinned binary.
+# The shared test-only crate (#233) — the per-service gates only compile it as
+# a dependency; this runs its own fmt/clippy/tests. Its self-tests spawn a
+# broker from the pinned nats-server the `install-nats` dependency provisions.
 # Run the fq-test-support gate (fmt-check, clippy, test).
 test-support-ci: install-nats
-    cd {{test_support_dir}} && cargo fmt --check
-    cd {{test_support_dir}} && cargo clippy --all-targets -- -D warnings
-    cd {{test_support_dir}} && FQ_TEST_NATS_SERVER="${FQ_TEST_NATS_SERVER:-{{nats_bin}}}" cargo test
+    cargo fmt --check -p fq-test-support
+    cargo clippy -p fq-test-support --all-targets -- -D warnings
+    cargo test -p fq-test-support
 
 # Run all Rust quality gates locally (fmt-check, clippy, doc, test).
 rust-ci: runtime-ci store-ci dashboard-ci test-support-ci
@@ -201,7 +292,7 @@ go-ci: gate-adapters
 # can drift. Adding a suite to CI means adding its target here, and nothing
 # else. The trade is granularity: one timer per suite, where this recipe used
 # to hand-roll a compile-vs-test split. Reclaiming that means putting
-# start_timer/end_timer inside each suite's own justfile, where those phases
+# start_timer/end_timer inside each suite's own gate, where those phases
 # actually live — not re-inlining their builds here.
 #
 # NATS: no shared broker. Every suite's NATS-backed tests spawn their own
@@ -235,15 +326,20 @@ ci:
     run_phase "test-support" just test-support-ci
     run_phase "go-ci"       just go-ci
 
-# Build container images for all services
+# Build container images for all services. Root build context — the image
+# compiles the unified workspace (#194); the Dockerfile stays with its service.
 docker-build:
-    cd {{runtime_dir}} && just docker-build
+    docker build -t factor-q/fq-runtime:latest -f services/fq-runtime/Dockerfile .
 
 # Runs inside a disposable container with networking disabled, for extra
-# blast-radius containment while iterating on the sandbox.
+# blast-radius containment while iterating on the sandbox. Mounts the repo
+# root read-only — the workspace root is what cargo needs (#194).
 # Run the exec tool's test battery in a locked-down container.
 test-shell-sandbox:
-    cd {{runtime_dir}} && just test-shell-sandbox
+    docker build -t factor-q/shell-test -f services/fq-runtime/Dockerfile.shell-test .
+    docker run --rm --network none \
+        -v {{justfile_directory()}}:/src:ro \
+        factor-q/shell-test
 
 # Exercises the full walking skeleton: agent definitions parse, triggers
 # run, the tool-call loop drives file_read and shell built-ins against
@@ -267,6 +363,22 @@ smoke: build-runtime
 drill: build-runtime
     {{justfile_directory()}}/tests/smoke/drain-drill.sh
 
+# Drift detector against the live Anthropic API. Sends one short
+# Haiku call (~fractions of a cent) and asserts the response
+# parses through our genai adapter. Use this when the mock-server
+# tests pass but you want to confirm the real wire contract is
+# unchanged — typically after Anthropic ships a model or API
+# update. Requires ANTHROPIC_API_KEY in the environment.
+acceptance-drift:
+    cargo test {{runtime_pkgs}} -- --ignored anthropic_real_api
+
+# Deep verification soak (reducer verification plan, slice 7): the
+# randomised lifecycle driver with every oracle on. CI runs 48
+# scenarios inside the normal test suite; this recipe scales the
+# iteration count for local bug-hunting (~3 min per 1000).
+soak iters="1000":
+    FQ_SOAK_ITERS={{iters}} cargo test -p fq-runtime --lib soak_fixed -- --nocapture
+
 # Preserves the user's invocation directory so relative paths in
 # arguments resolve against the directory where the user invoked `just`,
 # not the workspace or justfile directory.
@@ -277,7 +389,7 @@ drill: build-runtime
 # Run the fq CLI (e.g. `just fq --agents-dir ./agents agent list`).
 [no-cd]
 fq *args:
-    cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- "$@"
+    cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fq -- "$@"
 
 # Renders from deterministic fixtures (headless chromium over file:// — no
 # daemon, no broker). CI runs this when dashboard code changes and uploads
@@ -335,11 +447,12 @@ lint-sources:
 
 # === Release ===
 
-# Assert the release tag (vX.Y.Z) matches the workspace Cargo version.
+# Assert the release tag (vX.Y.Z) matches the workspace Cargo version
+# ([workspace.package] in the root Cargo.toml).
 check-version tag:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo_version="$(grep -m1 '^version = ' {{runtime_dir}}/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+    cargo_version="$(grep -m1 '^version = ' {{justfile_directory()}}/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
     if [ "{{tag}}" != "v${cargo_version}" ]; then
         echo "release tag {{tag}} != Cargo version v${cargo_version}" >&2
         exit 1
@@ -350,13 +463,15 @@ check-version tag:
 # main-branch deploy bundle takes all of them (`just package-main`).
 # Build the release binaries (fq, fq-cas, fq-dashboard) for a target triple.
 build-release target:
-    cd {{runtime_dir}} && cargo build --release --target {{target}} --bin fq
-    cd {{store_dir}} && cargo build --release --target {{target}} --features cli --bin fq-cas
-    cd {{dashboard_dir}} && cargo build --release --target {{target}}
+    cargo build --release --target {{target}} -p fq-cli --bin fq
+    cargo build --release --target {{target}} -p fq-store --features cli --bin fq-cas
+    cargo build --release --target {{target}} -p fq-dashboard
 
+# Rust binaries build into the workspace root target/ (#194), so their specs
+# use `.` as the crate dir; the Go adapters keep per-adapter target dirs.
 # Package the built binaries into a single bundle in dist/ (.tar.gz + .sha256).
 package target:
-    bash scripts/package.sh {{target}} {{runtime_dir}}:fq {{store_dir}}:fq-cas
+    bash scripts/package.sh {{target}} .:fq .:fq-cas
 
 # Create a draft GitHub release for a tag from the dist/ artifacts.
 publish-release tag:
@@ -365,9 +480,9 @@ publish-release tag:
 # === Main-branch deploy artifacts (#102) ===
 
 # Builds into the same target/<triple>/release/ layout the Rust binaries
-# use, so scripts/package.sh bundles all three with one spec form. Pure Go
-# with CGO_ENABLED=0 — as static as the musl Rust builds; the git SHA is
-# embedded by Go's default -buildvcs.
+# use (per-adapter, so the package.sh spec form stays uniform). Pure Go with
+# CGO_ENABLED=0 — as static as the musl Rust builds; the git SHA is embedded
+# by Go's default -buildvcs.
 # Build the github-watcher for a target triple.
 build-watcher target:
     #!/usr/bin/env bash
@@ -390,7 +505,7 @@ build-cron target:
 # verbatim).
 # Package the rolling main-branch deploy bundle into dist/.
 package-main target:
-    bash scripts/package.sh {{target}} {{runtime_dir}}:fq {{dashboard_dir}}:fq-dashboard {{store_dir}}:fq-cas adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh ops/dogfood/cron.sh
+    bash scripts/package.sh {{target}} .:fq .:fq-dashboard .:fq-cas adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh ops/dogfood/cron.sh
 
 # Recreates both the release and its tag so tag, assets, and notes always
 # point at the same commit. The channel keeps no history by design —
@@ -417,18 +532,14 @@ down: infra-down
 # Start the runtime in the foreground (brings up infra, builds, runs)
 [no-cd]
 run: infra-up build-runtime
-    cargo run --quiet --manifest-path {{justfile_directory()}}/{{runtime_dir}}/Cargo.toml --bin fq -- run
+    cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fq -- run
 
 # Deliberately spares .tools/ (pinned tooling, not a build product — see
 # .gitignore; `just install-nats` reprovisions it anyway) and .ci-timings
 # (the only record of where a killed CI run spent its time, #223).
-# Remove all build artefacts: Cargo target dirs, Go adapter binaries, dist/, TLC scratch.
+# Remove all build artefacts: the workspace target dir, Go adapter binaries, dist/, TLC scratch.
 clean:
-    cd {{runtime_dir}} && just clean
-    cd {{store_dir}} && just clean
-    cd {{dashboard_dir}} && just clean
-    # fq-test-support has no justfile; clean it directly, as test-support-ci does.
-    cd {{test_support_dir}} && cargo clean
+    cargo clean
     # Keep every standalone Go adapter on the same sweep (mirrors gate-adapters):
     # `go clean` drops the dev binary, target/ holds `build-watcher`/`build-cron` output.
     for module in adapters/*/go.mod; do dir="${module%/go.mod}"; (cd "$dir" && go clean && rm -rf target); done

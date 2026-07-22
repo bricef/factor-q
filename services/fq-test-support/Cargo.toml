@@ -1,11 +1,7 @@
-# Shared test-only helpers usable across factor-q's independent workspaces
-# (fq-runtime, fq-store, …) — they cannot share a `#[cfg(test)]` module, so the
+# Shared test-only helpers usable across factor-q's services (fq-runtime,
+# fq-store, …) — service crates cannot share a `#[cfg(test)]` module, so the
 # cross-cutting guards live here and each consumer dev-depends on this crate
-# (#233). Standalone (own `[workspace]`) because there is no parent workspace
-# the service workspaces share; version/edition are set explicitly rather than
-# inherited for the same reason.
-[workspace]
-
+# (#233).
 [package]
 name = "fq-test-support"
 version = "0.1.0"
@@ -29,7 +25,6 @@ async-nats = "0.38"
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 
-# Match the house zero-warnings policy. Can't inherit workspace lints (this is
-# a standalone crate), so denied explicitly.
-[lints.rust]
-warnings = "deny"
+# The house zero-warnings policy, from the workspace root.
+[lints]
+workspace = true

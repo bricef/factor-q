@@ -1,5 +1,3 @@
-/target
-
 # proptest writes failing-case seeds here. Our conformance suite shares a
 # store across parallel cases, so a structural race can produce a spurious
 # seed; keep these out of the repo and force-add a genuine regression if one

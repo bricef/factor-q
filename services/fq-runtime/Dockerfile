@@ -3,13 +3,20 @@
 # Builder stage uses the official Rust image to produce a release binary.
 # Runtime stage uses a distroless image for minimal surface area.
 #
+# Build context is the REPO ROOT (`just docker-build` passes `-f` with this
+# path): the unified workspace (#194) needs the root Cargo.toml/Cargo.lock
+# and every member manifest to resolve. rust-toolchain.toml rides along so
+# the container compiles with the same pinned toolchain as CI and local
+# builds — "same commit" implies "same binary" (#102); keep the base image
+# tag in lockstep with the pin.
+#
 # This Dockerfile is aspirational for now — the runtime doesn't yet do
 # enough to warrant a deploy, but we want the container shape established
 # early so the runtime is authored with distroless constraints in mind.
 
 # --- Builder ---------------------------------------------------------------
 
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.95-slim-bookworm AS builder
 
 WORKDIR /build
 
@@ -20,26 +27,48 @@ RUN apt-get update \
        pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the workspace manifest and crate manifests first so cargo can
-# cache dependency resolution independently of source changes. This is
-# a cheap form of caching without reaching for cargo-chef.
-COPY Cargo.toml Cargo.lock ./
-COPY crates/fq-cli/Cargo.toml crates/fq-cli/
-COPY crates/fq-runtime/Cargo.toml crates/fq-runtime/
-COPY crates/fq-tools/Cargo.toml crates/fq-tools/
+# Copy the workspace manifest, lockfile, toolchain pin, and every member
+# manifest first so cargo can cache dependency resolution independently of
+# source changes. This is a cheap form of caching without reaching for
+# cargo-chef. Cargo refuses to load a workspace with a member manifest
+# missing, so ALL members are listed — not just the ones this image builds.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY services/fq-runtime/crates/fq-cli/Cargo.toml services/fq-runtime/crates/fq-cli/
+COPY services/fq-runtime/crates/fq-ops/Cargo.toml services/fq-runtime/crates/fq-ops/
+COPY services/fq-runtime/crates/fq-runtime/Cargo.toml services/fq-runtime/crates/fq-runtime/
+COPY services/fq-runtime/crates/fq-tools/Cargo.toml services/fq-runtime/crates/fq-tools/
+COPY services/fq-dashboard/Cargo.toml services/fq-dashboard/
+COPY services/fq-store/Cargo.toml services/fq-store/
+COPY services/fq-test-support/Cargo.toml services/fq-test-support/
 
-# Populate the crates with empty stubs so cargo can build and cache the
-# dependency graph before any real source is present.
-RUN mkdir -p crates/fq-cli/src crates/fq-runtime/src crates/fq-tools/src \
-    && echo 'fn main() {}' > crates/fq-cli/src/main.rs \
-    && echo '' > crates/fq-runtime/src/lib.rs \
-    && echo '' > crates/fq-tools/src/lib.rs \
-    && cargo build --release --bin fq \
-    && rm -rf crates/fq-cli/src crates/fq-runtime/src crates/fq-tools/src
+# Populate the members with empty stubs so cargo can build and cache the
+# dependency graph before any real source is present. Every declared target
+# needs a file behind it or cargo rejects the manifest — hence the store's
+# bin and bench stubs.
+RUN mkdir -p services/fq-runtime/crates/fq-cli/src \
+             services/fq-runtime/crates/fq-ops/src \
+             services/fq-runtime/crates/fq-runtime/src \
+             services/fq-runtime/crates/fq-tools/src \
+             services/fq-dashboard/src \
+             services/fq-store/src/bin services/fq-store/benches \
+             services/fq-test-support/src \
+    && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/main.rs \
+    && echo '' > services/fq-runtime/crates/fq-ops/src/lib.rs \
+    && echo '' > services/fq-runtime/crates/fq-runtime/src/lib.rs \
+    && echo '' > services/fq-runtime/crates/fq-tools/src/lib.rs \
+    && echo 'fn main() {}' > services/fq-dashboard/src/main.rs \
+    && echo '' > services/fq-store/src/lib.rs \
+    && echo 'fn main() {}' > services/fq-store/src/bin/fq-cas.rs \
+    && echo 'fn main() {}' > services/fq-store/benches/throughput.rs \
+    && echo '' > services/fq-test-support/src/lib.rs \
+    && cargo build --release -p fq-cli --bin fq \
+    && rm -rf services/fq-runtime/crates/*/src services/fq-dashboard/src \
+              services/fq-store/src services/fq-store/benches \
+              services/fq-test-support/src
 
 # Copy the real source and build.
-COPY crates/ crates/
-RUN cargo build --release --bin fq \
+COPY services/ services/
+RUN cargo build --release -p fq-cli --bin fq \
     && strip target/release/fq
 
 # --- Runtime ---------------------------------------------------------------

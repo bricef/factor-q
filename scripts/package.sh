@@ -5,11 +5,13 @@
 #
 # Usage: scripts/package.sh <target-triple> <spec> [<spec> ...]
 # where each <spec> is either
-#   <crate-dir>:<bin>   a built binary at <crate-dir>/target/<triple>/release/<bin>
+#   <dir>:<bin>         a built binary at <dir>/target/<triple>/release/<bin> —
+#                       `.` for the workspace root, where every Rust binary
+#                       builds (#194); the Go adapters keep per-adapter dirs
 #   <repo-rel-path>     a plain repo file copied into the bundle as-is
 #                       (e.g. the dogfood launchers, so they travel with
 #                       the binaries they launch — #102)
-#   e.g. scripts/package.sh x86_64-unknown-linux-musl services/fq-runtime:fq services/fq-store:fq-cas
+#   e.g. scripts/package.sh x86_64-unknown-linux-musl .:fq .:fq-cas
 # (normally invoked via `just package <target>` / `just package-main <target>`).
 set -euo pipefail
 
@@ -21,9 +23,9 @@ shift
 }
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-# The release version is the runtime workspace version, which
-# `just check-version` ties to the release tag.
-version="$(grep -m1 '^version = ' "$root/services/fq-runtime/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+# The release version is the workspace version ([workspace.package] in the
+# root Cargo.toml), which `just check-version` ties to the release tag.
+version="$(grep -m1 '^version = ' "$root/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 
 name="factor-q-${version}-${target}"
 stage="$(mktemp -d)"

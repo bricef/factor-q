@@ -1,11 +1,20 @@
+# The single workspace for every Rust crate in the repo (#194): one
+# dependency resolution, one Cargo.lock, one target/. This retires the
+# per-service lockfiles and the LOCKSTEP hand-sync that kept their
+# transitive pins aligned (formerly in services/fq-dashboard/Cargo.toml).
+# Separate binaries, crash domains, and the tarpc/wire seams are
+# unaffected — membership here changes builds, not architecture.
 [workspace]
 resolver = "2"
 members = [
-    "crates/fq-cli",
-    "crates/fq-edge",
-    "crates/fq-ops",
-    "crates/fq-runtime",
-    "crates/fq-tools",
+    "services/fq-dashboard",
+    "services/fq-runtime/crates/fq-cli",
+    "services/fq-runtime/crates/fq-edge",
+    "services/fq-runtime/crates/fq-ops",
+    "services/fq-runtime/crates/fq-runtime",
+    "services/fq-runtime/crates/fq-tools",
+    "services/fq-store",
+    "services/fq-test-support",
 ]
 
 [workspace.package]

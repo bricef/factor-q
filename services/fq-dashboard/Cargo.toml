@@ -13,14 +13,9 @@ path = "src/main.rs"
 [dependencies]
 # The typed contract: the wire client and the view DTOs come straight
 # from the runtime — a trait change fails this compile instead of
-# drifting silently (#105 layer 3).
-#
-# LOCKSTEP: this workspace has its own Cargo.lock, but fq-runtime is a
-# path dep compiled under it — shared transitive deps (rmcp, genai, …)
-# must resolve to the versions the runtime's own lock pins, or
-# fq-runtime may not compile here (rmcp 1.8 broke it on first resolve).
-# When the runtime bumps one, mirror it:
-#   cargo update -p <dep> --precise <version>
+# drifting silently (#105 layer 3). Shared transitive deps resolve under
+# the single workspace Cargo.lock (#194), so runtime and dashboard can
+# never disagree on a pin.
 fq-runtime = { path = "../fq-runtime/crates/fq-runtime", features = ["read-service"] }
 anyhow = "1"
 axum = "0.8"
@@ -48,10 +43,6 @@ tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 
-# Mirror the fq-runtime workspace lint policy: a clean build has zero
-# warnings, and that is enforced.
-[lints.rust]
-warnings = "deny"
-
-[lints.clippy]
-all = "deny"
+# The house zero-warnings policy, from the workspace root.
+[lints]
+workspace = true

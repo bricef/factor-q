@@ -26,7 +26,7 @@
 # Each `just` recipe body is its own shell, and a phase is often itself a `just`
 # target that runs phases of its own:
 #
-#     just ci  ->  just runtime-ci  ->  (cd services/fq-runtime && just ci)
+#     just ci  ->  just runtime-ci  (its phases run from the workspace root)
 #
 # In-process state cannot cross that boundary, so phases are appended to a log
 # at the repo root ($FQ_CI_TIMINGS, default .ci-timings) as two events:
@@ -207,9 +207,8 @@ _ci_on_exit() {
 # Truncates and owns the log unless a parent run is already writing one.
 ci_timing_init() {
     if [ -z "${FQ_CI_NESTED:-}" ]; then
-        # Absolute, because nested gates run from their own directory
-        # (`runtime-ci` is `cd services/fq-runtime && just ci`) — a relative
-        # path would silently split the log across two files.
+        # Absolute, because a caller may run a gate from any directory — a
+        # relative path would silently split the log across two files.
         case "${FQ_CI_TIMINGS}" in /*) ;; *) FQ_CI_TIMINGS="${PWD}/${FQ_CI_TIMINGS}" ;; esac
         : >"${FQ_CI_TIMINGS}"
         export FQ_CI_NESTED=1
