@@ -66,8 +66,13 @@ RUN mkdir -p services/fq-runtime/crates/fq-cli/src/bin \
 
 # Do an initial build so /target is pre-warmed with compiled
 # dependencies. This takes a minute or two at image-build time but
-# makes every subsequent test run nearly instant.
+# makes every subsequent test run nearly instant. The final `cargo
+# clean -p` evicts the stub-built fq-tools artifacts themselves,
+# keeping only the dependency cache: the mounted repo's mtimes can be
+# older than the stub build, so cargo would otherwise keep the EMPTY
+# stub lib and compile the real tests against it.
 RUN cargo build --package fq-tools \
+    && cargo clean -p fq-tools \
     && rm -rf services/fq-runtime/crates/*/src services/fq-dashboard/src \
               services/fq-store/src services/fq-store/benches \
               services/fq-test-support/src
@@ -76,7 +81,9 @@ RUN cargo build --package fq-tools \
 # /target dir carries compiled artefacts across runs.
 WORKDIR /src
 
-# Default command: run the fq-tools shell tests. Every test uses
-# well-known safe unix commands (echo, true, false, sleep, env,
-# pwd, seq) and confines all filesystem activity to tempdirs.
-CMD ["cargo", "test", "--package", "fq-tools", "shell"]
+# Default command: run the fq-tools shell-tool tests — the shell tool
+# lives in the `builtin::exec` module, and the old `shell` name filter
+# had rotted to matching 1 of its 37 tests. Every test uses well-known
+# safe unix commands (echo, true, false, sleep, env, pwd, seq) and
+# confines all filesystem activity to tempdirs.
+CMD ["cargo", "test", "--package", "fq-tools", "builtin::exec"]
