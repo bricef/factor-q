@@ -26,6 +26,52 @@ license = "BUSL-1.1"
 description = "factor-q agent runtime"
 repository = "https://github.com/bricef/factor-q"
 
+# Shared dependencies, declared once (#194 phase 2). Members opt in with
+# `dep = { workspace = true }` and may ADD features on top (features are
+# additive); the root carries the version and only the features every
+# user wants. Policy: a dependency lives here when two or more member
+# manifests use it; single-crate deps stay in their crate's manifest so
+# this table reads as the genuinely shared surface.
+#
+# tokio is version-only on purpose: feature sets are per-crate policy
+# (binaries take "full"; library crates carry a trimmed list, with the
+# dev-dependency re-adding "full" for their test builds).
+[workspace.dependencies]
+# -- internal --
+fq-ops = { path = "services/fq-runtime/crates/fq-ops" }
+fq-runtime = { path = "services/fq-runtime/crates/fq-runtime" }
+fq-test-support = { path = "services/fq-test-support" }
+fq-tools = { path = "services/fq-runtime/crates/fq-tools" }
+# -- external --
+anyhow = "1"
+async-nats = "0.38"
+async-trait = "0.1"
+axum = "0.8"
+biscuit-auth = "6"
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+libc = "0.2"
+proptest = "1"
+schemars = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+strum = { version = "0.27", features = ["derive"] }
+tarpc = { version = "0.37", features = [
+    "tokio1",
+    "serde1",
+    "serde-transport",
+    "serde-transport-bincode",
+    "tcp",
+] }
+tempfile = "3"
+thiserror = "2"
+tokio = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v7"] }
+
 # Workspace-wide lint policy. Every member opts in via
 # `[lints] workspace = true` in its Cargo.toml. The intent: a
 # bare `cargo build` / `cargo check` / `cargo clippy` runs

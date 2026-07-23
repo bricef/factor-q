@@ -33,29 +33,31 @@ bin-dir = "fq"
 [dependencies]
 # read-service: the daemon hosts the read-only tarpc surface (#105
 # layer 2); whether the listener starts is `[read_service]` in fq.toml.
-fq-runtime = { path = "../fq-runtime", features = ["read-service"] }
-fq-tools = { path = "../fq-tools" }
-anyhow = "1"
-async-nats = "0.38"
-chrono = "0.4"
-clap = { version = "4", features = ["derive", "env"] }
-futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1", features = ["v7"] }
+fq-runtime = { workspace = true, features = ["read-service"] }
+fq-tools = { workspace = true }
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# "full" is deliberate: this is the daemon/CLI binary crate, not a
+# library — no consumer inherits the feature set (#194 phase 2).
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json"] }
+uuid = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = { workspace = true }
 
 [dev-dependencies]
 # The shared private-broker guard, for the daemon_shutdown integration
 # tests (#233).
-fq-test-support = { path = "../../../fq-test-support" }
-libc = "0.2"
-tempfile = "3"
+fq-test-support = { workspace = true }
+libc = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

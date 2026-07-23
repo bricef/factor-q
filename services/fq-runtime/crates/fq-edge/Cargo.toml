@@ -16,32 +16,27 @@ license.workspace = true
 # Phase 5 if binary size warrants it.)
 
 [dependencies]
-fq-ops = { path = "../fq-ops" }
-anyhow = "1"
-biscuit-auth = "6"
-futures = "0.3"
+fq-ops = { workspace = true }
+anyhow = { workspace = true }
+biscuit-auth = { workspace = true }
+futures = { workspace = true }
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = "0.10"
-tarpc = { version = "0.37", features = [
-    "tokio1",
-    "serde1",
-    "serde-transport",
-    "serde-transport-bincode",
-    "serde-transport-json",
-    "tcp",
-] }
-thiserror = "2"
-tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time"] }
+# serde-transport-json on top of the workspace baseline: the preamble
+# rides JSON before the bincode session starts.
+tarpc = { workspace = true, features = ["serde-transport-json"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "rt", "macros", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 
 [dev-dependencies]
-schemars = { version = "1", features = ["derive"] }
-tempfile = "3"
-tokio = { version = "1", features = ["full"] }
+schemars = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 
 [lints]
 workspace = true

@@ -1,39 +1,33 @@
 [package]
 name = "fq-store"
-version = "0.1.0"
-edition = "2024"
-license = "BUSL-1.1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "factor-q content-addressed storage + semantic index service"
-repository = "https://github.com/bricef/factor-q"
+repository.workspace = true
 
 [dependencies]
-async-nats = { version = "0.38", optional = true }
-async-trait = "0.1"
-biscuit-auth = "6"
+async-nats = { workspace = true, optional = true }
+async-trait = { workspace = true }
+biscuit-auth = { workspace = true }
 blake3 = "1"
-clap = { version = "4", features = ["derive", "env"], optional = true }
+clap = { workspace = true, optional = true }
 # Named, individually-failable protocol-step seams (`fail_point!`). Compiles to
 # nothing unless the `failpoints` feature is on — production is zero-cost; tests
 # and the interleaving checker turn it on to schedule and fault-inject each step.
 # See docs/design/committed/storage-concurrency-verification.md.
 fail = "0.5"
 fastcdc = "3"
-futures = { version = "0.3", optional = true }
+futures = { workspace = true, optional = true }
 hex = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
-tarpc = { version = "0.37", features = [
-    "tokio1",
-    "serde1",
-    "serde-transport",
-    "serde-transport-bincode",
-    "tcp",
-], optional = true }
-thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "rt", "rt-multi-thread", "macros", "net"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tarpc = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "rt-multi-thread", "macros", "net"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [features]
 # The CAS network service: the tarpc server (`serve`) and the RemoteStore
@@ -64,11 +58,11 @@ bin-dir = "fq-cas"
 [dev-dependencies]
 criterion = "0.5"
 # The shared private-broker guard, for the grant_bus integration test (#233).
-fq-test-support = { path = "../fq-test-support" }
-futures = "0.3"
-proptest = "1"
-tempfile = "3"
-tokio = { version = "1", features = ["full"] }
+fq-test-support = { workspace = true }
+futures = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 
 [[bench]]
 name = "throughput"
