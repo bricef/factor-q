@@ -39,8 +39,9 @@ If this contradicts `git log`, trust the log and fix this file.
   documented wire contracts, then observes the run's lifecycle events
   and moves the issue's label onward so nothing strands mid-flight. The
   intake side of the M0 change loop; ships in the dogfood bundle.
-- **Infra** — NATS via `infrastructure/docker-compose.yml` (localhost;
-  **no auth — don't expose the port beyond the host**). Build from source
+- **Infra** — NATS via `infrastructure/docker-compose.yml`, bound to localhost
+  with the public static development token `fq-dev-token`. Do not expose its
+  port, and replace the token for any non-local deployment. Build from source
   (`just up`, see [Quickstart](QUICKSTART.md)); `install.sh` awaits the
   first release.
 
@@ -97,7 +98,8 @@ instrumentation (read relative to an expert+frontier baseline) to make
 API layer (ADR-0006, accepted but unbuilt) · multi-agent orchestration (ADR-0007, accepted but unbuilt) ·
 memory + skills services · context compaction · container isolation
 (ADR-0010, accepted but unbuilt) · observability floor
-(JSON logs, metrics, alerting) · NATS auth · tagged binary releases (the
+(JSON logs, metrics, alerting) · production-grade NATS credentials and
+rotation · tagged binary releases (the
 rolling `main-latest` deploy channel is built — see
 [ops/dogfood](ops/dogfood/README.md) — but no `v*` release has shipped).
 

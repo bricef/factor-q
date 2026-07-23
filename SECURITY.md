@@ -12,8 +12,10 @@ one-line caveats.
   are not yet enforced ([#34](https://github.com/bricef/factor-q/issues/34),
   [#35](https://github.com/bricef/factor-q/issues/35)). Until they are, treat
   every agent as network-unrestricted regardless of its definition.
-- **NATS:** the bundled NATS service has no authentication. Do not expose its
-  port beyond the host.
+- **NATS:** the bundled NATS service requires a static development token. The
+  token is committed to this public repository, so it is not a secret: do not
+  expose the port beyond the host, and replace the token for any non-local
+  deployment.
 - **`fq-cas serve`:** the content-store service is localhost-only and
   unauthenticated until M5.
 - **Agent identity:** agent GitHub actions currently use the owner's
