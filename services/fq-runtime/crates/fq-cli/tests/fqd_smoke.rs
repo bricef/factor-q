@@ -17,6 +17,9 @@ fn unique_scratch() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("fqd-smoke-{}-{}", std::process::id(), nanos));
     std::fs::create_dir_all(dir.join("cache")).unwrap();
     std::fs::create_dir_all(dir.join("agents")).unwrap();
+    // The edge is on by default; an ephemeral port keeps parallel
+    // daemon-spawning tests from fighting over the fixed default bind.
+    std::fs::write(dir.join("fq.toml"), "[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
     dir
 }
 
@@ -51,7 +54,7 @@ fn fqd_reaches_steady_state_and_drains_on_sigterm() {
     let log_err = log.try_clone().expect("clone daemon log handle");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_fqd"))
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
@@ -93,5 +96,9 @@ fn fqd_reaches_steady_state_and_drains_on_sigterm() {
     assert!(
         log.contains("Received SIGTERM, draining..."),
         "fqd did not take the drain path — is it running the shared daemon code?\n--- log ---\n{log}"
+    );
+    assert!(
+        log.contains("edge is listening on"),
+        "the edge is on by default and must reach steady state with the daemon\n--- log ---\n{log}"
     );
 }
