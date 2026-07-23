@@ -94,7 +94,7 @@ instrumentation (read relative to an expert+frontier baseline) to make
 
 ## Not built yet
 
-API layer (ADR-0006, draft) · multi-agent orchestration (ADR-0007, draft) ·
+API layer (ADR-0006, accepted but unbuilt) · multi-agent orchestration (ADR-0007, accepted but unbuilt) ·
 memory + skills services · context compaction · container isolation
 (ADR-0010, accepted but unbuilt) · observability floor
 (JSON logs, metrics, alerting) · NATS auth · tagged binary releases (the
