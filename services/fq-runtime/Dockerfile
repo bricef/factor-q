@@ -64,6 +64,12 @@ RUN mkdir -p services/fq-runtime/crates/fq-cli/src/bin \
     && echo 'fn main() {}' > services/fq-store/benches/throughput.rs \
     && echo '' > services/fq-test-support/src/lib.rs \
     && cargo build --release -p fq-cli --bin fq \
+    # Evict the workspace members' own artifacts from the cache, keeping
+    # only the dependency artifacts. Without this the real build below is
+    # poisoned: COPY preserves context mtimes, which can be OLDER than the
+    # stub-built rlibs, so cargo's fingerprint check keeps the EMPTY stub
+    # fq_runtime and the real fq-cli fails with hundreds of "not found"s.
+    && cargo clean --release -p fq-cli -p fq-ops -p fq-runtime -p fq-tools \
     && rm -rf services/fq-runtime/crates/*/src services/fq-dashboard/src \
               services/fq-store/src services/fq-store/benches \
               services/fq-test-support/src
