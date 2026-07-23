@@ -150,8 +150,10 @@ for cpid in $(pgrep -x fq-cron || true); do
 done
 
 if [ -n "$DAEMON_PID" ]; then
-    log "Stopping daemon (PID $DAEMON_PID) via confirmed fq down"
-    "$REL/fq" --config "$DOGFOOD/fq.toml" down \
+    DRAIN_CLI="$REL/fq"
+    [ ! -x ./current/fq ] || DRAIN_CLI=./current/fq
+    log "Stopping daemon (PID $DAEMON_PID) via confirmed fq down using $DRAIN_CLI"
+    "$DRAIN_CLI" --config "$DOGFOOD/fq.toml" down \
         || printf '    (confirmed drain failed; escalating)\n'
     if kill -0 "$DAEMON_PID" 2>/dev/null; then
         # Escalation 1: `--now` skips the already-attempted drain;
@@ -160,7 +162,7 @@ if [ -n "$DAEMON_PID" ]; then
         # `fq down` exits zero only after observing the daemon's own
         # system.shutdown event. If wedged, fall through to the signal.
         printf '    graceful stop failed — requesting immediate stop (fq down --now)\n'
-        if "$REL/fq" --config "$DOGFOOD/fq.toml" down --now; then
+        if "$DRAIN_CLI" --config "$DOGFOOD/fq.toml" down --now; then
             printf '    confirmed stop\n'
         else
             # Escalation 2, last resort: SIGINT is crash-equivalent —
