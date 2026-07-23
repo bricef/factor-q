@@ -95,15 +95,42 @@ impl EdgeIdentity {
         if dir.join(CERT_FILE).exists() {
             return Ok((Self::load(dir)?, false));
         }
+        // A cert-less directory still holding private material is a
+        // partial identity — re-provisioning over it would silently
+        // rotate the root, orphaning every pinned client and every
+        // issued token. Fail closed; the operator restores the missing
+        // file or deletes the directory to rotate deliberately.
+        for name in [KEY_FILE, ROOT_FILE] {
+            if dir.join(name).exists() {
+                anyhow::bail!(
+                    "edge identity at {} is partial: {name} exists but {CERT_FILE} is \
+                     missing; restore the missing file, or delete the directory to \
+                     provision a fresh identity (this invalidates all issued tokens \
+                     and pinned fingerprints)",
+                    dir.display()
+                );
+            }
+        }
         let identity = Self::provision()?;
         identity.save(dir)?;
         Ok((identity, true))
     }
 
-    /// Persist the identity under `dir` (created if absent). Private
-    /// material — the TLS key and the token root — is written 0600 on
-    /// unix.
+    /// Persist the identity under `dir` (created 0700 on unix if
+    /// absent). Private material — the TLS key and the token root —
+    /// is written 0600 on unix, and never over an existing file:
+    /// permissions are only applied at creation, so overwriting could
+    /// silently inherit looser bits.
     pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
+        }
+        #[cfg(not(unix))]
         fs::create_dir_all(dir)?;
         write_secret(&dir.join(KEY_FILE), &self.key_der)?;
         write_secret(
@@ -137,24 +164,33 @@ const ROOT_FILE: &str = "root.key";
 
 /// Write private key material with owner-only permissions from the
 /// first byte — created 0600 rather than chmodded after, so there is
-/// no world-readable window.
+/// no world-readable window. Refuses an existing file: `mode` is only
+/// honoured when `open(2)` creates the inode, so overwriting would
+/// silently keep whatever (possibly looser) bits the old file had —
+/// fail closed instead.
 #[cfg(unix)]
 fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
-        .open(path)?;
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("refusing to write {}: {e}", path.display()))?;
     file.write_all(bytes)?;
     Ok(())
 }
 
 #[cfg(not(unix))]
 fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    fs::write(path, bytes)?;
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("refusing to write {}: {e}", path.display()))?;
+    file.write_all(bytes)?;
     Ok(())
 }
 

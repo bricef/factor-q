@@ -41,16 +41,55 @@ fn load_or_provision_provisions_exactly_once() {
 
 #[cfg(unix)]
 #[test]
-fn private_material_is_owner_only() {
+fn private_material_and_directory_are_owner_only() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    EdgeIdentity::provision().unwrap().save(dir.path()).unwrap();
+    // A nested path so `save` creates the directory itself.
+    let identity_dir = dir.path().join("edge");
+    EdgeIdentity::provision()
+        .unwrap()
+        .save(&identity_dir)
+        .unwrap();
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode(&identity_dir),
+        0o700,
+        "the identity directory must be owner-only"
+    );
     for name in ["key.der", "root.key"] {
-        let mode = std::fs::metadata(dir.path().join(name))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "{name} must be owner-only, got {mode:o}");
+        let m = mode(&identity_dir.join(name));
+        assert_eq!(m, 0o600, "{name} must be owner-only, got {m:o}");
     }
+}
+
+#[test]
+fn partial_identity_fails_closed_instead_of_rotating() {
+    let dir = tempfile::tempdir().unwrap();
+    // Private material present but no certificate: the shape left by a
+    // partial restore. Re-provisioning here would silently rotate the
+    // root and orphan every pinned client and issued token.
+    std::fs::write(dir.path().join("key.der"), b"stale").unwrap();
+    let err = match EdgeIdentity::load_or_provision(dir.path()) {
+        Ok(_) => panic!("a partial identity must be refused, not silently rotated"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("partial"),
+        "expected the partial-identity refusal, got: {err}"
+    );
+}
+
+#[test]
+fn save_refuses_to_overwrite_private_material() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = EdgeIdentity::provision().unwrap();
+    identity.save(dir.path()).unwrap();
+    // A second save must not truncate-in-place: `mode` is only
+    // honoured at creation, so overwriting could inherit looser bits.
+    let err = identity.save(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("refusing to write"),
+        "expected the overwrite refusal, got: {err}"
+    );
 }
