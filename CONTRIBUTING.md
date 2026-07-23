@@ -17,11 +17,14 @@ git clone https://github.com/bricef/factor-q.git && cd factor-q
 # Start NATS with JetStream
 just infra-up
 
+# Install the pinned broker binary used by integration tests
+just install-nats
+
 # Build
 just build
 
-# Run the unit tests (no API key needed, but NATS must be running)
-FQ_NATS_URL=nats://localhost:4222 just test
+# Run the tests (no API key needed)
+just test
 
 # Run the CLI
 just fq --help
@@ -60,29 +63,24 @@ and coverage:
 
 ### Tier 1: Unit tests
 
-Fast, run in-process. Most don't need NATS, but the integration
-tests (bus round-trips, executor event sequences, dispatcher,
-projection consumer) do.
-
-Only the runtime suite needs NATS; the store and dashboard suites are
-hermetic.
+Fast, run in-process. Integration tests that need NATS spawn private brokers
+using the pinned binary installed by `just install-nats`; they do not use the
+shared broker from `just infra-up`.
 
 ```sh
-# The runtime suite without NATS — skips the integration tests
+# The runtime suite (including its self-provisioned integration tests)
 just test-runtime
 
-# The runtime suite with NATS — runs the integration tests too
-FQ_NATS_URL=nats://localhost:4222 just test-runtime
-
 # Every Rust suite (runtime + store + dashboard)
-FQ_NATS_URL=nats://localhost:4222 just test
+just test
 
 # Filter — one workspace, so plain cargo filters work from the root
 cargo test -p fq-runtime --lib agent::definition
 ```
 
-If a test says "skipping: FQ_NATS_URL not set", it's gated on
-NATS. Start NATS with `just infra-up`.
+Run `just install-nats` once before the Rust suites so tests can provision
+their isolated brokers. The shared broker from `just infra-up` is required by
+smoke tests, not by these Rust suites.
 
 ### Tier 2: Smoke tests
 
@@ -119,8 +117,9 @@ subsequent runs.
 ### Running everything
 
 ```sh
-just infra-up
-FQ_NATS_URL=nats://localhost:4222 just test    # every Rust suite
+just install-nats                              # once per fresh clone
+just test                                      # every Rust suite
+just infra-up                                  # shared broker for smoke tests
 just smoke                                       # end-to-end (needs API key)
 just test-shell-sandbox                          # containerised sandbox
 ```
@@ -136,7 +135,7 @@ just test-shell-sandbox                          # containerised sandbox
   explaining the module's purpose and threat model where applicable.
 - **Tests live next to the code** (`#[cfg(test)] mod tests`) rather
   than in a separate `tests/` crate. Integration tests that need
-  NATS are gated on `FQ_NATS_URL`.
+  NATS spawn an isolated broker using the pinned `nats-server` binary.
 - **Commits** follow conventional style: imperative mood, short
   first line, body explains the "why" and links to ADRs where
   relevant.
