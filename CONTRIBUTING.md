@@ -31,10 +31,16 @@ just fq --help
 
 ```
 factor-q/
-├── services/fq-runtime/       Rust workspace (CLI + runtime library + tools)
-│   ├── crates/fq-cli/           fq binary
+├── Cargo.toml                  the single Cargo workspace (#194) — one Cargo.lock
+├── services/fq-runtime/        runtime crates
+│   ├── crates/fq-cli/           fq + fqd binaries
+│   ├── crates/fq-edge/          authenticated generic edge
+│   ├── crates/fq-ops/           operation-registry contract crate
 │   ├── crates/fq-runtime/       core library
 │   └── crates/fq-tools/         built-in tools and sandbox
+├── services/fq-store/          content-addressed storage (fq-cas)
+├── services/fq-dashboard/      operator dashboard
+├── services/fq-test-support/   shared test-only helpers
 ├── infrastructure/             docker-compose + NATS config
 ├── agents/examples/            sample agent definitions
 ├── tests/smoke/                end-to-end smoke tests (bash)
@@ -71,8 +77,8 @@ FQ_NATS_URL=nats://localhost:4222 just test-runtime
 # Every Rust suite (runtime + store + dashboard)
 FQ_NATS_URL=nats://localhost:4222 just test
 
-# Filter, by forwarding cargo args to one suite
-just test-runtime -p fq-runtime --lib agent::definition
+# Filter — one workspace, so plain cargo filters work from the root
+cargo test -p fq-runtime --lib agent::definition
 ```
 
 If a test says "skipping: FQ_NATS_URL not set", it's gated on
@@ -104,8 +110,9 @@ exec tool's sandbox logic.
 just test-shell-sandbox
 ```
 
-This builds a `rust:1.85-slim` Docker image with the cargo
-registry pre-populated, then runs the exec tests offline inside
+This builds a Docker image on the pinned toolchain (the
+`rust-toolchain.toml` pin travels into the build context) with the
+cargo registry pre-populated, then runs the exec tests offline inside
 the container. Takes ~30s on the first run (image build), ~5s on
 subsequent runs.
 
@@ -113,7 +120,7 @@ subsequent runs.
 
 ```sh
 just infra-up
-FQ_NATS_URL=nats://localhost:4222 just test    # all three Rust suites
+FQ_NATS_URL=nats://localhost:4222 just test    # every Rust suite
 just smoke                                       # end-to-end (needs API key)
 just test-shell-sandbox                          # containerised sandbox
 ```

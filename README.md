@@ -48,13 +48,19 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 
 ```
 factor-q/
-├── services/fq-runtime/       Rust workspace (CLI + runtime + tools)
+├── Cargo.toml                 The single Cargo workspace (#194) — every Rust
+│                              crate below shares one Cargo.lock and target/
+├── services/fq-runtime/       Runtime crates
 │   └── crates/
-│       ├── fq-cli/              fq binary (CLI commands, daemon host)
+│       ├── fq-cli/              fq + fqd binaries (CLI commands, daemon host)
+│       ├── fq-edge/             authenticated generic edge (wire transport)
+│       ├── fq-ops/              operation-registry contract crate
 │       ├── fq-runtime/          core library (bus, executor, projection, dispatcher)
 │       └── fq-tools/            built-in tools and sandbox enforcement
 │
 ├── services/fq-store/         Content-addressed storage + index (fq-cas CLI)
+├── services/fq-dashboard/     Operator dashboard (read-only web surface)
+├── services/fq-test-support/  Test-only helpers shared across services
 │
 ├── infrastructure/            Deployment and local dev
 │   ├── docker-compose.yml       NATS + JetStream
