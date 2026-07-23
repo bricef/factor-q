@@ -34,6 +34,7 @@ RUN apt-get update \
 # missing, so ALL members are listed — not just the ones this image builds.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY services/fq-runtime/crates/fq-cli/Cargo.toml services/fq-runtime/crates/fq-cli/
+COPY services/fq-runtime/crates/fq-edge/Cargo.toml services/fq-runtime/crates/fq-edge/
 COPY services/fq-runtime/crates/fq-ops/Cargo.toml services/fq-runtime/crates/fq-ops/
 COPY services/fq-runtime/crates/fq-runtime/Cargo.toml services/fq-runtime/crates/fq-runtime/
 COPY services/fq-runtime/crates/fq-tools/Cargo.toml services/fq-runtime/crates/fq-tools/
@@ -46,6 +47,7 @@ COPY services/fq-test-support/Cargo.toml services/fq-test-support/
 # needs a file behind it or cargo rejects the manifest — hence the store's
 # bin and bench stubs.
 RUN mkdir -p services/fq-runtime/crates/fq-cli/src/bin \
+             services/fq-runtime/crates/fq-edge/src \
              services/fq-runtime/crates/fq-ops/src \
              services/fq-runtime/crates/fq-runtime/src \
              services/fq-runtime/crates/fq-tools/src \
@@ -55,6 +57,7 @@ RUN mkdir -p services/fq-runtime/crates/fq-cli/src/bin \
     && echo '' > services/fq-runtime/crates/fq-cli/src/lib.rs \
     && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/bin/fq.rs \
     && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/bin/fqd.rs \
+    && echo '' > services/fq-runtime/crates/fq-edge/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-ops/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-runtime/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-tools/src/lib.rs \
@@ -69,7 +72,7 @@ RUN mkdir -p services/fq-runtime/crates/fq-cli/src/bin \
     # poisoned: COPY preserves context mtimes, which can be OLDER than the
     # stub-built rlibs, so cargo's fingerprint check keeps the EMPTY stub
     # fq_runtime and the real fq-cli fails with hundreds of "not found"s.
-    && cargo clean --release -p fq-cli -p fq-ops -p fq-runtime -p fq-tools \
+    && cargo clean --release -p fq-cli -p fq-edge -p fq-ops -p fq-runtime -p fq-tools \
     && rm -rf services/fq-runtime/crates/*/src services/fq-dashboard/src \
               services/fq-store/src services/fq-store/benches \
               services/fq-test-support/src

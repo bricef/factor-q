@@ -9,9 +9,9 @@ set positional-arguments
 
 # All Rust crates live in the single workspace at this justfile's directory
 # (#194); recipes scope their suite with `-p` filters instead of cd'ing into
-# per-service workspaces. The runtime suite is these four crates (fq-edge
-# joins the list when it lands).
-runtime_pkgs := "-p fq-cli -p fq-ops -p fq-runtime -p fq-tools"
+# per-service workspaces. The runtime suite is these five crates — a new
+# services/fq-runtime crate joins this list and the root Cargo.toml members.
+runtime_pkgs := "-p fq-cli -p fq-edge -p fq-ops -p fq-runtime -p fq-tools"
 infra_dir := "infrastructure"
 
 # Show available recipes
