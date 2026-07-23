@@ -37,6 +37,7 @@ WORKDIR /build
 # (~/.cargo by default) and sticks around.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY services/fq-runtime/crates/fq-cli/Cargo.toml services/fq-runtime/crates/fq-cli/
+COPY services/fq-runtime/crates/fq-edge/Cargo.toml services/fq-runtime/crates/fq-edge/
 COPY services/fq-runtime/crates/fq-ops/Cargo.toml services/fq-runtime/crates/fq-ops/
 COPY services/fq-runtime/crates/fq-runtime/Cargo.toml services/fq-runtime/crates/fq-runtime/
 COPY services/fq-runtime/crates/fq-tools/Cargo.toml services/fq-runtime/crates/fq-tools/
@@ -45,6 +46,7 @@ COPY services/fq-store/Cargo.toml services/fq-store/
 COPY services/fq-test-support/Cargo.toml services/fq-test-support/
 
 RUN mkdir -p services/fq-runtime/crates/fq-cli/src/bin \
+             services/fq-runtime/crates/fq-edge/src \
              services/fq-runtime/crates/fq-ops/src \
              services/fq-runtime/crates/fq-runtime/src \
              services/fq-runtime/crates/fq-tools/src \
@@ -54,6 +56,7 @@ RUN mkdir -p services/fq-runtime/crates/fq-cli/src/bin \
     && echo '' > services/fq-runtime/crates/fq-cli/src/lib.rs \
     && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/bin/fq.rs \
     && echo 'fn main() {}' > services/fq-runtime/crates/fq-cli/src/bin/fqd.rs \
+    && echo '' > services/fq-runtime/crates/fq-edge/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-ops/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-runtime/src/lib.rs \
     && echo '' > services/fq-runtime/crates/fq-tools/src/lib.rs \
