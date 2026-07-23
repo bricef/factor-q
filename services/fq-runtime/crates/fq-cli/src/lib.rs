@@ -788,7 +788,10 @@ fn store_connections(path: &Path, connections: &Connections) -> anyhow::Result<(
     #[cfg(not(unix))]
     std::fs::create_dir_all(dir)?;
     let body = toml::to_string_pretty(connections)?;
-    let tmp = dir.join(".connections.toml.tmp");
+    // Per-process temp name: concurrent `fq connect` runs must not
+    // race each other's staging file (the rename stays atomic either
+    // way; this just removes the create_new collision).
+    let tmp = dir.join(format!(".connections.toml.tmp.{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     {
         use std::io::Write;
@@ -868,6 +871,10 @@ async fn connect(
         let hex = fingerprint_hex(probed);
         eprintln!("The daemon at {addr} presents certificate fingerprint (SHA-256):");
         eprintln!("  {hex}");
+        eprintln!(
+            "Compare it with the fingerprint the daemon printed when it provisioned \
+             its identity (the `edge: certificate fingerprint` line at first run)."
+        );
         if std::io::stdin().is_terminal() {
             eprint!("Pin this fingerprint and continue? [y/N] ");
             {
