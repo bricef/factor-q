@@ -290,6 +290,27 @@ a follow-up; see the step-9 plan
 (`docs/plans/closed/2026-05-22-operator-cli.md`) for the
 scope decision.
 
+Until full step-resume lands, the sanctioned interim is
+**operator resume via interrupted-result injection**
+(decision 2026-07-23, prompted by the `019f7ea9` post-crash
+triage — an ambiguous run whose finished-but-uncommitted work
+had to be salvaged by hand): an operator verb completes the
+stuck `dispatched` row with a synthetic result that says,
+unmistakably, *"this call was interrupted by a crash; its
+effects are unknown — verify the world before building on
+it."* That flips the WAL into the safe-replay shape and hands
+reconciliation to the model — the one component that can
+*look* (inspect the workspace, query the world) rather than
+guess. The never-guess invariant holds because the runtime
+fabricates no outcome: it labels its ignorance honestly, and
+the injection is an operator-initiated event on the audit log
+(same audit posture as `drop`). The injected result should
+ride the host-to-agent notice format (#88) so interruption
+reads uniformly to the agent whether it came from drain, tool
+refresh, or a crash. Idempotency-keyed tools (§2) remain the
+additive path that turns these cases into safe-retry with no
+injection needed.
+
 ### 4.5 What the contract does NOT promise
 
 - No promise that any particular tool is safe to re-run. Tools
