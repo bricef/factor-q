@@ -1226,6 +1226,7 @@ dependencies = [
  "tarpc",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",

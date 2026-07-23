@@ -115,7 +115,7 @@ envelopes this phase originally scoped moved to Phase 2, designed
 against the real edge. Oracles: the `describe()` schema snapshot; all
 gates green.
 
-### Phase 2 — the authenticated generic edge
+### Phase 2 — the authenticated generic edge ✅ #354 #360 #370
 
 The tarpc `invoke`/`next_batch` service hosted by the shared daemon
 path — `fqd` is born early as the edge's named home (a thin second
