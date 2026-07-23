@@ -194,3 +194,15 @@ async fn unregistered_ops_resolve_to_not_registered() {
         "request vocabulary is refusable: {missing:?}"
     );
 }
+
+#[tokio::test]
+async fn probe_reports_the_fingerprint_the_pin_then_verifies() {
+    let edge = spawn_edge().await.unwrap();
+    let probed = fq_edge::probe_fingerprint(&edge.addr.to_string())
+        .await
+        .expect("probe the server certificate");
+    assert_eq!(
+        probed, edge.fingerprint,
+        "TOFU probe must report the real fingerprint"
+    );
+}

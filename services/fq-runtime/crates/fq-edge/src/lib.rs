@@ -24,7 +24,9 @@ pub mod testing;
 pub mod wire;
 
 pub use auth::EdgeIdentity;
+pub use auth::attenuate;
 pub use client::EdgeClient;
+pub use client::probe_fingerprint;
 pub use registry::EdgeRegistry;
 pub use server::DEFAULT_PREAMBLE_TIMEOUT;
 pub use server::bind;

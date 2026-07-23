@@ -194,6 +194,65 @@ fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Narrow a token offline — no root key, no daemon round-trip
+/// (ADR-0031 Appendix A: scoped clients come from offline attenuation
+/// of a broader token). Appends a block whose check constrains the
+/// operations the token authorises to the given `(verb, domain)`
+/// grants, `"*"` wildcard allowed on either position. Attenuation
+/// only ever narrows: the appended check must pass *in addition to*
+/// the original grants, and chained attenuations authorise the
+/// intersection. The principal stays the minter's — it is signed into
+/// the authority block; relabelling is a token-lifecycle design, not
+/// an attenuation.
+pub fn attenuate(token: &str, grants: &[(String, String)]) -> anyhow::Result<String> {
+    if grants.is_empty() {
+        anyhow::bail!("attenuation needs at least one (verb, domain) grant to narrow to");
+    }
+    // The grant segments are spliced into datalog source: validate
+    // hard so a hostile segment cannot smuggle syntax in.
+    for (verb, domain) in grants {
+        validate_grant_segment(verb)?;
+        validate_grant_segment(domain)?;
+    }
+    let conditions: Vec<String> = grants
+        .iter()
+        .map(|(verb, domain)| {
+            let v = if verb == "*" {
+                "true".to_string()
+            } else {
+                format!("$ov == \"{verb}\"")
+            };
+            let d = if domain == "*" {
+                "true".to_string()
+            } else {
+                format!("$od == \"{domain}\"")
+            };
+            format!("({v} && {d})")
+        })
+        .collect();
+    let check = format!(
+        "check if operation($ov, $od), ({})",
+        conditions.join(" || ")
+    );
+    let token = biscuit_auth::UnverifiedBiscuit::from_base64(token)?;
+    let block = biscuit_auth::builder::BlockBuilder::new().check(check.as_str())?;
+    Ok(token.append(block)?.to_base64()?)
+}
+
+/// A grant segment is a snake_case word or the `"*"` wildcard —
+/// anything else is refused before it reaches datalog source.
+fn validate_grant_segment(segment: &str) -> anyhow::Result<()> {
+    let word = !segment.is_empty()
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if word || segment == "*" {
+        Ok(())
+    } else {
+        anyhow::bail!("invalid grant segment {segment:?}: expected snake_case or \"*\"");
+    }
+}
+
 /// SHA-256 fingerprint of a DER certificate.
 pub fn fingerprint(cert_der: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
