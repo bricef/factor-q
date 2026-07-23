@@ -1,10 +1,10 @@
 [package]
 name = "fq-dashboard"
-version = "0.1.0"
-edition = "2024"
-license = "BUSL-1.1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "factor-q operator dashboard — a read-only web surface over the running daemon"
-repository = "https://github.com/bricef/factor-q"
+repository.workspace = true
 
 [[bin]]
 name = "fq-dashboard"
@@ -16,30 +16,30 @@ path = "src/main.rs"
 # drifting silently (#105 layer 3). Shared transitive deps resolve under
 # the single workspace Cargo.lock (#194), so runtime and dashboard can
 # never disagree on a pin.
-fq-runtime = { path = "../fq-runtime/crates/fq-runtime", features = ["read-service"] }
-anyhow = "1"
-axum = "0.8"
+fq-runtime = { workspace = true, features = ["read-service"] }
+anyhow = { workspace = true }
+axum = { workspace = true }
 # RFC3339 `since` strings for the costs page's time windows — the same
 # form the projection stores (envelope timestamp .to_rfc3339()), so the
 # store's lexicographic `timestamp >= ?` compare works. Already in the
 # tree via fq-runtime.
-chrono = "0.4"
-clap = { version = "4", features = ["derive", "env"] }
+chrono = { workspace = true }
+clap = { workspace = true }
 # Server-side builders for the datastar SSE protocol (the client is
 # vendored at assets/datastar.js — v1.0.0, MIT, served from the binary).
 datastar = { version = "0.3", features = ["axum"] }
-futures = "0.3"
+futures = { workspace = true }
 # Decodes the transcript wire payload (canonical JSON — see
 # ReadService::transcript) and pretty-prints tool parameters.
-serde_json = "1"
-tarpc = { version = "0.37", features = ["tokio1", "serde1", "serde-transport", "serde-transport-bincode", "tcp"] }
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = { workspace = true }
+tarpc = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-async-nats = "0.38"
-tempfile = "3"
+async-nats = { workspace = true }
+tempfile = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 

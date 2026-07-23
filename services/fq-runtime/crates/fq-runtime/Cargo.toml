@@ -4,37 +4,37 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-fq-tools = { path = "../fq-tools" }
-async-nats = "0.38"
+fq-tools = { workspace = true }
+async-nats = { workspace = true }
 url = "2"
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Trimmed from "full" (#194 phase 2): this is a library crate, so its
+# feature set leaks to every consumer. The list is the observed need of
+# the daemon loops (spawn/select/timers/channels), the SQLite projection
+# and config IO, and the MCP child-process transport; the dev-dependency
+# below re-adds "full" for test builds. Binaries (fq-cli, fq-dashboard)
+# take "full" themselves.
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = "0.9"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
-tracing = "0.1"
-thiserror = "2"
-uuid = { version = "1", features = ["v7", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-futures = "0.3"
+sqlx = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+chrono = { workspace = true, features = ["serde"] }
+futures = { workspace = true }
 bytes = "1"
 getrandom = "0.3"
 toml = "0.8"
 walkdir = "2"
-async-trait = "0.1"
+async-trait = { workspace = true }
 genai = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-strum = { version = "0.27", features = ["derive"] }
+strum = { workspace = true }
 # The read-only operator service (#105 layer 2). Optional so library
 # consumers don't pull tarpc — same shape as fq-store's `service` feature.
-tarpc = { version = "0.37", features = [
-    "tokio1",
-    "serde1",
-    "serde-transport",
-    "serde-transport-bincode",
-    "tcp",
-], optional = true }
+tarpc = { workspace = true, optional = true }
 
 [features]
 # The in-daemon read-only tarpc service (wire-mirror of `views` plus the
@@ -45,10 +45,13 @@ read-service = ["dep:tarpc"]
 [dev-dependencies]
 # The shared private-broker guard, re-exported as `test_support::nats` for
 # this crate's `#[cfg(test)]` code and used directly by tests/*.rs (#233).
-fq-test-support = { path = "../../../fq-test-support" }
-proptest = "1"
-tempfile = "3"
-axum = "0.7"
+fq-test-support = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+axum = { workspace = true }
+# Test builds get the whole runtime back — the trim above is about what
+# consumers inherit, not about starving the test suite.
+tokio = { workspace = true, features = ["full"] }
 # Integration tests construct rmcp wire types (e.g. a canned
 # `CreateMessageResult` to reply to a bridged sampling request); the
 # `server` + `transport-async-rw` features let unit tests serve an
@@ -59,4 +62,4 @@ rmcp = { version = "1.7", default-features = false, features = ["client", "serve
 workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"
+libc = { workspace = true }
