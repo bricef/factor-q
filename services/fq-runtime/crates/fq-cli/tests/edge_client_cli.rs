@@ -116,6 +116,10 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
         err.contains(&fingerprint_hex) && err.contains("non-interactive: pinning automatically"),
         "TOFU must show the fingerprint and say it auto-pinned:\n{err}"
     );
+    assert!(
+        err.contains("Compare it with the fingerprint the daemon printed"),
+        "TOFU must tell the operator what to compare against:\n{err}"
+    );
 
     // Credentials landed user-side, owner-only.
     let creds_path = scratch.join("xdg/factor-q/connections.toml");
