@@ -586,12 +586,18 @@ fn golden_down_case(golden_name: &str, down_args: &[&str]) {
     let server = fq_test_support::NatsServer::start();
     let scratch = Scratch::new();
 
+    // The edge is on by default; an ephemeral port keeps the two
+    // daemon-spawning down goldens from fighting over the fixed
+    // default bind when they run in parallel.
+    let daemon_config = scratch.cache().join("fq.toml");
+    std::fs::write(&daemon_config, "[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
+
     let log_path = scratch.cache().join("daemon.log");
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
     let mut child = Command::new(env!("CARGO_BIN_EXE_fq"))
         .arg("run")
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_CONFIG", &daemon_config)
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.cache())
         .env("FQ_AGENTS_DIR", scratch.agents())

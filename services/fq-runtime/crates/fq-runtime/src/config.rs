@@ -92,12 +92,14 @@ fn default_read_service_bind() -> String {
 /// `invoke`/`next_batch` surface operator clients speak. Born
 /// authenticated — every connection presents a capability token — so
 /// unlike `[read_service]` a non-loopback bind is the operator's
-/// choice, not a refusal. Off by default while the surface grows its
-/// exemplar ops (plan Phase 3); Phase 5 makes it the default surface.
+/// choice, not a refusal. On by default — the edge is the operator
+/// surface (plan Phase 5 retires the legacy paths); `enabled = false`
+/// disables it explicitly.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EdgeConfig {
-    /// Start the edge with the daemon.
-    #[serde(default)]
+    /// Start the edge with the daemon. Default true; set false to
+    /// disable explicitly.
+    #[serde(default = "default_edge_enabled")]
     pub enabled: bool,
     /// Bind address for the TLS listener.
     #[serde(default = "default_edge_bind")]
@@ -107,10 +109,14 @@ pub struct EdgeConfig {
 impl Default for EdgeConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_edge_enabled(),
             bind: default_edge_bind(),
         }
     }
+}
+
+fn default_edge_enabled() -> bool {
+    true
 }
 
 fn default_edge_bind() -> String {
@@ -739,6 +745,18 @@ mod tests {
             config.providers.anthropic.unwrap().api_key_env,
             "ANTHROPIC_API_KEY"
         );
+    }
+
+    #[test]
+    fn edge_is_on_by_default_and_disabled_explicitly() {
+        // The edge is the operator surface: it runs unless the
+        // operator explicitly opts out. Both the all-defaults path and
+        // an `[edge]` section that omits `enabled` must land on true.
+        assert!(Config::default().edge.enabled);
+        let omitted: Config = toml::from_str("[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
+        assert!(omitted.edge.enabled);
+        let disabled: Config = toml::from_str("[edge]\nenabled = false\n").unwrap();
+        assert!(!disabled.edge.enabled);
     }
 
     #[test]

@@ -43,6 +43,9 @@ fn unique_scratch() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("fq-sigterm-{}-{}", std::process::id(), nanos));
     std::fs::create_dir_all(dir.join("cache")).unwrap();
     std::fs::create_dir_all(dir.join("agents")).unwrap();
+    // The edge is on by default; an ephemeral port keeps the parallel
+    // daemon-spawning tests from fighting over the fixed default bind.
+    std::fs::write(dir.join("fq.toml"), "[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
     dir
 }
 
@@ -58,8 +61,9 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
 
     let mut child = Command::new(fq_binary())
         .arg("run")
-        // Everything via env so the test never reads a real fq.toml.
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        // The scratch fq.toml plus env overrides — the test never
+        // reads a real config.
+        .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
@@ -187,7 +191,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
 
     let mut child = Command::new(fq_binary())
         .arg("run")
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
@@ -288,7 +292,7 @@ fn daemon_stops_now_on_fq_down_now() {
 
     let mut child = Command::new(fq_binary())
         .arg("run")
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
