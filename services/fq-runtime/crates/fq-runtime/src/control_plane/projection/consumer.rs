@@ -24,9 +24,9 @@ use tracing::{debug, info};
 
 use crate::bus::{BusError, EventBus};
 use crate::control_plane::durable_consumer::{
-    DeliverFrom, DurableConsumerConfig, DurableConsumerError, HandlerError, run_durable_consumer,
+    DeliverFrom, Delivery, DurableConsumerConfig, DurableConsumerError, HandlerError,
+    run_durable_consumer,
 };
-use crate::events::Event;
 
 use super::store::{ProjectionStore, StoreError};
 
@@ -39,11 +39,23 @@ pub const CONSUMER_NAME: &str = "fq-projector";
 pub struct ProjectionConsumer {
     bus: EventBus,
     store: Arc<ProjectionStore>,
+    watermark: Option<crate::watermark::WatermarkSender>,
 }
 
 impl ProjectionConsumer {
     pub fn new(bus: EventBus, store: Arc<ProjectionStore>) -> Self {
-        Self { bus, store }
+        Self {
+            bus,
+            store,
+            watermark: None,
+        }
+    }
+
+    /// Advance `watermark` as events apply — the coordinate reads
+    /// wait on for read-your-writes (the fold as of watermark W).
+    pub fn with_watermark(mut self, watermark: crate::watermark::WatermarkSender) -> Self {
+        self.watermark = Some(watermark);
+        self
     }
 
     /// Run the consumer loop until `shutdown` fires.
@@ -63,25 +75,35 @@ impl ProjectionConsumer {
             filter_subjects: Vec::new(),
             deliver_from: DeliverFrom::Beginning,
         };
-        run_durable_consumer(&self.bus, config, shutdown, |event| {
-            self.handle_event(event)
+        run_durable_consumer(&self.bus, config, shutdown, |delivery| {
+            self.handle_event(delivery)
         })
         .await
         .map_err(ConsumerError::from)
     }
 
-    /// Insert one event into the projection. The shared loop owns
-    /// the ack: `Ok` acks, a transient error NAKs for redelivery.
-    async fn handle_event(&self, event: Event) -> Result<(), HandlerError> {
+    /// Insert one event into the projection, then advance the
+    /// watermark past it. The shared loop owns the ack: `Ok` acks, a
+    /// transient error NAKs for redelivery. The mark moves only after
+    /// the insert commits, so a reader released at sequence S always
+    /// finds S's row; advancement is monotonic, so redeliveries never
+    /// regress it.
+    async fn handle_event(&self, delivery: Delivery) -> Result<(), HandlerError> {
+        let Delivery { event, stream_seq } = delivery;
         debug!(
             event_id = %event.envelope.event_id,
             agent_id = %event.envelope.agent_id,
+            stream_seq,
             "projecting event"
         );
         self.store
             .insert_event(&event)
             .await
-            .map_err(HandlerError::transient)
+            .map_err(HandlerError::transient)?;
+        if let (Some(watermark), Some(seq)) = (&self.watermark, stream_seq) {
+            watermark.advance(seq);
+        }
+        Ok(())
     }
 }
 
@@ -212,15 +234,20 @@ mod tests {
         let bus_for_loop = bus.clone();
         let store_for_loop = store.clone();
         let handle = tokio::spawn(async move {
-            run_durable_consumer(&bus_for_loop, config, shutdown_rx, |event| {
-                let store = store_for_loop.clone();
-                async move {
-                    store
-                        .insert_event(&event)
-                        .await
-                        .map_err(HandlerError::transient)
-                }
-            })
+            run_durable_consumer(
+                &bus_for_loop,
+                config,
+                shutdown_rx,
+                |Delivery { event, .. }| {
+                    let store = store_for_loop.clone();
+                    async move {
+                        store
+                            .insert_event(&event)
+                            .await
+                            .map_err(HandlerError::transient)
+                    }
+                },
+            )
             .await
         });
 

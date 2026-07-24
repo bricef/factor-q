@@ -20,8 +20,8 @@
 //!     filter_subjects: vec!["fq.agent.*.mything".to_string()],
 //!     deliver_from: DeliverFrom::Beginning,
 //! };
-//! run_durable_consumer(&bus, config, shutdown, |event| async move {
-//!     handle(&event).await.map_err(HandlerError::transient)
+//! run_durable_consumer(&bus, config, shutdown, |delivery| async move {
+//!     handle(&delivery.event).await.map_err(HandlerError::transient)
 //! })
 //! .await?;
 //! ```
@@ -167,12 +167,23 @@ pub enum DurableConsumerError {
     Stream(String),
 }
 
+/// One delivered message: the deserialised event plus its position
+/// in the event log. The position is what watermarks are made of —
+/// handlers that don't track progress simply ignore it.
+pub struct Delivery {
+    pub event: Event,
+    /// The `fq-events` stream sequence of this message. Absent only
+    /// when JetStream metadata could not be read off the delivery.
+    pub stream_seq: Option<u64>,
+}
+
 /// Run a durable consumer loop until `shutdown` fires.
 ///
 /// `handler` is called once per delivered message with the
-/// deserialised [`Event`]; its result decides the ack (see the
-/// module doc's policy table). Handlers must be idempotent —
-/// delivery is at-least-once.
+/// [`Delivery`] (the deserialised [`Event`] plus its stream
+/// position); its result decides the ack (see the module doc's
+/// policy table). Handlers must be idempotent — delivery is
+/// at-least-once.
 pub async fn run_durable_consumer<H, HFut>(
     bus: &EventBus,
     config: DurableConsumerConfig,
@@ -180,7 +191,7 @@ pub async fn run_durable_consumer<H, HFut>(
     handler: H,
 ) -> Result<(), DurableConsumerError>
 where
-    H: Fn(Event) -> HFut,
+    H: Fn(Delivery) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
 {
     run_loop(bus, config, shutdown, handler, NO_TICK).await
@@ -200,7 +211,7 @@ pub async fn run_durable_consumer_with_tick<H, HFut, T, TFut>(
     tick: T,
 ) -> Result<(), DurableConsumerError>
 where
-    H: Fn(Event) -> HFut,
+    H: Fn(Delivery) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
     T: Fn() -> TFut,
     TFut: Future<Output = ()>,
@@ -220,7 +231,7 @@ async fn run_loop<H, HFut, T, TFut>(
     tick: Option<(Duration, T)>,
 ) -> Result<(), DurableConsumerError>
 where
-    H: Fn(Event) -> HFut,
+    H: Fn(Delivery) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
     T: Fn() -> TFut,
     TFut: Future<Output = ()>,
@@ -290,7 +301,7 @@ async fn maybe_tick(timer: Option<&mut tokio::time::Interval>) {
 /// failures must not kill the loop.
 async fn handle_message<H, HFut>(name: &str, handler: &H, msg: &async_nats::jetstream::Message)
 where
-    H: Fn(Event) -> HFut,
+    H: Fn(Delivery) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
 {
     let event = match serde_json::from_slice::<Event>(&msg.payload) {
@@ -308,8 +319,9 @@ where
         }
     };
 
+    let stream_seq = msg.info().ok().map(|info| info.stream_sequence);
     let event_id = event.envelope.event_id;
-    match handler(event).await {
+    match handler(Delivery { event, stream_seq }).await {
         Ok(()) => {
             if let Err(err) = msg.ack().await {
                 error!(
@@ -459,25 +471,30 @@ mod tests {
         let seen_for_loop = seen.clone();
         let poison_id = poison_worker.as_str().to_string();
         let handle = tokio::spawn(async move {
-            run_durable_consumer(&bus_for_loop, config, shutdown_rx, move |event| {
-                let seen = seen_for_loop.clone();
-                let poison_id = poison_id.clone();
-                async move {
-                    let EventPayload::WorkerHeartbeat(p) = &event.payload else {
-                        return Ok(());
-                    };
-                    let id = p.worker_id.as_str().to_string();
-                    let is_poison = id == poison_id;
-                    seen.lock().unwrap().push(id);
-                    if is_poison {
-                        Err(HandlerError::permanent(std::io::Error::other(
-                            "event this consumer can never handle",
-                        )))
-                    } else {
-                        Ok(())
+            run_durable_consumer(
+                &bus_for_loop,
+                config,
+                shutdown_rx,
+                move |Delivery { event, .. }| {
+                    let seen = seen_for_loop.clone();
+                    let poison_id = poison_id.clone();
+                    async move {
+                        let EventPayload::WorkerHeartbeat(p) = &event.payload else {
+                            return Ok(());
+                        };
+                        let id = p.worker_id.as_str().to_string();
+                        let is_poison = id == poison_id;
+                        seen.lock().unwrap().push(id);
+                        if is_poison {
+                            Err(HandlerError::permanent(std::io::Error::other(
+                                "event this consumer can never handle",
+                            )))
+                        } else {
+                            Ok(())
+                        }
                     }
-                }
-            })
+                },
+            )
             .await
         });
 

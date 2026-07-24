@@ -197,7 +197,7 @@ impl CoordinationConsumer {
             &self.bus,
             config,
             shutdown,
-            |event| this.handle_event(event),
+            |delivery| this.handle_event(delivery.event),
             Duration::from_millis(self.sweep_interval_ms),
             || async move {
                 if let Err(err) = this.sweep_stale_workers().await {
