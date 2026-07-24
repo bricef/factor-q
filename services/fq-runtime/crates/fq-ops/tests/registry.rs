@@ -10,9 +10,7 @@
 //! intentional change with
 //! `UPDATE_SNAPSHOT=1 cargo test -p fq-ops --test registry`.
 
-use fq_ops::{
-    Authority, Command, Domain, OpCategory, OpId, Registry, RegistryError, Stability, Verb,
-};
+use fq_ops::{Authority, Command, Domain, OpCategory, OpId, Registry, RegistryError, Verb};
 
 // ------------------------------------------------------------------
 // Exemplar declarations. Contract only — handlers arrive with the
@@ -21,8 +19,8 @@ use fq_ops::{
 // ------------------------------------------------------------------
 
 use fq_ops::fixtures::{
-    DropInput, control, control_down, cost_summary, invocation, invocation_drop, trigger,
-    trigger_publish, turn,
+    control, control_down, cost_summary, invocation, invocation_drop, trigger, trigger_publish,
+    turn,
 };
 
 fn exemplar_registry() -> Registry {
@@ -86,19 +84,21 @@ fn duplicate_registration_is_refused() {
 }
 
 /// A declared verb that collides with a derived generic name is caught
-/// at registration — the one guarantee the verb strings owe us.
+/// at registration. Typed verb ids make this unrepresentable through
+/// `Command::new` — the guarantee moved to the type level — so this
+/// exercises the registry's residual line of defence against a future
+/// enum variant that *renders* to a colliding word, by constructing
+/// the collision raw.
 #[test]
 fn verb_collision_with_the_derived_surface_is_refused() {
-    let bad = Command::new::<DropInput>(
-        Domain::Invocation,
-        "get",
-        Authority {
-            verb: Verb::Write,
-            scope: Domain::Invocation,
+    let template = fq_ops::fixtures::invocation_drop();
+    let bad = Command {
+        verb: fq_ops::VerbId::Unknown {
+            domain: "invocation".to_string(),
+            verb: "get".to_string(),
         },
-        "shadows a derived name",
-        Stability::Experimental,
-    );
+        ..template
+    };
     let mut registry = exemplar_registry();
     assert_eq!(
         registry.register(bad),

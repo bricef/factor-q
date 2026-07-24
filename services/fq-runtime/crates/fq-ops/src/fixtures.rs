@@ -10,6 +10,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::opid::{Control, Cost, Invocation, Trigger};
 use crate::{Atom, Authority, Command, Domain, Report, Stability, Synthetic, Verb, View};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -129,8 +130,7 @@ pub struct DropInput {
 /// call carrying identity, input type, authority, and contract text.
 pub fn invocation_drop() -> Command {
     Command::new::<DropInput>(
-        Domain::Invocation,
-        "drop",
+        Invocation::Drop,
         Authority {
             verb: Verb::Write,
             scope: Domain::Invocation,
@@ -151,8 +151,7 @@ pub struct DownInput {
 /// authority, same one-site declaration.
 pub fn control_down() -> Command {
     Command::new::<DownInput>(
-        Domain::Control,
-        "down",
+        Control::Down,
         Authority {
             verb: Verb::Write,
             scope: Domain::Control,
@@ -174,8 +173,7 @@ pub struct PublishInput {
 /// grantable from the machinery's lifecycle authority (Write control).
 pub fn trigger_publish() -> Command {
     Command::new::<PublishInput>(
-        Domain::Trigger,
-        "publish",
+        Trigger::Publish,
         Authority {
             verb: Verb::Write,
             scope: Domain::Trigger,
@@ -207,8 +205,7 @@ pub struct CostOutput {
 /// event log it computes from.
 pub fn cost_summary() -> Report {
     Report::new::<CostParams, CostOutput>(
-        Domain::Cost,
-        "summary",
+        Cost::Summary,
         "Aggregate cost across all agents.",
         Stability::Experimental,
     )

@@ -377,3 +377,22 @@ Decisions D1–D8 stand; the *production method* they specify is refined:
 - **D6's generic `invoke`/`next_batch` envelopes are edge artifacts**,
   designed with the Phase-2 tarpc service rather than speculatively in
   the contract crate.
+
+### Typed op identifiers (2026-07-24)
+
+The stringly halves of `OpId` — `Verb { domain, verb: String }` and
+`Report { domain, name: String }` — are replaced by typed identities:
+per-domain verb/report enums (`Invocation::Drop`,
+`Cost::Summary`) wrapped in `VerbId`/`ReportId` sums. A verb is
+now named at exactly one site (the declaration constructor takes the
+typed id and derives the domain from it), and nonsense pairs
+(`cost.drop`) are unrepresentable by construction. The registry stays
+the single semantic source — schemas, authority, handlers, describe —
+and the wire encoding is byte-identical to the pre-typed flat pair;
+version skew parses to an `Unknown` variant the registry refuses as
+not-registered, so unknown vocabulary degrades to a clean refusal,
+never a wire error. Rationale: with client and daemon in one
+workspace and BFFs fronting all other protocols, the open string
+namespace bought nothing at the wire that the registry does not
+already provide, while costing compile-time exhaustiveness in every
+consumer.

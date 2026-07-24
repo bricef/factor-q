@@ -46,6 +46,7 @@ use crate::opid::OpId;
     Deserialize,
     JsonSchema,
     strum::IntoStaticStr,
+    strum::EnumString,
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -336,9 +337,12 @@ impl Synthetic {
 #[derive(Debug, Clone, Serialize)]
 pub struct Command {
     pub domain: Domain,
-    /// The verb word itself; renders as `{domain}.{verb}`. Opaque
-    /// identity plus documentation — never parsed.
-    pub verb: &'static str,
+    /// The verb's typed identity; renders as `{domain}.{verb}`. The
+    /// domain field above is derived from it at construction — one
+    /// site, no drift. Serialises as the bare verb word so describe
+    /// output stays flat.
+    #[serde(serialize_with = "serialize_verb_word")]
+    pub verb: crate::opid::VerbId,
     pub version: u32,
     pub authority: Authority,
     /// The one-line summary (listings, MCP tool lists).
@@ -354,10 +358,12 @@ pub struct Command {
 impl Command {
     /// Declare a command. `Input` is the declaration's typed input;
     /// its schema is captured here, and the same type parameter will
-    /// type the handler when Phase 2 binds one.
+    /// type the handler when Phase 2 binds one. The verb arrives as
+    /// its typed identity (`Invocation::Drop`, …) — the domain is
+    /// derived from it, so a command cannot be declared under the
+    /// wrong domain.
     pub fn new<Input>(
-        domain: Domain,
-        verb: &'static str,
+        verb: impl Into<crate::opid::VerbId>,
         authority: Authority,
         summary: &'static str,
         stability: Stability,
@@ -365,6 +371,10 @@ impl Command {
     where
         Input: Serialize + DeserializeOwned + JsonSchema,
     {
+        let verb = verb.into();
+        let domain = verb
+            .domain()
+            .expect("declarations use typed verb identities, never Unknown");
         Command {
             domain,
             verb,
@@ -390,11 +400,25 @@ impl Command {
 
     /// This command's wire identity.
     pub fn op(&self) -> OpId {
-        OpId::Verb {
-            domain: self.domain,
-            verb: self.verb.to_string(),
-        }
+        OpId::Verb(self.verb.clone())
     }
+}
+
+/// Serialise a typed verb id as its bare word (`"drop"`), keeping the
+/// declaration's describe output flat alongside its `domain` field.
+fn serialize_verb_word<S: serde::Serializer>(
+    verb: &crate::opid::VerbId,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(verb.verb_segment())
+}
+
+/// Serialise a typed report id as its bare name word, same rationale.
+fn serialize_report_word<S: serde::Serializer>(
+    name: &crate::opid::ReportId,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(name.name_segment())
 }
 
 /// A named, typed computation over resources, as a value — the kind
@@ -412,9 +436,11 @@ impl Command {
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub domain: Domain,
-    /// The report's name word; renders as `{domain}.{name}`. Opaque
-    /// identity plus documentation — never parsed.
-    pub name: &'static str,
+    /// The report's typed identity; renders as `{domain}.{name}`. The
+    /// domain field above is derived from it at construction.
+    /// Serialises as the bare name word so describe output stays flat.
+    #[serde(serialize_with = "serialize_report_word")]
+    pub name: crate::opid::ReportId,
     pub version: u32,
     /// The one-line summary (listings, MCP tool lists).
     pub summary: &'static str,
@@ -429,8 +455,7 @@ impl Report {
     /// Declare a report. `Params` and `Output` are the declaration's
     /// types; their schemas are captured here.
     pub fn new<Params, Output>(
-        domain: Domain,
-        name: &'static str,
+        name: impl Into<crate::opid::ReportId>,
         summary: &'static str,
         stability: Stability,
     ) -> Self
@@ -438,6 +463,10 @@ impl Report {
         Params: Serialize + DeserializeOwned + JsonSchema,
         Output: Serialize + DeserializeOwned + JsonSchema,
     {
+        let name = name.into();
+        let domain = name
+            .domain()
+            .expect("declarations use typed report identities, never Unknown");
         Report {
             domain,
             name,
@@ -463,9 +492,6 @@ impl Report {
 
     /// This report's wire identity.
     pub fn op(&self) -> OpId {
-        OpId::Report {
-            domain: self.domain,
-            name: self.name.to_string(),
-        }
+        OpId::Report(self.name.clone())
     }
 }
