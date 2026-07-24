@@ -3,11 +3,6 @@ Invocation: 1c000000-0000-7000-8000-000000000001
   status:   completed
   worker:   researcher
 
-Live execution:
-  phase:      completed
-  step:       2
-  updated_at: 1767323050000 ms
-
 Recent events:
   2026-01-02T03:04:10  completed
   2026-01-02T03:04:06  llm_response

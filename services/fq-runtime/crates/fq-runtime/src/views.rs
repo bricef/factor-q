@@ -696,6 +696,22 @@ impl Views {
         Ok(())
     }
 
+    async fn coordination_is_terminal(&self, invocation_id: &str) -> Result<bool, ViewsError> {
+        let owner_terminal = self
+            .control_plane
+            .get_invocation_owner(invocation_id)
+            .await?
+            .is_some_and(|owner| {
+                matches!(owner.status, OwnerStatus::Completed | OwnerStatus::Failed)
+            });
+        Ok(owner_terminal
+            || self
+                .control_plane
+                .get_archive(invocation_id)
+                .await?
+                .is_some())
+    }
+
     /// Total event count in the projection.
     pub async fn event_count(&self) -> Result<i64, ViewsError> {
         Ok(self.projection.count().await?)
@@ -879,11 +895,12 @@ impl Views {
         long_dispatch_threshold_ms: i64,
     ) -> Result<ExecutionsView, ViewsError> {
         let in_flight = self.worker.find_in_flight_invocations().await?;
-        let mut view = ExecutionsView {
-            in_flight: in_flight.len() as i64,
-            ..Default::default()
-        };
+        let mut view = ExecutionsView::default();
         for row in in_flight {
+            if self.coordination_is_terminal(&row.invocation_id).await? {
+                continue;
+            }
+            view.in_flight += 1;
             // Newest open dispatch of either kind. One dispatch-list
             // query per in-flight row — bounded by
             // max_concurrent_invocations, the same shape as
@@ -980,6 +997,9 @@ impl Views {
         rows.sort_by_key(|r| r.started_at);
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
+            if self.coordination_is_terminal(&row.invocation_id).await? {
+                continue;
+            }
             let tool_rows = self
                 .worker
                 .open_tool_dispatches_for_invocation(&row.invocation_id)
@@ -1140,8 +1160,12 @@ impl Views {
             return Ok(None);
         }
 
+        let coordination_terminal = owner
+            .as_ref()
+            .is_some_and(|o| matches!(o.status, OwnerStatus::Completed | OwnerStatus::Failed))
+            || archive.is_some();
         let live = match state {
-            Some(s) => {
+            Some(s) if !coordination_terminal => {
                 let tools = self
                     .worker
                     .list_tool_dispatches_for_invocation(invocation_id)
@@ -1177,7 +1201,7 @@ impl Views {
                     llms: llms.into_iter().map(LlmDispatchView::from).collect(),
                 })
             }
-            None => None,
+            Some(_) | None => None,
         };
 
         // The projection has no per-invocation query; over-fetch by agent and
@@ -1655,6 +1679,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(active_late[0].liveness, Liveness::Stuck);
+    }
+
+    #[tokio::test]
+    async fn terminal_coordination_status_hides_orphaned_live_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimeDbPaths::under(dir.path());
+        {
+            let cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            cp.upsert_invocation_ownership("inv-dropped", "w1", 100, OwnerStatus::Failed)
+                .await
+                .unwrap();
+            let ws = WorkerStore::open(&paths.worker).await.unwrap();
+            ws.upsert_invocation_state(&InvocationStateRow {
+                invocation_id: "inv-dropped".into(),
+                agent_id: "agent-a".into(),
+                schema_version: 1,
+                phase: "dispatching_tools".into(),
+                state_blob: vec![],
+                step_index: 25,
+                started_at: 100,
+                updated_at: 150,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
+            })
+            .await
+            .unwrap();
+            let _projection = ProjectionStore::open(&paths.projection).await.unwrap();
+        }
+
+        let views = Views::open(&paths).await.unwrap();
+        let executions = views
+            .executions(1_000_000, 30_000, DEFAULT_LONG_DISPATCH_THRESHOLD_MS)
+            .await
+            .unwrap();
+        assert_eq!(executions.in_flight, 0);
+        assert_eq!(executions.stuck, 0);
+        assert!(
+            views
+                .active_invocations(1_000_000, 30_000, DEFAULT_LONG_DISPATCH_THRESHOLD_MS,)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let detail = views
+            .invocation(
+                "inv-dropped",
+                1_000_000,
+                30_000,
+                DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(detail.live.is_none());
     }
 
     /// An open LLM dispatch counts as working the same way a tool dispatch
