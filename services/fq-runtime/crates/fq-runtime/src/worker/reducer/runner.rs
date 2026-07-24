@@ -482,6 +482,10 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     /// worker ids for crashed runs). Worker-local by construction;
     /// cross-worker liveness is the #107/#374 coordination story.
     active: std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    /// Invocation-scoped halt requests, consumed at the next step boundary.
+    /// Unlike daemon drain, these terminate only the named invocation after
+    /// the operator-drop event reconciles its durable row.
+    halt_requested: std::sync::Mutex<std::collections::HashSet<Uuid>>,
 }
 
 /// RAII entry in [`ReducerRunner::active`]: removed on drop, so a
@@ -510,6 +514,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             drain: DrainSignal::new(),
             pending_notices: std::sync::Mutex::new(std::collections::HashMap::new()),
             active: std::sync::Mutex::new(std::collections::HashSet::new()),
+            halt_requested: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -520,6 +525,26 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .lock()
             .expect("active set poisoned")
             .contains(invocation_id)
+    }
+
+    /// Request a halt at the next step boundary. Returns false without
+    /// changing state when this runner is not currently driving the invocation.
+    pub fn request_halt(&self, invocation_id: Uuid) -> bool {
+        if !self.is_active(&invocation_id) {
+            return false;
+        }
+        self.halt_requested
+            .lock()
+            .expect("halt set poisoned")
+            .insert(invocation_id);
+        true
+    }
+
+    fn take_halt(&self, invocation_id: Uuid) -> bool {
+        self.halt_requested
+            .lock()
+            .expect("halt set poisoned")
+            .remove(&invocation_id)
     }
 
     fn mark_active(&self, invocation_id: Uuid) -> ActiveInvocation<'_> {
@@ -1450,6 +1475,20 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 carried.push((next_seq, kind, body));
             }
             let host_notices: Vec<String> = carried.into_iter().map(|(_, _, body)| body).collect();
+            // A live operator drop uses the same step-boundary semantics as
+            // drain, but is invocation-scoped. The coordination consumer marks
+            // the WAL row terminal from the operator-drop event, so this path
+            // only stops the in-memory driver and emits no competing terminal.
+            if self.take_halt(invocation_id) {
+                info!(
+                    agent_id = %agent_id,
+                    invocation_id = %invocation_id,
+                    step_index,
+                    "operator halt — stopping invocation at step boundary"
+                );
+                return Ok(InvocationOutcome::Suspended { invocation_id });
+            }
+
             // ADR-0027 graceful drain: suspend at this step boundary if
             // a drain has been requested. The previous iteration's
             // checkpoint — or, for `step_index_start`, the `Triggered`

@@ -616,3 +616,119 @@ async fn failed_redrive_fails_the_invocation_cleanly() {
     daemon.stop();
     mock.shutdown().await;
 }
+
+/// #107 live-drop contract: the runner is the liveness authority, so a bare
+/// drop is side-effect free while active; explicit --live lets the current
+/// tool finish (matching drain semantics), then stops before the next step.
+#[tokio::test(flavor = "multi_thread")]
+async fn live_drop_requires_opt_in_halts_and_stays_terminal_after_restart() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let mock = MockAnthropicServer::start().await;
+    let scratch = Scratch::new("live-drop", mock.base_url());
+
+    mock.push_response(MockResponse::tool_use(
+        "toolu_live_drop",
+        "builtin__exec",
+        json!({
+            "command": ["sleep", "2"],
+            "cwd": scratch.path("workspace"),
+        }),
+        10,
+        5,
+    ));
+
+    let mut daemon = Daemon::spawn(&scratch, &nats_url, "daemon-live-drop.log");
+    daemon
+        .await_log("Runtime ready", Duration::from_secs(30))
+        .await;
+    let nats = async_nats::connect(&nats_url)
+        .await
+        .expect("connect broker");
+    nats.publish(
+        "fq.trigger.resume-probe",
+        serde_json::to_vec(&json!("run the probe")).unwrap().into(),
+    )
+    .await
+    .expect("publish trigger");
+    nats.flush().await.expect("flush trigger");
+    daemon
+        .await_log(
+            "model produced tool calls; dispatching",
+            Duration::from_secs(30),
+        )
+        .await;
+    let invocation_id = invocation_id_from_log(&daemon.log());
+
+    let bare = run_fq(&scratch, &nats_url, &["invocation", "drop", &invocation_id]);
+    assert!(!bare.status.success(), "bare live drop must be rejected");
+    let bare_msg = format!(
+        "{}{}",
+        String::from_utf8_lossy(&bare.stdout),
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    assert!(bare_msg.contains("currently running"), "{bare_msg}");
+    assert!(bare_msg.contains("--live"), "{bare_msg}");
+    assert!(
+        !run_fq(&scratch, &nats_url, &["invocation", "show", &invocation_id])
+            .stdout
+            .windows("operator_recovered".len())
+            .any(|w| w == b"operator_recovered"),
+        "rejected bare drop published a terminal audit event"
+    );
+
+    let forced = run_fq(
+        &scratch,
+        &nats_url,
+        &[
+            "invocation",
+            "drop",
+            &invocation_id,
+            "--live",
+            "--reason",
+            "test halt",
+        ],
+    );
+    assert!(
+        forced.status.success(),
+        "forced live drop failed: {}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    daemon
+        .await_log(
+            "operator halt — stopping invocation at step boundary",
+            Duration::from_secs(30),
+        )
+        .await;
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let show = run_fq(&scratch, &nats_url, &["invocation", "show", &invocation_id]);
+        if String::from_utf8_lossy(&show.stdout).contains("failed") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "live drop never landed terminal");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    daemon.stop();
+    let mut restarted = Daemon::spawn(&scratch, &nats_url, "daemon-live-drop-restart.log");
+    restarted
+        .await_log("Runtime ready", Duration::from_secs(30))
+        .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !restarted.log().contains("resuming invocation"),
+        "dropped invocation resurrected after restart:\n{}",
+        restarted.log()
+    );
+    let resume = run_fq(
+        &scratch,
+        &nats_url,
+        &["invocation", "resume", &invocation_id],
+    );
+    assert!(!resume.status.success(), "terminal live-drop was resumable");
+
+    restarted.stop();
+    mock.shutdown().await;
+}

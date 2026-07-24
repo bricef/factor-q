@@ -122,6 +122,9 @@ pub const CONTROL_RELOAD_SUBJECT: &str = "fq.control.reload";
 /// Request/reply control subject for operator recovery of ambiguous invocations.
 pub const CONTROL_RESUME_SUBJECT: &str = "fq.control.invocation.resume";
 
+/// Request/reply control subject for live invocation drop preconditions and halt.
+pub const CONTROL_DROP_SUBJECT: &str = "fq.control.invocation.drop";
+
 /// Core-NATS subject an operator-initiated clean stop is requested on
 /// (`fq down`, issue #63). Ephemeral like reload — no daemon
 /// listening is a silent no-op. The message body selects the mode:
@@ -891,6 +894,23 @@ impl EventBus {
     /// request and a reply inbox the daemon answers on.
     pub async fn subscribe_control_resume(&self) -> Result<async_nats::Subscriber, BusError> {
         Ok(self.client.subscribe(CONTROL_RESUME_SUBJECT).await?)
+    }
+
+    /// Ask the daemon to check liveness and, when opted in, arm a halt.
+    pub async fn request_control_drop(&self, body: Vec<u8>) -> Result<Vec<u8>, BusError> {
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.client.request(CONTROL_DROP_SUBJECT, Bytes::from(body)),
+        )
+        .await
+        .map_err(|_| BusError::Publish("drop request timed out; start the daemon first".into()))?
+        .map_err(|err| BusError::Publish(err.to_string()))?;
+        Ok(response.payload.to_vec())
+    }
+
+    /// Subscribe to live-drop control requests.
+    pub async fn subscribe_control_drop(&self) -> Result<async_nats::Subscriber, BusError> {
+        Ok(self.client.subscribe(CONTROL_DROP_SUBJECT).await?)
     }
 
     /// Reply to a daemon control request.

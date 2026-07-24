@@ -437,6 +437,9 @@ enum InvocationCommands {
         /// Free-form reason recorded on the event payload.
         #[arg(long)]
         reason: Option<String>,
+        /// Explicitly halt the invocation if it is currently running.
+        #[arg(long)]
+        live: bool,
         /// Emit JSON instead of human-readable output.
         #[arg(long)]
         json: bool,
@@ -701,9 +704,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             InvocationCommands::Show { id, json } => {
                 invocation_show(&cli.global, &id, json).await?
             }
-            InvocationCommands::Drop { id, reason, json } => {
-                invocation_drop(&cli.global, &id, reason.as_deref(), json).await?
-            }
+            InvocationCommands::Drop {
+                id,
+                reason,
+                live,
+                json,
+            } => invocation_drop(&cli.global, &id, reason.as_deref(), live, json).await?,
             InvocationCommands::Resume { id, reason, json } => {
                 invocation_resume(&cli.global, &id, reason.as_deref(), json).await?
             }
@@ -3186,6 +3192,44 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     });
 
+    // Live-drop listener: this daemon's runner is the zero-lag liveness
+    // authority. Bare drops are rejected while active; --live arms the
+    // invocation-scoped boundary halt before the CLI publishes the audit event.
+    let (drop_listener_shutdown_tx, mut drop_listener_shutdown_rx) =
+        tokio::sync::oneshot::channel::<()>();
+    let drop_bus = bus.clone();
+    let drop_runner = resume_runner.clone();
+    let drop_listener_handle = tokio::spawn(async move {
+        'resubscribe: loop {
+            let mut sub = match drop_bus.subscribe_control_drop().await {
+                Ok(sub) => sub,
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to subscribe to control drop; retrying in 5s");
+                    tokio::select! {
+                        _ = &mut drop_listener_shutdown_rx => break 'resubscribe,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
+                    }
+                }
+            };
+            loop {
+                tokio::select! {
+                    _ = &mut drop_listener_shutdown_rx => break 'resubscribe,
+                    msg = sub.next() => {
+                        let Some(msg) = msg else { continue 'resubscribe };
+                        let Some(reply) = msg.reply.clone() else { continue };
+                        let response = match serde_json::from_slice::<InvocationDropRequest>(&msg.payload) {
+                            Ok(req) => handle_drop_request(&drop_runner, req),
+                            Err(err) => InvocationDropResponse { ok: false, message: format!("invalid drop request: {err}") },
+                        };
+                        if let Ok(body) = serde_json::to_vec(&response) {
+                            let _ = drop_bus.reply_control(reply.to_string(), body).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // Spawn the trigger dispatcher. Its concurrency bound (#70) is
     // config, default 1 (serial) until the Phase-2 concurrency gate.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -3475,6 +3519,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = reload_shutdown_tx.send(());
     let _ = down_listener_shutdown_tx.send(());
     let _ = resume_listener_shutdown_tx.send(());
+    let _ = drop_listener_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
         Ok(Ok(Ok(()))) => println!("  projection consumer stopped cleanly."),
@@ -3594,6 +3639,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Ok(Ok(())) => {}
         Ok(Err(err)) => tracing::error!(error = %err, "control-resume listener task panicked"),
         Err(_) => tracing::warn!("control-resume listener did not shut down within 5s"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), drop_listener_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(error = %err, "control-drop listener task panicked"),
+        Err(_) => tracing::warn!("control-drop listener did not shut down within 5s"),
     }
 
     // Shut down MCP server processes.
@@ -4314,6 +4364,45 @@ async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::R
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct InvocationDropRequest {
+    invocation_id: String,
+    live: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct InvocationDropResponse {
+    ok: bool,
+    message: String,
+}
+
+fn handle_drop_request(
+    runner: &fq_runtime::ReducerRunner<fq_runtime::Harness>,
+    req: InvocationDropRequest,
+) -> InvocationDropResponse {
+    let Ok(id) = uuid::Uuid::parse_str(&req.invocation_id) else {
+        return InvocationDropResponse {
+            ok: false,
+            message: format!("invalid invocation id `{}`", req.invocation_id),
+        };
+    };
+    if runner.is_active(&id) {
+        if !req.live {
+            return InvocationDropResponse {
+                ok: false,
+                message: format!(
+                    "invocation {id} is currently running; use --live to halt and drop it"
+                ),
+            };
+        }
+        let _ = runner.request_halt(id);
+    }
+    InvocationDropResponse {
+        ok: true,
+        message: "drop accepted".into(),
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
 struct InvocationResumeRequest {
     invocation_id: String,
     reason: Option<String>,
@@ -4609,6 +4698,7 @@ async fn invocation_drop(
     global: &GlobalArgs,
     id: &str,
     reason: Option<&str>,
+    live: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
@@ -4622,6 +4712,30 @@ async fn invocation_drop(
     let bus = EventBus::connect(&config.nats.url)
         .await
         .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+
+    // Fail closed: only the daemon can authoritatively say whether this
+    // invocation is active. It arms the halt before the terminal audit event
+    // is published, preventing a bare live drop from changing any state.
+    let request = InvocationDropRequest {
+        invocation_id: id.to_string(),
+        live,
+    };
+    match bus
+        .request_control_drop(serde_json::to_vec(&request)?)
+        .await
+    {
+        Ok(bytes) => {
+            let response: InvocationDropResponse = serde_json::from_slice(&bytes)?;
+            if !response.ok {
+                anyhow::bail!(response.message);
+            }
+        }
+        // Core NATS reports no responders immediately when no daemon owns the
+        // runner. That is precisely the inactive/stuck case, whose existing
+        // direct-store drop remains valid without --live.
+        Err(err) if err.to_string().contains("no responders") => {}
+        Err(err) => return Err(err).context("drop liveness check failed"),
+    }
 
     let result = publish_invocation_drop(&bus, &proj_store, &control_store, id, reason).await?;
 
