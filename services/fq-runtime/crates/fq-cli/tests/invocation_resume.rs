@@ -526,6 +526,33 @@ async fn resume_rejects_unknown_and_dropped_invocations() {
         "daemon-down resume must be a clean error:\n{down_msg}"
     );
 
+    // The #374 resurrection regression: restart after the drop. The
+    // startup reconciliation must close the worker row from the
+    // authoritative owner status BEFORE recovery classifies, so the
+    // dropped invocation neither re-reports ambiguous nor renders a
+    // live execution — on any restart, forever.
+    let mut third = Daemon::spawn(&scratch, &nats_url, "daemon-third.log");
+    third
+        .await_log("Runtime ready", Duration::from_secs(30))
+        .await;
+    let list = run_fq(&scratch, &nats_url, &["invocation", "list"]);
+    let list_text = String::from_utf8_lossy(&list.stdout).to_string();
+    assert!(
+        !list_text.contains("ambiguous"),
+        "dropped invocation resurrected as ambiguous after restart:\n{list_text}"
+    );
+    assert!(
+        list_text.contains("failed"),
+        "dropped invocation lost its terminal status after restart:\n{list_text}"
+    );
+    let show = run_fq(&scratch, &nats_url, &["invocation", "show", &invocation_id]);
+    let show_text = String::from_utf8_lossy(&show.stdout).to_string();
+    assert!(
+        !show_text.contains("Live execution"),
+        "dropped invocation still renders a live execution after restart:\n{show_text}"
+    );
+    third.stop();
+
     mock.shutdown().await;
 }
 
