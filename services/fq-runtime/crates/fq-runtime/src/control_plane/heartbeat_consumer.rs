@@ -63,6 +63,7 @@ impl HeartbeatConsumer {
             durable_name: CONSUMER_NAME.to_string(),
             filter_subjects: vec![FILTER_SUBJECT.to_string()],
             deliver_from: DeliverFrom::Beginning,
+            strict_order: false,
         };
         run_durable_consumer(&self.bus, config, shutdown, |delivery| {
             self.handle_event(delivery.event)

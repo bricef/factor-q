@@ -191,6 +191,7 @@ impl CoordinationConsumer {
             durable_name,
             filter_subjects: vec![filter],
             deliver_from,
+            strict_order: false,
         };
         let this = &self;
         run_durable_consumer_with_tick(
