@@ -191,7 +191,7 @@ impl RecordingSink {
 
 #[async_trait::async_trait]
 impl EventSink for RecordingSink {
-    async fn publish(&self, event: &Event) -> Result<(), BusError> {
+    async fn publish(&self, event: &Event) -> Result<u64, BusError> {
         let mut events = self.events.lock().unwrap();
         if events.len() >= self.fail_at.load(Ordering::SeqCst) {
             return Err(BusError::Publish("sim: injected publish fault".to_string()));
@@ -224,7 +224,10 @@ impl EventSink for RecordingSink {
         }
         drop(arm);
         events.push(event.clone());
-        Ok(())
+        // The sim's "stream sequence": 1-based position in the recorded
+        // log — deterministic, monotonic, exactly what JetStream would
+        // hand back.
+        Ok(events.len() as u64)
     }
 }
 

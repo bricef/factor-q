@@ -61,6 +61,14 @@ pub enum ViewsError {
     ControlPlane(#[from] ControlPlaneStoreError),
     #[error("worker store: {0}")]
     Worker(#[from] WorkerStoreError),
+    #[error(
+        "no projection watermark on this read path: min_seq waiting needs an \
+         in-process projection consumer (the daemon has one; a direct CLI \
+         read does not)"
+    )]
+    WatermarkUnavailable,
+    #[error(transparent)]
+    Watermark(#[from] crate::watermark::WatermarkError),
 }
 
 // ============================================================
@@ -637,6 +645,10 @@ pub struct Views {
     projection: ProjectionStore,
     control_plane: ControlPlaneStore,
     worker: WorkerStore,
+    /// The projection consumer's progress, when one runs in this
+    /// process (the daemon). Absent on direct CLI reads — those
+    /// serve whatever the fold currently holds and refuse `min_seq`.
+    watermark: Option<crate::watermark::Watermark>,
 }
 
 impl Views {
@@ -652,7 +664,36 @@ impl Views {
             projection,
             control_plane,
             worker,
+            watermark: None,
         })
+    }
+
+    /// Attach the in-process projection consumer's watermark, enabling
+    /// [`Views::at_watermark`] on this handle (the daemon's read path).
+    pub fn with_watermark(mut self, watermark: crate::watermark::Watermark) -> Self {
+        self.watermark = Some(watermark);
+        self
+    }
+
+    /// Gate a read at a watermark: with `min_seq` absent this is free;
+    /// otherwise wait — bounded by `bound` — until the projection's
+    /// fold includes at least `min_seq` (the read-your-writes
+    /// composition: `min_seq` comes from a command receipt's
+    /// `watermark(domain)`). Read paths without an in-process
+    /// projection refuse rather than serving a silently-stale answer.
+    pub async fn at_watermark(
+        &self,
+        min_seq: Option<u64>,
+        bound: std::time::Duration,
+    ) -> Result<(), ViewsError> {
+        let Some(min_seq) = min_seq else {
+            return Ok(());
+        };
+        let Some(watermark) = &self.watermark else {
+            return Err(ViewsError::WatermarkUnavailable);
+        };
+        watermark.wait_for(min_seq, bound).await?;
+        Ok(())
     }
 
     /// Total event count in the projection.

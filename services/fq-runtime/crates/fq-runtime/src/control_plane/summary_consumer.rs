@@ -153,8 +153,8 @@ impl SummaryConsumer {
             filter_subjects,
             deliver_from,
         };
-        run_durable_consumer(&self.bus, config, shutdown, |event| {
-            self.handle_event(event)
+        run_durable_consumer(&self.bus, config, shutdown, |delivery| {
+            self.handle_event(delivery.event)
         })
         .await
         .map_err(SummaryConsumerError::from)
@@ -357,7 +357,7 @@ impl SummaryConsumer {
         });
 
         match self.bus.publish(&summary_event).await {
-            Ok(()) => {
+            Ok(_seq) => {
                 if kind != SummaryKind::Outcome {
                     self.summaries
                         .lock()

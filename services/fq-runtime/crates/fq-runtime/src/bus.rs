@@ -26,12 +26,14 @@ use crate::events::Event;
 /// equivalence checks treat them as volatile.
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
-    async fn publish(&self, event: &Event) -> Result<(), BusError>;
+    /// Publish one event; returns its sequence on the event stream —
+    /// the coordinate receipts and the projection watermark speak.
+    async fn publish(&self, event: &Event) -> Result<u64, BusError>;
 }
 
 #[async_trait::async_trait]
 impl EventSink for EventBus {
-    async fn publish(&self, event: &Event) -> Result<(), BusError> {
+    async fn publish(&self, event: &Event) -> Result<u64, BusError> {
         EventBus::publish(self, event).await
     }
 }
@@ -434,8 +436,11 @@ impl EventBus {
     ///
     /// The event's subject is derived from its payload type via
     /// [`Event::subject`]. Publishing awaits the JetStream ack, confirming
-    /// the event was durably stored.
-    pub async fn publish(&self, event: &Event) -> Result<(), BusError> {
+    /// the event was durably stored, and returns the event's sequence on
+    /// the `fq-events` stream — the coordinate a command's receipt hands
+    /// back for read-your-writes against the projection watermark
+    /// (mirrors [`EventBus::publish_trigger`]).
+    pub async fn publish(&self, event: &Event) -> Result<u64, BusError> {
         let subject = event.subject();
         let payload = serde_json::to_vec(event)?;
         debug!(subject = %subject, event_id = %event.envelope.event_id, "publishing event");
@@ -450,11 +455,12 @@ impl EventBus {
         // poisons the retry loop.
         check_payload_size(payload.len(), self.max_payload)?;
 
-        self.jetstream
+        let ack = self
+            .jetstream
             .publish(subject, Bytes::from(payload))
             .await?
             .await?;
-        Ok(())
+        Ok(ack.sequence)
     }
 
     /// Publish a trigger for a given agent. The JSON-encoded

@@ -2807,9 +2807,13 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         .await
         .context("failed to publish system.startup event")?;
 
-    // Spawn the projection consumer.
+    // Spawn the projection consumer, advancing the watermark as it
+    // applies events — the fold-as-of-W coordinate reads gate on for
+    // read-your-writes (plan Phase 3a).
+    let (watermark_tx, projection_watermark) = fq_runtime::watermark::channel();
     let (proj_shutdown_tx, proj_shutdown_rx) = tokio::sync::oneshot::channel();
-    let projection_consumer = ProjectionConsumer::new(bus.clone(), store.clone());
+    let projection_consumer =
+        ProjectionConsumer::new(bus.clone(), store.clone()).with_watermark(watermark_tx);
     let mut projection_handle =
         tokio::spawn(async move { projection_consumer.run(proj_shutdown_rx).await });
 
@@ -3085,7 +3089,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         let views = Arc::new(
             fq_runtime::views::Views::open(&db_paths)
                 .await
-                .context("read service: failed to open the read views")?,
+                .context("read service: failed to open the read views")?
+                // The daemon's read path can gate at a watermark: the
+                // projection consumer runs in this process.
+                .with_watermark(projection_watermark.clone()),
         );
         let (rs_addr, rs_serving) = fq_runtime::read_service::bind(
             &config.read_service.bind,

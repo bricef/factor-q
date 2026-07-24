@@ -64,8 +64,8 @@ impl HeartbeatConsumer {
             filter_subjects: vec![FILTER_SUBJECT.to_string()],
             deliver_from: DeliverFrom::Beginning,
         };
-        run_durable_consumer(&self.bus, config, shutdown, |event| {
-            self.handle_event(event)
+        run_durable_consumer(&self.bus, config, shutdown, |delivery| {
+            self.handle_event(delivery.event)
         })
         .await
         .map_err(HeartbeatConsumerError::from)

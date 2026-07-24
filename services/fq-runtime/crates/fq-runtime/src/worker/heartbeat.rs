@@ -115,7 +115,7 @@ impl HeartbeatProducer {
             }),
         );
         match self.bus.publish(&event).await {
-            Ok(()) => {
+            Ok(_seq) => {
                 debug!(worker_id = %self.worker_id, "heartbeat published");
             }
             Err(err) => {
