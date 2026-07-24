@@ -3095,104 +3095,61 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     });
 
-    // Operator resume listener: the daemon owns the worker store and is the
-    // only process allowed to mutate the WAL. Request/reply also lets the CLI
-    // distinguish a stopped daemon from a rejected precondition.
+    // Operator resume listener (`fq invocation resume`, #373): the daemon
+    // owns the worker store and is the only process allowed to mutate the
+    // WAL, and request/reply lets the CLI distinguish a stopped daemon
+    // from a rejected precondition. All decision-making lives in
+    // `handle_resume_request`; this task is transport only. Best-effort
+    // core-NATS like reload/down: non-fatal, resubscribes on loss, and
+    // its handle is not watched in the main select.
     let (resume_listener_shutdown_tx, mut resume_listener_shutdown_rx) =
         tokio::sync::oneshot::channel::<()>();
-    let resume_control_bus = bus.clone();
-    let resume_control_store = worker_store.clone();
-    let resume_control_cp = cp_store.clone();
-    let resume_control_runner = resume_runner.clone();
-    let resume_control_registry = shared_registry.clone();
-    let resume_control_llm = llm.clone();
+    let resume_control = ResumeControl {
+        bus: bus.clone(),
+        worker_store: worker_store.clone(),
+        cp_store: cp_store.clone(),
+        runner: resume_runner.clone(),
+        registry: shared_registry.clone(),
+        llm: llm.clone(),
+    };
     let resume_listener_handle = tokio::spawn(async move {
-        let mut sub = match resume_control_bus.subscribe_control_resume().await {
-            Ok(sub) => sub,
-            Err(err) => {
-                tracing::error!(error=%err, "failed to subscribe to invocation resume");
-                return;
-            }
-        };
-        loop {
-            tokio::select! {
-                _ = &mut resume_listener_shutdown_rx => break,
-                msg = sub.next() => {
-                    let Some(msg) = msg else { break };
-                    let Some(reply) = msg.reply.clone() else { continue };
-                    let request: Result<InvocationResumeRequest, _> = serde_json::from_slice(&msg.payload);
-                    let response = match request {
-                        Err(err) => InvocationResumeResponse { ok: false, message: format!("invalid resume request: {err}"), completed_call_ids: vec![] },
-                        Ok(req) => {
-                            let state = resume_control_store.get_invocation_state(&req.invocation_id).await;
-                            match state {
-                                Ok(None) => {
-                                    let owner = resume_control_cp.get_invocation_owner(&req.invocation_id).await.ok().flatten();
-                                    let message = match owner.map(|o| o.status) {
-                                        Some(fq_runtime::control_plane::OwnerStatus::Completed | fq_runtime::control_plane::OwnerStatus::Failed) => format!("invocation {} is terminal and cannot be resumed", req.invocation_id),
-                                        _ => format!("unknown invocation {}", req.invocation_id),
-                                    };
-                                    InvocationResumeResponse { ok: false, message, completed_call_ids: vec![] }
-                                },
-                                Err(err) => InvocationResumeResponse { ok: false, message: format!("failed to inspect invocation: {err}"), completed_call_ids: vec![] },
-                                Ok(Some(state)) if state.terminal_at.is_some() => InvocationResumeResponse { ok: false, message: format!("invocation {} is terminal and cannot be resumed", req.invocation_id), completed_call_ids: vec![] },
-                                Ok(Some(state)) => {
-                                    let tools = resume_control_store.list_tool_dispatches_for_invocation(&req.invocation_id).await;
-                                    let llms = resume_control_store.list_llm_dispatches_for_invocation(&req.invocation_id).await;
-                                    match (tools, llms) {
-                                        (Ok(tools), Ok(llms)) => {
-                                            if llms.iter().any(|r| r.status == fq_runtime::worker::DispatchStatus::Dispatched) {
-                                                let response = InvocationResumeResponse { ok: false, message: format!("invocation {} is ambiguous in an LLM dispatch; interrupted-result injection applies only to tool calls", req.invocation_id), completed_call_ids: vec![] };
-                                                if let Ok(body) = serde_json::to_vec(&response) { let _ = resume_control_bus.reply_control(reply.to_string(), body).await; }
-                                                continue;
-                                            }
-                                            let category = fq_runtime::worker::categorise(&state, &tools, &llms);
-                                            if !matches!(category, fq_runtime::worker::RecoveryCategory::Ambiguous) {
-                                                let owner = resume_control_cp.get_invocation_owner(&req.invocation_id).await.ok().flatten();
-                                                let message = if owner.as_ref().is_some_and(|o| o.status == fq_runtime::control_plane::OwnerStatus::InFlight) {
-                                                    format!("invocation {} is live; only Ambiguous invocations can be resumed", req.invocation_id)
-                                                } else {
-                                                    format!("invocation {} is not Ambiguous (it may already have been resumed)", req.invocation_id)
-                                                };
-                                                InvocationResumeResponse { ok: false, message, completed_call_ids: vec![] }
-                                            } else {
-                                                match resume_control_store.inject_interrupted_results(&req.invocation_id).await {
-                                                    Err(err) => InvocationResumeResponse { ok: false, message: format!("failed to inject interrupted result: {err}"), completed_call_ids: vec![] },
-                                                    Ok(ids) => {
-                                                        let agent_id = fq_runtime::AgentId::new(state.agent_id.clone());
-                                                        let invocation_id = uuid::Uuid::parse_str(&req.invocation_id);
-                                                        match (agent_id, invocation_id) {
-                                                            (Ok(agent_id), Ok(invocation_id)) => {
-                                                                let event = Event::new(agent_id.clone(), invocation_id, EventPayload::InvocationOperatorResumed(fq_runtime::events::InvocationOperatorResumedPayload { completed_call_ids: ids.clone(), reason: req.reason }));
-                                                                if let Err(err) = resume_control_bus.publish(&event).await { tracing::warn!(error=%err, "failed to publish invocation.operator_resumed"); }
-                                                                let agent = { resume_control_registry.read().await.get(&agent_id).cloned() };
-                                                                if let Some(agent) = agent {
-                                                                    let runner = resume_control_runner.clone();
-                                                                    let llm = resume_control_llm.clone();
-                                                                    tokio::spawn(async move {
-                                                                        if let Err(err) = runner.resume(&agent, llm.as_ref(), invocation_id).await {
-                                                                            tracing::error!(error=%err, %invocation_id, "operator resume failed");
-                                                                        }
-                                                                    });
-                                                                    InvocationResumeResponse { ok: true, message: "resume accepted".into(), completed_call_ids: ids }
-                                                                } else {
-                                                                    InvocationResumeResponse { ok: false, message: format!("agent {} is not loaded", state.agent_id), completed_call_ids: ids }
-                                                                }
-                                                            }
-                                                            _ => InvocationResumeResponse { ok: false, message: "stored invocation identity is invalid".into(), completed_call_ids: ids },
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        _ => InvocationResumeResponse { ok: false, message: "failed to inspect invocation WAL".into(), completed_call_ids: vec![] },
-                                    }
-                                }
-                            }
+        'resubscribe: loop {
+            let mut sub = match resume_control.bus.subscribe_control_resume().await {
+                Ok(sub) => sub,
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "failed to subscribe to control resume; retrying in 5s"
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = &mut resume_listener_shutdown_rx => break 'resubscribe,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
+                    }
+                }
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut resume_listener_shutdown_rx => break 'resubscribe,
+                    msg = sub.next() => {
+                        let Some(msg) = msg else {
+                            tracing::warn!("control-resume subscription ended; resubscribing");
+                            continue 'resubscribe;
+                        };
+                        // Request/reply only: a message with no reply inbox
+                        // has no caller waiting, so there is nothing to serve.
+                        let Some(reply) = msg.reply.clone() else { continue };
+                        let response =
+                            match serde_json::from_slice::<InvocationResumeRequest>(&msg.payload) {
+                                Ok(req) => handle_resume_request(&resume_control, req).await,
+                                Err(err) => InvocationResumeResponse::rejected(format!(
+                                    "invalid resume request: {err}"
+                                )),
+                            };
+                        if let Ok(body) = serde_json::to_vec(&response) {
+                            let _ = resume_control.bus.reply_control(reply.to_string(), body).await;
                         }
-                    };
-                    if let Ok(body) = serde_json::to_vec(&response) {
-                        let _ = resume_control_bus.reply_control(reply.to_string(), body).await;
                     }
                 }
             }
@@ -4337,6 +4294,176 @@ struct InvocationResumeResponse {
     ok: bool,
     message: String,
     completed_call_ids: Vec<String>,
+}
+
+impl InvocationResumeResponse {
+    /// Precondition refusal: nothing was injected yet, so there are no
+    /// completed call ids to report.
+    fn rejected(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            message: message.into(),
+            completed_call_ids: Vec::new(),
+        }
+    }
+}
+
+/// Daemon-side dependencies for servicing `fq invocation resume`
+/// requests (#373), grouped so the control listener hands one handle to
+/// `handle_resume_request` instead of threading six parameters through
+/// the spawn.
+struct ResumeControl {
+    bus: EventBus,
+    worker_store: Arc<fq_runtime::WorkerStore>,
+    cp_store: Arc<ControlPlaneStore>,
+    runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
+    registry: SharedRegistry,
+    llm: Arc<dyn LlmClient>,
+}
+
+/// Service one `fq invocation resume` request on the daemon side: enforce
+/// the Ambiguous-only precondition, durably inject interrupted results,
+/// publish the `invocation.operator_resumed` audit event, and re-drive the
+/// invocation through the existing SafeReplay recovery path (#373).
+///
+/// Every refusal returns a distinct message because the CLI surfaces it
+/// verbatim — the operator must be able to tell terminal / live /
+/// already-resumed / unknown apart without reading daemon logs.
+async fn handle_resume_request(
+    control: &ResumeControl,
+    req: InvocationResumeRequest,
+) -> InvocationResumeResponse {
+    use fq_runtime::control_plane::OwnerStatus;
+    use fq_runtime::events::InvocationOperatorResumedPayload;
+    use fq_runtime::worker::{DispatchStatus, RecoveryCategory, categorise};
+
+    let id = &req.invocation_id;
+    let state = match control.worker_store.get_invocation_state(id).await {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            // No WAL row. The control plane can still tell a finished
+            // invocation apart from a never-seen id, so the operator
+            // learns which mistake they made.
+            let owner = control
+                .cp_store
+                .get_invocation_owner(id)
+                .await
+                .ok()
+                .flatten();
+            return InvocationResumeResponse::rejected(match owner.map(|o| o.status) {
+                Some(OwnerStatus::Completed | OwnerStatus::Failed) => {
+                    format!("invocation {id} is terminal and cannot be resumed")
+                }
+                _ => format!("unknown invocation {id}"),
+            });
+        }
+        Err(err) => {
+            return InvocationResumeResponse::rejected(format!(
+                "failed to inspect invocation: {err}"
+            ));
+        }
+    };
+    if state.terminal_at.is_some() {
+        return InvocationResumeResponse::rejected(format!(
+            "invocation {id} is terminal and cannot be resumed"
+        ));
+    }
+
+    let tools = control
+        .worker_store
+        .list_tool_dispatches_for_invocation(id)
+        .await;
+    let llms = control
+        .worker_store
+        .list_llm_dispatches_for_invocation(id)
+        .await;
+    let (Ok(tools), Ok(llms)) = (tools, llms) else {
+        return InvocationResumeResponse::rejected("failed to inspect invocation WAL");
+    };
+
+    // Interrupted-result injection only reconciles tool calls — a stuck
+    // LLM dispatch has no tool_dispatch row to complete, so resume cannot
+    // help and must say so rather than mislabel the state.
+    if llms.iter().any(|l| l.status == DispatchStatus::Dispatched) {
+        return InvocationResumeResponse::rejected(format!(
+            "invocation {id} is ambiguous in an LLM dispatch; \
+             interrupted-result injection applies only to tool calls"
+        ));
+    }
+    if categorise(&state, &tools, &llms) != RecoveryCategory::Ambiguous {
+        // Non-ambiguous splits into live (a worker still owns it) vs
+        // already-recovered — distinct errors per #373's precondition.
+        let live = control
+            .cp_store
+            .get_invocation_owner(id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|o| o.status == OwnerStatus::InFlight);
+        return InvocationResumeResponse::rejected(if live {
+            format!("invocation {id} is live; only Ambiguous invocations can be resumed")
+        } else {
+            format!("invocation {id} is not Ambiguous (it may already have been resumed)")
+        });
+    }
+
+    let ids = match control.worker_store.inject_interrupted_results(id).await {
+        Ok(ids) => ids,
+        Err(err) => {
+            return InvocationResumeResponse::rejected(format!(
+                "failed to inject interrupted result: {err}"
+            ));
+        }
+    };
+
+    // From here on the injection is durable, so even failure responses
+    // carry the completed call ids: the WAL changed whether or not the
+    // re-drive could be started.
+    let (Ok(agent_id), Ok(invocation_id)) =
+        (AgentId::new(state.agent_id.clone()), Uuid::parse_str(id))
+    else {
+        return InvocationResumeResponse {
+            ok: false,
+            message: "stored invocation identity is invalid".into(),
+            completed_call_ids: ids,
+        };
+    };
+
+    // Audit is best-effort: the durable injection is the source of truth,
+    // and a lost event must not abort the resume.
+    let event = Event::new(
+        agent_id.clone(),
+        invocation_id,
+        EventPayload::InvocationOperatorResumed(InvocationOperatorResumedPayload {
+            completed_call_ids: ids.clone(),
+            reason: req.reason,
+        }),
+    );
+    if let Err(err) = control.bus.publish(&event).await {
+        tracing::warn!(error = %err, "failed to publish invocation.operator_resumed");
+    }
+
+    let Some(agent) = control.registry.read().await.get(&agent_id).cloned() else {
+        return InvocationResumeResponse {
+            ok: false,
+            message: format!("agent {} is not loaded", state.agent_id),
+            completed_call_ids: ids,
+        };
+    };
+    // Detached like startup recovery: the reply must not wait on the
+    // re-driven invocation, which can run for minutes.
+    let runner = control.runner.clone();
+    let llm = control.llm.clone();
+    tokio::spawn(async move {
+        if let Err(err) = runner.resume(&agent, llm.as_ref(), invocation_id).await {
+            tracing::error!(error = %err, %invocation_id, "operator resume failed");
+        }
+    });
+    InvocationResumeResponse {
+        ok: true,
+        message: "resume accepted".into(),
+        completed_call_ids: ids,
+    }
 }
 
 async fn invocation_resume(
