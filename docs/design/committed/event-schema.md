@@ -135,6 +135,7 @@ Concrete subjects:
 | `fq.agent.{agent_id}.invocation.ambiguous` | An invocation is in recovery limbo — an ambiguous WAL row on restart, or a failed automatic resume — and needs operator attention |
 | `fq.agent.{agent_id}.invocation.archived` | Worker → control-plane: invocation reached terminal; hand off the final state |
 | `fq.agent.{agent_id}.invocation.operator_recovered` | Operator → control-plane: operator-issued terminal transition (`fq invocation drop`) |
+| `fq.agent.{agent_id}.invocation.operator_resumed` | Operator → worker: interrupted-result injection (`fq invocation resume`), with completed call ids and optional reason |
 | `fq.agent.{agent_id}.completed` | Invocation has finished successfully |
 | `fq.agent.{agent_id}.failed` | Invocation has terminated with an error |
 | `fq.worker.{worker_id}.heartbeat` | Worker liveness signal (periodic) |

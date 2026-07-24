@@ -278,11 +278,13 @@ row and updates the owner status to `Failed`. A late
 a no-downgrade guard and does not override the operator's
 decision.
 
-`resume` semantics are deferred from v1: the control-plane
-doesn't currently carry the worker's `state_blob` for
-ambiguous invocations, so an honest resume would either
-require enriching `invocation.ambiguous` to carry the blob or
-adding an operator-RPC to the worker. The contract — *that
+`fq invocation resume <id> [--reason <text>]` recovers an ambiguous
+invocation through the daemon that owns its worker store. It completes each
+stuck `dispatched` tool row with a durable synthetic interrupted result, then
+re-drives the existing `SafeReplay` path. The notice explicitly says execution
+is unknown so the model can inspect external state before deciding whether to
+retry. `fq invocation drop` remains the alternative when progress should be
+abandoned. The contract — *that
 ambiguity is operator-visible across the cluster and not
 silently resolved* — is preserved by drop. Node-level
 recovery (`fq recover`) for stuck workers / control-plane is

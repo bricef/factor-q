@@ -224,6 +224,7 @@ impl CoordinationConsumer {
                 self.handle_invocation_operator_recovered(&event, payload)
                     .await
             }
+            EventPayload::InvocationOperatorResumed(_) => Ok(()),
             _ => {
                 // Unknown invocation event variant — ack and
                 // move on. We only filter to invocation.*
