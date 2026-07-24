@@ -772,11 +772,8 @@ fn load_connections(path: &Path) -> anyhow::Result<Connections> {
     toml::from_str(&body).with_context(|| format!("parse {}", path.display()))
 }
 
-/// Persist the credential store: directory 0700, file 0600 from the
-/// first byte, written to a temp file and renamed so a crash never
-/// leaves a partial credentials file.
-fn store_connections(path: &Path, connections: &Connections) -> anyhow::Result<()> {
-    let dir = path.parent().expect("connections path has a parent");
+/// Create the credential directory owner-only.
+fn ensure_config_dir(dir: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -787,6 +784,39 @@ fn store_connections(path: &Path, connections: &Connections) -> anyhow::Result<(
     }
     #[cfg(not(unix))]
     std::fs::create_dir_all(dir)?;
+    Ok(())
+}
+
+/// Insert one pairing under an exclusive advisory lock, re-reading the
+/// store inside it. The window between a `connect`'s first read and
+/// its write is seconds long (probe, handshake, possibly a human at
+/// the [y/N] prompt), so writing that early snapshot back would
+/// silently discard whatever a concurrent `fq connect` stored for
+/// another address in the meantime — the lock makes every writer merge
+/// into the latest state instead.
+fn store_connection(path: &Path, addr: &str, entry: ConnectionEntry) -> anyhow::Result<()> {
+    let dir = path.parent().expect("connections path has a parent");
+    ensure_config_dir(dir)?;
+    let lock_path = dir.join(".connections.lock");
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock.lock()
+        .map_err(|e| anyhow::anyhow!("lock {}: {e}", lock_path.display()))?;
+    let mut store = load_connections(path)?;
+    store.connections.insert(addr.to_string(), entry);
+    store_connections(path, &store)
+    // The lock releases when `lock` drops.
+}
+
+/// Persist the credential store: directory 0700, file 0600 from the
+/// first byte, written to a temp file and renamed so a crash never
+/// leaves a partial credentials file.
+fn store_connections(path: &Path, connections: &Connections) -> anyhow::Result<()> {
+    let dir = path.parent().expect("connections path has a parent");
+    ensure_config_dir(dir)?;
     let body = toml::to_string_pretty(connections)?;
     // Per-process temp name: concurrent `fq connect` runs must not
     // race each other's staging file (the rename stays atomic either
@@ -818,6 +848,12 @@ fn fingerprint_hex(fingerprint: [u8; 32]) -> String {
 
 fn parse_fingerprint_hex(hex: &str) -> anyhow::Result<[u8; 32]> {
     let hex = hex.trim();
+    // Length is checked in bytes but sliced on char boundaries below —
+    // reject non-ASCII first so a 64-byte multi-byte string errors
+    // cleanly instead of panicking mid-codepoint.
+    if !hex.is_ascii() {
+        anyhow::bail!("fingerprint is not valid hex: {hex:?}");
+    }
     if hex.len() != 64 {
         anyhow::bail!(
             "fingerprint must be 64 hex chars (SHA-256), got {} chars",
@@ -849,8 +885,7 @@ async fn connect(
     let config = global.resolve_config()?;
     let addr = addr.unwrap_or_else(|| config.edge.bind.clone());
     let path = connections_path()?;
-    let mut store = load_connections(&path)?;
-    let existing = store.connections.get(&addr).cloned();
+    let existing = load_connections(&path)?.connections.get(&addr).cloned();
 
     let token = token
         .or_else(|| existing.as_ref().map(|e| e.token.clone()))
@@ -895,14 +930,14 @@ async fn connect(
 
     edge_client(&addr, expected, &token).await?;
 
-    store.connections.insert(
-        addr.clone(),
+    store_connection(
+        &path,
+        &addr,
         ConnectionEntry {
             fingerprint: fingerprint_hex(expected),
             token,
         },
-    );
-    store_connections(&path, &store)?;
+    )?;
     println!(
         "connected: {addr} (fingerprint {}…) — credentials stored in {}",
         &fingerprint_hex(expected)[..12],
@@ -5402,5 +5437,55 @@ mod doctor_tests {
         assert_eq!(report.dead_letters.exhausted_triggers, 0);
         let out = render_doctor_report_human(&report);
         assert!(out.contains("Dead-letters: none"), "got: {out}");
+    }
+}
+
+#[cfg(test)]
+mod edge_client_store_tests {
+    use super::*;
+
+    /// A 64-byte string with a multi-byte codepoint passes the length
+    /// gate; slicing must not panic mid-codepoint (ultrareview
+    /// bug_001) — it errors like any other junk.
+    #[test]
+    fn fingerprint_hex_rejects_non_ascii_without_panicking() {
+        let hostile = format!("a\u{e9}{}", "a".repeat(61));
+        assert_eq!(hostile.len(), 64, "64 bytes, 63 chars — the trap input");
+        let err = parse_fingerprint_hex(&hostile).unwrap_err();
+        assert!(err.to_string().contains("not valid hex"), "{err}");
+    }
+
+    /// Concurrent `fq connect` runs must merge, not lose each other's
+    /// entries (ultrareview bug_004): every writer re-reads under the
+    /// lock, so a slow writer cannot clobber a fast one.
+    #[test]
+    fn concurrent_connects_merge_rather_than_lose_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("factor-q").join("connections.toml");
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    store_connection(
+                        &path,
+                        &format!("127.0.0.1:{i}"),
+                        ConnectionEntry {
+                            fingerprint: "f".repeat(64),
+                            token: format!("token-{i}"),
+                        },
+                    )
+                    .unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let store = load_connections(&path).unwrap();
+        assert_eq!(
+            store.connections.len(),
+            8,
+            "every concurrent insert survives"
+        );
     }
 }
