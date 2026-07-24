@@ -76,6 +76,12 @@ is **complete** (claims R1–R7 all oracle-backed in the hermetic CI
 path: trace oracle, state validation, sim world, resume equivalence,
 crash DST, budget properties, soak — seven real bugs found and fixed
 by it; `just soak` scales the lifecycle driver for deep local runs).
+The registry-first API + daemon/CLI split (ADR-0006 + ADR-0031) is
+**underway** per the
+[registry-and-split-execution plan](docs/plans/active/2026-07-20-registry-and-split-execution.md):
+Phase 0 (golden net) and Phase 1 (`fq-ops` contract crate) have landed,
+and Phase 2 — the authenticated generic edge (`fq-edge`, TLS + capability
+tokens) — is wired into the daemon and enabled by default.
 The dogfood loop **lands PRs**: alongside the daily read-and-report
 `doc-drift` agent (fq-cron-scheduled; findings feed the
 issue tracker), the `github-watcher` adapter triggers
@@ -89,12 +95,12 @@ that track: exactly-once trigger dispatch
 to close the duplicate-PR redelivery storm, and the M0 plan's proxy
 instrumentation (read relative to an expert+frontier baseline) to make
 **M1 (Q1)** decidable. Open strategic questions
-(security sequencing, the API layer) are in the
+(security sequencing) are in the
 [2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
 
 ## Not built yet
 
-API layer (ADR-0006, accepted but unbuilt) · multi-agent orchestration (ADR-0007, accepted but unbuilt) ·
+Multi-agent orchestration (ADR-0007, accepted but unbuilt) ·
 memory + skills services · context compaction · container isolation
 (ADR-0010, accepted but unbuilt) · observability floor
 (JSON logs, metrics, alerting) · NATS auth · tagged binary releases (the
