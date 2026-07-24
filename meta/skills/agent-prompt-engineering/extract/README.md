@@ -6,10 +6,6 @@ JSON files in that directory. Logic is unchanged from the analysis run — the
 numbers in `factor-q-delegation-failure-analysis.md` (v2) reproduce from
 these.
 
-Suggested home: `factor-q/meta/skills/agent-prompt-engineering/extract/`,
-next to the SKILL.md — same convention as `backlog-grooming/prefilter.sh`
-(deterministic plumbing co-located with the judgment doc that consumes it).
-
 ## Prerequisites
 
 ```
