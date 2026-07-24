@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 fq-tools = { workspace = true }
 async-nats = { workspace = true }
+# Optional: only the `test-support` feature (the mock LLM server for
+# sibling crates' integration tests) compiles it into a non-test build.
+axum = { workspace = true, optional = true }
 url = "2"
 # Trimmed from "full" (#194 phase 2): this is a library crate, so its
 # feature set leaks to every consumer. The list is the observed need of
@@ -37,6 +40,9 @@ strum = { workspace = true }
 tarpc = { workspace = true, optional = true }
 
 [features]
+# Expose test_support::mock_anthropic to other crates' dev-dependencies
+# (resolver 2 keeps this out of every non-test build of consumers).
+test-support = ["dep:axum"]
 # The in-daemon read-only tarpc service (wire-mirror of `views` plus the
 # JetStream health probe). `fq-cli` enables it; whether the *listener*
 # starts is a runtime decision (`[read_service]` in fq.toml).

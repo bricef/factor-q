@@ -4368,6 +4368,19 @@ async fn handle_resume_request(
             "invocation {id} is terminal and cannot be resumed"
         ));
     }
+    // The worker store alone cannot see an operator drop (#374): drop
+    // writes coordination only, so the WAL state row still reads
+    // non-terminal here. Coordination is the authority on operator
+    // terminal decisions — consult it before touching the WAL, or
+    // resume would happily overrule a drop.
+    if let Ok(Some(owner)) = control.cp_store.get_invocation_owner(id).await
+        && matches!(owner.status, OwnerStatus::Completed | OwnerStatus::Failed)
+    {
+        return InvocationResumeResponse::rejected(format!(
+            "invocation {id} is terminal (completed, failed, or operator-dropped) \
+             and cannot be resumed"
+        ));
+    }
 
     let tools = control
         .worker_store

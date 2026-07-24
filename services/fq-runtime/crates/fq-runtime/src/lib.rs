@@ -49,7 +49,12 @@ pub mod read_service;
 pub mod control_plane;
 pub mod worker;
 
-#[cfg(test)]
+// Compiled for this crate's own tests, and — reduced to the
+// self-contained mock LLM server — for sibling crates' integration
+// tests via the `test-support` feature (fq-cli's resume e2e spawns a
+// daemon against it). The dev-dep-heavy helpers stay test-only; see
+// the cfg gates inside the module.
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
 pub use agent::{
