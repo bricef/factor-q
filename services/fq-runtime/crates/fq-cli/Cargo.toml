@@ -61,6 +61,9 @@ uuid = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+# The resume e2e drives a spawned daemon against the in-process mock
+# LLM server; the feature exists for exactly this (test builds only).
+fq-runtime = { workspace = true, features = ["read-service", "test-support"] }
 # The shared private-broker guard, for the daemon_shutdown integration
 # tests (#233).
 fq-test-support = { workspace = true }

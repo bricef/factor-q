@@ -18,13 +18,13 @@
 //! ```no_run
 //! # use fq_runtime::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
 //! # use fq_runtime::llm::GenAiClient;
-//! # tokio_test::block_on(async {
+//! # async fn example() {
 //! let mock = MockAnthropicServer::start().await;
 //! mock.push_response(MockResponse::text("hello", 12, 4));
-//! let client = GenAiClient::with_base_url(mock.base_url());
+//! let _client = GenAiClient::with_base_url(mock.base_url());
 //! // ... drive the runtime ...
 //! mock.shutdown().await;
-//! # });
+//! # }
 //! ```
 
 use std::net::{Ipv4Addr, SocketAddr};

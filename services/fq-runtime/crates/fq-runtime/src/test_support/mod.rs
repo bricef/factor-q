@@ -22,11 +22,20 @@
 // integration tests and other workspaces can share it (#233). Re-export it as
 // `nats` so this crate's own `#[cfg(test)]` code keeps using
 // `test_support::nats::{NatsServer, test_nats}` unchanged.
+#[cfg(test)]
 pub use fq_test_support as nats;
 
+// Everything except the mock LLM server leans on dev-dependencies
+// (fq-test-support, tempfile, …), so only the mock is exposed through
+// the `test-support` feature; the rest stays crate-test-only.
+#[cfg(test)]
 pub mod events;
 pub mod mock_anthropic;
+#[cfg(test)]
 pub mod oracle;
+#[cfg(test)]
 pub mod runtime;
+#[cfg(test)]
 pub mod sim;
+#[cfg(test)]
 pub mod stepper;

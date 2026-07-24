@@ -1938,6 +1938,36 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         let ctx = ToolContext::new(sandbox);
         let tool_start = Instant::now();
+
+        // Mark dispatched BEFORE the handoff, durably. This is the
+        // ambiguous-window state and it must cover the entire
+        // execution: a crash while the tool runs has unknown side
+        // effects and must classify Ambiguous on recovery — an
+        // intent-only WAL reads as "never ran" and gets silently
+        // re-run, which is exactly the double-side-effect disaster
+        // the recovery taxonomy exists to prevent.
+        self.config
+            .store
+            .write_tool_dispatched(
+                &inv_str,
+                req.tool_call_id.as_str(),
+                self.config.clock.unix_now_ms(),
+            )
+            .await
+            .map_err(map_store_err)?;
+        self.publish_chained(
+            cursor,
+            Event::new(
+                agent_id.clone(),
+                invocation_id,
+                EventPayload::ToolDispatched(events::ToolDispatchedPayload {
+                    tool_call_id: req.tool_call_id.clone(),
+                    tool_name: req.tool_name.clone(),
+                }),
+            ),
+        )
+        .await?;
+
         // While the tool runs, the server it belongs to may initiate
         // requests back at us (sampling) — those arrive *because* the
         // agent called this tool, landing while we're parked at the
@@ -1981,30 +2011,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
         };
         let duration_ms = tool_start.elapsed().as_millis() as u64;
-
-        // Tool returned control. Mark dispatched (the
-        // ambiguous-window state) before processing the result.
-        self.config
-            .store
-            .write_tool_dispatched(
-                &inv_str,
-                req.tool_call_id.as_str(),
-                self.config.clock.unix_now_ms(),
-            )
-            .await
-            .map_err(map_store_err)?;
-        self.publish_chained(
-            cursor,
-            Event::new(
-                agent_id.clone(),
-                invocation_id,
-                EventPayload::ToolDispatched(events::ToolDispatchedPayload {
-                    tool_call_id: req.tool_call_id.clone(),
-                    tool_name: req.tool_name.clone(),
-                }),
-            ),
-        )
-        .await?;
 
         match outcome {
             Ok(result) => {

@@ -516,4 +516,69 @@ mod tests {
         assert_eq!(counts.ambiguous, 1);
         assert_eq!(counts.total(), 4);
     }
+
+    use proptest::prelude::*;
+
+    fn any_status() -> impl Strategy<Value = DispatchStatus> {
+        prop_oneof![
+            Just(DispatchStatus::Intent),
+            Just(DispatchStatus::Dispatched),
+            Just(DispatchStatus::Completed),
+        ]
+    }
+
+    proptest! {
+        /// The classifier is a total partition over dispatch statuses
+        /// with a fixed dominance order — Dispatched over Intent over
+        /// Completed — that the imperative early returns only imply.
+        /// Stating it as law pins the precedence against refactors:
+        /// demoting Ambiguous below either sibling would silently
+        /// auto-recover crashes with unknown side effects.
+        #[test]
+        fn categorise_is_the_documented_partition(
+            tools in proptest::collection::vec(any_status(), 0..8),
+            llms in proptest::collection::vec(any_status(), 0..8),
+        ) {
+            let t: Vec<ToolDispatchRow> = tools.iter().map(|s| tool_row(*s)).collect();
+            let l: Vec<LlmDispatchRow> = llms.iter().map(|s| llm_row(*s)).collect();
+            let cat = categorise(&state_row(), &t, &l);
+
+            let any = |s: DispatchStatus| tools.contains(&s) || llms.contains(&s);
+            let expected = if any(DispatchStatus::Dispatched) {
+                RecoveryCategory::Ambiguous
+            } else if any(DispatchStatus::Intent) {
+                RecoveryCategory::SafeResume
+            } else if any(DispatchStatus::Completed) {
+                RecoveryCategory::SafeReplay
+            } else {
+                RecoveryCategory::SafeResume
+            };
+            prop_assert_eq!(cat, expected);
+        }
+
+        /// The theorem `fq invocation resume` (#373) stands on:
+        /// completing every Dispatched row — which is exactly what
+        /// interrupted-result injection does — always exits the
+        /// Ambiguous category, for every possible WAL shape. A
+        /// leftover Intent row correctly lands SafeResume (that
+        /// action never ran; re-running it is the contract), never
+        /// Ambiguous — so one operator resume never needs another.
+        #[test]
+        fn injection_always_resolves_ambiguity(
+            tools in proptest::collection::vec(any_status(), 0..8),
+            llms in proptest::collection::vec(any_status(), 0..8),
+        ) {
+            let inject = |s: &DispatchStatus| match s {
+                DispatchStatus::Dispatched => DispatchStatus::Completed,
+                other => *other,
+            };
+            let t: Vec<ToolDispatchRow> = tools.iter().map(|s| tool_row(inject(s))).collect();
+            let l: Vec<LlmDispatchRow> = llms.iter().map(|s| llm_row(inject(s))).collect();
+
+            prop_assert_ne!(
+                categorise(&state_row(), &t, &l),
+                RecoveryCategory::Ambiguous
+            );
+        }
+    }
 }
