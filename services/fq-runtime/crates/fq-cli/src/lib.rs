@@ -4366,12 +4366,35 @@ async fn handle_resume_request(
     // non-terminal here. Coordination is the authority on operator
     // terminal decisions — consult it before touching the WAL, or
     // resume would happily overrule a drop.
-    if let Ok(Some(owner)) = control.cp_store.get_invocation_owner(id).await
+    let owner = control
+        .cp_store
+        .get_invocation_owner(id)
+        .await
+        .ok()
+        .flatten();
+    if let Some(owner) = &owner
         && matches!(owner.status, OwnerStatus::Completed | OwnerStatus::Failed)
     {
         return InvocationResumeResponse::rejected(format!(
             "invocation {id} is terminal (completed, failed, or operator-dropped) \
              and cannot be resumed"
+        ));
+    }
+    // Ambiguous-shaped is not crashed: the dispatched mark lands
+    // BEFORE tool execution (by design), so a healthy invocation
+    // mid-tool has the same dispatched-without-completed WAL as a
+    // crashed one. Liveness comes from the process that actually
+    // knows — this daemon's own runner. v1 runs one daemon per
+    // store, so "not driven by this runner" IS orphaned; the
+    // coordination owner rows can't answer with zero lag (and carry
+    // placeholder worker ids for crashed runs — the resume e2e
+    // pinned both). Cross-worker liveness is the #107/#374 story.
+    if let Ok(uuid) = uuid::Uuid::parse_str(id)
+        && control.runner.is_active(&uuid)
+    {
+        return InvocationResumeResponse::rejected(format!(
+            "invocation {id} is executing on this daemon right now — resume \
+             is for crashed invocations; drain or wait for it instead"
         ));
     }
 

@@ -241,6 +241,27 @@ async fn crash_into_ambiguous(
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let invocation_id = invocation_id_from_log(&daemon.log());
+
+    // While the tool is genuinely RUNNING, resume must refuse: the
+    // WAL shape (dispatched-without-completed) is identical to a
+    // crash, and only the owning worker's liveness tells them apart.
+    // Injecting under a live worker would put two drivers on one
+    // invocation.
+    let live = run_fq(scratch, nats_url, &["invocation", "resume", &invocation_id]);
+    assert!(
+        !live.status.success(),
+        "resume of a LIVE invocation must be rejected"
+    );
+    let live_msg = format!(
+        "{}{}",
+        String::from_utf8_lossy(&live.stdout),
+        String::from_utf8_lossy(&live.stderr)
+    );
+    assert!(
+        live_msg.contains("executing on this daemon"),
+        "live rejection should say the invocation is currently executing:\n{live_msg}"
+    );
+
     daemon.sigkill();
 
     let mut restarted = Daemon::spawn(scratch, nats_url, "daemon-second.log");
@@ -265,6 +286,39 @@ async fn crash_into_ambiguous(
     }
 
     (restarted, invocation_id)
+}
+
+/// Resume, retrying while the just-crashed worker still reads
+/// `alive`: ambiguous classification lands before the staleness
+/// sweep flips the dead worker, so an operator (and this test)
+/// resuming promptly may need one beat before the guard releases.
+async fn resume_released(scratch: &Scratch, nats_url: &str, invocation_id: &str) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let out = run_fq(
+            scratch,
+            nats_url,
+            &[
+                "invocation",
+                "resume",
+                invocation_id,
+                "--reason",
+                "e2e test",
+            ],
+        );
+        let msg = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if out.status.success()
+            || !msg.contains("executing on this daemon")
+            || Instant::now() >= deadline
+        {
+            return out;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// The #373 acceptance scenario: crash → Ambiguous → resume →
@@ -294,17 +348,7 @@ async fn resume_recovers_ambiguous_invocation_end_to_end() {
         5,
     ));
 
-    let resume = run_fq(
-        &scratch,
-        &nats_url,
-        &[
-            "invocation",
-            "resume",
-            &invocation_id,
-            "--reason",
-            "e2e test",
-        ],
-    );
+    let resume = resume_released(&scratch, &nats_url, &invocation_id).await;
     assert!(
         resume.status.success(),
         "resume failed on an ambiguous invocation: {}\n{}",
@@ -348,6 +392,26 @@ async fn resume_recovers_ambiguous_invocation_end_to_end() {
     assert!(
         show_text.contains("completed"),
         "invocation did not reach completed after resume:\n{show_text}"
+    );
+
+    // The same event through the query surface (#373 acceptance):
+    // `fq events query` reads the projection without NATS.
+    let events = run_fq(
+        &scratch,
+        &nats_url,
+        &[
+            "events",
+            "query",
+            "--agent",
+            "resume-probe",
+            "--limit",
+            "100",
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&events.stdout).contains("operator_resumed"),
+        "fq events query does not surface invocation.operator_resumed:\n{}",
+        String::from_utf8_lossy(&events.stdout)
     );
 
     // Resuming a completed invocation must be a clean, explanatory
@@ -437,6 +501,89 @@ async fn resume_rejects_unknown_and_dropped_invocations() {
         mock.received_requests().len(),
         1,
         "rejected resumes must not reach the model"
+    );
+
+    daemon.stop();
+
+    // Daemon down: the verb must fail cleanly and promptly, telling
+    // the operator there is no daemon — not hang and not panic.
+    let down = run_fq(
+        &scratch,
+        &nats_url,
+        &["invocation", "resume", &invocation_id],
+    );
+    assert!(
+        !down.status.success(),
+        "resume with no daemon running must fail"
+    );
+    let down_msg = format!(
+        "{}{}",
+        String::from_utf8_lossy(&down.stdout),
+        String::from_utf8_lossy(&down.stderr)
+    );
+    assert!(
+        !down_msg.contains("panicked"),
+        "daemon-down resume must be a clean error:\n{down_msg}"
+    );
+
+    mock.shutdown().await;
+}
+
+/// A failed post-injection re-drive must FAIL the invocation cleanly
+/// (terminal, visible, re-resume rejected) — never leave it limbo.
+/// The injection itself still succeeds and is durable; the verb
+/// reports it; the model failure surfaces in the daemon log; and the
+/// terminal state closes the recovery loop without another operator
+/// action being possible or needed. (Byte-identical replay of the
+/// injected result is pinned at the runner seam:
+/// `injected_interrupted_result_reaches_replay_byte_identical`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_redrive_fails_the_invocation_cleanly() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let mock = MockAnthropicServer::start().await;
+    let scratch = Scratch::new("replay", mock.base_url());
+
+    let (mut daemon, invocation_id) = crash_into_ambiguous(&scratch, &nats_url, &mock).await;
+
+    // Nothing queued: the detached re-drive exhausts its model retries.
+    // The verb still succeeds — it reports the INJECTION, which is
+    // already durable by the time it replies.
+    let resume = resume_released(&scratch, &nats_url, &invocation_id).await;
+    assert!(
+        resume.status.success(),
+        "resume (the injection) should succeed even though the model is down: {}",
+        String::from_utf8_lossy(&resume.stderr)
+    );
+    daemon
+        .await_log("operator resume failed", Duration::from_secs(60))
+        .await;
+
+    // The invocation lands terminal-failed on the operator surface —
+    // not limbo, not ambiguous, not silently gone.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let list = run_fq(&scratch, &nats_url, &["invocation", "list"]);
+        if String::from_utf8_lossy(&list.stdout).contains("failed") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "invocation never reached failed after the re-drive died\n--- daemon log ---\n{}",
+            daemon.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Terminal means terminal: no second resume.
+    let again = run_fq(
+        &scratch,
+        &nats_url,
+        &["invocation", "resume", &invocation_id],
+    );
+    assert!(
+        !again.status.success(),
+        "resume of a terminally-failed invocation must be rejected"
     );
 
     daemon.stop();
