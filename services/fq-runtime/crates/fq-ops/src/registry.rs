@@ -227,7 +227,11 @@ impl Registry {
                 input_schema: None,
                 output_schema: Some(&s.state_schema),
             },
-            (Entry::Command(c), _) => Resolved {
+            // Envelope category must agree with the entry: a request
+            // whose rendered name collides with an entry of the other
+            // category (an Unknown id, under version skew) must not
+            // cross-dispatch — the wildcard falls through to None.
+            (Entry::Command(c), OpId::Verb(_)) => Resolved {
                 op: op.clone(),
                 category: OpCategory::DomainVerb,
                 authority: vec![c.authority],
@@ -240,7 +244,7 @@ impl Registry {
             // A report's authority is Read on its own scope — what
             // makes aggregates a privilege boundary: grantable without
             // granting the raw inputs they compute from.
-            (Entry::Report(r), _) => Resolved {
+            (Entry::Report(r), OpId::Report(_)) => Resolved {
                 op: op.clone(),
                 category: OpCategory::Report,
                 authority: read(r.domain),
