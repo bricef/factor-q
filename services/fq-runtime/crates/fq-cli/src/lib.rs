@@ -2507,14 +2507,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Worker recovery: scan in-flight invocations from the
-    // worker store, classify each, log the summary, and emit
-    // `invocation.ambiguous` events for the cases that can't
-    // be auto-recovered. Safe-resume / safe-replay execution
-    // is logged but deferred to a follow-up commit; the
-    // categorisation alone is the load-bearing contract that
-    // the rest of the runtime can rely on (data-architecture.md
-    // §3.1 / §7.1).
+    // Worker recovery: scan in-flight invocations from the worker store,
+    // classify each, restore ownership for auto-resumed cases, and emit
+    // `invocation.ambiguous` events for cases that cannot be recovered.
     let classified = fq_runtime::worker::scan_in_flight(worker_store.as_ref())
         .await
         .context("failed to scan in-flight invocations")?;
@@ -2609,18 +2604,28 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         .map(|c| c.state.invocation_id.clone())
         .collect();
 
-    // Stash the recoverable invocations for resume after the
-    // runner is constructed below.
-    let recoverable: Vec<_> = classified
-        .into_iter()
-        .filter(|c| {
-            matches!(
-                c.category,
-                fq_runtime::worker::RecoveryCategory::SafeResume
-                    | fq_runtime::worker::RecoveryCategory::SafeReplay
-            )
-        })
-        .collect();
+    // Restore the coordination rows before spawning resumes. A row can be
+    // absent after a daemon crash, but the list/dashboard projection keys on
+    // it; without this upsert a recovered invocation runs invisibly.
+    let mut recoverable = Vec::new();
+    for invocation in classified {
+        if matches!(
+            invocation.category,
+            fq_runtime::worker::RecoveryCategory::SafeResume
+                | fq_runtime::worker::RecoveryCategory::SafeReplay
+        ) {
+            cp_store
+                .upsert_invocation_ownership(
+                    &invocation.state.invocation_id,
+                    worker_id.as_str(),
+                    invocation.state.started_at,
+                    fq_runtime::control_plane::OwnerStatus::InFlight,
+                )
+                .await
+                .context("failed to restore recovered invocation ownership")?;
+            recoverable.push(invocation);
+        }
+    }
 
     // Load pricing, merge config overrides, and enforce the coverage
     // guarantee (ADR-0004) — fail-fast before serving any trigger.
