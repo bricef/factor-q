@@ -35,5 +35,5 @@ pub mod registry;
 pub use model::{
     Atom, AtomRef, Authority, Command, Domain, Receipt, Report, Stability, Synthetic, Verb, View,
 };
-pub use opid::{OpCategory, OpId};
+pub use opid::{Control, Cost, Invocation, OpCategory, OpId, ReportId, Trigger, VerbId};
 pub use registry::{Entry, Registry, RegistryError, Resolved};
