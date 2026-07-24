@@ -150,6 +150,10 @@ pub mod subjects {
         format!("fq.agent.{agent_id}.invocation.operator_recovered")
     }
 
+    pub fn agent_invocation_operator_resumed(agent_id: &str) -> String {
+        format!("fq.agent.{agent_id}.invocation.operator_resumed")
+    }
+
     /// A durable host notice injected into the invocation's
     /// conversation at a step boundary (#155). Deliberately outside
     /// the coordination consumer's `fq.agent.*.invocation.*` filter —
@@ -438,6 +442,9 @@ impl EventPayload {
             Self::InvocationOperatorRecovered(_) => {
                 subjects::agent_invocation_operator_recovered(agent)
             }
+            Self::InvocationOperatorResumed(_) => {
+                subjects::agent_invocation_operator_resumed(agent)
+            }
             Self::Completed(_) => subjects::agent_completed(agent),
             Self::Failed(_) => subjects::agent_failed(agent),
             Self::HostNotice(_) => subjects::agent_host_notice(agent),
@@ -472,6 +479,7 @@ impl EventPayload {
             Self::InvocationArchived(_) => "factor-q/invocation_archived@1",
             Self::InvocationArchiveAcked(_) => "factor-q/invocation_archive_acked@1",
             Self::InvocationOperatorRecovered(_) => "factor-q/invocation_operator_recovered@1",
+            Self::InvocationOperatorResumed(_) => "factor-q/invocation_operator_resumed@1",
             Self::SystemStartup(_) => "factor-q/system_startup@1",
             Self::SystemShutdown(_) => "factor-q/system_shutdown@1",
             Self::SystemTaskFailed(_) => "factor-q/system_task_failed@1",
@@ -655,6 +663,9 @@ pub enum EventPayload {
     /// to match `final_phase`; no ack is emitted (no worker
     /// is waiting to clean up).
     InvocationOperatorRecovered(InvocationOperatorRecoveredPayload),
+
+    /// Operator-triggered interrupted-result injection for an ambiguous invocation.
+    InvocationOperatorResumed(InvocationOperatorResumedPayload),
 
     // Runtime lifecycle
     SystemStartup(SystemStartupPayload),
@@ -1060,6 +1071,14 @@ pub struct InvocationOperatorRecoveredPayload {
     pub final_phase: String,
     /// Free-form reason supplied by the operator (e.g. via
     /// `--reason`). Audit-only; consumers must not parse it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Audit payload for `fq invocation resume`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationOperatorResumedPayload {
+    pub completed_call_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

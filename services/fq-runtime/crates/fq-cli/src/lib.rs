@@ -429,11 +429,26 @@ enum InvocationCommands {
     /// Publishes `invocation.operator_recovered` so audit can
     /// distinguish operator-initiated terminations from
     /// worker-initiated ones. Works on any current state
-    /// (kill-switch behaviour).
+    /// (kill-switch behaviour). To reconcile unknown execution and preserve
+    /// progress instead, use `resume`.
     Drop {
         /// Invocation id to drop.
         id: String,
         /// Free-form reason recorded on the event payload.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recover an Ambiguous invocation by durably completing every stuck tool
+    /// dispatch with an honest interrupted result, then re-driving normal
+    /// SafeReplay recovery. See data-architecture.md §4.4. Use `drop` instead
+    /// when progress should be abandoned.
+    Resume {
+        /// Invocation id to resume.
+        id: String,
+        /// Free-form reason recorded on the audit event.
         #[arg(long)]
         reason: Option<String>,
         /// Emit JSON instead of human-readable output.
@@ -688,6 +703,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             InvocationCommands::Drop { id, reason, json } => {
                 invocation_drop(&cli.global, &id, reason.as_deref(), json).await?
+            }
+            InvocationCommands::Resume { id, reason, json } => {
+                invocation_resume(&cli.global, &id, reason.as_deref(), json).await?
             }
             InvocationCommands::Transcript {
                 id,
@@ -1644,6 +1662,14 @@ fn print_event(event: &Event) {
             "invocation.operator_recovered action={} phase={}{}",
             p.action,
             p.final_phase,
+            p.reason
+                .as_deref()
+                .map(|r| format!(" reason={r:?}"))
+                .unwrap_or_default()
+        ),
+        EventPayload::InvocationOperatorResumed(p) => format!(
+            "invocation.operator_resumed calls={}{}",
+            p.completed_call_ids.join(","),
             p.reason
                 .as_deref()
                 .map(|r| format!(" reason={r:?}"))
@@ -3069,6 +3095,110 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     });
 
+    // Operator resume listener: the daemon owns the worker store and is the
+    // only process allowed to mutate the WAL. Request/reply also lets the CLI
+    // distinguish a stopped daemon from a rejected precondition.
+    let (resume_listener_shutdown_tx, mut resume_listener_shutdown_rx) =
+        tokio::sync::oneshot::channel::<()>();
+    let resume_control_bus = bus.clone();
+    let resume_control_store = worker_store.clone();
+    let resume_control_cp = cp_store.clone();
+    let resume_control_runner = resume_runner.clone();
+    let resume_control_registry = shared_registry.clone();
+    let resume_control_llm = llm.clone();
+    let resume_listener_handle = tokio::spawn(async move {
+        let mut sub = match resume_control_bus.subscribe_control_resume().await {
+            Ok(sub) => sub,
+            Err(err) => {
+                tracing::error!(error=%err, "failed to subscribe to invocation resume");
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                _ = &mut resume_listener_shutdown_rx => break,
+                msg = sub.next() => {
+                    let Some(msg) = msg else { break };
+                    let Some(reply) = msg.reply.clone() else { continue };
+                    let request: Result<InvocationResumeRequest, _> = serde_json::from_slice(&msg.payload);
+                    let response = match request {
+                        Err(err) => InvocationResumeResponse { ok: false, message: format!("invalid resume request: {err}"), completed_call_ids: vec![] },
+                        Ok(req) => {
+                            let state = resume_control_store.get_invocation_state(&req.invocation_id).await;
+                            match state {
+                                Ok(None) => {
+                                    let owner = resume_control_cp.get_invocation_owner(&req.invocation_id).await.ok().flatten();
+                                    let message = match owner.map(|o| o.status) {
+                                        Some(fq_runtime::control_plane::OwnerStatus::Completed | fq_runtime::control_plane::OwnerStatus::Failed) => format!("invocation {} is terminal and cannot be resumed", req.invocation_id),
+                                        _ => format!("unknown invocation {}", req.invocation_id),
+                                    };
+                                    InvocationResumeResponse { ok: false, message, completed_call_ids: vec![] }
+                                },
+                                Err(err) => InvocationResumeResponse { ok: false, message: format!("failed to inspect invocation: {err}"), completed_call_ids: vec![] },
+                                Ok(Some(state)) if state.terminal_at.is_some() => InvocationResumeResponse { ok: false, message: format!("invocation {} is terminal and cannot be resumed", req.invocation_id), completed_call_ids: vec![] },
+                                Ok(Some(state)) => {
+                                    let tools = resume_control_store.list_tool_dispatches_for_invocation(&req.invocation_id).await;
+                                    let llms = resume_control_store.list_llm_dispatches_for_invocation(&req.invocation_id).await;
+                                    match (tools, llms) {
+                                        (Ok(tools), Ok(llms)) => {
+                                            if llms.iter().any(|r| r.status == fq_runtime::worker::DispatchStatus::Dispatched) {
+                                                let response = InvocationResumeResponse { ok: false, message: format!("invocation {} is ambiguous in an LLM dispatch; interrupted-result injection applies only to tool calls", req.invocation_id), completed_call_ids: vec![] };
+                                                if let Ok(body) = serde_json::to_vec(&response) { let _ = resume_control_bus.reply_control(reply.to_string(), body).await; }
+                                                continue;
+                                            }
+                                            let category = fq_runtime::worker::categorise(&state, &tools, &llms);
+                                            if !matches!(category, fq_runtime::worker::RecoveryCategory::Ambiguous) {
+                                                let owner = resume_control_cp.get_invocation_owner(&req.invocation_id).await.ok().flatten();
+                                                let message = if owner.as_ref().is_some_and(|o| o.status == fq_runtime::control_plane::OwnerStatus::InFlight) {
+                                                    format!("invocation {} is live; only Ambiguous invocations can be resumed", req.invocation_id)
+                                                } else {
+                                                    format!("invocation {} is not Ambiguous (it may already have been resumed)", req.invocation_id)
+                                                };
+                                                InvocationResumeResponse { ok: false, message, completed_call_ids: vec![] }
+                                            } else {
+                                                match resume_control_store.inject_interrupted_results(&req.invocation_id).await {
+                                                    Err(err) => InvocationResumeResponse { ok: false, message: format!("failed to inject interrupted result: {err}"), completed_call_ids: vec![] },
+                                                    Ok(ids) => {
+                                                        let agent_id = fq_runtime::AgentId::new(state.agent_id.clone());
+                                                        let invocation_id = uuid::Uuid::parse_str(&req.invocation_id);
+                                                        match (agent_id, invocation_id) {
+                                                            (Ok(agent_id), Ok(invocation_id)) => {
+                                                                let event = Event::new(agent_id.clone(), invocation_id, EventPayload::InvocationOperatorResumed(fq_runtime::events::InvocationOperatorResumedPayload { completed_call_ids: ids.clone(), reason: req.reason }));
+                                                                if let Err(err) = resume_control_bus.publish(&event).await { tracing::warn!(error=%err, "failed to publish invocation.operator_resumed"); }
+                                                                let agent = { resume_control_registry.read().await.get(&agent_id).cloned() };
+                                                                if let Some(agent) = agent {
+                                                                    let runner = resume_control_runner.clone();
+                                                                    let llm = resume_control_llm.clone();
+                                                                    tokio::spawn(async move {
+                                                                        if let Err(err) = runner.resume(&agent, llm.as_ref(), invocation_id).await {
+                                                                            tracing::error!(error=%err, %invocation_id, "operator resume failed");
+                                                                        }
+                                                                    });
+                                                                    InvocationResumeResponse { ok: true, message: "resume accepted".into(), completed_call_ids: ids }
+                                                                } else {
+                                                                    InvocationResumeResponse { ok: false, message: format!("agent {} is not loaded", state.agent_id), completed_call_ids: ids }
+                                                                }
+                                                            }
+                                                            _ => InvocationResumeResponse { ok: false, message: "stored invocation identity is invalid".into(), completed_call_ids: ids },
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => InvocationResumeResponse { ok: false, message: "failed to inspect invocation WAL".into(), completed_call_ids: vec![] },
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    if let Ok(body) = serde_json::to_vec(&response) {
+                        let _ = resume_control_bus.reply_control(reply.to_string(), body).await;
+                    }
+                }
+            }
+        }
+    });
+
     // Spawn the trigger dispatcher. Its concurrency bound (#70) is
     // config, default 1 (serial) until the Phase-2 concurrency gate.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -3357,6 +3487,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = disp_shutdown_tx.send(());
     let _ = reload_shutdown_tx.send(());
     let _ = down_listener_shutdown_tx.send(());
+    let _ = resume_listener_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
         Ok(Ok(Ok(()))) => println!("  projection consumer stopped cleanly."),
@@ -3471,6 +3602,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Ok(Ok(())) => {}
         Ok(Err(err)) => tracing::error!(error = %err, "control-down listener task panicked"),
         Err(_) => tracing::warn!("control-down listener did not shut down within 5s"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), resume_listener_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(error = %err, "control-resume listener task panicked"),
+        Err(_) => tracing::warn!("control-resume listener did not shut down within 5s"),
     }
 
     // Shut down MCP server processes.
@@ -4186,6 +4322,56 @@ async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::R
                 println!("  {ts}  {}", e.event_type);
             }
         }
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct InvocationResumeRequest {
+    invocation_id: String,
+    reason: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct InvocationResumeResponse {
+    ok: bool,
+    message: String,
+    completed_call_ids: Vec<String>,
+}
+
+async fn invocation_resume(
+    global: &GlobalArgs,
+    id: &str,
+    reason: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    let bus = EventBus::connect(&config.nats.url).await.with_context(|| {
+        format!(
+            "failed to connect to NATS at {}; start the daemon first",
+            config.nats.url
+        )
+    })?;
+    let request = InvocationResumeRequest {
+        invocation_id: id.to_string(),
+        reason: reason.map(str::to_string),
+    };
+    let bytes = bus
+        .request_control_resume(serde_json::to_vec(&request)?)
+        .await
+        .context("resume request failed; start the daemon first")?;
+    let response: InvocationResumeResponse = serde_json::from_slice(&bytes)?;
+    if !response.ok {
+        anyhow::bail!(response.message);
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!(
+            "Resumed invocation {id}; injected interrupted results for: {}.",
+            response.completed_call_ids.join(", ")
+        );
+        println!("Follow with `fq invocation show {id}` or `fq invocation transcript {id}`.");
     }
     Ok(())
 }

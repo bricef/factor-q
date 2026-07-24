@@ -648,6 +648,52 @@ impl WorkerStore {
         Ok(())
     }
 
+    /// Complete every dispatch left ambiguous by a crashed host for one invocation.
+    /// The synthetic payload is rendered from each row's persisted dispatch time,
+    /// never from the live clock. Returns the completed call ids.
+    pub async fn inject_interrupted_results(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Vec<String>, WorkerStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT tool_call_id, dispatched_at FROM tool_dispatch \
+             WHERE invocation_id = ? AND status = 'dispatched' ORDER BY dispatched_at, tool_call_id",
+        )
+        .bind(invocation_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            let call_id: String = row.try_get("tool_call_id")?;
+            let dispatched_at: i64 = row.try_get("dispatched_at")?;
+            let rendered_at = chrono::DateTime::from_timestamp_millis(dispatched_at)
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_else(|| dispatched_at.to_string());
+            let payload = serde_json::json!({
+                "interrupted": true,
+                "notice": format!("HOST NOTICE: this tool call was interrupted by a runtime crash after being dispatched at {rendered_at}. Whether it executed — fully, partially, or not at all — is unknown. Verify the relevant state (files, git, external services) before building on anything; re-run it only if you have confirmed it did not take effect.")
+            }).to_string();
+            sqlx::query(
+                "UPDATE tool_dispatch SET status = 'completed', result = ?, is_error = 1, \
+                 completed_at = dispatched_at, seq = 1 + MAX(\
+                   COALESCE((SELECT MAX(seq) FROM tool_dispatch WHERE invocation_id = ?), 0), \
+                   COALESCE((SELECT MAX(seq) FROM llm_dispatch WHERE invocation_id = ?), 0)) \
+                 WHERE invocation_id = ? AND tool_call_id = ? AND status = 'dispatched'",
+            )
+            .bind(payload)
+            .bind(invocation_id)
+            .bind(invocation_id)
+            .bind(invocation_id)
+            .bind(&call_id)
+            .execute(&mut *tx)
+            .await?;
+            ids.push(call_id);
+        }
+        tx.commit().await?;
+        Ok(ids)
+    }
+
     /// Fetch a single tool-dispatch row by primary key.
     pub async fn get_tool_dispatch(
         &self,
@@ -1825,6 +1871,47 @@ mod tests {
         assert_eq!(r.completed_at, Some(300));
         assert_eq!(r.is_error, Some(false));
         assert_eq!(r.result.as_deref(), Some(r#"{"out":"ok"}"#));
+    }
+
+    #[tokio::test]
+    async fn interrupted_injection_is_durable_and_idempotent() {
+        let (store, _dir) = open_fresh().await;
+        store
+            .write_tool_intent("inv", "call", "exec", "{}", 100)
+            .await
+            .unwrap();
+        store
+            .write_tool_dispatched("inv", "call", 1_700_000_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.inject_interrupted_results("inv").await.unwrap(),
+            vec!["call"]
+        );
+        let first = store
+            .get_tool_dispatch("inv", "call")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.status, DispatchStatus::Completed);
+        let payload = first.result.unwrap();
+        assert!(payload.contains(r#""interrupted":true"#));
+        assert!(payload.contains("2023-11-14T22:13:20+00:00"));
+
+        assert!(
+            store
+                .inject_interrupted_results("inv")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let replay = store
+            .get_tool_dispatch("inv", "call")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.result.as_deref(), Some(payload.as_str()));
     }
 
     #[tokio::test]

@@ -56,6 +56,7 @@ pub fn event_kind_of(payload: &EventPayload) -> &'static str {
         EventPayload::InvocationArchived(_) => "invocation_archived",
         EventPayload::InvocationArchiveAcked(_) => "invocation_archive_acked",
         EventPayload::InvocationOperatorRecovered(_) => "invocation_operator_recovered",
+        EventPayload::InvocationOperatorResumed(_) => "invocation_operator_resumed",
         EventPayload::SystemStartup(_) => "system_startup",
         EventPayload::SystemShutdown(_) => "system_shutdown",
         EventPayload::SystemTaskFailed(_) => "system_task_failed",

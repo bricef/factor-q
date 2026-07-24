@@ -308,6 +308,21 @@ mod tests {
     }
 
     #[test]
+    fn post_injection_completed_row_is_safe_replay() {
+        let mut row = tool_row(DispatchStatus::Dispatched);
+        assert_eq!(
+            categorise(&state_row(), &[row.clone()], &[]),
+            RecoveryCategory::Ambiguous
+        );
+        row.status = DispatchStatus::Completed;
+        row.result = Some(r#"{"interrupted":true}"#.to_string());
+        assert_eq!(
+            categorise(&state_row(), &[row], &[]),
+            RecoveryCategory::SafeReplay
+        );
+    }
+
+    #[test]
     fn dispatched_llm_is_ambiguous() {
         let cat = categorise(&state_row(), &[], &[llm_row(DispatchStatus::Dispatched)]);
         assert_eq!(cat, RecoveryCategory::Ambiguous);

@@ -119,6 +119,9 @@ pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
 /// (ADR-0020 refresh-between-invocations precedent).
 pub const CONTROL_RELOAD_SUBJECT: &str = "fq.control.reload";
 
+/// Request/reply control subject for operator recovery of ambiguous invocations.
+pub const CONTROL_RESUME_SUBJECT: &str = "fq.control.invocation.resume";
+
 /// Core-NATS subject an operator-initiated clean stop is requested on
 /// (`fq down`, issue #63). Ephemeral like reload — no daemon
 /// listening is a silent no-op. The message body selects the mode:
@@ -868,6 +871,31 @@ impl EventBus {
         );
         let sub = self.client.subscribe(CONTROL_RELOAD_SUBJECT).await?;
         Ok(sub)
+    }
+
+    /// Ask the running daemon to inject interrupted results and resume an invocation.
+    pub async fn request_control_resume(&self, body: Vec<u8>) -> Result<Vec<u8>, BusError> {
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.client
+                .request(CONTROL_RESUME_SUBJECT, Bytes::from(body)),
+        )
+        .await
+        .map_err(|_| BusError::Publish("resume request timed out; start the daemon first".into()))?
+        .map_err(|err| BusError::Publish(err.to_string()))?;
+        Ok(response.payload.to_vec())
+    }
+
+    pub async fn subscribe_control_resume(&self) -> Result<async_nats::Subscriber, BusError> {
+        Ok(self.client.subscribe(CONTROL_RESUME_SUBJECT).await?)
+    }
+
+    /// Reply to a daemon control request.
+    pub async fn reply_control(&self, reply: String, body: Vec<u8>) -> Result<(), BusError> {
+        self.client
+            .publish(reply, Bytes::from(body))
+            .await
+            .map_err(|err| BusError::Publish(err.to_string()))
     }
 
     /// Request an operator-initiated clean stop of a running daemon
