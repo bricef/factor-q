@@ -117,3 +117,41 @@ fn unknown_ops_resolve_to_nothing() {
             .is_some()
     );
 }
+
+/// The colliding-name corner (ultrareview bug_001): an `Unknown`
+/// whose rendered name matches a registered entry of the *other*
+/// category must not cross-dispatch — the envelope category and the
+/// entry must agree. `cost.summary` addressed as a verb, and
+/// `invocation.drop` addressed as a report, both resolve to nothing
+/// while their honest addresses still resolve.
+#[test]
+fn colliding_unknown_never_cross_dispatches() {
+    let mut registry = fq_ops::Registry::new();
+    registry.register(fq_ops::fixtures::invocation()).unwrap();
+    registry
+        .register(fq_ops::fixtures::invocation_drop())
+        .unwrap();
+    registry.register(fq_ops::fixtures::cost_summary()).unwrap();
+
+    let report_as_verb: OpId =
+        serde_json::from_str(r#"{"verb":{"domain":"cost","verb":"summary"}}"#).unwrap();
+    assert_eq!(report_as_verb.to_string(), "cost.summary");
+    assert!(registry.resolve(&report_as_verb).is_none());
+
+    let command_as_report: OpId =
+        serde_json::from_str(r#"{"report":{"domain":"invocation","name":"drop"}}"#).unwrap();
+    assert_eq!(command_as_report.to_string(), "invocation.drop");
+    assert!(registry.resolve(&command_as_report).is_none());
+
+    // The honest addresses are untouched by the tightening.
+    assert!(
+        registry
+            .resolve(&OpId::Report(ReportId::Cost(Cost::Summary)))
+            .is_some()
+    );
+    assert!(
+        registry
+            .resolve(&OpId::Verb(VerbId::Invocation(Invocation::Drop)))
+            .is_some()
+    );
+}
