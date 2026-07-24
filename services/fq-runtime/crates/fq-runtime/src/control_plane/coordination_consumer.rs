@@ -81,6 +81,7 @@ pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 10_000;
 pub struct CoordinationConsumer {
     bus: EventBus,
     store: Arc<ControlPlaneStore>,
+    worker_store: Option<Arc<crate::worker::store::WorkerStore>>,
     stale_threshold_ms: i64,
     sweep_interval_ms: u64,
     /// Worker id of the local worker, so we don't mark
@@ -113,6 +114,7 @@ impl CoordinationConsumer {
         Self {
             bus,
             store,
+            worker_store: None,
             stale_threshold_ms: DEFAULT_STALE_THRESHOLD_MS,
             sweep_interval_ms: DEFAULT_SWEEP_INTERVAL_MS,
             self_worker_id: None,
@@ -120,6 +122,16 @@ impl CoordinationConsumer {
             test_filter_subject: None,
             runtime_id: Uuid::now_v7(),
         }
+    }
+
+    /// Attach the co-located worker store so authoritative operator
+    /// terminal transitions also close the worker execution row.
+    pub fn with_worker_store(
+        mut self,
+        worker_store: Arc<crate::worker::store::WorkerStore>,
+    ) -> Self {
+        self.worker_store = Some(worker_store);
+        self
     }
 
     /// Set the daemon's runtime id, stamped on emitted system
@@ -408,6 +420,12 @@ impl CoordinationConsumer {
             .upsert_invocation_ownership(&invocation_id, &worker_id, now_ms, final_status)
             .await?;
 
+        if let Some(worker_store) = &self.worker_store {
+            worker_store
+                .mark_invocation_operator_terminal(&invocation_id, &payload.final_phase, now_ms)
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -476,6 +494,9 @@ pub enum CoordinationConsumerError {
 
     #[error("control-plane store error: {0}")]
     Store(#[from] ControlPlaneStoreError),
+
+    #[error("worker store error: {0}")]
+    WorkerStore(#[from] crate::worker::store::WorkerStoreError),
 
     #[error("jetstream message stream error: {0}")]
     Stream(String),
@@ -814,6 +835,11 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        let worker_store = Arc::new(
+            crate::worker::store::WorkerStore::open(&dir.path().join("worker.db"))
+                .await
+                .unwrap(),
+        );
 
         let agent_id =
             AgentId::new(format!("op-recover-test-{}", Uuid::now_v7().simple())).unwrap();
@@ -833,6 +859,27 @@ mod tests {
             .await
             .unwrap();
 
+        worker_store
+            .upsert_invocation_state(&crate::worker::store::InvocationStateRow {
+                invocation_id: inv_str.clone(),
+                agent_id: agent_id.as_str().to_string(),
+                schema_version: 1,
+                phase: "dispatching_tools".into(),
+                state_blob: vec![],
+                step_index: 25,
+                started_at: 1_000,
+                updated_at: 1_500,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
+            })
+            .await
+            .unwrap();
+
         // Subscribe to the worker's ack subject so we can
         // assert nothing is published there.
         let mut ack_sub = bus
@@ -844,7 +891,8 @@ mod tests {
             .expect("subscribe");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let consumer = CoordinationConsumer::new(bus.clone(), store.clone());
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone())
+            .with_worker_store(worker_store.clone());
         let event = Event::new(
             agent_id.clone(),
             invocation_id,
@@ -881,6 +929,21 @@ mod tests {
             .expect("owner row");
         assert_eq!(owner.status, OwnerStatus::Failed);
         assert_eq!(owner.worker_id, worker_id.as_str());
+
+        let worker_state = worker_store
+            .get_invocation_state(&inv_str)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(worker_state.phase, "failed");
+        assert!(worker_state.terminal_at.is_some());
+        assert!(
+            worker_store
+                .find_in_flight_invocations()
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // No ack published.
         let ack = tokio::time::timeout(Duration::from_millis(200), ack_sub.next()).await;

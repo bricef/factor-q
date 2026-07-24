@@ -2478,6 +2478,35 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         .context("failed to self-register worker with control-plane")?;
     println!("  worker:           {} (host: {})", worker_id, host_label);
 
+    // Reconcile worker rows left live by operator terminal transitions made
+    // before this binary was deployed. Do this before recovery classification
+    // so a pre-existing orphan cannot be reported ambiguous again.
+    for row in worker_store
+        .find_in_flight_invocations()
+        .await
+        .context("failed to scan worker rows for terminal-owner reconciliation")?
+    {
+        if let Some(owner) = cp_store
+            .get_invocation_owner(&row.invocation_id)
+            .await
+            .context("failed to read owner during worker reconciliation")?
+            && matches!(
+                owner.status,
+                fq_runtime::control_plane::OwnerStatus::Completed
+                    | fq_runtime::control_plane::OwnerStatus::Failed
+            )
+        {
+            worker_store
+                .mark_invocation_operator_terminal(
+                    &row.invocation_id,
+                    owner.status.as_str(),
+                    now_ms,
+                )
+                .await
+                .context("failed to reconcile terminal worker row")?;
+        }
+    }
+
     // Worker recovery: scan in-flight invocations from the
     // worker store, classify each, log the summary, and emit
     // `invocation.ambiguous` events for the cases that can't
@@ -2850,6 +2879,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let (coord_shutdown_tx, coord_shutdown_rx) = tokio::sync::oneshot::channel();
     let coord_consumer = fq_runtime::CoordinationConsumer::new(bus.clone(), cp_store.clone())
         .with_runtime_id(runtime_id)
+        .with_worker_store(worker_store.clone())
         .with_self_worker_id(worker_id.as_str().to_string());
     let mut coord_handle = tokio::spawn(async move { coord_consumer.run(coord_shutdown_rx).await });
 

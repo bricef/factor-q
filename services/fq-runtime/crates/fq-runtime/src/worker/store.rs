@@ -965,6 +965,7 @@ impl WorkerStore {
                 trigger_source = excluded.trigger_source,
                 trigger_subject = excluded.trigger_subject,
                 trigger_payload = excluded.trigger_payload
+            WHERE invocation_state.terminal_at IS NULL
             "#,
         )
         .bind(&row.invocation_id)
@@ -983,6 +984,32 @@ impl WorkerStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Mark an invocation terminal after an authoritative operator transition.
+    /// The conditional update is idempotent and never overwrites a terminal
+    /// worker outcome; paired with the guarded upsert above, it also prevents
+    /// a late live-worker write from resurrecting the invocation.
+    pub async fn mark_invocation_operator_terminal(
+        &self,
+        invocation_id: &str,
+        phase: &str,
+        terminal_at: i64,
+    ) -> Result<u64, WorkerStoreError> {
+        let res = sqlx::query(
+            r#"
+            UPDATE invocation_state
+            SET phase = ?, updated_at = ?, terminal_at = ?
+            WHERE invocation_id = ? AND terminal_at IS NULL
+            "#,
+        )
+        .bind(phase)
+        .bind(terminal_at)
+        .bind(terminal_at)
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// Mark a terminal invocation as awaiting archive ack.
@@ -2094,6 +2121,51 @@ mod tests {
         let in_flight = store.find_in_flight_invocations().await.unwrap();
         let ids: Vec<_> = in_flight.iter().map(|r| r.invocation_id.as_str()).collect();
         assert_eq!(ids, vec!["alive"]);
+    }
+
+    #[tokio::test]
+    async fn operator_terminal_marker_is_sticky_against_late_upsert() {
+        let (store, _dir) = open_fresh().await;
+        let row = InvocationStateRow {
+            invocation_id: "dropped".to_string(),
+            agent_id: "a".to_string(),
+            schema_version: 1,
+            phase: "dispatching_tools".to_string(),
+            state_blob: vec![],
+            step_index: 25,
+            started_at: 1,
+            updated_at: 2,
+            terminal_at: None,
+            workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
+        };
+        store.upsert_invocation_state(&row).await.unwrap();
+        assert_eq!(
+            store
+                .mark_invocation_operator_terminal("dropped", "failed", 3)
+                .await
+                .unwrap(),
+            1
+        );
+
+        let mut late_worker_write = row;
+        late_worker_write.updated_at = 4;
+        store
+            .upsert_invocation_state(&late_worker_write)
+            .await
+            .unwrap();
+        let stored = store
+            .get_invocation_state("dropped")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.phase, "failed");
+        assert_eq!(stored.terminal_at, Some(3));
+        assert!(store.find_in_flight_invocations().await.unwrap().is_empty());
     }
 
     #[tokio::test]
