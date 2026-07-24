@@ -473,6 +473,32 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     /// `StepInput` that carries them. Keyed by invocation because one
     /// runner services concurrent invocations.
     pending_notices: std::sync::Mutex<std::collections::HashMap<Uuid, Vec<(String, String)>>>,
+    /// Invocation ids this runner is DRIVING right now, registered
+    /// for the duration of every run/resume entry. The operator
+    /// resume precondition (#373) consults this: an invocation active
+    /// on this very runner is live, not crashed — and the process
+    /// driving it is the only zero-lag authority on that (the
+    /// coordination owner rows lag events and carry placeholder
+    /// worker ids for crashed runs). Worker-local by construction;
+    /// cross-worker liveness is the #107/#374 coordination story.
+    active: std::sync::Mutex<std::collections::HashSet<Uuid>>,
+}
+
+/// RAII entry in [`ReducerRunner::active`]: removed on drop, so a
+/// panic or early return can never leave a phantom "live" marker
+/// that would block operator resume forever.
+struct ActiveInvocation<'a> {
+    set: &'a std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    id: Uuid,
+}
+
+impl Drop for ActiveInvocation<'_> {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .expect("active set poisoned")
+            .remove(&self.id);
+    }
 }
 
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
@@ -483,6 +509,27 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             reducer,
             drain: DrainSignal::new(),
             pending_notices: std::sync::Mutex::new(std::collections::HashMap::new()),
+            active: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    /// Whether this runner is currently driving `invocation_id`. The
+    /// operator-resume precondition's liveness authority (#373).
+    pub fn is_active(&self, invocation_id: &Uuid) -> bool {
+        self.active
+            .lock()
+            .expect("active set poisoned")
+            .contains(invocation_id)
+    }
+
+    fn mark_active(&self, invocation_id: Uuid) -> ActiveInvocation<'_> {
+        self.active
+            .lock()
+            .expect("active set poisoned")
+            .insert(invocation_id);
+        ActiveInvocation {
+            set: &self.active,
+            id: invocation_id,
         }
     }
 
@@ -633,6 +680,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
         let invocation_id = Uuid::now_v7();
+        let _active = self.mark_active(invocation_id);
         let start = Instant::now();
         let agent_id: AgentId = agent.id().clone();
         let totals = InvocationTotals::default();
@@ -953,6 +1001,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         llm: &dyn LlmClient,
         invocation_id: Uuid,
     ) -> Result<InvocationOutcome, ExecutorError> {
+        let _active = self.mark_active(invocation_id);
         let inv_str = invocation_id.to_string();
         let state_row = self
             .config
@@ -6267,6 +6316,209 @@ mod tests {
         let row = store.get_invocation_state(&inv_str).await.unwrap().unwrap();
         assert!(row.terminal_at.is_some());
         assert_eq!(row.phase, "completed");
+    }
+
+    /// The #373 replay-equivalence claim, at the seam where it is
+    /// provable: seed the crashed WAL shape (tool `dispatched`, no
+    /// `completed`), inject the interrupted result exactly as the
+    /// operator verb does, resume — and assert the model request the
+    /// replay persists carries the injected bytes VERBATIM from the
+    /// stored row. The notice is rendered once at injection from the
+    /// persisted dispatch timestamp (never a live clock — the PR #143
+    /// landmine), so replay can only ever present those same bytes.
+    #[tokio::test]
+    async fn injected_interrupted_result_reaches_replay_byte_identical() {
+        let server = crate::test_support::nats::test_nats();
+        let url = server.url().to_string();
+
+        use crate::worker::reducer::types::{
+            AgentConfig, StepInput, TriggerPayload, TriggerSourceKind,
+        };
+
+        let dir = tempdir().unwrap();
+        let store_path = dir.path().join("events.db");
+        let store = Arc::new(WorkerStore::open(&store_path).await.unwrap());
+
+        let agent_id_str = unique_agent_id("resume-inject-replay");
+        let agent = Agent::builder()
+            .id(&agent_id_str)
+            .model("claude-haiku")
+            .system_prompt("You are a test agent.")
+            .tools(["builtin__self_inspect"])
+            .budget(1.0)
+            .build()
+            .unwrap();
+        let invocation_id = Uuid::now_v7();
+        let inv_str = invocation_id.to_string();
+
+        let harness = Harness::new();
+        let s0_output = harness
+            .step(StepInput {
+                config: AgentConfig {
+                    agent_id: AgentId::new(&agent_id_str).unwrap(),
+                    model: "claude-haiku".to_string(),
+                    system_prompt: "You are a test agent.".to_string(),
+                    tools_available: vec![],
+                    allowed_tool_names: vec![],
+                    max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+                    effort: None,
+                },
+                trigger: TriggerPayload {
+                    source: TriggerSourceKind::Manual,
+                    subject: None,
+                    payload: json!("hello"),
+                },
+                state: vec![],
+                last_result: None,
+                now_ms: 0,
+                random_seed: 0,
+                step_index: 0,
+                static_resource_context: None,
+                host_notices: vec![],
+            })
+            .expect("step 0");
+        store
+            .upsert_invocation_state(&InvocationStateRow {
+                invocation_id: inv_str.clone(),
+                agent_id: agent_id_str.clone(),
+                schema_version: 1,
+                phase: "awaiting_model".to_string(),
+                state_blob: s0_output.state,
+                step_index: 0,
+                started_at: 1_000,
+                updated_at: 1_000,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
+            })
+            .await
+            .unwrap();
+
+        // The crashed shape: model turn 0 requested the tool; the tool
+        // was handed off (dispatched) and the process died before any
+        // completion write.
+        let tool_use = ChatResponse {
+            content: None,
+            tool_calls: vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("tc-0").unwrap(),
+                tool_name: "builtin__self_inspect".to_string(),
+                parameters: json!({}),
+            }],
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage {
+                input_tokens: 50,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        };
+        store
+            .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
+            .await
+            .unwrap();
+        store
+            .write_llm_dispatched(&inv_str, "req-0", 2)
+            .await
+            .unwrap();
+        store
+            .write_llm_completed(
+                &inv_str,
+                "req-0",
+                &serde_json::to_string(&tool_use).unwrap(),
+                false,
+                0.0001,
+                3,
+            )
+            .await
+            .unwrap();
+        store
+            .write_tool_intent(&inv_str, "tc-0", "builtin__self_inspect", "{}", 4)
+            .await
+            .unwrap();
+        store
+            .write_tool_dispatched(&inv_str, "tc-0", 5)
+            .await
+            .unwrap();
+
+        // The operator verb's injection, via the same store API.
+        let injected = store
+            .inject_interrupted_results(&inv_str)
+            .await
+            .expect("inject");
+        assert_eq!(injected, vec!["tc-0".to_string()]);
+        let stored = store
+            .get_tool_dispatch(&inv_str, "tc-0")
+            .await
+            .unwrap()
+            .expect("injected row");
+        assert_eq!(stored.status, DispatchStatus::Completed);
+        let stored_result = stored.result.clone().expect("injected result present");
+        assert!(stored_result.contains("interrupted"));
+
+        // Resume: the replay feeds the injected result to the reducer,
+        // which requests the next model turn from the fixture.
+        let bus = EventBus::connect(&url).await.unwrap();
+        let runner = ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus)
+                    .pricing(test_pricing())
+                    .store(store.clone())
+                    .worker_id(test_worker_id())
+                    .build(),
+            ),
+            Harness::new(),
+        );
+        let llm = FixtureClient::new();
+        llm.push_response(canned("done.", 60, 4));
+
+        let outcome = runner
+            .resume(&agent, &llm, invocation_id)
+            .await
+            .expect("resume completes");
+        assert!(
+            matches!(outcome, InvocationOutcome::Completed { .. }),
+            "expected Completed, got {outcome:?}"
+        );
+
+        // The equivalence claim: the persisted request payload of the
+        // post-injection model turn contains the stored injected bytes
+        // verbatim — replay presents persisted bytes, never a
+        // re-render.
+        let llm_rows = store
+            .list_llm_dispatches_for_invocation(&inv_str)
+            .await
+            .expect("list llm dispatches");
+        let replay_request = llm_rows
+            .iter()
+            .find(|r| r.request_id != "req-0")
+            .expect("the post-injection model request was persisted");
+        fn tree_contains(v: &serde_json::Value, needle: &str) -> bool {
+            match v {
+                serde_json::Value::String(s) => s == needle,
+                serde_json::Value::Array(a) => a.iter().any(|v| tree_contains(v, needle)),
+                serde_json::Value::Object(o) => o.values().any(|v| tree_contains(v, needle)),
+                _ => false,
+            }
+        }
+        let payload: serde_json::Value =
+            serde_json::from_str(&replay_request.request_payload).expect("request payload JSON");
+        assert!(
+            tree_contains(&payload, &stored_result),
+            "the replayed model request does not carry the injected bytes \
+             verbatim\nstored: {}\npayload: {}",
+            stored_result,
+            replay_request.request_payload
+        );
     }
 
     /// #172 end-to-end: seed a WAL whose middle turn is a tool call and
