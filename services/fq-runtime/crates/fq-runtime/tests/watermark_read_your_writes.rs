@@ -125,3 +125,119 @@ async fn a_read_gated_at_the_publish_sequence_sees_the_write() {
     let _ = shutdown_tx.send(());
     handle.await.expect("join").expect("clean consumer exit");
 }
+
+/// The ultrareview's counterexample (bug_001), now a regression test:
+/// a transient failure NAKs one mid-run sequence. Without
+/// resolved-contiguous delivery a later sequence would leapfrog it,
+/// advance the mark, and release readers into the gap. Under
+/// `strict_order` the server redelivers the NAK'd sequence before
+/// anything later, so when the mark reaches S, everything at or
+/// below S has applied — proven here by injecting the failure and
+/// asserting both the redelivery order and the contiguity of the
+/// applied set at release time.
+#[tokio::test]
+async fn a_transient_failure_never_lets_the_watermark_expose_a_gap() {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use fq_runtime::control_plane::durable_consumer::{
+        DeliverFrom, DurableConsumerConfig, HandlerError, run_durable_consumer,
+    };
+
+    let server = fq_test_support::NatsServer::start();
+    let bus = EventBus::connect(server.url()).await.expect("connect");
+
+    // Five events; the middle one will fail its first delivery.
+    let mut seqs = Vec::new();
+    for _ in 0..5 {
+        seqs.push(bus.publish(&completed("wm-gap")).await.expect("publish"));
+    }
+    let victim = seqs[2];
+    let last = *seqs.last().unwrap();
+
+    let (watermark_tx, watermark) = watermark::channel();
+    let watermark_tx = Arc::new(watermark_tx);
+    let applied: Arc<Mutex<BTreeSet<u64>>> = Arc::new(Mutex::new(BTreeSet::new()));
+    let delivered: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let failed_once = Arc::new(AtomicBool::new(false));
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn({
+        let (tx, applied, delivered, failed_once) = (
+            watermark_tx.clone(),
+            applied.clone(),
+            delivered.clone(),
+            failed_once.clone(),
+        );
+        let bus = bus.clone();
+        async move {
+            let config = DurableConsumerConfig {
+                durable_name: "fq-projector-gap-test".to_string(),
+                filter_subjects: Vec::new(),
+                deliver_from: DeliverFrom::Beginning,
+                strict_order: true,
+            };
+            run_durable_consumer(&bus, config, shutdown_rx, |delivery| {
+                let seq = delivery.stream_seq.expect("jetstream metadata");
+                let (tx, applied, delivered, failed_once) = (
+                    tx.clone(),
+                    applied.clone(),
+                    delivered.clone(),
+                    failed_once.clone(),
+                );
+                async move {
+                    delivered.lock().unwrap().push(seq);
+                    // Mirror the projection handler: fail transiently
+                    // once at the victim, otherwise apply-then-advance.
+                    if seq == victim && !failed_once.swap(true, Ordering::SeqCst) {
+                        return Err(HandlerError::transient(std::io::Error::other(
+                            "injected transient store failure",
+                        )));
+                    }
+                    applied.lock().unwrap().insert(seq);
+                    tx.advance(seq);
+                    Ok(())
+                }
+            })
+            .await
+        }
+    });
+
+    // Released at the victim's sequence => the victim (and everything
+    // below it) has applied. This is the exact read the counterexample
+    // released into a gap.
+    watermark
+        .wait_for(victim, Duration::from_secs(10))
+        .await
+        .expect("watermark reaches the victim after redelivery");
+    {
+        let applied = applied.lock().unwrap();
+        for seq in seqs.iter().filter(|s| **s <= victim) {
+            assert!(
+                applied.contains(seq),
+                "released at {victim} but sequence {seq} is not applied: {applied:?}"
+            );
+        }
+    }
+
+    // And the mechanism: after the NAK, the very next delivery is the
+    // victim's retry — nothing later leapfrogs it.
+    watermark
+        .wait_for(last, Duration::from_secs(10))
+        .await
+        .expect("the run completes");
+    {
+        let delivered = delivered.lock().unwrap();
+        let first_victim = delivered.iter().position(|s| *s == victim).unwrap();
+        assert_eq!(
+            delivered.get(first_victim + 1),
+            Some(&victim),
+            "strict order must redeliver the NAK'd sequence next, saw {delivered:?}"
+        );
+        assert_eq!(applied.lock().unwrap().len(), 5, "all five applied");
+    }
+
+    let _ = shutdown_tx.send(());
+    handle.await.expect("join").expect("clean exit");
+}

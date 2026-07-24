@@ -74,6 +74,11 @@ impl ProjectionConsumer {
             durable_name: CONSUMER_NAME.to_string(),
             filter_subjects: Vec::new(),
             deliver_from: DeliverFrom::Beginning,
+            // The watermark's contract ("a reader released at S finds
+            // S's row") requires resolved-contiguous delivery: without
+            // it a NAK'd sequence can be leapfrogged by a later one
+            // and the mark would expose a gap.
+            strict_order: true,
         };
         run_durable_consumer(&self.bus, config, shutdown, |delivery| {
             self.handle_event(delivery)
@@ -84,10 +89,14 @@ impl ProjectionConsumer {
 
     /// Insert one event into the projection, then advance the
     /// watermark past it. The shared loop owns the ack: `Ok` acks, a
-    /// transient error NAKs for redelivery. The mark moves only after
-    /// the insert commits, so a reader released at sequence S always
-    /// finds S's row; advancement is monotonic, so redeliveries never
-    /// regress it.
+    /// transient error NAKs for redelivery. Two halves make the
+    /// invariant ("a reader released at sequence S finds S's row"):
+    /// the mark moves only after the insert commits, and the
+    /// consumer runs `strict_order` — the server redelivers a NAK'd
+    /// sequence before delivering any later one, so advance-on-
+    /// success is contiguous and a pending retry can never be
+    /// leapfrogged. Advancement is monotonic, so redeliveries of
+    /// already-applied sequences never regress it.
     async fn handle_event(&self, delivery: Delivery) -> Result<(), HandlerError> {
         let Delivery { event, stream_seq } = delivery;
         debug!(
@@ -228,6 +237,7 @@ mod tests {
             // stream has accumulated across days of runs (#118).
             filter_subjects: vec![format!("fq.agent.{agent_id}.>")],
             deliver_from: DeliverFrom::Beginning,
+            strict_order: false,
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

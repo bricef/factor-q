@@ -19,6 +19,7 @@
 //!     durable_name: "fq-mything".to_string(),
 //!     filter_subjects: vec!["fq.agent.*.mything".to_string()],
 //!     deliver_from: DeliverFrom::Beginning,
+//!     strict_order: false,
 //! };
 //! run_durable_consumer(&bus, config, shutdown, |delivery| async move {
 //!     handle(&delivery.event).await.map_err(HandlerError::transient)
@@ -91,6 +92,15 @@ pub struct DurableConsumerConfig {
     pub filter_subjects: Vec<String>,
     /// Where a newly created durable starts reading.
     pub deliver_from: DeliverFrom,
+    /// Resolved-contiguous delivery (`max_ack_pending = 1`): the
+    /// server never delivers past an unresolved message, so after a
+    /// NAK the next delivery is the retry of the same message.
+    /// Required by handlers whose progress mark must never expose a
+    /// sequence while an earlier one is still pending redelivery
+    /// (the projection watermark). Costs throughput — one
+    /// outstanding message per server round-trip. Only supported on
+    /// whole-stream consumers (no subject filters).
+    pub strict_order: bool,
 }
 
 impl DurableConsumerConfig {
@@ -100,6 +110,18 @@ impl DurableConsumerConfig {
         &self,
         bus: &EventBus,
     ) -> Result<async_nats::jetstream::consumer::PullConsumer, BusError> {
+        if self.strict_order {
+            // Fail loud on the unsupported combination rather than
+            // silently dropping the ordering guarantee.
+            if !self.filter_subjects.is_empty() || self.deliver_from != DeliverFrom::Beginning {
+                return Err(BusError::Stream(format!(
+                    "strict_order requires a whole-stream from-beginning consumer \
+                     (consumer `{}` has filters or a non-beginning start)",
+                    self.durable_name
+                )));
+            }
+            return bus.durable_consumer_strict(&self.durable_name).await;
+        }
         match self.deliver_from {
             DeliverFrom::Beginning => match self.filter_subjects.as_slice() {
                 [] => bus.durable_consumer(&self.durable_name).await,
@@ -400,6 +422,7 @@ mod tests {
             durable_name: "fq-loop-nak-test".to_string(),
             filter_subjects: vec![format!("fq.worker.{}.heartbeat", worker_id.as_str())],
             deliver_from: DeliverFrom::Beginning,
+            strict_order: false,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let bus_for_loop = bus.clone();
@@ -465,6 +488,7 @@ mod tests {
             // sees this test's two heartbeats.
             filter_subjects: vec!["fq.worker.*.heartbeat".to_string()],
             deliver_from: DeliverFrom::Beginning,
+            strict_order: false,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let bus_for_loop = bus.clone();

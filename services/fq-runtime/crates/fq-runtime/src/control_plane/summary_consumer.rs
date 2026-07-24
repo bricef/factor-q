@@ -152,6 +152,7 @@ impl SummaryConsumer {
             durable_name,
             filter_subjects,
             deliver_from,
+            strict_order: false,
         };
         run_durable_consumer(&self.bus, config, shutdown, |delivery| {
             self.handle_event(delivery.event)

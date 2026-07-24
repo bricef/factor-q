@@ -603,6 +603,59 @@ impl EventBus {
         Ok(consumer)
     }
 
+    /// [`EventBus::durable_consumer`], with **resolved-contiguous
+    /// delivery**: `max_ack_pending = 1`, so the server never delivers
+    /// a message until the previous one is resolved (acked — success
+    /// or permanent skip). After a NAK the next delivery is the retry
+    /// of the same message, which is what makes an advance-on-success
+    /// watermark contiguous by construction: sequence S is never
+    /// exposed while an earlier sequence is still pending redelivery.
+    /// Costs throughput — one outstanding message per round-trip —
+    /// which the projection's fold accepts as the price of
+    /// read-your-writes.
+    ///
+    /// `get_or_create` keeps an existing durable's settings, so a
+    /// pre-existing consumer is updated in place when its
+    /// `max_ack_pending` differs (the same drift-repair the trigger
+    /// consumer does for its retry policy).
+    pub async fn durable_consumer_strict(
+        &self,
+        name: &str,
+    ) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            "getting/creating strict-order durable JetStream consumer"
+        );
+        let stream = self
+            .jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let consumer = stream
+            .get_or_create_consumer(
+                name,
+                consumer::pull::Config {
+                    durable_name: Some(name.to_string()),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    max_ack_pending: 1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let existing = consumer.cached_info().config.clone();
+        if existing.max_ack_pending != 1 {
+            let mut config = consumer::pull::Config::try_from_consumer_config(existing)
+                .map_err(|err| BusError::Stream(err.to_string()))?;
+            config.max_ack_pending = 1;
+            return stream
+                .update_consumer(config)
+                .await
+                .map_err(|err| BusError::Stream(err.to_string()));
+        }
+        Ok(consumer)
+    }
+
     /// Durable JetStream consumer scoped to a subject filter.
     ///
     /// Used by the coordination consumer (step 7) which only
