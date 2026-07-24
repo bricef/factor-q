@@ -667,13 +667,7 @@ impl WorkerStore {
         for row in rows {
             let call_id: String = row.try_get("tool_call_id")?;
             let dispatched_at: i64 = row.try_get("dispatched_at")?;
-            let rendered_at = chrono::DateTime::from_timestamp_millis(dispatched_at)
-                .map(|t| t.to_rfc3339())
-                .unwrap_or_else(|| dispatched_at.to_string());
-            let payload = serde_json::json!({
-                "interrupted": true,
-                "notice": format!("HOST NOTICE: this tool call was interrupted by a runtime crash after being dispatched at {rendered_at}. Whether it executed — fully, partially, or not at all — is unknown. Verify the relevant state (files, git, external services) before building on anything; re-run it only if you have confirmed it did not take effect.")
-            }).to_string();
+            let payload = interrupted_result_payload(dispatched_at);
             sqlx::query(
                 "UPDATE tool_dispatch SET status = 'completed', result = ?, is_error = 1, \
                  completed_at = dispatched_at, seq = 1 + MAX(\
@@ -1251,6 +1245,22 @@ pub fn check_compatibility(recorded: Option<u32>, binary: u32) -> Compatibility 
         Some(v) if v < binary => Compatibility::NeedsUpgrade { from: v },
         Some(v) => Compatibility::BinaryTooOld { db_version: v },
     }
+}
+
+/// Render the synthetic result for one interrupted tool dispatch (#373).
+/// The timestamp is the row's persisted `dispatched_at` — never the live
+/// clock — so the payload is rendered once and every later replay
+/// reproduces it byte-identically (the PR #143 clock bug is the
+/// cautionary tale).
+fn interrupted_result_payload(dispatched_at_ms: i64) -> String {
+    let rendered_at = chrono::DateTime::from_timestamp_millis(dispatched_at_ms)
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| dispatched_at_ms.to_string());
+    serde_json::json!({
+        "interrupted": true,
+        "notice": format!("HOST NOTICE: this tool call was interrupted by a runtime crash after being dispatched at {rendered_at}. Whether it executed — fully, partially, or not at all — is unknown. Verify the relevant state (files, git, external services) before building on anything; re-run it only if you have confirmed it did not take effect.")
+    })
+    .to_string()
 }
 
 fn split_sql(sql: &str) -> Vec<String> {

@@ -827,6 +827,9 @@ impl EventBus {
         Ok(response.payload.to_vec())
     }
 
+    /// Subscribe to the daemon control-resume subject. Unlike reload and
+    /// down, this is request/reply: each message carries a JSON resume
+    /// request and a reply inbox the daemon answers on.
     pub async fn subscribe_control_resume(&self) -> Result<async_nats::Subscriber, BusError> {
         Ok(self.client.subscribe(CONTROL_RESUME_SUBJECT).await?)
     }
