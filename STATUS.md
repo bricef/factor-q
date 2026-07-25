@@ -16,7 +16,10 @@ If this contradicts `git log`, trust the log and fix this file.
   server-initiated capabilities (sampling, elicitation, roots). Operator
   surface: `fq init / run / trigger / reload / down / agent / invocation`
   (including `transcript`) `/ events / costs / status / workers /
-  dead-letters / doctor` (read commands take `--json`), plus a read-only
+  dead-letters / doctor` (read commands take `--json`), plus the
+  authenticated-edge client verbs `fq connect` (TOFU cert pinning +
+  token), `fq ops list`, and `fq token attenuate` (offline token
+  narrowing), plus a read-only
   web dashboard (`fq-dashboard` over the daemon's localhost tarpc read
   service — the
   [operator-dashboard plan](docs/plans/closed/2026-07-10-operator-dashboard.md)).
