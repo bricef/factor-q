@@ -477,6 +477,28 @@ async fn resume_rejects_unknown_and_dropped_invocations() {
         String::from_utf8_lossy(&drop_out.stderr)
     );
 
+    // `drop` publishes; the coordination consumer applies. Wait for the
+    // decision to be OBSERVABLE before asserting resume refuses it —
+    // otherwise this races the consumer and passes only when it happens
+    // to be keeping up. (That the window exists at all is its own bug,
+    // filed separately: a resume issued inside it is accepted.)
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let show = run_fq(&scratch, &nats_url, &["invocation", "show", &invocation_id]);
+        let text = String::from_utf8_lossy(&show.stdout).to_string();
+        if text
+            .lines()
+            .any(|l| l.trim_start().starts_with("status:") && l.contains("failed"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "drop never became observable:\n{text}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
     let resume_dropped = run_fq(
         &scratch,
         &nats_url,
@@ -631,9 +653,18 @@ async fn live_drop_requires_opt_in_halts_and_stays_terminal_after_restart() {
         "toolu_live_drop",
         "builtin__exec",
         json!({
-            "command": ["sleep", "2"],
+            "command": ["sleep", "5"],
             "cwd": scratch.path("workspace"),
         }),
+        10,
+        5,
+    ));
+    // Queued but must NEVER be consumed: if the halt really preempts at
+    // the boundary, the invocation never asks for another turn. Without
+    // this the mock would be exhausted and the invocation would die on
+    // its own — making "it stopped" indistinguishable from "it ran out".
+    mock.push_response(MockResponse::text(
+        "this turn must never be requested",
         10,
         5,
     ));
@@ -701,13 +732,30 @@ async fn live_drop_requires_opt_in_halts_and_stays_terminal_after_restart() {
         )
         .await;
 
+    // The preemption proof: the second response is still sitting in the
+    // queue, so only the opening turn was ever requested.
+    assert_eq!(
+        mock.received_requests().len(),
+        1,
+        "the halt did not preempt — the invocation consumed another model turn"
+    );
+
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let show = run_fq(&scratch, &nats_url, &["invocation", "show", &invocation_id]);
-        if String::from_utf8_lossy(&show.stdout).contains("failed") {
+        let text = String::from_utf8_lossy(&show.stdout).to_string();
+        // The status LINE, not merely the word somewhere in the output
+        // (`archived:` and event rows carry it too).
+        if text
+            .lines()
+            .any(|l| l.trim_start().starts_with("status:") && l.contains("failed"))
+        {
             break;
         }
-        assert!(Instant::now() < deadline, "live drop never landed terminal");
+        assert!(
+            Instant::now() < deadline,
+            "live drop never landed terminal:\n{text}"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
