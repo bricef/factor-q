@@ -491,8 +491,17 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
 /// RAII entry in [`ReducerRunner::active`]: removed on drop, so a
 /// panic or early return can never leave a phantom "live" marker
 /// that would block operator resume forever.
+///
+/// It clears [`ReducerRunner::halt_requested`] on the same edge. A halt
+/// armed against an invocation that then completes, fails, or panics
+/// before reaching a step boundary would otherwise sit in the set for
+/// the daemon's lifetime — and because `resume` re-drives the *same*
+/// invocation id, a later drive of that id would consume the stale halt
+/// and suspend for no reason. Tying both to the drive's lifetime makes
+/// that unrepresentable.
 struct ActiveInvocation<'a> {
     set: &'a std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    halts: &'a std::sync::Mutex<std::collections::HashSet<Uuid>>,
     id: Uuid,
 }
 
@@ -501,6 +510,10 @@ impl Drop for ActiveInvocation<'_> {
         self.set
             .lock()
             .expect("active set poisoned")
+            .remove(&self.id);
+        self.halts
+            .lock()
+            .expect("halt set poisoned")
             .remove(&self.id);
     }
 }
@@ -554,6 +567,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .insert(invocation_id);
         ActiveInvocation {
             set: &self.active,
+            halts: &self.halt_requested,
             id: invocation_id,
         }
     }

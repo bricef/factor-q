@@ -428,9 +428,10 @@ enum InvocationCommands {
     /// Operator-issued terminal transition for an invocation.
     /// Publishes `invocation.operator_recovered` so audit can
     /// distinguish operator-initiated terminations from
-    /// worker-initiated ones. Works on any current state
-    /// (kill-switch behaviour). To reconcile unknown execution and preserve
-    /// progress instead, use `resume`.
+    /// worker-initiated ones. Works on any state EXCEPT one this
+    /// daemon is actively driving — that needs `--live`, which halts
+    /// it at its next step boundary first (#107). To reconcile unknown
+    /// execution and preserve progress instead, use `resume`.
     Drop {
         /// Invocation id to drop.
         id: String,
@@ -2729,6 +2730,52 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         ));
     let worker: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
 
+    // Live-drop listener: this daemon's runner is the zero-lag liveness
+    // authority. Bare drops are rejected while active; --live arms the
+    // invocation-scoped boundary halt before the CLI publishes the audit event.
+    //
+    // ORDERING IS LOAD-BEARING: this must be listening before startup
+    // recovery re-drives anything (the `for inv in recoverable` loop
+    // below spawns detached resumes, which are immediately `is_active`).
+    // The CLI reads NATS `no responders` as "inactive/stuck, drop
+    // directly", so any window where an invocation is live and this
+    // subject is unowned silently defeats the guard — in exactly the
+    // post-crash restart operators reach for `drop` in.
+    let (drop_listener_shutdown_tx, mut drop_listener_shutdown_rx) =
+        tokio::sync::oneshot::channel::<()>();
+    let drop_bus = bus.clone();
+    let drop_runner = resume_runner.clone();
+    let drop_listener_handle = tokio::spawn(async move {
+        'resubscribe: loop {
+            let mut sub = match drop_bus.subscribe_control_drop().await {
+                Ok(sub) => sub,
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to subscribe to control drop; retrying in 5s");
+                    tokio::select! {
+                        _ = &mut drop_listener_shutdown_rx => break 'resubscribe,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
+                    }
+                }
+            };
+            loop {
+                tokio::select! {
+                    _ = &mut drop_listener_shutdown_rx => break 'resubscribe,
+                    msg = sub.next() => {
+                        let Some(msg) = msg else { continue 'resubscribe };
+                        let Some(reply) = msg.reply.clone() else { continue };
+                        let response = match serde_json::from_slice::<InvocationDropRequest>(&msg.payload) {
+                            Ok(req) => handle_drop_request(&drop_runner, req),
+                            Err(err) => InvocationDropResponse { ok: false, message: format!("invalid drop request: {err}") },
+                        };
+                        if let Ok(body) = serde_json::to_vec(&response) {
+                            let _ = drop_bus.reply_control(reply.to_string(), body).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // Drain the shared servers' notification streams for the life of
     // the daemon (ADR-0020): logs/progress fold into tracing, and a
     // `tools/list_changed` installs a rebuilt registry into the shared
@@ -3190,44 +3237,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                             };
                         if let Ok(body) = serde_json::to_vec(&response) {
                             let _ = resume_control.bus.reply_control(reply.to_string(), body).await;
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    // Live-drop listener: this daemon's runner is the zero-lag liveness
-    // authority. Bare drops are rejected while active; --live arms the
-    // invocation-scoped boundary halt before the CLI publishes the audit event.
-    let (drop_listener_shutdown_tx, mut drop_listener_shutdown_rx) =
-        tokio::sync::oneshot::channel::<()>();
-    let drop_bus = bus.clone();
-    let drop_runner = resume_runner.clone();
-    let drop_listener_handle = tokio::spawn(async move {
-        'resubscribe: loop {
-            let mut sub = match drop_bus.subscribe_control_drop().await {
-                Ok(sub) => sub,
-                Err(err) => {
-                    tracing::error!(error = %err, "failed to subscribe to control drop; retrying in 5s");
-                    tokio::select! {
-                        _ = &mut drop_listener_shutdown_rx => break 'resubscribe,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
-                    }
-                }
-            };
-            loop {
-                tokio::select! {
-                    _ = &mut drop_listener_shutdown_rx => break 'resubscribe,
-                    msg = sub.next() => {
-                        let Some(msg) = msg else { continue 'resubscribe };
-                        let Some(reply) = msg.reply.clone() else { continue };
-                        let response = match serde_json::from_slice::<InvocationDropRequest>(&msg.payload) {
-                            Ok(req) => handle_drop_request(&drop_runner, req),
-                            Err(err) => InvocationDropResponse { ok: false, message: format!("invalid drop request: {err}") },
-                        };
-                        if let Ok(body) = serde_json::to_vec(&response) {
-                            let _ = drop_bus.reply_control(reply.to_string(), body).await;
                         }
                     }
                 }
@@ -4399,7 +4408,20 @@ fn handle_drop_request(
                 ),
             };
         }
-        let _ = runner.request_halt(id);
+        // The arm can lose to the invocation finishing between the
+        // liveness check and here. Report that rather than letting the
+        // CLI publish a terminal event: the operator-recovered handler
+        // deliberately overrides any prior status, so a run that
+        // completed on its own would be archived as `failed`.
+        if !runner.request_halt(id) {
+            return InvocationDropResponse {
+                ok: false,
+                message: format!(
+                    "invocation {id} finished before the halt could be armed; \
+                     nothing dropped — re-check `fq invocation show {id}`"
+                ),
+            };
+        }
     }
     InvocationDropResponse {
         ok: true,
