@@ -107,6 +107,10 @@ pub struct CoordinationConsumer {
     /// it via [`Self::with_runtime_id`]; the constructor default
     /// (a fresh uuid) only applies in tests.
     runtime_id: Uuid,
+    /// Advanced as lifecycle events apply — the coordination half of
+    /// the read horizon: the Invocation view's fold spans stores this
+    /// consumer writes, so gated reads wait on this mark too.
+    watermark: Option<crate::watermark::WatermarkSender>,
 }
 
 impl CoordinationConsumer {
@@ -121,6 +125,7 @@ impl CoordinationConsumer {
             test_consumer_name: None,
             test_filter_subject: None,
             runtime_id: Uuid::now_v7(),
+            watermark: None,
         }
     }
 
@@ -182,6 +187,14 @@ impl CoordinationConsumer {
     }
 
     /// Run the consumer loop until `shutdown` fires. The
+    /// Advance `watermark` as lifecycle events apply (the read
+    /// horizon's coordination half). Also flips the durable to
+    /// strict-order delivery so the mark can never expose a gap.
+    pub fn with_watermark(mut self, watermark: crate::watermark::WatermarkSender) -> Self {
+        self.watermark = Some(watermark);
+        self
+    }
+
     /// stale-worker sweep rides the loop's tick arm, serialised
     /// with message handling on the same task.
     pub async fn run(
@@ -203,14 +216,27 @@ impl CoordinationConsumer {
             durable_name,
             filter_subjects: vec![filter],
             deliver_from,
-            strict_order: false,
+            // The mark's contract needs resolved-contiguous delivery;
+            // without a mark the extra strictness buys nothing.
+            // (Strict refuses deliver-from-new, so test consumers
+            // never combine the two.)
+            strict_order: self.watermark.is_some(),
         };
         let this = &self;
         run_durable_consumer_with_tick(
             &self.bus,
             config,
             shutdown,
-            |delivery| this.handle_event(delivery.event),
+            |delivery| async move {
+                let seq = delivery.stream_seq;
+                this.handle_event(delivery.event).await?;
+                // After the handler resolves: mirror the projection
+                // consumer's advance-after-commit discipline.
+                if let (Some(watermark), Some(seq)) = (&this.watermark, seq) {
+                    watermark.advance(seq);
+                }
+                Ok(())
+            },
             Duration::from_millis(self.sweep_interval_ms),
             || async move {
                 if let Err(err) = this.sweep_stale_workers().await {

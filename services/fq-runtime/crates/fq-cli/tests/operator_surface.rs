@@ -12,14 +12,15 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn operator_surface_matches_the_committed_snapshot() {
+    let server = fq_test_support::NatsServer::start();
     let scratch = tempfile::tempdir().unwrap();
     let paths = fq_runtime::db::RuntimeDbPaths::under(scratch.path());
-    drop(
+    let projection_store = std::sync::Arc::new(
         fq_runtime::control_plane::projection::store::ProjectionStore::open(&paths.projection)
             .await
             .expect("init projection store"),
     );
-    drop(
+    let control_plane_store = std::sync::Arc::new(
         fq_runtime::control_plane::store::ControlPlaneStore::open(&paths.control_plane)
             .await
             .expect("init control-plane store"),
@@ -35,8 +36,20 @@ async fn operator_surface_matches_the_committed_snapshot() {
             .expect("open views"),
     );
     let (_watermark_tx, watermark) = fq_runtime::watermark::channel();
-    let registry = fq_cli::operator_registry(views, watermark, Duration::from_millis(1))
-        .expect("assemble the operator registry");
+    let bus = fq_runtime::EventBus::connect(server.url())
+        .await
+        .expect("connect");
+    let registry = fq_cli::operator_registry(
+        views,
+        fq_runtime::watermark::Horizon::new(vec![watermark]),
+        Duration::from_millis(1),
+        fq_cli::OperatorDeps {
+            bus,
+            projection: projection_store,
+            control_plane: control_plane_store,
+        },
+    )
+    .expect("assemble the operator registry");
     let actual = serde_json::to_string_pretty(&registry.describe_value().expect("describe"))
         .expect("serialise")
         + "\n";
