@@ -1097,6 +1097,157 @@ fn token_attenuate(
     Ok(())
 }
 
+// ---------------------------------------------------------------------
+// The operator surface (plan Phase 3): the real declarations, bound
+// to Views-backed handlers — assembled here because the daemon is
+// where declarations meet their implementations. The contract shapes
+// that aren't runtime DTOs (keys, filters) live beside the assembly
+// until 3e's codegen decision settles their final home.
+// ---------------------------------------------------------------------
+
+/// Get identity for the Invocation view.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct InvocationViewKey {
+    invocation_id: String,
+}
+
+/// List selection for the Invocation view — the typed, schema'd
+/// filter (never a query language).
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct InvocationListFilter {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    include_archived: bool,
+    #[serde(default = "default_invocation_list_limit")]
+    limit: i64,
+}
+
+fn default_invocation_list_limit() -> i64 {
+    50
+}
+
+/// Build the daemon's operator registry: the Invocation view served
+/// from [`Views`], reads gated at the projection watermark. Public
+/// for one consumer besides the daemon: the operator-surface snapshot
+/// test, which commits `describe()` as the reviewable interface
+/// artifact.
+pub fn operator_registry(
+    views: Arc<Views>,
+    watermark: fq_runtime::watermark::Watermark,
+    min_seq_bound: std::time::Duration,
+) -> anyhow::Result<fq_edge::EdgeRegistry> {
+    use fq_edge::wire::WireError;
+
+    let mut registry = fq_edge::EdgeRegistry::new().with_read_gate(Arc::new(move |min_seq| {
+        let watermark = watermark.clone();
+        Box::pin(async move {
+            watermark
+                .wait_for(min_seq, min_seq_bound)
+                .await
+                .map(|_| ())
+                .map_err(|e| match e {
+                    fq_runtime::watermark::WatermarkError::Lag { applied, .. }
+                    | fq_runtime::watermark::WatermarkError::Stopped { applied, .. } => applied,
+                })
+        })
+    }));
+
+    let decl = fq_ops::View::new::<
+        InvocationViewKey,
+        fq_runtime::views::InvocationDetailView,
+        fq_runtime::views::InvocationSummaryView,
+        InvocationListFilter,
+    >(
+        fq_ops::Domain::Invocation,
+        "An agent invocation: the fold of its lifecycle events.",
+        fq_ops::Stability::Experimental,
+    );
+
+    let get_views = views.clone();
+    registry
+        .view::<InvocationViewKey, fq_runtime::views::InvocationDetailView, fq_runtime::views::InvocationSummaryView, InvocationListFilter, _, _, _, _>(
+            decl,
+            move |key: InvocationViewKey| {
+                let views = get_views.clone();
+                async move {
+                    let detail = views
+                        .invocation(
+                            &key.invocation_id,
+                            chrono::Utc::now().timestamp_millis(),
+                            fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS,
+                            fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+                        )
+                        .await
+                        .map_err(|e| WireError::Internal {
+                            message: e.to_string(),
+                        })?;
+                    detail.ok_or_else(|| WireError::NotFound {
+                        op: "invocation.get".into(),
+                        message: format!("no invocation `{}`", key.invocation_id),
+                    })
+                }
+            },
+            move |filter: InvocationListFilter| {
+                let views = views.clone();
+                async move {
+                    let status = filter
+                        .status
+                        .as_deref()
+                        .map(parse_invocation_status_filter)
+                        .transpose()
+                        .map_err(|e| WireError::InvalidInput {
+                            op: "invocation.list".into(),
+                            message: e.to_string(),
+                        })?;
+                    views
+                        .invocation_index(status, filter.include_archived, filter.limit)
+                        .await
+                        .map_err(|e| WireError::Internal {
+                            message: e.to_string(),
+                        })
+                }
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
+
+    Ok(registry)
+}
+
+/// One authenticated edge call using the stored pairing for the
+/// configured daemon: the outer error is transport/credentials, the
+/// inner is the operation's own verdict — callers that care (show's
+/// not-found path) match it, everyone else surfaces it.
+async fn edge_invoke(
+    global: &GlobalArgs,
+    op: fq_ops::OpId,
+    input: serde_json::Value,
+) -> anyhow::Result<Result<serde_json::Value, fq_edge::wire::WireError>> {
+    let config = global.resolve_config()?;
+    let addr = config.edge.bind.clone();
+    let entry = stored_connection(&addr)?;
+    let client = edge_client(
+        &addr,
+        parse_fingerprint_hex(&entry.fingerprint)?,
+        &entry.token,
+    )
+    .await?;
+    let response = client
+        .rpc
+        .invoke(
+            tarpc::context::current(),
+            fq_edge::InvokeRequest {
+                op,
+                version: 1,
+                input,
+                min_seq: None,
+            },
+        )
+        .await
+        .context("edge rpc failed")?;
+    Ok(response.map(|r| r.output))
+}
+
 /// Build-time version metadata, emitted by `build.rs`.
 const FQ_GIT_SHA: &str = env!("FQ_GIT_SHA");
 const FQ_BUILD_EPOCH: &str = env!("FQ_BUILD_EPOCH");
@@ -3319,10 +3470,18 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             println!("edge: admin token (printed once; store it securely):");
             println!("  {admin}");
         }
-        // Empty until Phase 3 transplants the exemplar ops; the edge
-        // still serves `List(Operation)` — the surface describing
-        // itself — so an authenticated client can see what exists.
-        let edge_registry = Arc::new(fq_edge::EdgeRegistry::new());
+        // The operator surface: real declarations over the daemon's
+        // read views, gated at the projection watermark (Phase 3).
+        let edge_views = Arc::new(
+            fq_runtime::views::Views::open(&db_paths)
+                .await
+                .context("edge: failed to open the read views")?,
+        );
+        let edge_registry = Arc::new(operator_registry(
+            edge_views,
+            projection_watermark.clone(),
+            std::time::Duration::from_millis(config.edge.min_seq_wait_ms),
+        )?);
         let (edge_addr, edge_serving) = fq_edge::bind(&config.edge.bind, &identity, edge_registry)
             .await
             .context("edge: failed to bind (check [edge] in fq.toml)")?;
@@ -4290,11 +4449,23 @@ async fn invocation_list(
     limit: i64,
     json: bool,
 ) -> anyhow::Result<()> {
-    let status_filter = status.map(parse_invocation_status_filter).transpose()?;
-    let views = open_views(global).await?;
-    let items = views
-        .invocation_index(status_filter, include_archived, limit)
-        .await?;
+    // Validate locally for a fast, friendly error before dialling.
+    status.map(parse_invocation_status_filter).transpose()?;
+    // The flip (plan Phase 3b): this read speaks the authenticated
+    // edge — the daemon serves it from its views. Rendering is
+    // untouched; the goldens prove it byte-identical.
+    let output = edge_invoke(
+        global,
+        fq_ops::OpId::List(fq_ops::Domain::Invocation),
+        serde_json::to_value(InvocationListFilter {
+            status: status.map(str::to_string),
+            include_archived,
+            limit,
+        })?,
+    )
+    .await?
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let items: Vec<fq_runtime::views::InvocationSummaryView> = serde_json::from_value(output)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&items)?);
@@ -4316,18 +4487,21 @@ async fn invocation_list(
 }
 
 async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::Result<()> {
-    let views = open_views(global).await?;
-    let Some(detail) = views
-        .invocation(
-            id,
-            chrono::Utc::now().timestamp_millis(),
-            fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS,
-            fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
-        )
-        .await?
-    else {
-        eprintln!("no invocation found with id={id}");
-        std::process::exit(1);
+    let output = edge_invoke(
+        global,
+        fq_ops::OpId::Get(fq_ops::Domain::Invocation),
+        serde_json::to_value(InvocationViewKey {
+            invocation_id: id.to_string(),
+        })?,
+    )
+    .await?;
+    let detail: fq_runtime::views::InvocationDetailView = match output {
+        Ok(value) => serde_json::from_value(value)?,
+        Err(fq_edge::wire::WireError::NotFound { .. }) => {
+            eprintln!("no invocation found with id={id}");
+            std::process::exit(1);
+        }
+        Err(e) => anyhow::bail!("{e}"),
     };
 
     if json {

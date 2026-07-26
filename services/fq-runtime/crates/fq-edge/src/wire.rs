@@ -71,10 +71,25 @@ pub enum WireError {
     NotRegistered { op: String },
     #[error("input rejected by `{op}`: {message}")]
     InvalidInput { op: String, message: String },
+    /// A well-formed Get whose key names nothing — a normal outcome,
+    /// distinct from invalid input: the request was fine, the entity
+    /// isn't there.
+    #[error("`{op}`: {message}")]
+    NotFound { op: String, message: String },
     /// The token's grants do not cover the operation's required
     /// authority — the read-only-dashboard case, as an error.
     #[error("denied `{op}`: {message}")]
     Denied { op: String, message: String },
+    /// A read gated at `min_seq` timed out before the projection's
+    /// fold reached it — retryable: the daemon is alive but behind.
+    /// Carries both positions so the caller can decide (retry, widen
+    /// the bound, or read ungated and accept staleness).
+    #[error("`{op}` lagging: wanted at least sequence {wanted}, applied {applied}")]
+    Lagging {
+        op: String,
+        wanted: u64,
+        applied: u64,
+    },
     #[error("internal error: {message}")]
     Internal { message: String },
 }

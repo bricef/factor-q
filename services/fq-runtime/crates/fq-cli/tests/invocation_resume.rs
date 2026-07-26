@@ -51,6 +51,15 @@ impl Scratch {
         std::fs::create_dir_all(root.join("cache")).unwrap();
         std::fs::create_dir_all(root.join("agents")).unwrap();
         std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::create_dir_all(root.join("xdg")).unwrap();
+
+        // A pinned free port (not :0): daemons restart in these tests,
+        // and the client pairing must survive the restart — same
+        // address, same persisted identity, same token.
+        let edge_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
 
         // The pricing guarantee (#62) requires the model declared; the
         // haiku name resolves in the LiteLLM table. base_url points the
@@ -59,7 +68,7 @@ impl Scratch {
         std::fs::write(
             root.join("fq.toml"),
             format!(
-                "[edge]\nbind = \"127.0.0.1:0\"\n\n\
+                "[edge]\nbind = \"127.0.0.1:{edge_port}\"\n\n\
                  [providers.anthropic]\nmodels = [\"claude-haiku-4-5\"]\nbase_url = \"{mock_base_url}\"\n"
             ),
         )
@@ -97,6 +106,7 @@ fn run_fq(scratch: &Scratch, nats_url: &str, args: &[&str]) -> Output {
         .env("FQ_NATS_URL", nats_url)
         .env("FQ_CACHE_DIR", scratch.path("cache"))
         .env("FQ_AGENTS_DIR", scratch.path("agents"))
+        .env("XDG_CONFIG_HOME", scratch.path("xdg"))
         .env("ANTHROPIC_API_KEY", "test-key-unused-by-mock")
         .output()
         .expect("run fq CLI")
@@ -131,6 +141,48 @@ impl Daemon {
 
     fn log(&self) -> String {
         std::fs::read_to_string(&self.log_path).unwrap_or_default()
+    }
+
+    /// Pair the CLI with this daemon's edge (idempotent): the flipped
+    /// read verbs (`invocation list`/`show`) speak the authenticated
+    /// edge, so tests that verify through them need the stored
+    /// pairing. Only the FIRST daemon of a scratch prints the admin
+    /// token; later daemons reuse the persisted identity, and the
+    /// pinned port keeps the stored pairing valid across restarts.
+    fn pair(&self, scratch: &Scratch) {
+        if scratch
+            .path("xdg")
+            .join("factor-q/connections.toml")
+            .exists()
+        {
+            return;
+        }
+        let log = self.log();
+        let addr = log
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("- edge is listening on "))
+            .expect("edge addr in daemon log")
+            .trim()
+            .to_string();
+        let token = {
+            let mut lines = log.lines();
+            lines
+                .find(|l| l.contains("edge: admin token"))
+                .expect("admin token in first daemon log");
+            lines.next().expect("token line").trim().to_string()
+        };
+        let out = Command::new(fq_binary())
+            .args(["connect", &addr, "--token", &token])
+            .env("FQ_CONFIG", scratch.path("fq.toml"))
+            .env("XDG_CONFIG_HOME", scratch.path("xdg"))
+            .stdin(std::process::Stdio::piped())
+            .output()
+            .expect("run fq connect");
+        assert!(
+            out.status.success(),
+            "fq connect failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// Poll the daemon log until `needle` appears. Panics (with the
@@ -212,6 +264,7 @@ async fn crash_into_ambiguous(
     daemon
         .await_log("Runtime ready", Duration::from_secs(30))
         .await;
+    daemon.pair(scratch);
 
     // Hand the invocation to the DAEMON over the trigger wire — the
     // same `fq.trigger.<agent>` subject the watcher and fq-cron
@@ -268,6 +321,7 @@ async fn crash_into_ambiguous(
     restarted
         .await_log("Runtime ready", Duration::from_secs(30))
         .await;
+    restarted.pair(scratch);
 
     // Wait for the classification on the operator's own surface — the
     // same view a human triaging the crash would read.
@@ -557,6 +611,7 @@ async fn resume_rejects_unknown_and_dropped_invocations() {
     third
         .await_log("Runtime ready", Duration::from_secs(30))
         .await;
+    third.pair(&scratch);
     let list = run_fq(&scratch, &nats_url, &["invocation", "list"]);
     let list_text = String::from_utf8_lossy(&list.stdout).to_string();
     assert!(
@@ -673,6 +728,7 @@ async fn live_drop_requires_opt_in_halts_and_stays_terminal_after_restart() {
     daemon
         .await_log("Runtime ready", Duration::from_secs(30))
         .await;
+    daemon.pair(&scratch);
     let nats = async_nats::connect(&nats_url)
         .await
         .expect("connect broker");
@@ -764,6 +820,7 @@ async fn live_drop_requires_opt_in_halts_and_stays_terminal_after_restart() {
     restarted
         .await_log("Runtime ready", Duration::from_secs(30))
         .await;
+    restarted.pair(&scratch);
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         !restarted.log().contains("resuming invocation"),

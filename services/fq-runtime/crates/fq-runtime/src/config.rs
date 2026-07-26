@@ -104,6 +104,11 @@ pub struct EdgeConfig {
     /// Bind address for the TLS listener.
     #[serde(default = "default_edge_bind")]
     pub bind: String,
+    /// Upper bound, in milliseconds, on how long a `min_seq`-gated
+    /// read waits for the projection fold to catch up before
+    /// answering `Lagging`. Config, not code (Design Principle 8).
+    #[serde(default = "default_edge_min_seq_wait_ms")]
+    pub min_seq_wait_ms: u64,
 }
 
 impl Default for EdgeConfig {
@@ -111,8 +116,13 @@ impl Default for EdgeConfig {
         Self {
             enabled: default_edge_enabled(),
             bind: default_edge_bind(),
+            min_seq_wait_ms: default_edge_min_seq_wait_ms(),
         }
     }
+}
+
+fn default_edge_min_seq_wait_ms() -> u64 {
+    2_000
 }
 
 fn default_edge_enabled() -> bool {

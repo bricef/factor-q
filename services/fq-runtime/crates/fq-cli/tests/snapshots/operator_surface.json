@@ -1,0 +1,564 @@
+[
+  {
+    "view": {
+      "description": "",
+      "domain": "invocation",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List selection for the Invocation view — the typed, schema'd\nfilter (never a query language).",
+        "properties": {
+          "include_archived": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 50,
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "InvocationListFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One row in the invocation list: a coordination-ownership row, or (in\nthe merged index) an archive-only row flagged `archived`.",
+        "properties": {
+          "agent_id": {
+            "description": "From the projection; `None` when no event for the id has landed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "archived": {
+            "description": "True when the row came from `invocation_archive` (no live\nownership row remains).",
+            "type": "boolean"
+          },
+          "assigned_at_ms": {
+            "description": "`assigned_at` for ownership rows; `archived_at` for archive-only\nrows.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "started_at_ms": {
+            "description": "When the invocation began: `assigned_at` (dispatch time — the\nclosest thing to a start the coordination store records) for\nownership rows, the archive's true `started_at` for archive-only\nrows. Unlike `assigned_at_ms`, this means the same thing on both\nrow kinds — the list surface's \"started\" column.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "description": "`in_flight` / `completed` / `failed` / `ambiguous`, or the\narchive's `final_phase` for archive-only rows.",
+            "type": "string"
+          },
+          "summary": {
+            "default": null,
+            "description": "One-line operator summary (#216); see\n[`ActiveInvocationView::summary`].",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "worker_id": {
+            "description": "Empty for archive-only rows (the archive keeps no worker).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invocation_id",
+          "worker_id",
+          "status",
+          "assigned_at_ms",
+          "started_at_ms",
+          "archived"
+        ],
+        "title": "InvocationSummaryView",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for the Invocation view.",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "invocation_id"
+        ],
+        "title": "InvocationViewKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "ArchiveView": {
+            "description": "A finalised invocation's archive record.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "archived_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "final_phase": {
+                "type": "string"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "terminal_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "agent_id",
+              "final_phase",
+              "started_at_ms",
+              "terminal_at_ms",
+              "archived_at_ms"
+            ],
+            "type": "object"
+          },
+          "EventView": {
+            "description": "One event row from the projection.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "duration_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "error_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error_message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "event_id": {
+                "type": "string"
+              },
+              "event_type": {
+                "type": "string"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timestamp": {
+                "type": "string"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "event_id",
+              "timestamp",
+              "agent_id",
+              "invocation_id",
+              "event_type"
+            ],
+            "type": "object"
+          },
+          "InvocationCostView": {
+            "description": "One invocation's share of an agent's spend.",
+            "properties": {
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "description": "Epoch ms of the invocation's first cost event (its effective\nstart as the projection sees it); 0 when the stored timestamp\nfails to parse.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "started_at_ms",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens"
+            ],
+            "type": "object"
+          },
+          "InvocationSummaryView": {
+            "description": "One row in the invocation list: a coordination-ownership row, or (in\nthe merged index) an archive-only row flagged `archived`.",
+            "properties": {
+              "agent_id": {
+                "description": "From the projection; `None` when no event for the id has landed.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "archived": {
+                "description": "True when the row came from `invocation_archive` (no live\nownership row remains).",
+                "type": "boolean"
+              },
+              "assigned_at_ms": {
+                "description": "`assigned_at` for ownership rows; `archived_at` for archive-only\nrows.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "description": "When the invocation began: `assigned_at` (dispatch time — the\nclosest thing to a start the coordination store records) for\nownership rows, the archive's true `started_at` for archive-only\nrows. Unlike `assigned_at_ms`, this means the same thing on both\nrow kinds — the list surface's \"started\" column.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "status": {
+                "description": "`in_flight` / `completed` / `failed` / `ambiguous`, or the\narchive's `final_phase` for archive-only rows.",
+                "type": "string"
+              },
+              "summary": {
+                "default": null,
+                "description": "One-line operator summary (#216); see\n[`ActiveInvocationView::summary`].",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "worker_id": {
+                "description": "Empty for archive-only rows (the archive keeps no worker).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "worker_id",
+              "status",
+              "assigned_at_ms",
+              "started_at_ms",
+              "archived"
+            ],
+            "type": "object"
+          },
+          "LiveExecutionView": {
+            "description": "Live execution state of an in-flight invocation, from the worker WAL —\nthe \"what is it doing right now\" view. Present only while the invocation\nhas a WAL row (deleted on archive hand-off).",
+            "properties": {
+              "liveness": {
+                "$ref": "#/$defs/Liveness",
+                "description": "The health page's verdict for this run (see [`Liveness`])."
+              },
+              "llms": {
+                "items": {
+                  "$ref": "#/$defs/LlmDispatchView"
+                },
+                "type": "array"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "step_index": {
+                "description": "Reducer *step* counter (every model and tool step) — not the\nmodel-turn count that `max_iterations` gates (issue #109).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "terminal_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tools": {
+                "items": {
+                  "$ref": "#/$defs/ToolDispatchView"
+                },
+                "type": "array"
+              },
+              "updated_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "liveness",
+              "phase",
+              "step_index",
+              "started_at_ms",
+              "updated_at_ms",
+              "tools",
+              "llms"
+            ],
+            "type": "object"
+          },
+          "Liveness": {
+            "description": "The per-invocation liveness verdict the health page counts —\nshared by every surface that shows an in-flight row, so the health\ntile, the active table, and the detail page cannot drift apart.",
+            "oneOf": [
+              {
+                "const": "working",
+                "description": "A fresh open dispatch (tool or LLM) — long runs are fine as\nlong as the dispatch itself is younger than the long-dispatch\nthreshold (#130).",
+                "type": "string"
+              },
+              {
+                "const": "advancing",
+                "description": "Nothing open, but the WAL row advanced recently: the reducer is\nbetween steps. The quiet, healthy in-between.",
+                "type": "string"
+              },
+              {
+                "const": "stuck",
+                "description": "No fresh dispatch AND the WAL row has not advanced within the\nstuck threshold — the row the operator needs to look at.",
+                "type": "string"
+              }
+            ]
+          },
+          "LlmDispatchView": {
+            "description": "One in-flight LLM dispatch (worker WAL).",
+            "properties": {
+              "completed_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "dispatched_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "intent_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "is_error": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              },
+              "status": {
+                "description": "`intent` / `dispatched` / `completed`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "request_id",
+              "model",
+              "status",
+              "intent_at_ms"
+            ],
+            "type": "object"
+          },
+          "ToolDispatchView": {
+            "description": "One in-flight tool dispatch (worker WAL).",
+            "properties": {
+              "completed_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "dispatched_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "intent_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "is_error": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "status": {
+                "description": "`intent` / `dispatched` / `completed`.",
+                "type": "string"
+              },
+              "tool_call_id": {
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool_call_id",
+              "tool_name",
+              "status",
+              "intent_at_ms"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Everything known about one invocation, composed across the three stores.",
+        "properties": {
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "archive": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ArchiveView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Archive record, if the invocation has finalised."
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InvocationCostView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The invocation's cost so far — llm calls, tokens, and spend\nsummed from the projection's cost-bearing events. Grows while\nthe run is live; `None` before the first priced call lands."
+          },
+          "has_transcript": {
+            "default": false,
+            "description": "Whether the worker WAL contains dispatch rows for a transcript.",
+            "type": "boolean"
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "live": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveExecutionView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Live WAL execution state, if the invocation is still in flight."
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InvocationSummaryView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Coordination ownership row, if any."
+          },
+          "recent_events": {
+            "description": "Most recent events for this invocation (newest first).",
+            "items": {
+              "$ref": "#/$defs/EventView"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "default": null,
+            "description": "One-line operator summary (#216); see\n[`ActiveInvocationView::summary`].",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "invocation_id",
+          "recent_events"
+        ],
+        "title": "InvocationDetailView",
+        "type": "object"
+      },
+      "summary": "An agent invocation: the fold of its lifecycle events.",
+      "version": 1
+    }
+  }
+]

@@ -150,7 +150,7 @@ alias until Phase 5 strips it), alongside the untouched `ReadService`:
 **Acceptance:** a non-loopback client authenticates against a test daemon;
 negative-auth tests pass; golden untouched. *(2–3 PRs.)*
 
-### Phase 3 — exemplars: one declaration per category
+### Phase 3 — exemplars: one declaration per category — 3a ✅ #377 · ids #379 · 3b #385
 
 The pattern-fixing slices, with full review scrutiny:
 

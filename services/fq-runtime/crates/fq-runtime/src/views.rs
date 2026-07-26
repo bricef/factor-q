@@ -160,7 +160,7 @@ pub const DEFAULT_LONG_DISPATCH_THRESHOLD_MS: i64 = 600_000;
 /// The per-invocation liveness verdict the health page counts —
 /// shared by every surface that shows an in-flight row, so the health
 /// tile, the active table, and the detail page cannot drift apart.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Liveness {
     /// A fresh open dispatch (tool or LLM) — long runs are fine as
@@ -282,7 +282,7 @@ fn open_tool_command(parameters: &str) -> Option<String> {
 
 /// One row in the invocation list: a coordination-ownership row, or (in
 /// the merged index) an archive-only row flagged `archived`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InvocationSummaryView {
     pub invocation_id: String,
     /// From the projection; `None` when no event for the id has landed.
@@ -326,7 +326,7 @@ impl From<OwnerRow> for InvocationSummaryView {
 }
 
 /// A finalised invocation's archive record.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ArchiveView {
     pub invocation_id: String,
     pub agent_id: String,
@@ -350,7 +350,7 @@ impl From<InvocationArchiveRow> for ArchiveView {
 }
 
 /// One event row from the projection.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct EventView {
     pub event_id: String,
     pub timestamp: String,
@@ -411,7 +411,7 @@ impl From<CostSummary> for CostView {
 }
 
 /// One invocation's share of an agent's spend.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct InvocationCostView {
     pub invocation_id: String,
     /// Epoch ms of the invocation's first cost event (its effective
@@ -533,7 +533,7 @@ impl From<FailureSummary> for FailureView {
 }
 
 /// One in-flight tool dispatch (worker WAL).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct ToolDispatchView {
     pub tool_call_id: String,
     pub tool_name: String,
@@ -560,7 +560,7 @@ impl From<ToolDispatchRow> for ToolDispatchView {
 }
 
 /// One in-flight LLM dispatch (worker WAL).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct LlmDispatchView {
     pub request_id: String,
     pub model: String,
@@ -591,7 +591,7 @@ impl From<LlmDispatchRow> for LlmDispatchView {
 /// Live execution state of an in-flight invocation, from the worker WAL —
 /// the "what is it doing right now" view. Present only while the invocation
 /// has a WAL row (deleted on archive hand-off).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct LiveExecutionView {
     /// The health page's verdict for this run (see [`Liveness`]).
     pub liveness: Liveness,
@@ -607,7 +607,7 @@ pub struct LiveExecutionView {
 }
 
 /// Everything known about one invocation, composed across the three stores.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct InvocationDetailView {
     pub invocation_id: String,
     pub agent_id: Option<String>,

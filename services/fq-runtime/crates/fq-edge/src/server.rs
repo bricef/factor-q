@@ -112,6 +112,34 @@ impl Edge for EdgeServer {
                 message: "stream operations ride next_batch, not invoke".into(),
             });
         }
+        // The min_seq gate is generic-surface semantics, enforced
+        // centrally: reads wait (bounded) until the fold includes the
+        // caller's watermark; on anything that isn't a read the field
+        // is refused — commands return receipts, they don't gate.
+        if let Some(min_seq) = request.min_seq {
+            let is_read = matches!(resolved.category, OpCategory::Get | OpCategory::List);
+            if !is_read {
+                return Err(WireError::InvalidInput {
+                    op: request.op.to_string(),
+                    message: "min_seq gates reads; commands and reports answer at                               their own watermark"
+                        .into(),
+                });
+            }
+            let Some(gate) = self.registry.read_gate() else {
+                return Err(WireError::InvalidInput {
+                    op: request.op.to_string(),
+                    message: "this daemon serves no watermark gate; retry without                               min_seq"
+                        .into(),
+                });
+            };
+            if let Err(applied) = gate(min_seq).await {
+                return Err(WireError::Lagging {
+                    op: request.op.to_string(),
+                    wanted: min_seq,
+                    applied,
+                });
+            }
+        }
         let handler = self
             .registry
             .handler(&request.op.to_string())

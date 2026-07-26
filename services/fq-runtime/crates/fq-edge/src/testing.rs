@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fq_ops::fixtures::{
-    ControlState, DownInput, DropInput, InvocationKey, InvocationState, PublishInput, control,
-    control_down, cost_summary, invocation, invocation_drop, trigger_publish,
+    ControlState, DownInput, DropInput, InvocationFilter, InvocationIndexRow, InvocationKey,
+    InvocationState, PublishInput, control, control_down, cost_summary, invocation,
+    invocation_drop, trigger_publish,
 };
 use fq_ops::{AtomRef, Domain, Receipt};
 
@@ -65,7 +66,7 @@ impl MockDomain {
 
         let state = self.clone();
         registry
-            .view::<InvocationKey, InvocationState, _, _, _, _>(
+            .view::<InvocationKey, InvocationState, InvocationIndexRow, InvocationFilter, _, _, _, _>(
                 invocation(),
                 move |key| {
                     let state = state.clone();
@@ -80,19 +81,20 @@ impl MockDomain {
                 },
                 {
                     let state = self.clone();
-                    move |_filter| {
+                    move |_filter: InvocationFilter| {
                         let state = state.clone();
                         async move {
-                            let all: Vec<InvocationState> = state
+                            let rows: Vec<InvocationIndexRow> = state
                                 .invocations
                                 .lock()
                                 .unwrap()
                                 .values()
-                                .cloned()
+                                .map(|s| InvocationIndexRow {
+                                    invocation_id: s.invocation_id.clone(),
+                                    phase: s.phase.clone(),
+                                })
                                 .collect();
-                            serde_json::to_value(all).map_err(|e| WireError::Internal {
-                                message: e.to_string(),
-                            })
+                            Ok(rows)
                         }
                     }
                 },

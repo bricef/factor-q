@@ -58,6 +58,15 @@ pub struct InvocationState {
     pub phase: String,
 }
 
+/// One row of the Invocation view's index — what List returns. The
+/// exemplar keeps it visibly narrower than the fold to demonstrate
+/// the distinction (state answers Get; index rows answer List).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct InvocationIndexRow {
+    pub invocation_id: String,
+    pub phase: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct InvocationFilter {
     #[serde(default)]
@@ -68,7 +77,7 @@ pub struct InvocationFilter {
 
 /// Invocation: a view — Get/List derive; no Stream (stream its atoms).
 pub fn invocation() -> View {
-    View::new::<InvocationKey, InvocationState, InvocationFilter>(
+    View::new::<InvocationKey, InvocationState, InvocationIndexRow, InvocationFilter>(
         Domain::Invocation,
         "exemplar resource",
         Stability::Experimental,

@@ -34,7 +34,10 @@ distinguishes two natures, and the distinction is load-bearing:
 - **Views** (projections) have stable identity and changing state — but a
   view's state is a fold of atoms, so views change *only because new atoms
   exist*. A view is read as "the fold as of watermark W"; it is never
-  streamed directly — you stream its atoms. ("Follow this invocation" is
+  streamed directly — you stream its atoms. Its List answers with the
+  view's **index** — one row per fold, cheap to enumerate, declared as
+  its own schema — not N full folds: Get returns the state, List
+  returns index rows, and the two shapes genuinely differ. ("Follow this invocation" is
   Stream(TranscriptEntry, invocation=I), not "stream the invocation." The
   dashboard's snapshot-then-cursor transcript already works exactly this
   way.)
