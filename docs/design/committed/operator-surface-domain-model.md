@@ -108,7 +108,7 @@ idempotency, caveats), never hidden behind a generic verb:
 
 | Verb | Authority | The contract that makes it bespoke |
 |---|---|---|
-| invocation.drop | Write invocation | kill-switch: archived as failed; workers observe at the next step boundary |
+| invocation.drop | Write invocation | archives as failed; workers observe at the next step boundary. Refused on an invocation the daemon is actively driving unless `--live`, which halts it at its next boundary first (in-flight tools finish) before the drop |
 | trigger.publish | Write trigger | dispatch work: at-least-once with a bounded budget; the receipt references the appended trigger atom |
 | deadletter.requeue | Write trigger | selects the newest dead letter; **not idempotent**; fresh delivery budget |
 | worker.prune | Delete worker | evicts stale registrations; co-emits its events (no silent mutation) |
