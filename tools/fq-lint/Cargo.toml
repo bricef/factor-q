@@ -1,0 +1,22 @@
+[package]
+name = "fq-lint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "fq-lint"
+path = "src/main.rs"
+
+[dependencies]
+# The de facto Rust parser (already in the tree via every derive macro).
+# `span-locations` is what turns a parsed item back into line numbers; with
+# resolver = "2" this feature stays in the normal dependency graph and does
+# not leak into the proc-macro graph, so the workspace's derive macros are
+# unaffected.
+syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[lints]
+workspace = true
