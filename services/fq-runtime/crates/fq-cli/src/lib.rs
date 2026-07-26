@@ -1127,22 +1127,40 @@ fn default_invocation_list_limit() -> i64 {
     50
 }
 
+/// What the operator surface's command handlers write through: the
+/// daemon's bus and writer stores. Reads come from [`Views`]; the
+/// split keeps the read path visibly read-only.
+pub struct OperatorDeps {
+    pub bus: fq_runtime::EventBus,
+    pub projection: Arc<fq_runtime::control_plane::projection::ProjectionStore>,
+    pub control_plane: Arc<fq_runtime::control_plane::store::ControlPlaneStore>,
+}
+
+/// The typed input of `invocation.drop` on the wire. `--live` halting
+/// stays on the control path until the Phase-4 drop flip.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct DropCommandInput {
+    invocation_id: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 /// Build the daemon's operator registry: the Invocation view served
-/// from [`Views`], reads gated at the projection watermark. Public
-/// for one consumer besides the daemon: the operator-surface snapshot
-/// test, which commits `describe()` as the reviewable interface
-/// artifact.
+/// from [`Views`], reads gated at the read horizon (every consumer
+/// feeding the view's fold), and `invocation.drop` returning a
+/// receipt. Public for the operator-surface snapshot test.
 pub fn operator_registry(
     views: Arc<Views>,
-    watermark: fq_runtime::watermark::Watermark,
+    horizon: fq_runtime::watermark::Horizon,
     min_seq_bound: std::time::Duration,
+    deps: OperatorDeps,
 ) -> anyhow::Result<fq_edge::EdgeRegistry> {
     use fq_edge::wire::WireError;
 
     let mut registry = fq_edge::EdgeRegistry::new().with_read_gate(Arc::new(move |min_seq| {
-        let watermark = watermark.clone();
+        let horizon = horizon.clone();
         Box::pin(async move {
-            watermark
+            horizon
                 .wait_for(min_seq, min_seq_bound)
                 .await
                 .map(|_| ())
@@ -1209,6 +1227,56 @@ pub fn operator_registry(
                 }
             },
         )
+        .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
+
+    let decl = fq_ops::Command::new::<DropCommandInput>(
+        fq_ops::Invocation::Drop,
+        fq_ops::Authority {
+            verb: fq_ops::Verb::Write,
+            scope: fq_ops::Domain::Invocation,
+        },
+        "Drop an invocation: archive it as failed and release its owner.",
+        fq_ops::Stability::Experimental,
+    )
+    .description(
+        "Returns a receipt naming the drop event's sequence — feed it to a \
+         gated read for read-your-writes. Halting live work stays on the \
+         control path until the Phase-4 flip.",
+    );
+    registry
+        .command::<DropCommandInput, _, _>(decl, move |input: DropCommandInput| {
+            let bus = deps.bus.clone();
+            let projection = deps.projection.clone();
+            let control_plane = deps.control_plane.clone();
+            async move {
+                let result = fq_runtime::control_plane::operator::drop_invocation(
+                    &bus,
+                    &projection,
+                    &control_plane,
+                    &input.invocation_id,
+                    input.reason.as_deref(),
+                )
+                .await
+                .map_err(|e| match e {
+                    fq_runtime::control_plane::operator::DropError::UnknownInvocation(id) => {
+                        WireError::NotFound {
+                            op: "invocation.drop".into(),
+                            message: format!("no invocation `{id}`"),
+                        }
+                    }
+                    other => WireError::InvalidInput {
+                        op: "invocation.drop".into(),
+                        message: other.to_string(),
+                    },
+                })?;
+                Ok(fq_ops::Receipt {
+                    atoms: vec![fq_ops::AtomRef {
+                        domain: fq_ops::Domain::Event,
+                        seq: result.event_seq,
+                    }],
+                })
+            }
+        })
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
 
     Ok(registry)
@@ -3086,10 +3154,15 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // coordination_invocation_owner / coordination_worker
     // state. Stale-worker sweep runs on a timer.
     let (coord_shutdown_tx, coord_shutdown_rx) = tokio::sync::oneshot::channel();
+    let (coord_watermark_tx, coordination_watermark) = fq_runtime::watermark::channel();
     let coord_consumer = fq_runtime::CoordinationConsumer::new(bus.clone(), cp_store.clone())
         .with_runtime_id(runtime_id)
         .with_worker_store(worker_store.clone())
-        .with_self_worker_id(worker_id.as_str().to_string());
+        .with_self_worker_id(worker_id.as_str().to_string())
+        // The coordination half of the read horizon (Phase 3c):
+        // gated reads of the Invocation view wait on this mark too,
+        // because the fold spans stores this consumer writes.
+        .with_watermark(coord_watermark_tx);
     let mut coord_handle = tokio::spawn(async move { coord_consumer.run(coord_shutdown_rx).await });
 
     // Spawn the worker heartbeat consumer (control-plane side).
@@ -3479,8 +3552,16 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         );
         let edge_registry = Arc::new(operator_registry(
             edge_views,
-            projection_watermark.clone(),
+            fq_runtime::watermark::Horizon::new(vec![
+                projection_watermark.clone(),
+                coordination_watermark.clone(),
+            ]),
             std::time::Duration::from_millis(config.edge.min_seq_wait_ms),
+            OperatorDeps {
+                bus: bus.clone(),
+                projection: store.clone(),
+                control_plane: cp_store.clone(),
+            },
         )?);
         let (edge_addr, edge_serving) = fq_edge::bind(&config.edge.bind, &identity, edge_registry)
             .await

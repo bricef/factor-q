@@ -560,5 +560,40 @@
       "summary": "An agent invocation: the fold of its lifecycle events.",
       "version": 1
     }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "invocation",
+        "verb": "write"
+      },
+      "description": "Returns a receipt naming the drop event's sequence — feed it to a gated read for read-your-writes. Halting live work stays on the control path until the Phase-4 flip.",
+      "domain": "invocation",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `invocation.drop` on the wire. `--live` halting\nstays on the control path until the Phase-4 drop flip.",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          },
+          "reason": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "invocation_id"
+        ],
+        "title": "DropCommandInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Drop an invocation: archive it as failed and release its owner.",
+      "verb": "drop",
+      "version": 1
+    }
   }
 ]

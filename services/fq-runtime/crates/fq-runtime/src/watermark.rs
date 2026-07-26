@@ -189,3 +189,92 @@ mod tests {
         assert_eq!(wm.current(), 64);
     }
 }
+
+/// Several consumers' marks, waited on together: a view whose fold
+/// spans stores fed by different consumers (the Invocation view reads
+/// projection AND coordination state) is only honestly at sequence S
+/// when EVERY feeding consumer has resolved S. `wait_for` spends one
+/// bound across all marks — the waits overlap in wall time, so the
+/// bound is a ceiling, not a sum.
+#[derive(Clone)]
+pub struct Horizon {
+    marks: Vec<Watermark>,
+}
+
+impl Horizon {
+    pub fn new(marks: Vec<Watermark>) -> Self {
+        Self { marks }
+    }
+
+    /// Wait until every mark has resolved at least `min_seq`, bounded
+    /// by `bound` overall. Fails closed with the LOWEST applied
+    /// position — the honest answer to "how far is the fold, really".
+    pub async fn wait_for(&self, min_seq: u64, bound: Duration) -> Result<u64, WatermarkError> {
+        let deadline = tokio::time::Instant::now() + bound;
+        let mut lowest = u64::MAX;
+        for mark in &self.marks {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            let applied = mark
+                .wait_for(min_seq, remaining)
+                .await
+                .map_err(|e| match e {
+                    WatermarkError::Lag {
+                        wanted, applied, ..
+                    } => WatermarkError::Lag {
+                        wanted,
+                        applied: applied.min(self.lowest_applied()),
+                        bound,
+                    },
+                    stopped => stopped,
+                })?;
+            lowest = lowest.min(applied);
+        }
+        Ok(if lowest == u64::MAX { 0 } else { lowest })
+    }
+
+    fn lowest_applied(&self) -> u64 {
+        self.marks.iter().map(|m| m.current()).min().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod horizon_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn released_only_when_every_mark_arrives() {
+        let (tx_a, wm_a) = channel();
+        let (tx_b, wm_b) = channel();
+        let horizon = Horizon::new(vec![wm_a, wm_b]);
+        tx_a.advance(5);
+        // b is behind: the horizon must not release.
+        let err = horizon
+            .wait_for(5, Duration::from_millis(30))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WatermarkError::Lag { applied, .. } if applied < 5),
+            "got {err:?}"
+        );
+        tx_b.advance(5);
+        assert_eq!(
+            horizon.wait_for(5, Duration::from_secs(1)).await.unwrap(),
+            5
+        );
+    }
+
+    #[tokio::test]
+    async fn one_bound_spans_all_marks() {
+        let (_tx_a, wm_a) = channel();
+        let (_tx_b, wm_b) = channel();
+        let horizon = Horizon::new(vec![wm_a, wm_b]);
+        let started = std::time::Instant::now();
+        let _ = horizon.wait_for(1, Duration::from_millis(80)).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "the bound is a ceiling across marks, not per mark"
+        );
+    }
+}

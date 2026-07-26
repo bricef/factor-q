@@ -662,6 +662,54 @@ impl EventBus {
         Ok(consumer)
     }
 
+    /// [`EventBus::durable_consumer_strict`], scoped to subject
+    /// filters: resolved-contiguous delivery within the filtered
+    /// subsequence. `max_ack_pending = 1` is enforced by the server
+    /// regardless of filtering, so after a NAK the next delivery is
+    /// the retry — an advance-on-success mark over the filtered
+    /// stream can never expose a gap. Existing durables are
+    /// drift-repaired in place.
+    pub async fn durable_consumer_with_filters_strict(
+        &self,
+        name: &str,
+        filter_subjects: &[&str],
+    ) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            filters = ?filter_subjects,
+            "getting/creating strict-order filtered durable JetStream consumer"
+        );
+        let stream = self
+            .jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let consumer = stream
+            .get_or_create_consumer(
+                name,
+                consumer::pull::Config {
+                    durable_name: Some(name.to_string()),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    filter_subjects: filter_subjects.iter().map(|s| s.to_string()).collect(),
+                    max_ack_pending: 1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let existing = consumer.cached_info().config.clone();
+        if existing.max_ack_pending != 1 {
+            let mut config = consumer::pull::Config::try_from_consumer_config(existing)
+                .map_err(|err| BusError::Stream(err.to_string()))?;
+            config.max_ack_pending = 1;
+            return stream
+                .update_consumer(config)
+                .await
+                .map_err(|err| BusError::Stream(err.to_string()));
+        }
+        Ok(consumer)
+    }
+
     /// Durable JetStream consumer scoped to a subject filter.
     ///
     /// Used by the coordination consumer (step 7) which only

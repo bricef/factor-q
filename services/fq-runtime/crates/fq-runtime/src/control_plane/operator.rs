@@ -26,6 +26,9 @@ pub struct DropResult {
     pub agent_id: String,
     pub event_id: String,
     pub reason: Option<String>,
+    /// The drop event's sequence on the event stream — the receipt
+    /// coordinate a gated read waits on for read-your-writes (D4).
+    pub event_seq: u64,
 }
 
 /// Failure modes for [`drop_invocation`].
@@ -98,13 +101,14 @@ pub async fn drop_invocation(
         }),
     );
     let event_id = event.envelope.event_id.to_string();
-    bus.publish(&event).await?;
+    let event_seq = bus.publish(&event).await?;
 
     Ok(DropResult {
         invocation_id: invocation_id.to_string(),
         agent_id: agent_id_str,
         event_id,
         reason: reason.map(|s| s.to_string()),
+        event_seq,
     })
 }
 
