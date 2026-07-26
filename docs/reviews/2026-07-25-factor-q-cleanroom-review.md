@@ -2,7 +2,7 @@
 
 *Reviewed 2026-07-25 against `main` @ `1d8456e`. Independent read of the working tree: 41,198 production LOC / 41,840 test LOC of Rust, ~28k lines of Markdown, 654 commits since 2026-03-12. Security findings marked **PoC** were reproduced empirically, not inferred.*
 
-I read the prior [2026-07-14 cleanroom review](docs/reviews/2026-07-14-cleanroom-code-review.md) **after** forming my own view, specifically so this document adds rather than repeats. Where we agree I say so briefly and move on; the bulk here is new ground — the strategic layer, the code that landed in the last ten days, and four security findings that review did not surface.
+I read the prior [2026-07-14 cleanroom review](./2026-07-14-cleanroom-code-review.md) **after** forming my own view, specifically so this document adds rather than repeats. Where we agree I say so briefly and move on; the bulk here is new ground — the strategic layer, the code that landed in the last ten days, and four security findings that review did not surface.
 
 ---
 
