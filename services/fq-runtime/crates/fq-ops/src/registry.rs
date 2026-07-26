@@ -216,7 +216,8 @@ impl Registry {
                 authority: read(v.domain),
                 version: v.version,
                 input_schema: Some(&v.filter_schema),
-                output_schema: Some(&v.state_schema),
+                // List answers with the view's index rows, not folds.
+                output_schema: Some(&v.index_schema),
             },
             // A machinery singleton has no key: Get takes no input.
             (Entry::Synthetic(s), OpId::Get(_)) => Resolved {

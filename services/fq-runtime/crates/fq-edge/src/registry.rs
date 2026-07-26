@@ -21,6 +21,13 @@ type Handler = Arc<
         + Sync,
 >;
 
+/// The read gate: called by the server before dispatching a Get/List
+/// whose request carries `min_seq` — the daemon installs one backed
+/// by the projection watermark; without one (the mock, a daemon
+/// without a projection) gated reads are refused rather than served
+/// stale. `Err(applied)` reports how far the fold actually got.
+pub type ReadGate = Arc<dyn Fn(u64) -> BoxFuture<'static, Result<(), u64>> + Send + Sync>;
+
 /// The declarations plus their handlers. `List(Operation)` — the
 /// surface describing itself — is served by the edge directly from
 /// [`EdgeRegistry::describe_value`], the model's one self-referential
@@ -29,11 +36,22 @@ type Handler = Arc<
 pub struct EdgeRegistry {
     registry: Registry,
     handlers: HashMap<String, Handler>,
+    read_gate: Option<ReadGate>,
 }
 
 impl EdgeRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Install the read gate (the daemon's projection watermark).
+    pub fn with_read_gate(mut self, gate: ReadGate) -> Self {
+        self.read_gate = Some(gate);
+        self
+    }
+
+    pub fn read_gate(&self) -> Option<ReadGate> {
+        self.read_gate.clone()
     }
 
     fn bind<I, O, F, Fut>(&mut self, op: &OpId, handler: F)
@@ -116,7 +134,7 @@ impl EdgeRegistry {
 
     /// Register a view with its Get and List handlers. (Atoms — with
     /// stream handlers — arrive with the Phase-3 Turn exemplar.)
-    pub fn view<K, S, F1, F2, Fut1, Fut2>(
+    pub fn view<K, S, X, F, F1, F2, Fut1, Fut2>(
         &mut self,
         decl: View,
         get: F1,
@@ -125,15 +143,19 @@ impl EdgeRegistry {
     where
         K: DeserializeOwned + Send + 'static,
         S: Serialize,
+        X: Serialize,
+        F: DeserializeOwned + Send + 'static,
         F1: Fn(K) -> Fut1 + Send + Sync + 'static,
         Fut1: Future<Output = Result<S, WireError>> + Send + 'static,
-        F2: Fn(serde_json::Value) -> Fut2 + Send + Sync + 'static,
-        Fut2: Future<Output = Result<serde_json::Value, WireError>> + Send + 'static,
+        F2: Fn(F) -> Fut2 + Send + Sync + 'static,
+        Fut2: Future<Output = Result<Vec<X>, WireError>> + Send + 'static,
     {
         let domain = decl.domain;
         self.registry.register(decl)?;
         self.bind::<K, S, _, _>(&OpId::Get(domain), get);
-        self.bind::<serde_json::Value, serde_json::Value, _, _>(&OpId::List(domain), list);
+        // List is typed by the declaration's Filter and Index row —
+        // the same generic slot discipline as Get.
+        self.bind::<F, Vec<X>, _, _>(&OpId::List(domain), list);
         Ok(())
     }
 

@@ -139,10 +139,14 @@ async fn first_run_provisions_and_restart_reuses_the_identity() {
     let token = line_after(&text1, "edge: admin token").to_string();
     let addr1 = suffix_of(&text1, "- edge is listening on ").to_string();
 
-    // The registry is empty until Phase 3 transplants ops, but the
-    // surface already describes itself to an authenticated caller.
+    // The surface describes itself to an authenticated caller — the
+    // real catalogue, carrying the Invocation view (Phase 3b).
     let described = describe_via(&addr1, fingerprint, &token).await;
-    assert_eq!(described, json!([]), "empty registry describes as []");
+    let entries = described.as_array().expect("describe is a list");
+    assert!(
+        entries.iter().any(|e| e.get("view").is_some()),
+        "describe carries the Invocation view: {described}"
+    );
     terminate(child);
 
     // Restart on the same cache: the identity is reused, the old
@@ -157,10 +161,9 @@ async fn first_run_provisions_and_restart_reuses_the_identity() {
 
     let addr2 = suffix_of(&text2, "- edge is listening on ").to_string();
     let described = describe_via(&addr2, fingerprint, &token).await;
-    assert_eq!(
-        described,
-        json!([]),
-        "restarted edge honours the original token"
+    assert!(
+        described.as_array().is_some_and(|e| !e.is_empty()),
+        "restarted edge honours the original token: {described}"
     );
     terminate(child);
 

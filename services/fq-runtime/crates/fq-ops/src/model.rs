@@ -238,13 +238,21 @@ pub struct View {
     pub stability: Stability,
     pub key_schema: Schema,
     pub state_schema: Schema,
+    /// The shape of one List item. A view's List returns its
+    /// **index** — one row per fold, cheap to enumerate — not N full
+    /// folds: Get answers with the state, List answers with index
+    /// rows, and the two shapes are declared separately because they
+    /// genuinely differ (the dashboard's list pages are exactly the
+    /// index).
+    pub index_schema: Schema,
     pub filter_schema: Schema,
 }
 
 impl View {
-    /// Declare a view. `Key` (Get identity), `State` (the fold),
+    /// Declare a view. `Key` (Get identity), `State` (the fold, what
+    /// Get returns), `Index` (one List row — the view's index),
     /// `Filter` (List selection).
-    pub fn new<Key, State, Filter>(
+    pub fn new<Key, State, Index, Filter>(
         domain: Domain,
         summary: &'static str,
         stability: Stability,
@@ -252,6 +260,7 @@ impl View {
     where
         Key: Serialize + DeserializeOwned + JsonSchema,
         State: Serialize + DeserializeOwned + JsonSchema,
+        Index: Serialize + DeserializeOwned + JsonSchema,
         Filter: Serialize + DeserializeOwned + JsonSchema,
     {
         View {
@@ -262,6 +271,7 @@ impl View {
             stability,
             key_schema: schema_for!(Key),
             state_schema: schema_for!(State),
+            index_schema: schema_for!(Index),
             filter_schema: schema_for!(Filter),
         }
     }

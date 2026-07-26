@@ -162,6 +162,10 @@ fn state_row(
 }
 
 async fn seed(dir: &Path) {
+    seed_at(dir, BASE_MS).await
+}
+
+async fn seed_at(dir: &Path, base_ms: i64) {
     let paths = fq_runtime::db::RuntimeDbPaths::under(dir);
     let proj = ProjectionStore::open(&paths.projection)
         .await
@@ -170,8 +174,8 @@ async fn seed(dir: &Path) {
     // Projection events: two invocations for `researcher`, two for
     // `fixer`, with per-call costs on the LLM responses.
     for event in [
-        triggered(AGENT_RESEARCHER, INV_COMPLETED, 1, BASE_MS),
-        llm_response(AGENT_RESEARCHER, INV_COMPLETED, 2, BASE_MS + 1_000, 0.0125),
+        triggered(AGENT_RESEARCHER, INV_COMPLETED, 1, base_ms),
+        llm_response(AGENT_RESEARCHER, INV_COMPLETED, 2, base_ms + 1_000, 0.0125),
         stamp(
             Event::new(
                 AgentId::new(AGENT_RESEARCHER).unwrap(),
@@ -186,10 +190,10 @@ async fn seed(dir: &Path) {
                 }),
             ),
             3,
-            BASE_MS + 5_000,
+            base_ms + 5_000,
         ),
-        triggered(AGENT_FIXER, INV_FAILED, 4, BASE_MS + 10_000),
-        llm_response(AGENT_FIXER, INV_FAILED, 5, BASE_MS + 11_000, 0.0031),
+        triggered(AGENT_FIXER, INV_FAILED, 4, base_ms + 10_000),
+        llm_response(AGENT_FIXER, INV_FAILED, 5, base_ms + 11_000, 0.0031),
         stamp(
             Event::new(
                 AgentId::new(AGENT_FIXER).unwrap(),
@@ -208,10 +212,10 @@ async fn seed(dir: &Path) {
                 }),
             ),
             6,
-            BASE_MS + 12_000,
+            base_ms + 12_000,
         ),
-        triggered(AGENT_RESEARCHER, INV_INFLIGHT, 7, BASE_MS + 20_000),
-        triggered(AGENT_FIXER, INV_ARCHIVED, 8, BASE_MS + 30_000),
+        triggered(AGENT_RESEARCHER, INV_INFLIGHT, 7, base_ms + 20_000),
+        triggered(AGENT_FIXER, INV_ARCHIVED, 8, base_ms + 30_000),
     ] {
         proj.insert_event(&event).await.expect("insert event");
     }
@@ -227,8 +231,8 @@ async fn seed(dir: &Path) {
             INV_COMPLETED,
             AGENT_RESEARCHER,
             "completed",
-            BASE_MS,
-            Some(BASE_MS + 5_000),
+            base_ms,
+            Some(base_ms + 5_000),
         ))
         .await
         .unwrap();
@@ -237,8 +241,8 @@ async fn seed(dir: &Path) {
             INV_FAILED,
             AGENT_FIXER,
             "failed",
-            BASE_MS + 10_000,
-            Some(BASE_MS + 12_000),
+            base_ms + 10_000,
+            Some(base_ms + 12_000),
         ))
         .await
         .unwrap();
@@ -247,7 +251,7 @@ async fn seed(dir: &Path) {
             INV_INFLIGHT,
             AGENT_RESEARCHER,
             "awaiting_model",
-            BASE_MS + 20_000,
+            base_ms + 20_000,
             None,
         ))
         .await
@@ -305,12 +309,12 @@ async fn seed(dir: &Path) {
             "req-1",
             "claude-haiku",
             &request_payload,
-            BASE_MS,
+            base_ms,
         )
         .await
         .unwrap();
     worker
-        .write_llm_dispatched(INV_COMPLETED, "req-1", BASE_MS + 100)
+        .write_llm_dispatched(INV_COMPLETED, "req-1", base_ms + 100)
         .await
         .unwrap();
     worker
@@ -320,7 +324,7 @@ async fn seed(dir: &Path) {
             &first_response,
             false,
             0.0125,
-            BASE_MS + 1_000,
+            base_ms + 1_000,
         )
         .await
         .unwrap();
@@ -330,12 +334,12 @@ async fn seed(dir: &Path) {
             "tc-1",
             "read_file",
             "{\"path\":\"fixture.txt\"}",
-            BASE_MS + 1_500,
+            base_ms + 1_500,
         )
         .await
         .unwrap();
     worker
-        .write_tool_dispatched(INV_COMPLETED, "tc-1", BASE_MS + 1_600)
+        .write_tool_dispatched(INV_COMPLETED, "tc-1", base_ms + 1_600)
         .await
         .unwrap();
     worker
@@ -344,7 +348,7 @@ async fn seed(dir: &Path) {
             "tc-1",
             "{\"bytes\":42,\"content\":\"deterministic\"}",
             false,
-            BASE_MS + 2_000,
+            base_ms + 2_000,
         )
         .await
         .unwrap();
@@ -354,12 +358,12 @@ async fn seed(dir: &Path) {
             "req-2",
             "claude-haiku",
             &request_payload,
-            BASE_MS + 3_000,
+            base_ms + 3_000,
         )
         .await
         .unwrap();
     worker
-        .write_llm_dispatched(INV_COMPLETED, "req-2", BASE_MS + 3_100)
+        .write_llm_dispatched(INV_COMPLETED, "req-2", base_ms + 3_100)
         .await
         .unwrap();
     worker
@@ -369,7 +373,7 @@ async fn seed(dir: &Path) {
             &second_response,
             false,
             0.0125,
-            BASE_MS + 4_000,
+            base_ms + 4_000,
         )
         .await
         .unwrap();
@@ -382,12 +386,12 @@ async fn seed(dir: &Path) {
             "req-open",
             "claude-haiku",
             &request_payload,
-            BASE_MS + 21_000,
+            base_ms + 21_000,
         )
         .await
         .unwrap();
     worker
-        .write_llm_dispatched(INV_INFLIGHT, "req-open", BASE_MS + 21_100)
+        .write_llm_dispatched(INV_INFLIGHT, "req-open", base_ms + 21_100)
         .await
         .unwrap();
 
@@ -396,13 +400,13 @@ async fn seed(dir: &Path) {
     let cp = ControlPlaneStore::open(&paths.control_plane)
         .await
         .expect("open control plane");
-    cp.register_worker("worker-alpha", "golden-host", BASE_MS)
+    cp.register_worker("worker-alpha", "golden-host", base_ms)
         .await
         .unwrap();
-    cp.register_worker("worker-beta", "golden-host", BASE_MS + 1_000)
+    cp.register_worker("worker-beta", "golden-host", base_ms + 1_000)
         .await
         .unwrap();
-    cp.register_worker("worker-omega", "golden-host", BASE_MS + 2_000)
+    cp.register_worker("worker-omega", "golden-host", base_ms + 2_000)
         .await
         .unwrap();
     assert!(cp.mark_worker_stale("worker-alpha").await.unwrap());
@@ -413,25 +417,25 @@ async fn seed(dir: &Path) {
             INV_COMPLETED,
             AGENT_RESEARCHER,
             OwnerStatus::Completed,
-            BASE_MS + 5_000,
+            base_ms + 5_000,
         ),
         (
             INV_FAILED,
             AGENT_FIXER,
             OwnerStatus::Failed,
-            BASE_MS + 12_000,
+            base_ms + 12_000,
         ),
         (
             INV_INFLIGHT,
             AGENT_RESEARCHER,
             OwnerStatus::InFlight,
-            BASE_MS + 20_000,
+            base_ms + 20_000,
         ),
         (
             INV_ARCHIVED,
             AGENT_FIXER,
             OwnerStatus::Completed,
-            BASE_MS + 31_000,
+            base_ms + 31_000,
         ),
     ] {
         cp.upsert_invocation_ownership(invocation, agent, at, status)
@@ -444,9 +448,9 @@ async fn seed(dir: &Path) {
         agent_id: AGENT_FIXER.to_string(),
         final_phase: "completed".to_string(),
         final_state_blob: b"{}".to_vec(),
-        started_at: BASE_MS + 30_000,
-        terminal_at: BASE_MS + 31_000,
-        archived_at: BASE_MS + 31_500,
+        started_at: base_ms + 30_000,
+        terminal_at: base_ms + 31_000,
+        archived_at: base_ms + 31_500,
     })
     .await
     .unwrap();
@@ -588,11 +592,14 @@ fn check_golden(name: &str, args: &[&str], nats: Nats, volatile_markers: &[&str]
         "fq {args:?} should exit 0; stderr:\n{stderr}"
     );
     let actual = redact(&stdout, &nats, volatile_markers);
+    compare_golden(name, &actual);
+}
 
+fn compare_golden(name: &str, actual: &str) {
     let path = golden_path(name);
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, &actual).unwrap();
+        std::fs::write(&path, actual).unwrap();
         return;
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
@@ -633,10 +640,13 @@ fn check_golden(name: &str, args: &[&str], nats: Nats, volatile_markers: &[&str]
 /// worse, recreate) the legacy file.
 #[test]
 fn legacy_single_file_layout_is_a_hint_not_a_read() {
+    // `costs` still reads the local stores; the invocation verbs no
+    // longer do (they speak the edge — Phase 3b), so the legacy-layout
+    // hint is pinned on a verb where a local read still happens.
     let dir = tempfile::tempdir().expect("legacy tempdir");
     std::fs::write(dir.path().join("events.db"), b"not a real db").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_fq"))
-        .args(["invocation", "list"])
+        .args(["costs"])
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_AGENTS_DIR", "/nonexistent/agents")
         .env("FQ_CACHE_DIR", dir.path())
@@ -655,6 +665,26 @@ fn legacy_single_file_layout_is_a_hint_not_a_read() {
     assert!(
         stderr.contains("legacy single-file database"),
         "stderr should carry the migration hint even with RUST_LOG=off; got:\n{stderr}"
+    );
+}
+
+/// The flipped verbs' unpaired error is operator guidance, not a
+/// stack trace: no stored connection means "run fq connect", stated.
+#[test]
+fn flipped_verb_without_a_pairing_says_how_to_pair() {
+    let xdg = tempfile::tempdir().expect("xdg dir");
+    let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+        .args(["invocation", "list"])
+        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("RUST_LOG", "off")
+        .output()
+        .expect("run fq binary");
+    assert_ne!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fq connect"),
+        "unpaired flipped verb must point at `fq connect`; got:\n{stderr}"
     );
 }
 
@@ -713,42 +743,233 @@ fn golden_events_query_json() {
     );
 }
 
+// ------------------------------------------------------------------
+// The edge-backed goldens (plan Phase 3b): the flipped verbs run the
+// same argv against the same golden files — through a live daemon and
+// the authenticated edge instead of local SQLite. Each test copies
+// the seeded fixture (the daemon opens the stores RW), starts its own
+// broker and daemon, pairs once via `fq connect`, and compares the
+// unchanged golden: the flip proven byte-identical.
+// ------------------------------------------------------------------
+
+struct EdgeFixture {
+    daemon: Option<std::process::Child>,
+    dir: tempfile::TempDir,
+    xdg: tempfile::TempDir,
+    client_config: std::path::PathBuf,
+    _broker: fq_test_support::NatsServer,
+}
+
+impl EdgeFixture {
+    fn start() -> Self {
+        // A private seed at the SAME fixed base as the shared fixture
+        // (the JSON goldens embed its literal timestamps), then worker
+        // heartbeats alone freshened to now: the live daemon's
+        // stale-worker sweep runs at startup, and ancient heartbeats
+        // would (correctly) reclassify in-flight work as ambiguous —
+        // an artifact of fixture age, not of the transport under
+        // test. No flipped golden renders a heartbeat, so the
+        // freshening is invisible to the outputs.
+        let dir = tempfile::tempdir().expect("edge fixture dir");
+        tokio::runtime::Runtime::new()
+            .expect("edge fixture runtime")
+            .block_on(async {
+                seed_at(dir.path(), BASE_MS).await;
+                let paths = fq_runtime::db::RuntimeDbPaths::under(dir.path());
+                let cp = ControlPlaneStore::open(&paths.control_plane)
+                    .await
+                    .expect("open control plane");
+                // The in-flight row's OWNER is the worker named after
+                // its agent; give it a live registration so the
+                // daemon's recovery sees a live owner and leaves the
+                // in-flight work alone. Registrations aren't rendered
+                // by the flipped goldens.
+                let now = chrono::Utc::now().timestamp_millis();
+                for worker in ["researcher", "fixer"] {
+                    cp.register_worker(worker, "golden-host", now)
+                        .await
+                        .expect("register owner worker");
+                    cp.heartbeat_worker(worker, now)
+                        .await
+                        .expect("freshen owner heartbeat");
+                }
+            });
+        std::fs::create_dir_all(dir.path().join("agents")).expect("agents dir");
+
+        let broker = fq_test_support::NatsServer::start();
+        let daemon_config = dir.path().join("fqd.toml");
+        std::fs::write(&daemon_config, "[edge]\nbind = \"127.0.0.1:0\"\n").expect("fqd.toml");
+        let log_path = dir.path().join("daemon.log");
+        let log = std::fs::File::create(&log_path).expect("daemon log");
+        let log_err = log.try_clone().expect("log handle");
+        let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
+            .env("FQ_CONFIG", &daemon_config)
+            .env("FQ_NATS_URL", broker.url())
+            .env("FQ_CACHE_DIR", dir.path())
+            .env("FQ_AGENTS_DIR", dir.path().join("agents"))
+            .env("RUST_LOG", "off")
+            .env("NO_COLOR", "1")
+            .stdout(std::process::Stdio::from(log))
+            .stderr(std::process::Stdio::from(log_err))
+            .spawn()
+            .expect("spawn fqd");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let text = loop {
+            if let Some(status) = daemon.try_wait().expect("poll fqd") {
+                let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+                panic!("fqd exited during startup with {status:?}\n--- log ---\n{text}");
+            }
+            let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if text.contains("Runtime ready") {
+                break text;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fqd never reached 'Runtime ready'\n--- log ---\n{text}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let addr = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("- edge is listening on "))
+            .expect("edge addr in log")
+            .trim()
+            .to_string();
+        let token = {
+            let mut lines = text.lines();
+            lines
+                .find(|l| l.contains("edge: admin token"))
+                .expect("admin token marker");
+            lines.next().expect("token line").trim().to_string()
+        };
+
+        // The daemon's startup recovery has (correctly) marked the
+        // seeded in-flight row ambiguous: at boot, in-flight work
+        // owned by a previous life cannot still be running. The
+        // goldens capture a world where that work IS live — so
+        // re-assert the row now that the one-shot recovery has run;
+        // the fresh owner heartbeat above keeps the periodic sweep
+        // off it for the test's lifetime.
+        tokio::runtime::Runtime::new()
+            .expect("post-boot runtime")
+            .block_on(async {
+                let paths = fq_runtime::db::RuntimeDbPaths::under(dir.path());
+                let cp = ControlPlaneStore::open(&paths.control_plane)
+                    .await
+                    .expect("reopen control plane");
+                cp.upsert_invocation_ownership(
+                    INV_INFLIGHT,
+                    AGENT_RESEARCHER,
+                    BASE_MS + 20_000,
+                    OwnerStatus::InFlight,
+                )
+                .await
+                .expect("re-assert in-flight row");
+            });
+
+        // The client's config names the daemon's actual address as
+        // the default edge, so the flipped verbs dial it unchanged.
+        let client_config = dir.path().join("fq.toml");
+        std::fs::write(&client_config, format!("[edge]\nbind = \"{addr}\"\n"))
+            .expect("client fq.toml");
+
+        // Pair once: non-interactive TOFU auto-pins with a notice.
+        let xdg = tempfile::tempdir().expect("xdg dir");
+        let connect = Command::new(env!("CARGO_BIN_EXE_fq"))
+            .args(["connect", &addr, "--token", &token])
+            .env("FQ_CONFIG", &client_config)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("RUST_LOG", "off")
+            .stdin(std::process::Stdio::piped())
+            .output()
+            .expect("run fq connect");
+        assert!(
+            connect.status.success(),
+            "fq connect failed:\n{}",
+            String::from_utf8_lossy(&connect.stderr)
+        );
+
+        EdgeFixture {
+            daemon: Some(daemon),
+            dir,
+            xdg,
+            client_config,
+            _broker: broker,
+        }
+    }
+
+    fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+            .args(args)
+            .env("FQ_CONFIG", &self.client_config)
+            .env("FQ_CACHE_DIR", self.dir.path())
+            .env("XDG_CONFIG_HOME", self.xdg.path())
+            .env("RUST_LOG", "off")
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run fq");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+}
+
+impl Drop for EdgeFixture {
+    fn drop(&mut self) {
+        if let Some(mut daemon) = self.daemon.take() {
+            unsafe {
+                libc::kill(daemon.id() as i32, libc::SIGTERM);
+            }
+            let _ = daemon.wait();
+        }
+    }
+}
+
+/// The edge-transport variant of [`check_golden`]: same argv, same
+/// golden file, the data travels the authenticated edge.
+fn check_golden_edge(name: &str, args: &[&str], volatile_markers: &[&str]) {
+    let fixture = EdgeFixture::start();
+    let (exit, stdout, stderr) = fixture.run_fq(args);
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
+    );
+    let actual = redact(&stdout, &Nats::Closed, volatile_markers);
+    compare_golden(name, &actual);
+}
+
 #[test]
 fn golden_invocation_list_human() {
-    check_golden(
-        "invocation_list_human",
-        &["invocation", "list"],
-        Nats::Closed,
-        &["ago"],
-    );
+    check_golden_edge("invocation_list_human", &["invocation", "list"], &["ago"]);
 }
 
 #[test]
 fn golden_invocation_list_json() {
-    check_golden(
+    check_golden_edge(
         "invocation_list_json",
         &["invocation", "list", "--json"],
-        Nats::Closed,
         &[],
     );
 }
 
 #[test]
 fn golden_invocation_show_human() {
-    check_golden(
+    check_golden_edge(
         "invocation_show_human",
         &["invocation", "show", INV_COMPLETED],
-        Nats::Closed,
         &["ago"],
     );
 }
 
 #[test]
 fn golden_invocation_show_json() {
-    check_golden(
+    check_golden_edge(
         "invocation_show_json",
         &["invocation", "show", INV_COMPLETED, "--json"],
-        Nats::Closed,
         &[],
     );
 }

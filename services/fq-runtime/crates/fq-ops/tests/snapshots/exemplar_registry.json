@@ -119,6 +119,24 @@
           "phase"
         ]
       },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "InvocationIndexRow",
+        "description": "One row of the Invocation view's index — what List returns. The\nexemplar keeps it visibly narrower than the fold to demonstrate\nthe distinction (state answers Get; index rows answer List).",
+        "type": "object",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "invocation_id",
+          "phase"
+        ]
+      },
       "filter_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "InvocationFilter",

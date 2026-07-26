@@ -134,7 +134,8 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
         assert_eq!(mode, 0o600, "credentials must be owner-only, got {mode:o}");
     }
 
-    // --- fq ops list: the authenticated surface, empty until Phase 3.
+    // --- fq ops list: the authenticated surface, carrying the real
+    // catalogue (the Invocation view landed with Phase 3b).
     let out = fq(&scratch, &["ops", "list", "--addr", &addr]);
     assert!(
         out.status.success(),
@@ -142,12 +143,19 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
         stderr_of(&out)
     );
     assert!(
-        stdout_of(&out).contains("no operations registered"),
-        "empty registry renders honestly:\n{}",
+        stdout_of(&out).contains("invocation") && stdout_of(&out).contains("view"),
+        "the surface lists the Invocation view:\n{}",
         stdout_of(&out)
     );
     let out = fq(&scratch, &["ops", "list", "--addr", &addr, "--json"]);
-    assert_eq!(stdout_of(&out).trim(), "[]", "empty registry as JSON");
+    let described: serde_json::Value =
+        serde_json::from_str(stdout_of(&out).trim()).expect("describe JSON");
+    assert!(
+        described
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|e| e.get("view").is_some())),
+        "describe carries the view declaration: {described}"
+    );
 
     // --- a tampered pin is refused with guidance, never re-pinned
     // silently.
@@ -226,7 +234,13 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
         .await
         .expect("rpc")
         .expect("read:* covers operation.list");
-    assert_eq!(described.output, serde_json::json!([]));
+    assert!(
+        described
+            .output
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "read:* covers operation.list and sees the catalogue"
+    );
 
     // --- malformed grant refused before any datalog is built.
     let out = fq(
