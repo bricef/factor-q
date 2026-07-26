@@ -120,6 +120,18 @@ jobs:
       # .rs-targeted include_str!/include_bytes! (see justfile:
       # lint-sources for the full rationale — PR #322 postmortem).
       - run: just lint-sources
+      # The file-size ratchet parses Rust with syn rather than scanning text
+      # (tools/fq-lint), so this job needs the pinned toolchain. Keep the
+      # version ref in lockstep with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # fq-lint gates itself before it gates anything else.
+      - run: just fq-lint-ci
+      # Per-file production-line budgets, ratcheted down (see justfile:
+      # lint-filesize — 2026-07-25 cleanroom review, Part 2).
+      - run: just lint-filesize
 
   runtime-ci:
     name: Runtime CI

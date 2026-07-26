@@ -1,0 +1,30 @@
+# Per-file production-line budgets — the large-file ratchet.
+#
+# Generated and maintained by `just filesize-bless`; enforced by
+# `just lint-filesize` (tools/fq-lint) in the source-policy CI job.
+#
+# Production lines = total minus `#[cfg(test)]` items, measured off a
+# real syn AST rather than by matching source text.
+#
+# Every file here exceeds the 800-line cap and is pinned at its size when
+# the ratchet landed. These numbers may only ever go DOWN. Lowering one
+# is automatic (`just filesize-bless`); raising one, or admitting a new
+# file, means hand-editing this file so a human sees it in the diff.
+#
+# The three entries that motivated this gate have their own split issues:
+#   services/fq-runtime/crates/fq-cli/src/lib.rs                       -> #189
+#   services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs -> #78
+#   services/fq-runtime/crates/fq-runtime/src/mcp.rs                   -> #191
+services/fq-dashboard/src/render.rs 1450
+services/fq-runtime/crates/fq-cli/src/lib.rs 5363
+services/fq-runtime/crates/fq-runtime/src/agent.rs 868
+services/fq-runtime/crates/fq-runtime/src/bus.rs 1012
+services/fq-runtime/crates/fq-runtime/src/control_plane/projection/store.rs 854
+services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1049
+services/fq-runtime/crates/fq-runtime/src/events.rs 1329
+services/fq-runtime/crates/fq-runtime/src/mcp.rs 1850
+services/fq-runtime/crates/fq-runtime/src/views.rs 1258
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 4248
+services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1414
+services/fq-store/src/cli.rs 842
+services/fq-store/src/index.rs 849

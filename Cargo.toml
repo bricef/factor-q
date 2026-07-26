@@ -15,6 +15,7 @@ members = [
     "services/fq-runtime/crates/fq-tools",
     "services/fq-store",
     "services/fq-test-support",
+    "tools/fq-lint",
 ]
 
 [workspace.package]
