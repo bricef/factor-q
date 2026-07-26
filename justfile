@@ -189,8 +189,6 @@ runtime-ci: install-nats
     export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
     source {{justfile_directory()}}/scripts/ci-timing.sh
     ci_timing_init
-    run_phase "fmt-check" cargo fmt --check {{runtime_pkgs}}
-    run_phase "lint"      cargo clippy --all-targets {{runtime_pkgs}} -- -D warnings
     run_phase "doc"       env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps {{runtime_pkgs}}
     run_phase "build"     cargo build --tests {{runtime_pkgs}}
     run_phase "test"      cargo test --tests {{runtime_pkgs}}
@@ -201,7 +199,7 @@ runtime-ci: install-nats
 # `--all-features` on lint/doc covers cli/service/bus/failpoints; `build` and
 # `test` carry `cli,service` — the hermetic path. The final phases compile the
 # failpoint seams and the bus feed only where they are actually driven.
-# Run the store Rust gate (fmt-check, clippy, doc, test).
+# Run the store Rust gate (doc, build, test). fmt/clippy: `just quality`.
 store-ci: install-nats
     #!/usr/bin/env bash
     set -uo pipefail
@@ -209,8 +207,6 @@ store-ci: install-nats
     export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
     source {{justfile_directory()}}/scripts/ci-timing.sh
     ci_timing_init
-    run_phase "fmt-check" cargo fmt --check -p fq-store
-    run_phase "lint"      cargo clippy -p fq-store --all-targets --all-features
     run_phase "doc"       env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p fq-store --all-features
     run_phase "build"     cargo build --tests -p fq-store --features cli,service
     run_phase "test"      cargo test --tests -p fq-store --features cli,service
@@ -234,7 +230,7 @@ test-failpoints:
 # Hermetic — the dashboard's router tests spin their own read service over a
 # temp DB; no broker needed. No doctest phase: doctests only exist for library
 # targets and this crate is bin-only (`cargo test --doc` would hard-error).
-# Run the dashboard Rust gate (fmt-check, clippy, doc, test).
+# Run the dashboard Rust gate (doc, build, test). fmt/clippy: `just quality`.
 dashboard-ci:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -242,8 +238,6 @@ dashboard-ci:
     export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
     source {{justfile_directory()}}/scripts/ci-timing.sh
     ci_timing_init
-    run_phase "fmt-check" cargo fmt --check -p fq-dashboard
-    run_phase "lint"      cargo clippy -p fq-dashboard --all-targets
     run_phase "doc"       env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p fq-dashboard
     run_phase "build"     cargo build --tests -p fq-dashboard
     run_phase "test"      cargo test --tests -p fq-dashboard
@@ -251,13 +245,11 @@ dashboard-ci:
 # The shared test-only crate (#233) — the per-service gates only compile it as
 # a dependency; this runs its own fmt/clippy/tests. Its self-tests spawn a
 # broker from the pinned nats-server the `install-nats` dependency provisions.
-# Run the fq-test-support gate (fmt-check, clippy, test).
+# Run the fq-test-support gate (test). fmt/clippy: `just quality`.
 test-support-ci: install-nats
-    cargo fmt --check -p fq-test-support
-    cargo clippy -p fq-test-support --all-targets -- -D warnings
     cargo test -p fq-test-support
 
-# Run all Rust quality gates locally (fmt-check, clippy, doc, test).
+# Run every Rust test suite locally (doc, build, test). Linting: `just quality`.
 rust-ci: runtime-ci store-ci dashboard-ci test-support-ci
 
 # The Go trigger adapters — standalone binaries that talk to factor-q only
@@ -318,9 +310,7 @@ ci:
     #    so there is no shared broker to bring up, wait for, or tear down. --
     run_phase "lint-docs"   just lint-docs
     run_phase "check-links" just check-links
-    run_phase "lint-sources" just lint-sources
-    run_phase "fq-lint"     just fq-lint-ci
-    run_phase "lint-filesize" just lint-filesize
+    run_phase "quality"     just quality
     run_phase "runtime"     just runtime-ci
     run_phase "store"       just store-ci
     run_phase "dashboard"   just dashboard-ci
@@ -414,7 +404,7 @@ lint-docs *args:
 check-links:
     python3 scripts/check-links.py
 
-# === Source policy ===
+# === Code quality ===
 
 # No include!-based code splicing (postmortem of
 # https://github.com/bricef/factor-q/pull/322): include! splices source
@@ -486,11 +476,37 @@ filesize-bless:
 lint-metrics:
     cargo run -q -p fq-lint -- --metrics
 
-# Gate the source-policy tooling itself, matching the per-crate *-ci pattern.
-fq-lint-ci:
-    cargo fmt --check -p fq-lint
-    cargo clippy --all-targets -p fq-lint -- -D warnings
-    cargo test -q -p fq-lint
+# One command for every quality gate that is not a test, mirrored exactly by
+# the "Code quality" CI job. Before this, the structural gates lived in the
+# source-policy job while formatting and clippy were scattered across the four
+# per-suite gates, so there was no single answer to "is this branch clean?"
+# without running the test suites too. The per-suite gates keep doc/build/test;
+# everything that reports on code *quality* is here.
+#
+# Clippy stays per-crate rather than one `--workspace` pass on purpose:
+# fq-store lints under --all-features (cli/service/bus/failpoints), and a
+# workspace pass resolves default features, which would silently drop that
+# coverage. Same reason the invocations are not collapsed — the feature sets
+# are load-bearing, not incidental.
+#
+# Needs no NATS and no Node: nothing here runs a test that wants a broker.
+# Run every non-test quality gate: source policy, file sizes, fmt, clippy.
+quality:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    # Same phase-log anchoring as the per-suite gates (#223).
+    export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
+    source {{justfile_directory()}}/scripts/ci-timing.sh
+    ci_timing_init
+    run_phase "lint-sources"  just lint-sources
+    run_phase "fq-lint-test"  cargo test -q -p fq-lint
+    run_phase "lint-filesize" just lint-filesize
+    run_phase "fmt"           cargo fmt --check --all
+    run_phase "clippy-runtime"      cargo clippy --all-targets {{runtime_pkgs}} -- -D warnings
+    run_phase "clippy-store"        cargo clippy -p fq-store --all-targets --all-features
+    run_phase "clippy-dashboard"    cargo clippy -p fq-dashboard --all-targets
+    run_phase "clippy-test-support" cargo clippy -p fq-test-support --all-targets -- -D warnings
+    run_phase "clippy-fq-lint"      cargo clippy -p fq-lint --all-targets -- -D warnings
 
 # === Release ===
 
