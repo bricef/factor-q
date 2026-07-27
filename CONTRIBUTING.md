@@ -140,6 +140,7 @@ just test-shell-sandbox                          # containerised sandbox
   just lint-sizes       # file + function size ratchets
   just lint-fmt         # cargo fmt --check, workspace-wide
   just lint-clippy      # clippy per crate, with each crate's features
+  just lint-creep       # function-length creep report (advisory, never fails)
   just test-fq-lint     # unit tests for the linter itself
   ```
 
