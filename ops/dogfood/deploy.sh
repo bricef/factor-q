@@ -17,6 +17,9 @@
 # Contract: exits 0 ONLY when the daemon, watcher and dashboard — plus
 # fq-cron on hosts that have fq-cron.toml — are confirmed running from
 # releases/<sha>/ (checked via /proc/<pid>/exe, not just log lines).
+# Every process lookup here resolves /proc/<pid>/exe rather than trusting
+# the process name, so a dev build left running from a worktree cannot
+# shadow the real one — see pids_under() below.
 # The dashboard must move in lockstep with the daemon: the read-service
 # RPC uses a length-framed binary codec, so a dashboard from another
 # build fails to decode the daemon's responses and renders "runtime
@@ -45,6 +48,33 @@ KEEP_RELEASES="${KEEP_RELEASES:-5}"
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()  { printf '\033[1;32m    ✓ %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31m✗ ERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+# --- process selection: match /proc/<pid>/exe, never the name alone -------
+# A dev build left running from .claude/worktrees/<x>/target/debug/fq is
+# also called `fq`, and `pgrep -x fq | head -1` returns the LOWEST pid — so
+# a stray that outlives a daemon restart silently shadows the real process.
+# Seen 2026-07-27: 17 orphaned worktree daemons (oldest 11 days) made the
+# post-launch check report "daemon PID N runs …/target/debug/fq (deleted)"
+# and exit 1 on a deploy that had in fact relaunched correctly. The same
+# lookup picks the bring-down target, so the failure mode is worse than a
+# bad message: once the real daemon's pid sorts above a stray's, `fq down`
+# and the SIGINT escalation aim at the stray while the real daemon keeps
+# running — and the deploy aborts having already stopped cron and watcher.
+#
+# $1 = process name, $2 = required exe prefix (with trailing slash).
+pids_under() {
+    local name="$1" prefix="$2" p exe
+    for p in $(pgrep -x "$name" 2>/dev/null || true); do
+        exe="$(readlink "/proc/$p/exe" 2>/dev/null || true)"
+        # A replaced-on-disk binary reads back as "<path> (deleted)".
+        case "${exe% (deleted)}" in "$prefix"*) printf '%s\n' "$p" ;; esac
+    done
+}
+# Bring-down: any release of this host's install — the running stack
+# legitimately predates $REL (that is the point of a deploy).
+pids_installed() { pids_under "$1" "$DOGFOOD/releases/"; }
+# Verification: the exact release we just flipped `current` to.
+pids_release()   { pids_under "$1" "$DOGFOOD/$REL/"; }
 
 FORCE=0
 WANT="latest"
@@ -121,17 +151,17 @@ fi
 
 # --- 2. early exit when the target is already live -----------------------
 ACTIVE="$(readlink current 2>/dev/null || true)"
-DAEMON_PID="$(pgrep -x fq | head -1 || true)"
+DAEMON_PID="$(pids_installed fq | head -1 || true)"
 CRON_OK=1
 if [ -f fq-cron.toml ]; then
-    CRON_PID="$(pgrep -x fq-cron | head -1 || true)"
+    CRON_PID="$(pids_installed fq-cron | head -1 || true)"
     cron_exe="$(readlink "/proc/$CRON_PID/exe" 2>/dev/null || true)"
     [ "$cron_exe" = "$DOGFOOD/$REL/fq-cron" ] || CRON_OK=0
 fi
 if [ "$FORCE" != 1 ] && [ "$ACTIVE" = "$REL" ] && [ -n "$DAEMON_PID" ]; then
     exe="$(readlink "/proc/$DAEMON_PID/exe" 2>/dev/null || true)"
-    if [ "$exe" = "$DOGFOOD/$REL/fq" ] && pgrep -x github-watcher >/dev/null \
-        && pgrep -x fq-dashboard >/dev/null && [ "$CRON_OK" = 1 ]; then
+    if [ "$exe" = "$DOGFOOD/$REL/fq" ] && [ -n "$(pids_release github-watcher)" ] \
+        && [ -n "$(pids_release fq-dashboard)" ] && [ "$CRON_OK" = 1 ]; then
         ok "already running $SHA — nothing to do (--force to restart anyway)"
         exit 0
     fi
@@ -141,7 +171,7 @@ fi
 # The scheduler goes down first so no new fires land mid-drain; anything
 # already published rides out the restart broker-side (fq-cron DESIGN
 # D5/D6).
-for cpid in $(pgrep -x fq-cron || true); do
+for cpid in $(pids_installed fq-cron); do
     log "Stopping cron (PID $cpid)"
     kill -TERM "$cpid" 2>/dev/null || true
     for _ in $(seq 1 15); do kill -0 "$cpid" 2>/dev/null || break; sleep 1; done
@@ -179,7 +209,7 @@ else
     ok "no daemon running"
 fi
 
-for wpid in $(pgrep -x github-watcher || true); do
+for wpid in $(pids_installed github-watcher); do
     log "Stopping watcher (PID $wpid)"
     kill -TERM "$wpid" 2>/dev/null || true
     for _ in $(seq 1 15); do kill -0 "$wpid" 2>/dev/null || break; sleep 1; done
@@ -189,7 +219,7 @@ done
 
 # The dashboard must not outlive the flip: a stale binary cannot decode
 # the new daemon's read-service responses (see the header contract).
-for dpid in $(pgrep -x fq-dashboard || true); do
+for dpid in $(pids_installed fq-dashboard); do
     log "Stopping dashboard (PID $dpid)"
     kill -TERM "$dpid" 2>/dev/null || true
     for _ in $(seq 1 15); do kill -0 "$dpid" 2>/dev/null || break; sleep 1; done
@@ -232,8 +262,8 @@ for _ in $(seq 1 "$READY_WAIT"); do
 done
 [ "$ready" = 1 ] || die "daemon did not reach 'Runtime ready' within ${READY_WAIT}s (see logs/fq-run.log)"
 
-NEW_DAEMON="$(pgrep -x fq | head -1 || true)"
-[ -n "$NEW_DAEMON" ] || die "no fq process after relaunch"
+NEW_DAEMON="$(pids_release fq | head -1 || true)"
+[ -n "$NEW_DAEMON" ] || die "no fq process from $REL after relaunch (see logs/fq-run.log)"
 exe="$(readlink "/proc/$NEW_DAEMON/exe" 2>/dev/null || true)"
 [ "$exe" = "$DOGFOOD/$REL/fq" ] \
     || die "daemon PID $NEW_DAEMON runs $exe, not $DOGFOOD/$REL/fq"
@@ -241,8 +271,8 @@ ok "daemon up (PID $NEW_DAEMON) from $REL, Runtime ready"
 
 log "Verifying watcher startup"
 sleep 4
-NEW_WATCHER="$(pgrep -x github-watcher | head -1 || true)"
-[ -n "$NEW_WATCHER" ] || die "watcher not running after relaunch (see logs/watcher.log)"
+NEW_WATCHER="$(pids_release github-watcher | head -1 || true)"
+[ -n "$NEW_WATCHER" ] || die "no github-watcher from $REL after relaunch (see logs/watcher.log)"
 wexe="$(readlink "/proc/$NEW_WATCHER/exe" 2>/dev/null || true)"
 [ "$wexe" = "$DOGFOOD/$REL/github-watcher" ] \
     || die "watcher PID $NEW_WATCHER runs $wexe, not $DOGFOOD/$REL/github-watcher"
@@ -254,8 +284,8 @@ else
 fi
 
 log "Verifying dashboard startup"
-NEW_DASHBOARD="$(pgrep -x fq-dashboard | head -1 || true)"
-[ -n "$NEW_DASHBOARD" ] || die "dashboard not running after relaunch (see logs/dashboard.log)"
+NEW_DASHBOARD="$(pids_release fq-dashboard | head -1 || true)"
+[ -n "$NEW_DASHBOARD" ] || die "no fq-dashboard from $REL after relaunch (see logs/dashboard.log)"
 dexe="$(readlink "/proc/$NEW_DASHBOARD/exe" 2>/dev/null || true)"
 [ "$dexe" = "$DOGFOOD/$REL/fq-dashboard" ] \
     || die "dashboard PID $NEW_DASHBOARD runs $dexe, not $DOGFOOD/$REL/fq-dashboard"
@@ -263,8 +293,8 @@ ok "dashboard up (PID $NEW_DASHBOARD) from $REL"
 
 if [ -f fq-cron.toml ]; then
     log "Verifying cron startup"
-    NEW_CRON="$(pgrep -x fq-cron | head -1 || true)"
-    [ -n "$NEW_CRON" ] || die "cron not running after relaunch (see logs/cron.log)"
+    NEW_CRON="$(pids_release fq-cron | head -1 || true)"
+    [ -n "$NEW_CRON" ] || die "no fq-cron from $REL after relaunch (see logs/cron.log)"
     cexe="$(readlink "/proc/$NEW_CRON/exe" 2>/dev/null || true)"
     [ "$cexe" = "$DOGFOOD/$REL/fq-cron" ] \
         || die "cron PID $NEW_CRON runs $cexe, not $DOGFOOD/$REL/fq-cron"
