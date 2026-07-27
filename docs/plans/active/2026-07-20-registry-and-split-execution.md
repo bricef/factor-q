@@ -184,6 +184,10 @@ read-your-writes test green. *(3–5 PRs.)*
 
 ### Phase 4 — fleet migration (~17 near-identical PRs)
 
+> Call-point inventory and cohort breakdown:
+> [2026-07-28-phase-4-call-point-inventory.md](2026-07-28-phase-4-call-point-inventory.md)
+> (surveyed at main `1323c62`; 17 flips confirmed, hazards H1–H4).
+
 Migrate the remainder per the inventory's disposition table, one op (or one
 tight cohort) per PR, each specced from the exemplar template: define op →
 transplant handler → flip CLI verb behind golden → delete the old path.
