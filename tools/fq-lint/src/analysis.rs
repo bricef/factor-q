@@ -36,6 +36,15 @@ pub struct FileFacts {
     pub test_lines: usize,
     /// Every function-like item, test and production alike.
     pub functions: Vec<FnFacts>,
+    /// Names from bodyless `#[cfg(test)] mod NAME;` declarations. The file
+    /// they resolve to is test code in its entirety, so the ratchet must not
+    /// budget it — otherwise moving a test module out of a god-file would read
+    /// as a brand-new file over the cap (#390).
+    pub test_mod_decls: Vec<String>,
+    /// Names from every other bodyless `mod NAME;` declaration. Needed to
+    /// close the exclusion transitively: a test module may declare submodules
+    /// of its own, and those are test code too.
+    pub mod_decls: Vec<String>,
     /// Every `crate::`- or `super::`-rooted path written in this file, in
     /// source order. Resolving these to modules needs the file's own position
     /// in the tree, which this layer does not know — see `coupling.rs`.
@@ -134,6 +143,8 @@ pub fn analyze(src: &str) -> Result<FileFacts, syn::Error> {
         test_lines: 0,
         functions: Vec::new(),
         module_refs: Vec::new(),
+        test_mod_decls: Vec::new(),
+        mod_decls: Vec::new(),
     };
     walk_items(&file.items, false, "", &mut facts);
     Ok(facts)
@@ -269,11 +280,21 @@ fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileF
                     inside,
                 ));
             }
-            syn::Item::Mod(m) => {
-                if let Some((_, inner)) = &m.content {
-                    walk_items(inner, inside, &nest(scope, &m.ident.to_string()), facts);
+            syn::Item::Mod(m) => match &m.content {
+                Some((_, inner)) => {
+                    walk_items(inner, inside, &nest(scope, &m.ident.to_string()), facts)
                 }
-            }
+                // Bodyless: the module lives in another file. Record which,
+                // so the caller can resolve and exclude it.
+                None => {
+                    let name = m.ident.to_string();
+                    if inside {
+                        facts.test_mod_decls.push(name);
+                    } else {
+                        facts.mod_decls.push(name);
+                    }
+                }
+            },
             syn::Item::Impl(i) => {
                 // Header only — the members are walked individually below, so
                 // scanning the whole item here would double-count them.

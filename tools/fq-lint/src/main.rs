@@ -40,7 +40,7 @@ mod analysis;
 mod coupling;
 mod ratchet;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -196,6 +196,66 @@ struct Measured {
     facts: Option<analysis::FileFacts>,
 }
 
+/// Where a bodyless `mod NAME;` inside `declaring` puts its file.
+///
+/// A module's children live beside it when the declaring file *is* a module
+/// root (`mod.rs`, `lib.rs`, `main.rs`) and in a directory named after it
+/// otherwise — `a/foo.rs` declaring `mod tests;` means `a/foo/tests.rs`.
+fn module_file_candidates(declaring: &str, name: &str) -> Vec<String> {
+    let path = Path::new(declaring);
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string());
+    let dir = match stem.as_deref() {
+        Some("mod") | Some("lib") | Some("main") => parent,
+        Some(stem) => parent.join(stem),
+        None => parent,
+    };
+    vec![
+        dir.join(format!("{name}.rs"))
+            .to_string_lossy()
+            .replace('\\', "/"),
+        dir.join(name)
+            .join("mod.rs")
+            .to_string_lossy()
+            .replace('\\', "/"),
+    ]
+}
+
+/// Files that are test code by virtue of being the body of a
+/// `#[cfg(test)] mod NAME;` declaration, closed transitively: a test module
+/// may declare submodules, and those are test code too.
+fn resolve_test_module_files(measured: &BTreeMap<String, Measured>) -> BTreeSet<String> {
+    let mut excluded: BTreeSet<String> = BTreeSet::new();
+    let mut frontier: Vec<String> = Vec::new();
+
+    for (path, m) in measured {
+        let Some(facts) = &m.facts else { continue };
+        for name in &facts.test_mod_decls {
+            for cand in module_file_candidates(path, name) {
+                if measured.contains_key(&cand) && excluded.insert(cand.clone()) {
+                    frontier.push(cand);
+                }
+            }
+        }
+    }
+
+    // Everything a test module pulls in is test code as well.
+    while let Some(path) = frontier.pop() {
+        let Some(m) = measured.get(&path) else {
+            continue;
+        };
+        let Some(facts) = &m.facts else { continue };
+        for name in facts.mod_decls.iter().chain(facts.test_mod_decls.iter()) {
+            for cand in module_file_candidates(&path, name) {
+                if measured.contains_key(&cand) && excluded.insert(cand.clone()) {
+                    frontier.push(cand);
+                }
+            }
+        }
+    }
+    excluded
+}
+
 fn measure_tree(root: &Path) -> Result<BTreeMap<String, Measured>, String> {
     let out = Command::new("git")
         .args(["ls-files", "-z", "*.rs", "*.go"])
@@ -233,6 +293,13 @@ fn measure_tree(root: &Path) -> Result<BTreeMap<String, Measured>, String> {
                 facts: Some(facts),
             },
         );
+    }
+
+    // Drop the files that exist only to hold a `#[cfg(test)]` module. Done
+    // after the whole tree is parsed, because the declaration lives in the
+    // parent and the exclusion closes transitively.
+    for path in resolve_test_module_files(&sizes) {
+        sizes.remove(&path);
     }
     Ok(sizes)
 }
@@ -536,6 +603,25 @@ mod tests {
         let mut keys: Vec<_> = r.measured.keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, vec!["a.rs::Foo as Bar::run", "a.rs::Foo::run"]);
+    }
+
+    #[test]
+    fn a_plain_module_puts_children_in_a_directory_named_after_it() {
+        assert_eq!(
+            module_file_candidates("a/b/runner.rs", "tests"),
+            vec!["a/b/runner/tests.rs", "a/b/runner/tests/mod.rs"]
+        );
+    }
+
+    #[test]
+    fn a_module_root_puts_children_beside_it() {
+        for root in ["mod", "lib", "main"] {
+            assert_eq!(
+                module_file_candidates(&format!("a/b/{root}.rs"), "tests"),
+                vec!["a/b/tests.rs", "a/b/tests/mod.rs"],
+                "{root}.rs is a module root, so children are siblings"
+            );
+        }
     }
 
     #[test]
