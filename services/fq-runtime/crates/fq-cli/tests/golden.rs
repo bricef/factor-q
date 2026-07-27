@@ -856,9 +856,18 @@ impl EdgeFixture {
         // seeded in-flight row ambiguous: at boot, in-flight work
         // owned by a previous life cannot still be running. The
         // goldens capture a world where that work IS live — so
-        // re-assert the row now that the one-shot recovery has run;
-        // the fresh owner heartbeat above keeps the periodic sweep
-        // off it for the test's lifetime.
+        // re-assert the row once that recovery has run; the fresh
+        // owner heartbeat above keeps the periodic sweep off it for
+        // the test's lifetime.
+        //
+        // "Runtime ready" is NOT a barrier for this: startup recovery
+        // is detached, and the ambiguity is applied asynchronously by
+        // the coordination consumer reacting to an
+        // `invocation.ambiguous` event. Re-asserting on the strength
+        // of the log line alone races the daemon — if our write lands
+        // first, recovery overwrites it and the goldens see Ambiguous
+        // instead of InFlight (#395). So wait for the transition we
+        // are compensating for to be OBSERVED, then undo it.
         tokio::runtime::Runtime::new()
             .expect("post-boot runtime")
             .block_on(async {
@@ -866,6 +875,24 @@ impl EdgeFixture {
                 let cp = ControlPlaneStore::open(&paths.control_plane)
                     .await
                     .expect("reopen control plane");
+
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                loop {
+                    let owner = cp
+                        .get_invocation_owner(INV_INFLIGHT)
+                        .await
+                        .expect("read in-flight owner");
+                    if owner.map(|o| o.status) == Some(OwnerStatus::Ambiguous) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "startup recovery never marked {INV_INFLIGHT} ambiguous — the fixture \
+                         compensates for that transition, so it must observe it first (#395)"
+                    );
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+
                 cp.upsert_invocation_ownership(
                     INV_INFLIGHT,
                     AGENT_RESEARCHER,
