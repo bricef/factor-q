@@ -43,8 +43,8 @@ use crate::bus::EventBus;
 use crate::events::{
     self, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
     HostNoticePayload, InvocationArchivedPayload, InvocationTotals, LlmCallOrigin,
-    LlmRequestPayload, LlmResponsePayload, Message, MessageRole, RequestParams, StopReason,
-    ToolCallPayload, ToolErrorKind, ToolResultPayload, ToolSchema, TriggerSource, TriggeredPayload,
+    LlmRequestPayload, Message, MessageRole, RequestParams, StopReason, ToolCallPayload,
+    ToolErrorKind, ToolSchema, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::mcp::{
@@ -473,6 +473,9 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     /// `StepInput` that carries them. Keyed by invocation because one
     /// runner services concurrent invocations.
     pending_notices: std::sync::Mutex<std::collections::HashMap<Uuid, Vec<(String, String)>>>,
+    /// The current Round per driven invocation (Phase 3d) — see
+    /// [`super::rounds::RoundLedger`].
+    rounds: super::rounds::RoundLedger,
     /// Invocation ids this runner is DRIVING right now, registered
     /// for the duration of every run/resume entry. The operator
     /// resume precondition (#373) consults this: an invocation active
@@ -502,6 +505,7 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
 struct ActiveInvocation<'a> {
     set: &'a std::sync::Mutex<std::collections::HashSet<Uuid>>,
     halts: &'a std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    rounds: &'a super::rounds::RoundLedger,
     id: Uuid,
 }
 
@@ -515,6 +519,7 @@ impl Drop for ActiveInvocation<'_> {
             .lock()
             .expect("halt set poisoned")
             .remove(&self.id);
+        self.rounds.forget(self.id);
     }
 }
 
@@ -526,6 +531,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             reducer,
             drain: DrainSignal::new(),
             pending_notices: std::sync::Mutex::new(std::collections::HashMap::new()),
+            rounds: super::rounds::RoundLedger::default(),
             active: std::sync::Mutex::new(std::collections::HashSet::new()),
             halt_requested: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
@@ -568,6 +574,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         ActiveInvocation {
             set: &self.active,
             halts: &self.halt_requested,
+            rounds: &self.rounds,
             id: invocation_id,
         }
     }
@@ -1293,12 +1300,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // `total_duration_ms` stays attempt-scoped: it is what
         // `start` below measures.
         let mut totals = InvocationTotals::default();
-        for r in &llms {
-            if r.status == DispatchStatus::Completed && r.is_error != Some(true) {
-                totals.total_llm_calls += 1;
-                totals.total_cost += r.cost_usd.unwrap_or(0.0);
-            }
-        }
+        (totals.total_llm_calls, totals.total_cost) =
+            self.rounds.seed_from_wal(invocation_id, &llms);
         // A re-run partial final batch re-counts its already-completed
         // calls in `run_loop_inner`, so exclude them from the seed.
         totals.total_tool_calls = (tools
@@ -1970,6 +1973,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 agent_id.clone(),
                 invocation_id,
                 EventPayload::ToolCall(ToolCallPayload {
+                    round: self.rounds.current(invocation_id),
                     tool_call_id: req.tool_call_id.clone(),
                     tool_name: req.tool_name.clone(),
                     parameters: req.parameters.clone(),
@@ -2129,16 +2133,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     .map_err(map_store_err)?;
                 self.publish_chained(
                     cursor,
-                    Event::new(
-                        agent_id.clone(),
+                    super::emit::tool_result_event(
+                        self.rounds.current(invocation_id),
+                        agent_id,
                         invocation_id,
-                        EventPayload::ToolResult(ToolResultPayload {
-                            tool_call_id: req.tool_call_id.clone(),
-                            output: result.output.clone(),
-                            is_error: result.is_error,
-                            error_kind: None,
-                            duration_ms,
-                        }),
+                        &req,
+                        result.output.clone(),
+                        result.is_error,
+                        None,
+                        duration_ms,
                     ),
                 )
                 .await?;
@@ -2165,16 +2168,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     .map_err(map_store_err)?;
                 self.publish_chained(
                     cursor,
-                    Event::new(
-                        agent_id.clone(),
+                    super::emit::tool_result_event(
+                        self.rounds.current(invocation_id),
+                        agent_id,
                         invocation_id,
-                        EventPayload::ToolResult(ToolResultPayload {
-                            tool_call_id: req.tool_call_id.clone(),
-                            output: message.clone(),
-                            is_error: true,
-                            error_kind: Some(kind),
-                            duration_ms,
-                        }),
+                        &req,
+                        message.clone(),
+                        true,
+                        Some(kind),
+                        duration_ms,
                     ),
                 )
                 .await?;
@@ -2268,16 +2270,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         self.publish_chained(
             cursor,
-            Event::new(
-                agent_id.clone(),
+            super::emit::tool_result_event(
+                self.rounds.current(invocation_id),
+                agent_id,
                 invocation_id,
-                EventPayload::ToolResult(ToolResultPayload {
-                    tool_call_id: req.tool_call_id.clone(),
-                    output: output.clone(),
-                    is_error: false,
-                    error_kind: None,
-                    duration_ms,
-                }),
+                &req,
+                output.clone(),
+                false,
+                None,
+                duration_ms,
             ),
         )
         .await?;
@@ -2343,16 +2344,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .map_err(map_store_err)?;
         self.publish_chained(
             cursor,
-            Event::new(
-                agent_id.clone(),
+            super::emit::tool_result_event(
+                self.rounds.current(invocation_id),
+                agent_id,
                 invocation_id,
-                EventPayload::ToolResult(ToolResultPayload {
-                    tool_call_id: req.tool_call_id.clone(),
-                    output: message.clone(),
-                    is_error: true,
-                    error_kind: Some(kind),
-                    duration_ms: 0,
-                }),
+                req,
+                message.clone(),
+                true,
+                Some(kind),
+                0,
             ),
         )
         .await?;
@@ -2905,32 +2905,19 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
         }
 
-        let mut response_event = Event::new(
-            agent_id.clone(),
+        let mut response_event = super::emit::llm_response_event(
+            self.rounds.next(invocation_id),
+            agent_id,
             invocation_id,
-            EventPayload::LlmResponse(LlmResponsePayload {
-                call_id,
-                content: response.content.clone(),
-                tool_calls: response.tool_calls.clone(),
-                stop_reason: response.stop_reason,
-                usage: response.usage,
-                origin: origin.clone(),
-            }),
-        )
-        .with_cost(events::CostMetadata {
             call_id,
-            model: request.model.clone(),
-            input_tokens: response.usage.input_tokens,
-            output_tokens: response.usage.output_tokens,
-            cache_read_tokens: response.usage.cache_read_tokens,
-            cache_write_tokens: response.usage.cache_write_tokens,
+            &response,
+            origin,
+            request.model.clone(),
             input_cost,
             output_cost,
             total_cost,
-            cumulative_invocation_cost: totals.total_cost,
-            cumulative_agent_cost: totals.total_cost,
-            origin,
-        });
+            totals.total_cost,
+        );
         if let Some(message) = context_warning {
             response_event = response_event.annotate(
                 crate::events::annotation_keys::FLAGS,

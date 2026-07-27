@@ -24,7 +24,9 @@
 //!   instance dropped, and a fresh instance resumed from the blob
 //!   with no observable difference in final output.
 
+pub(crate) mod emit;
 pub mod harness;
+pub(crate) mod rounds;
 pub mod runner;
 pub mod types;
 

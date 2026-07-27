@@ -296,6 +296,8 @@ fn validate_token_rejects_dot_wildcard_whitespace_and_empty() {
 #[test]
 fn tool_result_error_kind_serialises() {
     let payload = ToolResultPayload {
+        round: 0,
+        tool_name: String::new(),
         tool_call_id: crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
         output: "Path /etc/passwd is outside allowed scope".to_string(),
         is_error: true,
@@ -310,6 +312,8 @@ fn tool_result_error_kind_serialises() {
 #[test]
 fn tool_result_success_omits_error_kind() {
     let payload = ToolResultPayload {
+        round: 0,
+        tool_name: String::new(),
         tool_call_id: crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
         output: "file contents".to_string(),
         is_error: false,
@@ -479,6 +483,7 @@ fn event_with_cost_sets_envelope_cost() {
         AgentId::new("agent").unwrap(),
         invocation_id,
         EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
             content: None,
@@ -526,6 +531,7 @@ fn cost_metadata_round_trips_on_envelope() {
         AgentId::new("agent").unwrap(),
         invocation_id,
         EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
             content: Some("ok".to_string()),
@@ -547,6 +553,7 @@ fn envelope_cost_omits_when_none() {
         AgentId::new("agent").unwrap(),
         invocation_id,
         EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
             content: None,
@@ -648,6 +655,7 @@ fn consumer_view_strips_annotations_round_trip() {
         AgentId::new("agent").unwrap(),
         invocation_id,
         EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
             content: Some("hello".to_string()),
@@ -683,6 +691,7 @@ fn consumer_view_serialises_without_annotations_field_even_with_annotations() {
         AgentId::new("producer").unwrap(),
         invocation_id,
         EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
             content: Some("answer: 42".to_string()),
@@ -765,6 +774,7 @@ fn schema_id_for_every_payload_variant() {
             model: "m".into(),
         }),
         EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: inv,
             content: None,
@@ -773,6 +783,7 @@ fn schema_id_for_every_payload_variant() {
             usage: TokenUsage::default(),
         }),
         EventPayload::ToolCall(ToolCallPayload {
+            round: 0,
             tool_call_id: crate::events::ToolCallId::new("tc").unwrap(),
             tool_name: "n".into(),
             parameters: json!({}),
@@ -782,6 +793,8 @@ fn schema_id_for_every_payload_variant() {
             tool_name: "n".into(),
         }),
         EventPayload::ToolResult(ToolResultPayload {
+            round: 0,
+            tool_name: String::new(),
             tool_call_id: crate::events::ToolCallId::new("tc").unwrap(),
             output: String::new(),
             is_error: false,

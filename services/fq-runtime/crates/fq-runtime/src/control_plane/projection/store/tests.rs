@@ -302,6 +302,7 @@ fn sample_llm_response_with_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
         aid(agent),
         inv,
         EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
             origin: crate::events::LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
             content: Some("ok".to_string()),
@@ -395,6 +396,7 @@ fn sample_llm_response(agent: &str, inv: Uuid) -> Event {
         aid(agent),
         inv,
         EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
             origin: crate::events::LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
             content: Some("hi".to_string()),

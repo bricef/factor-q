@@ -115,6 +115,7 @@ fn cost(call: u32, total: f64, cumulative: f64) -> CostMetadata {
 
 fn llm_response(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost: f64) -> Event {
     let payload = EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
+        round: 0,
         call_id: fixed_uuid(seq),
         content: Some("Fixture assistant reply.".into()),
         tool_calls: Vec::new(),

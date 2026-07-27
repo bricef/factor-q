@@ -167,10 +167,12 @@ impl Edge for EdgeServer {
                 message: "next_batch carries stream operations only".into(),
             });
         }
-        // Stream handlers arrive with the Phase-3 Turn exemplar.
-        Err(WireError::NotRegistered {
-            op: request.op.to_string(),
-        })
+        let Some(handler) = self.registry.stream_handler(&request.op.to_string()) else {
+            return Err(WireError::NotRegistered {
+                op: request.op.to_string(),
+            });
+        };
+        handler(request.filter, request.from_seq, request.max_wait_ms).await
     }
 }
 

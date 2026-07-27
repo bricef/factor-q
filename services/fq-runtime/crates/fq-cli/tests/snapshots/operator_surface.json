@@ -595,5 +595,205 @@
       "verb": "drop",
       "version": 1
     }
+  },
+  {
+    "atom": {
+      "description": "Event-log-backed: `seq` is the stream sequence — the same cursor receipts and min_seq gates speak. Stream long-polls via next_batch; from_seq = u64::MAX seeks the tail.",
+      "domain": "turn",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List/Stream selection for Turns — full payloads by default; an\n`abbreviate` option waits for a consumer that wants it (P11).",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          },
+          "limit": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "invocation_id"
+        ],
+        "title": "TurnFilter",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for a Turn: its event-log sequence.",
+        "properties": {
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq"
+        ],
+        "title": "TurnKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "AssistantToolCall": {
+            "properties": {
+              "parameters": true,
+              "tool_call_id": {
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool_call_id",
+              "tool_name",
+              "parameters"
+            ],
+            "type": "object"
+          },
+          "TurnAction": {
+            "description": "What happened: the turn's content, full payload by default.",
+            "oneOf": [
+              {
+                "properties": {
+                  "content": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "cost_usd": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "is_error": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "assistant",
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "tool_calls": {
+                    "items": {
+                      "$ref": "#/$defs/AssistantToolCall"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "model",
+                  "tool_calls"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "is_error": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "tool_result",
+                    "type": "string"
+                  },
+                  "output": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "parameters": {
+                    "description": "Joined from the initiating call when it is in the fold's\nwindow; `null` for a lone turn fetched by key."
+                  },
+                  "tool_call_id": {
+                    "type": "string"
+                  },
+                  "tool_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tool_call_id",
+                  "tool_name",
+                  "parameters"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One turn, addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `turn.stream`, feeds\n`min_seq` gates, and appears in command receipts.",
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/TurnAction",
+            "description": "The action itself — the fact this atom records."
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "initiating_turn": {
+            "description": "For a tool-result turn: the sequence of the assistant turn\nwhose call it answers — tracing in log coordinates. Absent\nwhen the initiating turn predates the stream window.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "round": {
+            "description": "The Round grouping key: one Round is an assistant action plus\nthe tool results it initiated (the model-turn count\n`max_iterations` gates). 0 on turns derived from events\npredating the field.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timestamp_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "invocation_id",
+          "agent_id",
+          "round",
+          "timestamp_ms",
+          "action"
+        ],
+        "title": "TurnState",
+        "type": "object"
+      },
+      "summary": "One action within a Round: an assistant output or a tool result.",
+      "version": 1
+    }
   }
 ]
