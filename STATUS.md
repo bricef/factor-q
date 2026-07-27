@@ -108,6 +108,41 @@ instrumentation (read relative to an expert+frontier baseline) to make
 (security sequencing) are in the
 [2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
 
+## How the work is sequenced
+
+A coarse map of what gates what. It exists because a hold is
+indistinguishable from neglect unless the reason is written down: the
+graph-executor plan sat untouched for three weeks and read as
+abandoned, when it was deliberately waiting on security and structural
+work. Workstream-level only — per-issue dependency trees come from
+`issue-graph` against GitHub sub-issue links, not from this diagram.
+**Rule: anything held carries a named exit condition.**
+
+```mermaid
+flowchart TD
+  ratchet["size ratchet #388 ✅"] -.->|"stops growth,<br/>does not shrink"| splits
+  splits["structural splits<br/>#78 #189 #191<br/>⚠ no allocated capacity"]
+  secpoc["security PoCs<br/>#399 #400"]
+  splits -->|"clean base before<br/>compounding debt"| mvp
+  secpoc -->|"clean base before<br/>compounding debt"| mvp
+  mvp["multi-node MVP #414<br/>⏸ HELD"] --> vertical["two-node vertical<br/>ADR-0007 plan"]
+  vertical -->|"needs multi-agent<br/>workflows"| noncode["non-code workload<br/>1.3 — untracked"]
+  storage["storage/vector M3→M4→M5"] --> memskills["Memory + Skills"]
+  ladder["capability ladder #413<br/>maintainer-owned"] -.->|"supersede or<br/>rescope?"| m0["#340 M0 instrumentation"]
+  mvp -.->|"L4 queue autonomy<br/>needs orchestration"| ladder
+```
+
+Reading the diagram: solid arrows are hard gates; dashed arrows are
+open questions or weak couplings. The exit criteria drawn into #414
+(#399, #400, #78, #189, #191) are **proposed and not yet confirmed by
+the maintainer** — read them as a candidate release condition for the
+hold, not a settled one. #78/#189/#191 carry no allocated capacity
+today: the size ratchet (#388) stops those files growing but does not
+shrink them. The non-code workload (cleanroom finding 1.3) has no issue
+yet. Registry + split execution (ADR-0006/0031) and exactly-once
+trigger dispatch are in flight but gate nothing on this map, so they
+are omitted rather than drawn as orphans.
+
 ## Not built yet
 
 Multi-agent orchestration (ADR-0007, accepted but unbuilt) ·
