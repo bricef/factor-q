@@ -41,6 +41,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0029](accepted/0029-fuse-binding-crate.md) | FUSE binding crate for the harness-owned VFS is `fuse-backend-rs` (`fuse3` fallback), chosen by a blind bake-off; refines ADR-0028 |
 | [0030](accepted/0030-object-manifest-gc-back-off.md) | Object/manifest GC uses back-off (no generations) — objects get the block protocol's claim CAS + reserve-before-rely, but a writer meeting a claimed object retries rather than minting a generation; TLC-checked, refines ADR-0023 (F2) |
 | [0031](accepted/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; shared-secret-over-TLS auth as swappable middleware |
+| [0033](accepted/0033-bsl-reaffirmation.md) | BSL 1.1 stands after the 2026-07-25 cleanroom review's finding 1.4 — reaffirms [ADR-0022](accepted/0022-binary-distribution-and-licensing.md) §7 unamended; costs carried knowingly, the named-scenario gap left open, revisit triggers proposed |
 
 ## Draft
 
