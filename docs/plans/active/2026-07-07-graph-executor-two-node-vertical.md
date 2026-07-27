@@ -1,7 +1,12 @@
 # Graph executor — the two-node vertical (`propose → review`)
 
-**Status:** draft (2026-07-07). The concrete Q20 first vertical for the graph
-executor decided in
+**Status:** draft (2026-07-07) — **held, not stalled.** This plan is
+deliberately waiting on security and structural remediation so the
+multi-agent work lands on a clean base rather than compounding known
+debt. The hold rationale and its proposed exit criteria are tracked in
+[#414](https://github.com/bricef/factor-q/issues/414); the wider
+sequencing map is in [STATUS.md](../../../STATUS.md). The concrete Q20
+first vertical for the graph executor decided in
 [ADR-0007](../../adrs/accepted/0007-inter-agent-communication.md) ("build the
 declared two-node graph first; verify the executor to the reducer's bar").
 Grounded in the signatures cornerstone
