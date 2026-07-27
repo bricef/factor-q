@@ -1,0 +1,17 @@
+# Configures clippy lints that are not enabled by default. Setting a threshold
+# here does NOT enable a lint — `too_many_lines` is allow-by-default (pedantic)
+# and stays that way, so this is inert for `just lint-clippy` and cannot turn
+# into a gate by accident.
+#
+# It is read by `just lint-creep`, which force-warns the lint to make function
+# growth visible before it reaches the 250-line ratchet cap in
+# .function-size-baseline. Advisory on purpose: the ratchet is the gate, this
+# is the early warning.
+#
+# 150 rather than something nearer the cap because the two count DIFFERENT
+# things. clippy counts code lines, skipping comments and blank lines; the
+# ratchet counts physical span from the `fn` keyword. In this tree the ratio
+# runs about 0.7 (`resume` is 358 physical / 241 code), so the 250-line cap
+# lands around 175 clippy lines — a warning at 175 would fire as the gate hit,
+# not before it. 150 gives roughly a 25-line runway.
+too-many-lines-threshold = 150
