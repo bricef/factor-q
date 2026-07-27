@@ -1,0 +1,25 @@
+# Per-function line budgets — the large-function ratchet.
+#
+# Generated and maintained by `just sizes-bless`; enforced by
+# `just lint-sizes` (tools/fq-lint) in the Code quality CI job.
+#
+# Measured from the `fn` keyword to the closing brace, so a function is
+# never charged for its own doc comment. Test functions are out of scope,
+# matching the file gate's exclusion of test code.
+#
+# Keys are `path::scope::name`, not line numbers — line numbers move on
+# every edit above them, and a baseline that churned on unrelated changes
+# would be ignored within a week.
+#
+# Every function here exceeds the 250-line cap and is pinned at its size
+# when the ratchet landed. These numbers may only ever go DOWN. Lowering
+# one is automatic (`just sizes-bless`); raising one, or admitting a new
+# function, means hand-editing this file so a human sees it in the diff.
+#
+# clippy::too_many_lines is the complementary threshold gate (it counts
+# CODE lines, skipping comments and blanks) — tracked in #392.
+services/fq-runtime/crates/fq-cli/src/lib.rs::run_daemon 1373
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::dispatch_llm 271
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::resume 358
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 378
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_tool 317

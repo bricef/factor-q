@@ -50,6 +50,15 @@ impl FileFacts {
 #[derive(Debug, Clone)]
 pub struct FnFacts {
     pub name: String,
+    /// Enclosing scope — inline modules and the `impl` type, joined with `::`
+    /// (`worker::Runner`, or `Runner as Reducer` for a trait impl). Empty for
+    /// a free function at file scope.
+    pub scope: String,
+    /// Line of the `fn` keyword. Deliberately **not** the start of the item:
+    /// an item's span includes its doc comments, and measuring from there
+    /// would make documenting a function count against its budget. This repo
+    /// puts incident and ADR rationale in doc comments; the gate must not
+    /// discourage that.
     pub first_line: usize,
     pub last_line: usize,
     /// Parameter count, `self` included — the quantity behind the tree's 14
@@ -60,8 +69,22 @@ pub struct FnFacts {
 }
 
 impl FnFacts {
+    /// Signature-to-closing-brace span, doc comments and attributes excluded.
     pub fn lines(&self) -> usize {
         self.last_line.saturating_sub(self.first_line) + 1
+    }
+
+    /// Stable identity for a baseline entry.
+    ///
+    /// Keyed on name and scope rather than line number, because line numbers
+    /// move on every edit above them and a baseline that churned on unrelated
+    /// changes would be ignored within a week.
+    pub fn key(&self, path: &str) -> String {
+        if self.scope.is_empty() {
+            format!("{path}::{}", self.name)
+        } else {
+            format!("{path}::{}::{}", self.scope, self.name)
+        }
     }
 }
 
@@ -77,7 +100,7 @@ pub fn analyze(src: &str) -> Result<FileFacts, syn::Error> {
         test_lines: 0,
         functions: Vec::new(),
     };
-    walk_items(&file.items, false, &mut facts);
+    walk_items(&file.items, false, "", &mut facts);
     Ok(facts)
 }
 
@@ -147,7 +170,42 @@ fn record_test_item(spanned: &impl Spanned, facts: &mut FileFacts) {
     facts.test_lines += last.saturating_sub(first) + 1;
 }
 
-fn walk_items(items: &[syn::Item], in_test: bool, facts: &mut FileFacts) {
+/// Join a parent scope with one more segment.
+fn nest(scope: &str, segment: &str) -> String {
+    if scope.is_empty() {
+        segment.to_string()
+    } else {
+        format!("{scope}::{segment}")
+    }
+}
+
+/// Last path segment of a type, e.g. `Runner` for `worker::Runner<'a>`.
+/// `None` for shapes without a nameable head (tuples, references, `dyn`).
+fn type_head(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        syn::Type::Reference(r) => type_head(&r.elem),
+        syn::Type::Group(g) => type_head(&g.elem),
+        syn::Type::Paren(p) => type_head(&p.elem),
+        _ => None,
+    }
+}
+
+/// Scope label for an `impl` block: `Runner`, or `Runner as Reducer` for a
+/// trait impl. The trait matters — a type can implement an inherent `run` and
+/// a trait `run`, and the two need distinct baseline keys.
+fn impl_scope(i: &syn::ItemImpl) -> String {
+    let ty = type_head(&i.self_ty).unwrap_or_else(|| "_".into());
+    match &i.trait_ {
+        Some((_, path, _)) => match path.segments.last() {
+            Some(seg) => format!("{ty} as {}", seg.ident),
+            None => ty,
+        },
+        None => ty,
+    }
+}
+
+fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileFacts) {
     for item in items {
         let gated = is_test_gated(item_attrs(item));
         // A test item's whole subtree is test code; count it once and do not
@@ -158,24 +216,28 @@ fn walk_items(items: &[syn::Item], in_test: bool, facts: &mut FileFacts) {
         let inside = in_test || gated;
 
         match item {
-            syn::Item::Fn(f) => {
-                facts
-                    .functions
-                    .push(fn_facts(f.sig.ident.to_string(), &f.sig, item, inside))
-            }
+            syn::Item::Fn(f) => facts.functions.push(fn_facts(
+                f.sig.ident.to_string(),
+                scope,
+                &f.sig,
+                item,
+                inside,
+            )),
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
-                    walk_items(inner, inside, facts);
+                    walk_items(inner, inside, &nest(scope, &m.ident.to_string()), facts);
                 }
             }
             syn::Item::Impl(i) => {
+                let inner_scope = nest(scope, &impl_scope(i));
                 for impl_item in &i.items {
-                    walk_impl_item(impl_item, inside, facts);
+                    walk_impl_item(impl_item, inside, &inner_scope, facts);
                 }
             }
             syn::Item::Trait(t) => {
+                let inner_scope = nest(scope, &t.ident.to_string());
                 for trait_item in &t.items {
-                    walk_trait_item(trait_item, inside, facts);
+                    walk_trait_item(trait_item, inside, &inner_scope, facts);
                 }
             }
             _ => {}
@@ -183,36 +245,55 @@ fn walk_items(items: &[syn::Item], in_test: bool, facts: &mut FileFacts) {
     }
 }
 
-fn walk_impl_item(item: &syn::ImplItem, in_test: bool, facts: &mut FileFacts) {
+fn walk_impl_item(item: &syn::ImplItem, in_test: bool, scope: &str, facts: &mut FileFacts) {
     let gated = is_test_gated(impl_item_attrs(item));
     if gated && !in_test {
         record_test_item(item, facts);
     }
     let inside = in_test || gated;
     if let syn::ImplItem::Fn(f) = item {
-        facts
-            .functions
-            .push(fn_facts(f.sig.ident.to_string(), &f.sig, item, inside));
+        facts.functions.push(fn_facts(
+            f.sig.ident.to_string(),
+            scope,
+            &f.sig,
+            item,
+            inside,
+        ));
     }
 }
 
-fn walk_trait_item(item: &syn::TraitItem, in_test: bool, facts: &mut FileFacts) {
+fn walk_trait_item(item: &syn::TraitItem, in_test: bool, scope: &str, facts: &mut FileFacts) {
     let gated = is_test_gated(trait_item_attrs(item));
     if gated && !in_test {
         record_test_item(item, facts);
     }
     let inside = in_test || gated;
     if let syn::TraitItem::Fn(f) = item {
-        facts
-            .functions
-            .push(fn_facts(f.sig.ident.to_string(), &f.sig, item, inside));
+        facts.functions.push(fn_facts(
+            f.sig.ident.to_string(),
+            scope,
+            &f.sig,
+            item,
+            inside,
+        ));
     }
 }
 
-fn fn_facts(name: String, sig: &syn::Signature, spanned: &impl Spanned, is_test: bool) -> FnFacts {
-    let (first_line, last_line) = span_lines(spanned);
+fn fn_facts(
+    name: String,
+    scope: &str,
+    sig: &syn::Signature,
+    spanned: &impl Spanned,
+    is_test: bool,
+) -> FnFacts {
+    let (_, last_line) = span_lines(spanned);
+    // Measure from the `fn` keyword, not the start of the item: the item's
+    // span includes doc comments, and charging a function for its own
+    // documentation is exactly the wrong incentive in this codebase.
+    let first_line = sig.fn_token.span.start().line;
     FnFacts {
         name,
+        scope: scope.to_string(),
         first_line,
         last_line,
         params: sig.inputs.len(),
