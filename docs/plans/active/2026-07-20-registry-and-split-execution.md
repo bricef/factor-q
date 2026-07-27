@@ -150,7 +150,7 @@ alias until Phase 5 strips it), alongside the untouched `ReadService`:
 **Acceptance:** a non-loopback client authenticates against a test daemon;
 negative-auth tests pass; golden untouched. *(2–3 PRs.)*
 
-### Phase 3 — exemplars: one declaration per category — 3a ✅ #377 · ids #379 · 3b ✅ #385 · 3c ✅ #386 · 3d #427
+### Phase 3 — exemplars: one declaration per category ✅ — 3a #377 · ids #379 · 3b #385 · 3c #386 · 3d #427 · 3e D-3 resolved
 
 The pattern-fixing slices, with full review scrutiny:
 
@@ -278,10 +278,18 @@ audit events carry the MCP caller identity. *(1–2 PRs.)*
 - **D-2 (gates Phase 4.2): NATS binding for `control.*`.** Retire from the
   operator path entirely (leaning, per D3/D8); `fq.control.*` remains at
   most internal daemon↔worker fan-out.
-- **D-3 (gates Phase 3e): wrapper codegen mechanism.** Generator consuming
-  `registry.describe` output vs. build.rs vs. macro. Leaning: a small
-  generator binary checked against `registry.describe` in CI (no proc-macro
-  layer; keeps the schema the single source).
+- **D-3 — resolved (2026-07-28, Phase 3e): no codegen.** Code
+  generation is a smell; the interface is **shared data definitions**.
+  Client and daemon live in one workspace and speak the same contract
+  types — the filter/key/state structs the client serialises are the
+  very types whose schemas the declarations capture, so schema, server
+  handler, and client call cannot drift. The committed
+  `operator_surface.json` snapshot is the drift oracle; the Phase-6
+  MCP face consumes `describe` dynamically. ADR-0006's held fallback
+  (per-method generation if generic-invoke ergonomics disappoint) is
+  formally not taken: three exemplar categories shipped on ~15-line
+  hand glue. Revisit trigger: an out-of-workspace consumer (non-Rust
+  client, customer SDK) reopens this with `describe` as its input.
 - **D-4 — resolved (2026-07-22, ADR-0031 Appendix A):** first `fqd`
   run mints a root keypair and prints an admin token + cert
   fingerprint; the client stores both. TOFU and explicit-fingerprint
