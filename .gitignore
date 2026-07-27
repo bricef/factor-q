@@ -36,3 +36,10 @@ docs/design/states/
 
 # TLC model-checker scratch output
 docs/design/committed/states/
+
+# CPython bytecode cache. The repo's Python tooling (scripts/check-links.py,
+# scripts/coupling-comment.py) is invoked by `just` targets and CI, and CPython
+# writes __pycache__/ beside a script whenever one is imported or compiled.
+# Same reason as the entries above: it is reproducible scratch, and leaving it
+# untracked-but-not-ignored would make release builds stamp "<sha>-dirty".
+__pycache__/
