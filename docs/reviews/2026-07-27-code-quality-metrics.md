@@ -1,6 +1,6 @@
 # Code quality metrics — beyond file and function size
 
-*Captured 2026-07-27 against `debt/file-size-ratchet` @ `f4ff53b`. A conversational analysis, recorded verbatim, prompted by the question: now that `just quality` reports and gates file and function size, what else is worth watching, and can cross-module coupling be measured? The coupling numbers below come from an ad-hoc `use crate::`-only pass over `fq-runtime` written for this discussion, not from `fq-lint`; the analysis discloses why that makes them a floor. Second person throughout is an artifact of the conversational origin.*
+*Captured 2026-07-27 against the size-ratchet branch that became PR #388, at what is now `6bea27a` on `main`. A conversational analysis, recorded verbatim, prompted by the question: now that `just quality` reports and gates file and function size, what else is worth watching, and can cross-module coupling be measured? The coupling numbers below come from an ad-hoc `use crate::`-only pass over `fq-runtime` written for this discussion, not from `fq-lint`; the analysis discloses why that makes them a floor — and the `fq-lint --coupling` implementation that followed in this PR measures several of them higher for exactly that reason. Second person throughout is an artifact of the conversational origin.*
 
 ---
 

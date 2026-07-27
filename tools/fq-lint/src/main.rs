@@ -37,6 +37,7 @@
 //! `docs/reviews/2026-07-25-factor-q-cleanroom-review.md`.
 
 mod analysis;
+mod coupling;
 mod ratchet;
 
 use std::collections::BTreeMap;
@@ -79,11 +80,13 @@ fn main() -> ExitCode {
 
     if flags.contains(&"--help") || flags.contains(&"-h") {
         eprintln!(
-            "usage: fq-lint [--bless | --metrics]\n\n  \
+            "usage: fq-lint [--bless | --metrics | --creep | --coupling [--json]]\n\n  \
              (no flags)  check files and functions against their baselines\n  \
              --bless     lower budgets to match reality (never raises)\n  \
              --creep     report functions approaching the cap (never fails)\n  \
-             --metrics   report structural facts (never fails)"
+             --metrics   report structural facts (never fails)\n  \
+             --coupling  report module fan-in/fan-out and cycles (never fails)\n  \
+             --json      machine-readable form of --coupling"
         );
         return ExitCode::SUCCESS;
     }
@@ -104,6 +107,19 @@ fn main() -> ExitCode {
         }
     };
 
+    if flags.contains(&"--coupling") {
+        let graphs = coupling::build(
+            measured
+                .iter()
+                .filter_map(|(p, m)| m.facts.as_ref().map(|f| (p.as_str(), m.production, f))),
+        );
+        if flags.contains(&"--json") {
+            coupling::report_json(&graphs);
+        } else {
+            coupling::report(&graphs);
+        }
+        return ExitCode::SUCCESS;
+    }
     if flags.contains(&"--metrics") {
         report_metrics(&measured);
         return ExitCode::SUCCESS;

@@ -50,6 +50,7 @@ jobs:
       store: ${{ steps.filter.outputs.store }}
       go: ${{ steps.filter.outputs.go }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
+      coupling: ${{ steps.filter.outputs.coupling }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -93,6 +94,17 @@ jobs:
               - 'adapters/**'
               - 'justfile'
               - '.github/workflows/**'
+            # Any Rust the module graph is built from — deliberately broader
+            # than the per-suite filters, which miss `tools/` entirely, and
+            # narrower than "always", so a docs-only PR gets no comment.
+            coupling:
+              - 'services/**'
+              - 'tools/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'scripts/coupling-comment.py'
+              - 'scripts/coupling-pr-comment.sh'
+              - '.github/workflows/ci.yml'
             dashboard:
               - 'services/fq-dashboard/**'
               - 'scripts/dashboard-screenshots.sh'
@@ -337,6 +349,45 @@ jobs:
         run: >-
           bash scripts/dashboard-pr-comment.sh dist/dashboard-screenshots
           "${{ github.event.pull_request.number }}"
+          "${{ github.event.pull_request.head.sha }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # Advisory artifact, not a required check: report what a PR does to module
+  # coupling, as a self-renewing comment on the PR. The counterweight to the
+  # size ratchets — a file-size budget alone rewards splitting a god-file into
+  # two halves that import each other, and this is what makes that visible.
+  # Reporting first, deliberately: gates and verification come later
+  # (docs/reviews/2026-07-27-code-quality-metrics.md).
+  coupling-metrics:
+    name: Coupling metrics
+    needs: changes
+    runs-on: ubuntu-latest
+    # PR context only — the comment needs somewhere to go, and the diff needs
+    # a merge base. Fork PRs get a read-only token, so the upsert would fail;
+    # the script exits 0 either way, but there is no point spending the build.
+    if: >-
+      needs.changes.outputs.coupling == 'true' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    # Elevated for this job only: upsert the PR comment. The workflow default
+    # stays read-only.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the script resolves the merge base and materialises
+          # it as a worktree. The default depth-1 checkout has neither.
+          fetch-depth: 0
+      # Keep in lockstep with rust-toolchain.toml — fq-lint parses Rust with syn.
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: >-
+          bash scripts/coupling-pr-comment.sh
+          "${{ github.event.pull_request.number }}"
+          "${{ github.event.pull_request.base.sha }}"
           "${{ github.event.pull_request.head.sha }}"
         env:
           GH_TOKEN: ${{ github.token }}
