@@ -80,9 +80,15 @@ by it; `just soak` scales the lifecycle driver for deep local runs).
 The registry-first API + daemon/CLI split (ADR-0006 + ADR-0031) is
 **underway** per the
 [registry-and-split-execution plan](docs/plans/active/2026-07-20-registry-and-split-execution.md):
-Phase 0 (golden net) and Phase 1 (`fq-ops` contract crate) have landed,
-and Phase 2 — the authenticated generic edge (`fq-edge`, TLS + capability
-tokens) — is wired into the daemon and enabled by default.
+Phase 0 (golden net), Phase 1 (`fq-ops` contract crate), and Phase 2
+(the authenticated generic edge — `fq-edge`, TLS + capability tokens —
+wired into the daemon and enabled by default) have landed. Phase 3, the
+exemplar slices proving one declaration per category through the edge,
+is underway: watermark plumbing (3a) and typed op identifiers are in,
+the `Invocation` view (3b) has flipped its CLI verbs behind golden, and
+`invocation.drop` (3c) now composes read-your-writes through the public
+surface alone; the `Turn` atom (3d) and wrapper codegen (3e) remain
+before the Phase 4 fleet migration.
 The dogfood loop **lands PRs**: alongside the daily read-and-report
 `doc-drift` agent (fq-cron-scheduled; findings feed the
 issue tracker), the `github-watcher` adapter triggers
