@@ -538,6 +538,26 @@ sizes-bless:
 lint-metrics:
     cargo run -q -p fq-lint -- --metrics
 
+# ADVISORY — always exits 0, never gates. The counterweight to the size
+# ratchets: a file-size budget on its own rewards the wrong refactor, because
+# splitting a god-file into two halves that import each other heavily passes
+# `lint-sizes` and leaves the tree worse. Nothing else in `just quality` can
+# tell that split apart from a real one.
+#
+# Reports per-crate module fan-in/fan-out and import cycles (Rust forbids crate
+# cycles but permits module cycles silently, so no other tool here sees them).
+# Edges are `crate::`/`super::` paths in production code between a crate's
+# top-level modules — see tools/fq-lint/src/coupling.rs for what is deliberately
+# not counted, and why every number is a floor rather than an estimate.
+#
+# `--json` is the same data for scripts/coupling-pr-comment.sh, which diffs a
+# PR against its merge base and keeps one self-renewing comment on the PR.
+# Gates and verification come later; this is the reporting layer first
+# (docs/reviews/2026-07-27-code-quality-metrics.md).
+# Report module coupling: fan-in/fan-out and cycles (advisory — never fails).
+lint-coupling:
+    cargo run -q -p fq-lint -- --coupling
+
 # One command for every quality gate that is not a test, mirrored exactly by
 # the "Code quality" CI job. Before this, the structural gates lived in the
 # source-policy job while formatting and clippy were scattered across the four
@@ -571,6 +591,7 @@ quality:
     run_phase "lint-fmt"     just lint-fmt
     run_phase "lint-clippy"  just lint-clippy
     run_phase "lint-creep"   just lint-creep
+    run_phase "lint-coupling" just lint-coupling
 
 # === Release ===
 

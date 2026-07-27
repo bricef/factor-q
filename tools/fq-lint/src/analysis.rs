@@ -36,6 +36,29 @@ pub struct FileFacts {
     pub test_lines: usize,
     /// Every function-like item, test and production alike.
     pub functions: Vec<FnFacts>,
+    /// Every `crate::`- or `super::`-rooted path written in this file, in
+    /// source order. Resolving these to modules needs the file's own position
+    /// in the tree, which this layer does not know — see `coupling.rs`.
+    pub module_refs: Vec<ModuleRef>,
+}
+
+/// One same-crate path reference, as written, before resolution.
+///
+/// Only the root prefix and the first named segment are kept: module coupling
+/// is measured between top-level modules, so `crate::worker::reducer::Runner`
+/// and `crate::worker::Handle` are the same edge, and keeping the tail would
+/// only invite a finer-grained metric than the graph can support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleRef {
+    /// Leading `super::` hops. Zero for a `crate::`-rooted path.
+    pub supers: usize,
+    /// First named segment after the root prefix — `worker` in
+    /// `crate::worker::Handle`.
+    pub head: String,
+    /// Whether this reference sits under a `#[cfg(test)]` item. Test-only
+    /// coupling is real but is not the debt the metric is aimed at, so
+    /// callers filter on it.
+    pub is_test: bool,
 }
 
 impl FileFacts {
@@ -110,6 +133,7 @@ pub fn analyze(src: &str) -> Result<FileFacts, syn::Error> {
         total_lines: src.split('\n').count(),
         test_lines: 0,
         functions: Vec::new(),
+        module_refs: Vec::new(),
     };
     walk_items(&file.items, false, "", &mut facts);
     Ok(facts)
@@ -226,33 +250,57 @@ fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileF
         }
         let inside = in_test || gated;
 
+        // Module references are gathered on the way through, at whatever depth
+        // the walk already descends to, so each one is tagged with the
+        // test-ness of the item it actually sits in. Scanning the file's whole
+        // token stream in one pass would be simpler and would mark every
+        // reference inside a non-test item as production, including those in a
+        // `#[cfg(test)] mod tests` nested within it.
         match item {
-            syn::Item::Fn(f) => facts.functions.push(fn_facts(
-                f.sig.ident.to_string(),
-                scope,
-                &f.sig,
-                Some(&f.block),
-                item,
-                inside,
-            )),
+            syn::Item::Fn(f) => {
+                scan_refs(f.sig.to_token_stream(), inside, &mut facts.module_refs);
+                scan_refs(f.block.to_token_stream(), inside, &mut facts.module_refs);
+                facts.functions.push(fn_facts(
+                    f.sig.ident.to_string(),
+                    scope,
+                    &f.sig,
+                    Some(&f.block),
+                    item,
+                    inside,
+                ));
+            }
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
                     walk_items(inner, inside, &nest(scope, &m.ident.to_string()), facts);
                 }
             }
             syn::Item::Impl(i) => {
+                // Header only — the members are walked individually below, so
+                // scanning the whole item here would double-count them.
+                scan_refs(i.self_ty.to_token_stream(), inside, &mut facts.module_refs);
+                scan_refs(i.generics.to_token_stream(), inside, &mut facts.module_refs);
+                if let Some((_, path, _)) = &i.trait_ {
+                    scan_refs(path.to_token_stream(), inside, &mut facts.module_refs);
+                }
                 let inner_scope = nest(scope, &impl_scope(i));
                 for impl_item in &i.items {
                     walk_impl_item(impl_item, inside, &inner_scope, facts);
                 }
             }
             syn::Item::Trait(t) => {
+                scan_refs(t.generics.to_token_stream(), inside, &mut facts.module_refs);
+                for bound in &t.supertraits {
+                    scan_refs(bound.to_token_stream(), inside, &mut facts.module_refs);
+                }
                 let inner_scope = nest(scope, &t.ident.to_string());
                 for trait_item in &t.items {
                     walk_trait_item(trait_item, inside, &inner_scope, facts);
                 }
             }
-            _ => {}
+            // `use`, `struct`, `enum`, `const`, `type`, `macro_rules!` — items
+            // the walk does not descend into, so their whole token stream is
+            // scanned at this level. This is where `use crate::…` is caught.
+            other => scan_refs(other.to_token_stream(), inside, &mut facts.module_refs),
         }
     }
 }
@@ -264,6 +312,8 @@ fn walk_impl_item(item: &syn::ImplItem, in_test: bool, scope: &str, facts: &mut 
     }
     let inside = in_test || gated;
     if let syn::ImplItem::Fn(f) = item {
+        scan_refs(f.sig.to_token_stream(), inside, &mut facts.module_refs);
+        scan_refs(f.block.to_token_stream(), inside, &mut facts.module_refs);
         facts.functions.push(fn_facts(
             f.sig.ident.to_string(),
             scope,
@@ -272,6 +322,8 @@ fn walk_impl_item(item: &syn::ImplItem, in_test: bool, scope: &str, facts: &mut 
             item,
             inside,
         ));
+    } else {
+        scan_refs(item.to_token_stream(), inside, &mut facts.module_refs);
     }
 }
 
@@ -282,6 +334,10 @@ fn walk_trait_item(item: &syn::TraitItem, in_test: bool, scope: &str, facts: &mu
     }
     let inside = in_test || gated;
     if let syn::TraitItem::Fn(f) = item {
+        scan_refs(f.sig.to_token_stream(), inside, &mut facts.module_refs);
+        if let Some(block) = &f.default {
+            scan_refs(block.to_token_stream(), inside, &mut facts.module_refs);
+        }
         facts.functions.push(fn_facts(
             f.sig.ident.to_string(),
             scope,
@@ -290,6 +346,109 @@ fn walk_trait_item(item: &syn::TraitItem, in_test: bool, scope: &str, facts: &mu
             item,
             inside,
         ));
+    } else {
+        scan_refs(item.to_token_stream(), inside, &mut facts.module_refs);
+    }
+}
+
+/// Are the two trees at `i` a `::`?
+fn is_colon2(trees: &[TokenTree], i: usize) -> bool {
+    match (trees.get(i), trees.get(i + 1)) {
+        (Some(TokenTree::Punct(a)), Some(TokenTree::Punct(b))) => {
+            a.as_char() == ':' && b.as_char() == ':'
+        }
+        _ => false,
+    }
+}
+
+/// The module name(s) a path continues into after its root prefix.
+///
+/// One ident is the common case (`crate::worker::…`). A brace group is a
+/// grouped import (`use crate::{worker, events}`), which is several edges
+/// written as one statement — each element's leading ident is its own head.
+/// Anything else (a glob, `crate::*`) names no module and yields nothing.
+fn heads_at(tree: Option<&TokenTree>) -> Vec<String> {
+    match tree {
+        Some(TokenTree::Ident(id)) => match id.to_string() {
+            // `crate::{self, …}` re-exports the root, naming no child module.
+            s if s == "self" => Vec::new(),
+            s => vec![s],
+        },
+        Some(TokenTree::Group(g)) if g.delimiter() == proc_macro2::Delimiter::Brace => {
+            let mut heads = Vec::new();
+            // Only the first ident of each comma-separated element is a head:
+            // in `{worker::Handle, events}` the `Handle` belongs to `worker`
+            // and must not be mistaken for a module of its own.
+            let mut at_element_start = true;
+            for tree in g.stream() {
+                match tree {
+                    TokenTree::Punct(p) if p.as_char() == ',' => at_element_start = true,
+                    TokenTree::Ident(id) if at_element_start => {
+                        let name = id.to_string();
+                        if name != "self" {
+                            heads.push(name);
+                        }
+                        at_element_start = false;
+                    }
+                    _ => at_element_start = false,
+                }
+            }
+            heads
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Collect `crate::`- and `super::`-rooted references from a token stream.
+///
+/// Token-level rather than AST-level, deliberately. A same-crate path can be
+/// written in a `use` item, a type, an expression, a where-clause, or inside a
+/// macro invocation, and only the token stream sees all five — `syn`'s visitor
+/// walks *parsed* paths, so every reference inside a `println!` or a
+/// declarative macro body would be invisible to it. The tokens are the same
+/// ones the compiler sees, so nothing is guessed here either.
+///
+/// The bare ident `crate` in `pub(crate)`, and `extern crate foo`, are not
+/// followed by `::` and so are correctly not references.
+fn scan_refs(tokens: proc_macro2::TokenStream, is_test: bool, out: &mut Vec<ModuleRef>) {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    let mut i = 0;
+    while i < trees.len() {
+        if let TokenTree::Ident(id) = &trees[i] {
+            let root = id.to_string();
+            if (root == "crate" || root == "super") && is_colon2(&trees, i + 1) {
+                let mut supers = usize::from(root == "super");
+                let mut at = i + 3;
+                // `super::super::…` — each further hop is another level up.
+                while supers > 0 {
+                    match trees.get(at) {
+                        Some(TokenTree::Ident(next))
+                            if *next == "super" && is_colon2(&trees, at + 1) =>
+                        {
+                            supers += 1;
+                            at += 3;
+                        }
+                        _ => break,
+                    }
+                }
+                for head in heads_at(trees.get(at)) {
+                    out.push(ModuleRef {
+                        supers,
+                        head,
+                        is_test,
+                    });
+                }
+                // Resume at the head position rather than past it: if it is a
+                // brace group its elements still need scanning for nested
+                // roots, and re-reading a plain ident is harmless.
+                i = at;
+                continue;
+            }
+        }
+        if let TokenTree::Group(g) = &trees[i] {
+            scan_refs(g.stream(), is_test, out);
+        }
+        i += 1;
     }
 }
 
@@ -498,5 +657,140 @@ mod tests {
     fn functions_inside_test_modules_are_marked_test() {
         let facts = analyze("#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n").expect("valid Rust");
         assert!(facts.functions.iter().all(|f| f.is_test));
+    }
+
+    /// Production `crate::`/`super::` heads, in source order.
+    fn refs(src: &str) -> Vec<(usize, String)> {
+        analyze(src)
+            .expect("valid Rust")
+            .module_refs
+            .into_iter()
+            .filter(|r| !r.is_test)
+            .map(|r| (r.supers, r.head))
+            .collect()
+    }
+
+    #[test]
+    fn finds_a_plain_use_of_another_module() {
+        assert_eq!(refs("use crate::worker::Handle;\n"), [(0, "worker".into())]);
+    }
+
+    #[test]
+    fn a_grouped_import_is_one_edge_per_element() {
+        // `use crate::{a, b}` is two dependencies written as one statement.
+        assert_eq!(
+            refs("use crate::{worker, events};\n"),
+            [(0, "worker".into()), (0, "events".into())]
+        );
+    }
+
+    #[test]
+    fn a_nested_group_does_not_promote_leaf_names_to_modules() {
+        // The `Handle`/`Id` in `worker::{Handle, Id}` are types, not modules.
+        assert_eq!(
+            refs("use crate::worker::{Handle, Id};\n"),
+            [(0, "worker".into())]
+        );
+    }
+
+    #[test]
+    fn finds_a_fully_qualified_path_in_an_expression() {
+        // The half a `use`-only scan misses entirely.
+        assert_eq!(
+            refs("fn a() {\n    crate::events::emit();\n}\n"),
+            [(0, "events".into())]
+        );
+    }
+
+    #[test]
+    fn finds_a_path_written_inside_a_macro_invocation() {
+        // Why this is a token scan and not a `syn` visitor: a visitor sees an
+        // unparsed token blob here and would report nothing.
+        assert_eq!(
+            refs("fn a() {\n    println!(\"{}\", crate::config::NAME);\n}\n"),
+            [(0, "config".into())]
+        );
+    }
+
+    #[test]
+    fn super_hops_are_counted() {
+        assert_eq!(refs("use super::Thing;\n"), [(1, "Thing".into())]);
+        assert_eq!(refs("use super::super::Thing;\n"), [(2, "Thing".into())]);
+    }
+
+    #[test]
+    fn pub_crate_and_extern_crate_are_not_references() {
+        // Both contain the ident `crate` with no `::` after it.
+        assert!(refs("pub(crate) fn a() {}\n").is_empty());
+        assert!(refs("extern crate alloc;\n").is_empty());
+    }
+
+    #[test]
+    fn a_crate_root_glob_names_no_module() {
+        assert!(refs("use crate::*;\n").is_empty());
+    }
+
+    #[test]
+    fn an_intra_doc_link_is_not_a_dependency() {
+        // `events.rs` documents its constraint with [`crate::agent::AgentId`]
+        // links. Documentation is not coupling, and counting it would punish
+        // the cross-referencing this codebase does well. Safe by construction:
+        // a doc comment lowers to `#[doc = "…"]`, whose payload is a single
+        // string literal the lexer never breaks into idents.
+        assert!(refs("/// See [`crate::agent::AgentId`].\npub struct T;\n").is_empty());
+        assert!(refs("//! Module doc naming crate::worker::Handle.\n").is_empty());
+    }
+
+    #[test]
+    fn a_reference_in_a_string_literal_is_not_a_dependency() {
+        assert!(refs("fn a() -> &'static str {\n    \"crate::worker::x\"\n}\n").is_empty());
+    }
+
+    #[test]
+    fn references_under_cfg_test_are_marked_test() {
+        let src = "use crate::a::X;\n#[cfg(test)]\nmod tests {\n    use crate::b::Y;\n}\n";
+        let facts = analyze(src).expect("valid Rust");
+        let production: Vec<_> = facts
+            .module_refs
+            .iter()
+            .filter(|r| !r.is_test)
+            .map(|r| r.head.as_str())
+            .collect();
+        let test: Vec<_> = facts
+            .module_refs
+            .iter()
+            .filter(|r| r.is_test)
+            .map(|r| r.head.as_str())
+            .collect();
+        assert_eq!(production, ["a"]);
+        assert_eq!(test, ["b"], "a test-only import is not production coupling");
+    }
+
+    #[test]
+    fn a_test_only_method_inside_a_production_impl_is_still_test() {
+        // The `test_support/sim.rs` shape, and the reason references are
+        // gathered during the walk rather than in one whole-file pass.
+        let src = "impl S {\n    fn a(&self) {\n        crate::a::f();\n    }\n\n    \
+                   #[cfg(test)]\n    fn t(&self) {\n        crate::b::f();\n    }\n}\n";
+        let facts = analyze(src).expect("valid Rust");
+        let test_heads: Vec<_> = facts
+            .module_refs
+            .iter()
+            .filter(|r| r.is_test)
+            .map(|r| r.head.as_str())
+            .collect();
+        assert_eq!(test_heads, ["b"]);
+    }
+
+    #[test]
+    fn finds_references_in_types_and_trait_impl_headers() {
+        let src = "struct S {\n    f: crate::events::Event,\n}\n\
+                   impl crate::bus::Sink for S {}\n";
+        let heads: Vec<_> = refs(src).into_iter().map(|(_, h)| h).collect();
+        assert!(
+            heads.contains(&"events".to_string()),
+            "field type: {heads:?}"
+        );
+        assert!(heads.contains(&"bus".to_string()), "trait path: {heads:?}");
     }
 }

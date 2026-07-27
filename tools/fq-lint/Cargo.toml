@@ -18,6 +18,11 @@ path = "src/main.rs"
 syn = { version = "2", features = ["full", "parsing", "extra-traits", "printing"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
+# `--coupling --json` is consumed by scripts/coupling-pr-comment.sh, which
+# diffs two runs of it. Hand-rolled JSON would be fine for today's keys
+# (module names are Rust identifiers) and would break the first time a path
+# needed escaping.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
