@@ -396,3 +396,19 @@ workspace and BFFs fronting all other protocols, the open string
 namespace bought nothing at the wire that the registry does not
 already provide, while costing compile-time exhaustiveness in every
 consumer.
+
+### Phase 3e resolution — the fallback is not taken (2026-07-28)
+
+The held fallback (per-method wrapper generation if generic-invoke
+ergonomics disappoint) is closed without being exercised. Through the
+Phase-3 exemplars — a view, a command, and a streaming atom — every
+client call was ~15 lines of hand glue over `invoke`/`next_batch` and
+the typed op identifiers, and none of it wanted generation. The typed
+interface is **shared data definitions**: client and daemon share the
+contract types in one workspace, so the schema captured at the
+declaration site and the type the client serialises are one thing —
+drift is unrepresentable, and the committed operator-surface snapshot
+is the reviewable oracle. Code generation is treated as a smell here:
+where richer typing is wanted, derive it from the shared definitions
+(macros included) rather than generating source. An out-of-workspace
+consumer reopens the question with `describe` as its input.
