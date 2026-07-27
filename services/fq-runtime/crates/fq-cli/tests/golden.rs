@@ -475,17 +475,20 @@ fn fixture() -> &'static Fixture {
     })
 }
 
-/// The private test broker, started once for the commands that need a
-/// live NATS (`status` bails without one). Everything else gets a
-/// closed-port URL so no daemon can leak in.
-fn broker() -> &'static fq_test_support::NatsServer {
-    static BROKER: OnceLock<fq_test_support::NatsServer> = OnceLock::new();
-    BROKER.get_or_init(fq_test_support::test_nats)
-}
-
 enum Nats {
-    /// A live private broker (commands that bail without NATS).
-    Live,
+    /// A live private broker, for the commands that bail without NATS
+    /// (`status`). The guard is owned by the calling test rather than cached
+    /// in a `static`, and that is load-bearing: `NatsServer` spawns the broker
+    /// with `PR_SET_PDEATHSIG`, which Linux delivers when the spawning
+    /// *thread* exits, not the process. libtest runs each `#[test]` on its own
+    /// thread, so a shared `static` broker is killed the moment whichever test
+    /// happened to initialise it returns, leaving later tests holding a handle
+    /// to a dead server. `fq-test-support` states the constraint outright —
+    /// "every shape here starts the server from a thread that outlives the
+    /// guard" — and a `static` is the one shape that inverts it. Starting per
+    /// test costs one extra spawn and matches every other broker call site in
+    /// the tree.
+    Live(fq_test_support::NatsServer),
     /// A guaranteed-closed port: proves the command needs no NATS.
     Closed,
 }
@@ -493,7 +496,7 @@ enum Nats {
 fn run_fq(args: &[&str], nats: &Nats) -> (Option<i32>, String, String) {
     let fixture = fixture();
     let nats_url = match nats {
-        Nats::Live => broker().url().to_string(),
+        Nats::Live(server) => server.url().to_string(),
         Nats::Closed => "nats://127.0.0.1:1".to_string(),
     };
     let mut child = Command::new(env!("CARGO_BIN_EXE_fq"))
@@ -558,7 +561,7 @@ fn collapse_digits(line: &str) -> String {
 fn redact(raw: &str, nats: &Nats, volatile_markers: &[&str]) -> String {
     let fixture_path = fixture().dir.path().display().to_string();
     let nats_url = match nats {
-        Nats::Live => broker().url().to_string(),
+        Nats::Live(server) => server.url().to_string(),
         Nats::Closed => "nats://127.0.0.1:1".to_string(),
     };
     raw.lines()
@@ -693,14 +696,19 @@ fn golden_status_human() {
     check_golden(
         "status_human",
         &["status"],
-        Nats::Live,
+        Nats::Live(fq_test_support::test_nats()),
         &["connection:", "rows:"],
     );
 }
 
 #[test]
 fn golden_status_json() {
-    check_golden("status_json", &["status", "--json"], Nats::Live, &[]);
+    check_golden(
+        "status_json",
+        &["status", "--json"],
+        Nats::Live(fq_test_support::test_nats()),
+        &[],
+    );
 }
 
 #[test]
