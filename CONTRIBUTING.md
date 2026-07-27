@@ -158,9 +158,15 @@ just test-shell-sandbox                          # containerised sandbox
   identifiers speak for themselves.
 - **Module-level doc comments** (`//!`) on every `.rs` file
   explaining the module's purpose and threat model where applicable.
-- **Tests live next to the code** (`#[cfg(test)] mod tests`) rather
-  than in a separate `tests/` crate. Integration tests that need
-  NATS spawn an isolated broker using the pinned `nats-server` binary.
+- **Tests live next to the code**, but in a sibling file rather than
+  inline: `#[cfg(test)] mod tests;` in `foo.rs`, with the body in
+  `foo/tests.rs`. `super::*` gives the same access it had inline, so
+  nothing else changes. Small modules may keep an inline
+  `#[cfg(test)] mod tests { .. }` — the convention exists so a large
+  file's production code is not buried under its own tests, and
+  `fq-lint` resolves the declaration and excludes the file from the
+  size budgets either way. Integration tests that need NATS spawn an
+  isolated broker using the pinned `nats-server` binary.
 - **Commits** follow conventional style: imperative mood, short
   first line, body explains the "why" and links to ADRs where
   relevant.
