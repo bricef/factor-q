@@ -58,6 +58,12 @@ const FN_CAP: usize = 250;
 /// at 175 would fire as the gate hit rather than before it; 150 leaves runway.
 const FN_CREEP_THRESHOLD: usize = 150;
 
+/// Physical lines below [`FN_CAP`] at which a function starts being flagged
+/// regardless of its code-line count — the gate measures physical span, so
+/// something can be comment-heavy, under the code threshold, and still be a
+/// few lines from blocking a merge.
+const CREEP_RUNWAY: usize = 50;
+
 const FILE_BASELINE: &str = ".file-size-baseline";
 const FN_BASELINE: &str = ".function-size-baseline";
 
@@ -342,42 +348,83 @@ fn fn_header() -> String {
 /// 13 depended on what happened to be stale. Deriving it from the AST is exact,
 /// instant, and cannot silently under-report.
 fn report_creep(measured: &BTreeMap<String, Measured>) {
-    let mut over: Vec<(&str, &analysis::FnFacts)> = measured
-        .iter()
-        .filter_map(|(p, m)| m.facts.as_ref().map(|f| (p.as_str(), f)))
-        .flat_map(|(p, f)| f.functions.iter().map(move |fun| (p, fun)))
-        .filter(|(_, f)| !f.is_test && f.code_lines > FN_CREEP_THRESHOLD)
-        .collect();
-    over.sort_by_key(|(_, f)| std::cmp::Reverse(f.code_lines));
+    let (approaching, budgeted) = creep_candidates(measured);
 
-    if over.is_empty() {
-        println!("function-length creep: none over {FN_CREEP_THRESHOLD} code lines");
+    if approaching.is_empty() {
+        println!("function-length creep: nothing approaching the {FN_CAP}-line cap");
+        if !budgeted.is_empty() {
+            println!(
+                "  ({} already over it and budgeted in {FN_BASELINE})",
+                budgeted.len()
+            );
+        }
         return;
     }
 
-    let past_cap = over.iter().filter(|(_, f)| f.lines() > FN_CAP).count();
+    let rule = "─".repeat(74);
+    println!("{rule}");
     println!(
-        "function-length creep: {} production functions over {FN_CREEP_THRESHOLD} code lines",
-        over.len()
+        "warning: {} production function{} approaching the {FN_CAP}-line cap",
+        approaching.len(),
+        if approaching.len() == 1 { "" } else { "s" }
     );
-    println!("  advisory only — the gate is the {FN_CAP}-line ratchet in {FN_BASELINE}");
-    println!(
-        "  {past_cap} already past the cap (budgeted); {} approaching it",
-        over.len() - past_cap
-    );
-    for (path, f) in over.iter().take(10) {
-        let flag = if f.lines() > FN_CAP { "*" } else { " " };
+    println!("{rule}");
+    for (path, f) in &approaching {
+        let headroom = FN_CAP.saturating_sub(f.lines());
         println!(
-            "  {flag} {:>4} code / {:>4} physical  {path}:{}  {}",
-            f.code_lines,
-            f.lines(),
+            "  {headroom:>3} line{} from the cap   {path}:{}  {}  ({} physical / {} code)",
+            if headroom == 1 { " " } else { "s" },
             f.first_line,
-            f.name
+            f.name,
+            f.lines(),
+            f.code_lines
         );
     }
-    if over.len() > 10 {
-        println!("    … and {} more", over.len() - 10);
+    println!();
+    println!("  Advisory — this exits 0 and is NOT what failed if something failed.");
+    println!("  But adding lines to one of these WILL trip `just lint-sizes` and block");
+    println!("  the merge, and the budget cannot be raised to let it through. Extract a");
+    println!("  helper into a new function or module rather than growing these.");
+    if !budgeted.is_empty() {
+        println!();
+        println!(
+            "  ({} other function{} already over the cap and budgeted in {FN_BASELINE};",
+            budgeted.len(),
+            if budgeted.len() == 1 { " is" } else { "s are" }
+        );
+        println!("  those belong to their own split issues — leave them alone.)");
     }
+    println!("{rule}");
+}
+
+/// Split the tree's production functions into (approaching the cap, already
+/// over it), most urgent first.
+///
+/// Selection is deliberately two-pronged. Code lines are the better complexity
+/// signal, but the GATE measures physical span — so a comment-heavy function
+/// can sit under the code-line threshold while being two lines from blocking a
+/// merge. Testing both means the advisory never stays silent on something
+/// about to trip.
+#[allow(clippy::type_complexity)]
+fn creep_candidates(
+    measured: &BTreeMap<String, Measured>,
+) -> (
+    Vec<(&str, &analysis::FnFacts)>,
+    Vec<(&str, &analysis::FnFacts)>,
+) {
+    let near_cap = FN_CAP.saturating_sub(CREEP_RUNWAY);
+    let flagged: Vec<(&str, &analysis::FnFacts)> = measured
+        .iter()
+        .filter_map(|(p, m)| m.facts.as_ref().map(|f| (p.as_str(), f)))
+        .flat_map(|(p, f)| f.functions.iter().map(move |fun| (p, fun)))
+        .filter(|(_, f)| !f.is_test && (f.code_lines > FN_CREEP_THRESHOLD || f.lines() > near_cap))
+        .collect();
+
+    let (budgeted, mut approaching): (Vec<_>, Vec<_>) =
+        flagged.into_iter().partition(|(_, f)| f.lines() > FN_CAP);
+    // Least headroom first — the one that will trip next is the one to read.
+    approaching.sort_by_key(|(_, f)| FN_CAP.saturating_sub(f.lines()));
+    (approaching, budgeted)
 }
 
 /// Non-enforcing report over the structural facts the AST layer makes cheap.
@@ -473,6 +520,33 @@ mod tests {
         let mut keys: Vec<_> = r.measured.keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, vec!["a.rs::Foo as Bar::run", "a.rs::Foo::run"]);
+    }
+
+    #[test]
+    fn creep_flags_a_comment_heavy_function_near_the_physical_cap() {
+        // Under the code-line threshold, but only a few physical lines from
+        // the gate — exactly the case a code-lines-only rule would miss.
+        let body = "    // rationale\n".repeat(FN_CAP - 10);
+        let src = format!("fn big() {{\n{body}    let x = 1;\n}}\n");
+        let m = measured_from("a.rs", &src);
+        let f = &m["a.rs"].facts.as_ref().unwrap().functions[0];
+        assert!(
+            f.code_lines <= FN_CREEP_THRESHOLD,
+            "precondition: comments keep it under the code threshold"
+        );
+        let (approaching, budgeted) = creep_candidates(&m);
+        assert_eq!(approaching.len(), 1, "must still be flagged");
+        assert!(budgeted.is_empty());
+    }
+
+    #[test]
+    fn creep_separates_already_budgeted_from_approaching() {
+        let over = "    let x = 1;\n".repeat(FN_CAP + 20);
+        let src = format!("fn big() {{\n{over}}}\n");
+        let m = measured_from("a.rs", &src);
+        let (approaching, budgeted) = creep_candidates(&m);
+        assert!(approaching.is_empty(), "over the cap is not 'approaching'");
+        assert_eq!(budgeted.len(), 1);
     }
 
     #[test]
