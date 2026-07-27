@@ -1097,224 +1097,9 @@ fn token_attenuate(
     Ok(())
 }
 
-// ---------------------------------------------------------------------
-// The operator surface (plan Phase 3): the real declarations, bound
-// to Views-backed handlers — assembled here because the daemon is
-// where declarations meet their implementations. The contract shapes
-// that aren't runtime DTOs (keys, filters) live beside the assembly
-// until 3e's codegen decision settles their final home.
-// ---------------------------------------------------------------------
-
-/// Get identity for the Invocation view.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-struct InvocationViewKey {
-    invocation_id: String,
-}
-
-/// List selection for the Invocation view — the typed, schema'd
-/// filter (never a query language).
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-struct InvocationListFilter {
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    include_archived: bool,
-    #[serde(default = "default_invocation_list_limit")]
-    limit: i64,
-}
-
-fn default_invocation_list_limit() -> i64 {
-    50
-}
-
-/// What the operator surface's command handlers write through: the
-/// daemon's bus and writer stores. Reads come from [`Views`]; the
-/// split keeps the read path visibly read-only.
-pub struct OperatorDeps {
-    pub bus: fq_runtime::EventBus,
-    pub projection: Arc<fq_runtime::control_plane::projection::ProjectionStore>,
-    pub control_plane: Arc<fq_runtime::control_plane::store::ControlPlaneStore>,
-}
-
-/// The typed input of `invocation.drop` on the wire. `--live` halting
-/// stays on the control path until the Phase-4 drop flip.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-struct DropCommandInput {
-    invocation_id: String,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-/// Build the daemon's operator registry: the Invocation view served
-/// from [`Views`], reads gated at the read horizon (every consumer
-/// feeding the view's fold), and `invocation.drop` returning a
-/// receipt. Public for the operator-surface snapshot test.
-pub fn operator_registry(
-    views: Arc<Views>,
-    horizon: fq_runtime::watermark::Horizon,
-    min_seq_bound: std::time::Duration,
-    deps: OperatorDeps,
-) -> anyhow::Result<fq_edge::EdgeRegistry> {
-    use fq_edge::wire::WireError;
-
-    let mut registry = fq_edge::EdgeRegistry::new().with_read_gate(Arc::new(move |min_seq| {
-        let horizon = horizon.clone();
-        Box::pin(async move {
-            horizon
-                .wait_for(min_seq, min_seq_bound)
-                .await
-                .map(|_| ())
-                .map_err(|e| match e {
-                    fq_runtime::watermark::WatermarkError::Lag { applied, .. }
-                    | fq_runtime::watermark::WatermarkError::Stopped { applied, .. } => applied,
-                })
-        })
-    }));
-
-    let decl = fq_ops::View::new::<
-        InvocationViewKey,
-        fq_runtime::views::InvocationDetailView,
-        fq_runtime::views::InvocationSummaryView,
-        InvocationListFilter,
-    >(
-        fq_ops::Domain::Invocation,
-        "An agent invocation: the fold of its lifecycle events.",
-        fq_ops::Stability::Experimental,
-    );
-
-    let get_views = views.clone();
-    registry
-        .view::<InvocationViewKey, fq_runtime::views::InvocationDetailView, fq_runtime::views::InvocationSummaryView, InvocationListFilter, _, _, _, _>(
-            decl,
-            move |key: InvocationViewKey| {
-                let views = get_views.clone();
-                async move {
-                    let detail = views
-                        .invocation(
-                            &key.invocation_id,
-                            chrono::Utc::now().timestamp_millis(),
-                            fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS,
-                            fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
-                        )
-                        .await
-                        .map_err(|e| WireError::Internal {
-                            message: e.to_string(),
-                        })?;
-                    detail.ok_or_else(|| WireError::NotFound {
-                        op: "invocation.get".into(),
-                        message: format!("no invocation `{}`", key.invocation_id),
-                    })
-                }
-            },
-            move |filter: InvocationListFilter| {
-                let views = views.clone();
-                async move {
-                    let status = filter
-                        .status
-                        .as_deref()
-                        .map(parse_invocation_status_filter)
-                        .transpose()
-                        .map_err(|e| WireError::InvalidInput {
-                            op: "invocation.list".into(),
-                            message: e.to_string(),
-                        })?;
-                    views
-                        .invocation_index(status, filter.include_archived, filter.limit)
-                        .await
-                        .map_err(|e| WireError::Internal {
-                            message: e.to_string(),
-                        })
-                }
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
-
-    let decl = fq_ops::Command::new::<DropCommandInput>(
-        fq_ops::Invocation::Drop,
-        fq_ops::Authority {
-            verb: fq_ops::Verb::Write,
-            scope: fq_ops::Domain::Invocation,
-        },
-        "Drop an invocation: archive it as failed and release its owner.",
-        fq_ops::Stability::Experimental,
-    )
-    .description(
-        "Returns a receipt naming the drop event's sequence — feed it to a \
-         gated read for read-your-writes. Halting live work stays on the \
-         control path until the Phase-4 flip.",
-    );
-    registry
-        .command::<DropCommandInput, _, _>(decl, move |input: DropCommandInput| {
-            let bus = deps.bus.clone();
-            let projection = deps.projection.clone();
-            let control_plane = deps.control_plane.clone();
-            async move {
-                let result = fq_runtime::control_plane::operator::drop_invocation(
-                    &bus,
-                    &projection,
-                    &control_plane,
-                    &input.invocation_id,
-                    input.reason.as_deref(),
-                )
-                .await
-                .map_err(|e| match e {
-                    fq_runtime::control_plane::operator::DropError::UnknownInvocation(id) => {
-                        WireError::NotFound {
-                            op: "invocation.drop".into(),
-                            message: format!("no invocation `{id}`"),
-                        }
-                    }
-                    other => WireError::InvalidInput {
-                        op: "invocation.drop".into(),
-                        message: other.to_string(),
-                    },
-                })?;
-                Ok(fq_ops::Receipt {
-                    atoms: vec![fq_ops::AtomRef {
-                        domain: fq_ops::Domain::Event,
-                        seq: result.event_seq,
-                    }],
-                })
-            }
-        })
-        .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
-
-    Ok(registry)
-}
-
-/// One authenticated edge call using the stored pairing for the
-/// configured daemon: the outer error is transport/credentials, the
-/// inner is the operation's own verdict — callers that care (show's
-/// not-found path) match it, everyone else surfaces it.
-async fn edge_invoke(
-    global: &GlobalArgs,
-    op: fq_ops::OpId,
-    input: serde_json::Value,
-) -> anyhow::Result<Result<serde_json::Value, fq_edge::wire::WireError>> {
-    let config = global.resolve_config()?;
-    let addr = config.edge.bind.clone();
-    let entry = stored_connection(&addr)?;
-    let client = edge_client(
-        &addr,
-        parse_fingerprint_hex(&entry.fingerprint)?,
-        &entry.token,
-    )
-    .await?;
-    let response = client
-        .rpc
-        .invoke(
-            tarpc::context::current(),
-            fq_edge::InvokeRequest {
-                op,
-                version: 1,
-                input,
-                min_seq: None,
-            },
-        )
-        .await
-        .context("edge rpc failed")?;
-    Ok(response.map(|r| r.output))
-}
+mod operator_surface;
+use operator_surface::*;
+pub use operator_surface::{OperatorDeps, operator_registry};
 
 /// Build-time version metadata, emitted by `build.rs`.
 const FQ_GIT_SHA: &str = env!("FQ_GIT_SHA");
@@ -5051,10 +4836,7 @@ async fn invocation_transcript(
     format: Option<TranscriptFormat>,
     full: bool,
 ) -> anyhow::Result<()> {
-    use fq_runtime::transcript::{
-        DEFAULT_TRUNCATE_BYTES, assistant_entry, dedup_key, render_pretty, snapshot_keys,
-        tool_result_entry,
-    };
+    use fq_runtime::transcript::{DEFAULT_TRUNCATE_BYTES, dedup_key, render_pretty, snapshot_keys};
 
     let as_json = json || matches!(format, Some(TranscriptFormat::Json));
     if json && matches!(format, Some(TranscriptFormat::Pretty)) {
@@ -5071,33 +4853,42 @@ async fn invocation_transcript(
 
     let views = open_views(global).await?;
 
-    // For --follow, subscribe to the invocation's agent subject BEFORE
+    // For --follow, seek the turn stream's tail on the edge BEFORE
     // reading the WAL snapshot, so a turn that completes in the gap
-    // between the read and the subscription is not lost: anything
-    // published in that window is caught by both the snapshot and the
-    // live stream, then deduped at the seam. Snapshot-only mode needs no
-    // NATS. The returned stream owns its connection, so `bus` may drop.
-    let follow_stream = if follow {
+    // between the read and the seek is not lost: anything published
+    // in that window is caught by both the snapshot and the stream,
+    // then deduped at the seam (Phase 3d: the tail rides
+    // `turn.stream` over the authenticated edge, not a raw NATS
+    // subscription — real tool names and parameters included).
+    let follow_cursor = if follow {
         let config = global.resolve_config()?;
-        let agent_id = views.agent_id_for_invocation(id).await?.ok_or_else(|| {
-            let hint = if id.len() != 36 {
-                " (not a full invocation id — see `fq invocation list --json`)"
-            } else {
-                ""
-            };
-            anyhow::anyhow!(
-                "cannot follow invocation {id}: no agent recorded for it in the projection{hint}"
+        let addr = config.edge.bind.clone();
+        let entry = stored_connection(&addr)?;
+        let client = edge_client(
+            &addr,
+            parse_fingerprint_hex(&entry.fingerprint)?,
+            &entry.token,
+        )
+        .await?;
+        let seek = client
+            .rpc
+            .next_batch(
+                tarpc::context::current(),
+                fq_edge::NextBatchRequest {
+                    op: fq_ops::OpId::Stream(fq_ops::Domain::Turn),
+                    version: 1,
+                    filter: serde_json::to_value(TurnFilter {
+                        invocation_id: id.to_string(),
+                        limit: None,
+                    })?,
+                    from_seq: u64::MAX,
+                    max_wait_ms: 0,
+                },
             )
-        })?;
-        let bus = EventBus::connect(&config.nats.url)
             .await
-            .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
-        let subject = format!("fq.agent.{agent_id}.>");
-        let stream = bus
-            .subscribe(subject.clone())
-            .await
-            .with_context(|| format!("failed to subscribe to {subject}"))?;
-        Some((subject, stream))
+            .context("edge rpc failed")?
+            .map_err(|e| anyhow::anyhow!("cannot follow invocation {id}: {e}"))?;
+        Some((client, seek.next_from_seq))
     } else {
         None
     };
@@ -5142,47 +4933,39 @@ async fn invocation_transcript(
 
     print!("{}", render_pretty(&entries, truncate_bytes));
 
-    // Snapshot-only mode: done. Otherwise take the live stream that was
-    // subscribed above (before the snapshot) and tail it.
-    let Some((subject, mut stream)) = follow_stream else {
+    // Snapshot-only mode: done. Otherwise long-poll the turn stream
+    // from the cursor pinned above (before the snapshot).
+    let Some((client, mut cursor)) = follow_cursor else {
         return Ok(());
     };
 
     println!();
-    println!("── following {subject} (invocation {id}); Ctrl-C to exit ──");
+    println!("── following turn.stream (invocation {id}); Ctrl-C to exit ──");
 
     let mut seen = snapshot_keys(&entries);
-    while let Some(result) = stream.next().await {
-        let event = match result {
-            Ok(e) => e,
-            Err(err) => {
-                eprintln!("deserialise error: {err}");
-                continue;
-            }
-        };
-        if event.envelope.invocation_id.to_string() != id {
-            continue;
-        }
-        let ts_ms = event.envelope.timestamp.timestamp_millis();
-        let entry = match &event.payload {
-            EventPayload::LlmResponse(p) => {
-                let cost = event.envelope.cost.as_ref().map(|c| c.total_cost);
-                Some(assistant_entry(ts_ms, p_model(&event), cost, p))
-            }
-            EventPayload::ToolResult(p) => {
-                // The live event carries the result; tool name/params
-                // rode the earlier tool.call. Best-effort: label by the
-                // correlation id when we can't recover the name.
-                Some(tool_result_entry(
-                    ts_ms,
-                    format!("(tool_call {})", p.tool_call_id),
-                    serde_json::Value::Null,
-                    p,
-                ))
-            }
-            _ => None,
-        };
-        if let Some(entry) = entry {
+    loop {
+        let batch = client
+            .rpc
+            .next_batch(
+                tarpc::context::current(),
+                fq_edge::NextBatchRequest {
+                    op: fq_ops::OpId::Stream(fq_ops::Domain::Turn),
+                    version: 1,
+                    filter: serde_json::to_value(TurnFilter {
+                        invocation_id: id.to_string(),
+                        limit: None,
+                    })?,
+                    from_seq: cursor,
+                    max_wait_ms: 30_000,
+                },
+            )
+            .await
+            .context("edge rpc failed")?
+            .map_err(|e| anyhow::anyhow!("turn.stream: {e}"))?;
+        cursor = batch.next_from_seq;
+        for item in batch.items {
+            let turn: fq_runtime::turn::TurnState = serde_json::from_value(item.item)?;
+            let entry = turn.transcript_entry();
             if let Some(key) = dedup_key(&entry)
                 && !seen.insert(key)
             {
@@ -5194,21 +4977,7 @@ async fn invocation_transcript(
             );
         }
     }
-
-    Ok(())
-}
-
-/// The model string for a live event, if the payload carries one.
-fn p_model(event: &Event) -> String {
-    match &event.payload {
-        EventPayload::LlmResponse(_) => event
-            .envelope
-            .cost
-            .as_ref()
-            .map(|c| c.model.clone())
-            .unwrap_or_else(|| "?".to_string()),
-        _ => "?".to_string(),
-    }
+    // The tail loop runs until Ctrl-C or a transport error (`?`).
 }
 
 #[cfg(test)]

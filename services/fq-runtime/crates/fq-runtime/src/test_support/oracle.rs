@@ -617,6 +617,7 @@ mod tests {
 
     fn llm_response() -> EventPayload {
         EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
             call_id: Uuid::now_v7(),
             content: Some("ok".to_string()),
             tool_calls: vec![],
@@ -628,6 +629,7 @@ mod tests {
 
     fn tool_call() -> EventPayload {
         EventPayload::ToolCall(ToolCallPayload {
+            round: 0,
             tool_call_id: ToolCallId::new("t1").unwrap(),
             tool_name: "echo".to_string(),
             parameters: json!({}),
@@ -643,6 +645,8 @@ mod tests {
 
     fn tool_result(is_error: bool) -> EventPayload {
         EventPayload::ToolResult(ToolResultPayload {
+            round: 0,
+            tool_name: String::new(),
             tool_call_id: ToolCallId::new("t1").unwrap(),
             output: "out".to_string(),
             is_error,

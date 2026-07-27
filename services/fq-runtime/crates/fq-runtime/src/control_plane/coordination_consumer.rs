@@ -201,10 +201,21 @@ impl CoordinationConsumer {
         self,
         shutdown: oneshot::Receiver<()>,
     ) -> Result<(), CoordinationConsumerError> {
-        let filter = self
-            .test_filter_subject
-            .clone()
-            .unwrap_or_else(|| FILTER_SUBJECT.to_string());
+        // A mark-bearing consumer must see the WHOLE stream: a
+        // filtered mark cannot vouch for the gaps between its matches
+        // (a reader gated at a non-lifecycle sequence would wait
+        // forever). Non-matching events resolve as no-ops and advance
+        // the mark. Without a mark, the #118 filter optimisation
+        // stands.
+        let filter = if self.watermark.is_some() {
+            None
+        } else {
+            Some(
+                self.test_filter_subject
+                    .clone()
+                    .unwrap_or_else(|| FILTER_SUBJECT.to_string()),
+            )
+        };
         // A test-name override pairs with deliver-from-new so
         // each test gets a fresh cursor on the shared stream
         // (see [`Self::with_test_consumer_name`]).
@@ -214,7 +225,7 @@ impl CoordinationConsumer {
         };
         let config = DurableConsumerConfig {
             durable_name,
-            filter_subjects: vec![filter],
+            filter_subjects: filter.into_iter().collect(),
             deliver_from,
             // The mark's contract needs resolved-contiguous delivery;
             // without a mark the extra strictness buys nothing.

@@ -26,6 +26,18 @@ type Handler = Arc<
 /// by the projection watermark; without one (the mock, a daemon
 /// without a projection) gated reads are refused rather than served
 /// stale. `Err(applied)` reports how far the fold actually got.
+/// A stream handler: `(filter, from_seq, max_wait_ms)` to one long-poll
+/// batch. Bound per stream op by [`EdgeRegistry::atom`].
+pub type StreamHandler = Arc<
+    dyn Fn(
+            serde_json::Value,
+            u64,
+            u64,
+        ) -> BoxFuture<'static, Result<crate::wire::StreamBatch, WireError>>
+        + Send
+        + Sync,
+>;
+
 pub type ReadGate = Arc<dyn Fn(u64) -> BoxFuture<'static, Result<(), u64>> + Send + Sync>;
 
 /// The declarations plus their handlers. `List(Operation)` — the
@@ -36,6 +48,7 @@ pub type ReadGate = Arc<dyn Fn(u64) -> BoxFuture<'static, Result<(), u64>> + Sen
 pub struct EdgeRegistry {
     registry: Registry,
     handlers: HashMap<String, Handler>,
+    stream_handlers: HashMap<String, StreamHandler>,
     read_gate: Option<ReadGate>,
 }
 
@@ -157,6 +170,58 @@ impl EdgeRegistry {
         // the same generic slot discipline as Get.
         self.bind::<F, Vec<X>, _, _>(&OpId::List(domain), list);
         Ok(())
+    }
+
+    /// Register an atom with its Get, List, and Stream handlers —
+    /// the full derived surface of the only streamable nature. Get
+    /// and List follow the view discipline; Stream binds the
+    /// long-poll handler `next_batch` dispatches to.
+    #[allow(clippy::type_complexity)]
+    pub fn atom<K, S, F, F1, F2, F3, Fut1, Fut2, Fut3>(
+        &mut self,
+        decl: fq_ops::Atom,
+        get: F1,
+        list: F2,
+        stream: F3,
+    ) -> Result<(), RegistryError>
+    where
+        K: DeserializeOwned + Send + 'static,
+        S: Serialize,
+        F: DeserializeOwned + Send + 'static,
+        F1: Fn(K) -> Fut1 + Send + Sync + 'static,
+        Fut1: Future<Output = Result<S, WireError>> + Send + 'static,
+        F2: Fn(F) -> Fut2 + Send + Sync + 'static,
+        Fut2: Future<Output = Result<Vec<S>, WireError>> + Send + 'static,
+        F3: Fn(F, u64, u64) -> Fut3 + Send + Sync + 'static,
+        Fut3: Future<Output = Result<crate::wire::StreamBatch, WireError>> + Send + 'static,
+    {
+        let domain = decl.domain;
+        self.registry.register(decl)?;
+        self.bind::<K, S, _, _>(&OpId::Get(domain), get);
+        self.bind::<F, Vec<S>, _, _>(&OpId::List(domain), list);
+        let stream = Arc::new(stream);
+        let stream_op = OpId::Stream(domain).to_string();
+        self.stream_handlers.insert(
+            stream_op.clone(),
+            Arc::new(move |filter_value, from_seq, max_wait_ms| {
+                let stream = stream.clone();
+                let op = stream_op.clone();
+                Box::pin(async move {
+                    let filter: F = serde_json::from_value(filter_value).map_err(|e| {
+                        WireError::InvalidInput {
+                            op,
+                            message: format!("filter: {e}"),
+                        }
+                    })?;
+                    stream(filter, from_seq, max_wait_ms).await
+                })
+            }),
+        );
+        Ok(())
+    }
+
+    pub fn stream_handler(&self, name: &str) -> Option<StreamHandler> {
+        self.stream_handlers.get(name).cloned()
     }
 
     pub fn registry(&self) -> &Registry {

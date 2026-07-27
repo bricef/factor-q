@@ -97,9 +97,10 @@ pub struct DurableConsumerConfig {
     /// NAK the next delivery is the retry of the same message.
     /// Required by handlers whose progress mark must never expose a
     /// sequence while an earlier one is still pending redelivery
-    /// (the projection and coordination watermarks). Composes with
-    /// subject filters; refuses a from-new start. Costs throughput —
-    /// one outstanding message per server round-trip.
+    /// (the projection and coordination watermarks). Whole-stream,
+    /// from-beginning consumers only: a filtered mark cannot vouch
+    /// for the gaps between its matches. Costs throughput — one
+    /// outstanding message per server round-trip.
     pub strict_order: bool,
 }
 
@@ -111,23 +112,20 @@ impl DurableConsumerConfig {
         bus: &EventBus,
     ) -> Result<async_nats::jetstream::consumer::PullConsumer, BusError> {
         if self.strict_order {
-            // Strict order composes with filters (the server enforces
-            // max_ack_pending regardless), but not with a
-            // from-new start — a mark that skips history would lie.
-            if self.deliver_from != DeliverFrom::Beginning {
+            // Strict order refuses filters and from-new starts, for
+            // the same reason: a progress mark must vouch for EVERY
+            // sequence at or below it. A filtered consumer never sees
+            // the gaps between its matches, so its mark cannot speak
+            // for them (a reader gated at an unmatched sequence would
+            // wait forever); a from-new start skips history outright.
+            if !self.filter_subjects.is_empty() || self.deliver_from != DeliverFrom::Beginning {
                 return Err(BusError::Stream(format!(
-                    "strict_order requires a from-beginning consumer \
-                     (consumer `{}` starts from new)",
+                    "strict_order requires a whole-stream from-beginning consumer \
+                     (consumer `{}` has filters or a non-beginning start)",
                     self.durable_name
                 )));
             }
-            if self.filter_subjects.is_empty() {
-                return bus.durable_consumer_strict(&self.durable_name).await;
-            }
-            let refs: Vec<&str> = self.filter_subjects.iter().map(|s| s.as_str()).collect();
-            return bus
-                .durable_consumer_with_filters_strict(&self.durable_name, &refs)
-                .await;
+            return bus.durable_consumer_strict(&self.durable_name).await;
         }
         match self.deliver_from {
             DeliverFrom::Beginning => match self.filter_subjects.as_slice() {

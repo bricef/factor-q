@@ -66,7 +66,7 @@ pub enum TranscriptEntry {
     },
 }
 
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct AssistantToolCall {
     pub tool_call_id: String,
     pub tool_name: String,

@@ -689,6 +689,7 @@ mod tests {
                 world.agent.clone(),
                 inv,
                 EventPayload::LlmResponse(LlmResponsePayload {
+                    round: 0,
                     call_id: Uuid::now_v7(),
                     content: Some("I'll edit widget.rs to reverse the frob.".to_string()),
                     tool_calls: vec![],
