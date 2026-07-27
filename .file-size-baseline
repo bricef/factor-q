@@ -1,14 +1,14 @@
 # Per-file production-line budgets — the large-file ratchet.
 #
-# Generated and maintained by `just filesize-bless`; enforced by
-# `just lint-filesize` (tools/fq-lint) in the source-policy CI job.
+# Generated and maintained by `just sizes-bless`; enforced by
+# `just lint-sizes` (tools/fq-lint) in the Code quality CI job.
 #
 # Production lines = total minus `#[cfg(test)]` items, measured off a
 # real syn AST rather than by matching source text.
 #
 # Every file here exceeds the 800-line cap and is pinned at its size when
 # the ratchet landed. These numbers may only ever go DOWN. Lowering one
-# is automatic (`just filesize-bless`); raising one, or admitting a new
+# is automatic (`just sizes-bless`); raising one, or admitting a new
 # file, means hand-editing this file so a human sees it in the diff.
 #
 # The three entries that motivated this gate have their own split issues:

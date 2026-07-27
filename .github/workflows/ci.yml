@@ -26,7 +26,7 @@ permissions:
 # check that never arrives — the reason we gate steps, not the whole job.
 #
 # Linting is one job, not a phase of each suite: `quality` ("Code quality")
-# runs every non-test gate — the include! scan, the file-size ratchet, fmt, and
+# runs every non-test gate — the include! scan, the size ratchets, fmt, and
 # clippy over every crate — so one command answers whether the tree is clean.
 # The per-suite jobs below keep doc/build/test.
 #
@@ -116,8 +116,8 @@ jobs:
       - run: just check-links
 
   # Every non-test quality gate, in one job, behind one just target: the
-  # include! source scan, the file-size ratchet, workspace formatting, and
-  # clippy over every crate. fmt and clippy used to be phases inside
+  # include! source scan, the file and function size ratchets, workspace
+  # formatting, and clippy over every crate. fmt and clippy used to be phases inside
   # runtime-ci/store-ci/dashboard-ci, which meant no single command answered
   # "is this branch clean?" without also running the test suites; consolidating
   # them here also compiles the workspace for clippy once rather than per suite.
@@ -125,7 +125,7 @@ jobs:
   # Needs neither NATS nor Node — nothing here runs a test that wants a broker.
   #
   # Deliberately NOT path-filtered. It is the job that says whether the tree is
-  # clean, and .file-size-baseline can be edited without touching any .rs file,
+  # clean, and a size baseline can be edited without touching any .rs file,
   # so a filter keyed on Rust sources would let a budget edit through ungated.
   quality:
     name: Code quality
@@ -134,7 +134,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v3
       # Keep the version ref in lockstep with rust-toolchain.toml — the
-      # file-size ratchet parses Rust with syn (tools/fq-lint), and clippy
+      # size ratchets parse Rust with syn (tools/fq-lint), and clippy
       # runs here, so this job needs the pinned toolchain.
       - uses: dtolnay/rust-toolchain@1.95.0
         with:

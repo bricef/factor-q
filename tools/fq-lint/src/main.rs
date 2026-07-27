@@ -1,48 +1,58 @@
 //! `fq-lint` — structural source policy that clippy cannot express.
 //!
-//! # Why this exists alongside clippy
+//! # Where the boundary with clippy sits
 //!
 //! Clippy is the right tool for anything item-shaped and semantic: it runs on
 //! HIR after name resolution, so it sees types, and it already gates this
-//! workspace (`[workspace.lints.clippy] all = "deny"`). Function length,
-//! argument counts and complexity all belong to clippy — `too_many_lines`,
-//! `too_many_arguments` and `cognitive_complexity` exist and are configurable
-//! through `clippy.toml`. Do not reimplement those here.
+//! workspace (`[workspace.lints.clippy] all = "deny"`). Do not reimplement a
+//! clippy lint here.
 //!
-//! What clippy structurally cannot do is reason about a *file*. Its lint
-//! passes walk items in a crate, not lines in a file, and there is no
-//! file-length lint — nor any way to add one, because clippy's lints are
-//! compiled into clippy. Custom lints mean `rustc_private` on nightly (via
-//! `dylint` or a clippy fork), which would trade this repo's stable, pinned
-//! toolchain for a nightly one that must track rustc exactly.
+//! The line is not "files versus functions" — it is **threshold versus
+//! ratchet**. Clippy can say "no function may exceed N lines"
+//! (`clippy::too_many_lines`, with `too-many-lines-threshold`). It cannot say
+//! "*these* functions must shrink," because its thresholds are global and it
+//! has no per-item baseline: the only way to exempt a known offender is an
+//! `#[allow]` at the site, which grants a permanent pass rather than a
+//! shrinking budget. Existing debt therefore has to be either annotated away
+//! or left failing.
 //!
-//! This is the same boundary the repo already found with `include!`: clippy
-//! could not see it, so `just lint-sources` is a source scan. `fq-lint` is the
-//! structural counterpart, built on a real AST rather than on text.
+//! A ratchet needs a stored, per-subject budget that can only tighten. That is
+//! the shape both gates here share, and it is why the function gate lives
+//! beside the file gate rather than in `clippy.toml`.
 //!
-//! # The gate
+//! Clippy also cannot reason about a *file* at all — its passes walk items in
+//! a crate, not lines in a file, there is no file-length lint, and adding one
+//! means `rustc_private` on nightly via `dylint`. That is the same boundary
+//! the repo already found with `include!`, which is why `lint-sources` is a
+//! source scan.
 //!
-//! Files carry a production-line budget. New files may not exceed [`CAP`]
-//! production lines; the god-files that predate the gate are pinned at their
-//! size in `.file-size-baseline` and may only ever shrink. Motivated by Part 2
-//! of `docs/reviews/2026-07-25-factor-q-cleanroom-review.md`: three split
-//! issues stayed open across two reviews while every file they named grew.
+//! # The gates
+//!
+//! * **Files** may not exceed [`FILE_CAP`] production lines.
+//! * **Functions** may not exceed [`FN_CAP`] lines, measured from the `fn`
+//!   keyword so documentation is never charged against the budget.
+//!
+//! Pre-existing offenders are pinned in `.file-size-baseline` and
+//! `.function-size-baseline` and may only shrink. Motivated by Part 2 of
+//! `docs/reviews/2026-07-25-factor-q-cleanroom-review.md`.
 
 mod analysis;
+mod ratchet;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use ratchet::Ratchet;
+
 /// Files not listed in the baseline may not exceed this many production lines.
-const CAP: usize = 800;
+const FILE_CAP: usize = 800;
 
-/// How far a budget may drift above a file's real size before CI demands it be
-/// lowered. This is what makes the gate a ratchet rather than a one-off
-/// freeze: without it a file shrinks and quietly regrows into its old budget.
-const STALENESS_SLACK: usize = 100;
+/// Functions not listed in the baseline may not exceed this many lines.
+const FN_CAP: usize = 250;
 
-const BASELINE_PATH: &str = ".file-size-baseline";
+const FILE_BASELINE: &str = ".file-size-baseline";
+const FN_BASELINE: &str = ".function-size-baseline";
 
 /// Test code by purpose, excluded wholesale. `tests/` and `benches/` are test
 /// targets; `test_support/` is test infrastructure. Note that fq-dashboard's
@@ -57,9 +67,9 @@ fn main() -> ExitCode {
     if flags.contains(&"--help") || flags.contains(&"-h") {
         eprintln!(
             "usage: fq-lint [--bless | --metrics]\n\n  \
-             (no flags)  check every file against .file-size-baseline\n  \
+             (no flags)  check files and functions against their baselines\n  \
              --bless     lower budgets to match reality (never raises)\n  \
-             --metrics   report function-length and arity facts (never fails)"
+             --metrics   report structural facts (never fails)"
         );
         return ExitCode::SUCCESS;
     }
@@ -72,7 +82,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let sizes = match measure_tree(&root) {
+    let measured = match measure_tree(&root) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
@@ -81,13 +91,42 @@ fn main() -> ExitCode {
     };
 
     if flags.contains(&"--metrics") {
-        report_metrics(&root, &sizes);
+        report_metrics(&measured);
         return ExitCode::SUCCESS;
     }
-    if flags.contains(&"--bless") {
-        return bless(&root, &sizes);
+
+    let files = file_ratchet(&measured);
+    let functions = match function_ratchet(&measured) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let ok = if flags.contains(&"--bless") {
+        // Both, unconditionally — a partial bless leaves the tree in a state
+        // where the next run fails on whichever half was skipped.
+        let a = files.bless(&root, &file_header());
+        let b = functions.bless(&root, &fn_header());
+        a && b
+    } else {
+        let a = files.check(&root);
+        let b = functions.check(&root);
+        if !(a && b) {
+            eprintln!(
+                "\n(size ratchets — justfile: lint-sizes; rationale in tools/fq-lint and\n\
+                 docs/reviews/2026-07-25-factor-q-cleanroom-review.md Part 2)"
+            );
+        }
+        a && b
+    };
+
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
-    check(&root, &sizes)
 }
 
 fn repo_root() -> Result<PathBuf, String> {
@@ -116,8 +155,8 @@ fn in_scope(path: &str) -> bool {
     path.ends_with(".rs") || path.ends_with(".go")
 }
 
-/// One file's measurement. Go files have no inline test convention, so they
-/// are counted whole; Rust files go through the AST.
+/// One file's measurement. Go files have no inline test convention and are not
+/// parsed, so they are counted whole and contribute no function facts.
 struct Measured {
     production: usize,
     facts: Option<analysis::FileFacts>,
@@ -164,212 +203,127 @@ fn measure_tree(root: &Path) -> Result<BTreeMap<String, Measured>, String> {
     Ok(sizes)
 }
 
-fn over_cap(sizes: &BTreeMap<String, Measured>) -> BTreeMap<String, usize> {
-    sizes
-        .iter()
-        .filter(|(_, m)| m.production > CAP)
-        .map(|(p, m)| (p.clone(), m.production))
-        .collect()
+fn file_ratchet(measured: &BTreeMap<String, Measured>) -> Ratchet<'static> {
+    Ratchet {
+        subject: "file",
+        unit: "production lines",
+        cap: FILE_CAP,
+        baseline_path: FILE_BASELINE,
+        measured: measured
+            .iter()
+            .map(|(p, m)| (p.clone(), m.production))
+            .collect(),
+        guidance_new: "  A new file crossed the cap. Split it — do not add a budget entry.\n  \
+                       Budgets exist only for the god-files that predate this gate.",
+        guidance_grown: "  STOP — do not raise the budget, and do not restructure this file\n  \
+             as a side effect of your change. These files are being split under\n  \
+             their own issues (#78 runner.rs, #189 fq-cli/src/lib.rs, #191 mcp.rs).\n  \
+             Put your new code in a new module, or say on the PR that the change\n  \
+             genuinely needs to land in this file and let a human decide.",
+    }
 }
 
-fn read_baseline(root: &Path) -> BTreeMap<String, usize> {
-    let Ok(text) = std::fs::read_to_string(root.join(BASELINE_PATH)) else {
-        return BTreeMap::new();
-    };
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(|l| {
-            let (path, budget) = l.rsplit_once(' ')?;
-            Some((path.trim().to_string(), budget.parse().ok()?))
-        })
-        .collect()
+/// Test functions are out of scope, matching the file gate's exclusion of test
+/// code: a long table-driven test is not the debt this is aimed at.
+fn function_ratchet(measured: &BTreeMap<String, Measured>) -> Result<Ratchet<'static>, String> {
+    // Keys can legitimately collide: platform-gated alternatives share a name
+    // and scope (`#[cfg(unix)]` / `#[cfg(not(unix))]` `write_secret` in
+    // fq-edge's auth.rs). Collapsing them to the larger is harmless while both
+    // sit under the cap — but a collision among *budgeted* functions would
+    // mean two functions sharing one budget, which is ambiguous, so that fails
+    // loudly and asks for a more specific key.
+    let mut seen: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for (path, m) in measured {
+        let Some(facts) = &m.facts else { continue };
+        for f in &facts.functions {
+            if f.is_test {
+                continue;
+            }
+            let entry = seen.entry(f.key(path)).or_insert((0, 0));
+            entry.0 = entry.0.max(f.lines());
+            entry.1 += 1;
+        }
+    }
+
+    let mut fns: BTreeMap<String, usize> = BTreeMap::new();
+    for (key, (lines, count)) in seen {
+        if count > 1 && lines > FN_CAP {
+            return Err(format!(
+                "{count} functions share the key {key} and one is {lines} lines, over the \
+                 {FN_CAP}-line cap. fq-lint cannot budget them separately under one key — \
+                 give the scope in analysis.rs a cfg-aware discriminator."
+            ));
+        }
+        fns.insert(key, lines);
+    }
+
+    Ok(Ratchet {
+        subject: "function",
+        unit: "lines",
+        cap: FN_CAP,
+        baseline_path: FN_BASELINE,
+        measured: fns,
+        guidance_new: "  A new function crossed the cap. Extract helpers — do not add a\n  \
+                       budget entry. Budgets exist only for functions that predate this gate.",
+        guidance_grown: "  STOP — do not raise the budget. Extract the new logic into a\n  \
+                         helper instead of growing a function that is already too long,\n  \
+                         or say on the PR why it has to grow and let a human decide.",
+    })
 }
 
-fn write_baseline(root: &Path, entries: &BTreeMap<String, usize>) -> std::io::Result<()> {
-    let mut out = format!(
+fn file_header() -> String {
+    format!(
         "# Per-file production-line budgets — the large-file ratchet.\n\
          #\n\
-         # Generated and maintained by `just filesize-bless`; enforced by\n\
-         # `just lint-filesize` (tools/fq-lint) in the source-policy CI job.\n\
+         # Generated and maintained by `just sizes-bless`; enforced by\n\
+         # `just lint-sizes` (tools/fq-lint) in the Code quality CI job.\n\
          #\n\
          # Production lines = total minus `#[cfg(test)]` items, measured off a\n\
          # real syn AST rather than by matching source text.\n\
          #\n\
-         # Every file here exceeds the {CAP}-line cap and is pinned at its size when\n\
+         # Every file here exceeds the {FILE_CAP}-line cap and is pinned at its size when\n\
          # the ratchet landed. These numbers may only ever go DOWN. Lowering one\n\
-         # is automatic (`just filesize-bless`); raising one, or admitting a new\n\
+         # is automatic (`just sizes-bless`); raising one, or admitting a new\n\
          # file, means hand-editing this file so a human sees it in the diff.\n\
          #\n\
          # The three entries that motivated this gate have their own split issues:\n\
          #   services/fq-runtime/crates/fq-cli/src/lib.rs                       -> #189\n\
          #   services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs -> #78\n\
          #   services/fq-runtime/crates/fq-runtime/src/mcp.rs                   -> #191\n"
-    );
-    for (path, budget) in entries {
-        out.push_str(&format!("{path} {budget}\n"));
-    }
-    std::fs::write(root.join(BASELINE_PATH), out)
+    )
 }
 
-fn bless(root: &Path, sizes: &BTreeMap<String, Measured>) -> ExitCode {
-    let current = over_cap(sizes);
-    let previous = read_baseline(root);
-
-    let raised: Vec<_> = current
-        .iter()
-        .filter_map(|(p, &n)| previous.get(p).filter(|&&b| n > b).map(|&b| (p, b, n)))
-        .collect();
-    if !raised.is_empty() {
-        eprintln!(
-            "refusing to bless: these files GREW beyond their budget.\n\
-             The ratchet only ever tightens — shrink the file, or hand-edit\n\
-             {BASELINE_PATH} if a bigger budget is genuinely the right call.\n"
-        );
-        for (p, was, now) in raised {
-            eprintln!("  {p}: {was} -> {now} (+{})", now - was);
-        }
-        return ExitCode::FAILURE;
-    }
-
-    // Blessing must never be able to legitimise a brand-new god-file, or the
-    // cap would be advisory: an agent that tripped the gate could clear it by
-    // running this command.
-    let fresh: Vec<_> = current
-        .iter()
-        .filter(|(p, _)| !previous.contains_key(*p))
-        .collect();
-    if !fresh.is_empty() && !previous.is_empty() {
-        eprintln!(
-            "refusing to bless: these files newly exceed the {CAP}-line cap.\n\
-             Split them. `--bless` only lowers and drops existing budgets — it\n\
-             cannot admit a new file to {BASELINE_PATH}. If one genuinely\n\
-             belongs there, add it by hand so a human sees it in the diff.\n"
-        );
-        for (p, n) in fresh {
-            eprintln!("  {p}: {n} lines (cap {CAP})");
-        }
-        return ExitCode::FAILURE;
-    }
-
-    if let Err(e) = write_baseline(root, &current) {
-        eprintln!("error: writing {BASELINE_PATH}: {e}");
-        return ExitCode::from(2);
-    }
-    let lowered = current
-        .iter()
-        .filter(|(p, n)| previous.get(*p).is_some_and(|&b| **n < b))
-        .count();
-    let added = current
-        .keys()
-        .filter(|p| !previous.contains_key(*p))
-        .count();
-    let dropped = previous
-        .keys()
-        .filter(|p| !current.contains_key(*p))
-        .count();
-    println!(
-        "blessed {} entries in {BASELINE_PATH} ({lowered} lowered, {added} added, {dropped} dropped)",
-        current.len()
-    );
-    ExitCode::SUCCESS
+fn fn_header() -> String {
+    format!(
+        "# Per-function line budgets — the large-function ratchet.\n\
+         #\n\
+         # Generated and maintained by `just sizes-bless`; enforced by\n\
+         # `just lint-sizes` (tools/fq-lint) in the Code quality CI job.\n\
+         #\n\
+         # Measured from the `fn` keyword to the closing brace, so a function is\n\
+         # never charged for its own doc comment. Test functions are out of scope,\n\
+         # matching the file gate's exclusion of test code.\n\
+         #\n\
+         # Keys are `path::scope::name`, not line numbers — line numbers move on\n\
+         # every edit above them, and a baseline that churned on unrelated changes\n\
+         # would be ignored within a week.\n\
+         #\n\
+         # Every function here exceeds the {FN_CAP}-line cap and is pinned at its size\n\
+         # when the ratchet landed. These numbers may only ever go DOWN. Lowering\n\
+         # one is automatic (`just sizes-bless`); raising one, or admitting a new\n\
+         # function, means hand-editing this file so a human sees it in the diff.\n\
+         #\n\
+         # clippy::too_many_lines is the complementary threshold gate (it counts\n\
+         # CODE lines, skipping comments and blanks) — tracked in #392.\n"
+    )
 }
 
-fn check(root: &Path, sizes: &BTreeMap<String, Measured>) -> ExitCode {
-    let baseline = read_baseline(root);
-    let current = over_cap(sizes);
-
-    let new_offenders: Vec<_> = current
-        .iter()
-        .filter(|(p, _)| !baseline.contains_key(*p))
-        .collect();
-    let grown: Vec<_> = current
-        .iter()
-        .filter_map(|(p, &n)| baseline.get(p).filter(|&&b| n > b).map(|&b| (p, b, n)))
-        .collect();
-    let stale: Vec<_> = baseline
-        .iter()
-        .filter_map(|(p, &b)| {
-            let m = sizes.get(p)?;
-            (b.saturating_sub(m.production) > STALENESS_SLACK).then_some((p, b, m.production))
-        })
-        .collect();
-    let obsolete: Vec<_> = baseline
-        .keys()
-        .filter(|p| sizes.get(*p).is_none_or(|m| m.production <= CAP))
-        .collect();
-
-    if new_offenders.is_empty() && grown.is_empty() && stale.is_empty() && obsolete.is_empty() {
-        println!(
-            "file-size ratchet: {} files in scope, {} budgeted, all within budget",
-            sizes.len(),
-            baseline.len()
-        );
-        return ExitCode::SUCCESS;
-    }
-
-    if !new_offenders.is_empty() {
-        eprintln!("\nerror: file exceeds the {CAP}-line production cap and has no budget:");
-        for (p, n) in new_offenders {
-            eprintln!("  {p}: {n} lines (cap {CAP})");
-        }
-        eprintln!(
-            "\n  A new file crossed the cap. Split it — do not add a budget entry.\n  \
-             Budgets exist only for the god-files that predate this gate."
-        );
-    }
-
-    if !grown.is_empty() {
-        eprintln!("\nerror: file grew beyond its budget:");
-        for (p, was, now) in grown {
-            eprintln!("  {p}: {was} -> {now} (+{})", now - was);
-        }
-        eprintln!(
-            "\n  STOP — do not raise the budget, and do not restructure this file\n  \
-             as a side effect of your change. These files are being split under\n  \
-             their own issues (#78 runner.rs, #189 fq-cli/src/lib.rs, #191 mcp.rs).\n  \
-             Put your new code in a new module, or say on the PR that the change\n  \
-             genuinely needs to land in this file and let a human decide."
-        );
-    }
-
-    if !stale.is_empty() {
-        eprintln!(
-            "\nerror: budget is stale by more than {STALENESS_SLACK} lines — the ratchet must tighten:"
-        );
-        for (p, was, now) in stale {
-            eprintln!(
-                "  {p}: budget {was}, actual {now} ({} lines of slack)",
-                was - now
-            );
-        }
-        eprintln!("\n  Fix: run `just filesize-bless` and commit the result.");
-    }
-
-    if !obsolete.is_empty() {
-        eprintln!("\nerror: budget entry no longer needed (file is gone or under the cap):");
-        for p in obsolete {
-            eprintln!("  {p}");
-        }
-        eprintln!("\n  Fix: run `just filesize-bless` and commit the result.");
-    }
-
-    eprintln!(
-        "\n(file-size ratchet — justfile: lint-filesize; rationale in tools/fq-lint and\n\
-         docs/reviews/2026-07-25-factor-q-cleanroom-review.md Part 2)"
-    );
-    ExitCode::FAILURE
-}
-
-/// Non-enforcing report. Exists to show what the AST layer makes cheap —
-/// these are the Part 5 metrics the review counted by hand. Function *length*
-/// is deliberately left to `clippy::too_many_lines`, which counts code lines
-/// rather than physical span and is the better measure.
-fn report_metrics(_root: &Path, sizes: &BTreeMap<String, Measured>) {
+/// Non-enforcing report over the structural facts the AST layer makes cheap.
+fn report_metrics(measured: &BTreeMap<String, Measured>) {
     let mut prod: Vec<(&str, &analysis::FnFacts)> = Vec::new();
     let mut test_fns = 0usize;
 
-    for (path, m) in sizes {
+    for (path, m) in measured {
         let Some(facts) = &m.facts else { continue };
         for f in &facts.functions {
             if f.is_test {
@@ -394,11 +348,8 @@ fn report_metrics(_root: &Path, sizes: &BTreeMap<String, Measured>) {
     }
 
     prod.sort_by_key(|(_, f)| std::cmp::Reverse(f.lines()));
-    println!(
-        "\nlargest by physical span (production) — this is what drives file size.\n\
-         Note clippy::too_many_lines counts CODE lines instead, which is the better\n\
-         measure of complexity and is the one that should gate:"
-    );
+    let over = prod.iter().filter(|(_, f)| f.lines() > FN_CAP).count();
+    println!("\nlongest (production), {over} over the {FN_CAP}-line cap:");
     for (path, f) in prod.iter().take(10) {
         println!(
             "  {:>5} lines  {path}:{}  {}",
@@ -429,5 +380,46 @@ mod tests {
         // Compiled into the shipping binary; drives `fq-dashboard
         // render-fixtures`. Excluding it would be wrong.
         assert!(in_scope("services/fq-dashboard/src/fixtures.rs"));
+    }
+
+    fn measured_from(path: &str, src: &str) -> BTreeMap<String, Measured> {
+        let facts = analysis::analyze(src).expect("valid Rust");
+        let mut m = BTreeMap::new();
+        m.insert(
+            path.to_string(),
+            Measured {
+                production: facts.production_lines(),
+                facts: Some(facts),
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn function_ratchet_skips_test_functions() {
+        let long = "\n".repeat(FN_CAP + 10);
+        let src = format!("#[cfg(test)]\nmod tests {{\n    fn big() {{{long}}}\n}}\n");
+        let r = function_ratchet(&measured_from("a.rs", &src)).expect("no duplicate keys");
+        assert!(r.measured.is_empty(), "test functions must not be budgeted");
+    }
+
+    #[test]
+    fn function_keys_distinguish_inherent_from_trait_impls() {
+        let src =
+            "impl Foo {\n    fn run(&self) {}\n}\nimpl Bar for Foo {\n    fn run(&self) {}\n}\n";
+        let r = function_ratchet(&measured_from("a.rs", src)).expect("no duplicate keys");
+        let mut keys: Vec<_> = r.measured.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["a.rs::Foo as Bar::run", "a.rs::Foo::run"]);
+    }
+
+    #[test]
+    fn duplicate_keys_are_an_error_not_a_silent_pick() {
+        // Two same-named free functions in different inline modules are fine
+        // (distinct scopes); the same name twice in one scope cannot compile,
+        // so this asserts the guard exists rather than a reachable state.
+        let src = "mod a {\n    fn f() {}\n}\nmod b {\n    fn f() {}\n}\n";
+        let r = function_ratchet(&measured_from("x.rs", src)).expect("distinct scopes");
+        assert_eq!(r.measured.len(), 2);
     }
 }

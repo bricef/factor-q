@@ -436,39 +436,51 @@ lint-sources:
     fi
     exit "$fail"
 
-# The large-file ratchet (2026-07-25 cleanroom review, Part 2). Three split
-# issues (#78 runner.rs, #189 fq-cli/src/lib.rs, #191 mcp.rs) stayed open
-# across two reviews while every file they named grew — runner.rs 5.6k to
-# 7.4k, lib.rs 4.4k to 6.3k. Reviews reliably land work that decomposes into
-# issues and reliably do not land structural work, so this is a gate rather
-# than a preference: it converts "should refactor" into "cannot merge".
+# The size ratchets (2026-07-25 cleanroom review, Part 2). Three split issues
+# (#78 runner.rs, #189 fq-cli/src/lib.rs, #191 mcp.rs) stayed open across two
+# reviews while every file they named grew — runner.rs 5.6k to 7.4k, lib.rs
+# 4.4k to 6.3k. Reviews reliably land work that decomposes into issues and
+# reliably do not land structural work, so this is a gate rather than a
+# preference: it converts "should refactor" into "cannot merge".
 #
-# It counts PRODUCTION lines — total minus #[cfg(test)] items — because Rust
+# Two dimensions, one mechanism. FILES may not exceed 800 production lines;
+# FUNCTIONS may not exceed 250 lines. Pre-existing offenders are pinned in
+# .file-size-baseline and .function-size-baseline and may only ever shrink.
+#
+# Files count PRODUCTION lines — total minus #[cfg(test)] items — because Rust
 # puts unit tests inline and a total-lines budget would tax the test suite,
 # which is the strongest thing in this repo. It also aims the gate correctly:
 # by total lines runner.rs (7,441) looks worse than lib.rs (6,274), but 3,193
 # of runner.rs's lines are tests, so lib.rs is the bigger file in production
 # terms. Test targets (tests/, benches/, test_support/, *_test.go) are out of
-# scope entirely.
+# scope, and so are test functions.
+#
+# Functions are measured from the `fn` keyword, not the start of the item, so
+# a function is never charged for its own doc comment — this codebase puts
+# incident and ADR rationale there and the gate must not discourage it.
+#
+# Why not clippy for the function half: clippy CAN say "no function over N"
+# (too_many_lines) but cannot say "these functions must shrink" — its
+# thresholds are global with no per-item baseline, so the only way to exempt
+# known debt is an #[allow] at the site, which is a permanent pass rather than
+# a shrinking budget. The threshold gate is complementary and tracked in #392.
 #
 # Measurement runs off a real syn AST (tools/fq-lint), not a text scan. The
 # first version was a hand-rolled line scanner and it was wrong on three of
 # the tree's 140 files — cfg(any(test, ..)), indented #[cfg(test)] items, and
 # doc comments on test-only items. syn either parses the file exactly or fails
-# loudly; there is no third outcome where it guesses. Note this is the FILE
-# layer only: function length, arity and complexity belong to clippy, which
-# already gates this workspace — see tools/fq-lint/src/main.rs for the split.
+# loudly; there is no third outcome where it guesses.
 #
-# Budgets in .file-size-baseline may only go down (`just filesize-bless`).
-# Raising one, or admitting a new file, means hand-editing that file — it
-# shows in the diff and needs a human at the merge gate.
-# Enforce per-file production-line budgets (the large-file ratchet).
-lint-filesize:
+# Budgets may only go down (`just sizes-bless`). Raising one, or admitting a
+# new entry, means hand-editing the baseline — it shows in the diff and needs
+# a human at the merge gate.
+# Enforce the file and function size ratchets.
+lint-sizes:
     cargo run -q -p fq-lint
 
-# Lower the budgets in .file-size-baseline to match current sizes. Refuses to
-# raise any budget or admit a new file — the ratchet only ever tightens.
-filesize-bless:
+# Lower the size budgets to match reality. Refuses to raise any budget or
+# admit a new entry — the ratchets only ever tighten.
+sizes-bless:
     cargo run -q -p fq-lint -- --bless
 
 # Report function arity and physical span across the tree. Non-enforcing —
@@ -500,7 +512,7 @@ quality:
     ci_timing_init
     run_phase "lint-sources"  just lint-sources
     run_phase "fq-lint-test"  cargo test -q -p fq-lint
-    run_phase "lint-filesize" just lint-filesize
+    run_phase "lint-sizes"    just lint-sizes
     run_phase "fmt"           cargo fmt --check --all
     run_phase "clippy-runtime"      cargo clippy --all-targets {{runtime_pkgs}} -- -D warnings
     run_phase "clippy-store"        cargo clippy -p fq-store --all-targets --all-features
