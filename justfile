@@ -145,8 +145,8 @@ test-store *args:
 test-dashboard *args:
     cargo test -p fq-dashboard "$@"
 
-# Type-check the whole workspace without building. --all-targets covers
-# tests and examples, matching the workspace lint policy.
+# --all-targets covers tests and examples, matching the workspace lint policy.
+# Type-check the whole workspace without building.
 check:
     cargo check --workspace --all-targets
 
@@ -179,7 +179,7 @@ fmt:
 # NATS-backed tests spawn their own broker (#233) from the pinned nats-server,
 # provisioned by the `install-nats` dependency; the MCP integration tests need
 # Node/npx.
-# Run the runtime Rust gate (fmt-check, clippy, doc, test).
+# Run the runtime Rust gate (doc, build, test). fmt/clippy: `just quality`.
 runtime-ci: install-nats
     #!/usr/bin/env bash
     set -uo pipefail
@@ -478,13 +478,43 @@ lint-sources:
 lint-sizes:
     cargo run -q -p fq-lint
 
-# Lower the size budgets to match reality. Refuses to raise any budget or
-# admit a new entry — the ratchets only ever tighten.
+# `--all` covers every workspace member, including tools/fq-lint. This only
+# reports; `just fmt` is the one that rewrites files.
+# Check workspace formatting without modifying anything.
+lint-fmt:
+    cargo fmt --check --all
+
+# Per crate rather than one `--workspace` pass, because the feature sets are
+# load-bearing: fq-store lints under --all-features (cli/service/bus/
+# failpoints), and a workspace pass resolves default features, which would
+# silently drop that coverage.
+# Run clippy over every crate with its own feature set.
+lint-clippy:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
+    source {{justfile_directory()}}/scripts/ci-timing.sh
+    ci_timing_init
+    run_phase "runtime"      cargo clippy --all-targets {{runtime_pkgs}} -- -D warnings
+    run_phase "store"        cargo clippy -p fq-store --all-targets --all-features
+    run_phase "dashboard"    cargo clippy -p fq-dashboard --all-targets
+    run_phase "test-support" cargo clippy -p fq-test-support --all-targets -- -D warnings
+    run_phase "fq-lint"      cargo clippy -p fq-lint --all-targets -- -D warnings
+
+# The measurement rule both ratchets depend on. Runs inside `just quality` so
+# the linter proves itself before it gates anything else.
+# Run fq-lint's own unit tests.
+test-fq-lint:
+    cargo test -q -p fq-lint
+
+# Refuses to raise any budget or admit a new entry — the ratchets only ever
+# tighten, so a budget can be lowered automatically but never relaxed.
+# Lower the file and function size budgets to match reality.
 sizes-bless:
     cargo run -q -p fq-lint -- --bless
 
-# Report function arity and physical span across the tree. Non-enforcing —
-# a read on the structural facts the AST layer makes cheap.
+# Non-enforcing: a read on the structural facts the AST layer makes cheap.
+# Report function arity and physical span across the tree.
 lint-metrics:
     cargo run -q -p fq-lint -- --metrics
 
@@ -502,7 +532,12 @@ lint-metrics:
 # are load-bearing, not incidental.
 #
 # Needs no NATS and no Node: nothing here runs a test that wants a broker.
-# Run every non-test quality gate: source policy, file sizes, fmt, clippy.
+#
+# Every phase is its own recipe, so any single gate can be run on its own
+# while iterating — `just lint-sources`, `just test-fq-lint`, `just
+# lint-sizes`, `just lint-fmt`, `just lint-clippy`. Phases nest in the timing
+# summary, so `just lint-clippy` alone still reports its per-crate breakdown.
+# Run every non-test quality gate: source policy, sizes, fmt, clippy.
 quality:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -510,20 +545,16 @@ quality:
     export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
     source {{justfile_directory()}}/scripts/ci-timing.sh
     ci_timing_init
-    run_phase "lint-sources"  just lint-sources
-    run_phase "fq-lint-test"  cargo test -q -p fq-lint
-    run_phase "lint-sizes"    just lint-sizes
-    run_phase "fmt"           cargo fmt --check --all
-    run_phase "clippy-runtime"      cargo clippy --all-targets {{runtime_pkgs}} -- -D warnings
-    run_phase "clippy-store"        cargo clippy -p fq-store --all-targets --all-features
-    run_phase "clippy-dashboard"    cargo clippy -p fq-dashboard --all-targets
-    run_phase "clippy-test-support" cargo clippy -p fq-test-support --all-targets -- -D warnings
-    run_phase "clippy-fq-lint"      cargo clippy -p fq-lint --all-targets -- -D warnings
+    run_phase "lint-sources" just lint-sources
+    run_phase "test-fq-lint" just test-fq-lint
+    run_phase "lint-sizes"   just lint-sizes
+    run_phase "lint-fmt"     just lint-fmt
+    run_phase "lint-clippy"  just lint-clippy
 
 # === Release ===
 
-# Assert the release tag (vX.Y.Z) matches the workspace Cargo version
-# ([workspace.package] in the root Cargo.toml).
+# Reads [workspace.package] in the root Cargo.toml.
+# Assert the release tag (vX.Y.Z) matches the workspace Cargo version.
 check-version tag:
     #!/usr/bin/env bash
     set -euo pipefail
