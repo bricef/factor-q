@@ -51,6 +51,13 @@ const FILE_CAP: usize = 800;
 /// Functions not listed in the baseline may not exceed this many lines.
 const FN_CAP: usize = 250;
 
+/// Advisory threshold for `--creep`, in CODE lines. Below [`FN_CAP`] on
+/// purpose: the two count different things — the cap is physical span from
+/// the `fn` keyword, this skips comments and blanks — and the ratio on this
+/// tree is about 0.7, so the 250-line cap lands near 175 code lines. Warning
+/// at 175 would fire as the gate hit rather than before it; 150 leaves runway.
+const FN_CREEP_THRESHOLD: usize = 150;
+
 const FILE_BASELINE: &str = ".file-size-baseline";
 const FN_BASELINE: &str = ".function-size-baseline";
 
@@ -69,6 +76,7 @@ fn main() -> ExitCode {
             "usage: fq-lint [--bless | --metrics]\n\n  \
              (no flags)  check files and functions against their baselines\n  \
              --bless     lower budgets to match reality (never raises)\n  \
+             --creep     report functions approaching the cap (never fails)\n  \
              --metrics   report structural facts (never fails)"
         );
         return ExitCode::SUCCESS;
@@ -92,6 +100,10 @@ fn main() -> ExitCode {
 
     if flags.contains(&"--metrics") {
         report_metrics(&measured);
+        return ExitCode::SUCCESS;
+    }
+    if flags.contains(&"--creep") {
+        report_creep(&measured);
         return ExitCode::SUCCESS;
     }
 
@@ -316,6 +328,56 @@ fn fn_header() -> String {
          # clippy::too_many_lines is the complementary threshold gate (it counts\n\
          # CODE lines, skipping comments and blanks) — tracked in #392.\n"
     )
+}
+
+/// Advisory: functions approaching the [`FN_CAP`] ratchet, by code lines.
+///
+/// Always succeeds. The ratchet is the gate; this exists so growth is legible
+/// while there is still runway, rather than a merge stopping without warning.
+///
+/// This deliberately does not shell out to `clippy::too_many_lines`, which
+/// measures the same idea. `cargo clippy -- --force-warn <lint>` does not
+/// invalidate cargo's fingerprint, so cached units never re-emit: measured on
+/// this tree it reported 13 functions where a full rebuild found 35, and which
+/// 13 depended on what happened to be stale. Deriving it from the AST is exact,
+/// instant, and cannot silently under-report.
+fn report_creep(measured: &BTreeMap<String, Measured>) {
+    let mut over: Vec<(&str, &analysis::FnFacts)> = measured
+        .iter()
+        .filter_map(|(p, m)| m.facts.as_ref().map(|f| (p.as_str(), f)))
+        .flat_map(|(p, f)| f.functions.iter().map(move |fun| (p, fun)))
+        .filter(|(_, f)| !f.is_test && f.code_lines > FN_CREEP_THRESHOLD)
+        .collect();
+    over.sort_by_key(|(_, f)| std::cmp::Reverse(f.code_lines));
+
+    if over.is_empty() {
+        println!("function-length creep: none over {FN_CREEP_THRESHOLD} code lines");
+        return;
+    }
+
+    let past_cap = over.iter().filter(|(_, f)| f.lines() > FN_CAP).count();
+    println!(
+        "function-length creep: {} production functions over {FN_CREEP_THRESHOLD} code lines",
+        over.len()
+    );
+    println!("  advisory only — the gate is the {FN_CAP}-line ratchet in {FN_BASELINE}");
+    println!(
+        "  {past_cap} already past the cap (budgeted); {} approaching it",
+        over.len() - past_cap
+    );
+    for (path, f) in over.iter().take(10) {
+        let flag = if f.lines() > FN_CAP { "*" } else { " " };
+        println!(
+            "  {flag} {:>4} code / {:>4} physical  {path}:{}  {}",
+            f.code_lines,
+            f.lines(),
+            f.first_line,
+            f.name
+        );
+    }
+    if over.len() > 10 {
+        println!("    … and {} more", over.len() - 10);
+    }
 }
 
 /// Non-enforcing report over the structural facts the AST layer makes cheap.

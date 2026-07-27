@@ -507,49 +507,25 @@ lint-clippy:
 test-fq-lint:
     cargo test -q -p fq-lint
 
-# ADVISORY — always exits 0, never gates. `clippy::too_many_lines` is
-# allow-by-default and the workspace denies warnings, so enabling it the normal
-# way would immediately make it a gate; `--force-warn` reports it without
-# letting `-D warnings` escalate it. Threshold lives in clippy.toml.
+# ADVISORY — always exits 0, never gates. The 250-line function ratchet stops a
+# merge, which makes it a cliff; this is the ramp, so growth is legible while
+# there is still runway.
 #
-# The point is visibility, not enforcement: function growth should be legible
-# while there is still runway before the 250-line ratchet cap stops a merge.
-# Prints a banded summary and the worst offenders rather than every hit, so the
-# signal survives in a CI log.
+# Reports CODE lines (comments and blanks excluded) alongside physical span, at
+# a threshold below the cap: the two measures differ by roughly 0.7 on this
+# tree, so the 250-line cap lands near 175 code lines and a warning at 175
+# would fire as the gate hit rather than before it.
+#
+# Deliberately NOT `cargo clippy --force-warn clippy::too_many_lines`, which
+# measures the same idea: `cargo clippy -- <args>` does not invalidate cargo's
+# fingerprint, so cached units never re-emit. Measured on this tree that
+# reported 13 functions where a full rebuild found 35, and which 13 depended on
+# what happened to be stale — an advisory that silently under-reports is worse
+# than none. Deriving it from the AST fq-lint already builds is exact, instant,
+# and needs no compile at all.
 # Report function-length creep (advisory — never fails the gate).
 lint-creep:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    threshold="$(sed -nE 's/^too-many-lines-threshold = ([0-9]+).*/\1/p' {{justfile_directory()}}/clippy.toml)"
-    out="$(cargo clippy --all-targets {{runtime_pkgs}} -p fq-store -p fq-dashboard \
-        -p fq-test-support -p fq-lint 2>&1 -- \
-        --force-warn clippy::too_many_lines -A warnings || true)"
-    # Pair each warning with the `-->` line that follows it, dedupe by location
-    # (clippy reports a function once per target it compiles into), and drop the
-    # test targets the ratchet also excludes so the advisory and the gate agree
-    # on scope. Inline `#[cfg(test)]` functions still show — clippy has no way
-    # to tell us they are test code.
-    hits="$(printf '%s\n' "$out" \
-        | grep -A1 'too many lines' \
-        | grep -oE 'too many lines \([0-9]+/[0-9]+\)|--> [^ ]+' \
-        | paste - - \
-        | sed -E 's/too many lines \(([0-9]+)\/[0-9]+\)/\1/; s/--> //' \
-        | grep -vE '/(tests|benches|test_support)/' \
-        | sort -u -k2,2 | sort -rn)"
-    n="$(printf '%s' "$hits" | grep -c . || true)"
-    if [ "$n" -eq 0 ]; then
-        echo "function-length creep: none over ${threshold} clippy lines"
-        exit 0
-    fi
-    echo "function-length creep: ${n} production functions over ${threshold} clippy lines"
-    echo "  advisory only — the gate is the 250-line ratchet in .function-size-baseline"
-    printf '%s\n' "$hits" | awk -v t="$threshold" '
-        {n=$1; if (n>250) over++; else if (n>175) near++; else watch++}
-        END {printf "    >250: %d    176-250: %d    %s-175: %d   (clippy lines, not the ratchet\47s physical span)\n",
-                    over+0, near+0, t, watch+0}'
-    echo "  worst:"
-    printf '%s\n' "$hits" | head -8 | awk '{printf "    %5s lines  %s\n", $1, $2}'
-    exit 0
+    cargo run -q -p fq-lint -- --creep
 
 # Refuses to raise any budget or admit a new entry — the ratchets only ever
 # tighten, so a budget can be lowered automatically but never relaxed.

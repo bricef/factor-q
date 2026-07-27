@@ -23,6 +23,7 @@
 //! this repo. See the module docs in `main.rs` for where the boundary sits.
 
 use proc_macro2::TokenTree;
+use quote::ToTokens;
 use syn::spanned::Spanned;
 
 /// Everything `fq-lint` knows about one source file.
@@ -64,6 +65,16 @@ pub struct FnFacts {
     /// Parameter count, `self` included — the quantity behind the tree's 14
     /// `#[allow(clippy::too_many_arguments)]`.
     pub params: usize,
+    /// Distinct lines carrying at least one token, across the signature and
+    /// body. Comments and blank lines vanish because the lexer never emits
+    /// tokens for them, so this is "lines of code" in the sense
+    /// `clippy::too_many_lines` means — but computed from the AST, which
+    /// matters: `cargo clippy -- --force-warn` does not bust cargo's
+    /// fingerprint, so it silently replays diagnostics for only the units it
+    /// happens to rebuild. Measured on this tree that reported 13 functions
+    /// where a full rebuild found 35. An advisory that under-reports is worse
+    /// than none, so the number is derived here instead.
+    pub code_lines: usize,
     /// Whether this function sits under a `#[cfg(test)]` item.
     pub is_test: bool,
 }
@@ -220,6 +231,7 @@ fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileF
                 f.sig.ident.to_string(),
                 scope,
                 &f.sig,
+                Some(&f.block),
                 item,
                 inside,
             )),
@@ -256,6 +268,7 @@ fn walk_impl_item(item: &syn::ImplItem, in_test: bool, scope: &str, facts: &mut 
             f.sig.ident.to_string(),
             scope,
             &f.sig,
+            Some(&f.block),
             item,
             inside,
         ));
@@ -273,9 +286,22 @@ fn walk_trait_item(item: &syn::TraitItem, in_test: bool, scope: &str, facts: &mu
             f.sig.ident.to_string(),
             scope,
             &f.sig,
+            f.default.as_ref(),
             item,
             inside,
         ));
+    }
+}
+
+/// Collect every line touched by a token, recursing into groups.
+fn token_lines(tokens: proc_macro2::TokenStream, lines: &mut std::collections::BTreeSet<usize>) {
+    for tree in tokens {
+        let span = tree.span();
+        lines.insert(span.start().line);
+        lines.insert(span.end().line);
+        if let TokenTree::Group(group) = tree {
+            token_lines(group.stream(), lines);
+        }
     }
 }
 
@@ -283,10 +309,19 @@ fn fn_facts(
     name: String,
     scope: &str,
     sig: &syn::Signature,
+    body: Option<&syn::Block>,
     spanned: &impl Spanned,
     is_test: bool,
 ) -> FnFacts {
     let (_, last_line) = span_lines(spanned);
+    // Signature plus body, never the attributes: a doc comment is tokens too,
+    // and charging a function for documenting itself is the wrong incentive
+    // here for the same reason it is in `first_line`.
+    let mut code = std::collections::BTreeSet::new();
+    token_lines(sig.to_token_stream(), &mut code);
+    if let Some(block) = body {
+        token_lines(block.to_token_stream(), &mut code);
+    }
     // Measure from the `fn` keyword, not the start of the item: the item's
     // span includes doc comments, and charging a function for its own
     // documentation is exactly the wrong incentive in this codebase.
@@ -296,6 +331,7 @@ fn fn_facts(
         scope: scope.to_string(),
         first_line,
         last_line,
+        code_lines: code.len(),
         params: sig.inputs.len(),
         is_test,
     }
@@ -433,6 +469,29 @@ mod tests {
         assert_eq!(f.params, 2);
         assert_eq!(f.lines(), 3);
         assert!(!f.is_test);
+    }
+
+    #[test]
+    fn code_lines_skip_comments_and_blank_lines() {
+        let src = "fn a() {\n    let x = 1;\n\n    // a comment\n\n    let y = 2;\n}\n";
+        let f = &analyze(src).expect("valid Rust").functions[0];
+        // fn/{, let x, let y, } — the blank and comment lines carry no tokens.
+        assert_eq!(f.code_lines, 4);
+        assert_eq!(f.lines(), 7, "physical span still counts them");
+    }
+
+    #[test]
+    fn code_lines_exclude_the_doc_comment() {
+        let src = "/// doc\n/// doc\n/// doc\nfn a() {\n    let x = 1;\n}\n";
+        let f = &analyze(src).expect("valid Rust").functions[0];
+        assert_eq!(f.code_lines, 3, "signature, body, closing brace only");
+    }
+
+    #[test]
+    fn code_lines_cover_a_trait_method_without_a_body() {
+        let src = "trait T {\n    fn a(&self);\n}\n";
+        let f = &analyze(src).expect("valid Rust").functions[0];
+        assert_eq!(f.code_lines, 1);
     }
 
     #[test]
