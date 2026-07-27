@@ -44,6 +44,7 @@ factor-q/
 ├── services/fq-store/          content-addressed storage (fq-cas)
 ├── services/fq-dashboard/      operator dashboard
 ├── services/fq-test-support/   shared test-only helpers
+├── tools/fq-lint/              source-policy linter — the size ratchets
 ├── infrastructure/             docker-compose + NATS config
 ├── agents/examples/            sample agent definitions
 ├── tests/smoke/                end-to-end smoke tests (bash)
@@ -128,7 +129,30 @@ just test-shell-sandbox                          # containerised sandbox
 
 - **Rust edition 2024**, formatted with `cargo fmt`, linted with
   `cargo clippy -- -D warnings`. Run `just ci` to check both plus
-  tests in one shot.
+  tests in one shot, or `just quality` for every non-test gate
+  without waiting on the suites — that is exactly what the
+  "Code quality" CI job runs. Each gate is also its own recipe if
+  you want to iterate on one:
+
+  ```sh
+  just quality          # all of the below, fail-fast, timed
+  just lint-sources     # the include! ban (see AGENTS.md)
+  just lint-sizes       # file + function size ratchets
+  just lint-fmt         # cargo fmt --check, workspace-wide
+  just lint-clippy      # clippy per crate, with each crate's features
+  just test-fq-lint     # unit tests for the linter itself
+  ```
+
+- **Size budgets are ratcheted, not advisory.** No file may exceed
+  800 production lines and no function may exceed 250 lines;
+  pre-existing offenders are pinned in `.file-size-baseline` and
+  `.function-size-baseline` and may only ever shrink. `just
+  sizes-bless` lowers a budget to match reality but refuses to raise
+  one or admit a new entry, so relaxing a budget is always a
+  hand-edit a reviewer sees. If a change trips a gate, extract into a
+  new module or helper rather than raising the budget. `just
+  lint-metrics` reports the underlying numbers. Rationale and the
+  measurement rule live in `tools/fq-lint`.
 - **No comments explaining what** — only why. Well-named
   identifiers speak for themselves.
 - **Module-level doc comments** (`//!`) on every `.rs` file
