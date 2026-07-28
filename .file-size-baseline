@@ -16,14 +16,14 @@
 #   services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs -> #78
 #   services/fq-runtime/crates/fq-runtime/src/mcp.rs                   -> #191
 services/fq-dashboard/src/render.rs 1450
-services/fq-runtime/crates/fq-cli/src/lib.rs 5132
+services/fq-runtime/crates/fq-cli/src/lib.rs 5010
 services/fq-runtime/crates/fq-runtime/src/agent.rs 868
-services/fq-runtime/crates/fq-runtime/src/bus.rs 973
+services/fq-runtime/crates/fq-runtime/src/bus.rs 953
 services/fq-runtime/crates/fq-runtime/src/control_plane/projection/store.rs 854
 services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1049
 services/fq-runtime/crates/fq-runtime/src/events.rs 1203
 services/fq-runtime/crates/fq-runtime/src/mcp.rs 1850
-services/fq-runtime/crates/fq-runtime/src/views.rs 1258
+services/fq-runtime/crates/fq-runtime/src/views.rs 1235
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 4235
 services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1414
 services/fq-store/src/cli.rs 842

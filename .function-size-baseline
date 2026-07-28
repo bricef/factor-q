@@ -18,7 +18,7 @@
 #
 # clippy::too_many_lines is the complementary threshold gate (it counts
 # CODE lines, skipping comments and blanks) — tracked in #392.
-services/fq-runtime/crates/fq-cli/src/lib.rs::run_daemon 1373
+services/fq-runtime/crates/fq-cli/src/lib.rs::run_daemon 1336
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::dispatch_llm 258
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::resume 354
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 378

@@ -609,14 +609,19 @@
         "scope": "invocation",
         "verb": "write"
       },
-      "description": "Returns a receipt naming the drop event's sequence — feed it to a gated read for read-your-writes. Halting live work stays on the control path until the Phase-4 flip.",
+      "description": "Returns a receipt naming the drop event's sequence — feed it to a gated read for read-your-writes. Refused on an invocation this daemon is actively driving unless `live` is set, which halts it at its next step boundary (in-flight tools finish) before the drop.",
       "domain": "invocation",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "The typed input of `invocation.drop` on the wire. `--live` halting\nstays on the control path until the Phase-4 drop flip.",
+        "description": "The typed input of `invocation.drop` on the wire.",
         "properties": {
           "invocation_id": {
             "type": "string"
+          },
+          "live": {
+            "default": false,
+            "description": "Halt the invocation first if this daemon is actively driving\nit. Without it, live work is refused outright — the kill\nswitch is opt-in, never implied (#107). Defaults false, which\nis also what every peer that predates the field sends.",
+            "type": "boolean"
           },
           "reason": {
             "default": null,

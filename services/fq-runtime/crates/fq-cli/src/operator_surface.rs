@@ -56,6 +56,11 @@ pub struct OperatorDeps {
     pub bus: fq_runtime::EventBus,
     pub projection: Arc<fq_runtime::control_plane::projection::ProjectionStore>,
     pub control_plane: Arc<fq_runtime::control_plane::store::ControlPlaneStore>,
+    /// The reducer runner this daemon drives invocations with — the
+    /// zero-lag liveness authority `invocation.drop` asks before it
+    /// writes anything (#107). A command that can stop work needs the
+    /// thing doing the work, not a projection of it.
+    pub runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
 }
 
 /// Get identity for a Turn: its event-log sequence.
@@ -73,13 +78,62 @@ pub(crate) struct TurnFilter {
     pub(crate) limit: Option<u32>,
 }
 
-/// The typed input of `invocation.drop` on the wire. `--live` halting
-/// stays on the control path until the Phase-4 drop flip.
+/// The typed input of `invocation.drop` on the wire.
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 struct DropCommandInput {
     invocation_id: String,
     #[serde(default)]
     reason: Option<String>,
+    /// Halt the invocation first if this daemon is actively driving
+    /// it. Without it, live work is refused outright — the kill
+    /// switch is opt-in, never implied (#107). Defaults false, which
+    /// is also what every peer that predates the field sends.
+    #[serde(default)]
+    live: bool,
+}
+
+/// The live-drop precondition, daemon-side (plan Phase 4, verb 18):
+/// the runner that would be driving this invocation is the only
+/// zero-lag authority on whether it *is*, so the check and the halt
+/// happen here — in the same handler that then writes the terminal
+/// event, leaving no window between deciding and acting.
+///
+/// Refusals are `InvalidInput`: they are verdicts on this request (a
+/// bare drop of live work), not on the invocation's existence. The
+/// operator reads the message verbatim, so each one names its remedy.
+fn arm_drop_halt(
+    runner: &fq_runtime::ReducerRunner<fq_runtime::Harness>,
+    input: &DropCommandInput,
+) -> Result<(), fq_edge::wire::WireError> {
+    let refuse = |message: String| fq_edge::wire::WireError::InvalidInput {
+        op: "invocation.drop".into(),
+        message,
+    };
+    let Ok(id) = uuid::Uuid::parse_str(&input.invocation_id) else {
+        return Err(refuse(format!(
+            "invalid invocation id `{}`",
+            input.invocation_id
+        )));
+    };
+    if runner.is_active(&id) {
+        if !input.live {
+            return Err(refuse(format!(
+                "invocation {id} is currently running; use --live to halt and drop it"
+            )));
+        }
+        // The arm can lose to the invocation finishing between the
+        // liveness check and here. Report that rather than publishing
+        // a terminal event: the operator-recovered handler
+        // deliberately overrides any prior status, so a run that
+        // completed on its own would be archived as `failed`.
+        if !runner.request_halt(id) {
+            return Err(refuse(format!(
+                "invocation {id} finished before the halt could be armed; \
+                 nothing dropped — re-check `fq invocation show {id}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Build the daemon's operator registry: the Invocation view served
@@ -194,15 +248,21 @@ pub fn operator_registry(
     )
     .description(
         "Returns a receipt naming the drop event's sequence — feed it to a \
-         gated read for read-your-writes. Halting live work stays on the \
-         control path until the Phase-4 flip.",
+         gated read for read-your-writes. Refused on an invocation this \
+         daemon is actively driving unless `live` is set, which halts it at \
+         its next step boundary (in-flight tools finish) before the drop.",
     );
     registry
         .command::<DropCommandInput, _, _>(decl, move |input: DropCommandInput| {
             let bus = deps.bus.clone();
             let projection = deps.projection.clone();
             let control_plane = deps.control_plane.clone();
+            let runner = deps.runner.clone();
             async move {
+                // Liveness first: a refused drop must leave no trace, so
+                // nothing is published until the halt is armed (or the
+                // invocation is known idle).
+                arm_drop_halt(&runner, &input)?;
                 // The edge implementing an op IS the runtime boundary, not a
                 // call point to flip.
                 // allow-runtime-internals: daemon-side command handler.
@@ -471,6 +531,20 @@ pub(crate) async fn invoke_on(
     op: fq_ops::OpId,
     input: serde_json::Value,
 ) -> anyhow::Result<Result<serde_json::Value, fq_edge::wire::WireError>> {
+    invoke_gated_on(client, op, input, None).await
+}
+
+/// [`invoke_on`], watermarked: `min_seq` holds the answer until this
+/// daemon's fold has applied at least that sequence. It is the read
+/// half of read-your-writes — the number comes from a command's
+/// receipt (D4) — and it is a read-only argument: the edge refuses a
+/// command that carries one.
+pub(crate) async fn invoke_gated_on(
+    client: &fq_edge::EdgeClient,
+    op: fq_ops::OpId,
+    input: serde_json::Value,
+    min_seq: Option<u64>,
+) -> anyhow::Result<Result<serde_json::Value, fq_edge::wire::WireError>> {
     let response = client
         .rpc
         .invoke(
@@ -479,7 +553,7 @@ pub(crate) async fn invoke_on(
                 op,
                 version: 1,
                 input,
-                min_seq: None,
+                min_seq,
             },
         )
         .await
