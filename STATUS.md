@@ -130,23 +130,47 @@ flowchart TD
   secpoc["security PoCs<br/>#399 #400"]
   splits -->|"clean base before<br/>compounding debt"| mvp
   secpoc -->|"clean base before<br/>compounding debt"| mvp
+  parts["reasoning as message parts<br/>#437 — contract precondition"]
+  parts -->|"cross-model edges need<br/>strippable reasoning"| mvp
+  parts -->|"same 10 modules —<br/>one disruption, not two"| coupling["module coupling #424<br/>⏸ blocked on #437"]
   mvp["multi-node MVP #414<br/>⏸ HELD"] --> vertical["two-node vertical<br/>ADR-0007 plan"]
   vertical -->|"needs multi-agent<br/>workflows"| noncode["non-code workload<br/>1.3 — untracked"]
   storage["storage/vector M3→M4→M5"] --> memskills["Memory + Skills"]
   ladder["capability ladder #413<br/>maintainer-owned"] -.->|"supersede or<br/>rescope?"| m0["#340 M0 instrumentation"]
   mvp -.->|"L4 queue autonomy<br/>needs orchestration"| ladder
+  splits -.->|"merge risk in runner.rs —<br/>order unresolved"| parts
 ```
 
 Reading the diagram: solid arrows are hard gates; dashed arrows are
-open questions or weak couplings. The exit criteria drawn into #414
-(#399, #400, #78, #189, #191) are **proposed and not yet confirmed by
-the maintainer** — read them as a candidate release condition for the
-hold, not a settled one. #78/#189/#191 carry no allocated capacity
-today: the size ratchet (#388) stops those files growing but does not
-shrink them. The non-code workload (cleanroom finding 1.3) has no issue
-yet. Registry + split execution (ADR-0006/0031) and exactly-once
-trigger dispatch are in flight but gate nothing on this map, so they
-are omitted rather than drawn as orphans.
+open questions or weak couplings. Of the exit criteria drawn into #414,
+five (#399, #400, #78, #189, #191) are **proposed and not yet confirmed
+by the maintainer** — read them as a candidate release condition for
+the hold, not a settled one. #437 is different: it was **confirmed by
+the maintainer on 2026-07-28** and is a contract precondition rather
+than debt-avoidance. Reasoning blocks are tied to the model that
+produced them, and ADR-0003 guarantees per-agent model selection, so a
+multi-node graph has cross-model edges by construction; on each of
+those, reasoning must be stripped. That invariant belongs to the graph,
+not to an invocation, and cannot be expressed while `Message` is
+`{role, content: Option<String>, tool_calls, tool_call_id}` and
+reasoning has no name in the type system. Only the message shape
+carries the gate — the provider work in #437 is separable.
+
+#437 also blocks #424: `events` is the highest fan-in module in the
+tree at 10, and the parts change ripples through the same ten modules
+that epic restructures, so the coupling work waits rather than
+measuring against a graph about to change shape. Its advisory
+`just lint-coupling` phase keeps running meanwhile.
+
+One ordering is deliberately left open (drawn dashed): whether #437
+lands before or after #78/#189/#191. Both touch `runner.rs`, so
+whichever goes second pays a merge cost — but #78/#189/#191 carry no
+allocated capacity today, and #437 should not inherit that stall. The
+size ratchet (#388) stops those files growing but does not shrink them.
+The non-code workload (cleanroom finding 1.3) has no issue yet.
+Registry + split execution (ADR-0006/0031) and exactly-once trigger
+dispatch are in flight but gate nothing on this map, so they are
+omitted rather than drawn as orphans.
 
 ## Not built yet
 
