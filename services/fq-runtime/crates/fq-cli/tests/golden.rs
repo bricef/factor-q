@@ -761,15 +761,102 @@ fn golden_events_query_json() {
 // unchanged golden: the flip proven byte-identical.
 // ------------------------------------------------------------------
 
+/// The conversation of [`INV_COMPLETED`], as the event log records it:
+/// the two assistant turns and the tool result between them, stamped at
+/// the same instants the WAL fixture uses so the rendered transcript is
+/// the same timeline either way.
+///
+/// This is the transcript fixture's substrate. The WAL seed above
+/// describes the same run from the worker's side (it is what
+/// `invocation.get` still mines the opening prompt from); these are the
+/// facts the Turn atom is folded from, and `fq invocation transcript`
+/// now reads both.
+fn conversation_events() -> Vec<Event> {
+    let agent = AgentId::new(AGENT_RESEARCHER).unwrap();
+    let call = || fq_runtime::events::ToolCallId::new("tc-1").unwrap();
+    vec![
+        stamp(
+            Event::new(
+                agent.clone(),
+                inv(INV_COMPLETED),
+                EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
+                    round: 1,
+                    call_id: fixed_uuid(20),
+                    content: Some("Reading the fixture file first.".into()),
+                    tool_calls: vec![fq_runtime::events::MessageToolCall {
+                        tool_call_id: call(),
+                        tool_name: "read_file".into(),
+                        parameters: serde_json::json!({"path": "fixture.txt"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: TokenUsage {
+                        input_tokens: 1_200,
+                        output_tokens: 340,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    origin: LlmCallOrigin::AgentTurn,
+                }),
+            ),
+            20,
+            BASE_MS,
+        )
+        .with_cost(cost(20, 0.0125, 0.0125)),
+        stamp(
+            Event::new(
+                agent.clone(),
+                inv(INV_COMPLETED),
+                EventPayload::ToolResult(fq_runtime::events::ToolResultPayload {
+                    round: 1,
+                    tool_name: "read_file".into(),
+                    tool_call_id: call(),
+                    output: "{\"bytes\":42,\"content\":\"deterministic\"}".into(),
+                    is_error: false,
+                    error_kind: None,
+                    duration_ms: 500,
+                }),
+            ),
+            21,
+            BASE_MS + 1_500,
+        ),
+        stamp(
+            Event::new(
+                agent,
+                inv(INV_COMPLETED),
+                EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
+                    round: 2,
+                    call_id: fixed_uuid(22),
+                    content: Some("The fixture file says: deterministic.".into()),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage {
+                        input_tokens: 1_400,
+                        output_tokens: 120,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    origin: LlmCallOrigin::AgentTurn,
+                }),
+            ),
+            22,
+            BASE_MS + 3_000,
+        )
+        .with_cost(cost(22, 0.0125, 0.0125)),
+    ]
+}
+
 struct EdgeFixture {
     daemon: Option<std::process::Child>,
     dir: tempfile::TempDir,
     xdg: tempfile::TempDir,
     client_config: std::path::PathBuf,
-    _broker: fq_test_support::NatsServer,
+    broker: fq_test_support::NatsServer,
 }
 
 impl EdgeFixture {
+    /// The plain fixture: stores seeded, event log empty. Every golden
+    /// but the transcript ones renders folds, which the stores already
+    /// hold.
     fn start() -> Self {
         // A private seed at the SAME fixed base as the shared fixture
         // (the JSON goldens embed its literal timestamps), then worker
@@ -931,8 +1018,32 @@ impl EdgeFixture {
             dir,
             xdg,
             client_config,
-            _broker: broker,
+            broker,
         }
+    }
+
+    /// The transcript fixture: the plain fixture plus the invocation's
+    /// conversation on the event log.
+    ///
+    /// Published after the daemon is ready, because the daemon is what
+    /// provisions the event stream — a publish before that has nothing
+    /// to land in. Only the transcript goldens use this: the turns are
+    /// projected as they land, so the other flipped goldens
+    /// (`invocation show`'s recent-events block) would see a different
+    /// world for no reason.
+    fn start_with_conversation() -> Self {
+        let fixture = Self::start();
+        tokio::runtime::Runtime::new()
+            .expect("conversation runtime")
+            .block_on(async {
+                let bus = fq_runtime::EventBus::connect(fixture.broker.url())
+                    .await
+                    .expect("connect bus");
+                for event in conversation_events() {
+                    bus.publish(&event).await.expect("publish conversation");
+                }
+            });
+        fixture
     }
 
     fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
@@ -967,7 +1078,10 @@ impl Drop for EdgeFixture {
 /// The edge-transport variant of [`check_golden`]: same argv, same
 /// golden file, the data travels the authenticated edge.
 fn check_golden_edge(name: &str, args: &[&str], volatile_markers: &[&str]) {
-    let fixture = EdgeFixture::start();
+    check_golden_on(EdgeFixture::start(), name, args, volatile_markers);
+}
+
+fn check_golden_on(fixture: EdgeFixture, name: &str, args: &[&str], volatile_markers: &[&str]) {
     let (exit, stdout, stderr) = fixture.run_fq(args);
     assert_eq!(
         exit,
@@ -1010,32 +1124,38 @@ fn golden_invocation_show_json() {
     );
 }
 
+// The transcript goldens (plan Phase 4, verb 20): the same argv and
+// the same golden files, now composed from `turn.list` (the Turn atom,
+// folded from the event log) with the opening prompt from
+// `invocation.get`. Byte-identical output across a change of substrate
+// is the whole claim, so the files below are untouched.
+
 #[test]
 fn golden_transcript_human() {
-    check_golden(
+    check_golden_on(
+        EdgeFixture::start_with_conversation(),
         "transcript_human",
         &["invocation", "transcript", INV_COMPLETED],
-        Nats::Closed,
         &[],
     );
 }
 
 #[test]
 fn golden_transcript_full_human() {
-    check_golden(
+    check_golden_on(
+        EdgeFixture::start_with_conversation(),
         "transcript_full_human",
         &["invocation", "transcript", INV_COMPLETED, "--full"],
-        Nats::Closed,
         &[],
     );
 }
 
 #[test]
 fn golden_transcript_json() {
-    check_golden(
+    check_golden_on(
+        EdgeFixture::start_with_conversation(),
         "transcript_json",
         &["invocation", "transcript", INV_COMPLETED, "--json"],
-        Nats::Closed,
         &[],
     );
 }

@@ -89,6 +89,11 @@
         "properties": {
           "invocation_id": {
             "type": "string"
+          },
+          "with_prompt": {
+            "default": false,
+            "description": "Ask for the invocation's opening prompt alongside the fold.\n\nNot identity — the id alone names the invocation — but a\ndeclaration of what the reader will do with the answer. The\nprompt is the one unbounded field on the view\n(`InvocationDetailView::prompt`), so a reader that renders the\nconversation says so and pays for it, and a reader that wants\nthe fold is not charged an agent's whole system prompt on every\n`invocation show`. Defaults false, which is also what every\npeer that predates the field sends.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -470,6 +475,32 @@
               "intent_at_ms"
             ],
             "type": "object"
+          },
+          "TranscriptPrompt": {
+            "description": "An invocation's opening prompt — the system prompt and the first\nuser message — as a value of its own, separate from the timeline\nentry that renders it.\n\nThe split exists because the prompt has two homes. It is the\ntranscript's first entry (rendered by [`render_pretty`]), and it is\nalso invocation state: the one part of the conversation that is not\na Turn (an assistant output or a tool result — see\n[`crate::turn`]), so a transcript composed from the Turn atom has to\nobtain it from the Invocation view instead. Both paths hand back\nthis value; only the rendering path wraps it in a\n[`TranscriptEntry`].",
+            "properties": {
+              "system": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timestamp_ms": {
+                "description": "The first LLM request's `intent_at` — when the invocation\nstarted talking, and the sort key the WAL-backed transcript\norders every entry by.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "user": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "timestamp_ms"
+            ],
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -533,6 +564,17 @@
               }
             ],
             "description": "Coordination ownership row, if any."
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TranscriptPrompt"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The invocation's opening prompt, for readers that render the\nconversation. **Composed on request, never by\n[`Views::invocation`]** — see [`Views::invocation_prompt`],\nwhich the operator surface's `invocation.get` calls when the\ncaller asks for it.\n\nOpt-in because it is the one unbounded field on this view: an\nagent's system prompt runs to thousands of tokens, and every\nother reader of an invocation (`fq invocation show`, the\ndashboard's detail page, the list joins) wants the fold, not the\nconversation. Omitted from the serialised form when absent, so\n\"did not ask\" and \"asked, nothing there\" read the same on the\nwire — which is what a caller that did not ask should see."
           },
           "recent_events": {
             "description": "Most recent events for this invocation (newest first).",
