@@ -223,6 +223,10 @@ fn invocation_detail() -> InvocationDetailView {
         invocation_id: "019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string(),
         agent_id: Some("m0-issue-fix".to_string()),
         has_transcript: true,
+        // The dashboard renders the conversation from the transcript
+        // read, never from the detail fold, so the opt-in prompt stays
+        // unasked-for here.
+        prompt: None,
         summary: Some("Fixing #83: SECURITY.md drafted, running just ci".to_string()),
         // Mid-run burn: the cost-so-far row on a live invocation.
         cost: Some(fq_runtime::views::InvocationCostView {

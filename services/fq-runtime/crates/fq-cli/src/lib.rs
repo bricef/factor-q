@@ -4358,6 +4358,9 @@ async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::R
         fq_ops::OpId::Get(fq_ops::Domain::Invocation),
         serde_json::to_value(InvocationViewKey {
             invocation_id: id.to_string(),
+            // `show` renders the fold, not the conversation: the
+            // prompt would be the one unbounded thing on the page.
+            with_prompt: false,
         })?,
     )
     .await?;
@@ -4823,11 +4826,11 @@ async fn invocation_drop(
 
 /// Render the full payload-bearing transcript for one invocation.
 ///
-/// Snapshot mode (default): open the worker WAL read-only against
-/// `worker.db`, collect the ordered `llm_dispatch` + `tool_dispatch`
-/// rows for the invocation, and render them with payloads. Read-only
-/// and NATS-free. `--follow` additionally subscribes to the invocation's
-/// agent subject and appends new turns live until Ctrl-C.
+/// Every read here rides the authenticated edge (plan Phase 4, verb
+/// 20): the snapshot is `turn.list` behind the opening prompt from
+/// `invocation.get`, and `--follow` continues on `turn.stream` from a
+/// cursor pinned before the snapshot. The client no longer opens the
+/// worker WAL for itself — one daemon, one transport, one answer.
 async fn invocation_transcript(
     global: &GlobalArgs,
     id: &str,
@@ -4851,44 +4854,22 @@ async fn invocation_transcript(
         Some(DEFAULT_TRUNCATE_BYTES)
     };
 
-    let views = open_views(global).await?;
+    // One client for the whole verb: the snapshot's two reads and the
+    // follow cursor are one conversation with one daemon incarnation.
+    let client = edge_client_for(global).await?;
 
-    // For --follow, seek the turn stream's tail on the edge BEFORE
-    // reading the WAL snapshot, so a turn that completes in the gap
-    // between the read and the seek is not lost: anything published
-    // in that window is caught by both the snapshot and the stream,
-    // then deduped at the seam (Phase 3d: the tail rides
-    // `turn.stream` over the authenticated edge, not a raw NATS
-    // subscription — real tool names and parameters included).
+    // For --follow, seek the turn stream's tail BEFORE reading the
+    // snapshot, so a turn that completes in the gap between the read
+    // and the seek is not lost: anything published in that window is
+    // caught by both the snapshot and the stream, then deduped at the
+    // seam (Phase 3d: the tail rides `turn.stream` over the
+    // authenticated edge, not a raw NATS subscription — real tool
+    // names and parameters included).
     let follow_cursor = if follow {
-        let config = global.resolve_config()?;
-        let addr = config.edge.bind.clone();
-        let entry = stored_connection(&addr)?;
-        let client = edge_client(
-            &addr,
-            parse_fingerprint_hex(&entry.fingerprint)?,
-            &entry.token,
-        )
-        .await?;
-        let seek = client
-            .rpc
-            .next_batch(
-                tarpc::context::current(),
-                fq_edge::NextBatchRequest {
-                    op: fq_ops::OpId::Stream(fq_ops::Domain::Turn),
-                    version: 1,
-                    filter: serde_json::to_value(TurnFilter {
-                        invocation_id: id.to_string(),
-                        limit: None,
-                    })?,
-                    from_seq: u64::MAX,
-                    max_wait_ms: 0,
-                },
-            )
-            .await
-            .context("edge rpc failed")?
+        let seek = next_turn_batch(&client, id, u64::MAX, 0)
+            .await?
             .map_err(|e| anyhow::anyhow!("cannot follow invocation {id}: {e}"))?;
-        Some((client, seek.next_from_seq))
+        Some(seek.next_from_seq)
     } else {
         None
     };
@@ -4896,7 +4877,7 @@ async fn invocation_transcript(
     // An empty snapshot is a hard error only for the one-shot view; under
     // --follow it is valid (tailing an invocation that has not dispatched
     // anything yet), so fall through to the live loop.
-    let mut entries = match views.transcript(id).await? {
+    let entries = match edge_transcript_snapshot(&client, id).await? {
         Some(entries) => entries,
         None if follow => Vec::new(),
         None => {
@@ -4916,16 +4897,6 @@ async fn invocation_transcript(
         }
     };
 
-    // `Views::transcript` also exposes terminal outcomes. This CLI command's
-    // established snapshot contract predates that entry, so retain its
-    // byte-identical LLM/tool-only output during the reader migration.
-    entries.retain(|entry| {
-        !matches!(
-            entry,
-            fq_runtime::transcript::TranscriptEntry::Outcome { .. }
-        )
-    });
-
     if as_json {
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
@@ -4935,7 +4906,7 @@ async fn invocation_transcript(
 
     // Snapshot-only mode: done. Otherwise long-poll the turn stream
     // from the cursor pinned above (before the snapshot).
-    let Some((client, mut cursor)) = follow_cursor else {
+    let Some(mut cursor) = follow_cursor else {
         return Ok(());
     };
 
@@ -4944,23 +4915,8 @@ async fn invocation_transcript(
 
     let mut seen = snapshot_keys(&entries);
     loop {
-        let batch = client
-            .rpc
-            .next_batch(
-                tarpc::context::current(),
-                fq_edge::NextBatchRequest {
-                    op: fq_ops::OpId::Stream(fq_ops::Domain::Turn),
-                    version: 1,
-                    filter: serde_json::to_value(TurnFilter {
-                        invocation_id: id.to_string(),
-                        limit: None,
-                    })?,
-                    from_seq: cursor,
-                    max_wait_ms: 30_000,
-                },
-            )
-            .await
-            .context("edge rpc failed")?
+        let batch = next_turn_batch(&client, id, cursor, 30_000)
+            .await?
             .map_err(|e| anyhow::anyhow!("turn.stream: {e}"))?;
         cursor = batch.next_from_seq;
         for item in batch.items {

@@ -18,6 +18,10 @@
 //! DB-backed counts from here with a NATS probe at the daemon layer; it lands
 //! with the tarpc service, not here.
 
+// The conversation reads — payload-bearing, WAL-backed, and the only
+// reads here that are not header folds.
+mod transcript;
+
 // DTOs are Deserialize as well as Serialize so they can travel over the
 // read service's bincode wire (#105 layer 2), not just out as JSON.
 use serde::{Deserialize, Serialize};
@@ -631,6 +635,21 @@ pub struct InvocationDetailView {
     /// the run is live; `None` before the first priced call lands.
     #[serde(default)]
     pub cost: Option<InvocationCostView>,
+    /// The invocation's opening prompt, for readers that render the
+    /// conversation. **Composed on request, never by
+    /// [`Views::invocation`]** — see [`Views::invocation_prompt`],
+    /// which the operator surface's `invocation.get` calls when the
+    /// caller asks for it.
+    ///
+    /// Opt-in because it is the one unbounded field on this view: an
+    /// agent's system prompt runs to thousands of tokens, and every
+    /// other reader of an invocation (`fq invocation show`, the
+    /// dashboard's detail page, the list joins) wants the fold, not the
+    /// conversation. Omitted from the serialised form when absent, so
+    /// "did not ask" and "asked, nothing there" read the same on the
+    /// wire — which is what a caller that did not ask should see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<crate::transcript::TranscriptPrompt>,
 }
 
 // ============================================================
@@ -940,49 +959,6 @@ impl Views {
         Ok(view)
     }
 
-    /// The payload-bearing transcript for one invocation, reconstructed
-    /// from the worker WAL (`llm_dispatch` + `tool_dispatch` — the only
-    /// place payloads persist; those rows outlive archival, so this
-    /// works for completed invocations too). `None` when the id has no
-    /// dispatch rows at all.
-    pub async fn transcript(
-        &self,
-        invocation_id: &str,
-    ) -> Result<Option<Vec<crate::transcript::TranscriptEntry>>, ViewsError> {
-        let llm = self
-            .worker
-            .list_llm_dispatches_for_invocation(invocation_id)
-            .await?;
-        let tools = self
-            .worker
-            .list_tool_dispatches_for_invocation(invocation_id)
-            .await?;
-        if llm.is_empty() && tools.is_empty() {
-            return Ok(None);
-        }
-        let mut entries = crate::transcript::collect_transcript(&llm, &tools);
-
-        // Close the story: a terminal invocation gets an explicit
-        // Outcome entry so the transcript states whether more turns are
-        // expected. The live WAL row (if still present) knows the
-        // terminal phase; after archive hand-off the archive row does.
-        let terminal = match self.worker.get_invocation_state(invocation_id).await? {
-            Some(state) => state.terminal_at.map(|at| (at, state.phase)),
-            None => self
-                .control_plane
-                .get_archive(invocation_id)
-                .await?
-                .map(|a| (a.terminal_at, a.final_phase)),
-        };
-        if let Some((timestamp_ms, phase)) = terminal {
-            entries.push(crate::transcript::TranscriptEntry::Outcome {
-                timestamp_ms,
-                phase,
-            });
-        }
-        Ok(Some(entries))
-    }
-
     /// Every currently-executing invocation as a row (the list behind
     /// [`Views::executions`]' counts), longest-running first, each with
     /// its open tool/LLM dispatches — the "what is running right now"
@@ -1251,6 +1227,7 @@ impl Views {
             has_transcript,
             summary,
             cost,
+            prompt: None,
         }))
     }
 }

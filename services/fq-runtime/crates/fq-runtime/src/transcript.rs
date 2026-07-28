@@ -119,9 +119,9 @@ pub fn collect_transcript(
 
     // Seed the prompt from the first LLM request payload.
     if let Some(first) = llm_rows.first()
-        && let Some(entry) = prompt_from_request(first.intent_at, &first.request_payload)
+        && let Some(prompt) = prompt_from_request(first.intent_at, &first.request_payload)
     {
-        entries.push(entry);
+        entries.push(prompt.into_entry());
     }
 
     for row in llm_rows {
@@ -163,9 +163,44 @@ pub fn collect_transcript(
     entries
 }
 
+/// An invocation's opening prompt — the system prompt and the first
+/// user message — as a value of its own, separate from the timeline
+/// entry that renders it.
+///
+/// The split exists because the prompt has two homes. It is the
+/// transcript's first entry (rendered by [`render_pretty`]), and it is
+/// also invocation state: the one part of the conversation that is not
+/// a Turn (an assistant output or a tool result — see
+/// [`crate::turn`]), so a transcript composed from the Turn atom has to
+/// obtain it from the Invocation view instead. Both paths hand back
+/// this value; only the rendering path wraps it in a
+/// [`TranscriptEntry`].
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct TranscriptPrompt {
+    /// The first LLM request's `intent_at` — when the invocation
+    /// started talking, and the sort key the WAL-backed transcript
+    /// orders every entry by.
+    pub timestamp_ms: i64,
+    pub system: Option<String>,
+    pub user: Option<String>,
+}
+
+impl TranscriptPrompt {
+    /// The prompt as the timeline entry that renders it. Consuming:
+    /// the strings are large (a system prompt runs to thousands of
+    /// tokens) and there is no reason to clone them at the seam.
+    pub fn into_entry(self) -> TranscriptEntry {
+        TranscriptEntry::Prompt {
+            timestamp_ms: self.timestamp_ms,
+            system: self.system,
+            user: self.user,
+        }
+    }
+}
+
 /// Reconstruct the system prompt + first user message from a serialised
 /// `LlmRequestPayload`. Returns `None` if the payload carries neither.
-fn prompt_from_request(intent_at: i64, raw: &str) -> Option<TranscriptEntry> {
+pub(crate) fn prompt_from_request(intent_at: i64, raw: &str) -> Option<TranscriptPrompt> {
     let payload: LlmRequestLike = serde_json::from_str(raw).ok()?;
     let mut system = None;
     let mut user = None;
@@ -179,7 +214,7 @@ fn prompt_from_request(intent_at: i64, raw: &str) -> Option<TranscriptEntry> {
     if system.is_none() && user.is_none() {
         return None;
     }
-    Some(TranscriptEntry::Prompt {
+    Some(TranscriptPrompt {
         timestamp_ms: intent_at,
         system,
         user,
