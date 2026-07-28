@@ -162,7 +162,16 @@ impl TurnFold {
                             })
                             .collect(),
                         cost_usd: cost.map(|c| c.total_cost),
-                        is_error: None,
+                        // Not unknown — false. An `llm.response` event
+                        // exists only for a call that returned a
+                        // response: when the provider errors the runner
+                        // closes the WAL row `is_error = true` and
+                        // returns without publishing one. That is the
+                        // same occasion on which the WAL-backed
+                        // transcript records `is_error = false`, so the
+                        // bridge's byte-identity contract needs the
+                        // same value, not a null standing in for it.
+                        is_error: Some(false),
                     },
                 ))
             }
@@ -319,10 +328,17 @@ mod tests {
         let turn = fold.apply(7, &assistant_event(1, None)).unwrap();
         match turn.transcript_entry() {
             TranscriptEntry::Assistant {
-                model, cost_usd, ..
+                model,
+                cost_usd,
+                is_error,
+                ..
             } => {
                 assert_eq!(model, "claude-haiku");
                 assert_eq!(cost_usd, Some(0.01));
+                // The WAL path renders a completed call as
+                // `is_error: false`; a response event means exactly
+                // that, so the bridge must not weaken it to `null`.
+                assert_eq!(is_error, Some(false));
             }
             other => panic!("expected an assistant entry, got {other:?}"),
         }
