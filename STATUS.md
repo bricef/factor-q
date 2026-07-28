@@ -87,11 +87,16 @@ Phase 0 (golden net), Phase 1 (`fq-ops` contract crate), and Phase 2
 (the authenticated generic edge — `fq-edge`, TLS + capability tokens —
 wired into the daemon and enabled by default) have landed. Phase 3, the
 exemplar slices proving one declaration per category through the edge,
-is underway: watermark plumbing (3a) and typed op identifiers are in,
-the `Invocation` view (3b) has flipped its CLI verbs behind golden, and
-`invocation.drop` (3c) now composes read-your-writes through the public
-surface alone; the `Turn` atom (3d) and wrapper codegen (3e) remain
-before the Phase 4 fleet migration.
+is **complete** as of 2026-07-28: watermark plumbing (3a) and typed op
+identifiers are in, the `Invocation` view (3b) has flipped its CLI verbs
+behind golden, `invocation.drop` (3c) composes read-your-writes through
+the public surface alone, and the `Turn` atom (3d) added
+`turn.get`/`turn.list`/`turn.stream` with `--follow` riding the stream.
+Phase 3e closed decision D-3 with **no codegen**: shared data
+definitions in one workspace are the interface, so ADR-0006's held
+per-method-generation fallback is formally not taken. Next is the Phase 4
+fleet migration — ~17 verb flips, surveyed call point by call point in
+the [Phase-4 call-point inventory](docs/plans/active/2026-07-28-phase-4-call-point-inventory.md).
 The dogfood loop **lands PRs**: alongside the daily read-and-report
 `doc-drift` agent (fq-cron-scheduled; findings feed the
 issue tracker), the `github-watcher` adapter triggers
