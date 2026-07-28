@@ -25,7 +25,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
             .await
             .expect("init control-plane store"),
     );
-    drop(
+    let worker_store = Arc::new(
         fq_runtime::worker::store::WorkerStore::open(&paths.worker)
             .await
             .expect("init worker store"),
@@ -39,6 +39,25 @@ async fn operator_surface_matches_the_committed_snapshot() {
     let bus = fq_runtime::EventBus::connect(server.url())
         .await
         .expect("connect");
+    // A real runner, driving nothing: `invocation.drop` holds one as
+    // its liveness authority, and the snapshot describes the surface
+    // that daemon assembles — so it is assembled the same way here.
+    let runner = Arc::new(fq_runtime::ReducerRunner::new(
+        Arc::new(
+            fq_runtime::ReducerContext::builder()
+                .tools(Arc::new(fq_runtime::ToolRegistry::new()))
+                .build(),
+        ),
+        Arc::new(
+            fq_runtime::RunnerConfig::builder()
+                .bus(bus.clone())
+                .pricing(Arc::new(fq_runtime::PricingTable::empty()))
+                .store(worker_store)
+                .worker_id(fq_runtime::worker::WorkerId::new("snapshot-worker").unwrap())
+                .build(),
+        ),
+        fq_runtime::Harness::new(),
+    ));
     let registry = fq_cli::operator_registry(
         views,
         fq_runtime::watermark::Horizon::new(vec![watermark]),
@@ -47,6 +66,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
             bus,
             projection: projection_store,
             control_plane: control_plane_store,
+            runner,
         },
     )
     .expect("assemble the operator registry");

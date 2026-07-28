@@ -126,7 +126,7 @@ fn read_handlers_never_open_stores_directly() {
     // The sanctioned set is small and intentional; if this count moves,
     // the diff added or removed a marker — make sure the review saw it.
     assert_eq!(
-        sanctioned, 7,
+        sanctioned, 5,
         "sanctioned direct-store-open count changed — update this gate alongside the marker"
     );
 }

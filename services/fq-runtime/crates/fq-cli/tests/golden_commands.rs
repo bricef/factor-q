@@ -29,14 +29,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use fq_runtime::AgentId;
 use fq_runtime::bus::EventBus;
-use fq_runtime::control_plane::store::{ControlPlaneStore, OwnerStatus};
+use fq_runtime::control_plane::store::ControlPlaneStore;
 use fq_runtime::events::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
     DEAD_LETTER_SUBJECT_KEY, Event, EventPayload, FailureKind, FailurePhase, InvocationTotals,
-    TriggerSource, TriggeredPayload,
 };
-use fq_runtime::{AgentId, ProjectionStore};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -47,7 +46,6 @@ use uuid::Uuid;
 /// Fixture epoch: 2026-01-02 03:04:05 UTC (same instant as golden.rs).
 const BASE_MS: i64 = 1_767_323_045_000;
 
-const INV_INFLIGHT: &str = "3a000000-0000-7000-8000-000000000003";
 const AGENT_RESEARCHER: &str = "researcher";
 
 /// A guaranteed-closed port: proves a command needs no NATS.
@@ -63,34 +61,6 @@ fn stamp(mut event: Event, seq: u32, at_ms: i64) -> Event {
     event.envelope.event_id = fixed_uuid(seq);
     event.envelope.timestamp = chrono::DateTime::from_timestamp_millis(at_ms).unwrap();
     event
-}
-
-fn snapshot_for(agent: &str) -> fq_runtime::events::ConfigSnapshot {
-    fq_runtime::Agent::builder()
-        .id(agent)
-        .model("claude-haiku")
-        .system_prompt("You are a deterministic fixture.")
-        .build()
-        .unwrap()
-        .to_snapshot()
-}
-
-fn triggered(agent: &str, invocation: &str, seq: u32, at_ms: i64) -> Event {
-    let payload = EventPayload::Triggered(TriggeredPayload {
-        trigger_source: TriggerSource::Manual,
-        trigger_subject: None,
-        trigger_payload: serde_json::Value::String("golden fixture trigger".into()),
-        config_snapshot: snapshot_for(agent),
-    });
-    stamp(
-        Event::new(
-            AgentId::new(agent).unwrap(),
-            Uuid::parse_str(invocation).unwrap(),
-            payload,
-        ),
-        seq,
-        at_ms,
-    )
 }
 
 /// A dead-letter event exactly as both emitters shape it (the
@@ -491,87 +461,11 @@ fn golden_dead_letters_requeue_json() {
     );
 }
 
-// ------------------------------------------------------------------
-// invocation drop — the operator write over the bus. The published
-// event's id is minted at runtime, so it redacts to <UUID>; the
-// invocation and agent identities stay byte-exact.
-// ------------------------------------------------------------------
-
-fn seed_inflight_invocation(scratch: &Scratch) {
-    block_on(async {
-        let paths = fq_runtime::db::RuntimeDbPaths::under(scratch.dir.path());
-        let proj = ProjectionStore::open(&paths.projection)
-            .await
-            .expect("open projection");
-        proj.insert_event(&triggered(AGENT_RESEARCHER, INV_INFLIGHT, 7, BASE_MS))
-            .await
-            .expect("insert event");
-        let cp = ControlPlaneStore::open(&paths.control_plane)
-            .await
-            .expect("open control plane");
-        cp.upsert_invocation_ownership(
-            INV_INFLIGHT,
-            AGENT_RESEARCHER,
-            BASE_MS,
-            OwnerStatus::InFlight,
-        )
-        .await
-        .unwrap();
-    });
-}
-
-#[test]
-fn golden_invocation_drop_human() {
-    let server = fq_test_support::NatsServer::start();
-    let scratch = Scratch::new();
-    seed_inflight_invocation(&scratch);
-
-    let (exit, stdout, stderr) = run_fq(
-        &scratch,
-        server.url(),
-        &[
-            "invocation",
-            "drop",
-            INV_INFLIGHT,
-            "--reason",
-            "golden fixture drop",
-        ],
-    );
-    assert_eq!(exit, Some(0), "drop should exit 0; stderr:\n{stderr}");
-    assert_golden(
-        "invocation_drop_human",
-        &redact(&stdout, &scratch, server.url(), &[INV_INFLIGHT]),
-    );
-}
-
-#[test]
-fn golden_invocation_drop_json() {
-    let server = fq_test_support::NatsServer::start();
-    let scratch = Scratch::new();
-    seed_inflight_invocation(&scratch);
-
-    let (exit, stdout, stderr) = run_fq(
-        &scratch,
-        server.url(),
-        &[
-            "invocation",
-            "drop",
-            INV_INFLIGHT,
-            "--reason",
-            "golden fixture drop",
-            "--json",
-        ],
-    );
-    assert_eq!(
-        exit,
-        Some(0),
-        "drop --json should exit 0; stderr:\n{stderr}"
-    );
-    assert_golden(
-        "invocation_drop_json",
-        &redact(&stdout, &scratch, server.url(), &[INV_INFLIGHT]),
-    );
-}
+// The `invocation drop` goldens used to live here. They moved to
+// `golden.rs`'s edge fixture with the verb's Phase-4 flip: dropping is
+// now an `invocation.drop` command on the authenticated edge, which
+// this harness — a bare `fq` over seeded stores, no daemon — cannot
+// serve. The golden files are unchanged.
 
 // ------------------------------------------------------------------
 // down / down --now — the full daemon round-trip (the pattern from

@@ -1092,6 +1092,66 @@ fn check_golden_on(fixture: EdgeFixture, name: &str, args: &[&str], volatile_mar
     compare_golden(name, &actual);
 }
 
+/// True if `s[i..i + 36]` is a UUID (8-4-4-4-12 lowercase hex).
+fn is_uuid_at(bytes: &[u8], i: usize) -> bool {
+    if i + 36 > bytes.len() {
+        return false;
+    }
+    (0..36).all(|k| {
+        let c = bytes[i + k];
+        match k {
+            8 | 13 | 18 | 23 => c == b'-',
+            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+        }
+    })
+}
+
+/// Rewrite every runtime-minted UUID to `<UUID>`. Ids in `keep`
+/// (fixture identities) stay byte-exact, so the oracle still proves
+/// the right invocation was echoed back. Only the mutating goldens
+/// need this: the reads render fixture identities alone.
+fn redact_uuids(raw: &str, keep: &[&str]) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if is_uuid_at(bytes, i) {
+            let token = &raw[i..i + 36];
+            out.push_str(if keep.contains(&token) {
+                token
+            } else {
+                "<UUID>"
+            });
+            i += 36;
+        } else {
+            // UUIDs are pure ASCII, so scanning byte-wise is safe: any
+            // multi-byte char fails `is_uuid_at` and is copied whole.
+            let ch = raw[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// The drop goldens' harness (plan Phase 4, verb 18). Unlike the read
+/// goldens this one MUTATES, so it takes a private fixture — daemon,
+/// broker and stores all its own — and unlike them it needs a daemon
+/// at all: dropping is now an `invocation.drop` command on the edge,
+/// and the identities it prints come back from the gated read that
+/// follows. The event id is minted per run, so it redacts to `<UUID>`.
+fn check_golden_drop(name: &str, args: &[&str]) {
+    let fixture = EdgeFixture::start();
+    let (exit, stdout, stderr) = fixture.run_fq(args);
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
+    );
+    let actual = redact_uuids(&redact(&stdout, &Nats::Closed, &[]), &[INV_INFLIGHT]);
+    compare_golden(name, &actual);
+}
+
 #[test]
 fn golden_invocation_list_human() {
     check_golden_edge("invocation_list_human", &["invocation", "list"], &["ago"]);
@@ -1129,6 +1189,43 @@ fn golden_invocation_show_json() {
 // folded from the event log) with the opening prompt from
 // `invocation.get`. Byte-identical output across a change of substrate
 // is the whole claim, so the files below are untouched.
+
+// The drop goldens (plan Phase 4, verb 18): the same argv and the
+// same golden files, now a command on the edge instead of a control
+// request plus a client-side store write. They moved here from
+// `golden_commands.rs` because that harness runs `fq` against seeded
+// stores with no daemon, and a drop without a daemon is exactly what
+// this flip retires. Byte-identical output across the change of
+// substrate is the whole claim, so the files below are untouched.
+
+#[test]
+fn golden_invocation_drop_human() {
+    check_golden_drop(
+        "invocation_drop_human",
+        &[
+            "invocation",
+            "drop",
+            INV_INFLIGHT,
+            "--reason",
+            "golden fixture drop",
+        ],
+    );
+}
+
+#[test]
+fn golden_invocation_drop_json() {
+    check_golden_drop(
+        "invocation_drop_json",
+        &[
+            "invocation",
+            "drop",
+            INV_INFLIGHT,
+            "--reason",
+            "golden fixture drop",
+            "--json",
+        ],
+    );
+}
 
 #[test]
 fn golden_transcript_human() {

@@ -2443,7 +2443,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 )
             })?,
     );
-    // allow-direct-store-open: run_daemon hosts the control plane (writer).
     // Pool ceiling scales with the fan-out bound (#70): each
     // dispatcher-run invocation is WAL-chatty, plus headroom for the
     // sweepers. Startup recovery is NOT covered — it spawns one resume
@@ -2734,51 +2733,16 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         ));
     let worker: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
 
-    // Live-drop listener: this daemon's runner is the zero-lag liveness
-    // authority. Bare drops are rejected while active; --live arms the
-    // invocation-scoped boundary halt before the CLI publishes the audit event.
-    //
-    // ORDERING IS LOAD-BEARING: this must be listening before startup
-    // recovery re-drives anything (the `for inv in recoverable` loop
-    // below spawns detached resumes, which are immediately `is_active`).
-    // The CLI reads NATS `no responders` as "inactive/stuck, drop
-    // directly", so any window where an invocation is live and this
-    // subject is unowned silently defeats the guard — in exactly the
-    // post-crash restart operators reach for `drop` in.
-    let (drop_listener_shutdown_tx, mut drop_listener_shutdown_rx) =
-        tokio::sync::oneshot::channel::<()>();
-    let drop_bus = bus.clone();
-    let drop_runner = resume_runner.clone();
-    let drop_listener_handle = tokio::spawn(async move {
-        'resubscribe: loop {
-            let mut sub = match drop_bus.subscribe_control_drop().await {
-                Ok(sub) => sub,
-                Err(err) => {
-                    tracing::error!(error = %err, "failed to subscribe to control drop; retrying in 5s");
-                    tokio::select! {
-                        _ = &mut drop_listener_shutdown_rx => break 'resubscribe,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
-                    }
-                }
-            };
-            loop {
-                tokio::select! {
-                    _ = &mut drop_listener_shutdown_rx => break 'resubscribe,
-                    msg = sub.next() => {
-                        let Some(msg) = msg else { continue 'resubscribe };
-                        let Some(reply) = msg.reply.clone() else { continue };
-                        let response = match serde_json::from_slice::<InvocationDropRequest>(&msg.payload) {
-                            Ok(req) => handle_drop_request(&drop_runner, req),
-                            Err(err) => InvocationDropResponse { ok: false, message: format!("invalid drop request: {err}") },
-                        };
-                        if let Ok(body) = serde_json::to_vec(&response) {
-                            let _ = drop_bus.reply_control(reply.to_string(), body).await;
-                        }
-                    }
-                }
-            }
-        }
-    });
+    // Live-drop liveness now lives in the `invocation.drop` command
+    // handler on the edge (plan Phase 4, verb 18), which holds this same
+    // runner. The `fq.control.invocation.drop` listener that used to
+    // answer it is gone, and with it a failure class: core NATS reported
+    // "no responders" the instant nobody owned that subject, and the CLI
+    // read that as "inactive/stuck, drop directly" — so every window
+    // where the subject was unowned (notably a restart racing startup
+    // recovery, exactly when operators reach for `drop`) silently
+    // defeated the guard. An unreachable edge is a connection error, not
+    // a licence to bypass; the guard now fails closed by construction.
 
     // Drain the shared servers' notification streams for the life of
     // the daemon (ADR-0020): logs/progress fold into tracing, and a
@@ -3346,6 +3310,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 bus: bus.clone(),
                 projection: store.clone(),
                 control_plane: cp_store.clone(),
+                // The same runner the dispatcher and startup recovery
+                // drive invocations with — `invocation.drop` asks it
+                // whether the target is live, and arms its halt.
+                runner: resume_runner.clone(),
             },
         )?);
         let (edge_addr, edge_serving) = fq_edge::bind(&config.edge.bind, &identity, edge_registry)
@@ -3558,7 +3526,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = reload_shutdown_tx.send(());
     let _ = down_listener_shutdown_tx.send(());
     let _ = resume_listener_shutdown_tx.send(());
-    let _ = drop_listener_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
         Ok(Ok(Ok(()))) => println!("  projection consumer stopped cleanly."),
@@ -3678,11 +3645,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         Ok(Ok(())) => {}
         Ok(Err(err)) => tracing::error!(error = %err, "control-resume listener task panicked"),
         Err(_) => tracing::warn!("control-resume listener did not shut down within 5s"),
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(5), drop_listener_handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => tracing::error!(error = %err, "control-drop listener task panicked"),
-        Err(_) => tracing::warn!("control-drop listener did not shut down within 5s"),
     }
 
     // Shut down MCP server processes.
@@ -4421,58 +4383,6 @@ async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::R
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
-struct InvocationDropRequest {
-    invocation_id: String,
-    live: bool,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-struct InvocationDropResponse {
-    ok: bool,
-    message: String,
-}
-
-fn handle_drop_request(
-    runner: &fq_runtime::ReducerRunner<fq_runtime::Harness>,
-    req: InvocationDropRequest,
-) -> InvocationDropResponse {
-    let Ok(id) = uuid::Uuid::parse_str(&req.invocation_id) else {
-        return InvocationDropResponse {
-            ok: false,
-            message: format!("invalid invocation id `{}`", req.invocation_id),
-        };
-    };
-    if runner.is_active(&id) {
-        if !req.live {
-            return InvocationDropResponse {
-                ok: false,
-                message: format!(
-                    "invocation {id} is currently running; use --live to halt and drop it"
-                ),
-            };
-        }
-        // The arm can lose to the invocation finishing between the
-        // liveness check and here. Report that rather than letting the
-        // CLI publish a terminal event: the operator-recovered handler
-        // deliberately overrides any prior status, so a run that
-        // completed on its own would be archived as `failed`.
-        if !runner.request_halt(id) {
-            return InvocationDropResponse {
-                ok: false,
-                message: format!(
-                    "invocation {id} finished before the halt could be armed; \
-                     nothing dropped — re-check `fq invocation show {id}`"
-                ),
-            };
-        }
-    }
-    InvocationDropResponse {
-        ok: true,
-        message: "drop accepted".into(),
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
 struct InvocationResumeRequest {
     invocation_id: String,
     reason: Option<String>,
@@ -4736,34 +4646,26 @@ struct InvocationDropResult {
     reason: Option<String>,
 }
 
-/// Look up the agent for an invocation, build the
-/// `invocation.operator_recovered` event with `action="drop"`,
-/// publish it, and return the result struct. Extracted from the
-/// CLI handler so tests can drive the publish path without
-/// constructing `GlobalArgs` / config files.
-async fn publish_invocation_drop(
-    bus: &EventBus,
-    proj_store: &ProjectionStore,
-    control_store: &ControlPlaneStore,
-    invocation_id: &str,
-    reason: Option<&str>,
-) -> anyhow::Result<InvocationDropResult> {
-    let res = fq_runtime::control_plane::operator::drop_invocation(
-        bus,
-        proj_store,
-        control_store,
-        invocation_id,
-        reason,
-    )
-    .await?;
-    Ok(InvocationDropResult {
-        invocation_id: res.invocation_id,
-        agent_id: res.agent_id,
-        event_id: res.event_id,
-        reason: res.reason,
-    })
-}
+/// The projection's name for the event a drop publishes — the row the
+/// rendered `event_id` is read back from.
+const OPERATOR_RECOVERED_EVENT_TYPE: &str = "invocation_operator_recovered";
 
+/// Drop an invocation over the authenticated edge (plan Phase 4, verb
+/// 18). One client, two questions: the `invocation.drop` command, then
+/// the Invocation view read at the receipt's watermark.
+///
+/// The second question is not a nicety. A receipt references the atoms
+/// a command appended — never state (D3/P4) — so the agent and the
+/// event's identity, which this line has always printed, now come from
+/// a gated read rather than from a locally minted event. Composing the
+/// two also makes the closing "follow with `fq invocation show`"
+/// honest: the horizon releases the read only once the archive row and
+/// the owner flip are visible too.
+///
+/// Liveness lives entirely daemon-side now (see `arm_drop_halt`): the
+/// runner is asked and the halt armed inside the one handler that
+/// writes the event, so `--live` travels as an input, not as a
+/// separate round trip the client could skip.
 async fn invocation_drop(
     global: &GlobalArgs,
     id: &str,
@@ -4771,43 +4673,62 @@ async fn invocation_drop(
     live: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    // The drop writes to the control-plane store, so this path runs
-    // the legacy split if one is pending.
-    let db_paths = ensure_split_dbs(&config).await?;
-    // allow-direct-store-open: operator write path (`fq invocation drop`), not a read.
-    let proj_store = ProjectionStore::open_read_only(&db_paths.projection).await?;
-    // allow-direct-store-open: operator write path (`fq invocation drop`), not a read.
-    let control_store = ControlPlaneStore::open(&db_paths.control_plane).await?;
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    let client = edge_client_for(global).await?;
+    let receipt = invoke_on(
+        &client,
+        fq_ops::OpId::Verb(fq_ops::VerbId::Invocation(fq_ops::Invocation::Drop)),
+        serde_json::json!({
+            "invocation_id": id,
+            "reason": reason,
+            "live": live,
+        }),
+    )
+    .await?
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let receipt: fq_ops::Receipt = serde_json::from_value(receipt)?;
+    let event_seq = receipt
+        .watermark(fq_ops::Domain::Event)
+        .context("the drop receipt named no event — cannot confirm the drop")?;
 
-    // Fail closed: only the daemon can authoritatively say whether this
-    // invocation is active. It arms the halt before the terminal audit event
-    // is published, preventing a bare live drop from changing any state.
-    let request = InvocationDropRequest {
+    let detail = invoke_gated_on(
+        &client,
+        fq_ops::OpId::Get(fq_ops::Domain::Invocation),
+        serde_json::to_value(InvocationViewKey {
+            invocation_id: id.to_string(),
+            with_prompt: false,
+        })?,
+        Some(event_seq),
+    )
+    .await?
+    // The write already landed, so this is never "the drop failed" —
+    // say so, and name the sequence the operator can read it back at.
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "dropped invocation {id} at event sequence {event_seq}, but reading it back failed: {e}"
+        )
+    })?;
+    let detail: fq_runtime::views::InvocationDetailView = serde_json::from_value(detail)?;
+    let result = InvocationDropResult {
         invocation_id: id.to_string(),
-        live,
+        // An invocation whose only events are operator-issued has no
+        // agent of its own; the drop was published as `operator`, and
+        // that is what it is reported as.
+        agent_id: detail
+            .agent_id
+            .unwrap_or_else(|| AgentId::operator().into_inner()),
+        event_id: detail
+            .recent_events
+            .iter()
+            .find(|e| e.event_type == OPERATOR_RECOVERED_EVENT_TYPE)
+            .map(|e| e.event_id.clone())
+            .with_context(|| {
+                format!(
+                    "dropped invocation {id} at event sequence {event_seq}, but the drop \
+                     event is not among its recent events"
+                )
+            })?,
+        reason: reason.map(str::to_string),
     };
-    match bus
-        .request_control_drop(serde_json::to_vec(&request)?)
-        .await
-    {
-        Ok(bytes) => {
-            let response: InvocationDropResponse = serde_json::from_slice(&bytes)?;
-            if !response.ok {
-                anyhow::bail!(response.message);
-            }
-        }
-        // Core NATS reports no responders immediately when no daemon owns the
-        // runner. That is precisely the inactive/stuck case, whose existing
-        // direct-store drop remains valid without --live.
-        Err(err) if err.to_string().contains("no responders") => {}
-        Err(err) => return Err(err).context("drop liveness check failed"),
-    }
-
-    let result = publish_invocation_drop(&bus, &proj_store, &control_store, id, reason).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -5042,13 +4963,19 @@ mod invocation_tests {
         );
     }
 
+    /// The write behind `invocation.drop`, exercised where the CLI's
+    /// wrapper used to be. The wrapper went with the verb's flip to
+    /// the edge (plan Phase 4, verb 18); the behaviour it encoded —
+    /// which agent the event is attributed to, what an agent-less
+    /// owner row does, and that an unknown id publishes nothing — is
+    /// the daemon's contract now, so these drive
+    /// `operator::drop_invocation` directly.
     #[tokio::test]
-    async fn publish_invocation_drop_emits_operator_recovered_for_agent() {
+    async fn drop_invocation_emits_operator_recovered_for_agent() {
         // NATS-gated end-to-end of the publish path: seed a
         // ProjectionStore with one event so the agent lookup
-        // works, then call publish_invocation_drop and capture
-        // the event on the agent-scoped operator_recovered
-        // subject.
+        // works, then call drop_invocation and capture the event
+        // on the agent-scoped operator_recovered subject.
         let server = fq_test_support::NatsServer::start();
         let url = server.url().to_string();
 
@@ -5096,7 +5023,7 @@ mod invocation_tests {
             .expect("subscribe");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let result = publish_invocation_drop(
+        let result = fq_runtime::control_plane::operator::drop_invocation(
             &bus,
             &proj_store,
             &control_store,
@@ -5104,7 +5031,7 @@ mod invocation_tests {
             Some("test reason"),
         )
         .await
-        .expect("publish_invocation_drop");
+        .expect("drop_invocation");
         assert_eq!(result.agent_id, agent_id.as_str());
         assert_eq!(result.reason.as_deref(), Some("test reason"));
 
@@ -5125,7 +5052,7 @@ mod invocation_tests {
     }
 
     #[tokio::test]
-    async fn publish_invocation_drop_removes_agentless_owner() {
+    async fn drop_invocation_removes_agentless_owner() {
         let server = fq_test_support::NatsServer::start();
         let url = server.url().to_string();
         use tempfile::tempdir;
@@ -5147,9 +5074,15 @@ mod invocation_tests {
             .unwrap();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
 
-        let result = publish_invocation_drop(&bus, &proj_store, &control_store, &fake_inv, None)
-            .await
-            .expect("agent-less owner should drop");
+        let result = fq_runtime::control_plane::operator::drop_invocation(
+            &bus,
+            &proj_store,
+            &control_store,
+            &fake_inv,
+            None,
+        )
+        .await
+        .expect("agent-less owner should drop");
         assert_eq!(result.agent_id, "operator");
         assert!(
             control_store
@@ -5161,7 +5094,7 @@ mod invocation_tests {
     }
 
     #[tokio::test]
-    async fn publish_invocation_drop_errors_when_nothing_known() {
+    async fn drop_invocation_errors_when_nothing_known() {
         // No projection event *and* no coordination owner row: a truly
         // unknown id must still error rather than emit a phantom
         // operator-recovered event for something that never existed.
@@ -5178,9 +5111,15 @@ mod invocation_tests {
         let bus = EventBus::connect(&url).await.expect("connect NATS");
 
         let fake_inv = Uuid::now_v7().to_string();
-        let err = publish_invocation_drop(&bus, &proj_store, &control_store, &fake_inv, None)
-            .await
-            .expect_err("unknown invocation should error");
+        let err = fq_runtime::control_plane::operator::drop_invocation(
+            &bus,
+            &proj_store,
+            &control_store,
+            &fake_inv,
+            None,
+        )
+        .await
+        .expect_err("unknown invocation should error");
         assert!(format!("{err}").contains("not found"), "got: {err}");
     }
 
