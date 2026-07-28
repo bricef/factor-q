@@ -179,6 +179,9 @@ pub fn operator_registry(
             let projection = deps.projection.clone();
             let control_plane = deps.control_plane.clone();
             async move {
+                // The edge implementing an op IS the runtime boundary, not a
+                // call point to flip.
+                // allow-runtime-internals: daemon-side command handler.
                 let result = fq_runtime::control_plane::operator::drop_invocation(
                     &bus,
                     &projection,
@@ -188,6 +191,7 @@ pub fn operator_registry(
                 )
                 .await
                 .map_err(|e| match e {
+                    // allow-runtime-internals: daemon-side error mapping, same handler.
                     fq_runtime::control_plane::operator::DropError::UnknownInvocation(id) => {
                         WireError::NotFound {
                             op: "invocation.drop".into(),
