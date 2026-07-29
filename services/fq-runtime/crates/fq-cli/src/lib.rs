@@ -5029,6 +5029,7 @@ mod invocation_tests {
             &control_store,
             &invocation_id.to_string(),
             Some("test reason"),
+            None,
         )
         .await
         .expect("drop_invocation");
@@ -5080,6 +5081,7 @@ mod invocation_tests {
             &control_store,
             &fake_inv,
             None,
+            None,
         )
         .await
         .expect("agent-less owner should drop");
@@ -5116,6 +5118,7 @@ mod invocation_tests {
             &proj_store,
             &control_store,
             &fake_inv,
+            None,
             None,
         )
         .await

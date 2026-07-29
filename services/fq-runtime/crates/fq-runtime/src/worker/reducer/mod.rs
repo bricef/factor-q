@@ -26,6 +26,7 @@
 
 pub(crate) mod emit;
 pub mod harness;
+pub(crate) mod liveness;
 pub(crate) mod rounds;
 pub mod runner;
 pub mod types;

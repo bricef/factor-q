@@ -476,51 +476,12 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     /// The current Round per driven invocation (Phase 3d) — see
     /// [`super::rounds::RoundLedger`].
     rounds: super::rounds::RoundLedger,
-    /// Invocation ids this runner is DRIVING right now, registered
-    /// for the duration of every run/resume entry. The operator
-    /// resume precondition (#373) consults this: an invocation active
-    /// on this very runner is live, not crashed — and the process
-    /// driving it is the only zero-lag authority on that (the
-    /// coordination owner rows lag events and carry placeholder
-    /// worker ids for crashed runs). Worker-local by construction;
-    /// cross-worker liveness is the #107/#374 coordination story.
-    active: std::sync::Mutex<std::collections::HashSet<Uuid>>,
-    /// Invocation-scoped halt requests, consumed at the next step boundary.
-    /// Unlike daemon drain, these terminate only the named invocation after
-    /// the operator-drop event reconciles its durable row.
-    halt_requested: std::sync::Mutex<std::collections::HashSet<Uuid>>,
-}
-
-/// RAII entry in [`ReducerRunner::active`]: removed on drop, so a
-/// panic or early return can never leave a phantom "live" marker
-/// that would block operator resume forever.
-///
-/// It clears [`ReducerRunner::halt_requested`] on the same edge. A halt
-/// armed against an invocation that then completes, fails, or panics
-/// before reaching a step boundary would otherwise sit in the set for
-/// the daemon's lifetime — and because `resume` re-drives the *same*
-/// invocation id, a later drive of that id would consume the stale halt
-/// and suspend for no reason. Tying both to the drive's lifetime makes
-/// that unrepresentable.
-struct ActiveInvocation<'a> {
-    set: &'a std::sync::Mutex<std::collections::HashSet<Uuid>>,
-    halts: &'a std::sync::Mutex<std::collections::HashSet<Uuid>>,
-    rounds: &'a super::rounds::RoundLedger,
-    id: Uuid,
-}
-
-impl Drop for ActiveInvocation<'_> {
-    fn drop(&mut self) {
-        self.set
-            .lock()
-            .expect("active set poisoned")
-            .remove(&self.id);
-        self.halts
-            .lock()
-            .expect("halt set poisoned")
-            .remove(&self.id);
-        self.rounds.forget(self.id);
-    }
+    /// What this runner is driving right now, and the halts armed
+    /// against it — see [`super::liveness::LiveRegistry`]. The zero-lag
+    /// authority behind both operator preconditions: resume refuses a
+    /// live invocation (#373), and `invocation.drop` gates its kill
+    /// switch on it and resolves the invocation from it (#107).
+    live: super::liveness::LiveRegistry,
 }
 
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
@@ -532,51 +493,37 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             drain: DrainSignal::new(),
             pending_notices: std::sync::Mutex::new(std::collections::HashMap::new()),
             rounds: super::rounds::RoundLedger::default(),
-            active: std::sync::Mutex::new(std::collections::HashSet::new()),
-            halt_requested: std::sync::Mutex::new(std::collections::HashSet::new()),
+            live: super::liveness::LiveRegistry::default(),
         }
+    }
+
+    /// The agent this runner is driving `invocation_id` for, or `None`
+    /// when it is not driving it. Liveness *and* identity from the one
+    /// authority that has both with zero lag: a command that has
+    /// established the invocation is live can name it without asking a
+    /// store that may not have heard of it yet (#107).
+    pub fn active_agent(&self, invocation_id: &Uuid) -> Option<AgentId> {
+        self.live.agent_for(invocation_id)
     }
 
     /// Whether this runner is currently driving `invocation_id`. The
     /// operator-resume precondition's liveness authority (#373).
     pub fn is_active(&self, invocation_id: &Uuid) -> bool {
-        self.active
-            .lock()
-            .expect("active set poisoned")
-            .contains(invocation_id)
+        self.live.is_active(invocation_id)
     }
 
     /// Request a halt at the next step boundary. Returns false without
     /// changing state when this runner is not currently driving the invocation.
     pub fn request_halt(&self, invocation_id: Uuid) -> bool {
-        if !self.is_active(&invocation_id) {
-            return false;
-        }
-        self.halt_requested
-            .lock()
-            .expect("halt set poisoned")
-            .insert(invocation_id);
-        true
+        self.live.request_halt(invocation_id)
     }
 
-    fn take_halt(&self, invocation_id: Uuid) -> bool {
-        self.halt_requested
-            .lock()
-            .expect("halt set poisoned")
-            .remove(&invocation_id)
-    }
-
-    fn mark_active(&self, invocation_id: Uuid) -> ActiveInvocation<'_> {
-        self.active
-            .lock()
-            .expect("active set poisoned")
-            .insert(invocation_id);
-        ActiveInvocation {
-            set: &self.active,
-            halts: &self.halt_requested,
-            rounds: &self.rounds,
-            id: invocation_id,
-        }
+    fn mark_active(
+        &self,
+        invocation_id: Uuid,
+        agent_id: AgentId,
+    ) -> super::liveness::ActiveInvocation<'_> {
+        self.live.enter(invocation_id, agent_id, &self.rounds)
     }
 
     /// Queue a host notice for injection into `invocation_id`'s
@@ -726,9 +673,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
         let invocation_id = Uuid::now_v7();
-        let _active = self.mark_active(invocation_id);
-        let start = Instant::now();
         let agent_id: AgentId = agent.id().clone();
+        let _active = self.mark_active(invocation_id, agent_id.clone());
+        let start = Instant::now();
         let totals = InvocationTotals::default();
 
         info!(
@@ -1047,7 +994,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         llm: &dyn LlmClient,
         invocation_id: Uuid,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        let _active = self.mark_active(invocation_id);
+        let _active = self.mark_active(invocation_id, agent.id().clone());
         let inv_str = invocation_id.to_string();
         let state_row = self
             .config
@@ -1496,7 +1443,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // drain, but is invocation-scoped. The coordination consumer marks
             // the WAL row terminal from the operator-drop event, so this path
             // only stops the in-memory driver and emits no competing terminal.
-            if self.take_halt(invocation_id) {
+            if self.live.take_halt(invocation_id) {
                 info!(
                     agent_id = %agent_id,
                     invocation_id = %invocation_id,

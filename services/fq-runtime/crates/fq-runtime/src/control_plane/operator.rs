@@ -52,24 +52,43 @@ pub enum DropError {
     Bus(#[from] BusError),
 }
 
-/// Operator-issued drop. Looks up the agent for the given
-/// invocation from the projection, builds an
-/// `invocation.operator_recovered` event with
-/// `action="drop"` and `final_phase="failed"`, and publishes
-/// it. The control-plane's coordination consumer is
-/// responsible for writing the archive row and flipping the
-/// owner status.
+/// Operator-issued drop. Resolves the agent the invocation belongs to,
+/// builds an `invocation.operator_recovered` event with `action="drop"`
+/// and `final_phase="failed"`, and publishes it. The control-plane's
+/// coordination consumer is responsible for writing the archive row and
+/// flipping the owner status.
+///
+/// `driving_agent` is the agent a **live** runner on this daemon is
+/// driving the invocation for, straight from that runner (#107). It
+/// takes precedence over every durable source because it is the only
+/// one with zero lag: the projection is folded by an asynchronous
+/// consumer and nothing on the dispatch path writes an owner row, so an
+/// invocation that started moments ago is live in the runner and absent
+/// from both stores. Passing it makes the safety invariant structural —
+/// **a drop of a running invocation can never resolve to
+/// `UnknownInvocation`** — which matters because the caller has, by
+/// then, already armed the halt that stops the work. `None` means "no
+/// runner here is driving it", and resolution falls back to the durable
+/// record.
 pub async fn drop_invocation(
     bus: &EventBus,
     proj_store: &ProjectionStore,
     control_store: &ControlPlaneStore,
     invocation_id: &str,
     reason: Option<&str>,
+    driving_agent: Option<&AgentId>,
 ) -> Result<DropResult, DropError> {
-    // Older/synthetic recovery rows may have no projection event and therefore
-    // no agent. Clear those rows directly; normal rows retain the existing
-    // event-driven terminal/archive transition.
-    let agent_id_str = match proj_store.agent_id_for_invocation(invocation_id).await? {
+    // Resolution, freshest source first. A live runner's answer needs no
+    // corroboration and cannot be stale; only when no runner here is
+    // driving the invocation does the durable record get a say. Older or
+    // synthetic recovery rows may have no projection event and therefore
+    // no agent — those rows are cleared directly below; normal rows
+    // retain the existing event-driven terminal/archive transition.
+    let resolved_agent = match driving_agent {
+        Some(agent) => Some(agent.as_str().to_string()),
+        None => proj_store.agent_id_for_invocation(invocation_id).await?,
+    };
+    let agent_id_str = match resolved_agent {
         Some(agent_id) => agent_id,
         None => {
             // No projection event names an agent — this is either an
