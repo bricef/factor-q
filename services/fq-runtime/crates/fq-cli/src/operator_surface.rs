@@ -98,13 +98,23 @@ struct DropCommandInput {
 /// happen here — in the same handler that then writes the terminal
 /// event, leaving no window between deciding and acting.
 ///
+/// Returns **the agent the halted invocation belongs to**, when this
+/// daemon was driving it. That is not a convenience: the runner is the
+/// same authority that just justified stopping real work, and it is
+/// ahead of every durable record (the projection is folded
+/// asynchronously; nothing on the dispatch path writes an owner row).
+/// Carrying its answer forward is what makes the drop's resolution
+/// infallible whenever the halt was armed — so a call can never stop an
+/// invocation and then report it unknown (#107).
+///
 /// Refusals are `InvalidInput`: they are verdicts on this request (a
 /// bare drop of live work), not on the invocation's existence. The
 /// operator reads the message verbatim, so each one names its remedy.
+/// Every refusal here precedes the arm, so a refused drop stops nothing.
 fn arm_drop_halt(
     runner: &fq_runtime::ReducerRunner<fq_runtime::Harness>,
     input: &DropCommandInput,
-) -> Result<(), fq_edge::wire::WireError> {
+) -> Result<Option<fq_runtime::AgentId>, fq_edge::wire::WireError> {
     let refuse = |message: String| fq_edge::wire::WireError::InvalidInput {
         op: "invocation.drop".into(),
         message,
@@ -115,25 +125,26 @@ fn arm_drop_halt(
             input.invocation_id
         )));
     };
-    if runner.is_active(&id) {
-        if !input.live {
-            return Err(refuse(format!(
-                "invocation {id} is currently running; use --live to halt and drop it"
-            )));
-        }
-        // The arm can lose to the invocation finishing between the
-        // liveness check and here. Report that rather than publishing
-        // a terminal event: the operator-recovered handler
-        // deliberately overrides any prior status, so a run that
-        // completed on its own would be archived as `failed`.
-        if !runner.request_halt(id) {
-            return Err(refuse(format!(
-                "invocation {id} finished before the halt could be armed; \
-                 nothing dropped — re-check `fq invocation show {id}`"
-            )));
-        }
+    let Some(agent) = runner.active_agent(&id) else {
+        return Ok(None);
+    };
+    if !input.live {
+        return Err(refuse(format!(
+            "invocation {id} is currently running; use --live to halt and drop it"
+        )));
     }
-    Ok(())
+    // The arm can lose to the invocation finishing between the
+    // liveness check and here. Report that rather than publishing
+    // a terminal event: the operator-recovered handler
+    // deliberately overrides any prior status, so a run that
+    // completed on its own would be archived as `failed`.
+    if !runner.request_halt(id) {
+        return Err(refuse(format!(
+            "invocation {id} finished before the halt could be armed; \
+             nothing dropped — re-check `fq invocation show {id}`"
+        )));
+    }
+    Ok(Some(agent))
 }
 
 /// Build the daemon's operator registry: the Invocation view served
@@ -261,8 +272,12 @@ pub fn operator_registry(
             async move {
                 // Liveness first: a refused drop must leave no trace, so
                 // nothing is published until the halt is armed (or the
-                // invocation is known idle).
-                arm_drop_halt(&runner, &input)?;
+                // invocation is known idle). The arm hands back who the
+                // halted invocation belongs to, and the write below
+                // resolves from that rather than from a projection this
+                // daemon may be ahead of — an armed halt and a NotFound
+                // can never be the same answer (#107).
+                let driving_agent = arm_drop_halt(&runner, &input)?;
                 // The edge implementing an op IS the runtime boundary, not a
                 // call point to flip.
                 // allow-runtime-internals: daemon-side command handler.
@@ -272,6 +287,7 @@ pub fn operator_registry(
                     &control_plane,
                     &input.invocation_id,
                     input.reason.as_deref(),
+                    driving_agent.as_ref(),
                 )
                 .await
                 .map_err(|e| match e {

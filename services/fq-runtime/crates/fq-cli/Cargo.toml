@@ -62,6 +62,10 @@ uuid = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+# The drop-liveness suite implements `LlmClient` (an #[async_trait]
+# trait) with a model call that parks, so "the daemon is running this
+# invocation" is a state the test holds rather than a window it races.
+async-trait = { workspace = true }
 # The resume e2e drives a spawned daemon against the in-process mock
 # LLM server; the feature exists for exactly this (test builds only).
 fq-runtime = { workspace = true, features = ["read-service", "test-support"] }

@@ -576,6 +576,7 @@ mod tests {
             rt.cp_store(),
             &inv_str,
             Some("e2e drop scenario"),
+            None,
         )
         .await
         .expect("drop_invocation");
@@ -878,6 +879,7 @@ mod tests {
             rt.cp_store(),
             &inv_str,
             Some("race scenario: operator wins"),
+            None,
         )
         .await
         .expect("drop_invocation");
