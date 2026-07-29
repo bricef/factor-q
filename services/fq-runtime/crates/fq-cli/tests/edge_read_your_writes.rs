@@ -107,11 +107,58 @@ async fn drop_then_gated_get_sees_every_effect() {
             },
         }),
     );
-    bus.publish(&event).await.expect("publish triggered");
+    let triggered_seq = bus.publish(&event).await.expect("publish triggered");
 
     let client = fq_edge::EdgeClient::connect(&addr, fingerprint, &token)
         .await
         .expect("connect edge");
+
+    // Read-your-writes for the SETUP, not only for the assertion.
+    // This test used to command the drop straight after `publish`,
+    // and failed roughly one run in three under a full parallel
+    // `cargo test` sweep — passing every time in isolation — with
+    //
+    //     invocation.drop: NotFound { op: "invocation.drop",
+    //                                 message: "no invocation `<uuid>`" }
+    //
+    // The assumption that produced it: a successful publish makes the
+    // invocation actionable. It does not. What `publish` returns is
+    // the event atom's durability coordinate — "this event is in the
+    // log at sequence N" — not an execution receipt, and not a
+    // promise that any fold has seen it. The invocation materialises
+    // as a runtime entity later, when the daemon acts on the event:
+    // `drop_invocation` resolves it through the projection
+    // (`agent_id_for_invocation`, falling back to the control-plane
+    // owner row), and both stores are written by asynchronous durable
+    // JetStream consumers. Under load those consumers are
+    // descheduled, the drop's lookup runs first, and NotFound is the
+    // honest answer at that instant.
+    //
+    // So gate the setup at the coordinate publish handed back — the
+    // same discipline the verification read below applies to the
+    // receipt's watermark, simply applied before the command instead
+    // of after. The gated read is released only when the read horizon
+    // (every consumer feeding the Invocation fold) has applied
+    // sequence N, after which the invocation is visible to the drop
+    // by construction. A sleep or a retry loop would only make the
+    // race rarer and the suite slower — it would still be a race.
+    // `min_seq` is accepted on Get/List and deliberately refused on
+    // commands (fq-edge/src/server.rs), so a gated read is both the
+    // only way to express this ordering and the intended one.
+    client
+        .rpc
+        .invoke(
+            tarpc::context::current(),
+            fq_edge::InvokeRequest {
+                op: OpId::Get(Domain::Invocation),
+                version: 1,
+                input: json!({"invocation_id": invocation_id.to_string()}),
+                min_seq: Some(triggered_seq),
+            },
+        )
+        .await
+        .expect("rpc")
+        .expect("the invocation is materialised at the Triggered event's sequence");
 
     // The command: drop over the public surface. Its receipt is the
     // read coordinate.
