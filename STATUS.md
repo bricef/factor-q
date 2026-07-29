@@ -97,9 +97,10 @@ definitions in one workspace are the interface, so ADR-0006's held
 per-method-generation fallback is formally not taken. Next is the Phase 4
 fleet migration — ~17 verb flips, surveyed call point by call point in
 the [Phase-4 call-point inventory](docs/plans/active/2026-07-28-phase-4-call-point-inventory.md).
-The dogfood loop **lands PRs**: alongside the daily read-and-report
-`doc-drift` agent (fq-cron-scheduled; findings feed the
-issue tracker), the `github-watcher` adapter triggers
+The dogfood loop **lands PRs**: the daily `doc-drift` agent
+(fq-cron-scheduled) now opens its own docs-only PRs for drift it can
+verify and fix, and files issues for the rest; alongside it the
+`github-watcher` adapter triggers
 an `m0-issue-fix` agent on `ready`-labelled issues (agent definitions in
 `~/fq-dogfood`, outside the repo); the agent makes the change in a
 sandboxed working copy, validates with `just ci`, and opens a PR behind
