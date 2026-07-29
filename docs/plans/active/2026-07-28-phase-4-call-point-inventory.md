@@ -194,6 +194,17 @@ model amendment first)*
     flip (D-5 decides the exposed roster).
 17. Dashboard re-point over an attenuated read-only token; read
     service retires; `version`-probe freeze honoured explicitly.
+    **Resolves a live divergence**: `read_service.rs` still answers
+    the dashboard from `Views::transcript`, which stamps entries with
+    the WAL's `intent_at`, while the flipped CLI reads the Turn atom
+    and stamps `envelope.timestamp`. Since one is written before the
+    call and the other after it, the two surfaces disagree on the
+    same transcript's timestamps by the operation's duration until
+    this lands. Human rendering never prints the field, so the
+    divergence is only visible to `--json` consumers correlating
+    against WAL or log data. If intent-time is wanted back, it
+    belongs on the atom (cohort 4.2 shape work) — not joined across
+    the atom boundary at the edge.
 
 ## Hazards
 
