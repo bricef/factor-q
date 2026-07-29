@@ -127,4 +127,4 @@ For development setup and test tiers, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-factor-q is licensed under the [Business Source License 1.1](LICENSE). Personal, non-commercial use by individuals is free; any organizational or commercial use requires a commercial license — contact `licensing@factorq.top`. Each release converts to Apache-2.0 four years after publication.
+factor-q is licensed under the [Apache License 2.0](LICENSE) — free to use, modify, and distribute, commercially or otherwise, with an express patent grant.

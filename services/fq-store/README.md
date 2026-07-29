@@ -136,4 +136,4 @@ Library consumers that only need the in-process store enable neither.
 
 ## License
 
-[BUSL-1.1](../../LICENSE) — see the repository root.
+[Apache-2.0](../../LICENSE) — see the repository root.

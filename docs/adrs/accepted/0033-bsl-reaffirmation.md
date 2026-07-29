@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted (2026-07-27). Reaffirms the licensing decision in
+Accepted (2026-07-27). **Superseded in full by
+[ADR-0034](0034-apache-2-relicense.md) (2026-07-29):** factor-q
+relicensed to Apache-2.0 two days later, ahead of every revisit trigger
+listed below. The critique recorded here was upheld, not rebutted; the
+decision to hold BSL pending a tagged release was reversed on the grounds
+that the triggers all fire after the adoption cost has been paid.
+
+Reaffirms the licensing decision in
 [ADR-0022](0022-binary-distribution-and-licensing.md) §7; does not alter
 that ADR's distribution or release-pipeline decisions.
 

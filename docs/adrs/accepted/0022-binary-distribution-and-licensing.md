@@ -2,10 +2,18 @@
 
 ## Status
 
-Accepted (2026-06-27). Builds on
-[ADR-0011](0011-event-bus-and-persistence.md) (the NATS dependency that
-shapes the "getting started" story) and the CI-through-`just` convention
-in [AGENTS.md](../../../AGENTS.md).
+Accepted (2026-06-27). **The licensing half (§7) is superseded by
+[ADR-0034](0034-apache-2-relicense.md) (2026-07-29):** BSL 1.1, the
+personal-use carve-out, the `licensing@factorq.top` commercial gate, and
+the four-year Change Date are all overturned — factor-q is licensed under
+Apache-2.0, and the CLA prerequisite recorded in the Consequences below is
+discharged. The **binary distribution and release-pipeline** decisions
+(§§1–6: release matrix, `install.sh`, cargo-binstall, version stamping,
+`fq init`) remain in force.
+
+Builds on [ADR-0011](0011-event-bus-and-persistence.md) (the NATS
+dependency that shapes the "getting started" story) and the
+CI-through-`just` convention in [AGENTS.md](../../../AGENTS.md).
 
 ## Context
 

@@ -31,7 +31,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0019](accepted/0019-skill-format.md) | Skill format and discovery |
 | [0020](accepted/0020-mcp-notification-handling.md) | MCP server notifications — drained in the daemon, tools refresh between invocations |
 | [0021](accepted/0021-mcp-cost-control-and-memory-boundary.md) | Cost control for MCP services via `_meta` (budget hint + cost report); memory stays MCP; embedding boundary deferred to the storage design |
-| [0022](accepted/0022-binary-distribution-and-licensing.md) | Binary distribution (musl/Apple Silicon release matrix, install.sh, cargo-binstall) and BSL 1.1 licensing |
+| [0022](accepted/0022-binary-distribution-and-licensing.md) | Binary distribution (musl/Apple Silicon release matrix, install.sh, cargo-binstall) and BSL 1.1 licensing — licensing half (§7) superseded by [ADR-0034](accepted/0034-apache-2-relicense.md); distribution/release-pipeline half stands |
 | [0023](accepted/0023-storage-and-vector-foundation.md) | Storage, extraction, and vector index foundation (Phase 2 pillar #2) |
 | [0024](accepted/0024-separate-databases-storage-foundation.md) | Separate databases for the storage foundation's three stores (refines ADR-0023 F9) |
 | [0007](accepted/0007-inter-agent-communication.md) | Inter-agent communication — agents never touch the transport; one graph executor with two authoring surfaces (declared graphs + spawn as sugar); per-traversal budget with an ε cost floor; graduated from the April draft |
@@ -41,7 +41,8 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0029](accepted/0029-fuse-binding-crate.md) | FUSE binding crate for the harness-owned VFS is `fuse-backend-rs` (`fuse3` fallback), chosen by a blind bake-off; refines ADR-0028 |
 | [0030](accepted/0030-object-manifest-gc-back-off.md) | Object/manifest GC uses back-off (no generations) — objects get the block protocol's claim CAS + reserve-before-rely, but a writer meeting a claimed object retries rather than minting a generation; TLC-checked, refines ADR-0023 (F2) |
 | [0031](accepted/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; shared-secret-over-TLS auth as swappable middleware |
-| [0033](accepted/0033-bsl-reaffirmation.md) | BSL 1.1 stands after the 2026-07-25 cleanroom review's finding 1.4 — reaffirms [ADR-0022](accepted/0022-binary-distribution-and-licensing.md) §7 unamended; costs carried knowingly, the named-scenario gap left open, revisit triggers proposed |
+| [0033](accepted/0033-bsl-reaffirmation.md) | BSL 1.1 stands after the 2026-07-25 cleanroom review's finding 1.4 — reaffirms [ADR-0022](accepted/0022-binary-distribution-and-licensing.md) §7 unamended; costs carried knowingly, the named-scenario gap left open, revisit triggers proposed — superseded in full by [ADR-0034](accepted/0034-apache-2-relicense.md) |
+| [0034](accepted/0034-apache-2-relicense.md) | Relicensed to Apache-2.0 — factor-q becomes OSI open source; supersedes [ADR-0022](accepted/0022-binary-distribution-and-licensing.md) §7 and [ADR-0033](accepted/0033-bsl-reaffirmation.md); commercial gate and `licensing@` contact removed, CLA prerequisite discharged |
 
 ## Draft
 
