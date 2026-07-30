@@ -94,9 +94,15 @@ the public surface alone, and the `Turn` atom (3d) added
 `turn.get`/`turn.list`/`turn.stream` with `--follow` riding the stream.
 Phase 3e closed decision D-3 with **no codegen**: shared data
 definitions in one workspace are the interface, so ADR-0006's held
-per-method-generation fallback is formally not taken. Next is the Phase 4
-fleet migration — ~17 verb flips, surveyed call point by call point in
-the [Phase-4 call-point inventory](docs/plans/active/2026-07-28-phase-4-call-point-inventory.md).
+per-method-generation fallback is formally not taken. Phase 4, the fleet
+migration, is **underway**: cohort 4.0 (the pure flips over ops that
+already existed) landed 2026-07-28 — `fq invocation drop` (verb 18) and
+`fq invocation transcript` (verb 20) now speak only the edge — leaving
+**15 verb flips**, surveyed call point by call point in the
+[Phase-4 call-point inventory](docs/plans/active/2026-07-28-phase-4-call-point-inventory.md).
+A migration gate counts the operator surface's remaining legacy call
+points (10 at Phase-4 start, 8 now, zero at the end) so a flip cannot
+leave the old path behind as a fallback.
 The dogfood loop **lands PRs**: the daily `doc-drift` agent
 (fq-cron-scheduled) now opens its own docs-only PRs for drift it can
 verify and fix, and files issues for the rest; alongside it the
