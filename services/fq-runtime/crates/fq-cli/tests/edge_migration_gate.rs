@@ -47,7 +47,7 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// Raising it means a new legacy call point was introduced — that is
 /// a hand edit, visible in the diff, and needs a reason at the merge
 /// gate.
-const REMAINING: usize = 8;
+const REMAINING: usize = 6;
 
 /// Every `.rs` file under `dir`, recursively, in a stable order.
 fn rust_sources(dir: &Path) -> Vec<PathBuf> {

@@ -49,6 +49,23 @@ fn default_invocation_list_limit() -> i64 {
     50
 }
 
+/// Get identity for the Worker view.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct WorkerViewKey {
+    pub(crate) worker_id: String,
+}
+
+/// List selection for the Worker view — the typed, schema'd filter
+/// (never a query language). `fq workers list` used to pull the whole
+/// roster and sieve it in the client; the selection now travels with
+/// the request and the view applies it to its index.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct WorkerListFilter {
+    /// `alive` | `stale` | `shutdown`. Absent lists the whole roster.
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+}
+
 /// What the operator surface's command handlers write through: the
 /// daemon's bus and writer stores. Reads come from [`Views`]; the
 /// split keeps the read path visibly read-only.
@@ -147,10 +164,11 @@ fn arm_drop_halt(
     Ok(Some(agent))
 }
 
-/// Build the daemon's operator registry: the Invocation view served
-/// from [`Views`], reads gated at the read horizon (every consumer
-/// feeding the view's fold), and `invocation.drop` returning a
-/// receipt. Public for the operator-surface snapshot test.
+/// Build the daemon's operator registry: the Invocation and Worker
+/// views served from [`Views`], reads gated at the read horizon (every
+/// consumer feeding a view's fold), the Turn atom, and
+/// `invocation.drop` returning a receipt. Public for the
+/// operator-surface snapshot test.
 pub fn operator_registry(
     views: Arc<Views>,
     horizon: fq_runtime::watermark::Horizon,
@@ -163,6 +181,7 @@ pub fn operator_registry(
     // handles into 'static closures.
     let turn_bus = deps.bus.clone();
     let turn_views = views.clone();
+    let worker_views = views.clone();
 
     let mut registry = fq_edge::EdgeRegistry::new().with_read_gate(Arc::new(move |min_seq| {
         let horizon = horizon.clone();
@@ -247,6 +266,8 @@ pub fn operator_registry(
             },
         )
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
+
+    register_worker_view(&mut registry, worker_views)?;
 
     let decl = fq_ops::Command::new::<DropCommandInput>(
         fq_ops::Invocation::Drop,
@@ -354,6 +375,94 @@ pub fn operator_registry(
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
 
     Ok(registry)
+}
+
+/// The Worker view (plan Phase 4, verbs 21/22): Get answers with the
+/// fold — roster row plus the invocations the worker owns — and List
+/// answers with the index rows, narrowed by the request's typed
+/// filter. Its own function because `operator_registry` is an
+/// assembly point, not a place for one resource's wiring to live.
+fn register_worker_view(
+    registry: &mut fq_edge::EdgeRegistry,
+    views: Arc<Views>,
+) -> anyhow::Result<()> {
+    use fq_edge::wire::WireError;
+
+    let worker_get_views = views.clone();
+    let worker_list_views = views;
+
+    let decl = fq_ops::View::new::<
+        WorkerViewKey,
+        fq_runtime::views::WorkerDetailView,
+        fq_runtime::views::WorkerView,
+        WorkerListFilter,
+    >(
+        fq_ops::Domain::Worker,
+        "A worker: the fold of its registration, heartbeats and ownership.",
+        fq_ops::Stability::Experimental,
+    )
+    .description(
+        "Get answers with the roster row plus every invocation the worker \
+         owns; List answers with the roster rows alone. Neither derives a \
+         heartbeat age — the fold stays wall-clock-free, so a reader that \
+         wants an age computes it from `last_heartbeat_ms`.",
+    );
+    registry
+        .view::<WorkerViewKey, fq_runtime::views::WorkerDetailView, fq_runtime::views::WorkerView, WorkerListFilter, _, _, _, _>(
+            decl,
+            move |key: WorkerViewKey| {
+                let views = worker_get_views.clone();
+                async move {
+                    views
+                        .worker(&key.worker_id)
+                        .await
+                        .map_err(|e| WireError::Internal {
+                            message: e.to_string(),
+                        })?
+                        .ok_or_else(|| WireError::NotFound {
+                            op: "worker.get".into(),
+                            message: format!("no worker `{}`", key.worker_id),
+                        })
+                }
+            },
+            move |filter: WorkerListFilter| {
+                let views = worker_list_views.clone();
+                async move {
+                    let status = filter
+                        .status
+                        .as_deref()
+                        .map(parse_worker_status_filter)
+                        .transpose()?;
+                    let roster = views.workers().await.map_err(|e| WireError::Internal {
+                        message: e.to_string(),
+                    })?;
+                    // Applied here, not in the client: a filtered list
+                    // costs the caller only the rows it asked for.
+                    Ok(roster
+                        .into_iter()
+                        .filter(|w| status.is_none_or(|want| w.status == want.as_str()))
+                        .collect())
+                }
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
+
+    Ok(())
+}
+
+/// The Worker view's status filter, validated at the edge: an
+/// unknown value is a verdict on the request, so it comes back as
+/// `InvalidInput` naming the accepted set rather than as an empty
+/// list the caller would read as "no such workers".
+fn parse_worker_status_filter(
+    s: &str,
+) -> Result<fq_runtime::control_plane::store::WorkerStatus, fq_edge::wire::WireError> {
+    fq_runtime::control_plane::store::WorkerStatus::parse(s).ok_or_else(|| {
+        fq_edge::wire::WireError::InvalidInput {
+            op: "worker.list".into(),
+            message: format!("unknown status filter `{s}` — try alive | stale | shutdown"),
+        }
+    })
 }
 
 /// Cap on one stream batch and one list page.
