@@ -81,8 +81,8 @@ pub enum ViewsError {
 // name so a browser/JSON consumer never has to guess.
 // ============================================================
 
-/// One worker in the roster.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// One worker in the roster: the Worker view's **index** row (`worker.list`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct WorkerView {
     pub worker_id: String,
     pub host: String,
@@ -109,11 +109,11 @@ impl From<WorkerRow> for WorkerView {
     }
 }
 
-/// One worker plus the invocations it currently owns — the `fq workers
-/// show` / dashboard worker-detail view. `worker` is nested (not
-/// serde-flattened): flatten is JSON-only sugar that bincode — the read
-/// service's wire format — cannot serialize.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// One worker plus the invocations it currently owns: the Worker
+/// view's **state**, what `worker.get` answers with. `worker` is
+/// nested rather than serde-flattened, and stays that way — the
+/// nesting is `fq workers show --json`'s committed shape.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct WorkerDetailView {
     pub worker: WorkerView,
     /// Every ownership row for this worker (any status), newest first.

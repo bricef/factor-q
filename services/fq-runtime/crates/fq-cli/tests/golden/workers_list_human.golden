@@ -1,4 +1,7 @@
 worker                       status   hb-age     in-flight host
+<UUID>                       alive    <AGE>      0        <HOST>
+fixer                        alive    <AGE>      0        golden-host
+researcher                   alive    <AGE>      1        golden-host
 worker-alpha                 stale    stale      0        golden-host
-worker-beta                  alive    stale      0        golden-host
+worker-beta                  alive    <AGE>      0        golden-host
 worker-omega                 shutdown stale      0        golden-host

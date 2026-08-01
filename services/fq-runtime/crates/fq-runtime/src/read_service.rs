@@ -32,8 +32,7 @@ use crate::control_plane::store::OwnerStatus;
 use crate::health::{self, StreamHealth};
 use crate::views::{
     ActiveInvocationView, AgentCostDetailView, CostReport, EventView, ExecutionsView, FailureView,
-    InvocationDetailView, InvocationSummaryView, RecoveryView, Views, ViewsError, WorkerDetailView,
-    WorkerView,
+    InvocationDetailView, InvocationSummaryView, RecoveryView, Views, ViewsError,
 };
 
 /// Staleness / stuck-ness threshold used by [`ReadService::health`] —
@@ -135,8 +134,6 @@ pub trait ReadService {
     /// Currently-executing invocations from the worker WAL, longest-
     /// running first, with their open dispatches.
     async fn active_invocations() -> Result<Vec<ActiveInvocationView>, WireError>;
-    async fn workers() -> Result<Vec<WorkerView>, WireError>;
-    async fn worker(id: String) -> Result<Option<WorkerDetailView>, WireError>;
     /// `status` accepts `in_flight | ambiguous | completed | failed`.
     async fn invocations(
         status: Option<String>,
@@ -276,18 +273,6 @@ impl ReadService for ReadServer {
                 crate::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
             )
             .await?)
-    }
-
-    async fn workers(self, _: context::Context) -> Result<Vec<WorkerView>, WireError> {
-        Ok(self.views.workers().await?)
-    }
-
-    async fn worker(
-        self,
-        _: context::Context,
-        id: String,
-    ) -> Result<Option<WorkerDetailView>, WireError> {
-        Ok(self.views.worker(&id).await?)
     }
 
     async fn invocations(
@@ -555,8 +540,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = RuntimeDbPaths::under(dir.path());
         {
-            let cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
-            cp.register_worker("w1", "localhost", 100).await.unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
             let _ws = WorkerStore::open(&paths.worker).await.unwrap();
             let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
         }
@@ -586,21 +570,6 @@ mod tests {
         tokio::spawn(serving);
 
         let client = connect(&addr.to_string()).await.expect("connect");
-
-        let workers = client
-            .workers(context::current())
-            .await
-            .expect("rpc")
-            .expect("workers");
-        assert_eq!(workers.len(), 1);
-        assert_eq!(workers[0].worker_id, "w1");
-
-        let detail = client
-            .worker(context::current(), "w1".to_string())
-            .await
-            .expect("rpc")
-            .expect("worker");
-        assert_eq!(detail.expect("w1 exists").worker.worker_id, "w1");
 
         let active = client
             .active_invocations(context::current())

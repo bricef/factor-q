@@ -124,30 +124,44 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
 
     // A graceful shutdown must also *deregister* the worker: its
     // coordination row should read `shutdown`, not linger `alive` for
-    // the sweep to flip to `stale`. Checked through the product's own
-    // read-only view over the same cache DB (no NATS needed).
-    let workers = Command::new(fq_binary())
-        .args(["workers", "list", "--json"])
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
-        .env("FQ_NATS_URL", &nats_url)
-        .env("FQ_CACHE_DIR", scratch.join("cache"))
-        .env("FQ_AGENTS_DIR", scratch.join("agents"))
-        .output()
-        .expect("run fq workers list");
-    let workers_out = String::from_utf8_lossy(&workers.stdout).into_owned();
+    // the sweep to flip to `stale`.
+    let workers = worker_statuses(&scratch.join("cache"));
 
     let _ = std::fs::remove_dir_all(&scratch);
 
     assert!(
-        workers.status.success(),
-        "`fq workers list --json` failed: {}\n{workers_out}",
-        String::from_utf8_lossy(&workers.stderr),
-    );
-    assert!(
-        workers_out.contains("shutdown"),
+        workers.iter().any(|status| status == "shutdown"),
         "worker was not deregistered on graceful shutdown — \
-         expected a `shutdown` status in `fq workers list`:\n{workers_out}",
+         expected a `shutdown` row: {workers:?}",
     );
+}
+
+/// Every worker row's status, read straight from the daemon's
+/// control-plane store.
+///
+/// This used to shell out to `fq workers list --json`, which read the
+/// same file in-process. Verb 21 now speaks the daemon's edge (plan
+/// Phase 4), and these assertions are made *after* the daemon has
+/// exited — there is no edge left to ask, by construction. The
+/// coordination row was always the thing under test; the CLI was only
+/// ever the lens.
+fn worker_statuses(cache: &std::path::Path) -> Vec<String> {
+    tokio::runtime::Runtime::new()
+        .expect("worker-roster runtime")
+        .block_on(async {
+            let paths = fq_runtime::db::RuntimeDbPaths::under(cache);
+            let store =
+                fq_runtime::control_plane::store::ControlPlaneStore::open(&paths.control_plane)
+                    .await
+                    .expect("open control-plane store");
+            store
+                .list_workers()
+                .await
+                .expect("list workers")
+                .into_iter()
+                .map(|worker| worker.status.as_str().to_string())
+                .collect()
+        })
 }
 
 /// Poll `try_wait` until the child exits or the timeout elapses. Returns
@@ -239,15 +253,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
 
     // A clean `fq down` deregisters the worker: its coordination row
     // must read `shutdown`, not linger `alive`.
-    let workers = Command::new(fq_binary())
-        .args(["workers", "list", "--json"])
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
-        .env("FQ_NATS_URL", &nats_url)
-        .env("FQ_CACHE_DIR", scratch.join("cache"))
-        .env("FQ_AGENTS_DIR", scratch.join("agents"))
-        .output()
-        .expect("run fq workers list");
-    let workers_out = String::from_utf8_lossy(&workers.stdout).into_owned();
+    let workers = worker_statuses(&scratch.join("cache"));
 
     let _ = std::fs::remove_dir_all(&scratch);
 
@@ -272,8 +278,8 @@ fn daemon_stops_and_confirms_on_fq_down() {
         "dispatcher did not stop cleanly on down\n--- log ---\n{log}"
     );
     assert!(
-        workers_out.contains("shutdown"),
-        "worker was not deregistered on `fq down` — expected a `shutdown` status:\n{workers_out}"
+        workers.iter().any(|status| status == "shutdown"),
+        "worker was not deregistered on `fq down` — expected a `shutdown` row: {workers:?}"
     );
 }
 

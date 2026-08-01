@@ -859,13 +859,12 @@ impl EdgeFixture {
     /// hold.
     fn start() -> Self {
         // A private seed at the SAME fixed base as the shared fixture
-        // (the JSON goldens embed its literal timestamps), then worker
-        // heartbeats alone freshened to now: the live daemon's
-        // stale-worker sweep runs at startup, and ancient heartbeats
-        // would (correctly) reclassify in-flight work as ambiguous —
-        // an artifact of fixture age, not of the transport under
-        // test. No flipped golden renders a heartbeat, so the
-        // freshening is invisible to the outputs.
+        // (the JSON goldens embed its literal timestamps). Registration
+        // times are pinned; only heartbeats are freshened, and that
+        // happens after the daemon is up (see `freshen_live_workers`) —
+        // the live daemon's stale-worker sweep runs at startup, and an
+        // ancient heartbeat on the in-flight row's owner would
+        // (correctly) reclassify live work as ambiguous.
         let dir = tempfile::tempdir().expect("edge fixture dir");
         tokio::runtime::Runtime::new()
             .expect("edge fixture runtime")
@@ -878,16 +877,13 @@ impl EdgeFixture {
                 // The in-flight row's OWNER is the worker named after
                 // its agent; give it a live registration so the
                 // daemon's recovery sees a live owner and leaves the
-                // in-flight work alone. Registrations aren't rendered
-                // by the flipped goldens.
-                let now = chrono::Utc::now().timestamp_millis();
-                for worker in ["researcher", "fixer"] {
-                    cp.register_worker(worker, "golden-host", now)
+                // in-flight work alone. `fq workers list` renders these
+                // rows, so their registration times are pinned like
+                // every other seeded timestamp.
+                for (offset, worker) in [(10_000, "fixer"), (11_000, "researcher")] {
+                    cp.register_worker(worker, "golden-host", BASE_MS + offset)
                         .await
                         .expect("register owner worker");
-                    cp.heartbeat_worker(worker, now)
-                        .await
-                        .expect("freshen owner heartbeat");
                 }
             });
         std::fs::create_dir_all(dir.path().join("agents")).expect("agents dir");
@@ -989,6 +985,27 @@ impl EdgeFixture {
                 )
                 .await
                 .expect("re-assert in-flight row");
+
+                // The workers that should read `alive` get their
+                // heartbeat here — after the daemon's startup sweep,
+                // and moments before the verb under test runs — rather
+                // than before the daemon was spawned. A worker is alive
+                // only as long as its heartbeat is inside the 30s
+                // threshold, and fixture startup (two 30s deadlines,
+                // a broker, a daemon boot, a pairing) can outlast that
+                // under a loaded parallel run. Freshening last shrinks
+                // the exposure to the pairing plus one process spawn.
+                //
+                // `worker-beta` is freshened with them deliberately:
+                // seeded `alive` with a 2026-01-02 heartbeat, it is a
+                // contradiction the sweep exists to repair, and a
+                // fixture should not ask a golden to pin a state the
+                // system is actively correcting.
+                for worker in ["fixer", "researcher", "worker-beta"] {
+                    cp.heartbeat_worker(worker, chrono::Utc::now().timestamp_millis())
+                        .await
+                        .expect("freshen live worker heartbeat");
+                }
             });
 
         // The client's config names the daemon's actual address as
@@ -1134,6 +1151,127 @@ fn redact_uuids(raw: &str, keep: &[&str]) -> String {
     out
 }
 
+/// Epoch-ms at or after this are a runtime clock read, not one of the
+/// fixture's pinned constants: a full day past the fixture epoch, so
+/// no seeded offset can reach it and no real `now` can fall short.
+const WALL_CLOCK_FLOOR_MS: i64 = BASE_MS + 86_400_000;
+
+/// The host every seeded worker registers under. The daemon's own row
+/// carries `local_host_label()` instead — `$HOSTNAME` when the
+/// environment exports one — so it is machine-dependent.
+const FIXTURE_HOST: &str = "golden-host";
+
+/// The worker roster's volatile fields, redacted **by field** so that
+/// which rows exist, in what order, with which status and in-flight
+/// count all stay pinned — that set is the answer under test.
+///
+/// Three things in a live daemon's roster are minted at run time: the
+/// daemon's own worker id (its `runtime_id`), the host it reports, and
+/// every wall-clock-derived time — the heartbeat ages the human table
+/// renders, and the epoch-ms fields of the rows whose heartbeat is
+/// current. Line-level digit collapsing would take the in-flight
+/// counts with them, so each field is replaced on its own.
+fn redact_worker_roster(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for line in redact_uuids(raw, &[]).lines() {
+        out.push_str(&redact_worker_line(line));
+        out.push('\n');
+    }
+    out
+}
+
+fn redact_worker_line(line: &str) -> String {
+    // JSON form: one field per line, so the field name is the key.
+    if let Some((key, value)) = json_field(line) {
+        let redacted = match key {
+            "host" if value.trim_matches('"') != FIXTURE_HOST => Some("\"<HOST>\"".to_string()),
+            "registered_at_ms" | "last_heartbeat_ms"
+                if value
+                    .parse::<i64>()
+                    .is_ok_and(|ms| ms >= WALL_CLOCK_FLOOR_MS) =>
+            {
+                Some("<MS>".to_string())
+            }
+            _ => None,
+        };
+        if let Some(redacted) = redacted {
+            let prefix = line.len() - line.trim_start().len();
+            let comma = if line.ends_with(',') { "," } else { "" };
+            return format!("{}\"{key}\": {redacted}{comma}", " ".repeat(prefix));
+        }
+        return line.to_string();
+    }
+
+    // Human form: `worker status hb-age in-flight host`, each field but
+    // the last left-padded to a fixed width. Only a numeric age is
+    // wall-clock-derived — `stale` and `future` are verdicts and stay.
+    let fields: Vec<(usize, &str)> = field_spans(line);
+    if fields.len() < 5 || !["alive", "stale", "shutdown"].contains(&fields[1].1) {
+        return line.to_string();
+    }
+    let mut line = line.to_string();
+    let (host_at, host) = fields[4];
+    if host != FIXTURE_HOST {
+        line.replace_range(host_at..host_at + host.len(), "<HOST>");
+    }
+    let (age_at, age) = fields[2];
+    if age.ends_with(['s', 'm', 'h']) && age[..age.len() - 1].parse::<u64>().is_ok() {
+        // Replace the whole 10-wide column, not just the token: `0s`
+        // and `10s` differ in length, and the padding after them is
+        // what keeps the row byte-stable across runs.
+        let width = 10.min(line.len() - age_at);
+        line.replace_range(age_at..age_at + width, &format!("{:<width$}", "<AGE>"));
+    }
+    // Last, because widening the first field shifts every span after
+    // it: a redacted worker id is 30 columns shorter than the UUID it
+    // replaced, and an unpadded row would read as a rendering bug in
+    // `fq workers list` rather than as a redaction.
+    let (id_at, id) = fields[0];
+    if id == "<UUID>" {
+        line.replace_range(id_at..id_at + id.len(), &format!("{id:<28}"));
+    }
+    line
+}
+
+/// `("key", "value")` for a `  "key": value[,]` line, else `None`.
+fn json_field(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.trim().split_once(": ")?;
+    Some((
+        key.strip_prefix('"')?.strip_suffix('"')?,
+        value.trim_end_matches(','),
+    ))
+}
+
+/// Every whitespace-delimited field with its byte offset.
+fn field_spans(line: &str) -> Vec<(usize, &str)> {
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while let Some(start) = line[at..].find(|c: char| !c.is_whitespace()) {
+        let from = at + start;
+        let field = line[from..]
+            .split_whitespace()
+            .next()
+            .expect("non-space run");
+        spans.push((from, field));
+        at = from + field.len();
+    }
+    spans
+}
+
+/// The roster goldens' harness: [`check_golden_edge`] with the
+/// worker-specific field redaction (plan Phase 4, verb 21).
+fn check_golden_roster(name: &str, args: &[&str]) {
+    let fixture = EdgeFixture::start();
+    let (exit, stdout, stderr) = fixture.run_fq(args);
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
+    );
+    let actual = redact_worker_roster(&redact(&stdout, &Nats::Closed, &[]));
+    compare_golden(name, &actual);
+}
+
 /// The drop goldens' harness (plan Phase 4, verb 18). Unlike the read
 /// goldens this one MUTATES, so it takes a private fixture — daemon,
 /// broker and stores all its own — and unlike them it needs a daemon
@@ -1257,42 +1395,58 @@ fn golden_transcript_json() {
     );
 }
 
+// REVIEWED GOLDEN CHANGE (plan Phase 4, verb 21) — the one in this
+// migration, and here is why it is not a golden weakened to make a
+// flip pass.
+//
+// The previous expectation was three workers, one of them `alive`
+// with a heartbeat from 2026-01-02. That roster was wrong twice over:
+//
+//   * It described a store no daemon had ever touched. The daemon
+//     self-registers its own worker row at startup (`run_daemon`, and
+//     that has always been true) — so an operator running `fq workers
+//     list` against a live system has ALWAYS seen that row. The old
+//     golden could only be produced by reading the store with the
+//     daemon absent, which is not a state operators read from.
+//   * `alive` with a stale heartbeat is a contradiction the system
+//     actively repairs: the coordination consumer's sweep promotes
+//     such a row to `stale` on sight (first tick immediately, then
+//     every 10s). The fixture now freshens that worker's heartbeat
+//     instead, so the row is self-consistent rather than pinned
+//     mid-repair.
+//
+// Production output does not change with this flip. What changed is
+// that the TEST now runs a daemon, so its world finally contains what
+// production's always did. The listing still covers all three
+// statuses — `alive` (the daemon's own row, both owner workers,
+// `worker-beta`), `stale` (`worker-alpha`), `shutdown`
+// (`worker-omega`) — and the row set, its order, every status and
+// every in-flight count stay pinned; only runtime-minted identity and
+// wall-clock time are redacted, by field.
 #[test]
 fn golden_workers_list_human() {
-    check_golden(
-        "workers_list_human",
-        &["workers", "list"],
-        Nats::Closed,
-        &["ago", "age"],
-    );
+    check_golden_roster("workers_list_human", &["workers", "list"]);
 }
 
 #[test]
 fn golden_workers_list_json() {
-    check_golden(
-        "workers_list_json",
-        &["workers", "list", "--json"],
-        Nats::Closed,
-        &[],
-    );
+    check_golden_roster("workers_list_json", &["workers", "list", "--json"]);
 }
 
 #[test]
 fn golden_workers_show_human() {
-    check_golden(
+    check_golden_edge(
         "workers_show_human",
         &["workers", "show", "worker-alpha"],
-        Nats::Closed,
         &["ago", "age"],
     );
 }
 
 #[test]
 fn golden_workers_show_json() {
-    check_golden(
+    check_golden_edge(
         "workers_show_json",
         &["workers", "show", "worker-alpha", "--json"],
-        Nats::Closed,
         &[],
     );
 }

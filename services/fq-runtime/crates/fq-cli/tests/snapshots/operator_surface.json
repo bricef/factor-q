@@ -604,6 +604,199 @@
     }
   },
   {
+    "view": {
+      "description": "Get answers with the roster row plus every invocation the worker owns; List answers with the roster rows alone. Neither derives a heartbeat age — the fold stays wall-clock-free, so a reader that wants an age computes it from `last_heartbeat_ms`.",
+      "domain": "worker",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List selection for the Worker view — the typed, schema'd filter\n(never a query language). `fq workers list` used to pull the whole\nroster and sieve it in the client; the selection now travels with\nthe request and the view applies it to its index.",
+        "properties": {
+          "status": {
+            "default": null,
+            "description": "`alive` | `stale` | `shutdown`. Absent lists the whole roster.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WorkerListFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One worker in the roster: the Worker view's **index** row (`worker.list`).",
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "in_flight_count": {
+            "description": "Invocations this worker currently owns in a non-terminal state\n(`in_flight` or `ambiguous`). Filled by [`Views::workers`] /\n[`Views::worker`]; the bare `From<WorkerRow>` leaves it 0.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_heartbeat_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "registered_at_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "description": "`alive` / `stale` / `shutdown`, as recorded by the control-plane.",
+            "type": "string"
+          },
+          "worker_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_id",
+          "host",
+          "registered_at_ms",
+          "last_heartbeat_ms",
+          "status",
+          "in_flight_count"
+        ],
+        "title": "WorkerView",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for the Worker view.",
+        "properties": {
+          "worker_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_id"
+        ],
+        "title": "WorkerViewKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "InvocationSummaryView": {
+            "description": "One row in the invocation list: a coordination-ownership row, or (in\nthe merged index) an archive-only row flagged `archived`.",
+            "properties": {
+              "agent_id": {
+                "description": "From the projection; `None` when no event for the id has landed.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "archived": {
+                "description": "True when the row came from `invocation_archive` (no live\nownership row remains).",
+                "type": "boolean"
+              },
+              "assigned_at_ms": {
+                "description": "`assigned_at` for ownership rows; `archived_at` for archive-only\nrows.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "description": "When the invocation began: `assigned_at` (dispatch time — the\nclosest thing to a start the coordination store records) for\nownership rows, the archive's true `started_at` for archive-only\nrows. Unlike `assigned_at_ms`, this means the same thing on both\nrow kinds — the list surface's \"started\" column.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "status": {
+                "description": "`in_flight` / `completed` / `failed` / `ambiguous`, or the\narchive's `final_phase` for archive-only rows.",
+                "type": "string"
+              },
+              "summary": {
+                "default": null,
+                "description": "One-line operator summary (#216); see\n[`ActiveInvocationView::summary`].",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "worker_id": {
+                "description": "Empty for archive-only rows (the archive keeps no worker).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "worker_id",
+              "status",
+              "assigned_at_ms",
+              "started_at_ms",
+              "archived"
+            ],
+            "type": "object"
+          },
+          "WorkerView": {
+            "description": "One worker in the roster: the Worker view's **index** row (`worker.list`).",
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "in_flight_count": {
+                "description": "Invocations this worker currently owns in a non-terminal state\n(`in_flight` or `ambiguous`). Filled by [`Views::workers`] /\n[`Views::worker`]; the bare `From<WorkerRow>` leaves it 0.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "last_heartbeat_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "registered_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "status": {
+                "description": "`alive` / `stale` / `shutdown`, as recorded by the control-plane.",
+                "type": "string"
+              },
+              "worker_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "worker_id",
+              "host",
+              "registered_at_ms",
+              "last_heartbeat_ms",
+              "status",
+              "in_flight_count"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One worker plus the invocations it currently owns: the Worker\nview's **state**, what `worker.get` answers with. `worker` is\nnested rather than serde-flattened, and stays that way — the\nnesting is `fq workers show --json`'s committed shape.",
+        "properties": {
+          "owned": {
+            "description": "Every ownership row for this worker (any status), newest first.",
+            "items": {
+              "$ref": "#/$defs/InvocationSummaryView"
+            },
+            "type": "array"
+          },
+          "worker": {
+            "$ref": "#/$defs/WorkerView"
+          }
+        },
+        "required": [
+          "worker",
+          "owned"
+        ],
+        "title": "WorkerDetailView",
+        "type": "object"
+      },
+      "summary": "A worker: the fold of its registration, heartbeats and ownership.",
+      "version": 1
+    }
+  },
+  {
     "command": {
       "authority": {
         "scope": "invocation",
