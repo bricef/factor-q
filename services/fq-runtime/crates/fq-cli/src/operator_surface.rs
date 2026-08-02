@@ -55,6 +55,19 @@ pub(crate) struct WorkerViewKey {
     pub(crate) worker_id: String,
 }
 
+/// Get identity for the Agent view.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct AgentViewKey {
+    pub(crate) agent_id: String,
+}
+
+/// List selection for the Agent view. Empty, and declared anyway: a
+/// registry is a directory of definitions the daemon holds entirely in
+/// memory, so there is no narrowing worth a wire contract yet, and the
+/// declaration is where a future one would appear.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct AgentListFilter {}
+
 /// List selection for the Worker view — the typed, schema'd filter
 /// (never a query language). `fq workers list` used to pull the whole
 /// roster and sieve it in the client; the selection now travels with
@@ -66,9 +79,11 @@ pub(crate) struct WorkerListFilter {
     pub(crate) status: Option<String>,
 }
 
-/// What the operator surface's command handlers write through: the
-/// daemon's bus and writer stores. Reads come from [`Views`]; the
-/// split keeps the read path visibly read-only.
+/// What the operator surface's handlers reach for beyond [`Views`]:
+/// the bus and writer stores commands write through, the runner a
+/// command asks about liveness, and the live agent registry the Agent
+/// view reads. Everything a *fold* can answer still comes from
+/// `Views`; the split keeps that read path visibly read-only.
 pub struct OperatorDeps {
     pub bus: fq_runtime::EventBus,
     pub projection: Arc<fq_runtime::control_plane::projection::ProjectionStore>,
@@ -78,6 +93,12 @@ pub struct OperatorDeps {
     /// writes anything (#107). A command that can stop work needs the
     /// thing doing the work, not a projection of it.
     pub runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
+    /// The hot-swapped registry handle the dispatcher reads and `fq
+    /// reload` replaces — the Agent view's source. Not a store and not
+    /// a fold: agent definitions are configuration this daemon holds
+    /// in memory, and the whole point of verb 9's flip is that the
+    /// answer comes from what the daemon would actually run.
+    pub agents: fq_runtime::SharedRegistry,
 }
 
 /// Get identity for a Turn: its event-log sequence.
@@ -165,10 +186,10 @@ fn arm_drop_halt(
 }
 
 /// Build the daemon's operator registry: the Invocation and Worker
-/// views served from [`Views`], reads gated at the read horizon (every
-/// consumer feeding a view's fold), the Turn atom, and
-/// `invocation.drop` returning a receipt. Public for the
-/// operator-surface snapshot test.
+/// views served from [`Views`], the Agent view served from the live
+/// registry, reads gated at the read horizon (every consumer feeding a
+/// view's fold), the Turn atom, and `invocation.drop` returning a
+/// receipt. Public for the operator-surface snapshot test.
 pub fn operator_registry(
     views: Arc<Views>,
     horizon: fq_runtime::watermark::Horizon,
@@ -182,6 +203,7 @@ pub fn operator_registry(
     let turn_bus = deps.bus.clone();
     let turn_views = views.clone();
     let worker_views = views.clone();
+    let agent_registry = deps.agents.clone();
 
     let mut registry = fq_edge::EdgeRegistry::new().with_read_gate(Arc::new(move |min_seq| {
         let horizon = horizon.clone();
@@ -268,6 +290,7 @@ pub fn operator_registry(
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
 
     register_worker_view(&mut registry, worker_views)?;
+    register_agent_view(&mut registry, agent_registry)?;
 
     let decl = fq_ops::Command::new::<DropCommandInput>(
         fq_ops::Invocation::Drop,
@@ -465,6 +488,73 @@ fn parse_worker_status_filter(
     })
 }
 
+/// The Agent view (plan Phase 4, verb 9): Get answers with one
+/// definition in full, List with the registry snapshot's index — the
+/// loaded definitions and the files that failed to load.
+///
+/// Its source is the daemon's `SharedRegistry`, the same handle the
+/// dispatcher reads and `fq reload` swaps, which is the entire point:
+/// `fq agent list` used to read the caller's own disk and could
+/// disagree with what the daemon would actually run. The read gate
+/// applies as it does to every view, but a registry is not a fold of
+/// atoms — there is no sequence to wait for, and a caller passing
+/// `min_seq` is waiting on the projection horizon, not on this answer.
+fn register_agent_view(
+    registry: &mut fq_edge::EdgeRegistry,
+    agents: fq_runtime::SharedRegistry,
+) -> anyhow::Result<()> {
+    use fq_edge::wire::WireError;
+    use fq_runtime::agent_view::{AgentDetailView, AgentEntryView};
+
+    let agent_get = agents.clone();
+    let agent_list = agents;
+
+    let decl = fq_ops::View::new::<AgentViewKey, AgentDetailView, AgentEntryView, AgentListFilter>(
+        fq_ops::Domain::Agent,
+        "An agent definition, as the daemon's live registry holds it.",
+        fq_ops::Stability::Experimental,
+    )
+    .description(
+        "The answer is what this daemon would run right now — the registry `fq reload` \
+         swaps, not the definitions on the caller's disk. Get answers with one definition \
+         in full, including its system prompt. List answers with one row per definition \
+         file the registry knows: the agents it loaded, in id order, then the files it \
+         rejected, because a definition that failed to parse is the row an operator most \
+         needs to see and has no agent id to be listed under.",
+    );
+    registry
+        .view::<AgentViewKey, AgentDetailView, AgentEntryView, AgentListFilter, _, _, _, _>(
+            decl,
+            move |key: AgentViewKey| {
+                let agents = agent_get.clone();
+                async move {
+                    // Clone the inner Arc out of the lock so the wire
+                    // work never holds it — the dispatcher's discipline.
+                    let registry = agents.read().await.clone();
+                    // An id the validator rejects cannot be in the
+                    // registry, so it is not found rather than invalid.
+                    let loaded = fq_runtime::AgentId::new(&key.agent_id)
+                        .ok()
+                        .and_then(|id| registry.get_loaded(&id).map(AgentDetailView::from_loaded));
+                    loaded.ok_or_else(|| WireError::NotFound {
+                        op: "agent.get".into(),
+                        message: format!("no agent `{}` in the daemon's registry", key.agent_id),
+                    })
+                }
+            },
+            move |_filter: AgentListFilter| {
+                let agents = agent_list.clone();
+                async move {
+                    let registry = agents.read().await.clone();
+                    Ok(AgentEntryView::index(&registry))
+                }
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
+
+    Ok(())
+}
+
 /// Cap on one stream batch and one list page.
 const TURN_BATCH_CAP: usize = 64;
 const TURN_LIST_DEFAULT_LIMIT: u32 = 200;
@@ -629,169 +719,4 @@ async fn stream_turns(
         items,
         next_from_seq,
     })
-}
-
-/// Dial the configured daemon's edge with the stored pairing. One
-/// handle per verb, not per call: a verb that asks two questions
-/// (`invocation transcript` reads the prompt and the turns) pays for
-/// the TLS handshake and the token exchange once, and both answers come
-/// from the same daemon incarnation.
-pub(crate) async fn edge_client_for(global: &GlobalArgs) -> anyhow::Result<fq_edge::EdgeClient> {
-    let config = global.resolve_config()?;
-    let addr = config.edge.bind.clone();
-    let entry = stored_connection(&addr)?;
-    edge_client(
-        &addr,
-        parse_fingerprint_hex(&entry.fingerprint)?,
-        &entry.token,
-    )
-    .await
-}
-
-/// One authenticated call on an open client: the outer error is
-/// transport, the inner is the operation's own verdict — callers that
-/// care (show's not-found path) match it, everyone else surfaces it.
-pub(crate) async fn invoke_on(
-    client: &fq_edge::EdgeClient,
-    op: fq_ops::OpId,
-    input: serde_json::Value,
-) -> anyhow::Result<Result<serde_json::Value, fq_edge::wire::WireError>> {
-    invoke_gated_on(client, op, input, None).await
-}
-
-/// [`invoke_on`], watermarked: `min_seq` holds the answer until this
-/// daemon's fold has applied at least that sequence. It is the read
-/// half of read-your-writes — the number comes from a command's
-/// receipt (D4) — and it is a read-only argument: the edge refuses a
-/// command that carries one.
-pub(crate) async fn invoke_gated_on(
-    client: &fq_edge::EdgeClient,
-    op: fq_ops::OpId,
-    input: serde_json::Value,
-    min_seq: Option<u64>,
-) -> anyhow::Result<Result<serde_json::Value, fq_edge::wire::WireError>> {
-    let response = client
-        .rpc
-        .invoke(
-            tarpc::context::current(),
-            fq_edge::InvokeRequest {
-                op,
-                version: 1,
-                input,
-                min_seq,
-            },
-        )
-        .await
-        .context("edge rpc failed")?;
-    Ok(response.map(|r| r.output))
-}
-
-/// One authenticated edge call using the stored pairing for the
-/// configured daemon — the single-question form: dial, ask, hang up.
-pub(crate) async fn edge_invoke(
-    global: &GlobalArgs,
-    op: fq_ops::OpId,
-    input: serde_json::Value,
-) -> anyhow::Result<Result<serde_json::Value, fq_edge::wire::WireError>> {
-    invoke_on(&edge_client_for(global).await?, op, input).await
-}
-
-/// The transcript wants the whole conversation, not a page of it.
-/// `turn.list` pages at 200 by default, which would silently clip a
-/// long run's tail; the daemon walks the invocation's stream either
-/// way, so asking for everything costs the same scan and only makes
-/// the answer complete.
-const TRANSCRIPT_TURN_LIMIT: u32 = u32::MAX;
-
-/// The transcript snapshot, over the edge: the invocation's turns
-/// (`turn.list`) rendered through the turn→entry bridge, behind the
-/// opening prompt from the Invocation view (`invocation.get`). A
-/// transcript is a rendering composed over turns *plus* the
-/// invocation's prompt — a prompt is not an action within a Round, so
-/// it comes from the view, not the atom.
-///
-/// `None` means "nothing recorded for this id": no prompt and no
-/// turns, which is also what an id the daemon has never heard of looks
-/// like. Both cases are the caller's established not-found path, so
-/// they are not distinguished here.
-pub(crate) async fn edge_transcript_snapshot(
-    client: &fq_edge::EdgeClient,
-    invocation_id: &str,
-) -> anyhow::Result<Option<Vec<fq_runtime::transcript::TranscriptEntry>>> {
-    use fq_edge::wire::WireError;
-
-    let prompt = match invoke_on(
-        client,
-        fq_ops::OpId::Get(fq_ops::Domain::Invocation),
-        serde_json::to_value(InvocationViewKey {
-            invocation_id: invocation_id.to_string(),
-            with_prompt: true,
-        })?,
-    )
-    .await?
-    {
-        Ok(value) => {
-            serde_json::from_value::<fq_runtime::views::InvocationDetailView>(value)?.prompt
-        }
-        Err(WireError::NotFound { .. }) => None,
-        Err(e) => anyhow::bail!("{e}"),
-    };
-
-    let turns = match invoke_on(
-        client,
-        fq_ops::OpId::List(fq_ops::Domain::Turn),
-        serde_json::to_value(TurnFilter {
-            invocation_id: invocation_id.to_string(),
-            limit: Some(TRANSCRIPT_TURN_LIMIT),
-        })?,
-    )
-    .await?
-    {
-        Ok(value) => serde_json::from_value::<Vec<fq_runtime::turn::TurnState>>(value)?,
-        Err(WireError::NotFound { .. }) => Vec::new(),
-        Err(e) => anyhow::bail!("{e}"),
-    };
-
-    if prompt.is_none() && turns.is_empty() {
-        return Ok(None);
-    }
-    // Log order is chronological, and the prompt precedes the first
-    // turn by construction — no re-sort is needed to reproduce the
-    // WAL-backed timeline.
-    let mut entries = Vec::with_capacity(turns.len() + 1);
-    entries.extend(prompt.map(fq_runtime::transcript::TranscriptPrompt::into_entry));
-    entries.extend(
-        turns
-            .iter()
-            .map(fq_runtime::turn::TurnState::transcript_entry),
-    );
-    Ok(Some(entries))
-}
-
-/// One long-poll batch of an invocation's turns from the edge.
-/// `from_seq = u64::MAX` seeks the tail without consuming anything —
-/// the gap-free seam `--follow` pins before it reads the snapshot.
-pub(crate) async fn next_turn_batch(
-    client: &fq_edge::EdgeClient,
-    invocation_id: &str,
-    from_seq: u64,
-    max_wait_ms: u64,
-) -> anyhow::Result<Result<fq_edge::wire::StreamBatch, fq_edge::wire::WireError>> {
-    client
-        .rpc
-        .next_batch(
-            tarpc::context::current(),
-            fq_edge::NextBatchRequest {
-                op: fq_ops::OpId::Stream(fq_ops::Domain::Turn),
-                version: 1,
-                filter: serde_json::to_value(TurnFilter {
-                    invocation_id: invocation_id.to_string(),
-                    limit: None,
-                })?,
-                from_seq,
-                max_wait_ms,
-            },
-        )
-        .await
-        .context("edge rpc failed")
 }

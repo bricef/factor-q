@@ -674,22 +674,26 @@ fn legacy_single_file_layout_is_a_hint_not_a_read() {
 
 /// The flipped verbs' unpaired error is operator guidance, not a
 /// stack trace: no stored connection means "run fq connect", stated.
+/// Every newly flipped verb joins this list — `agent list` (verb 9) is
+/// the one whose old self needed no daemon at all.
 #[test]
 fn flipped_verb_without_a_pairing_says_how_to_pair() {
-    let xdg = tempfile::tempdir().expect("xdg dir");
-    let out = Command::new(env!("CARGO_BIN_EXE_fq"))
-        .args(["invocation", "list"])
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
-        .env("XDG_CONFIG_HOME", xdg.path())
-        .env("RUST_LOG", "off")
-        .output()
-        .expect("run fq binary");
-    assert_ne!(out.status.code(), Some(0));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("fq connect"),
-        "unpaired flipped verb must point at `fq connect`; got:\n{stderr}"
-    );
+    for verb in [["invocation", "list"], ["agent", "list"]] {
+        let xdg = tempfile::tempdir().expect("xdg dir");
+        let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+            .args(verb)
+            .env("FQ_CONFIG", "/nonexistent/fq.toml")
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("RUST_LOG", "off")
+            .output()
+            .expect("run fq binary");
+        assert_ne!(out.status.code(), Some(0), "{verb:?} must fail unpaired");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("fq connect"),
+            "unpaired {verb:?} must point at `fq connect`; got:\n{stderr}"
+        );
+    }
 }
 
 #[test]
@@ -854,10 +858,26 @@ struct EdgeFixture {
 }
 
 impl EdgeFixture {
-    /// The plain fixture: stores seeded, event log empty. Every golden
-    /// but the transcript ones renders folds, which the stores already
-    /// hold.
+    /// The plain fixture: stores seeded, event log empty, agent
+    /// directory empty. Every golden but the transcript ones renders
+    /// folds, which the stores already hold.
     fn start() -> Self {
+        Self::start_with_agents(&[])
+    }
+
+    /// The fixture with agent definitions on disk before the daemon
+    /// boots, so the daemon's live registry holds them (plan Phase 4,
+    /// verb 9). Definitions are `(file name, contents)`; a file that
+    /// fails to parse is left in deliberately, because the load-error
+    /// path is part of `fq agent list`'s contract.
+    ///
+    /// Declaring agents forces the daemon's pricing guarantee
+    /// (ADR-0004) to have something to check, so the config gains a
+    /// provider declaring their model with an explicit price. The
+    /// override keeps the fixture hermetic: coverage is satisfied from
+    /// config, never from the network fetch that `PricingTable::load`
+    /// attempts.
+    fn start_with_agents(definitions: &[(&str, &str)]) -> Self {
         // A private seed at the SAME fixed base as the shared fixture
         // (the JSON goldens embed its literal timestamps). Registration
         // times are pinned; only heartbeats are freshened, and that
@@ -886,11 +906,28 @@ impl EdgeFixture {
                         .expect("register owner worker");
                 }
             });
-        std::fs::create_dir_all(dir.path().join("agents")).expect("agents dir");
+        let agents_dir = dir.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agents dir");
+        for (name, contents) in definitions {
+            std::fs::write(agents_dir.join(name), contents).expect("agent definition");
+        }
 
         let broker = fq_test_support::NatsServer::start();
         let daemon_config = dir.path().join("fqd.toml");
-        std::fs::write(&daemon_config, "[edge]\nbind = \"127.0.0.1:0\"\n").expect("fqd.toml");
+        let pricing = if definitions.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n[providers.anthropic]\nmodels = [\"{FIXTURE_AGENT_MODEL}\"]\n\n\
+                 [providers.anthropic.pricing.\"{FIXTURE_AGENT_MODEL}\"]\n\
+                 input_per_mtok = 1.0\noutput_per_mtok = 5.0\n"
+            )
+        };
+        std::fs::write(
+            &daemon_config,
+            format!("[edge]\nbind = \"127.0.0.1:0\"\n{pricing}"),
+        )
+        .expect("fqd.toml");
         let log_path = dir.path().join("daemon.log");
         let log = std::fs::File::create(&log_path).expect("daemon log");
         let log_err = log.try_clone().expect("log handle");
@@ -1064,10 +1101,44 @@ impl EdgeFixture {
     }
 
     fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        self.run_fq_with_agents_dir(args, &self.agents_dir())
+    }
+
+    fn agents_dir(&self) -> std::path::PathBuf {
+        self.dir.path().join("agents")
+    }
+
+    /// Stop the daemon and wait for it, leaving the pairing and the
+    /// stores behind — a client that is configured and paired, talking
+    /// to nothing.
+    fn stop_daemon(&mut self) {
+        if let Some(mut daemon) = self.daemon.take() {
+            unsafe {
+                libc::kill(daemon.id() as i32, libc::SIGTERM);
+            }
+            let _ = daemon.wait();
+        }
+    }
+
+    /// The client's own agents directory is named explicitly, and by
+    /// default it is the very directory the daemon loaded from. That
+    /// is the A/B this fixture exists to make honest for verb 9:
+    /// nothing about the harness changes across the flip, so a golden
+    /// that held when `fq agent list` read the disk and still holds
+    /// when it reads the daemon's registry is comparing like with
+    /// like. Point it somewhere else and the two answers separate —
+    /// which is exactly what [`agent_list_reads_the_daemon_not_the_client_disk`]
+    /// asserts.
+    fn run_fq_with_agents_dir(
+        &self,
+        args: &[&str],
+        agents_dir: &std::path::Path,
+    ) -> (Option<i32>, String, String) {
         let out = Command::new(env!("CARGO_BIN_EXE_fq"))
             .args(args)
             .env("FQ_CONFIG", &self.client_config)
             .env("FQ_CACHE_DIR", self.dir.path())
+            .env("FQ_AGENTS_DIR", agents_dir)
             .env("XDG_CONFIG_HOME", self.xdg.path())
             .env("RUST_LOG", "off")
             .env("NO_COLOR", "1")
@@ -1448,5 +1519,150 @@ fn golden_workers_show_json() {
         "workers_show_json",
         &["workers", "show", "worker-alpha", "--json"],
         &[],
+    );
+}
+
+// ------------------------------------------------------------------
+// The Agent view goldens (plan Phase 4, verb 9).
+//
+// Verb 9 shipped with no goldens at all, so these are written FIRST,
+// against the CLI's own disk read, and only then is the verb moved
+// onto the daemon's live registry. Without that order "byte-identical"
+// is a claim no test can refute.
+// ------------------------------------------------------------------
+
+/// The model the fixture's definitions name. Declared in the daemon's
+/// config with an explicit price so the ADR-0004 pricing guarantee is
+/// satisfied offline. Spelled out again inside each definition below —
+/// they are `&'static str` and cannot interpolate it — so the daemon
+/// refusing to start is what a mismatch looks like.
+const FIXTURE_AGENT_MODEL: &str = "claude-haiku-4-5";
+
+/// Two definitions the registry loads and one it rejects. The reject
+/// is a plain markdown file with no frontmatter — the most ordinary
+/// way an agents directory acquires one (someone drops a note in it) —
+/// and its error text is fixed, so it belongs in a golden.
+fn agent_definitions() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "researcher.md",
+            "---\nname: researcher\nmodel: claude-haiku-4-5\ntools:\n  - builtin__exec\n\
+             budget: 1.00\n---\n\nYou research.\n",
+        ),
+        (
+            "fixer.md",
+            "---\nname: fixer\nmodel: claude-haiku-4-5\ntools:\n  - builtin__exec\n  \
+             - builtin__file_read\n---\n\nYou fix.\n",
+        ),
+        ("notes.md", "# Scratch notes\n\nNot an agent definition.\n"),
+    ]
+}
+
+/// Run `fq agent list` against a fixture whose daemon loaded
+/// `definitions`, with the agents directory redacted (it is a
+/// tempdir, and the rendered rows name it in every `path=`).
+fn check_golden_agents(name: &str, args: &[&str], definitions: &[(&str, &str)]) {
+    let fixture = EdgeFixture::start_with_agents(definitions);
+    let (exit, stdout, stderr) = fixture.run_fq(args);
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq {args:?} should exit 0; stderr:\n{stderr}"
+    );
+    let agents_dir = fixture.agents_dir().display().to_string();
+    compare_golden(name, &stdout.replace(&agents_dir, "<AGENTS_DIR>"));
+}
+
+// REVIEWED GOLDEN CHANGE (plan Phase 4, verb 9) — one line, and only
+// after both goldens were first captured against the old disk read.
+//
+// Every agent row and the whole error block are byte-identical across
+// the flip. What changed is the provenance line, because the old one
+// named a directory: `Loaded 2 agent(s) from <dir>:` and `No agents
+// found in <dir>`. There is no directory in the daemon's answer, and
+// printing the CLIENT's configured path over rows the DAEMON computed
+// would reintroduce exactly the skew this flip removes — the client's
+// path can name a directory the daemon never read. The rows carry
+// `path=` each, so the "which file?" question is still answered, per
+// row, by the daemon.
+#[test]
+fn golden_agent_list_human() {
+    check_golden_agents("agent_list_human", &["agent", "list"], &agent_definitions());
+}
+
+/// An agents directory with nothing in it.
+#[test]
+fn golden_agent_list_empty_human() {
+    check_golden_agents("agent_list_empty_human", &["agent", "list"], &[]);
+}
+
+/// The skew, gone by construction: the client's own agents directory
+/// holds a different definition entirely, and the listing reports the
+/// daemon's registry regardless. Before the flip this test would have
+/// printed `client-only` — that disagreement, between what an operator
+/// reads and what the daemon would run, is what verb 9 was moved for.
+#[test]
+fn agent_list_reads_the_daemon_not_the_client_disk() {
+    let fixture = EdgeFixture::start_with_agents(&agent_definitions());
+    let elsewhere = fixture.dir.path().join("client-agents");
+    std::fs::create_dir_all(&elsewhere).expect("client agents dir");
+    std::fs::write(
+        elsewhere.join("client-only.md"),
+        "---\nname: client-only\nmodel: claude-haiku-4-5\n---\n\nOnly on the client's disk.\n",
+    )
+    .expect("client-only definition");
+
+    let (exit, stdout, stderr) = fixture.run_fq_with_agents_dir(&["agent", "list"], &elsewhere);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+    assert!(
+        !stdout.contains("client-only"),
+        "the client's own directory must not be read; got:\n{stdout}"
+    );
+    for daemon_side in ["researcher", "fixer", "notes.md"] {
+        assert!(
+            stdout.contains(daemon_side),
+            "the daemon's registry must be what is listed ({daemon_side}); got:\n{stdout}"
+        );
+    }
+}
+
+/// What the flip costs, stated: the listing now needs the daemon that
+/// holds the registry, so "I could not ask" is exit 1 with an
+/// operator-facing reason — never an empty listing, which would read
+/// as "this daemon has no agents".
+///
+/// This test replaces a golden that pinned `Agent directory <dir> does
+/// not exist (resolved: <dir>)`. That message described the CLI
+/// reading its own configured path, and there is no longer a path to
+/// read; it was captured before the flip (its golden is in this
+/// commit's history) and is answered here by the behaviour that took
+/// its place.
+#[test]
+fn agent_list_without_a_daemon_reports_why() {
+    let mut fixture = EdgeFixture::start_with_agents(&agent_definitions());
+    // Paired first, so this is not the unpaired path — the client has
+    // a connection and the daemon behind it is gone.
+    let (exit, stdout, _) = fixture.run_fq(&["agent", "list"]);
+    assert_eq!(
+        exit,
+        Some(0),
+        "the fixture pairs and lists before the daemon is stopped"
+    );
+    assert!(stdout.contains("researcher"), "got: {stdout}");
+
+    fixture.stop_daemon();
+    let (exit, stdout, stderr) = fixture.run_fq(&["agent", "list"]);
+    assert_eq!(
+        exit,
+        Some(1),
+        "a daemon-less listing must fail loudly; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a failed listing must not print a partial answer; got:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("could not reach the edge at") && stderr.contains("Connection refused"),
+        "the failure must name the edge it could not reach; got:\n{stderr}"
     );
 }

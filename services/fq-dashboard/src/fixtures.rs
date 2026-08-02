@@ -575,6 +575,7 @@ fn agents_view() -> fq_runtime::read_service::AgentsView {
             trigger: trigger.map(String::from),
             tool_count: tools,
             prompt_bytes: prompt,
+            path: format!("/home/fq/agents/{id}.md"),
         }
     };
     fq_runtime::read_service::AgentsView {

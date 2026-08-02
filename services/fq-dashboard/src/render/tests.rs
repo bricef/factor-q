@@ -670,6 +670,7 @@ fn agents_list_links_definitions_and_surfaces_load_errors() {
                 trigger: Some("m0-issue-fix".to_string()),
                 tool_count: 3,
                 prompt_bytes: 4_212,
+                path: "/agents/m0-issue-fix.md".to_string(),
             },
             AgentSummaryView {
                 agent_id: "doc-drift".to_string(),
@@ -678,6 +679,7 @@ fn agents_list_links_definitions_and_surfaces_load_errors() {
                 trigger: None,
                 tool_count: 1,
                 prompt_bytes: 900,
+                path: "/agents/doc-drift.md".to_string(),
             },
         ],
         errors: vec!["failed to parse /agents/broken.md: missing model".to_string()],

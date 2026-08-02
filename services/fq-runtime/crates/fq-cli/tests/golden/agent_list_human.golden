@@ -1,0 +1,6 @@
+Loaded 2 agent(s) from the daemon's registry:
+  fixer                          model=claude-haiku-4-5 tools=2 path=<AGENTS_DIR>/fixer.md
+  researcher                     model=claude-haiku-4-5 tools=1 path=<AGENTS_DIR>/researcher.md
+
+Errors (1):
+  failed to parse <AGENTS_DIR>/notes.md: missing or malformed YAML frontmatter

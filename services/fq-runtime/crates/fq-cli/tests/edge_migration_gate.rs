@@ -9,13 +9,20 @@
 //! re-derive from the diff. A flip that leaves the old path in place
 //! as a fallback passes its goldens — it does not pass this.
 //!
-//! Two legacy paths are counted:
+//! Three legacy paths are counted:
 //!
 //! * `open_views(` — the CLI opening projection stores for itself.
 //!   Its definition counts too, so the terminal state is a clean zero:
 //!   the last caller's departure takes the helper with it.
 //! * `control_plane::operator::` — reaching into runtime internals
 //!   directly instead of invoking a declared op.
+//! * `AgentRegistry::load_from_directory` — a client verb loading the
+//!   agents directory for itself. Not runtime *internals*, which is
+//!   why the first two patterns were blind to it, but the same class
+//!   of bug and a worse one: the daemon's registry is hot-swapped by
+//!   `fq reload`, so a client that reads the disk answers with
+//!   definitions the daemon may never have loaded (plan Phase 4,
+//!   verb 9).
 //!
 //! **Marked uses are exempt.** fq-cli is still both the thin client
 //! and the daemon host (the binary split is Phase 5), so the same
@@ -36,7 +43,11 @@ use std::path::{Path, PathBuf};
 
 /// Legacy paths this gate counts. Substring match on production
 /// source lines.
-const LEGACY: &[&str] = &["open_views(", "control_plane::operator::"];
+const LEGACY: &[&str] = &[
+    "open_views(",
+    "control_plane::operator::",
+    "AgentRegistry::load_from_directory",
+];
 
 /// Marker exempting a legitimate daemon-side use, on the line or the
 /// line above.
@@ -47,7 +58,16 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// Raising it means a new legacy call point was introduced — that is
 /// a hand edit, visible in the diff, and needs a reason at the merge
 /// gate.
-const REMAINING: usize = 6;
+///
+/// It went 6 -> 7 once, with verb 9: not a regression but a widening
+/// of what is counted. Adding `AgentRegistry::load_from_directory`
+/// admitted four sites — two daemon-side (marked), verb 9's listing
+/// (removed by the flip) and verb 5's in-process `fq trigger`, which
+/// is the one that raised the count. That verb runs a whole second
+/// execution path in the client, disk registry included, and the plan
+/// retires it (decision D-1); a gate that did not count it was
+/// under-reporting the backlog.
+const REMAINING: usize = 7;
 
 /// Every `.rs` file under `dir`, recursively, in a stable order.
 fn rust_sources(dir: &Path) -> Vec<PathBuf> {

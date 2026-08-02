@@ -17,6 +17,7 @@
 //! for the implementation plan.
 
 pub mod agent;
+pub mod agent_view;
 pub mod bus;
 pub mod config;
 pub mod db;
