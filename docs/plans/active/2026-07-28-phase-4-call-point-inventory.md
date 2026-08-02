@@ -29,7 +29,7 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 6 | `fq trigger --via-nats` | NATS publish `fq.trigger.<agent>` | `trigger_via_nats_human` | `trigger.publish` command | enum + fixture exist; not registered |
 | 7 | `fq dead-letters list` | bus + `operator::list_dead_letters` ephemeral scan | `dead_letters_list_*` | `dead_letter.list` atom | no |
 | 8 | `fq dead-letters requeue` | bus + `operator::requeue_dead_letter` | `dead_letters_requeue_*` | `dead_letter.requeue` command | no enum variant |
-| 9 | `fq agent list` | CLI's own disk read (skew vs daemon's live registry) | — | `agent.list` view | no — transplant from `ReadService::agents` |
+| 9 | `fq agent list` | CLI's own disk read (skew vs daemon's live registry) | **created in 4.1** (none existed) | `agent.list` view | ✅ **DONE 2026-08-01** |
 | 10 | `fq agent validate` | local file parse | — | stays local | n/a |
 | 11 | `fq events tail` | core-NATS subscribe, silent-drop, non-resumable | — | `event.stream` atom | no |
 | 12 | `fq events query` | direct Views → `Views::events` | `events_query_*` | `event.list` atom | no |
@@ -41,46 +41,62 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 18 | `fq invocation drop` | **four legacy paths at once**: legacy-split migration + control request + direct store opens + local `operator::drop_invocation` (`CLI:4764-4813`) | `invocation_drop_*` | `invocation.drop` — **op exists**; flip = delete the local path, move `--live` halting daemon-side | ✅ **DONE 2026-07-28** |
 | 19 | `fq invocation resume` | NATS request/reply `fq.control.invocation.resume` | (invocation_resume.rs suite) | `invocation.resume` command | no — **needs a domain-model amendment** (not among the committed six verbs) |
 | 20 | `fq invocation transcript` | snapshot: direct Views; `--follow`: **edge** (3d) | `transcript_*` (snapshot path) | snapshot → `turn.list` + `invocation.get{with_prompt}` | ✅ **DONE 2026-07-28** |
-| 21 | `fq workers list` | direct Views, client-side filtering | `workers_list_*` | `worker.list` view (filter moves server-side) | no |
-| 22 | `fq workers show` | direct Views | `workers_show_*` | `worker.get` view | no |
+| 21 | `fq workers list` | direct Views, client-side filtering | `workers_list_*` (**reviewed change** — see 4.1) | `worker.list` view (filter moved server-side) | ✅ **DONE 2026-08-01** |
+| 22 | `fq workers show` | direct Views | `workers_show_*` | `worker.get` view | ✅ **DONE 2026-08-01** |
 | 23 | `fq workers prune` | **direct store write**, no events emitted | `workers_prune_*` ×3 | `worker.prune` command, evented | no — **behaviour change** (see hazards) |
 | 24 | `fq connect` | edge (TOFU pairing) | (edge_client_cli.rs) | — | ✅ DONE |
 | 25 | `fq ops list` | edge | (edge_client_cli.rs) | — | ✅ DONE |
 | 26 | `fq token attenuate` | offline (fq-edge) | — | — | ✅ DONE |
 | 27 | `fq version` | build-time consts | — | local stays; daemon build via `control.get` | n/a |
 
-**Count check**: flips remaining 3, 4, 6, 7, 8, 9, 11, 12, 13, 14,
-15, 19, 21, 22, 23 = **15**. Verbs 18 and 20 landed 2026-07-28
-(cohort 4.0), leaving the 17 the plan estimated less those two.
+**Count check**: flips remaining 3, 4, 6, 7, 8, 11, 12, 13, 14, 15,
+19, 23 = **12**. Verbs 18 and 20 landed 2026-07-28 (cohort 4.0);
+verbs 21, 22 and 9 landed 2026-08-01 (cohort 4.1).
 
 **Migration gate** (`edge_migration_gate.rs`, added with cohort 4.0):
 the remaining legacy call points are counted and asserted, so a flip
 that leaves the old path in place as a fallback fails even though its
-goldens pass. It counts `open_views(` and `control_plane::operator::`
-in fq-cli production source — **10 at the start of Phase 4, 8 now,
-zero at the end**. Daemon-side uses carry `allow-runtime-internals:`
-and are exempt: fq-cli hosts both client and daemon until the Phase-5
+goldens pass. Daemon-side uses carry `allow-runtime-internals:` and
+are exempt: fq-cli hosts both client and daemon until the Phase-5
 binary split, so the edge's own command handlers calling runtime
 internals is the architecture, not debt.
+
+It counts `open_views(`, `control_plane::operator::` and — since
+cohort 4.1 — `AgentRegistry::load_from_directory`. **10 at the start
+of Phase 4, 7 now, zero at the end.**
+
+The count went **6 -> 7** with verb 9, and that is worth reading
+carefully, because a rising ratchet normally means debt was added.
+Here it means the gate was under-reporting. Adding the registry
+pattern admitted four sites: two daemon-side (marked), verb 9's own
+listing (removed by its flip), and **verb 5's in-process `fq
+trigger`**, which loads the disk registry in client code. The last is
+a genuine backlog item the gate had been blind to — the lesson being
+that a gate's *coverage* is as load-bearing as its number, and a
+falling count over a too-narrow pattern can flatter the work.
 
 **Store-open gate**: 7 sanctioned direct-open sites at Phase-4 start,
 **5 now** (verb 18 took two); end-state is 4 (daemon + init only).
 An eighth marker sanctioned nothing — orphaned above an unrelated
 comment when the open it guarded moved — and was removed with verb
 18, which is why the earlier count of 8 here was wrong. The unmarked
-bypass class is `open_views` (`CLI:4140`) — used by verbs 12, 13, 15,
-21, 22 — which that gate does not match; the migration gate does.
+bypass class is `open_views` — now used only by verbs 12, 13 and 15 —
+which that gate does not match; the migration gate does.
 
 ## B. Read service / dashboard
 
 14 RPCs (`read_service.rs:121-198`); the dashboard is a pure
 read-service client (its only store/bus references are in tests).
 
-- `workers` / `worker`: **no consumer at all** — transplant sources
-  for `worker.list`/`worker.get`, then delete.
-- `agents` / `agent`: answer from the daemon's **live**
-  `SharedRegistry` — the transplant source for `agent.list`/`agent.get`
-  (and fixes verb 9's disk-read skew).
+- `workers` / `worker`: ✅ **deleted 2026-08-01**. Confirmed to have
+  no caller anywhere — dashboard source *and* assets, adapters,
+  tools, experiments — except the read service's own round-trip test.
+- `agents` / `agent`: ✅ transplanted 2026-08-01, but **kept**: the
+  dashboard consumes them (`fq-dashboard/src/main.rs:613`, `:625`)
+  and has an agents page, so they retire with the rest of the read
+  service at 4.4. The projection now lives in one place
+  (`fq-runtime/src/agent_view.rs`) that both the RPCs and the Agent
+  view call, so the two surfaces cannot drift in the interim.
 - `version` is the frozen build-skew probe (`read_service.rs:126`);
   its edge successor must not casually inherit the freeze.
 - Remaining RPCs (`health`, `active_invocations`, `invocations`,
@@ -146,12 +162,39 @@ domain model should eventually resolve, most likely by making the
 prompt an atom like everything else. **Check the target op actually
 returns what the verb renders before calling a cohort "pure".**
 
-**4.1 — view transplants** *(read service is the donor)*
+**4.1 — view transplants** — ✅ **done 2026-08-01**
 3. `worker` view (`worker.get`/`worker.list`, index rows, server-side
-   filters) + verbs 21, 22 flip; delete the two dead read-service
-   RPCs in the same PR.
-4. `agent` view from `SharedRegistry` + verb 9 flip (fixes the
-   disk-read skew by construction).
+   filters) + verbs 21, 22 flip; the two dead read-service RPCs
+   deleted in the same PR.
+4. `agent` view from `SharedRegistry` + verb 9 flip. The donor RPCs
+   **stayed** — the dashboard consumes them until 4.4 — so the
+   projection was extracted to one shared module both call.
+
+Four things this cohort taught, which the later ones inherit:
+
+- **A gate's coverage matters as much as its number.** Verb 9's
+  legacy path was a disk registry load, which the migration gate did
+  not match, so flipping it would have left the count untouched. The
+  pattern was widened, which raised the count 6 -> 7 by admitting
+  verb 5's in-process `fq trigger` — a real backlog item the gate had
+  been blind to. Check a verb's legacy path is *counted* before
+  trusting a flip to move the number.
+- **A golden can pin an impossible world.** `workers_list_*` expected
+  a roster with no daemon row, though the daemon has always
+  self-registered, and a worker `alive` with a stale heartbeat, which
+  the sweep repairs on sight. The flip did not break them; it
+  revealed they described a store no daemon had touched. Updating
+  them was correct, and is the one reviewed golden change of the
+  migration so far. When a golden breaks on a flip, ask whether it
+  was right before assuming the flip is wrong.
+- **A verb with no goldens needs its oracle built first.** Verb 9 had
+  none, so goldens were written against the *old* code path and made
+  to pass before anything moved. Goldens authored after a flip only
+  record what the flip produced.
+- **Grep the tests for consumers, not just the source.**
+  `daemon_shutdown.rs` drove `fq workers list --json` *after the
+  daemon exited*, which the flipped verb cannot do by construction.
+  The section-B survey looked at production callers only.
 
 **4.2 — atoms and the event surface**
 
