@@ -384,9 +384,10 @@ enum DeadLetterCommands {
 
 #[derive(Subcommand)]
 enum AgentCommands {
-    /// List registered agent definitions
+    /// List the agent definitions the daemon has loaded (its live
+    /// registry, as `fq reload` left it — not this machine's disk)
     List,
-    /// Validate an agent definition file
+    /// Validate an agent definition file (offline; needs no daemon)
     Validate {
         /// Path to agent definition
         path: PathBuf,
@@ -653,7 +654,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             } => requeue_dead_letter(&cli.global, &agent, trigger_seq, json).await?,
         },
         Commands::Agent { command } => match command {
-            AgentCommands::List => list_agents(&cli.global)?,
+            AgentCommands::List => list_agents(&cli.global).await?,
             AgentCommands::Validate { path } => validate_agent(&path)?,
         },
         Commands::Events { command } => match command {
@@ -1101,6 +1102,12 @@ mod operator_surface;
 use operator_surface::*;
 pub use operator_surface::{OperatorDeps, operator_registry};
 
+mod edge_call;
+use edge_call::*;
+
+mod agents;
+use agents::list_agents;
+
 mod workers;
 use workers::{workers_list, workers_prune, workers_show};
 
@@ -1240,59 +1247,6 @@ fn init_project(force: bool) -> anyhow::Result<()> {
 
 fn write_file(path: &Path, contents: &str) -> anyhow::Result<()> {
     std::fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn list_agents(global: &GlobalArgs) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let dir = &config.agents.directory;
-
-    if !dir.exists() {
-        let absolute = if dir.is_absolute() {
-            dir.clone()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| normalise(&cwd.join(dir)))
-                .unwrap_or_else(|_| dir.clone())
-        };
-        println!(
-            "Agent directory {} does not exist (resolved: {}).",
-            dir.display(),
-            absolute.display()
-        );
-        return Ok(());
-    }
-
-    let registry = AgentRegistry::load_from_directory(dir, config.agents.default_model.as_deref())?;
-
-    if registry.is_empty() && registry.errors().is_empty() {
-        println!("No agents found in {}", dir.display());
-        return Ok(());
-    }
-
-    if !registry.is_empty() {
-        println!("Loaded {} agent(s) from {}:", registry.len(), dir.display());
-        let mut agents: Vec<_> = registry.iter().collect();
-        agents.sort_by(|a, b| a.agent.id().as_str().cmp(b.agent.id().as_str()));
-        for loaded in agents {
-            println!(
-                "  {:<30} model={} tools={} path={}",
-                loaded.agent.id().as_str(),
-                loaded.agent.model(),
-                loaded.agent.tools().len(),
-                loaded.path.display()
-            );
-        }
-    }
-
-    if !registry.errors().is_empty() {
-        println!();
-        println!("Errors ({}):", registry.errors().len());
-        for err in registry.errors() {
-            println!("  {err}");
-        }
-    }
-
-    Ok(())
 }
 
 fn validate_agent(path: &Path) -> anyhow::Result<()> {
@@ -2391,6 +2345,9 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             agents_dir.display()
         );
     }
+    // The daemon owns the registry: this read is what the Agent view
+    // later serves and what `fq reload` replaces.
+    // allow-runtime-internals: run_daemon IS the runtime — it builds the live registry.
     let registry = fq_runtime::AgentRegistry::load_from_directory(
         agents_dir,
         config.agents.default_model.as_deref(),
@@ -3252,8 +3209,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             std::time::Duration::from_millis(config.read_service.probe_timeout_ms),
             FQ_VERSION.to_string(),
             // The same hot-swapped handle `fq reload` updates, so the
-            // dashboard's agents pages reflect reloads live.
-            shared_registry,
+            // dashboard's agents pages reflect reloads live — and the
+            // same one the edge's Agent view reads, which is why the
+            // two surfaces cannot disagree while both exist.
+            shared_registry.clone(),
         )
         .await
         .context("read service: failed to bind (check [read_service] in fq.toml)")?;
@@ -3278,22 +3237,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         let (identity, fresh) = fq_edge::EdgeIdentity::load_or_provision(&identity_dir)
             .context("edge: failed to load or provision identity (check [edge] in fq.toml)")?;
         if fresh {
-            let fp: String = identity
-                .fingerprint()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
-            let admin = identity
-                .mint_admin_token()
-                .context("edge: failed to mint the admin token")?;
-            println!();
-            println!(
-                "edge: first run — identity provisioned under {}",
-                identity_dir.display()
-            );
-            println!("edge: certificate fingerprint (clients pin this): {fp}");
-            println!("edge: admin token (printed once; store it securely):");
-            println!("  {admin}");
+            announce_fresh_edge_identity(&identity, &identity_dir)?;
         }
         // The operator surface: real declarations over the daemon's
         // read views, gated at the projection watermark (Phase 3).
@@ -3317,6 +3261,10 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 // drive invocations with — `invocation.drop` asks it
                 // whether the target is live, and arms its halt.
                 runner: resume_runner.clone(),
+                // The same hot-swapped handle `fq reload` updates and
+                // the dispatcher reads, so `fq agent list` answers
+                // with the definitions this daemon would run.
+                agents: shared_registry.clone(),
             },
         )?);
         let (edge_addr, edge_serving) = fq_edge::bind(&config.edge.bind, &identity, edge_registry)
@@ -3749,6 +3697,33 @@ async fn wait_for_shutdown_signal() -> &'static str {
     }
 }
 
+/// The first run's edge banner: fingerprint and admin token, printed
+/// exactly once because minting is what makes them exist. Lifted out
+/// of `run_daemon` — it is output, not startup logic, and the function
+/// it lived in is over its budget.
+fn announce_fresh_edge_identity(
+    identity: &fq_edge::EdgeIdentity,
+    identity_dir: &Path,
+) -> anyhow::Result<()> {
+    let fp: String = identity
+        .fingerprint()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let admin = identity
+        .mint_admin_token()
+        .context("edge: failed to mint the admin token")?;
+    println!();
+    println!(
+        "edge: first run — identity provisioned under {}",
+        identity_dir.display()
+    );
+    println!("edge: certificate fingerprint (clients pin this): {fp}");
+    println!("edge: admin token (printed once; store it securely):");
+    println!("  {admin}");
+    Ok(())
+}
+
 /// Re-read the agents directory and atomically swap the shared
 /// registry the dispatcher reads. Invoked by the daemon's
 /// control-reload listener on each `fq.control.reload` message.
@@ -3762,6 +3737,7 @@ async fn wait_for_shutdown_signal() -> &'static str {
 /// trigger; in-flight invocations keep the config they snapshotted
 /// at trigger time (ADR-0020 refresh-between-invocations).
 async fn reload_agents(shared: &SharedRegistry, agents_dir: &Path, default_model: Option<&str>) {
+    // allow-runtime-internals: this IS the reload — the daemon re-reading its own registry.
     match AgentRegistry::load_from_directory(agents_dir, default_model) {
         Ok(registry) => {
             let count = registry.len();
@@ -4203,26 +4179,6 @@ async fn show_costs(
     println!();
     println!("Total across all agents: ${:.6}", report.total_cost);
     Ok(())
-}
-
-/// Collapse `.` and `..` components from a path without touching the
-/// filesystem. Used to produce a clean display path for error messages
-/// when `canonicalize` is not an option (path may not exist).
-fn normalise(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
-                }
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 // ============================================================

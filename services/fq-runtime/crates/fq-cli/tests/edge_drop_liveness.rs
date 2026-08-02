@@ -227,6 +227,10 @@ impl Surface {
                 projection: projection.clone(),
                 control_plane: control_plane.clone(),
                 runner: runner.clone(),
+                // Nothing here drops an agent definition; the Agent
+                // view is registered either way, so it gets an empty
+                // registry rather than a mock.
+                agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
             },
         )
         .expect("assemble the operator registry");

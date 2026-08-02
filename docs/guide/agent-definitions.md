@@ -497,10 +497,11 @@ code blocks — anything that helps the LLM understand its task.
 ## Validating and testing
 
 ```sh
-# Check that the definition parses correctly
+# Check that the definition parses correctly (offline, no daemon needed)
 fq agent validate agents/my-agent.md
 
-# List all agents in a directory
+# List the agents the running daemon has loaded — its live registry,
+# which `fq reload` swaps, not whatever is on this machine's disk
 fq agent list
 
 # Trigger it manually

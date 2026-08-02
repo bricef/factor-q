@@ -71,49 +71,13 @@ pub struct HealthReport {
     pub failures: Vec<FailureView>,
 }
 
-/// One agent definition in the daemon's live registry — the summary
-/// row behind the dashboard's agents list.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct AgentSummaryView {
-    pub agent_id: String,
-    pub model: String,
-    pub budget: Option<f64>,
-    /// The NATS trigger suffix the agent listens on, if any.
-    pub trigger: Option<String>,
-    pub tool_count: i64,
-    /// Size of the system prompt, so the list hints at definition
-    /// weight without shipping every prompt on every refresh.
-    pub prompt_bytes: i64,
-}
-
-/// The registry listing plus its per-file load errors — a broken
-/// definition should be visible on the operator surface, not only in
-/// the daemon log.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct AgentsView {
-    /// Sorted by agent id.
-    pub agents: Vec<AgentSummaryView>,
-    pub errors: Vec<String>,
-}
-
-/// One agent definition in full — the dashboard's agent detail page.
-/// Sourced from the daemon's registry handle, so `fq reload` is
-/// reflected without a restart.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct AgentDetailView {
-    pub agent_id: String,
-    pub model: String,
-    pub system_prompt: String,
-    pub tools: Vec<String>,
-    /// Declared MCP server names.
-    pub mcp_servers: Vec<String>,
-    pub budget: Option<f64>,
-    pub max_iterations: Option<u32>,
-    pub effort: Option<String>,
-    pub trigger: Option<String>,
-    /// The definition file the agent was loaded from.
-    pub path: String,
-}
+/// The Agent view's shapes, re-exported at the path the dashboard
+/// already imports them from. They moved to [`crate::agent_view`] with
+/// the edge's `agent.list`/`agent.get` (plan Phase 4, verb 9): two
+/// surfaces answer from the same `SharedRegistry`, so they share one
+/// projection rather than each carrying its own. This module retires
+/// in cohort 4.4 and the types outlive it.
+pub use crate::agent_view::{AgentDetailView, AgentSummaryView, AgentsView};
 
 /// The RPC surface, mirroring [`Views`] (see the module doc for why the
 /// daemon speaks tarpc here rather than HTTP).
@@ -393,20 +357,7 @@ impl ReadService for ReadServer {
         // Clone the inner Arc out of the lock so the wire work never
         // holds it — the same discipline as the dispatcher.
         let registry = self.registry.read().await.clone();
-        let mut agents: Vec<AgentSummaryView> = registry
-            .iter()
-            .map(|loaded| AgentSummaryView {
-                agent_id: loaded.agent.id().as_str().to_string(),
-                model: loaded.agent.model().to_string(),
-                budget: loaded.agent.budget(),
-                trigger: loaded.agent.trigger().map(String::from),
-                tool_count: loaded.agent.tools().len() as i64,
-                prompt_bytes: loaded.agent.system_prompt().len() as i64,
-            })
-            .collect();
-        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
-        let errors = registry.errors().iter().map(|e| e.to_string()).collect();
-        Ok(AgentsView { agents, errors })
+        Ok(AgentsView::from_registry(&registry))
     }
 
     async fn agent(
@@ -420,36 +371,9 @@ impl ReadService for ReadServer {
             return Ok(None);
         };
         let registry = self.registry.read().await.clone();
-        let Some(loaded) = registry.get_loaded(&agent_id) else {
-            return Ok(None);
-        };
-        let agent = &loaded.agent;
-        Ok(Some(AgentDetailView {
-            agent_id: agent.id().as_str().to_string(),
-            model: agent.model().to_string(),
-            system_prompt: agent.system_prompt().to_string(),
-            tools: agent.tools().to_vec(),
-            mcp_servers: agent
-                .mcp_servers()
-                .iter()
-                .map(|s| s.server.clone())
-                .collect(),
-            budget: agent.budget(),
-            max_iterations: agent.max_iterations(),
-            // The definition frontmatter's own lowercase spelling.
-            effort: agent.effort().map(|e| {
-                match e {
-                    crate::events::Effort::Minimal => "minimal",
-                    crate::events::Effort::Low => "low",
-                    crate::events::Effort::Medium => "medium",
-                    crate::events::Effort::High => "high",
-                    crate::events::Effort::XHigh => "xhigh",
-                }
-                .to_string()
-            }),
-            trigger: agent.trigger().map(String::from),
-            path: loaded.path.display().to_string(),
-        }))
+        Ok(registry
+            .get_loaded(&agent_id)
+            .map(AgentDetailView::from_loaded))
     }
 }
 

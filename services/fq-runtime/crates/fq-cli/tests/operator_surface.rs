@@ -67,6 +67,10 @@ async fn operator_surface_matches_the_committed_snapshot() {
             projection: projection_store,
             control_plane: control_plane_store,
             runner,
+            // The Agent view's source. Empty here: the snapshot
+            // describes the surface's shape, and a registry's contents
+            // are data, not declaration.
+            agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
         },
     )
     .expect("assemble the operator registry");

@@ -797,6 +797,190 @@
     }
   },
   {
+    "view": {
+      "description": "The answer is what this daemon would run right now — the registry `fq reload` swaps, not the definitions on the caller's disk. Get answers with one definition in full, including its system prompt. List answers with one row per definition file the registry knows: the agents it loaded, in id order, then the files it rejected, because a definition that failed to parse is the row an operator most needs to see and has no agent id to be listed under.",
+      "domain": "agent",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List selection for the Agent view. Empty, and declared anyway: a\nregistry is a directory of definitions the daemon holds entirely in\nmemory, so there is no narrowing worth a wire contract yet, and the\ndeclaration is where a future one would appear.",
+        "title": "AgentListFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$defs": {
+          "AgentSummaryView": {
+            "description": "One agent definition in the daemon's live registry — the summary\nrow behind the dashboard's agents list and the Agent view's loaded\nindex row.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "budget": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              },
+              "path": {
+                "description": "The definition file this agent was loaded from. On the summary\nas well as the detail because \"which file is this?\" is the\nquestion a listing gets asked next, and answering it from the\nindex costs one string per row instead of one Get per agent.",
+                "type": "string"
+              },
+              "prompt_bytes": {
+                "description": "Size of the system prompt, so the list hints at definition\nweight without shipping every prompt on every refresh.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "tool_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "trigger": {
+                "description": "The NATS trigger suffix the agent listens on, if any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "agent_id",
+              "model",
+              "tool_count",
+              "prompt_bytes",
+              "path"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One row of the Agent view's index (`agent.list`): a definition file\nthe daemon read, and what became of it.\n\nA registry snapshot is not only its agents. A file that failed to\nparse is usually the most operationally interesting thing in the\ndirectory — the agent someone expects to be running and is not —\nand it has no agent id to be listed under, so it rides the index as\nits own kind of row. Dropping it would make the listing lie by\nomission, and there is nowhere else on today's surface to put it.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/AgentSummaryView",
+            "description": "A definition the registry loaded.",
+            "properties": {
+              "entry": {
+                "const": "agent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A definition the registry rejected, rendered exactly as the\ndaemon reports it — the message names the file.",
+            "properties": {
+              "entry": {
+                "const": "load_error",
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "AgentEntryView"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for the Agent view.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "AgentViewKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One agent definition in full — the Agent view's state (`agent.get`)\nand the dashboard's agent detail page. Sourced from the daemon's\nregistry handle, so `fq reload` is reflected without a restart.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "budget": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_iterations": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mcp_servers": {
+            "description": "Declared MCP server names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "path": {
+            "description": "The definition file the agent was loaded from.",
+            "type": "string"
+          },
+          "system_prompt": {
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "trigger": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agent_id",
+          "model",
+          "system_prompt",
+          "tools",
+          "mcp_servers",
+          "path"
+        ],
+        "title": "AgentDetailView",
+        "type": "object"
+      },
+      "summary": "An agent definition, as the daemon's live registry holds it.",
+      "version": 1
+    }
+  },
+  {
     "command": {
       "authority": {
         "scope": "invocation",
