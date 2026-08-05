@@ -1867,6 +1867,16 @@ mod crash_dst {
                 .iter()
                 .any(|e| matches!(e.payload, EventPayload::Failed(_)))
         );
+        // #447: the failed *call* is its own atom, distinct from the
+        // failed invocation. Without it the trail holds an
+        // `llm.request` that simply trails off, and a consumer cannot
+        // tell the call failing from the event being lost.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.payload, EventPayload::LlmFailure(_))),
+            "a provider error must publish llm.failure"
+        );
         assert!(
             world
                 .store

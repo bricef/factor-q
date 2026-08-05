@@ -25,6 +25,7 @@ use serde_json::Value;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use super::emit::FailedCall;
 use super::harness::Harness;
 use super::types::{
     AgentConfig, CapabilityResult, EmittedEvent, HarnessError, LogEntry, LogLevel, ModelRequest,
@@ -2701,29 +2702,30 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         )
         .await?;
 
+        let call_started = Instant::now();
         let response = match llm.chat(chat_request).await {
             Ok(r) => r,
             Err(err) => {
-                // LLM call returned an error. Close the WAL with
-                // is_error=true so recovery sees a final state,
-                // not the ambiguous `dispatched` state.
-                self.config
-                    .store
-                    .write_llm_dispatched(&inv_str, &req_str, self.config.clock.unix_now_ms())
-                    .await
-                    .map_err(map_store_err)?;
-                self.config
-                    .store
-                    .write_llm_completed(
-                        &inv_str,
-                        &req_str,
-                        &err.to_string(),
-                        true,
-                        0.0,
-                        self.config.clock.unix_now_ms(),
-                    )
-                    .await
-                    .map_err(map_store_err)?;
+                // The provider errored. Nothing was parsed, so there is
+                // no usage to recover: the spend, if the request billed
+                // server-side before we lost the response, is real but
+                // unobservable, and `None` says exactly that.
+                self.fail_llm_call(
+                    FailedCall {
+                        agent_id,
+                        invocation_id,
+                        call_id,
+                        model: &request.model,
+                        error_kind: (&err).into(),
+                        error_message: err.to_string(),
+                        duration_ms: call_started.elapsed().as_millis() as u64,
+                        usage: None,
+                        origin: &origin,
+                    },
+                    totals,
+                    cursor,
+                )
+                .await?;
                 // Hand the LLM error back to the caller; the WAL is
                 // already closed `is_error`, so this is a final state.
                 return Ok(Err(err));
@@ -2736,30 +2738,29 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 .as_deref()
                 .is_none_or(|content| content.trim().is_empty())
         {
-            // Deliberately skips `totals.total_llm_calls` and drops the
-            // usage: the turn produced nothing to bill against an
-            // outcome. If a provider ever bills tokens for empty
-            // completions this undercounts — revisit if that matters.
+            // A 200 with nothing in it. Skips `totals.total_llm_calls`
+            // — no outcome to count — but *not* the spend: the provider
+            // did the prefill and `response.usage` says what it billed,
+            // so it is priced and recorded like any other call.
             let err = crate::llm::LlmError::RequestFailed(
                 "model returned an empty response (no content, no tool calls)".to_string(),
             );
-            self.config
-                .store
-                .write_llm_dispatched(&inv_str, &req_str, self.config.clock.unix_now_ms())
-                .await
-                .map_err(map_store_err)?;
-            self.config
-                .store
-                .write_llm_completed(
-                    &inv_str,
-                    &req_str,
-                    &err.to_string(),
-                    true,
-                    0.0,
-                    self.config.clock.unix_now_ms(),
-                )
-                .await
-                .map_err(map_store_err)?;
+            self.fail_llm_call(
+                FailedCall {
+                    agent_id,
+                    invocation_id,
+                    call_id,
+                    model: &request.model,
+                    error_kind: crate::events::LlmErrorKind::EmptyResponse,
+                    error_message: err.to_string(),
+                    duration_ms: call_started.elapsed().as_millis() as u64,
+                    usage: Some(response.usage),
+                    origin: &origin,
+                },
+                totals,
+                cursor,
+            )
+            .await?;
             return Ok(Err(err));
         }
 
@@ -4178,6 +4179,8 @@ fn trigger_from_state_row(row: &crate::worker::store::InvocationStateRow) -> Tri
         payload,
     }
 }
+
+mod failure;
 
 #[cfg(test)]
 mod tests;

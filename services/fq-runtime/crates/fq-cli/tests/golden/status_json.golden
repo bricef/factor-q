@@ -22,7 +22,7 @@
   "projection_path": "<CACHE_DIR>/projection.db",
   "legacy_events_db": null,
   "initialised": true,
-  "projection_rows": 8,
+  "projection_rows": 9,
   "recovery": {
     "ambiguous": 0,
     "stale_workers": 2,

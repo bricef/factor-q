@@ -55,6 +55,13 @@ pub fn agent_llm_response(agent_id: &str) -> String {
     format!("fq.agent.{agent_id}.llm.response")
 }
 
+/// The other terminal outcome of an LLM call: the provider errored,
+/// or returned nothing. Sibling of `llm.response`, so
+/// `fq.agent.*.llm.>` already matches it.
+pub fn agent_llm_failure(agent_id: &str) -> String {
+    format!("fq.agent.{agent_id}.llm.failure")
+}
+
 pub fn agent_tool_call(agent_id: &str) -> String {
     format!("fq.agent.{agent_id}.tool.call")
 }

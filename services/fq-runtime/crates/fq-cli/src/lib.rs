@@ -525,7 +525,8 @@ enum EventCommands {
         #[arg(long)]
         agent: Option<String>,
         /// Filter by event type (triggered, llm_request, llm_response,
-        /// tool_call, tool_result, cost, completed, failed)
+        /// llm_failure, tool_call, tool_result, cost, completed,
+        /// failed)
         #[arg(long, name = "type")]
         event_type: Option<String>,
         /// Only show events at or after this RFC3339 timestamp
@@ -1586,6 +1587,21 @@ fn print_event(event: &Event) {
             format!(
                 "llm.response tokens={}/{} stop={:?}{cost_suffix}",
                 p.usage.input_tokens, p.usage.output_tokens, p.stop_reason
+            )
+        }
+        EventPayload::LlmFailure(p) => {
+            // Cost only when the provider's usage was recoverable — an
+            // empty completion. Absent otherwise, and rendering a `$0`
+            // would claim we know the call was free.
+            let cost_suffix = event
+                .envelope
+                .cost
+                .as_ref()
+                .map(|c| format!(" cost=${:.6}", c.total_cost))
+                .unwrap_or_default();
+            format!(
+                "llm.failure {:?} model={} {}{cost_suffix}",
+                p.error_kind, p.model, p.error_message
             )
         }
         EventPayload::ToolCall(p) => format!("tool.call {}", p.tool_name),

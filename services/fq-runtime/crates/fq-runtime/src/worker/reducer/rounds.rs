@@ -48,6 +48,14 @@ impl RoundLedger {
     /// Seed from the WAL's completed-call rows on resume, returning
     /// the (completed calls, summed cost) pair the totals need — one
     /// pass serves both.
+    ///
+    /// The two counts have different filters on purpose. `calls`
+    /// feeds `total_llm_calls`, which counts turns that produced an
+    /// outcome, so errored rows are excluded. `cost` sums *every*
+    /// completed row: since #447 an errored row can carry real spend
+    /// (an empty completion still bills for the prefill), and dropping
+    /// it here would forget that money on every resume — the budget
+    /// accumulator is reconstituted from exactly this column.
     pub(crate) fn seed_from_wal(
         &self,
         invocation_id: Uuid,
@@ -57,9 +65,12 @@ impl RoundLedger {
         let mut calls = 0u32;
         let mut cost = 0.0f64;
         for r in llms {
-            if r.status == DispatchStatus::Completed && r.is_error != Some(true) {
+            if r.status != DispatchStatus::Completed {
+                continue;
+            }
+            cost += r.cost_usd.unwrap_or(0.0);
+            if r.is_error != Some(true) {
                 calls += 1;
-                cost += r.cost_usd.unwrap_or(0.0);
             }
         }
         self.seed(invocation_id, u64::from(calls));

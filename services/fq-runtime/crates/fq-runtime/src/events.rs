@@ -63,8 +63,9 @@ pub mod subjects;
 pub mod llm;
 
 pub use llm::{
-    Effort, LlmCallOrigin, LlmDispatchedPayload, LlmRequestPayload, LlmResponsePayload, Message,
-    MessageRole, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolSchema,
+    Effort, LlmCallOrigin, LlmDispatchedPayload, LlmErrorKind, LlmFailurePayload,
+    LlmRequestPayload, LlmResponsePayload, Message, MessageRole, MessageToolCall, RequestParams,
+    StopReason, TokenUsage, ToolSchema,
 };
 
 /// A complete event: envelope + payload + annotations.
@@ -325,6 +326,7 @@ impl EventPayload {
             Self::Triggered(_) => subjects::agent_triggered(agent),
             Self::LlmRequest(_) => subjects::agent_llm_request(agent),
             Self::LlmResponse(_) => subjects::agent_llm_response(agent),
+            Self::LlmFailure(_) => subjects::agent_llm_failure(agent),
             Self::ToolCall(_) => subjects::agent_tool_call(agent),
             Self::ToolDispatched(_) => subjects::agent_tool_dispatched(agent),
             Self::ToolResult(_) => subjects::agent_tool_result(agent),
@@ -361,6 +363,7 @@ impl EventPayload {
             Self::LlmRequest(_) => "factor-q/llm_request@1",
             Self::LlmDispatched(_) => "factor-q/llm_dispatched@1",
             Self::LlmResponse(_) => "factor-q/llm_response@1",
+            Self::LlmFailure(_) => "factor-q/llm_failure@1",
             Self::ToolCall(_) => "factor-q/tool_call@1",
             Self::ToolDispatched(_) => "factor-q/tool_dispatched@1",
             Self::ToolResult(_) => "factor-q/tool_result@1",
@@ -494,6 +497,13 @@ pub enum EventPayload {
     /// durably written. See data-architecture.md §3.2.
     LlmDispatched(LlmDispatchedPayload),
     LlmResponse(LlmResponsePayload),
+    /// The other terminal outcome of an LLM call (#447): the provider
+    /// errored, or returned nothing. Sibling of `LlmResponse` rather
+    /// than a nullable variant of it — see [`LlmFailurePayload`].
+    /// Publishing it is what makes "the call failed" distinguishable
+    /// from "the event was lost", which are the two cases an operator
+    /// most needs told apart.
+    LlmFailure(LlmFailurePayload),
     ToolCall(ToolCallPayload),
     /// WAL middle-state for tool calls. Emitted between
     /// `ToolCall` and `ToolResult` once the tool has returned

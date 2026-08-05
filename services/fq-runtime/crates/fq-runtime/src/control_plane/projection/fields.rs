@@ -64,6 +64,30 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
             }
             f
         }
+        // A call that produced no response (#447). Everything maps
+        // onto columns that already exist — `error_kind` and
+        // `error_message` as for `failed`, tokens as for
+        // `llm_response`. `total_cost` comes from the envelope and is
+        // NULL unless the provider's usage was recoverable: a zeroed
+        // cost here would be exempted from the retention sweep and
+        // kept forever as a fake cost record.
+        EventPayload::LlmFailure(p) => {
+            let mut f = Fields {
+                model: Some(p.model.clone()),
+                error_kind: Some(serialized_name(p.error_kind)),
+                error_message: Some(p.error_message.clone()),
+                duration_ms: Some(p.duration_ms as i64),
+                total_cost: event.envelope.cost.as_ref().map(|c| c.total_cost),
+                ..Default::default()
+            };
+            if let Some(usage) = p.usage {
+                f.input_tokens = Some(usage.input_tokens as i64);
+                f.output_tokens = Some(usage.output_tokens as i64);
+                f.cache_read_tokens = Some(usage.cache_read_tokens as i64);
+                f.cache_write_tokens = Some(usage.cache_write_tokens as i64);
+            }
+            f
+        }
         // The summariser's own spend (#216): everything lives on
         // envelope.cost (the llm_response pattern), emitted under the
         // reserved `summary` agent id — `fq costs` reports it as its

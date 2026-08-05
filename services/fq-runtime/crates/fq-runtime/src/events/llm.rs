@@ -167,3 +167,97 @@ pub struct TokenUsage {
     #[serde(default)]
     pub cache_write_tokens: u32,
 }
+
+/// Why an LLM call failed — a serialisable projection of
+/// [`crate::llm::LlmError`], not a new taxonomy.
+///
+/// The error enum already has the right joints, and `is_transient`
+/// already partitions them the way an operator cares about, but it
+/// cannot go on the wire: it is a `thiserror` type carrying the
+/// provider strings that belong in `error_message`. So this mirrors
+/// its variants as `Copy` units and a single [`From`] does the
+/// conversion, which is the only place the two can drift.
+///
+/// One variant has no `LlmError` counterpart. `EmptyResponse` is the
+/// provider returning 200 with no content and no tool calls; the
+/// runner synthesises a `RequestFailed` for it today, which makes it
+/// indistinguishable from a transport error. It is not: it is the one
+/// failure that *bills*, because the provider did the prefill.
+///
+/// A 429 currently arrives as `RequestFailed` with the status buried
+/// in `error_message` — under-classified, and where
+/// [#278](https://github.com/bricef/factor-q/issues/278)'s
+/// `Retry-After` rework lands, at which point `rate_limited` becomes
+/// queryable with no schema change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmErrorKind {
+    Auth,
+    RateLimited,
+    InvalidResponse,
+    RequestFailed,
+    UnpricedModel,
+    /// A 200 with nothing in it. Synthesised by the runner, never by
+    /// a provider, and the only kind that can carry usage.
+    EmptyResponse,
+}
+
+impl From<&crate::llm::LlmError> for LlmErrorKind {
+    fn from(err: &crate::llm::LlmError) -> Self {
+        use crate::llm::LlmError;
+        match err {
+            LlmError::Auth(_) => Self::Auth,
+            LlmError::RateLimited => Self::RateLimited,
+            LlmError::InvalidResponse(_) => Self::InvalidResponse,
+            LlmError::RequestFailed(_) => Self::RequestFailed,
+            LlmError::UnpricedModel(_) => Self::UnpricedModel,
+        }
+    }
+}
+
+/// Published when an LLM call ends without a response — the sibling
+/// of [`LlmResponsePayload`], sharing its `call_id`.
+///
+/// A separate variant rather than nullable fields on the response:
+/// every consumer that reads `stop_reason` and `usage` today reads
+/// them unconditionally, and making them optional would push a "did
+/// this actually happen?" branch into all of them while the type
+/// stopped saying which case you are in. As a variant, the compiler
+/// asks the question at the match site.
+///
+/// Terminality is per `call_id`, not per invocation: provider retries
+/// happen inside a single `LlmClient::chat` call and are not
+/// event-visible, so one request yields one outcome — but a failed
+/// *sampling* or *elicitation* call declines the server's request
+/// without ending the agent's invocation, so one invocation may carry
+/// several of these.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmFailurePayload {
+    /// The Round grouping key; 0 on pre-field events. A failed call
+    /// consumes one, exactly as a successful one does.
+    #[serde(default)]
+    pub round: u64,
+    /// Correlates with the `llm.request` that opened this call.
+    pub call_id: Uuid,
+    /// Restated because it is not derivable from the envelope when
+    /// the call carried no cost.
+    pub model: String,
+    pub error_kind: LlmErrorKind,
+    /// The provider's text. Often the operator's only handle on a 429.
+    pub error_message: String,
+    /// Wall time for the call *including* the hidden retry attempts
+    /// inside `RetryingLlmClient` — which is the tell for a rate
+    /// limit that eventually gave up.
+    pub duration_ms: u64,
+    /// What the provider billed, when we know. **`None` is not zero**:
+    /// `Some(0)` says the provider billed nothing, `None` says we
+    /// cannot see what it billed — a transport failure yields no
+    /// parsed body, while an empty completion yields real counts.
+    /// Writing the second as the first would be exactly the cost loss
+    /// this event exists to stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
+    /// What prompted this call (see [`LlmRequestPayload::origin`]).
+    #[serde(default)]
+    pub origin: LlmCallOrigin,
+}

@@ -3,7 +3,8 @@
 //! [`check_invocation_trace`] states the canonical-sequence claim as
 //! a pure predicate over one invocation's captured events: the trace
 //! is `triggered`, then complete LLM triples
-//! (`llm.request → llm.dispatched → llm.response`) and tool spans
+//! (`llm.request → llm.dispatched →` exactly one of `llm.response` /
+//! `llm.failure`) and tool spans
 //! (`tool.call → [nested LLM triples]* → tool.dispatched →
 //! tool.result`, where the nested triples are server-initiated
 //! sampling/evaluator calls made while the tool executes), ending in
@@ -189,12 +190,19 @@ fn check_with(
             },
             State::Llm { dispatched } => match (payload, dispatched) {
                 (EventPayload::LlmDispatched(_), false) => State::Llm { dispatched: true },
-                (EventPayload::LlmResponse(_), true) => State::Idle,
-                // A terminal may truncate an in-flight span (the
-                // failure that ended the invocation).
-                (EventPayload::Completed(_) | EventPayload::Failed(_), _) => {
-                    State::Terminal { archived: 0 }
-                }
+                // Either terminal closes the triple, and only one of
+                // them may (#447). Leaving `llm.failure` out of the
+                // grammar is what let the missing event survive: the
+                // oracle is where this invariant is enforced, so an
+                // unpublished failure has to read as a violation here.
+                (EventPayload::LlmResponse(_) | EventPayload::LlmFailure(_), true) => State::Idle,
+                // No truncation arm here, deliberately. A terminal used
+                // to be allowed to cut an in-flight triple short,
+                // because the invocation-failing LLM error published
+                // nothing of its own — which is exactly how the missing
+                // outcome hid from the oracle for as long as it did.
+                // Now that the call has its own terminal, a `failed`
+                // arriving mid-triple means one is missing.
                 (other, _) => {
                     push(
                         i,
@@ -215,10 +223,15 @@ fn check_with(
                     dispatched,
                     llm: Some(true),
                 },
-                (EventPayload::LlmResponse(_), false, Some(true)) => State::Tool {
-                    dispatched,
-                    llm: None,
-                },
+                // A nested sampling/evaluator call may fail without
+                // ending the tool span — ADR-0018: the failure is the
+                // server's, not the agent's.
+                (EventPayload::LlmResponse(_) | EventPayload::LlmFailure(_), false, Some(true)) => {
+                    State::Tool {
+                        dispatched,
+                        llm: None,
+                    }
+                }
                 (EventPayload::ToolDispatched(_), false, None) => State::Tool {
                     dispatched: true,
                     llm: None,
@@ -732,6 +745,84 @@ mod tests {
             .push(archived())
             .push(archived()); // sweeper republish
         assert_valid_trace(&t.events);
+    }
+
+    fn llm_failure() -> EventPayload {
+        EventPayload::LlmFailure(crate::events::LlmFailurePayload {
+            round: 0,
+            call_id: Uuid::now_v7(),
+            model: "claude-test".to_string(),
+            error_kind: crate::events::LlmErrorKind::RateLimited,
+            error_message: "rate limited".to_string(),
+            duration_ms: 1,
+            usage: None,
+            origin: Default::default(),
+        })
+    }
+
+    /// #447: a failure is a terminal for the triple, wherever the
+    /// triple sits — an agent turn, or a sampling call nested inside a
+    /// tool span, where the failure declines the server's request and
+    /// the span carries on.
+    #[test]
+    fn llm_failure_closes_a_triple_at_either_level() {
+        let mut t = Trace::new();
+        t.push(triggered())
+            .push(llm_request())
+            .push(llm_dispatched())
+            .push(llm_failure())
+            .push(tool_call())
+            .push(llm_request())
+            .push(llm_dispatched())
+            .push(llm_failure())
+            .push(tool_dispatched())
+            .push(tool_result(false))
+            .push(failed())
+            .push(archived());
+        assert_valid_trace(&t.events);
+    }
+
+    /// The hole #447 was filed for, stated as a test: a request with no
+    /// terminal at all. The oracle is where this invariant lives, so a
+    /// runner that stopped publishing the failure has to fail *here*
+    /// and not merely go unnoticed.
+    #[test]
+    fn llm_request_without_a_terminal_is_a_violation() {
+        let mut t = Trace::new();
+        t.push(triggered())
+            .push(llm_request())
+            .push(llm_dispatched())
+            // no llm.response and no llm.failure — the invocation just
+            // gives up, exactly as the runner used to.
+            .push(failed())
+            .push(archived());
+        let violations = check_invocation_trace(&t.events).unwrap_err();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.message.contains("inside an LLM triple")),
+            "{violations:?}"
+        );
+    }
+
+    /// A failure is a terminal for the *call*, not a licence to skip
+    /// `llm.dispatched`: the WAL records the middle state on the
+    /// failure path too, so the trail must as well.
+    #[test]
+    fn llm_failure_without_dispatched_is_a_violation() {
+        let mut t = Trace::new();
+        t.push(triggered())
+            .push(llm_request())
+            .push(llm_failure())
+            .push(failed())
+            .push(archived());
+        let violations = check_invocation_trace(&t.events).unwrap_err();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.message.contains("inside an LLM triple")),
+            "{violations:?}"
+        );
     }
 
     #[test]

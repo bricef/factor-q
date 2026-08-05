@@ -160,6 +160,36 @@ fn llm_response(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost:
     .with_cost(cost(seq, total_cost, total_cost))
 }
 
+/// A call that ended in `llm.failure` (#447), in the shape that
+/// bills: a 200 with nothing in it, so the provider's usage is
+/// recoverable and priced onto the envelope exactly like a response.
+/// The fixture carries one so the read commands are pinned against a
+/// *failing* call, not only a succeeding one — the coverage whose
+/// absence let the missing event ship.
+fn llm_failure(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost: f64) -> Event {
+    let payload = EventPayload::LlmFailure(fq_runtime::events::LlmFailurePayload {
+        round: 2,
+        call_id: fixed_uuid(seq),
+        model: "claude-haiku".into(),
+        error_kind: fq_runtime::events::LlmErrorKind::EmptyResponse,
+        error_message: "model returned an empty response (no content, no tool calls)".into(),
+        duration_ms: 900,
+        usage: Some(TokenUsage {
+            input_tokens: 1_200,
+            output_tokens: 340,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }),
+        origin: LlmCallOrigin::AgentTurn,
+    });
+    stamp(
+        Event::new(AgentId::new(agent).unwrap(), inv(invocation), payload),
+        seq,
+        at_ms,
+    )
+    .with_cost(cost(seq, total_cost, total_cost))
+}
+
 fn state_row(
     invocation: &str,
     agent: &str,
@@ -219,6 +249,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
         ),
         triggered(AGENT_FIXER, INV_FAILED, 4, base_ms + 10_000),
         llm_response(AGENT_FIXER, INV_FAILED, 5, base_ms + 11_000, 0.0031),
+        llm_failure(AGENT_FIXER, INV_FAILED, 9, base_ms + 11_500, 0.0007),
         stamp(
             Event::new(
                 AgentId::new(AGENT_FIXER).unwrap(),

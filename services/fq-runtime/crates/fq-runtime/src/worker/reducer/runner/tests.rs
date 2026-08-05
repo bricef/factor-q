@@ -1829,7 +1829,7 @@ async fn empty_model_response_fails_the_invocation_as_llm_error() {
     };
 
     let (store, events, outcome) =
-        run_with_wal_capturing_outcome(&url, agent, vec![empty], 2, None).await;
+        run_with_wal_capturing_outcome(&url, agent, vec![empty], 6, None).await;
 
     match outcome {
         Err(ExecutorError::Llm(crate::llm::LlmError::RequestFailed(msg))) => {
@@ -1838,8 +1838,11 @@ async fn empty_model_response_fails_the_invocation_as_llm_error() {
         other => panic!("expected Llm(RequestFailed) on an empty response, got {other:?}"),
     }
 
-    // The WAL closed the dispatch as an error, cost 0 — never a
-    // completed-ok row for a turn that returned nothing.
+    // The WAL closed the dispatch as an error — never a completed-ok
+    // row for a turn that returned nothing — and carries the call's
+    // real cost. 10 input tokens at $1/M is $0.00001; a 0.0 here is
+    // the #447 leak, and `resume()` reconstitutes the budget
+    // accumulator from exactly this column.
     let inv = events[0].envelope.invocation_id.to_string();
     let rows = store
         .list_llm_dispatches_for_invocation(&inv)
@@ -1856,7 +1859,189 @@ async fn empty_model_response_fails_the_invocation_as_llm_error() {
         "WAL response records the synthetic error, got {:?}",
         rows[0].response
     );
-    assert_eq!(rows[0].cost_usd, Some(0.0));
+    assert_eq!(
+        rows[0].cost_usd,
+        Some(1e-5),
+        "the provider's prefill was billed; the WAL must not record it as free"
+    );
+}
+
+/// #447: the empty-completion path used to hold a fully-populated
+/// `response.usage` and throw it away. It now publishes an
+/// `llm.failure` carrying those counts, priced onto the envelope, and
+/// folds the spend into the invocation's total.
+///
+/// This is the test that would fail if the capture were reverted: the
+/// tokens on the payload and the cost on the envelope both come from
+/// the discarded `ChatResponse`, and neither can be reconstructed from
+/// anywhere else once the response is dropped.
+#[tokio::test]
+async fn empty_response_bills_its_prefill_on_the_failure_event() {
+    let server = crate::test_support::nats::test_nats();
+    let url = server.url().to_string();
+
+    let agent = Agent::builder()
+        .id(unique_agent_id("empty-bills"))
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(5.0)
+        .build()
+        .unwrap();
+
+    let empty = ChatResponse {
+        content: None,
+        tool_calls: vec![],
+        stop_reason: StopReason::EndTurn,
+        usage: TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+    };
+    let (_store, events, _outcome) =
+        run_with_wal_capturing_outcome(&url, agent, vec![empty], 6, None).await;
+
+    let failure = crate::test_support::events::find_first(&events, "llm_failure")
+        .expect("an empty completion must publish llm.failure");
+    let EventPayload::LlmFailure(p) = &failure.payload else {
+        unreachable!("find_first matched on kind")
+    };
+    assert_eq!(p.error_kind, crate::events::LlmErrorKind::EmptyResponse);
+    assert_eq!(
+        p.usage.map(|u| u.input_tokens),
+        Some(1_000),
+        "the provider's token counts must survive onto the event"
+    );
+    let cost = failure
+        .envelope
+        .cost
+        .as_ref()
+        .expect("recovered usage must be priced onto the envelope");
+    assert!(
+        (cost.total_cost - 0.001).abs() < 1e-9,
+        "1000 input tokens at $1/M, got {}",
+        cost.total_cost
+    );
+
+    // And it reaches the invocation's total: the terminal `failed`
+    // event carries the same money, so a budget can be tripped by it.
+    let terminal = crate::test_support::events::find_first(&events, "failed").expect("failed");
+    let EventPayload::Failed(f) = &terminal.payload else {
+        unreachable!("find_first matched on kind")
+    };
+    assert!(
+        (f.partial_totals.total_cost - 0.001).abs() < 1e-9,
+        "recovered spend must reach the invocation total, got {}",
+        f.partial_totals.total_cost
+    );
+    assert_eq!(
+        f.partial_totals.total_llm_calls, 0,
+        "a call with no outcome is still not a completed call"
+    );
+}
+
+/// #447 in its commonest shape: a provider error. The trail must show
+/// the full triple ending in `llm.failure`, and the failure must carry
+/// **no** cost — a transport error yields no parsed body, so we do not
+/// know what the provider billed, and a zeroed cost would both lie and
+/// pin the row against the retention sweep forever.
+#[tokio::test]
+async fn provider_error_publishes_a_failure_with_no_cost() {
+    let server = crate::test_support::nats::test_nats();
+    let url = server.url().to_string();
+
+    let agent_id_str = unique_agent_id("provider-error");
+    let agent = Agent::builder()
+        .id(&agent_id_str)
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(5.0)
+        .build()
+        .unwrap();
+
+    let bus = EventBus::connect(&url).await.expect("connect to NATS");
+    let store_dir = tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&store_dir.path().join("events.db"))
+            .await
+            .expect("worker store"),
+    );
+    let llm = FixtureClient::new();
+    llm.push_error(crate::llm::LlmError::Auth("no api key".to_string()));
+
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(bus.clone())
+                .pricing(test_pricing())
+                .store(store.clone())
+                .worker_id(test_worker_id())
+                .build(),
+        ),
+        Harness::new(),
+    );
+
+    let events = crate::test_support::events::capture_events(
+        &bus,
+        &agent_id_str,
+        6,
+        Duration::from_secs(5),
+        || async {
+            let _ = runner
+                .run(
+                    &agent,
+                    &llm,
+                    TriggerSource::Manual,
+                    None,
+                    json!({"input": "go"}),
+                )
+                .await;
+        },
+    )
+    .await;
+
+    // The whole point of the event: a request with an outcome, not a
+    // request that trails off. `llm.dispatched` rides along so the
+    // middle state the WAL already recorded is on the bus too.
+    crate::test_support::events::assert_kinds_in_order(
+        &events[..5],
+        &[
+            "triggered",
+            "llm_request",
+            "llm_dispatched",
+            "llm_failure",
+            "failed",
+        ],
+    );
+    crate::test_support::oracle::assert_valid_trace(&events);
+
+    let EventPayload::LlmFailure(p) = &events[3].payload else {
+        unreachable!("asserted above")
+    };
+    assert_eq!(p.error_kind, crate::events::LlmErrorKind::Auth);
+    assert!(p.error_message.contains("no api key"));
+    assert_eq!(p.model, "claude-haiku");
+    assert_eq!(p.round, 0, "failures consume no Round yet");
+    assert!(
+        p.usage.is_none(),
+        "a transport failure parses no body: usage is unknown, not zero"
+    );
+    assert!(
+        events[3].envelope.cost.is_none(),
+        "unknown spend must leave cost absent — a zeroed row would be \
+         exempted from the retention sweep as a fake cost record"
+    );
+    // The correlation the invariant is keyed on.
+    let EventPayload::LlmRequest(req) = &events[1].payload else {
+        unreachable!("asserted above")
+    };
+    assert_eq!(p.call_id, req.call_id);
 }
 
 /// #301: a model that only ever produces bare text — never a tool
