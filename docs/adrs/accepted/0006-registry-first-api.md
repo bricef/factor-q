@@ -412,3 +412,113 @@ is the reviewable oracle. Code generation is treated as a smell here:
 where richer typing is wanted, derive it from the shared definitions
 (macros included) rather than generating source. An out-of-workspace
 consumer reopens the question with `describe` as its input.
+
+## Appendix C — Amendment: NATS is not an external control surface (2026-08-05)
+
+Recorded alongside the `invocation.resume` amendment to
+[the operator-surface domain model](../../design/committed/operator-surface-domain-model.md),
+which unblocks verb 19 of the
+[Phase-4 call-point inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md).
+D8 stands unchanged in substance; this is the same decision stated in
+the positive form the surface needs, plus the boundary its carve-out
+always implied.
+
+### The principle
+
+**NATS is factor-q's internal event bus and coordination substrate. It
+is not a control plane for external callers.** Every operator action is
+a declared op on the authenticated edge; nothing outside the daemon
+commands the system by publishing to a subject. Control flows one way
+in — client → edge → daemon → bus — and the daemon publishes because it
+owns the log, not because publishing is an interface.
+
+D8 answered the question as it was asked in July: *should third parties
+get NATS credentials?* No. But the question that actually recurs is
+smaller and more dangerous — *may this one verb keep its subject?* — and
+it recurs because a subject is always the cheaper thing to reach for
+when a verb needs to say something to the daemon. A prohibition on
+exposure does not settle it; a property of the architecture does. Stated
+positively: **a proposed verb that would need a subject of its own is a
+verb whose declaration is missing.**
+
+### Why a control subject is the wrong shape, demonstrated
+
+A control subject is not a lighter-weight edge. It is a different thing
+with none of the edge's guarantees, and the codebase has paid for each
+one:
+
+- **No scoping or addressing.** `fq.control.*` subjects are *global*.
+  One test's `fq down` reached every daemon on a shared broker,
+  including strays left by interrupted runs, which then poisoned every
+  later run (`services/fq-test-support/src/lib.rs:7`) — the reason the
+  suite now spawns a private `nats-server` per test. A subject has no
+  notion of *which* daemon is being addressed, and adding one means
+  reinventing addressing that the edge's connection already has.
+- **No authority.** D7's verb × scope is enforced at the edge and
+  nowhere else. A caller on a subject is not a principal, carries no
+  grants, and cannot be attenuated — so the biscuit capabilities of the
+  ADR-0031 Appendix A amendment simply do not apply to it.
+- **No receipt, so no composition.** A subject can carry a reply, but
+  not an `AtomRef` the caller can gate its next read on. Verbs reached
+  that way forfeit D3/P4 and D4 entirely: there is no read-your-writes
+  idiom available to them.
+- **No audit identity.** D7's "envelopes carry the authenticated
+  operator identity" has nothing to carry.
+- **It fails differently, and worse.** Core NATS answers "no
+  responders" the instant nobody owns a subject — at the client,
+  indistinguishable from a considered reply. `invocation.drop`'s
+  liveness guard was a request/reply subject and read that answer as
+  *"nothing is running, drop directly"*, so any window in which the
+  subject was unowned silently bypassed the guard — a restart racing
+  startup recovery being exactly when an operator reaches for drop
+  (PR #441). Over the edge an unreachable daemon is a connection
+  error, never a licence to proceed.
+
+The first point is the strongest, because it is demonstrated rather
+than argued: the property that made a shared broker unusable for tests
+is the same property that makes a subject unusable as a control
+surface.
+
+### What remains permitted
+
+D8's one carve-out, unchanged, and now stated as a boundary rather than
+an exception:
+
+- **`fq.trigger.<agent>` stays a documented SPI for co-located,
+  first-party adapters** (`fq-cron`, `github-watcher`). Durable
+  at-least-once ingress is JetStream's gift and there is no reason to
+  proxy it.
+- **Nothing else.** Remote ingress is `trigger.publish` on the edge.
+  Scoped NATS credentials for a third party remain a deliberate future
+  exception, never the default posture.
+
+The distinction that makes this consistent rather than a hole:
+**ingress is not control.** A trigger *submits work the daemon then
+decides about* — the daemon's dispatcher applies its own registry,
+budget, and policy, and may discard the trigger entirely. A control
+message expects the system to act on the *caller's* authority. The
+question to ask of the next proposal is therefore not "is it NATS" but
+**does the caller decide, or does the daemon**; anything in the second
+category is a declared op.
+
+### Consequences for the migration
+
+- The remaining `fq.control.*` bindings (`reload`, `down`,
+  `invocation.resume`) are legacy. They retire with their verbs' flips
+  in cohort 4.3 of the Phase-4 inventory, and `invocation.drop`'s is
+  already gone (PR #441).
+- `invocation.resume` becomes a declared verb mirroring
+  `invocation.drop` rather than keeping its request/reply subject.
+  Consistency between two actions on one resource was the trigger for
+  this amendment; the principle is what generalises it.
+- **A known inconsistency, tracked rather than fixed here.**
+  [`docs/design/committed/trigger-wire-contract.md`](../../design/committed/trigger-wire-contract.md)
+  still describes the trigger transport as "a stable,
+  language-agnostic **public** interface" for "an **external** trigger
+  source — in any language", which predates D8's narrowing to a
+  co-located first-party SPI and contradicts it head-on. That doc is
+  committed, so the repo currently holds two committed documents
+  disagreeing about whether `fq.trigger.*` is public. It is filed for
+  reconciliation, together with a post-migration sweep of every doc
+  that offers NATS as an external interface. This appendix describes
+  the decision, not yet the state of the documentation.

@@ -39,7 +39,7 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 16 | `fq invocation list` | **edge** | `invocation_list_*` | — | ✅ DONE (3b) |
 | 17 | `fq invocation show` | **edge** | `invocation_show_*` | — | ✅ DONE (3b) |
 | 18 | `fq invocation drop` | **four legacy paths at once**: legacy-split migration + control request + direct store opens + local `operator::drop_invocation` (`CLI:4764-4813`) | `invocation_drop_*` | `invocation.drop` — **op exists**; flip = delete the local path, move `--live` halting daemon-side | ✅ **DONE 2026-07-28** |
-| 19 | `fq invocation resume` | NATS request/reply `fq.control.invocation.resume` | (invocation_resume.rs suite) | `invocation.resume` command | no — **needs a domain-model amendment** (not among the committed six verbs) |
+| 19 | `fq invocation resume` | NATS request/reply `fq.control.invocation.resume` | (invocation_resume.rs suite) | `invocation.resume` command | no enum variant — but **amendment landed 2026-08-05**; see section C |
 | 20 | `fq invocation transcript` | snapshot: direct Views; `--follow`: **edge** (3d) | `transcript_*` (snapshot path) | snapshot → `turn.list`, and nothing else (the prompt is a Turn) | ✅ **DONE 2026-07-28** |
 | 21 | `fq workers list` | direct Views, client-side filtering | `workers_list_*` (**reviewed change** — see 4.1) | `worker.list` view (filter moved server-side) | ✅ **DONE 2026-08-01** |
 | 22 | `fq workers show` | direct Views | `workers_show_*` | `worker.get` view | ✅ **DONE 2026-08-01** |
@@ -118,9 +118,61 @@ read-service client (its only store/bus references are in tests).
   guard. That is what the listener's subscribe-before-recovery
   ordering was defending. Over the edge an unreachable daemon is a
   connection error, not a licence to proceed, so the guard fails
-  closed by construction. **Expect the same shape in `resume`'s
-  flip** (verb 19): a request/reply guard whose absence reads as
-  permission is the bug pattern to look for, not the ordering fix.
+  closed by construction.
+- **`resume` was checked for that shape and does not have it**
+  (2026-08-05). Its client bails on any request error, so the
+  no-responders answer surfaces as "start the daemon first" rather
+  than as permission — `invocation_resume.rs`'s daemon-down case
+  pins it. Retiring the subject removes the class regardless, but the
+  hazard verb 19 actually carries is a different one; see the
+  amendment below.
+- **Domain-model amendment for `invocation.resume`** — landed
+  2026-08-05 in
+  [the operator-surface domain model](../../design/committed/operator-surface-domain-model.md),
+  which unblocks cohort 4.3 item 13. What it decided:
+  - `invocation.resume` is a declared verb with the same shape as
+    `invocation.drop` (Write invocation, receipt-returning). Two
+    actions on one resource should not be reachable two different
+    ways.
+  - **NATS is not an external control surface** — recorded as an
+    architectural principle, not a note about one verb. The bus is the
+    internal event log and coordination substrate; every operator
+    action is a declared op on the edge. `fq.control.*` stops being an
+    entry point for anything outside the daemon.
+  - Two table entries that would otherwise have been minted into code
+    here are reconciled: `traversal.run` is marked **planned** (the
+    graph executor is held, #414 — nothing named `traversal` exists),
+    and `deadletter.requeue` becomes `dead_letter.requeue`, which is
+    what `Domain::DeadLetter`'s snake_case segment renders and what
+    rows 7/8 above already say.
+  - Row 19's "committed six verbs" was reading a model that disagreed
+    with itself: the verb table and the deltas prose said six, while
+    the appendix's domain-verb list named seven — the extra being
+    `traversal.run`. Post-amendment the two agree at **seven current**
+    domain verbs (the six real ones plus resume), with the traversal
+    trio pulled out and marked planned.
+- **Verb 19's real hazard is `drop`'s second lesson, not its first.**
+  PR #445 established that `invocation.drop` must never report
+  `NotFound` for work the daemon is running, because the liveness
+  authority and the identity authority do not share a clock. Resume
+  has the same two-authority shape, arranged differently, and the
+  amendment states its invariant: **it must never refuse an
+  invocation whose state it has already changed, and never act on a
+  terminal decision it cannot yet see.** Concretely, for the flip:
+  - The interrupted-result injection is a committed transaction, and
+    two steps after it (stored-identity validation, agent lookup)
+    still report failure — while the injection is exactly what makes
+    the invocation stop being Ambiguous, so a failed resume strands
+    work no second resume will accept. Order every fallible step
+    before the injection; past it the command must be infallible and
+    answer with a receipt naming the `invocation.operator_resumed`
+    atom. Note this makes the audit publish load-bearing rather than
+    best-effort — a receipt needs a sequence to name.
+  - The terminal precondition reads folds an async consumer writes,
+    so a resume issued inside the drop→consumer window is accepted
+    and re-drives a dropped invocation (#383, open). The edge's read
+    gate is the fix already in the building: evaluate terminality at
+    or after a watermark, not from whatever the fold currently says.
 - In-process `fq trigger` (D-1): retiring it removes the CLI's WAL
   writer, MCP child-process lifecycle, pricing loader, and genai
   dependency.
@@ -226,8 +278,8 @@ looking.
    silent-drop subscribe).
 7. `dead_letter` atom (`dead_letter.list`) + verb 7 flip.
 
-**4.3 — commands** *(each needs its enum variant; resume needs a
-model amendment first)*
+**4.3 — commands** *(each needs its enum variant; resume's model
+amendment landed 2026-08-05 — see section C)*
 8. `trigger.publish` + verb 6 flip.
 9. `control.down` + verb 4 flip — preserve the liveness gate and the
    deploy script's exit contract (hazard H3).
@@ -236,9 +288,11 @@ model amendment first)*
 11. `dead_letter.requeue` (+ enum variant) + verb 8 flip.
 12. `worker.prune` (+ enum variant) + verb 23 flip — **evented**
     mutation; reviewed golden change, not byte-identical (hazard H2).
-13. `invocation.resume` — domain-model amendment PR first (new verb
-    on Invocation), then registration + verb 19 flip; retire the two
-    request/reply control subjects with it.
+13. `invocation.resume` — the amendment is done; this is now
+    `Invocation::Resume` + registration + verb 19 flip, retiring the
+    request/reply control subject with it. **Implement the invariant
+    deliberately** (section C): fallible steps before the injection,
+    receipt after it, terminality read at a watermark.
 14. Retire D-1 (in-process trigger) and the remaining `fq.control.*`
     bindings; daemon banner updated.
 
@@ -246,7 +300,17 @@ model amendment first)*
 15. `cost.summary` report + verb 13 flip.
 16. `control.get` (status: version, health, stream probes move
     daemon-side) + verb 14 flip; `control.doctor` report + verb 15
-    flip (D-5 decides the exposed roster).
+    flip (D-5 decides the exposed roster). **Two decisions land here,
+    both from the 2026-08-05 model amendment.** (a) The machinery read
+    also carries the **registry's state, load errors included** — so
+    `agent.list`'s sum-typed index row (`AgentEntryView::LoadError`)
+    retires and verb 9's rendering re-sources its error block from
+    here; a reviewed golden change, not byte-identical. (b) The op's
+    **name is unsettled**: the maintainer named it `control.status`,
+    but a synthetic's Get renders `control.get`. The model recommends
+    changing the rendering rule for the synthetic nature and rejects
+    declaring it a report; **settle it before declaring the op**, and
+    edit all three places (model, ADR-0006 Appendix B, this row).
 17. Dashboard re-point over an attenuated read-only token; read
     service retires; `version`-probe freeze honoured explicitly.
     **Resolves a live divergence**: `read_service.rs` still answers

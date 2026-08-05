@@ -17,7 +17,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0003](accepted/0003-model-agnostic-per-agent.md) | Model-agnostic, per-agent model selection |
 | [0004](accepted/0004-cost-controls-from-day-one.md) | Cost controls from day one (per-invocation budget; sampling/elicitation sub-budget attribution) |
 | [0005](accepted/0005-agent-definition-format.md) | Agent definition format — Markdown + YAML frontmatter |
-| [0006](accepted/0006-registry-first-api.md) | Registry-first runtime API — typed operations, CQRS surface, derived interfaces; replaces the prior draft, amends ADR-0031 (Appendix A) |
+| [0006](accepted/0006-registry-first-api.md) | Registry-first runtime API — typed operations, CQRS surface, derived interfaces; replaces the prior draft, amends ADR-0031 (Appendix A); NATS is not an external control surface (Appendix C) |
 | [0009](accepted/0009-technology-choices.md) | Technology choices (Rust runtime) |
 | [0010](accepted/0010-agent-execution-isolation.md) | Agent execution isolation (containers by default; nothing-by-default sandbox) |
 | [0011](accepted/0011-event-bus-and-persistence.md) | Event bus and persistence (NATS + JetStream) — persistence/source-of-truth role partially superseded by [ADR-0026](accepted/0026-event-log-system-of-record.md); bus role stands |
