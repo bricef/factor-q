@@ -42,7 +42,7 @@ Closed schema — if a new field is needed, the runtime grows. Producing agents 
 | `invocation_id` | `string` (UUID v7) | Groups events from a single agent invocation. The primary key for grouping in projections and CLI queries. |
 | `schema_id` | `string` | Stable identifier for the payload schema, e.g. `"factor-q/triggered@1"`. Versioned from day one so payloads can evolve without becoming an archaeological dig. |
 | `timestamp` | `string` (RFC3339 with nanoseconds) | When the event was generated. |
-| `cost` | object, optional | Cost metadata for cost-bearing events (today: `llm.response`). See [Cost metadata](#cost-metadata) below. |
+| `cost` | object, optional | Cost metadata for cost-bearing events (today: `llm.response`, and `llm.failure` where the provider's usage was recoverable). See [Cost metadata](#cost-metadata) below. |
 
 ### Rationale
 
@@ -53,7 +53,7 @@ Closed schema — if a new field is needed, the runtime grows. Producing agents 
 
 ### Cost metadata
 
-When present (on `llm.response` events), `envelope.cost` has:
+When present (on `llm.response` events, and on the `llm.failure` events that bill), `envelope.cost` has:
 
 ```json
 {
@@ -129,6 +129,7 @@ Concrete subjects:
 | `fq.agent.{agent_id}.llm.request` | LLM call about to be made |
 | `fq.agent.{agent_id}.llm.dispatched` | LLM call has returned to the runtime (WAL middle-state) |
 | `fq.agent.{agent_id}.llm.response` | LLM call has returned and the response is durably written (carries `envelope.cost`) |
+| `fq.agent.{agent_id}.llm.failure` | LLM call ended without a response — a provider error, or a 200 with nothing in it (carries `envelope.cost` only when the provider's usage was recoverable) |
 | `fq.agent.{agent_id}.tool.call` | Agent is invoking a tool |
 | `fq.agent.{agent_id}.tool.dispatched` | Tool has returned to the runtime (WAL middle-state) |
 | `fq.agent.{agent_id}.tool.result` | Tool invocation has completed (success or failure) |
@@ -254,9 +255,36 @@ Published when an LLM call returns and the response is durably written. The enve
 ```
 
 **Design notes:**
-- **Cost rides on the envelope.** See [Cost metadata](#cost-metadata) above. Consumers query `WHERE event_type = 'llm_response' AND total_cost IS NOT NULL` for cost-bearing events.
+- **Cost rides on the envelope.** See [Cost metadata](#cost-metadata) above. Consumers query `WHERE event_type IN ('llm_response', 'llm_failure') AND total_cost IS NOT NULL` for cost-bearing per-call events.
 - **`tool_call_id` is assigned by the LLM.**
 - **`usage` carries raw token counts**, mirrored in `envelope.cost` along with the computed dollar values.
+
+### `llm.failure`
+
+The other terminal outcome of an LLM call (#447): the provider errored, or returned a 200 with no content and no tool calls. Sibling of `llm.response` rather than a nullable-fields variant of it, so a consumer's match site says which case it is in.
+
+```json
+{
+  "round": 4,
+  "call_id": "llm-01HXJ...",
+  "model": "claude-haiku-4-5",
+  "error_kind": "auth | rate_limited | invalid_response | request_failed | unpriced_model | empty_response",
+  "error_message": "rate limited",
+  "duration_ms": 4200,
+  "usage": {
+    "input_tokens": 1234,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0
+  }
+}
+```
+
+**Design notes:**
+- **`usage` is optional, and `None` is not zero.** Absent means "we do not know what the provider billed" — a transport failure yields no parsed body. Present means the counts are real: an empty completion still bills for the prefill. `envelope.cost` follows the same rule and is *absent*, never zeroed, when usage is unknown.
+- **`error_kind` mirrors `LlmError`**, plus `empty_response`, which has no error counterpart and is the one failure kind that can bill. A 429 currently arrives as `request_failed` with the status in `error_message`; [#278](https://github.com/bricef/factor-q/issues/278)'s `Retry-After` work is where `rate_limited` starts being produced.
+- **A failed call is not a failed invocation.** The agent-turn case publishes `failed` separately; a failed sampling or elicitation call declines the server's request and the invocation continues (ADR-0018).
+- **`duration_ms` includes the hidden retry attempts** inside `RetryingLlmClient`, which is the tell for a rate limit that eventually gave up. The attempt count itself is not surfaced — it lives below `LlmClient::chat` and belongs with #278.
 
 ### `tool.call`
 
@@ -508,9 +536,22 @@ The following invariants hold across the event stream and are assumed by consume
 
 1. **Events within one `invocation_id` are totally ordered** by the envelope chain. Sorting by `event_id` (UUID v7 is time-sortable) is a good fallback; following `parent_event_id` is authoritative.
 2. **Every invocation starts with a `triggered` event** and ends with either `completed` or `failed`. The `triggered` event is the chain root (`parent_event_id` absent).
-3. **Every `llm.request` is followed by `llm.dispatched` then `llm.response`** in the reducer path. The legacy executor path skips `llm.dispatched` (no WAL).
+3. **Every `llm.request` is followed by `llm.dispatched`, then exactly one
+   terminal outcome — `llm.response` on success, `llm.failure` on a provider
+   or validation error** — all three bearing the same `call_id`.
+   Provider-level retries happen below this boundary (`RetryingLlmClient`)
+   and are not event-visible, so one request yields one outcome. The
+   invariant is keyed on `call_id`, not on invocation: an invocation may
+   contain several `llm.failure` events, because a failed *sampling* or
+   *elicitation* call declines the server's request without ending the
+   agent's invocation, while a failed *agent turn* additionally emits
+   `failed`. The legacy executor path skips `llm.dispatched` (no WAL).
 4. **Every `tool.call` is followed by `tool.dispatched` then `tool.result`** in the reducer path. Tool failures surface as `tool.result` with `is_error: true`, not as missing results.
-5. **`envelope.cost` is present on `llm.response`** events that bill. There is no separate cost event.
+5. **`envelope.cost` is present on `llm.response` events that bill, and on
+   `llm.failure` events where the provider's usage was recoverable** (an
+   empty completion). It is *absent* — never zeroed — when usage is
+   unknown, so `total_cost IS NULL` continues to mean "no known spend"
+   rather than "zero spend". There is no separate cost event.
 6. **`config_snapshot` in `triggered` is immutable for the invocation.** Config changes during an invocation are ignored; they apply to the next invocation.
 7. **`invocation.ambiguous` is emitted by the worker on startup** for any invocation whose WAL classification returns "ambiguous" — or whose automatic resume fails (`stuck_entity: "recovery"`). It fires at most once per invocation across restarts (the worker store's `ambiguous_reported_at` stamp). The chain root for that emission is the new event itself (`parent_event_id` absent — recovery starts a fresh chain; see the recovery rationale in `data-architecture.md` §3.4).
 8. **`invocation.archived` immediately follows the terminal lifecycle event** (`completed` or `failed`) in the same invocation chain. The worker's retry sweeper may republish `invocation.archived` if the control-plane ack does not arrive; republishes keep the same `invocation_id` and the control-plane's insert is idempotent on it. `invocation.archive_acked` is the control-plane's reply on the worker-scoped subject and closes the hand-off.
@@ -531,7 +572,7 @@ The event trail has no payload-bearing system of record beyond JetStream retenti
 | Surface | Lifetime | What survives and record status |
 |---|---|---|
 | NATS `fq-events` | 30 days by default | Complete payload-bearing event trail; deleted after retention. Trigger and advisory streams retain messages for 24 hours by default. |
-| SQLite projection (`events`) | 30 days by default (`[state].retention_days`); cost-bearing rows kept indefinitely | Typed columns only, without event payloads. The daemon prunes it on the scheduled retention sweep, except rows carrying `total_cost` (`llm_response`, `invocation_summary`) — cost accounting is a primary platform concern and spend figures must survive retention. |
+| SQLite projection (`events`) | 30 days by default (`[state].retention_days`); cost-bearing rows kept indefinitely | Typed columns only, without event payloads. The daemon prunes it on the scheduled retention sweep, except rows carrying `total_cost` (`llm_response`, `llm_failure`, `invocation_summary`) — cost accounting is a primary platform concern and spend figures must survive retention. |
 | CAS archive (`fq-cas`) | Archive retention policy | Invocation final-state blobs only, not the event trail. ADR-0026 designates these invocation outcomes as the system of record. |
 
 After a projection sweep, replaying the retained NATS stream is the supported recovery path and can recover only events still inside JetStream retention. Events older than stream retention are gone by design; the projection intentionally does not preserve typed rows past that boundary. ADR-0026's system-of-record guarantee covers invocation outcomes, not the trail. A stronger re-projection guarantee is tracked in [#139](https://github.com/bricef/factor-q/issues/139) and [#163](https://github.com/bricef/factor-q/issues/163).
