@@ -11,13 +11,14 @@
 //! right one.
 
 use super::*;
-use crate::operator_surface::{InvocationViewKey, TurnFilter};
+use crate::operator_surface::TurnFilter;
 
 /// Dial the configured daemon's edge with the stored pairing. One
-/// handle per verb, not per call: a verb that asks two questions
-/// (`invocation transcript` reads the prompt and the turns) pays for
-/// the TLS handshake and the token exchange once, and both answers come
-/// from the same daemon incarnation.
+/// handle per verb, not per call: a verb that asks more than one
+/// question (`invocation transcript --follow` seeks the turn stream's
+/// tail, reads the snapshot, then long-polls) pays for the TLS
+/// handshake and the token exchange once, and every answer comes from
+/// the same daemon incarnation.
 pub(crate) async fn edge_client_for(global: &GlobalArgs) -> anyhow::Result<fq_edge::EdgeClient> {
     let config = global.resolve_config()?;
     let addr = config.edge.bind.clone();
@@ -85,39 +86,24 @@ pub(crate) async fn edge_invoke(
 /// the answer complete.
 const TRANSCRIPT_TURN_LIMIT: u32 = u32::MAX;
 
-/// The transcript snapshot, over the edge: the invocation's turns
-/// (`turn.list`) rendered through the turn→entry bridge, behind the
-/// opening prompt from the Invocation view (`invocation.get`). A
-/// transcript is a rendering composed over turns *plus* the
-/// invocation's prompt — a prompt is not an action within a Round, so
-/// it comes from the view, not the atom.
+/// The transcript snapshot, over the edge: `turn.list`, rendered
+/// through the turn→entry bridge. One question, one answer.
 ///
-/// `None` means "nothing recorded for this id": no prompt and no
-/// turns, which is also what an id the daemon has never heard of looks
-/// like. Both cases are the caller's established not-found path, so
-/// they are not distinguished here.
+/// The opening prompt is a Turn like any other — folded from the
+/// invocation's opening `llm.request`, which the runner publishes
+/// before it calls the provider — so there is nothing left for the
+/// transcript to compose. It used to ask `invocation.get` for the
+/// prompt as well, on the mistaken belief that the prompt never became
+/// an event; it always had.
+///
+/// `None` means "no turns recorded for this id", which is also what an
+/// id the daemon has never heard of looks like. Both are the caller's
+/// established not-found path, so they are not distinguished here.
 pub(crate) async fn edge_transcript_snapshot(
     client: &fq_edge::EdgeClient,
     invocation_id: &str,
 ) -> anyhow::Result<Option<Vec<fq_runtime::transcript::TranscriptEntry>>> {
     use fq_edge::wire::WireError;
-
-    let prompt = match invoke_on(
-        client,
-        fq_ops::OpId::Get(fq_ops::Domain::Invocation),
-        serde_json::to_value(InvocationViewKey {
-            invocation_id: invocation_id.to_string(),
-            with_prompt: true,
-        })?,
-    )
-    .await?
-    {
-        Ok(value) => {
-            serde_json::from_value::<fq_runtime::views::InvocationDetailView>(value)?.prompt
-        }
-        Err(WireError::NotFound { .. }) => None,
-        Err(e) => anyhow::bail!("{e}"),
-    };
 
     let turns = match invoke_on(
         client,
@@ -134,20 +120,18 @@ pub(crate) async fn edge_transcript_snapshot(
         Err(e) => anyhow::bail!("{e}"),
     };
 
-    if prompt.is_none() && turns.is_empty() {
+    if turns.is_empty() {
         return Ok(None);
     }
-    // Log order is chronological, and the prompt precedes the first
-    // turn by construction — no re-sort is needed to reproduce the
+    // Log order is chronological and `turn.list` answers in sequence
+    // order, so the rendering needs no re-sort to reproduce the
     // WAL-backed timeline.
-    let mut entries = Vec::with_capacity(turns.len() + 1);
-    entries.extend(prompt.map(fq_runtime::transcript::TranscriptPrompt::into_entry));
-    entries.extend(
+    Ok(Some(
         turns
             .iter()
-            .map(fq_runtime::turn::TurnState::transcript_entry),
-    );
-    Ok(Some(entries))
+            .map(fq_runtime::turn::TurnState::transcript_entry)
+            .collect(),
+    ))
 }
 
 /// One long-poll batch of an invocation's turns from the edge.

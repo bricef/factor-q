@@ -7,18 +7,13 @@
 //! only reads that touch payloads rather than headers, which is the
 //! property that decides where they can be served from.
 //!
-//! Two shapes live here, and the difference between them is the whole
-//! point:
-//!
-//! * [`Views::transcript`] — the full timeline, WAL-backed. The read
-//!   service (and through it the dashboard) still rides this.
-//! * [`Views::invocation_prompt`] — the opening prompt alone. The
-//!   operator surface's transcript is composed from the Turn atom
-//!   (`turn.list`), and a prompt is not a Turn, so the Invocation view
-//!   is where the edge picks it up.
+//! One shape lives here: [`Views::transcript`], the full timeline,
+//! WAL-backed. The read service (and through it the dashboard) still
+//! rides this. The operator surface does not — its transcript is
+//! composed from the Turn atom (`turn.list`), opening prompt included.
 
 use super::{Views, ViewsError};
-use crate::transcript::{TranscriptEntry, TranscriptPrompt};
+use crate::transcript::TranscriptEntry;
 
 impl Views {
     /// The payload-bearing transcript for one invocation, reconstructed
@@ -62,34 +57,5 @@ impl Views {
             });
         }
         Ok(Some(entries))
-    }
-
-    /// The invocation's opening prompt — system prompt and first user
-    /// message — from the first `llm_dispatch` row's request payload.
-    /// `None` when nothing has been dispatched yet, or when the stored
-    /// request carried neither message.
-    ///
-    /// Every later request re-sends the whole history, so the first row
-    /// is the only one worth mining: taking the earliest is what keeps
-    /// the prompt from being repeated once per round.
-    ///
-    /// Reads the dispatch list and keeps its head rather than asking
-    /// the store for one row. The store has no LIMIT-1 accessor, and
-    /// adding one to buy a first-row read is not worth a second query
-    /// shape on a call the operator makes once per transcript — the
-    /// rows are ordered by `intent_at` already.
-    pub async fn invocation_prompt(
-        &self,
-        invocation_id: &str,
-    ) -> Result<Option<TranscriptPrompt>, ViewsError> {
-        let first = self
-            .worker
-            .list_llm_dispatches_for_invocation(invocation_id)
-            .await?
-            .into_iter()
-            .next();
-        Ok(first.and_then(|row| {
-            crate::transcript::prompt_from_request(row.intent_at, &row.request_payload)
-        }))
     }
 }

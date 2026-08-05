@@ -1,17 +1,18 @@
-//! The Turn atom: one action within a Round — an assistant output or
-//! a tool result — as an immutable, event-log-backed fact
+//! The Turn atom: one action in an invocation's conversation — the
+//! opening prompt, an assistant output, or a tool result — as an
+//! immutable, event-log-backed fact
 //! (`docs/design/committed/operator-surface-domain-model.md`). The
 //! transcript is a *rendering* composed over turns (plus the
-//! invocation's prompt and outcome); the dependency runs that way,
-//! never the reverse.
+//! invocation's outcome); the dependency runs that way, never the
+//! reverse.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::events::{Event, EventPayload};
+use crate::events::{Event, EventPayload, LlmCallOrigin, LlmRequestPayload, MessageRole};
 use crate::transcript::{AssistantToolCall, TranscriptEntry};
 
 /// One turn, addressed by its event-log sequence — the universal
@@ -24,13 +25,15 @@ pub struct TurnState {
     pub agent_id: String,
     /// The Round grouping key: one Round is an assistant action plus
     /// the tool results it initiated (the model-turn count
-    /// `max_iterations` gates). 0 on turns derived from events
+    /// `max_iterations` gates). 0 on the opening prompt, which
+    /// precedes every Round, and on turns derived from events
     /// predating the field.
     pub round: u64,
     pub timestamp_ms: i64,
     /// For a tool-result turn: the sequence of the assistant turn
     /// whose call it answers — tracing in log coordinates. Absent
-    /// when the initiating turn predates the stream window.
+    /// when the initiating turn predates the stream window, and on
+    /// turns no other turn initiated (assistant turns, the prompt).
     pub initiating_turn: Option<u64>,
     /// The action itself — the fact this atom records.
     pub action: TurnAction,
@@ -40,6 +43,15 @@ pub struct TurnState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TurnAction {
+    /// The invocation's opening prompt: the system prompt the agent
+    /// was configured with and the user message its trigger became.
+    /// Folded from the opening `llm.request` — see
+    /// [`TurnFold::apply`]. First in the enum because it is first in
+    /// the conversation.
+    Prompt {
+        system: Option<String>,
+        user: Option<String>,
+    },
     Assistant {
         model: String,
         content: Option<String>,
@@ -65,6 +77,11 @@ impl TurnState {
     /// actions — the flip's contract.
     pub fn transcript_entry(&self) -> TranscriptEntry {
         match &self.action {
+            TurnAction::Prompt { system, user } => TranscriptEntry::Prompt {
+                timestamp_ms: self.timestamp_ms,
+                system: system.clone(),
+                user: user.clone(),
+            },
             TurnAction::Assistant {
                 model,
                 content,
@@ -99,17 +116,58 @@ impl TurnState {
 
 /// The fold from events to turns. Stateful across a window so a tool
 /// result joins its initiating call (name, parameters, and the
-/// assistant turn's sequence); the initiating events always precede
-/// the result in the log, so folding forward suffices.
+/// assistant turn's sequence), and so an invocation's opening prompt
+/// is yielded once; the initiating events always precede the result in
+/// the log, so folding forward suffices.
 #[derive(Default)]
 pub struct TurnFold {
     calls: HashMap<String, PendingCall>,
+    /// Invocations whose opening prompt this window has already
+    /// yielded. An invocation has exactly one opening prompt, but it
+    /// can publish more than one opening `llm.request`: `resume`
+    /// replays only *completed* WAL rows, so a crash between the
+    /// request publish and the response leaves nothing to replay and
+    /// the reducer re-issues the same opening call. Keyed by
+    /// invocation because one fold serves many — `list_turns` walks
+    /// the whole agent subject.
+    prompted: HashSet<String>,
 }
 
 struct PendingCall {
     tool_name: String,
     parameters: Value,
     assistant_seq: Option<u64>,
+}
+
+/// Is this request the invocation's *opening* one — the prompt the
+/// agent was launched with, rather than a later round's replay of the
+/// accumulated conversation?
+///
+/// Decided from the event's own content, never from the fold's
+/// position in the log. A fold is built fresh per read window:
+/// `turn.list` walks the whole agent subject (many invocations share
+/// one fold) and `turn.stream` starts at the caller's cursor, usually
+/// mid-invocation. A "the first one I saw" rule would answer
+/// differently per window — crowning whichever invocation the window
+/// opened on, and minting a bogus prompt out of round N's replayed
+/// history for anyone joining a run in progress. Two intrinsic tests,
+/// each stable under any window:
+///
+/// * The call is an agent turn. Server-initiated sampling and
+///   elicitation calls, and the evaluator completions that gate them
+///   (ADR-0018), also publish `llm.request`, and their message lists
+///   are system+user shaped — they are not this invocation's prompt.
+/// * The message list carries no assistant and no tool message. The
+///   harness's opening request is exactly system + user
+///   (`reducer::harness::initial_step`); every later round re-sends
+///   the whole conversation, which by then contains the preceding
+///   assistant turn.
+fn is_opening_request(payload: &LlmRequestPayload) -> bool {
+    matches!(payload.origin, LlmCallOrigin::AgentTurn)
+        && !payload
+            .messages
+            .iter()
+            .any(|m| matches!(m.role, MessageRole::Assistant | MessageRole::Tool))
 }
 
 impl TurnFold {
@@ -132,6 +190,31 @@ impl TurnFold {
             action,
         };
         match &event.payload {
+            EventPayload::LlmRequest(p) if is_opening_request(p) => {
+                // The prompt is not an action *within* a Round: it is
+                // what the first Round answers. `round: 0` is the
+                // ledger's own reading — `RoundLedger::current` is 0
+                // until the first response advances it, and this event
+                // is published before that (`runner::dispatch_llm`
+                // publishes, then `rounds.next()` stamps the
+                // response). `initiating_turn: None`: no turn caused
+                // it — the trigger did, and a trigger is not a Turn.
+                let prompt = crate::transcript::prompt_from_messages(
+                    envelope.timestamp.timestamp_millis(),
+                    &p.messages,
+                )?;
+                if !self.prompted.insert(envelope.invocation_id.to_string()) {
+                    return None;
+                }
+                Some(base(
+                    0,
+                    None,
+                    TurnAction::Prompt {
+                        system: prompt.system,
+                        user: prompt.user,
+                    },
+                ))
+            }
             EventPayload::LlmResponse(p) => {
                 for call in &p.tool_calls {
                     self.calls.insert(
@@ -217,10 +300,58 @@ mod tests {
     use super::*;
     use crate::agent::AgentId;
     use crate::events::{
-        CostMetadata, LlmCallOrigin, LlmResponsePayload, MessageToolCall, StopReason, TokenUsage,
-        ToolCallId, ToolResultPayload,
+        CostMetadata, LlmResponsePayload, Message, MessageToolCall, RequestParams, StopReason,
+        TokenUsage, ToolCallId, ToolResultPayload,
     };
     use uuid::Uuid;
+
+    fn msg(role: MessageRole, content: &str) -> Message {
+        Message {
+            role,
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// An `llm.request` event for one invocation, carrying `messages`
+    /// verbatim — the fold's only input for the prompt turn.
+    fn request_event(invocation: Uuid, origin: LlmCallOrigin, messages: Vec<Message>) -> Event {
+        Event::new(
+            AgentId::new("fold-probe").unwrap(),
+            invocation,
+            EventPayload::LlmRequest(LlmRequestPayload {
+                call_id: Uuid::now_v7(),
+                model: "claude-haiku".into(),
+                messages,
+                tools_available: Vec::new(),
+                request_params: RequestParams {
+                    effort: None,
+                    temperature: None,
+                    max_tokens: Some(4096),
+                },
+                origin,
+            }),
+        )
+    }
+
+    /// The shape the harness's `initial_step` builds: system, then the
+    /// trigger's user message. Nothing else.
+    fn opening_messages() -> Vec<Message> {
+        vec![
+            msg(MessageRole::System, "You are a deterministic fixture."),
+            msg(MessageRole::User, "Summarise the fixture."),
+        ]
+    }
+
+    /// Round 2's request: the whole conversation replayed, assistant
+    /// turn and tool result included.
+    fn continued_messages() -> Vec<Message> {
+        let mut messages = opening_messages();
+        messages.push(msg(MessageRole::Assistant, "Reading the file first."));
+        messages.push(msg(MessageRole::Tool, "deterministic"));
+        messages
+    }
 
     fn assistant_event(round: u64, with_call: Option<&str>) -> Event {
         Event::new(
@@ -318,6 +449,155 @@ mod tests {
         };
         assert_eq!(tool_name, "exec");
         assert_eq!(parameters, &serde_json::Value::Null);
+    }
+
+    /// The opening `llm.request` is a turn, and it is the first one:
+    /// the runner publishes it before the provider call, so it sorts
+    /// ahead of round 1's response on sequence alone.
+    #[test]
+    fn opening_request_becomes_the_first_turn() {
+        let invocation = Uuid::now_v7();
+        let mut fold = TurnFold::new();
+        let prompt = fold
+            .apply(
+                10,
+                &request_event(invocation, LlmCallOrigin::AgentTurn, opening_messages()),
+            )
+            .expect("the opening request yields a turn");
+        let assistant = fold.apply(11, &assistant_event(1, None)).unwrap();
+
+        assert!(prompt.seq < assistant.seq, "the prompt sorts first");
+        // Not an action within a Round — it is what Round 1 answers.
+        assert_eq!(prompt.round, 0);
+        assert_eq!(prompt.initiating_turn, None);
+        assert_eq!(prompt.invocation_id, invocation.to_string());
+        let TurnAction::Prompt { system, user } = &prompt.action else {
+            panic!("expected a prompt turn, got {:?}", prompt.action);
+        };
+        assert_eq!(system.as_deref(), Some("You are a deterministic fixture."));
+        assert_eq!(user.as_deref(), Some("Summarise the fixture."));
+    }
+
+    /// The negative control the whole rule turns on: a later round's
+    /// request re-sends the accumulated conversation, and must not
+    /// produce a second prompt. Folded *alone* — no earlier request in
+    /// the window — so nothing but the event's own content can be
+    /// telling the fold "not the opening one". This is the case a
+    /// `--follow` that joins a run in progress actually sees.
+    #[test]
+    fn a_later_rounds_replayed_history_is_not_a_prompt() {
+        let invocation = Uuid::now_v7();
+        let mut fold = TurnFold::new();
+        assert!(
+            fold.apply(
+                77,
+                &request_event(invocation, LlmCallOrigin::AgentTurn, continued_messages()),
+            )
+            .is_none(),
+            "round N's replayed history is not the opening prompt"
+        );
+    }
+
+    /// Sampling and elicitation calls (ADR-0018) publish `llm.request`
+    /// too, and their message lists are system+user shaped. They are
+    /// somebody else's prompt, not this invocation's.
+    #[test]
+    fn server_initiated_calls_mint_no_prompt() {
+        let invocation = Uuid::now_v7();
+        for origin in [
+            LlmCallOrigin::Sampling {
+                server: "docs".into(),
+            },
+            LlmCallOrigin::Elicitation {
+                server: "docs".into(),
+            },
+        ] {
+            let mut fold = TurnFold::new();
+            assert!(
+                fold.apply(
+                    5,
+                    &request_event(invocation, origin.clone(), opening_messages())
+                )
+                .is_none(),
+                "{origin:?} must not mint a prompt turn"
+            );
+        }
+    }
+
+    /// An invocation has one opening prompt however many opening
+    /// requests it published. `resume` replays only *completed* WAL
+    /// rows, so a crash between the request publish and the response
+    /// leaves nothing to replay and the reducer re-issues the same
+    /// opening call — two identical events, one turn.
+    #[test]
+    fn one_prompt_per_invocation_however_many_opening_requests() {
+        let invocation = Uuid::now_v7();
+        let mut fold = TurnFold::new();
+        assert!(
+            fold.apply(
+                3,
+                &request_event(invocation, LlmCallOrigin::AgentTurn, opening_messages())
+            )
+            .is_some()
+        );
+        assert!(
+            fold.apply(
+                9,
+                &request_event(invocation, LlmCallOrigin::AgentTurn, opening_messages())
+            )
+            .is_none(),
+            "the re-issued opening call is the same prompt, not a second one"
+        );
+    }
+
+    /// The dedup is per invocation, not per fold: `list_turns` walks
+    /// the whole agent subject, so one fold routinely sees several
+    /// invocations and each is owed its own prompt.
+    #[test]
+    fn one_fold_serves_every_invocations_prompt() {
+        let (first, second) = (Uuid::now_v7(), Uuid::now_v7());
+        let mut fold = TurnFold::new();
+        assert!(
+            fold.apply(
+                1,
+                &request_event(first, LlmCallOrigin::AgentTurn, opening_messages())
+            )
+            .is_some()
+        );
+        assert!(
+            fold.apply(
+                2,
+                &request_event(second, LlmCallOrigin::AgentTurn, opening_messages())
+            )
+            .is_some(),
+            "a second invocation in the same window keeps its prompt"
+        );
+    }
+
+    /// The rendering bridge maps a prompt turn onto the same
+    /// `TranscriptEntry::Prompt` the WAL path emits, timestamped from
+    /// the request event's envelope.
+    #[test]
+    fn prompt_turn_bridges_to_the_prompt_entry() {
+        let mut fold = TurnFold::new();
+        let turn = fold
+            .apply(
+                4,
+                &request_event(Uuid::now_v7(), LlmCallOrigin::AgentTurn, opening_messages()),
+            )
+            .unwrap();
+        match turn.transcript_entry() {
+            TranscriptEntry::Prompt {
+                timestamp_ms,
+                system,
+                user,
+            } => {
+                assert_eq!(timestamp_ms, turn.timestamp_ms);
+                assert_eq!(system.as_deref(), Some("You are a deterministic fixture."));
+                assert_eq!(user.as_deref(), Some("Summarise the fixture."));
+            }
+            other => panic!("expected a prompt entry, got {other:?}"),
+        }
     }
 
     /// The rendering bridge maps turns onto the exact transcript

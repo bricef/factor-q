@@ -19,18 +19,6 @@ use super::*;
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct InvocationViewKey {
     pub(crate) invocation_id: String,
-    /// Ask for the invocation's opening prompt alongside the fold.
-    ///
-    /// Not identity — the id alone names the invocation — but a
-    /// declaration of what the reader will do with the answer. The
-    /// prompt is the one unbounded field on the view
-    /// (`InvocationDetailView::prompt`), so a reader that renders the
-    /// conversation says so and pays for it, and a reader that wants
-    /// the fold is not charged an agent's whole system prompt on every
-    /// `invocation show`. Defaults false, which is also what every
-    /// peer that predates the field sends.
-    #[serde(default)]
-    pub(crate) with_prompt: bool,
 }
 
 /// List selection for the Invocation view — the typed, schema'd
@@ -249,21 +237,10 @@ pub fn operator_registry(
                         )
                         .await
                         .map_err(internal)?;
-                    let mut detail = detail.ok_or_else(|| WireError::NotFound {
+                    detail.ok_or_else(|| WireError::NotFound {
                         op: "invocation.get".into(),
                         message: format!("no invocation `{}`", key.invocation_id),
-                    })?;
-                    // The prompt is composed here rather than inside
-                    // the fold: it is the only opt-in field, and the
-                    // reader's request is what decides whether the
-                    // payload read happens at all.
-                    if key.with_prompt {
-                        detail.prompt = views
-                            .invocation_prompt(&key.invocation_id)
-                            .await
-                            .map_err(internal)?;
-                    }
-                    Ok(detail)
+                    })
                 }
             },
             move |filter: InvocationListFilter| {

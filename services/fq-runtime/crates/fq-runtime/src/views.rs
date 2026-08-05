@@ -635,21 +635,6 @@ pub struct InvocationDetailView {
     /// the run is live; `None` before the first priced call lands.
     #[serde(default)]
     pub cost: Option<InvocationCostView>,
-    /// The invocation's opening prompt, for readers that render the
-    /// conversation. **Composed on request, never by
-    /// [`Views::invocation`]** — see [`Views::invocation_prompt`],
-    /// which the operator surface's `invocation.get` calls when the
-    /// caller asks for it.
-    ///
-    /// Opt-in because it is the one unbounded field on this view: an
-    /// agent's system prompt runs to thousands of tokens, and every
-    /// other reader of an invocation (`fq invocation show`, the
-    /// dashboard's detail page, the list joins) wants the fold, not the
-    /// conversation. Omitted from the serialised form when absent, so
-    /// "did not ask" and "asked, nothing there" read the same on the
-    /// wire — which is what a caller that did not ask should see.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<crate::transcript::TranscriptPrompt>,
 }
 
 // ============================================================
@@ -1227,7 +1212,6 @@ impl Views {
             has_transcript,
             summary,
             cost,
-            prompt: None,
         }))
     }
 }
