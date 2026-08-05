@@ -12,6 +12,20 @@ Basis for the
 [registry+split execution plan](../../plans/active/2026-07-20-registry-and-split-execution.md)'s
 registry work.
 
+**Amended 2026-08-05**, on four points. `invocation.resume` becomes a
+declared verb mirroring `invocation.drop` (there is no reason two
+actions on the same resource should be reachable different ways). The
+model states plainly that **NATS is not an external control surface**,
+recorded as
+[ADR-0006 Appendix C](../../adrs/accepted/0006-registry-first-api.md).
+Registry state, load errors included, moves onto the machinery
+resource, leaving `agent.list` homogeneous. And two entries that
+described the world inaccurately — `traversal.run`, which does not
+exist, and `deadletter.requeue`, which is not how the codebase spells
+it — are reconciled before cohort 4.3 mints them into code. Unblocks
+verb 19 of the
+[Phase-4 call-point inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md).
+
 ## The domain in one paragraph
 
 The append-only event log is the system of record; everything else is
@@ -60,11 +74,11 @@ The initial catalogue:
 | Event | atom | the substrate; every other resource derives from it |
 | Turn | atom | one action (an assistant output or a tool result), filtered by invocation; a **Round** is the bundle of Turns in one agent-loop iteration (the ADR-0027 step boundary is a Round boundary), recoverable via the `round` grouping key |
 | DeadLetter | atom | born of trigger exhaustion |
-| Trigger | atom | minted by `trigger.publish` (a domain verb) and by first-party adapters via the wire-contract SPI |
+| Trigger | atom | minted by `trigger.publish` (a domain verb) and by **co-located** first-party adapters via the wire-contract SPI — ingress, not control (see the control-surface principle) |
 | Invocation | view | fold: phase, totals, archive status |
 | Worker | view | fold: registration + heartbeats + ownership |
-| Agent | view | the daemon's registry snapshot (reload swaps it) |
-| Control | synthetic | the daemon machinery itself — its Get answers with the machinery state, and it carries the lifecycle verbs (down, reload; room for future ones such as peer join) |
+| Agent | view | the daemon's registry snapshot (reload swaps it); its index rows are agent definitions and nothing else — a file that failed to parse never became an agent, so it belongs to the machinery |
+| Control | synthetic | the daemon machinery itself — the machinery read answers with its state, **including the registry's own (load errors and all)**, and it carries the lifecycle verbs (down, reload; room for future ones such as peer join) |
 | Operation | view | the surface describing itself: the catalogue of promises |
 
 Domains need not all carry catalogue resources: `Cost` exists purely as
@@ -109,17 +123,27 @@ idempotency, caveats), never hidden behind a generic verb:
 | Verb | Authority | The contract that makes it bespoke |
 |---|---|---|
 | invocation.drop | Write invocation | archives as failed; workers observe at the next step boundary. Refused on an invocation the daemon is actively driving unless `--live`, which halts it at its next boundary first (in-flight tools finish) before the drop |
+| invocation.resume | Write invocation | the counterpart to drop — reconciles unknown execution instead of abandoning it: durably completes every stuck tool dispatch with an honest interrupted result, then re-drives the invocation through ordinary SafeReplay recovery. Refused on anything not **Ambiguous**, and each refusal is distinct because the operator must be able to tell them apart: terminal (including operator-dropped), live on this daemon, stuck in an *LLM* dispatch (injection reconciles tool calls only), or already resumed |
 | trigger.publish | Write trigger | dispatch work: at-least-once with a bounded budget; the receipt references the appended trigger atom |
-| deadletter.requeue | Write trigger | selects the newest dead letter; **not idempotent**; fresh delivery budget |
+| dead_letter.requeue | Write trigger | selects the newest dead letter; **not idempotent**; fresh delivery budget |
 | worker.prune | Delete worker | evicts stale registrations; co-emits its events (no silent mutation) |
 | control.down | Write control (manual) | drain-to-step-boundary then exit; confirmation is the shutdown event |
 | control.reload | Write control (manual) | registry swap affects next trigger only |
 
-(Verbs that mint atoms — `trigger.publish`, `deadletter.requeue` — are
+(Verbs that mint atoms — `trigger.publish`, `dead_letter.requeue` — are
 still verbs, not generic creation: their semantics (delivery budget,
 non-idempotency) are the contract, and `trigger.publish`'s authority
 (Write trigger) stays separately grantable from the machinery's
 lifecycle authority.)
+
+**Names are rendered, never chosen.** A verb's name is its domain's
+segment plus its declared word (P8), and the domain segment is the
+snake_case rendering of the `Domain` variant — `Domain::DeadLetter`
+gives `dead_letter`. So `dead_letter.requeue` is the spelling, here and
+everywhere. The `deadletter.requeue` this table carried until
+2026-08-05 was not a second convention needing reconciliation; it was
+prose disagreeing with a name structure had already decided, which is
+the only way the two can ever differ.
 
 Commands return **receipts** — model-native references to the atoms
 they appended, never state: `AtomRef { domain, seq }`, the same
@@ -129,6 +153,59 @@ mapped by the edge, never exposed in a receipt. A receipt's watermark
 is **per-domain** (sequences from different domains are not
 comparable) and feeds the next Get/List of that domain for
 read-your-writes.
+
+### The two-authority hazard
+
+`invocation.drop` and `invocation.resume` share a shape no other verb
+has: each evaluates a precondition against records that are **older
+than the decision it is about to make**, and each applies a durable
+side effect **before** it has finished answering. That pair of
+properties is what produced #445 and #383, so the invariants are
+recorded here rather than rediscovered a third time.
+
+**Drop's invariant (PR #445): it must never report `NotFound` for work
+the daemon is actively running.** The liveness authority is the
+in-memory runner; the identity authority is the projection — and they
+do not share a clock, because the runner marks an invocation active on
+its first line, seconds before anything durable names it. A `--live`
+drop could therefore arm a halt that stops real work and *then* answer
+that the invocation did not exist. The fix was structural rather than
+defensive: the liveness authority now answers identity too, so
+resolution is infallible exactly when the halt was armed, and the
+partial application is unrepresentable instead of handled.
+
+**Resume's invariant: it must never refuse an invocation whose state it
+has already changed, and never act on a terminal decision it cannot yet
+see.** Resume has both of drop's properties, in its own arrangement:
+
+- Its side effect is the interrupted-result injection — one committed
+  transaction that rewrites every stuck tool dispatch as completed.
+  Two later steps still report failure after it (stored-identity
+  validation, agent lookup), the audit publish is best-effort, and the
+  re-drive is a detached task whose failure reaches only the log. And
+  the injection is precisely what makes the invocation *stop* being
+  Ambiguous, so a resume that injects and then fails leaves work no
+  second resume will accept — stranded until a daemon restart's
+  recovery sweep happens to pick it up as SafeReplay. Order every
+  fallible step **before** the injection, so that past it the command
+  is infallible and always answers with a receipt naming the
+  `invocation.operator_resumed` atom. That receipt is not decoration:
+  it is the only thing that tells an operator the WAL moved, and today
+  the refusal and the after-the-fact failure are the same shape on the
+  wire.
+- Its precondition reads terminality from folds an asynchronous
+  consumer writes. `invocation.drop` publishes and returns; until the
+  coordination consumer applies that event, resume's guards both read
+  "not terminal" and it will re-drive the invocation the operator just
+  dropped (#383). Sequence is the domain's clock and the edge already
+  gates reads at a watermark, so the terminal authority must be read
+  at or after the coordinate the drop's receipt named — not sampled
+  from whatever the fold currently says.
+
+Neither is a caveat about one verb. The rule the next command of this
+shape inherits: **a command that decides on a fold and acts on the
+world owes the model an ordering in which its decision cannot be
+overtaken and its effect cannot outrun its answer.**
 
 ## Reports
 
@@ -159,6 +236,72 @@ same access-control semantics as everything else (Read control), on
 the same resource whose lifecycle verbs write it. Bring taxonomy back
 only if the machinery surface stops being small.
 
+### The machinery read is the accumulation point (`control.status`)
+
+*Amended 2026-08-05.* **The registry's current state — load errors
+included — rides the machinery read, and `agent.list` returns
+homogeneous agent rows.** The machinery read is also where further
+machinery information accumulates, by growing one schema rather than
+by growing the op roster.
+
+The forcing case was `agent.list`, whose index row is a sum today
+(`AgentEntryView::Agent(..) | ::LoadError { message }`) because a
+view's List answers `Vec<Index>` with no envelope for
+collection-level data, and a file that failed to parse has no agent id
+to be listed under. The tell that the union is transport rather than
+modelling is what every consumer does with it first: partition it
+straight back into two lists. An agent entry is semantically an agent
+definition, and a definition that failed to load never became one.
+
+The model already had the right home and did not use it. Synthetics
+stand for live machinery rather than recorded truth, and the daemon's
+agent registry is live machinery by construction — `control.reload`
+rebuilds it, which is why the Agent row is a view over a registry
+snapshot rather than a fold of atoms. Registry state is machinery
+state; it belongs on the machinery resource, where a load error is not
+an anomalous row but an ordinary field.
+
+This generalises. The question "where does *this* piece of machinery
+state go?" now has one answer, which is what stops the next such value
+being smuggled into whichever listing happens to be nearby.
+
+**Unsettled: what this op renders as.** The model says a synthetic
+answers by Get alone, and `OpId::Get(Domain::Control)` renders
+`control.get` — the name ADR-0006's Appendix B and the Phase-4
+inventory both use. `control.status` is not that string. Three ways
+out, and they are not equivalent:
+
+1. **Keep `control.get`, treat "status" as the informal name.** Costs
+   nothing, changes nothing — but the op was named deliberately, and
+   `get` is a poor word for it.
+2. **Let the synthetic carry a named read verb.** This would put a
+   second kind of read on a surface whose entire read side is generic
+   and derives Read and nothing else. Largest change, smallest gain.
+3. **Give the rendering rule one more word: a synthetic's read renders
+   `<domain>.status`, not `<domain>.get`.**
+
+Option 3 looks right, and its justification is already in this
+document: a synthetic has **no key**, and its Get **takes no input**.
+"Get" names an identity lookup a synthetic does not have — so the
+current rendering has been slightly wrong since synthetics were
+introduced, and this is the occasion to notice. Naming that nature's
+read `status` is a rule about a nature, not an exception for one op,
+and it leaves authority derivation (Read on `Control`) and the
+one-machinery-read shape untouched.
+
+A fourth option should be rejected explicitly, because it is the
+cheapest and therefore the tempting one: declaring `control.status` a
+**report** on scope `Control` renders the right string with no new
+mechanism at all (`control.doctor` is already that shape). But it
+would leave a synthetic whose read answers nothing much sitting beside
+a report that answers everything — a worse model bought with a smaller
+diff.
+
+**This needs settling before cohort 4.4 declares the op.** Whichever
+way it goes, it is a three-place edit: this section, ADR-0006's
+Appendix B ("Probe dissolves into `control.get`"), and the inventory's
+verbs 14/16.
+
 ## Access control, uniformly
 
 One vocabulary across the whole surface — verb × scope, where scope is
@@ -170,6 +313,56 @@ a domain (which may exist purely as a scope, like `Cost`):
   Control resource always declare manually
 - Reports ⇒ Read on their own domain (never their inputs — aggregates
   are a privilege boundary)
+
+## NATS is not an external control surface
+
+The bus is the system's internal event log and coordination substrate.
+It is not a control plane. **Nothing outside the daemon commands the
+system by publishing to a subject** — every operator action is a
+declared op on the authenticated edge, and a proposed verb that would
+need a subject of its own is a verb whose declaration is missing.
+
+ADR-0006's D8 ("NATS is internal infrastructure, not public API") and
+ADR-0031's rejected alternative ("`fq` keeps its own NATS connection
+for commands") each said where the bus must not be *exposed*. This is
+the same commitment stated as a property of the architecture, so it
+settles the next case rather than the last one:
+
+- **Control flows one way in: client → edge → daemon → bus.** The
+  daemon publishes because it owns the log; a client never does.
+  `fq.control.*` is therefore not an entry point. The subjects that
+  remain (`reload`, `down`, `invocation.resume`) are legacy, and
+  retire with their verbs' flips.
+- **A control subject is not a cheaper edge.** It skips authority
+  (D7's verb × scope is enforced at the edge and nowhere else), skips
+  the receipt/watermark contract (a subject can carry a reply, but not
+  an `AtomRef` a caller can gate the next read on — P4/D3), and skips
+  audit identity. A verb reached that way is not a lighter version of
+  the declared verb; it is a different verb with none of the model's
+  guarantees.
+- **It also fails differently, and worse.** Core NATS answers "no
+  responders" the instant nobody owns a subject — at the client,
+  indistinguishable from a considered reply. `invocation.drop`'s
+  liveness guard was a request/reply subject and read that answer as
+  *"nothing is running, drop directly"*, so any window in which the
+  subject was unowned silently bypassed the guard, a restart racing
+  startup recovery being exactly when an operator reaches for drop
+  (PR #441). Over the edge an unreachable daemon is a connection
+  error, never a licence to proceed: the guard fails closed by
+  construction, and the ordering constraint that used to defend it is
+  gone rather than merely satisfied.
+- **Ingress is not control.** `fq.trigger.<agent>` remains a
+  documented SPI for co-located, first-party adapters (D8's one
+  carve-out); the Trigger row above says so. It *submits work the
+  daemon then decides about* — it does not command the daemon. Remote
+  ingress is `trigger.publish` on the edge like everything else. The
+  question to ask of the next proposal is not "is it NATS", it is
+  **does the caller decide, or does the daemon**: anything expecting
+  the system to act on the caller's authority is a declared op.
+
+The practical test for a new verb: if it cannot be expressed as a
+declared op with an authority, a typed input, and a receipt, that is a
+finding about the verb — not a reason to reach for the bus.
 
 ## Deltas against ADR-0006 (recorded as its Appendix B)
 
@@ -191,13 +384,14 @@ a domain (which may exist purely as a scope, like `Cost`):
 - **Per-domain op enumerations dissolve.** `agent.list` / `worker.show` /
   `invocation.get` were never domain facts — they are the catalogue ×
   generic-verb cross-product, derivable. What remains hand-declared is
-  exactly what is semantically bespoke: the catalogue itself, six
+  exactly what is semantically bespoke: the catalogue itself, seven
   domain verbs, three reports.
 - **D6's generic envelopes are edge artifacts**, designed with the
   Phase-2 tarpc service rather than in the contract crate.
 - Everything else stands: receipts (D3), watermarks (D4), sequence
   cursors (D5), derived surfaces (D6), the authority vocabulary (D7),
-  NATS interior (D8).
+  NATS interior (D8) — D8 now restated positively, as the
+  control-surface principle above.
 
 ## Out of scope
 
@@ -225,16 +419,29 @@ remains declared is declared on purpose.
 | `worker.list` / `.show` | List / Get(Worker) |
 | `agent.list` / `.show` | List / Get(Agent) |
 | `registry.describe` | List(Operation) |
-| `traversal.status` / `.tail` | Get(Traversal) / Stream(TraversalEvent) |
-| `trigger.publish` · `traversal.run` · `invocation.drop` · `deadletter.requeue` · `worker.prune` · `control.down` · `control.reload` | domain verbs |
+| `traversal.status` / `.tail` — **planned** | Get(Traversal) / Stream(TraversalEvent) |
+| `trigger.publish` · `invocation.drop` · `invocation.resume` · `dead_letter.requeue` · `worker.prune` · `control.down` · `control.reload` | domain verbs |
+| `traversal.run` — **planned** | a domain verb, when there is a graph executor to run |
 | `cost.summary` · `cost.by_agent` (scope `Cost`) · `control.doctor` (scope `Control`) | reports |
 | `runtime.health` · `runtime.status` · `runtime.version` | `control.get` — one machinery read |
+
+**Planned rows are not surface.** Nothing named `traversal` exists in
+the codebase: the graph executor is deliberately held (#414), so those
+three rows say where the ops *will* land, not what the registry serves.
+They are kept because the mapping is itself the finding below. Every
+other row names a real domain concept — which op is *registered* yet is
+the [Phase-4 inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md)'s
+business, not this table's — and that is exactly why the traversal rows
+had to be marked: unmarked, they read as description, and cohort 4.3
+would mint a verb the model only imagined.
 
 Findings worth keeping:
 
 - **Traversal is the proof of "born derived":** the whole trio costs one
   catalogue row, not three op definitions — the original ADR-0006
-  motivation, now literal.
+  motivation, applied. Still a prediction rather than a result, since
+  the executor is held; the model's claim is about what the trio *will*
+  cost when it arrives.
 - **The overlay mints unasked-for but useful surface:** Stream(DeadLetter)
   ("tell me the moment something dead-letters") and List(Trigger)
   (pending triggers) fall out free. Reads (Get/List, +Stream for atoms)
