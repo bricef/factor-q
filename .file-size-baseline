@@ -19,7 +19,6 @@ services/fq-dashboard/src/render.rs 1450
 services/fq-runtime/crates/fq-cli/src/lib.rs 4869
 services/fq-runtime/crates/fq-runtime/src/agent.rs 868
 services/fq-runtime/crates/fq-runtime/src/bus.rs 953
-services/fq-runtime/crates/fq-runtime/src/control_plane/projection/store.rs 854
 services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1049
 services/fq-runtime/crates/fq-runtime/src/events.rs 1203
 services/fq-runtime/crates/fq-runtime/src/mcp.rs 1850
