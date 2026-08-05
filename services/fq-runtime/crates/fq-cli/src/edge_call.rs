@@ -11,6 +11,7 @@
 //! right one.
 
 use super::*;
+use crate::event_atom::EventFilter;
 use crate::operator_surface::TurnFilter;
 
 /// Dial the configured daemon's edge with the stored pairing. One
@@ -134,6 +135,64 @@ pub(crate) async fn edge_transcript_snapshot(
     ))
 }
 
+/// Slack on a long poll's deadline: how much longer the caller waits
+/// than the window it asked the daemon to hold. Covers the round trip
+/// and the daemon's own scheduling under load — generous, because the
+/// deadline is a backstop against a hung daemon, not the thing that
+/// ends a poll.
+const LONG_POLL_DEADLINE_SLACK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The RPC context for a long poll: patient enough for the wait it is
+/// asking for.
+///
+/// tarpc's default deadline is a flat ten seconds, which is **shorter
+/// than the window these calls ask the daemon to hold** (30s). A poll
+/// that legitimately waits out its window is then abandoned by the
+/// very client that asked for it, and the verb dies with `edge rpc
+/// failed: DeadlineExceeded`.
+///
+/// That this was not obvious is worth recording: `event.stream` reads
+/// the whole log, and the daemon heartbeats every
+/// `DEFAULT_INTERVAL_MS` — exactly 10s — so an idle tail's poll was
+/// ended by a heartbeat in a photo finish with the deadline, and lost
+/// the race only under load. `turn.stream` has no such cover: it is
+/// filtered to one agent's subject, so `invocation transcript
+/// --follow` on a quiet invocation loses every time.
+fn long_poll_context(max_wait_ms: u64) -> tarpc::context::Context {
+    let mut ctx = tarpc::context::current();
+    ctx.deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(max_wait_ms)
+        + LONG_POLL_DEADLINE_SLACK;
+    ctx
+}
+
+/// One long-poll batch of events from the edge. `from_seq = u64::MAX`
+/// seeks the tail without consuming anything — the seam `fq events
+/// tail` starts from, and the same cursor it resumes at, so a tail that
+/// reconnects picks up exactly where it stopped rather than wherever
+/// the broker happens to be (plan Phase 4, verb 11).
+pub(crate) async fn next_event_batch(
+    client: &fq_edge::EdgeClient,
+    filter: &EventFilter,
+    from_seq: u64,
+    max_wait_ms: u64,
+) -> anyhow::Result<Result<fq_edge::wire::StreamBatch, fq_edge::wire::WireError>> {
+    client
+        .rpc
+        .next_batch(
+            long_poll_context(max_wait_ms),
+            fq_edge::NextBatchRequest {
+                op: fq_ops::OpId::Stream(fq_ops::Domain::Event),
+                version: 1,
+                filter: serde_json::to_value(filter)?,
+                from_seq,
+                max_wait_ms,
+            },
+        )
+        .await
+        .context("edge rpc failed")
+}
+
 /// One long-poll batch of an invocation's turns from the edge.
 /// `from_seq = u64::MAX` seeks the tail without consuming anything —
 /// the gap-free seam `--follow` pins before it reads the snapshot.
@@ -146,7 +205,7 @@ pub(crate) async fn next_turn_batch(
     client
         .rpc
         .next_batch(
-            tarpc::context::current(),
+            long_poll_context(max_wait_ms),
             fq_edge::NextBatchRequest {
                 op: fq_ops::OpId::Stream(fq_ops::Domain::Turn),
                 version: 1,
@@ -160,4 +219,33 @@ pub(crate) async fn next_turn_batch(
         )
         .await
         .context("edge rpc failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The invariant both long-polling verbs depend on, pinned where
+    /// it cannot cost wall-clock time to check: a caller must be more
+    /// patient than the wait it asks for. tarpc's default is a flat
+    /// ten seconds, so this is the one thing that stops a 30-second
+    /// poll from being abandoned at ten.
+    #[test]
+    fn a_long_poll_outlasts_the_wait_it_asks_for() {
+        for max_wait_ms in [0, 30_000, 60_000] {
+            let ctx = long_poll_context(max_wait_ms);
+            let asked = std::time::Instant::now() + std::time::Duration::from_millis(max_wait_ms);
+            assert!(
+                ctx.deadline > asked,
+                "a {max_wait_ms}ms poll must not be abandoned before it is answered"
+            );
+        }
+        // And the default it replaces would not have been: this is
+        // the regression, stated.
+        assert!(
+            tarpc::context::current().deadline
+                < std::time::Instant::now() + std::time::Duration::from_millis(30_000),
+            "tarpc's default deadline is shorter than a 30s poll — the bug this guards"
+        );
+    }
 }
