@@ -64,6 +64,7 @@ pub fn event_kind_of(payload: &EventPayload) -> &'static str {
         EventPayload::WorkerHeartbeat(_) => "worker_heartbeat",
         EventPayload::WorkerOrphaned(_) => "worker_orphaned",
         EventPayload::McpServerLog(_) => "mcp_server_log",
+        EventPayload::Unknown => "unknown",
     }
 }
 

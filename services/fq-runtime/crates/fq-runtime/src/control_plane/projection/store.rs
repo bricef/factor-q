@@ -839,7 +839,10 @@ fn extract_fields(event: &Event) -> Fields {
         | EventPayload::WorkerOrphaned(_)
         | EventPayload::McpServerLog(_)
         | EventPayload::InvocationOperatorRecovered(_)
-        | EventPayload::InvocationOperatorResumed(_) => Fields::default(),
+        | EventPayload::InvocationOperatorResumed(_)
+        // A type this binary cannot read: the envelope columns still
+        // project, so the row records that something happened here.
+        | EventPayload::Unknown => Fields::default(),
     }
 }
 

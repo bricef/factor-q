@@ -7,6 +7,11 @@ pub const SYSTEM_RECOVERY: &str = "fq.system.recovery";
 /// Daemon-scoped log records forwarded from connected MCP servers
 /// (ADR-0020).
 pub const SYSTEM_MCP_LOG: &str = "fq.system.mcp.log";
+/// Where an [`crate::events::EventPayload::Unknown`] would route if it
+/// were ever published. It never is — the variant only exists so a
+/// newer daemon's event type deserialises in an older binary — but
+/// `subject()` is total, so the case needs an answer.
+pub const SYSTEM_UNKNOWN: &str = "fq.system.unknown";
 
 /// Validate that `s` is safe to use as a single NATS subject
 /// token. NATS subjects are dot-separated tokens; a token
