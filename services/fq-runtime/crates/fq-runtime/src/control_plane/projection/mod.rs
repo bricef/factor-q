@@ -22,6 +22,7 @@
 //! It runs until a shutdown signal fires and returns cleanly.
 
 pub mod consumer;
+mod fields;
 pub mod store;
 
 pub use consumer::{ConsumerError, ProjectionConsumer};
