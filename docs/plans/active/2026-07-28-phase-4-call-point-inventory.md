@@ -40,7 +40,7 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 17 | `fq invocation show` | **edge** | `invocation_show_*` | — | ✅ DONE (3b) |
 | 18 | `fq invocation drop` | **four legacy paths at once**: legacy-split migration + control request + direct store opens + local `operator::drop_invocation` (`CLI:4764-4813`) | `invocation_drop_*` | `invocation.drop` — **op exists**; flip = delete the local path, move `--live` halting daemon-side | ✅ **DONE 2026-07-28** |
 | 19 | `fq invocation resume` | NATS request/reply `fq.control.invocation.resume` | (invocation_resume.rs suite) | `invocation.resume` command | no — **needs a domain-model amendment** (not among the committed six verbs) |
-| 20 | `fq invocation transcript` | snapshot: direct Views; `--follow`: **edge** (3d) | `transcript_*` (snapshot path) | snapshot → `turn.list` + `invocation.get{with_prompt}` | ✅ **DONE 2026-07-28** |
+| 20 | `fq invocation transcript` | snapshot: direct Views; `--follow`: **edge** (3d) | `transcript_*` (snapshot path) | snapshot → `turn.list`, and nothing else (the prompt is a Turn) | ✅ **DONE 2026-07-28** |
 | 21 | `fq workers list` | direct Views, client-side filtering | `workers_list_*` (**reviewed change** — see 4.1) | `worker.list` view (filter moved server-side) | ✅ **DONE 2026-08-01** |
 | 22 | `fq workers show` | direct Views | `workers_show_*` | `worker.get` view | ✅ **DONE 2026-08-01** |
 | 23 | `fq workers prune` | **direct store write**, no events emitted | `workers_prune_*` ×3 | `worker.prune` command, evented | no — **behaviour change** (see hazards) |
@@ -148,19 +148,31 @@ no `operator::*` when the phase completes.
    (hazard H1). Goldens byte-identical but **moved harness**: they
    ran against seeded stores with no daemon, which is exactly what
    the flipped verb cannot do.
-2. Verb 20 snapshot — `invocation transcript` reads `turn.list` +
-   the opening prompt from `invocation.get`; byte-identical rendering
-   via the turn→entry bridge.
+2. Verb 20 snapshot — `invocation transcript` reads `turn.list`;
+   byte-identical rendering via the turn→entry bridge.
 
 *"No declarations needed" was wrong.* `invocation.get` carried no
-prompt — the opening prompt is the only part of a conversation that
-never became an event, living solely in the WAL — so verb 20 needed a
-schema change after all, via an opt-in `with_prompt` on the Get key.
-That is a projection flag on an identity key, taken deliberately
-because the prompt is the view's one unbounded field; it is a wart the
-domain model should eventually resolve, most likely by making the
-prompt an atom like everything else. **Check the target op actually
-returns what the verb renders before calling a cohort "pure".**
+prompt, so verb 20 needed a schema change after all, via an opt-in
+`with_prompt` on the Get key — a projection flag on an identity key,
+taken deliberately because the prompt is the view's one unbounded
+field, and recorded here as a wart the domain model should eventually
+resolve by making the prompt an atom like everything else. **Check the
+target op actually returns what the verb renders before calling a
+cohort "pure".**
+
+*And the reason given for the wart was itself wrong* (corrected
+2026-08-05). The claim was that the opening prompt "never became an
+event and lives solely in the WAL". It had been an event all along:
+the runner publishes `EventPayload::LlmRequest` immediately before
+every provider call, and its payload carries the `messages` sent —
+the opening call's being exactly the system prompt and the trigger's
+user message. `TurnFold` simply never matched `LlmRequest`. Teaching
+it to (`TurnAction::Prompt`, folded from the opening request) makes
+the prompt a Turn like everything else, and the whole workaround —
+`with_prompt`, `InvocationDetailView::prompt`, `Views::invocation_prompt`,
+the second edge call — deletes. **When a value seems to be missing
+from the log, grep the publish sites before designing around its
+absence.**
 
 **4.1 — view transplants** — ✅ **done 2026-08-01**
 3. `worker` view (`worker.get`/`worker.list`, index rows, server-side

@@ -167,14 +167,14 @@ pub fn collect_transcript(
 /// user message — as a value of its own, separate from the timeline
 /// entry that renders it.
 ///
-/// The split exists because the prompt has two homes. It is the
-/// transcript's first entry (rendered by [`render_pretty`]), and it is
-/// also invocation state: the one part of the conversation that is not
-/// a Turn (an assistant output or a tool result — see
-/// [`crate::turn`]), so a transcript composed from the Turn atom has to
-/// obtain it from the Invocation view instead. Both paths hand back
-/// this value; only the rendering path wraps it in a
-/// [`TranscriptEntry`].
+/// The split exists because the prompt is read out of two different
+/// records of the same fact: the WAL's first `llm_dispatch` request
+/// payload (this module's [`collect_transcript`], which the read
+/// service still serves the dashboard from), and the `llm.request`
+/// event that the runner publishes immediately before the same call
+/// ([`crate::turn::TurnFold`], which the operator surface's
+/// `turn.list` folds). Both paths hand back this value; only the
+/// rendering path wraps it in a [`TranscriptEntry`].
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct TranscriptPrompt {
     /// The first LLM request's `intent_at` — when the invocation
@@ -202,9 +202,26 @@ impl TranscriptPrompt {
 /// `LlmRequestPayload`. Returns `None` if the payload carries neither.
 pub(crate) fn prompt_from_request(intent_at: i64, raw: &str) -> Option<TranscriptPrompt> {
     let payload: LlmRequestLike = serde_json::from_str(raw).ok()?;
+    prompt_from_messages(intent_at, &payload.messages)
+}
+
+/// Mine the opening prompt out of a request's message list: the first
+/// system message and the first user message. `None` if it carries
+/// neither.
+///
+/// The one definition of "what the prompt is", shared by both paths
+/// that need it — the WAL-backed transcript, which parses a stored
+/// request payload, and the Turn fold, which has the live
+/// `llm.request` event's messages in hand
+/// ([`crate::turn::TurnFold::apply`]). Two readings of the same fact
+/// must not be allowed to drift.
+pub(crate) fn prompt_from_messages(
+    timestamp_ms: i64,
+    messages: &[Message],
+) -> Option<TranscriptPrompt> {
     let mut system = None;
     let mut user = None;
-    for msg in &payload.messages {
+    for msg in messages {
         match msg.role {
             MessageRole::System if system.is_none() => system = msg.content.clone(),
             MessageRole::User if user.is_none() => user = msg.content.clone(),
@@ -215,7 +232,7 @@ pub(crate) fn prompt_from_request(intent_at: i64, raw: &str) -> Option<Transcrip
         return None;
     }
     Some(TranscriptPrompt {
-        timestamp_ms: intent_at,
+        timestamp_ms,
         system,
         user,
     })
@@ -431,9 +448,15 @@ fn indent(s: &str) -> String {
 ///   effort). This is low-risk: such a turn is either the final answer
 ///   (no live event follows a completed invocation) or a rare mid-run
 ///   text turn, and the seam window is a single WAL read.
+/// - The prompt keys on a constant, like the outcome: an invocation
+///   has exactly one opening prompt, so "already printed one" is the
+///   whole test. It needs a key now that the prompt arrives as a Turn
+///   — `--follow` pins its stream cursor *before* reading the
+///   snapshot, so an invocation that starts inside that window has its
+///   prompt turn in both, and an unkeyed prompt would print twice.
 pub fn dedup_key(entry: &TranscriptEntry) -> Option<String> {
     match entry {
-        TranscriptEntry::Prompt { .. } => None,
+        TranscriptEntry::Prompt { .. } => Some("prompt".to_string()),
         TranscriptEntry::Assistant { tool_calls, .. } => tool_calls
             .first()
             .map(|tc| format!("call:{}", tc.tool_call_id)),
@@ -758,9 +781,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_keys_capture_tool_call_and_result_ids() {
-        // Both the requesting assistant turn and the tool result must be
-        // deduped at the --follow seam, under distinct prefixes.
+    fn snapshot_keys_capture_prompt_tool_call_and_result_ids() {
+        // The requesting assistant turn, the tool result, and the
+        // prompt must all be deduped at the --follow seam, under
+        // distinct keys.
         let llm = vec![llm_row(
             100,
             100,
@@ -779,6 +803,10 @@ mod tests {
             keys.contains("tool:tc-100"),
             "tool-result key missing: {keys:?}"
         );
+        // The prompt arrives as a Turn now, so `--follow` can see it
+        // on the stream as well as in the snapshot; a constant key is
+        // what keeps it from printing twice.
+        assert!(keys.contains("prompt"), "prompt key missing: {keys:?}");
     }
     #[tokio::test]
     async fn store_round_trip_transcript_ordering_and_payloads() {

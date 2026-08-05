@@ -96,6 +96,30 @@ fn triggered(agent: &str, invocation: &str, seq: u32, at_ms: i64) -> Event {
     )
 }
 
+/// The invocation's opening messages: the agent's system prompt and
+/// the user message its trigger became. One definition seeded into
+/// both records of that one fact — the WAL's first
+/// `llm_dispatch.request_payload` (which the read service's transcript
+/// mines) and the `llm.request` event (which the Turn fold folds into
+/// the opening prompt turn). If the two ever disagree the fixture is
+/// lying, not the code.
+fn opening_messages() -> Vec<Message> {
+    vec![
+        Message {
+            role: MessageRole::System,
+            content: Some("You are a deterministic fixture.".into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        },
+        Message {
+            role: MessageRole::User,
+            content: Some("Summarise the fixture, then read a file.".into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        },
+    ]
+}
+
 fn cost(call: u32, total: f64, cumulative: f64) -> CostMetadata {
     CostMetadata {
         call_id: fixed_uuid(call),
@@ -258,23 +282,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
         .await
         .unwrap();
 
-    let request_payload = serde_json::json!({
-        "messages": [
-            Message {
-                role: MessageRole::System,
-                content: Some("You are a deterministic fixture.".into()),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-            },
-            Message {
-                role: MessageRole::User,
-                content: Some("Summarise the fixture, then read a file.".into()),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-            },
-        ]
-    })
-    .to_string();
+    let request_payload = serde_json::json!({ "messages": opening_messages() }).to_string();
     let first_response = serde_json::to_string(&ChatResponse {
         content: Some("Reading the fixture file first.".into()),
         tool_calls: vec![fq_runtime::events::MessageToolCall {
@@ -781,6 +789,31 @@ fn conversation_events() -> Vec<Event> {
     let agent = AgentId::new(AGENT_RESEARCHER).unwrap();
     let call = || fq_runtime::events::ToolCallId::new("tc-1").unwrap();
     vec![
+        // The opening `llm.request`, published (in the real runner)
+        // immediately before the provider call that answers it — so it
+        // precedes round 1's response in the log, carries the same
+        // instant the WAL row's `intent_at` records, and is where the
+        // transcript's prompt turn comes from.
+        stamp(
+            Event::new(
+                agent.clone(),
+                inv(INV_COMPLETED),
+                EventPayload::LlmRequest(fq_runtime::events::LlmRequestPayload {
+                    call_id: fixed_uuid(20),
+                    model: "claude-haiku".into(),
+                    messages: opening_messages(),
+                    tools_available: Vec::new(),
+                    request_params: fq_runtime::events::RequestParams {
+                        effort: None,
+                        temperature: None,
+                        max_tokens: Some(4096),
+                    },
+                    origin: LlmCallOrigin::AgentTurn,
+                }),
+            ),
+            19,
+            BASE_MS,
+        ),
         stamp(
             Event::new(
                 agent.clone(),
@@ -1089,6 +1122,13 @@ impl EdgeFixture {
     /// (`invocation show`'s recent-events block) would see a different
     /// world for no reason.
     fn start_with_conversation() -> Self {
+        Self::start_with_events(conversation_events())
+    }
+
+    /// [`start_with_conversation`](Self::start_with_conversation) over
+    /// an arbitrary event list — the seam a negative control needs, so
+    /// a test can withhold one event and watch what stops rendering.
+    fn start_with_events(events: Vec<Event>) -> Self {
         let fixture = Self::start();
         tokio::runtime::Runtime::new()
             .expect("conversation runtime")
@@ -1096,8 +1136,8 @@ impl EdgeFixture {
                 let bus = fq_runtime::EventBus::connect(fixture.broker.url())
                     .await
                     .expect("connect bus");
-                for event in conversation_events() {
-                    bus.publish(&event).await.expect("publish conversation");
+                for event in &events {
+                    bus.publish(event).await.expect("publish conversation");
                 }
             });
         fixture
@@ -1467,6 +1507,53 @@ fn golden_transcript_json() {
         "transcript_json",
         &["invocation", "transcript", INV_COMPLETED, "--json"],
         &[],
+    );
+}
+
+/// The negative control for "the opening prompt is a Turn".
+///
+/// The transcript's prompt block is folded from the invocation's
+/// opening `llm.request` event and from nothing else. Publish the same
+/// conversation with that one event withheld and the prompt must
+/// vanish — while every entry after it renders unchanged, so this is
+/// the prompt going missing, not the transcript.
+///
+/// What makes it a control rather than a tautology: the fixture's
+/// worker WAL still holds `req-1`'s stored `request_payload`, carrying
+/// the very system/user pair the goldens print (see `seed_at`). That
+/// is the record the deleted `invocation.get{with_prompt}` path read.
+/// If any WAL-backed read were still supplying the prompt, it would
+/// render here regardless of the event log. It does not.
+#[test]
+fn the_transcripts_prompt_comes_from_the_llm_request_event() {
+    let present = EdgeFixture::start_with_conversation();
+    let (exit, stdout, stderr) = present.run_fq(&["invocation", "transcript", INV_COMPLETED]);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+    assert!(
+        stdout.contains("── prompt ──") && stdout.contains("You are a deterministic fixture."),
+        "with the llm.request event, the prompt renders; got:\n{stdout}"
+    );
+
+    let withheld = EdgeFixture::start_with_events(
+        conversation_events()
+            .into_iter()
+            .filter(|e| !matches!(e.payload, EventPayload::LlmRequest(_)))
+            .collect(),
+    );
+    let (exit, stdout, stderr) = withheld.run_fq(&["invocation", "transcript", INV_COMPLETED]);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+    assert!(
+        !stdout.contains("── prompt ──"),
+        "no llm.request event, no prompt block; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("You are a deterministic fixture."),
+        "the WAL still holds this prompt — nothing may read it back; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Reading the fixture file first.")
+            && stdout.contains("── tool result: read_file ──"),
+        "the rest of the conversation is untouched; got:\n{stdout}"
     );
 }
 

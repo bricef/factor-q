@@ -242,7 +242,6 @@ fn summary_renders_on_detail_and_transcript_pages() {
         live: None,
         recent_events: vec![],
         has_transcript: false,
-        prompt: None,
         summary: Some("Fixing #83: <b>ci</b> running".into()),
         cost: Some(fq_runtime::views::InvocationCostView {
             invocation_id: "inv-1".into(),
@@ -996,7 +995,6 @@ fn liveness_and_status_carry_the_health_palette() {
         summary: None,
         cost: None,
         has_transcript: false,
-        prompt: None,
     };
     let html = invocation_detail(&detail, 1_000);
     assert!(

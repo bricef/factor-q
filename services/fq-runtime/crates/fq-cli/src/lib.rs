@@ -4258,9 +4258,6 @@ async fn invocation_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::R
         fq_ops::OpId::Get(fq_ops::Domain::Invocation),
         serde_json::to_value(InvocationViewKey {
             invocation_id: id.to_string(),
-            // `show` renders the fold, not the conversation: the
-            // prompt would be the one unbounded thing on the page.
-            with_prompt: false,
         })?,
     )
     .await?;
@@ -4633,7 +4630,6 @@ async fn invocation_drop(
         fq_ops::OpId::Get(fq_ops::Domain::Invocation),
         serde_json::to_value(InvocationViewKey {
             invocation_id: id.to_string(),
-            with_prompt: false,
         })?,
         Some(event_seq),
     )
