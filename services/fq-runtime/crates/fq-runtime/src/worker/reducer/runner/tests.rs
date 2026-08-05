@@ -2027,7 +2027,7 @@ async fn provider_error_publishes_a_failure_with_no_cost() {
     assert_eq!(p.error_kind, crate::events::LlmErrorKind::Auth);
     assert!(p.error_message.contains("no api key"));
     assert_eq!(p.model, "claude-haiku");
-    assert_eq!(p.round, 0, "failures consume no Round yet");
+    assert_eq!(p.round, 1, "a failed call consumes a Round");
     assert!(
         p.usage.is_none(),
         "a transport failure parses no body: usage is unknown, not zero"

@@ -24,9 +24,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// with no outcome and a consumer folding the pair could not tell
     /// "the call failed" from "the event was lost" (#447).
     ///
-    /// The Round is the current one, not a fresh one — only building a
-    /// response event calls `rounds.next`, so a failure consumes none
-    /// today. That asymmetry is real but is its own change.
+    /// The failure consumes a Round, exactly as a response does. A
+    /// Round is a model turn that happened, not one that succeeded.
     ///
     /// Invocation status is untouched. A failed *call* is not a failed
     /// *invocation* — an agent turn publishes `failed` separately, and
@@ -90,7 +89,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         self.publish_chained(
             cursor,
             emit::llm_failure_event(
-                self.rounds.current(call.invocation_id),
+                self.rounds.next(call.invocation_id),
                 &call,
                 priced,
                 totals.total_cost,
