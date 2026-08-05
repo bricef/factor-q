@@ -29,6 +29,7 @@ fn run_fq(args: &[&str], timeout: Duration) -> (Option<i32>, String, String) {
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_AGENTS_DIR", "/nonexistent/agents")
         .env("FQ_CACHE_DIR", "/nonexistent/cache")
+        .env("FQ_STATE_DIR", "/nonexistent/state")
         // Quiet logging so stderr stays readable.
         .env("RUST_LOG", "off")
         .stdout(std::process::Stdio::piped())
@@ -138,6 +139,7 @@ fn fq_status_against_bogus_nats_fails_gracefully() {
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_AGENTS_DIR", "/nonexistent/agents")
         .env("FQ_CACHE_DIR", "/nonexistent/cache")
+        .env("FQ_STATE_DIR", "/nonexistent/state")
         .env("RUST_LOG", "off")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

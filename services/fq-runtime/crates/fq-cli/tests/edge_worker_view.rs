@@ -125,6 +125,7 @@ async fn the_worker_view_folds_and_filters_daemon_side() {
         .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .env("RUST_LOG", "off")
         .stdout(Stdio::from(log))

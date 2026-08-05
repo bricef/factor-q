@@ -66,6 +66,7 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
         .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
@@ -208,6 +209,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
         .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
@@ -240,6 +242,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .output()
         .expect("run fq down");
@@ -301,6 +304,7 @@ fn daemon_stops_now_on_fq_down_now() {
         .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
@@ -330,6 +334,7 @@ fn daemon_stops_now_on_fq_down_now() {
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .output()
         .expect("run fq down --now");
@@ -378,6 +383,7 @@ fn fq_down_fast_fails_when_no_daemon_running() {
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .output()
         .expect("run fq down");

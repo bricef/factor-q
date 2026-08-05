@@ -38,7 +38,7 @@ just fq status
 
 ## 2. Initialise a project
 
-factor-q runs out of a directory containing a config file (`fq.toml`), an agents directory (`agents/`), and a cache (`./cache/` or `$XDG_CACHE_HOME/factor-q`). `fq init` writes those for you.
+factor-q runs out of a directory containing a config file (`fq.toml`), an agents directory (`agents/`), a cache (`./cache/` or `$XDG_CACHE_HOME/factor-q`), and a state directory (`./state/` or `$XDG_STATE_HOME/factor-q`) for data that must survive a wipe of the cache — today the edge identity. `fq init` writes those for you.
 
 ```sh
 mkdir my-fq-project && cd my-fq-project

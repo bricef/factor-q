@@ -26,6 +26,7 @@ pub mod events;
 pub mod health;
 pub mod llm;
 pub mod mcp;
+pub mod paths;
 pub mod policy;
 pub mod pricing;
 pub mod prompt;

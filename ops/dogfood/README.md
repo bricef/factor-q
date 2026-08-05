@@ -65,6 +65,16 @@ into `.secrets/env`, delete the legacy scripts, `bin/`, and `fq.rollback`,
 then run `deploy.sh`. State (`fq.toml`, `fq-cron.toml`, `agents/`, `cache/`, `workspace/`,
 the NATS volume) is untouched by deploys.
 
+Note (#362): the daemon's edge identity — self-signed certificate plus
+biscuit token root, whose loss orphans every pinned client and issued
+token — lives in the **state** directory, not `cache/`. With no
+`[state] directory` in the instance `fq.toml` and no `FQ_STATE_DIR` in
+`.secrets/env`, that resolves to `$HOME/.local/state/factor-q`, i.e.
+*outside* the dogfood tree. Set `[state] directory = "./state"` to keep
+it project-local like `cache/`. Either way a daemon whose state
+directory is empty adopts an identity still sitting at `cache/edge`
+rather than minting a new one, and says so on startup.
+
 ## Routine operations
 
 ```sh
