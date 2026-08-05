@@ -719,7 +719,11 @@ fn legacy_single_file_layout_is_a_hint_not_a_read() {
 /// the one whose old self needed no daemon at all.
 #[test]
 fn flipped_verb_without_a_pairing_says_how_to_pair() {
-    for verb in [["invocation", "list"], ["agent", "list"]] {
+    for verb in [
+        ["invocation", "list"],
+        ["agent", "list"],
+        ["events", "tail"],
+    ] {
         let xdg = tempfile::tempdir().expect("xdg dir");
         let out = Command::new(env!("CARGO_BIN_EXE_fq"))
             .args(verb)

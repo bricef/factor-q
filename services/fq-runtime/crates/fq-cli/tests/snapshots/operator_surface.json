@@ -939,6 +939,93 @@
     }
   },
   {
+    "atom": {
+      "description": "Event-log-backed: `seq` is the stream sequence — the same cursor receipts, `min_seq` gates and `turn` sequences speak. List answers with the most recent `limit` matching events in sequence order, bounded by the tip observed at entry; Stream long-polls via next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail without consuming anything. Resuming at a cursor loses nothing: the log is durable and the consumer is positional.",
+      "domain": "event",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List/Stream selection for Events — the typed, schema'd filter.\n\nNever a query language, and deliberately never a bus subject: a\nsubject pattern is a coordinate of the infrastructure the edge maps\n(D8), so the selection travels in domain terms and the daemon\ndecides which subjects answer it. It carries exactly the narrowing\n`fq events query` offers, which is the same narrowing a tail wants.",
+        "properties": {
+          "agent": {
+            "default": null,
+            "description": "One agent's events. Absent reads the whole log.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_type": {
+            "default": null,
+            "description": "One event type, as the payload names itself (`llm_response`,\n`tool_call`, `system_startup`, …). An unrecognised value\nmatches nothing rather than failing: event types are values,\nand a newer daemon has types this binary has never heard of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Cap on one List page — the most recent N matching events.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "since": {
+            "default": null,
+            "description": "Only events at or after this RFC3339 instant.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "EventFilter",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for an Event: its event-log sequence.",
+        "properties": {
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq"
+        ],
+        "title": "EventKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One recorded event, addressed by its event-log sequence — the\nuniversal cursor (P5): the same number that cursors `event.stream`,\nfeeds `min_seq` gates, and rides in a command receipt's `AtomRef`.\n\nThe Event atom's state is the event itself, unabridged. It is the\nsubstrate every other resource folds from, so an atom that dropped\nthe payload would not be the fact; the projection's `events` table\nis an *index* over these, not the atom.",
+        "properties": {
+          "event": {
+            "description": "The event exactly as published.\n\nDeclared to the surface as an opaque object rather than a\nreflected schema: an event already names its own payload\ncontract in `envelope.schema_id` (`factor-q/llm_response@1`),\nwhich is the versioned reference a reader resolves, and\nreflecting the whole payload tree here would need schemars'\nchrono and uuid integrations — a wider change than this atom."
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "event"
+        ],
+        "title": "EventState",
+        "type": "object"
+      },
+      "summary": "One recorded event: the substrate every other resource folds from.",
+      "version": 1
+    }
+  },
+  {
     "command": {
       "authority": {
         "scope": "invocation",

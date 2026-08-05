@@ -1116,6 +1116,9 @@ pub use operator_surface::{OperatorDeps, operator_registry};
 mod edge_call;
 use edge_call::*;
 
+mod event_atom;
+use event_atom::{filter_for_subject, subject_matches};
+
 mod agents;
 use agents::list_agents;
 
@@ -1513,17 +1516,37 @@ async fn trigger_agent(
     Ok(())
 }
 
-/// Tail the event stream from NATS, formatting each event as a single
-/// readable line.
+/// Tail the event stream, formatting each event as a single readable
+/// line.
+///
+/// Rides `event.stream` over the authenticated edge (plan Phase 4,
+/// verb 11). It used to hold its own core-NATS subscription, which
+/// **drops messages silently** when the consumer falls behind and
+/// cannot be resumed; the stream is an ephemeral consumer positioned by
+/// sequence, so a slow terminal costs latency rather than events, and
+/// the cursor below is a real resume point.
+///
+/// `--subject` keeps its full NATS meaning: the pattern is matched
+/// here, on the way out, because a subject is a coordinate of the
+/// infrastructure the edge maps and does not belong in a wire filter
+/// (D8). What the pattern says about the *agent* does travel, so a
+/// tail scoped to one agent is scoped at the log.
 async fn tail_events(global: &GlobalArgs, subject: &str, json: bool) -> anyhow::Result<()> {
+    let filter = filter_for_subject(subject);
     let config = global.resolve_config()?;
 
     if !json {
-        println!("Connecting to NATS at {}...", config.nats.url);
+        println!("Connecting to the edge at {}...", config.edge.bind);
     }
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    let client = edge_client_for(global).await?;
+
+    // Seek the tail before printing "listening": from here on the
+    // cursor is ours, and every batch resumes from where the last one
+    // ended — no gap, no silent drop.
+    let seek = next_event_batch(&client, &filter, u64::MAX, 0)
+        .await?
+        .map_err(|e| anyhow::anyhow!("event.stream: {e}"))?;
+    let mut cursor = seek.next_from_seq;
 
     if !json {
         println!("Subscribing to {subject}");
@@ -1531,25 +1554,24 @@ async fn tail_events(global: &GlobalArgs, subject: &str, json: bool) -> anyhow::
         println!();
     }
 
-    let mut stream = bus
-        .subscribe(subject.to_string())
-        .await
-        .context("failed to subscribe to events")?;
-
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(event) => {
-                if json {
-                    println!("{}", serde_json::to_string(&event)?);
-                } else {
-                    print_event(&event);
-                }
+    loop {
+        let batch = next_event_batch(&client, &filter, cursor, 30_000)
+            .await?
+            .map_err(|e| anyhow::anyhow!("event.stream: {e}"))?;
+        cursor = batch.next_from_seq;
+        for item in batch.items {
+            let state: fq_runtime::event_tail::EventState = serde_json::from_value(item.item)?;
+            if !subject_matches(subject, &state.event.subject()) {
+                continue;
             }
-            Err(err) => eprintln!("deserialise error: {err}"),
+            if json {
+                println!("{}", serde_json::to_string(&state.event)?);
+            } else {
+                print_event(&state.event);
+            }
         }
     }
-
-    Ok(())
+    // The tail loop runs until Ctrl-C or a transport error (`?`).
 }
 
 /// Format one event as a single readable line.
@@ -3025,6 +3047,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let reload_default_model = config.agents.default_model.clone();
     let reload_handle = tokio::spawn(async move {
         'resubscribe: loop {
+            // allow-runtime-internals: the daemon's own control-plane listener.
             let mut sub = match reload_bus.subscribe_control_reload().await {
                 Ok(sub) => sub,
                 Err(err) => {
@@ -3099,6 +3122,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let down_handle = tokio::spawn(async move {
         let mut down_requested_tx = Some(down_requested_tx);
         'resubscribe: loop {
+            // allow-runtime-internals: the daemon's own control-plane listener.
             let mut sub = match down_bus.subscribe_control_down().await {
                 Ok(sub) => sub,
                 Err(err) => {
@@ -3168,6 +3192,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     };
     let resume_listener_handle = tokio::spawn(async move {
         'resubscribe: loop {
+            // allow-runtime-internals: the daemon's own control-plane listener.
             let mut sub = match resume_control.bus.subscribe_control_resume().await {
                 Ok(sub) => sub,
                 Err(err) => {

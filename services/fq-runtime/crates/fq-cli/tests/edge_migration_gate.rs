@@ -9,7 +9,7 @@
 //! re-derive from the diff. A flip that leaves the old path in place
 //! as a fallback passes its goldens — it does not pass this.
 //!
-//! Three legacy paths are counted:
+//! Four legacy paths are counted:
 //!
 //! * `open_views(` — the CLI opening projection stores for itself.
 //!   Its definition counts too, so the terminal state is a clean zero:
@@ -23,6 +23,14 @@
 //!   `fq reload`, so a client that reads the disk answers with
 //!   definitions the daemon may never have loaded (plan Phase 4,
 //!   verb 9).
+//! * `.subscribe` — a client verb holding its own bus subscription
+//!   (`EventBus::subscribe`, `subscribe_control_*`). Neither a store
+//!   open nor a runtime-internals call, so the first three patterns
+//!   were blind to it, and it is the worst of the four: core NATS
+//!   drops messages silently when a consumer falls behind and cannot
+//!   be resumed, so a verb built on one answers with *some* of the
+//!   truth and says nothing about the rest (plan Phase 4, verbs 11
+//!   and 4).
 //!
 //! **Marked uses are exempt.** fq-cli is still both the thin client
 //! and the daemon host (the binary split is Phase 5), so the same
@@ -47,6 +55,10 @@ const LEGACY: &[&str] = &[
     "open_views(",
     "control_plane::operator::",
     "AgentRegistry::load_from_directory",
+    // The leading dot is load-bearing: it matches `.subscribe(` and
+    // `.subscribe_control_down()` while leaving `tracing_subscriber`,
+    // `'resubscribe:` and the word "subscription" in prose alone.
+    ".subscribe",
 ];
 
 /// Marker exempting a legitimate daemon-side use, on the line or the
@@ -67,7 +79,27 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// execution path in the client, disk registry included, and the plan
 /// retires it (decision D-1); a gate that did not count it was
 /// under-reporting the backlog.
-const REMAINING: usize = 7;
+///
+/// It went 7 -> 9 with verb 11, for the same reason and with the same
+/// arithmetic worth reading. Verb 11's legacy path was a raw bus
+/// subscribe, which none of the three patterns matched — so flipping
+/// it would have moved this number *not at all*. Adding `.subscribe`
+/// admitted six sites: three daemon-side control listeners in
+/// `run_daemon` (marked — a daemon owning its own control-plane
+/// subscriptions is the architecture), verb 11's own tail (removed by
+/// its flip), and **verb 4's `fq down`, which subscribes twice from
+/// client code**. Those two are the rise, and they are a real backlog
+/// item the gate had been blind to: `fq down` decides whether a
+/// daemon stopped by watching a subscription that drops messages
+/// silently and cannot be resumed. Cohort 4.3 flips it.
+///
+/// Verb 12 (`fq events query`) did **not** flip in cohort 4.2, so its
+/// `open_views(` is still counted: a daemon-backed `event.list`
+/// necessarily includes the daemon's own events (`system_startup`,
+/// `system_recovery`, `worker_orphaned`), which the `events_query_*`
+/// goldens — seeded into a store no daemon had ever touched — do not
+/// contain.
+const REMAINING: usize = 9;
 
 /// Every `.rs` file under `dir`, recursively, in a stable order.
 fn rust_sources(dir: &Path) -> Vec<PathBuf> {

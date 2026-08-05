@@ -176,8 +176,9 @@ fn arm_drop_halt(
 /// Build the daemon's operator registry: the Invocation and Worker
 /// views served from [`Views`], the Agent view served from the live
 /// registry, reads gated at the read horizon (every consumer feeding a
-/// view's fold), the Turn atom, and `invocation.drop` returning a
-/// receipt. Public for the operator-surface snapshot test.
+/// view's fold), the Turn and Event atoms served from the log, and
+/// `invocation.drop` returning a receipt. Public for the
+/// operator-surface snapshot test.
 pub fn operator_registry(
     views: Arc<Views>,
     horizon: fq_runtime::watermark::Horizon,
@@ -188,6 +189,7 @@ pub fn operator_registry(
 
     // Cloned up front: the registrations below each move their own
     // handles into 'static closures.
+    let event_bus = deps.bus.clone();
     let turn_bus = deps.bus.clone();
     let turn_views = views.clone();
     let worker_views = views.clone();
@@ -268,6 +270,7 @@ pub fn operator_registry(
 
     register_worker_view(&mut registry, worker_views)?;
     register_agent_view(&mut registry, agent_registry)?;
+    crate::event_atom::register_event_atom(&mut registry, event_bus)?;
 
     let decl = fq_ops::Command::new::<DropCommandInput>(
         fq_ops::Invocation::Drop,
@@ -599,15 +602,22 @@ async fn list_turns(
     let internal = |e: fq_runtime::bus::BusError| fq_edge::wire::WireError::Internal {
         message: e.to_string(),
     };
-    let tip = bus.last_event_seq().await.map_err(internal)?;
+    let subject = format!("fq.agent.{agent}.>");
+    // The scan's end is the last sequence *this agent's subject*
+    // matches, not the stream's last sequence: the walk below only
+    // ever sees matching messages, so a stream tip belonging to
+    // another agent (or to a heartbeat) is a sequence it would wait
+    // for forever. Found while building the Event atom, which has the
+    // same shape and would have had the same hang.
+    let tip = bus
+        .last_event_seq_matching(&subject)
+        .await
+        .map_err(internal)?;
     if tip == 0 {
         return Ok(Vec::new());
     }
     let limit = filter.limit.unwrap_or(TURN_LIST_DEFAULT_LIMIT) as usize;
-    let mut events = bus
-        .events_from(&format!("fq.agent.{agent}.>"), 1)
-        .await
-        .map_err(internal)?;
+    let mut events = bus.events_from(&subject, 1).await.map_err(internal)?;
     let mut fold = fq_runtime::turn::TurnFold::new();
     let mut turns = Vec::new();
     while let Some(next) = events.next().await {
