@@ -36,6 +36,18 @@
     "duration_ms": 2000
   },
   {
+    "event_id": "00000000-0000-7000-8000-000000001009",
+    "timestamp": "2026-01-02T03:04:16.500+00:00",
+    "agent_id": "fixer",
+    "invocation_id": "2f000000-0000-7000-8000-000000000002",
+    "event_type": "llm_failure",
+    "model": "claude-haiku",
+    "total_cost": 0.0007,
+    "error_kind": "empty_response",
+    "error_message": "model returned an empty response (no content, no tool calls)",
+    "duration_ms": 900
+  },
+  {
     "event_id": "00000000-0000-7000-8000-000000001005",
     "timestamp": "2026-01-02T03:04:16+00:00",
     "agent_id": "fixer",

@@ -45,6 +45,7 @@ pub fn event_kind_of(payload: &EventPayload) -> &'static str {
         EventPayload::LlmRequest(_) => "llm_request",
         EventPayload::LlmDispatched(_) => "llm_dispatched",
         EventPayload::LlmResponse(_) => "llm_response",
+        EventPayload::LlmFailure(_) => "llm_failure",
         EventPayload::ToolCall(_) => "tool_call",
         EventPayload::ToolDispatched(_) => "tool_dispatched",
         EventPayload::ToolResult(_) => "tool_result",

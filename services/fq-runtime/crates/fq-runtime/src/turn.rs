@@ -247,17 +247,33 @@ impl TurnFold {
                         cost_usd: cost.map(|c| c.total_cost),
                         // Not unknown — false. An `llm.response` event
                         // exists only for a call that returned a
-                        // response: when the provider errors the runner
-                        // closes the WAL row `is_error = true` and
-                        // returns without publishing one. That is the
-                        // same occasion on which the WAL-backed
-                        // transcript records `is_error = false`, so the
-                        // bridge's byte-identity contract needs the
-                        // same value, not a null standing in for it.
+                        // response; a call that did not publishes
+                        // `llm.failure` instead, folded below. That is
+                        // the same distinction the WAL-backed
+                        // transcript drew with its `is_error` column,
+                        // so the bridge's byte-identity contract needs
+                        // the value, not a null standing in for it.
                         is_error: Some(false),
                     },
                 ))
             }
+            // The failure fold (#447). No new `TurnAction` variant:
+            // `is_error` already exists and the transcript already
+            // renders `" [error]"` from it — precisely the entry the
+            // WAL-backed transcript produced and the Turn-backed one
+            // lost when the read path flipped. The message is the
+            // content, because on a failed call it is all there is.
+            EventPayload::LlmFailure(p) => Some(base(
+                p.round,
+                None,
+                TurnAction::Assistant {
+                    model: p.model.clone(),
+                    content: Some(p.error_message.clone()),
+                    tool_calls: Vec::new(),
+                    cost_usd: envelope.cost.as_ref().map(|c| c.total_cost),
+                    is_error: Some(true),
+                },
+            )),
             EventPayload::ToolCall(p) => {
                 // Enrich (or establish) the pending-call record; the
                 // event itself is part of the assistant turn, not a
@@ -598,6 +614,52 @@ mod tests {
             }
             other => panic!("expected a prompt entry, got {other:?}"),
         }
+    }
+
+    /// #447: a failed call folds to an assistant turn flagged as an
+    /// error — the `[error]` entry the WAL-backed transcript produced
+    /// and the Turn-backed one lost. The fold's catch-all arm compiles
+    /// happily without this, so the assertion is the only thing
+    /// holding it.
+    #[test]
+    fn failure_folds_to_an_error_assistant_turn() {
+        let failure = Event::new(
+            AgentId::new("fold-probe").unwrap(),
+            Uuid::now_v7(),
+            EventPayload::LlmFailure(crate::events::LlmFailurePayload {
+                round: 4,
+                call_id: Uuid::now_v7(),
+                model: "claude-haiku".into(),
+                error_kind: crate::events::LlmErrorKind::RateLimited,
+                error_message: "rate limited".into(),
+                duration_ms: 12,
+                usage: None,
+                origin: Default::default(),
+            }),
+        );
+
+        let turn = TurnFold::new()
+            .apply(12, &failure)
+            .expect("a failed call is a turn");
+        assert_eq!(turn.round, 4);
+        let TurnAction::Assistant {
+            model,
+            content,
+            is_error,
+            cost_usd,
+            ..
+        } = &turn.action
+        else {
+            panic!("expected an assistant turn");
+        };
+        assert_eq!(is_error, &Some(true));
+        assert_eq!(model, "claude-haiku");
+        assert_eq!(content.as_deref(), Some("rate limited"));
+        assert_eq!(cost_usd, &None, "no cost metadata, no cost claim");
+
+        // And it renders as the operator saw it before the flip.
+        let rendered = crate::transcript::render_pretty(&[turn.transcript_entry()], None);
+        assert!(rendered.contains("[error]"), "got:\n{rendered}");
     }
 
     /// The rendering bridge maps turns onto the exact transcript

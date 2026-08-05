@@ -412,6 +412,115 @@ fn sample_llm_response(agent: &str, inv: Uuid) -> Event {
     )
 }
 
+/// A failed call (#447). `usage` decides whether it bills: `Some` is
+/// the empty-completion case where the provider's counts survived,
+/// `None` a transport error where they did not — and `None` must leave
+/// the envelope cost absent rather than zeroed.
+fn sample_llm_failure(agent: &str, inv: Uuid, cost: Option<f64>) -> Event {
+    let usage = cost.map(|_| TokenUsage {
+        input_tokens: 100,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    });
+    let event = Event::new(
+        aid(agent),
+        inv,
+        EventPayload::LlmFailure(crate::events::LlmFailurePayload {
+            round: 1,
+            call_id: Uuid::now_v7(),
+            model: "claude-haiku-4-5".to_string(),
+            error_kind: crate::events::LlmErrorKind::EmptyResponse,
+            error_message: "model returned an empty response".to_string(),
+            duration_ms: 900,
+            usage,
+            origin: crate::events::LlmCallOrigin::AgentTurn,
+        }),
+    );
+    let (Some(total_cost), Some(usage)) = (cost, usage) else {
+        return event;
+    };
+    event.with_cost(CostMetadata {
+        call_id: Uuid::now_v7(),
+        model: "claude-haiku-4-5".to_string(),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        input_cost: total_cost,
+        output_cost: 0.0,
+        total_cost,
+        cumulative_invocation_cost: total_cost,
+        cumulative_agent_cost: total_cost,
+        origin: crate::events::LlmCallOrigin::AgentTurn,
+    })
+}
+
+/// Recovered failure spend is *reported*, not merely projected. Before
+/// #447 the cost queries listed `llm_response` and
+/// `invocation_summary` only, so a billing failure would have landed
+/// in the table and never appeared in a total.
+#[tokio::test]
+async fn cost_queries_include_recovered_failure_spend() {
+    let (store, _dir) = open_store().await;
+    let inv = Uuid::now_v7();
+    store
+        .insert_event(&sample_llm_response_with_cost("biller", inv, 0.25))
+        .await
+        .unwrap();
+    store
+        .insert_event(&sample_llm_failure("biller", inv, Some(0.01)))
+        .await
+        .unwrap();
+
+    let summary = store.cost_summary(Some("biller"), None).await.unwrap();
+    assert_eq!(summary.len(), 1);
+    assert!((summary[0].total_cost - 0.26).abs() < 1e-9, "{summary:?}");
+    assert_eq!(summary[0].total_input_tokens, 200);
+
+    let per_invocation = store.cost_of_invocation(&inv.to_string()).await.unwrap();
+    assert!(
+        (per_invocation.expect("a cost row").total_cost - 0.26).abs() < 1e-9,
+        "the per-invocation figure must agree with the per-agent one"
+    );
+    let by_model = store.cost_by_model(None, None).await.unwrap();
+    assert!((by_model[0].total_cost - 0.26).abs() < 1e-9, "{by_model:?}");
+}
+
+/// The other half of "`None` is not zero": a failure whose usage was
+/// never recoverable carries no cost, so it is swept with the rest of
+/// the trail. A zeroed cost would pin it against the sweep's
+/// `total_cost IS NOT NULL` exemption forever, as a cost record for
+/// spend nobody can account for.
+#[tokio::test]
+async fn failure_without_usage_is_swept_like_any_other_row() {
+    let (store, _dir) = open_store().await;
+    let unbilled = sample_llm_failure("biller", Uuid::now_v7(), None);
+    let billed = sample_llm_failure("biller", Uuid::now_v7(), Some(0.01));
+    store.insert_event(&unbilled).await.unwrap();
+    store.insert_event(&billed).await.unwrap();
+    for event in [&unbilled, &billed] {
+        sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
+            .bind("2020-01-01T00:00:00+00:00")
+            .bind(event.envelope.event_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+    }
+
+    let cutoff = chrono::DateTime::parse_from_rfc3339("2021-01-01T00:00:00Z")
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(store.sweep_events(cutoff).await.unwrap(), 1);
+    let rows = store
+        .query_events(&EventFilter::default(), 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].total_cost, Some(0.01));
+    assert_eq!(rows[0].error_kind.as_deref(), Some("empty_response"));
+}
+
 async fn open_store() -> (ProjectionStore, tempfile::TempDir) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("projection.db");

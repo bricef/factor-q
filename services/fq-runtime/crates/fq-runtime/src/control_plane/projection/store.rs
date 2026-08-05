@@ -158,7 +158,8 @@ impl ProjectionStore {
     /// rows deleted.
     ///
     /// Cost accounting is a primary platform concern: rows with
-    /// `total_cost` set (`llm_response`, `invocation_summary`) are
+    /// `total_cost` set (`llm_response`, `llm_failure`,
+    /// `invocation_summary`) are
     /// retained indefinitely so all-time spend figures and
     /// per-invocation cost display survive retention. Everything the
     /// cost queries read filters on `total_cost IS NOT NULL`, so the
@@ -376,10 +377,11 @@ impl ProjectionStore {
     /// now rides on `llm.response` envelopes (envelope-refactor
     /// plan step 3), so the filter is `total_cost IS NOT NULL`
     /// instead of `event_type = 'cost'`. The event-type allowlist
-    /// covers per-call cost carriers only — `llm_response` and the
-    /// summariser's `invocation_summary` (#216) — because terminal
-    /// events (`completed`/`failed`) carry invocation *totals* and
-    /// would double-count.
+    /// covers per-call cost carriers only — `llm_response`,
+    /// `llm_failure` (#447: an empty completion still bills for the
+    /// prefill) and the summariser's `invocation_summary` (#216) —
+    /// because terminal events (`completed`/`failed`) carry
+    /// invocation *totals* and would double-count.
     pub async fn cost_summary(
         &self,
         agent: Option<&str>,
@@ -395,7 +397,8 @@ impl ProjectionStore {
              COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, \
              COUNT(DISTINCT invocation_id) AS invocation_count \
              FROM events \
-             WHERE event_type IN ('llm_response', 'invocation_summary') AND total_cost IS NOT NULL",
+             WHERE event_type IN ('llm_response', 'llm_failure', 'invocation_summary') \
+             AND total_cost IS NOT NULL",
         );
         if agent.is_some() {
             sql.push_str(" AND agent_id = ?");
@@ -450,7 +453,8 @@ impl ProjectionStore {
              COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
              COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
              FROM events \
-             WHERE event_type IN ('llm_response', 'invocation_summary') AND total_cost IS NOT NULL \
+             WHERE event_type IN ('llm_response', 'llm_failure', 'invocation_summary') \
+             AND total_cost IS NOT NULL \
              AND agent_id = ?",
         );
         if since.is_some() {
@@ -496,7 +500,7 @@ impl ProjectionStore {
              COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
              COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
              FROM events \
-             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL \
+             WHERE event_type IN ('llm_response', 'llm_failure') AND total_cost IS NOT NULL \
              AND invocation_id = ? \
              GROUP BY invocation_id",
         )
@@ -531,7 +535,7 @@ impl ProjectionStore {
             "SELECT substr(timestamp, 1, {prefix_len}) AS bucket, \
              COALESCE(SUM(total_cost), 0.0) AS total_cost \
              FROM events \
-             WHERE event_type = 'llm_response' AND total_cost IS NOT NULL",
+             WHERE event_type IN ('llm_response', 'llm_failure') AND total_cost IS NOT NULL",
         );
         if since.is_some() {
             sql.push_str(" AND timestamp >= ?");
@@ -567,7 +571,8 @@ impl ProjectionStore {
              COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
              COALESCE(SUM(output_tokens), 0) AS total_output_tokens \
              FROM events \
-             WHERE event_type IN ('llm_response', 'invocation_summary') AND total_cost IS NOT NULL",
+             WHERE event_type IN ('llm_response', 'llm_failure', 'invocation_summary') \
+             AND total_cost IS NOT NULL",
         );
         if agent.is_some() {
             sql.push_str(" AND agent_id = ?");

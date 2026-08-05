@@ -394,6 +394,114 @@ fn schema_version_constant_is_two() {
     assert_eq!(SCHEMA_VERSION, 2);
 }
 
+/// #447: subject leaf, schema id and projection `event_type` are three
+/// spellings of one name and are minted together. They are also easy
+/// to desync later, so they are pinned here as a triple.
+#[test]
+fn llm_failure_subject_schema_and_type_agree() {
+    let payload = EventPayload::LlmFailure(LlmFailurePayload {
+        round: 3,
+        call_id: Uuid::now_v7(),
+        model: "claude-haiku".to_string(),
+        error_kind: LlmErrorKind::RateLimited,
+        error_message: "429".to_string(),
+        duration_ms: 4_200,
+        usage: None,
+        origin: LlmCallOrigin::default(),
+    });
+    assert_eq!(
+        payload.subject("researcher"),
+        "fq.agent.researcher.llm.failure"
+    );
+    assert_eq!(payload.schema_id(), "factor-q/llm_failure@1");
+    assert_eq!(payload.event_type(), "llm_failure");
+    // Sibling of llm.response, so the existing wildcard still reaches it.
+    assert!(
+        payload
+            .subject("researcher")
+            .starts_with("fq.agent.researcher.llm.")
+    );
+}
+
+/// `None` is not zero, on the wire as well as in the type: an unknown
+/// usage is *absent*, not a zeroed `TokenUsage` that a reader would
+/// take for "the provider billed nothing".
+#[test]
+fn llm_failure_omits_usage_when_unknown() {
+    let payload = EventPayload::LlmFailure(LlmFailurePayload {
+        round: 1,
+        call_id: Uuid::now_v7(),
+        model: "claude-haiku".to_string(),
+        error_kind: LlmErrorKind::RequestFailed,
+        error_message: "connection reset".to_string(),
+        duration_ms: 10,
+        usage: None,
+        origin: LlmCallOrigin::default(),
+    });
+    let json = serde_json::to_value(&payload).unwrap();
+    assert!(
+        json["payload"].get("usage").is_none(),
+        "unknown usage must be absent, not zeroed: {json}"
+    );
+
+    // And a recoverable one survives the round trip intact.
+    let priced = EventPayload::LlmFailure(LlmFailurePayload {
+        round: 1,
+        call_id: Uuid::now_v7(),
+        model: "claude-haiku".to_string(),
+        error_kind: LlmErrorKind::EmptyResponse,
+        error_message: "empty".to_string(),
+        duration_ms: 10,
+        usage: Some(TokenUsage {
+            input_tokens: 1_200,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }),
+        origin: LlmCallOrigin::default(),
+    });
+    let wire = serde_json::to_string(&priced).unwrap();
+    let back: EventPayload = serde_json::from_str(&wire).unwrap();
+    let EventPayload::LlmFailure(p) = back else {
+        panic!("wrong variant");
+    };
+    assert_eq!(p.usage.map(|u| u.input_tokens), Some(1_200));
+    assert_eq!(p.error_kind, LlmErrorKind::EmptyResponse);
+}
+
+/// The kind is a projection of `LlmError`, so the mapping is the one
+/// place the two can drift. `EmptyResponse` is deliberately not
+/// reachable from any error — the runner sets it, because the error it
+/// synthesises for an empty completion is a `RequestFailed` and would
+/// otherwise be indistinguishable from a transport failure.
+#[test]
+fn error_kind_mirrors_the_llm_error() {
+    use crate::llm::LlmError;
+    let cases = [
+        (LlmError::Auth("x".into()), LlmErrorKind::Auth),
+        (LlmError::RateLimited, LlmErrorKind::RateLimited),
+        (
+            LlmError::InvalidResponse("x".into()),
+            LlmErrorKind::InvalidResponse,
+        ),
+        (
+            LlmError::RequestFailed("x".into()),
+            LlmErrorKind::RequestFailed,
+        ),
+        (
+            LlmError::UnpricedModel("x".into()),
+            LlmErrorKind::UnpricedModel,
+        ),
+    ];
+    for (err, expected) in &cases {
+        assert_eq!(LlmErrorKind::from(err), *expected);
+    }
+    assert_eq!(
+        serde_json::to_value(LlmErrorKind::EmptyResponse).unwrap(),
+        serde_json::json!("empty_response")
+    );
+}
+
 /// The forward-compatibility landing pad: an `event_type` this binary
 /// has never heard of parses as `Unknown` instead of failing the whole
 /// event. Without it, every new event type breaks every deployed

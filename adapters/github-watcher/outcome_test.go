@@ -324,6 +324,10 @@ func TestOutcomeKindFromSubject(t *testing.T) {
 		"fq.agent.m0-issue-fix.failed":       {OutcomeFailed, true},
 		"fq.agent.m0-issue-fix.llm.response": {0, false},
 		"fq.agent.m0-issue-fix.tool.result":  {0, false},
+		// A failed *call* is not a failed *invocation*: the watcher
+		// must not relabel an issue because one model call errored
+		// and the agent carried on (#447).
+		"fq.agent.m0-issue-fix.llm.failure": {0, false},
 
 		"fq.agent.m0-issue-fix.invocation.ambiguous": {OutcomeAmbiguous, true},
 		// The full `.invocation.ambiguous` suffix is required — a
