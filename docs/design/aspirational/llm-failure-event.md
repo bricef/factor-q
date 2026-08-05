@@ -1,6 +1,9 @@
 # `llm.failure` — a consumer contract
 
-**Status:** proposed (2026-08-05) — awaiting a maintainer's accept/redirect.
+**Status:** accepted (2026-08-05). Every open question below was decided by
+the maintainer on [#450](https://github.com/bricef/factor-q/pull/450); the
+answers are folded into the sections they affect, and §8 records them
+together. Implementation follows this document.
 Resolves [#447](https://github.com/bricef/factor-q/issues/447) by closing the
 hole in code rather than weakening the doc; scheduled by
 [Phase 4 cohort 4.2](../../plans/active/2026-07-28-phase-4-call-point-inventory.md).
@@ -306,29 +309,35 @@ Ideal order:
 5. Then cohort 4.2's `event.list` flip, so the new atom is visible the day the
    surface ships.
 
-## Decisions needed
+## 8. Decisions, settled
 
 Determined from code, not open: terminality per `call_id` (§1); that the
 empty-completion path holds and discards real usage (§2); that unknown tags
 hard-fail and durable consumers ack-and-drop them (§6); the consumer list and
 which sites are compile-forced (§4); the ratchet arithmetic (§7).
 
-Wanting the owner's call:
+Decided on [#450](https://github.com/bricef/factor-q/pull/450), 2026-08-05:
 
-1. **Does `llm_failure` join the cost-query filters**, and does recovered
-   failure spend accumulate into `totals.total_cost` — where it can trip a
-   budget? (Recommended: yes to both; it is the cost principle applied
-   literally.)
-2. **Does the `#[serde(other)]` fallback land first**, as its own PR? (§6.)
-3. **Does a failed call consume a Round number?** `rounds.next()` is only called
-   when building the response event today, so failures currently consume none.
-   Consistency argues yes; the cost is that round numbers shift for any
-   invocation containing a failed-but-survived sampling call, which is a
-   reviewed golden change, not a mechanical one.
-4. **Does the summary consumer stay deaf to failures?** (Recommended: yes.)
-5. **Is `EmptyResponse` a distinct `error_kind`**, or does it stay folded into
-   `request_failed` as today? (Recommended: distinct — it is the one failure
-   that bills.)
-6. **`llm.failure` or `llm.error`** for the subject leaf. `failure` is proposed
-   for consistency with `FailureKind` / `failed`; `llm.error` reads closer to
-   `LlmError`. Cosmetic, but unpickable after the first event is published.
+1. **Cost: yes to both.** `llm_failure` joins the cost-query filters, and
+   recovered failure spend accumulates into `totals.total_cost` where it can
+   trip a budget. The maintainer's reasoning goes further than the question
+   asked: *"anything that incurs costs and isn't accounted for should be
+   considered an error."* That promotes §2's finding from context to a defect
+   this work must close — the empty-completion path holds a fully-parsed
+   `response.usage` and writes `0.0`, and the implementation captures and
+   prices it rather than merely carrying it in a new payload.
+2. **The `#[serde(other)]` fallback is folded in as a dedicated commit**,
+   not a separate PR.
+3. **A failed call consumes a round number** — in its own commit, because
+   round numbers shift for any invocation containing a failed-but-survived
+   sampling call, which is a reviewed golden change rather than a mechanical
+   one.
+4. **The summary consumer stays deaf to failures** for summarisation, with
+   the explicit qualification that nothing about that deafness may
+   compromise cost accounting — decision 1 governs.
+5. **`EmptyResponse` is a distinct `error_kind`.**
+6. **`llm.failure`** is the subject leaf.
+
+The commit boundaries these imply: the serde fallback; the `events/llm.rs`
+extraction that pays the ratchet; `llm.failure` itself with every §4
+obligation; the round-number change; and the §5 invariant amendments.
