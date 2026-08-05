@@ -113,6 +113,13 @@ impl Scratch {
         self.dir.path().to_path_buf()
     }
 
+    /// Durable state (the edge identity, #362) — scoped to the
+    /// scratch dir so a test never mints into the developer's real
+    /// `$XDG_STATE_HOME/factor-q`.
+    fn state(&self) -> PathBuf {
+        self.dir.path().join("state")
+    }
+
     fn agents(&self) -> PathBuf {
         self.dir.path().join("agents")
     }
@@ -124,6 +131,7 @@ fn run_fq(scratch: &Scratch, nats_url: &str, args: &[&str]) -> (Option<i32>, Str
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_AGENTS_DIR", scratch.agents())
         .env("FQ_CACHE_DIR", scratch.cache())
+        .env("FQ_STATE_DIR", scratch.state())
         .env("FQ_NATS_URL", nats_url)
         .env("RUST_LOG", "off")
         .env("NO_COLOR", "1")
@@ -494,6 +502,7 @@ fn golden_down_case(golden_name: &str, down_args: &[&str]) {
         .env("FQ_CONFIG", &daemon_config)
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.cache())
+        .env("FQ_STATE_DIR", scratch.state())
         .env("FQ_AGENTS_DIR", scratch.agents())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))

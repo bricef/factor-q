@@ -92,14 +92,60 @@ impl EdgeIdentity {
     /// identity was freshly minted — the caller prints the admin token
     /// on that run and never again.
     pub fn load_or_provision(dir: &Path) -> anyhow::Result<(Self, bool)> {
-        if dir.join(CERT_FILE).exists() {
-            return Ok((Self::load(dir)?, false));
+        if let Some(identity) = Self::try_load(dir)? {
+            return Ok((identity, false));
         }
-        // A cert-less directory still holding private material is a
-        // partial identity — re-provisioning over it would silently
-        // rotate the root, orphaning every pinned client and every
-        // issued token. Fail closed; the operator restores the missing
-        // file or deletes the directory to rotate deliberately.
+        let identity = Self::provision()?;
+        identity.save(dir)?;
+        Ok((identity, true))
+    }
+
+    /// Load the identity persisted under `dir`; failing that, **adopt**
+    /// one persisted under `legacy` before falling back to minting a
+    /// fresh one (#362 — the identity moved from the cache directory
+    /// to the state directory, and an upgrade must not orphan the
+    /// clients pinned to the identity already on disk).
+    ///
+    /// Adoption *copies*: the identity is re-`save`d at `dir`, and the
+    /// legacy copy is left untouched. Three reasons, in order of
+    /// weight. First, `save` re-applies the hardening at creation time
+    /// — 0700 directory, 0600 `create_new` key files — whereas a
+    /// rename would carry whatever bits the old directory happened to
+    /// have. Second, a rename across filesystems fails outright
+    /// (`EXDEV`), which is exactly the cache-on-tmpfs shape this move
+    /// exists to fix. Third, deleting durable secret material as a
+    /// side effect of an upgrade is a one-way door: leaving the old
+    /// copy keeps a rollback to the previous binary working. The
+    /// legacy read happens at most once — from the next start the new
+    /// location wins.
+    pub fn load_or_adopt(dir: &Path, legacy: &Path) -> anyhow::Result<(Self, IdentityOrigin)> {
+        if let Some(identity) = Self::try_load(dir)? {
+            return Ok((identity, IdentityOrigin::Loaded));
+        }
+        if let Some(identity) = Self::try_load(legacy)? {
+            identity.save(dir)?;
+            return Ok((identity, IdentityOrigin::Adopted));
+        }
+        let identity = Self::provision()?;
+        identity.save(dir)?;
+        Ok((identity, IdentityOrigin::Minted))
+    }
+
+    /// Read the identity under `dir` if it holds a complete one,
+    /// `Ok(None)` if it holds none at all, and an error if it holds a
+    /// *partial* one.
+    ///
+    /// The certificate is the completeness marker ([`save`](Self::save)
+    /// writes it last). A cert-less directory still holding private
+    /// material is a partial identity — provisioning over it, or
+    /// skipping past it to another location, would silently rotate the
+    /// root and orphan every pinned client and every issued token.
+    /// Fail closed; the operator restores the missing file or deletes
+    /// the directory to rotate deliberately.
+    fn try_load(dir: &Path) -> anyhow::Result<Option<Self>> {
+        if dir.join(CERT_FILE).exists() {
+            return Ok(Some(Self::load(dir)?));
+        }
         for name in [KEY_FILE, ROOT_FILE] {
             if dir.join(name).exists() {
                 anyhow::bail!(
@@ -111,9 +157,7 @@ impl EdgeIdentity {
                 );
             }
         }
-        let identity = Self::provision()?;
-        identity.save(dir)?;
-        Ok((identity, true))
+        Ok(None)
     }
 
     /// Persist the identity under `dir` (created 0700 on unix if
@@ -156,6 +200,19 @@ impl EdgeIdentity {
             root: KeyPair::from(&private),
         })
     }
+}
+
+/// Where the identity a daemon just started with came from. Only
+/// [`Minted`](IdentityOrigin::Minted) is a new root — the other two
+/// keep every pinned fingerprint and issued token valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityOrigin {
+    /// Read from the configured location: the steady state.
+    Loaded,
+    /// Read from the legacy location and copied to the configured one.
+    Adopted,
+    /// Neither location held one, so a fresh identity was provisioned.
+    Minted,
 }
 
 const CERT_FILE: &str = "cert.der";

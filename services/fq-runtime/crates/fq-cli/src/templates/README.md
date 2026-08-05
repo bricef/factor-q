@@ -43,8 +43,9 @@ fq events tail
 
 - Edit `agents/sample-agent.md` or add new agent files under `agents/`.
 - Override any configuration field from `fq.toml` using CLI flags
-  (`--agents-dir`, `--nats-url`, `--cache-dir`) or environment variables
-  (`FQ_AGENTS_DIR`, `FQ_NATS_URL`, `FQ_CACHE_DIR`).
+  (`--agents-dir`, `--nats-url`, `--cache-dir`, `--state-dir`) or
+  environment variables (`FQ_AGENTS_DIR`, `FQ_NATS_URL`,
+  `FQ_CACHE_DIR`, `FQ_STATE_DIR`).
 
 ## Documentation
 

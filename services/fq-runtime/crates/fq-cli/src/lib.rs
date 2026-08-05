@@ -117,6 +117,12 @@ struct GlobalArgs {
     #[arg(long, env = "FQ_CACHE_DIR", global = true)]
     cache_dir: Option<PathBuf>,
 
+    /// Override the state directory from config — durable data that
+    /// must survive a restart (the edge identity), as opposed to the
+    /// regenerable cache directory
+    #[arg(long, env = "FQ_STATE_DIR", global = true)]
+    state_dir: Option<PathBuf>,
+
     /// Log output format for the tracing subscriber. `text` (the
     /// default) is human-readable ANSI; `json` emits one JSON object
     /// per log line for machine parsing by a log aggregator.
@@ -136,6 +142,9 @@ impl GlobalArgs {
         }
         if let Some(dir) = &self.cache_dir {
             config.cache.directory = dir.clone();
+        }
+        if let Some(dir) = &self.state_dir {
+            config.state.directory = dir.clone();
         }
         Ok(config)
     }
@@ -1098,6 +1107,7 @@ fn token_attenuate(
     Ok(())
 }
 
+mod edge_identity;
 mod operator_surface;
 use operator_surface::*;
 pub use operator_surface::{OperatorDeps, operator_registry};
@@ -2335,6 +2345,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("  NATS:             {}", config.nats.url);
     println!("  agent directory:  {}", config.agents.directory.display());
     println!("  cache directory:  {}", config.cache.directory.display());
+    println!("  state directory:  {}", config.state.directory.display());
 
     // Load agents eagerly. A missing directory is an error: the
     // dispatcher would otherwise silently drop every trigger.
@@ -3228,17 +3239,12 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // The authenticated operator edge (ADR-0006 + ADR-0031, plan
     // Phase 2): TLS + capability tokens over tarpc
     // `invoke`/`next_batch`. Identity (certificate + token root)
-    // persists under the cache dir; the first run mints it and prints
-    // the admin token exactly once. Same supervision posture as the
-    // read service: outside the supervised set — an operator surface
-    // dying must not take the runtime down.
+    // persists under the state dir; the first run mints it and prints
+    // the admin token exactly once — see `edge_identity`. Same
+    // supervision posture as the read service: outside the supervised
+    // set — an operator surface dying must not take the runtime down.
     let edge_addr = if config.edge.enabled {
-        let identity_dir = config.cache.directory.join("edge");
-        let (identity, fresh) = fq_edge::EdgeIdentity::load_or_provision(&identity_dir)
-            .context("edge: failed to load or provision identity (check [edge] in fq.toml)")?;
-        if fresh {
-            announce_fresh_edge_identity(&identity, &identity_dir)?;
-        }
+        let (identity, _identity_dir) = edge_identity::resolve(&config)?;
         // The operator surface: real declarations over the daemon's
         // read views, gated at the projection watermark (Phase 3).
         let edge_views = Arc::new(
@@ -3695,33 +3701,6 @@ async fn wait_for_shutdown_signal() -> &'static str {
             }
         }
     }
-}
-
-/// The first run's edge banner: fingerprint and admin token, printed
-/// exactly once because minting is what makes them exist. Lifted out
-/// of `run_daemon` — it is output, not startup logic, and the function
-/// it lived in is over its budget.
-fn announce_fresh_edge_identity(
-    identity: &fq_edge::EdgeIdentity,
-    identity_dir: &Path,
-) -> anyhow::Result<()> {
-    let fp: String = identity
-        .fingerprint()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let admin = identity
-        .mint_admin_token()
-        .context("edge: failed to mint the admin token")?;
-    println!();
-    println!(
-        "edge: first run — identity provisioned under {}",
-        identity_dir.display()
-    );
-    println!("edge: certificate fingerprint (clients pin this): {fp}");
-    println!("edge: admin token (printed once; store it securely):");
-    println!("  {admin}");
-    Ok(())
 }
 
 /// Re-read the agents directory and atomically swap the shared

@@ -196,10 +196,20 @@ impl ExecToolConfig {
     }
 }
 
-/// Runtime retention knobs. Drives the scheduled sweeps for the
-/// `invocation_archive` and rebuildable projection `events` tables.
+/// `[state]` — durable runtime state: where it lives, and how long
+/// the sweepable parts of it are kept. Drives the scheduled sweeps for
+/// the `invocation_archive` and rebuildable projection `events` tables.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StateConfig {
+    /// Directory for data factor-q must never regenerate — today the
+    /// edge identity (certificate + biscuit token root), whose loss
+    /// orphans every pinned client and every issued token (#362).
+    /// Defaults to the system state directory — see
+    /// [`crate::paths::default_state_dir`] for the resolution order.
+    /// The SQLite stores are the obvious next tenant; they still live
+    /// under `[cache]`, and moving them is its own migration.
+    #[serde(default = "default_state_dir_for_config")]
+    pub directory: PathBuf,
     /// How long to keep archive and projected event rows before the
     /// retention sweep deletes them. Default 30 days. Set to
     /// `-1` to disable the sweep entirely. Cost-bearing event rows
@@ -224,6 +234,7 @@ fn default_sweep_interval_seconds() -> u64 {
 impl Default for StateConfig {
     fn default() -> Self {
         Self {
+            directory: default_state_dir_for_config(),
             retention_days: default_retention_days(),
             sweep_interval_seconds: default_sweep_interval_seconds(),
         }
@@ -567,6 +578,10 @@ fn default_cache_dir_for_config() -> PathBuf {
     crate::pricing::default_cache_dir()
 }
 
+fn default_state_dir_for_config() -> PathBuf {
+    crate::paths::default_state_dir()
+}
+
 fn default_agents_directory() -> PathBuf {
     PathBuf::from("agents")
 }
@@ -680,6 +695,9 @@ impl Config {
         }
         if self.cache.directory.is_relative() {
             self.cache.directory = base.join(&self.cache.directory);
+        }
+        if self.state.directory.is_relative() {
+            self.state.directory = base.join(&self.state.directory);
         }
     }
 
@@ -1112,6 +1130,46 @@ directory = "my-agents"
 
         let config = Config::from_file(&config_path).unwrap();
         assert_eq!(config.agents.directory, dir.path().join("my-agents"));
+    }
+
+    /// `[state] directory` follows `[cache] directory` in every
+    /// respect: same key shape, and a relative path resolves against
+    /// the config file rather than the process cwd (#362).
+    #[test]
+    fn state_directory_is_configurable_and_resolves_like_the_cache_directory() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("fq.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[cache]
+directory = "./cache"
+
+[state]
+directory = "./state"
+retention_days = 7
+"#,
+        )
+        .unwrap();
+
+        let config = Config::from_file(&config_path).unwrap();
+        assert_eq!(config.cache.directory, dir.path().join("./cache"));
+        assert_eq!(config.state.directory, dir.path().join("./state"));
+        // The directory key coexists with the retention knobs already
+        // under `[state]` rather than displacing them.
+        assert_eq!(config.state.retention_days, 7);
+    }
+
+    /// An `fq.toml` with no `[state] directory` — every deployment
+    /// that predates #362 — must not fall back to the cache directory
+    /// or to anything temp-dir shaped.
+    #[test]
+    fn state_directory_defaults_to_the_system_state_dir() {
+        let config = Config::from_toml_str("[state]\nretention_days = 1\n").unwrap();
+        assert_eq!(config.state.directory, crate::paths::default_state_dir());
+        assert_ne!(config.state.directory, config.cache.directory);
     }
 
     #[test]

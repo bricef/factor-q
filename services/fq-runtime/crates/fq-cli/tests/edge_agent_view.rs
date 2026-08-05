@@ -92,6 +92,7 @@ async fn the_agent_view_answers_from_the_daemons_live_registry() {
         .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .env("ANTHROPIC_API_KEY", "test-key-unused-by-this-test")
         .env("RUST_LOG", "off")

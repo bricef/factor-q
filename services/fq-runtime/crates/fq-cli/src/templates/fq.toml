@@ -62,6 +62,21 @@ directory = "agents"
 # $HOME/.cache/factor-q, then the system temp directory.
 # directory = "./cache"
 
+[state]
+# Directory for data factor-q must never regenerate — today the edge
+# identity: the daemon's self-signed certificate and its biscuit token
+# root. Losing it orphans every client pinned to the old fingerprint
+# and invalidates every token already issued, so this is deliberately
+# NOT the cache directory, which the XDG spec and FHS 5.5 both license
+# a cleaner to empty at any time.
+#
+# If omitted, defaults to $XDG_STATE_HOME/factor-q, then
+# $HOME/.local/state/factor-q, then /var/lib/factor-q.
+#
+# An upgrade from a build that kept the identity under [cache] adopts
+# it on first start (and says so) rather than minting a new one.
+# directory = "./state"
+
 [providers.anthropic]
 # Environment variable holding the Anthropic API key. The runtime reads
 # the variable at call time; nothing is written back to this file.

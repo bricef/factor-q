@@ -24,6 +24,7 @@ pub mod testing;
 pub mod wire;
 
 pub use auth::EdgeIdentity;
+pub use auth::IdentityOrigin;
 pub use auth::attenuate;
 pub use client::EdgeClient;
 pub use client::probe_fingerprint;

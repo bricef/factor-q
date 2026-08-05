@@ -168,22 +168,50 @@ through to safe locations.
 |-------------------|-------------------|------------------------------|-------------------------------------------|
 | `FQ_CONFIG`       | `--config`        | `/etc/factor-q/fq.toml`       | Optional — defaults apply if unset        |
 | `FQ_AGENTS_DIR`   | `--agents-dir`    | `/var/lib/factor-q/agents`    | Mount a volume with your agent definitions |
-| `FQ_CACHE_DIR`    | `--cache-dir`     | `/var/cache/factor-q`         | Pricing cache and other runtime caches    |
+| `FQ_CACHE_DIR`    | `--cache-dir`     | `/var/cache/factor-q`         | Pricing snapshot and the SQLite stores    |
+| `FQ_STATE_DIR`    | `--state-dir`     | (unset — resolves as below)   | Durable state: the edge identity          |
 | `FQ_NATS_URL`     | `--nats-url`      | `nats://nats:4222`            | Points at a NATS service on the same network |
 | `RUST_LOG`        | (n/a)             | `info`                        | Log level / filter                        |
 
 Precedence remains CLI flag > env var > config file > default. On a
 host without any of these set, factor-q falls back to:
+
 - `agents/` in cwd
-- `$XDG_CACHE_HOME/factor-q` → `$HOME/.cache/factor-q` → `/tmp/factor-q`
+- cache: `$XDG_CACHE_HOME/factor-q` → `$HOME/.cache/factor-q` → `/tmp/factor-q`
+- state: `$XDG_STATE_HOME/factor-q` → `$HOME/.local/state/factor-q` → `/var/lib/factor-q`
 - `nats://localhost:4222`
+
+### Cache vs state
+
+Two directories, two lifetimes (#362):
+
+- **cache** (`FQ_CACHE_DIR`, `[cache] directory`) — the LiteLLM pricing
+  snapshot, plus (for now) the daemon's SQLite stores. Its fallback is
+  temp-dir shaped because FHS §5.5 and the XDG spec both license a
+  cleaner to empty it.
+- **state** (`FQ_STATE_DIR`, `[state] directory`) — data factor-q must
+  never regenerate. Today that is the **edge identity**: the daemon's
+  self-signed certificate and its biscuit token root. Losing it orphans
+  every client pinned to the old fingerprint and invalidates every
+  issued token, so its fallback is deliberately durable
+  (`/var/lib/factor-q`), never `/tmp`.
+
+A daemon whose state directory is empty but whose cache directory still
+holds an `edge/` identity — every deployment that predates the split —
+**adopts** the old one and says so on startup. The legacy copy is left
+in place; delete it once you are satisfied. A fresh identity is minted
+only when neither location has one.
+
+The SQLite stores are the obvious next tenant of the state directory;
+moving them is a separate migration.
 
 ### Mounted volumes
 
 The image declares volumes at `/var/lib/factor-q` (agent definitions,
-skills, future state) and `/var/cache/factor-q` (pricing JSON and other
-caches). Mount persistent volumes at these paths for anything that
-needs to survive container restarts.
+skills, and the state directory when `FQ_STATE_DIR` is unset) and
+`/var/cache/factor-q` (pricing JSON and the SQLite stores). Mount
+persistent volumes at these paths for anything that needs to survive
+container restarts.
 
 ### Example compose stanza
 

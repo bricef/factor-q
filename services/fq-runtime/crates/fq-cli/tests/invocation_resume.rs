@@ -105,6 +105,7 @@ fn run_fq(scratch: &Scratch, nats_url: &str, args: &[&str]) -> Output {
         .env("FQ_CONFIG", scratch.path("fq.toml"))
         .env("FQ_NATS_URL", nats_url)
         .env("FQ_CACHE_DIR", scratch.path("cache"))
+        .env("FQ_STATE_DIR", scratch.path("state"))
         .env("FQ_AGENTS_DIR", scratch.path("agents"))
         .env("XDG_CONFIG_HOME", scratch.path("xdg"))
         .env("ANTHROPIC_API_KEY", "test-key-unused-by-mock")
@@ -127,6 +128,7 @@ impl Daemon {
             .env("FQ_CONFIG", scratch.path("fq.toml"))
             .env("FQ_NATS_URL", nats_url)
             .env("FQ_CACHE_DIR", scratch.path("cache"))
+            .env("FQ_STATE_DIR", scratch.path("state"))
             .env("FQ_AGENTS_DIR", scratch.path("agents"))
             .env("ANTHROPIC_API_KEY", "test-key-unused-by-mock")
             // JSON logs: single-line, no ANSI — the id extraction and
