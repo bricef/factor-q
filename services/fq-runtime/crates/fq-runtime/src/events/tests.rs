@@ -394,6 +394,58 @@ fn schema_version_constant_is_two() {
     assert_eq!(SCHEMA_VERSION, 2);
 }
 
+/// The forward-compatibility landing pad: an `event_type` this binary
+/// has never heard of parses as `Unknown` instead of failing the whole
+/// event. Without it, every new event type breaks every deployed
+/// consumer for the length of the mixed-version window.
+#[test]
+fn unknown_event_type_parses_instead_of_failing() {
+    let from_the_future = json!({
+        "envelope": {
+            "schema_version": SCHEMA_VERSION,
+            "event_id": Uuid::now_v7(),
+            "trace_id": Uuid::now_v7(),
+            "agent_id": "researcher",
+            "invocation_id": Uuid::now_v7(),
+            "schema_id": "factor-q/telepathy@1",
+            "timestamp": "2026-08-05T00:00:00Z"
+        },
+        "payload": {
+            "event_type": "telepathy",
+            "payload": { "thought": "a field no version of this binary knows" }
+        }
+    });
+
+    let event: Event = serde_json::from_value(from_the_future).expect("unknown tag must not fail");
+    assert!(matches!(event.payload, EventPayload::Unknown));
+    // The envelope survives intact — which is the point: an old
+    // consumer can still see whose invocation this was and when.
+    assert_eq!(event.envelope.agent_id, "researcher");
+}
+
+/// The escape hatch must not swallow a *known* type whose payload is
+/// malformed. A `triggered` event missing its config snapshot is a
+/// real error, not an unknown event.
+#[test]
+fn malformed_known_payload_still_fails() {
+    let broken = json!({
+        "envelope": {
+            "schema_version": SCHEMA_VERSION,
+            "event_id": Uuid::now_v7(),
+            "trace_id": Uuid::now_v7(),
+            "agent_id": "researcher",
+            "invocation_id": Uuid::now_v7(),
+            "schema_id": "factor-q/triggered@1",
+            "timestamp": "2026-08-05T00:00:00Z"
+        },
+        "payload": {
+            "event_type": "triggered",
+            "payload": { "trigger_source": "manual" }
+        }
+    });
+    assert!(serde_json::from_value::<Event>(broken).is_err());
+}
+
 #[test]
 fn tool_call_id_round_trips_as_bare_string() {
     let id = ToolCallId::new("toolu_01ABC").unwrap();

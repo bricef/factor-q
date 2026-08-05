@@ -1653,6 +1653,12 @@ fn print_event(event: &Event) {
                 .map(|r| format!(" reason={r:?}"))
                 .unwrap_or_default()
         ),
+        // A newer daemon's event type. The envelope still renders; say
+        // plainly that the payload is unreadable rather than pretend
+        // the line is complete.
+        EventPayload::Unknown => {
+            "unknown event_type (published by a newer fq; upgrade to read it)".to_string()
+        }
     };
 
     println!(

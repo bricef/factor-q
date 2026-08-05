@@ -69,9 +69,35 @@ pub mod subjects;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub envelope: Envelope,
+    #[serde(deserialize_with = "payload_or_unknown")]
     pub payload: EventPayload,
     #[serde(default, skip_serializing_if = "Annotations::is_empty")]
     pub annotations: Annotations,
+}
+
+/// Read a payload, degrading an `event_type` this binary has never
+/// heard of to [`EventPayload::Unknown`] rather than failing the whole
+/// event (see that variant for why).
+///
+/// `#[serde(other)]` alone is not enough: it catches the unknown *tag*,
+/// but serde then tries to read the adjacent `payload` body into a unit
+/// variant and refuses. So the parse is attempted twice — once whole,
+/// and if that fails, once with the body dropped. The second attempt
+/// succeeds only when `other` fires, i.e. exactly when the tag is
+/// unknown; a *known* tag with a malformed body fails both times and
+/// keeps its original error, which is what it should be.
+fn payload_or_unknown<'de, D>(deserializer: D) -> Result<EventPayload, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let err = match EventPayload::deserialize(&value) {
+        Ok(payload) => return Ok(payload),
+        Err(err) => err,
+    };
+    let tag = value.get("event_type").cloned().unwrap_or(Value::Null);
+    EventPayload::deserialize(&serde_json::json!({ "event_type": tag }))
+        .map_err(|_| serde::de::Error::custom(err))
 }
 
 impl Event {
@@ -316,6 +342,7 @@ impl EventPayload {
             Self::InvocationArchiveAcked(p) => {
                 subjects::worker_invocation_archive_acked(p.worker_id.as_str())
             }
+            Self::Unknown => subjects::SYSTEM_UNKNOWN.to_string(),
         }
     }
 
@@ -344,6 +371,7 @@ impl EventPayload {
             Self::WorkerHeartbeat(_) => "factor-q/worker_heartbeat@1",
             Self::WorkerOrphaned(_) => "factor-q/worker_orphaned@1",
             Self::McpServerLog(_) => "factor-q/mcp_server_log@1",
+            Self::Unknown => "factor-q/unknown@1",
         }
     }
 
@@ -553,6 +581,26 @@ pub enum EventPayload {
     /// notification drain (ADR-0020). Daemon-scoped — no agent or
     /// invocation.
     McpServerLog(McpServerLogPayload),
+
+    /// An `event_type` this binary has never heard of — a payload
+    /// minted by a newer daemon and read by an older one.
+    ///
+    /// Without this variant an unknown tag is a hard deserialisation
+    /// error, and every consumer handles that differently: the durable
+    /// consumers warn and ack (dropping the event permanently), `fq
+    /// events tail` propagates the error and terminates the stream,
+    /// and the advisory watch skips silently. Adding a new event type
+    /// is therefore a backwards-breaking change for the whole
+    /// mixed-version window. With it, an old binary reads the envelope
+    /// — agent, invocation, timestamp, chain, cost — and simply has no
+    /// typed payload, which is what every one of those consumers
+    /// actually wants.
+    ///
+    /// The runtime never constructs or publishes this variant; it
+    /// exists only as a deserialisation landing pad, and the payload
+    /// body is discarded on the way in.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The fixed sentinel every host-notice body is wrapped in
