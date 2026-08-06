@@ -129,6 +129,53 @@ fn fq_events_query_refuses_an_unbounded_limit() {
     );
 }
 
+/// A `--limit` too large to travel is refused, not saturated into one
+/// the operator never typed.
+///
+/// `fq dead-letters list --limit` is a `usize` and the wire contract a
+/// `u32`, so the values that cannot travel are exactly those above
+/// `u32::MAX` — nothing negative can be typed for a `usize`, and clap
+/// rejects the attempt itself. Those used to be clamped to `u32::MAX`,
+/// on the reading that a limit past four billion asks for everything a
+/// page can hold. Nothing holds everything, and `u32::MAX` is now over
+/// the cap besides, so the clamp bought the operator a refusal quoting
+/// a number that was never theirs.
+///
+/// The refusal is local — no daemon, no connection — and names the cap
+/// and the narrowing, so the next command is an edit rather than a
+/// guess. (Only reachable where `usize` is wider than `u32`, which is
+/// every target this ships on.)
+#[test]
+fn fq_dead_letters_list_refuses_a_limit_too_large_to_travel() {
+    let (exit, _stdout, stderr) = run_fq(
+        &["dead-letters", "list", "--limit", "4294967296"],
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        exit,
+        Some(1),
+        "a limit that cannot travel must be refused; {stderr}"
+    );
+    for needle in [
+        // What was asked for, the cap, and the narrowing that serves
+        // more than a page.
+        "4294967296",
+        "500",
+        "--agent",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "expected `{needle}` in the refusal; got: {stderr}"
+        );
+    }
+    // Refused, not quietly turned into a page of some size the
+    // operator never asked for.
+    assert!(
+        !stderr.contains("4294967295"),
+        "the operator's number must not be swapped for a saturated one; got: {stderr}"
+    );
+}
+
 #[test]
 fn fq_drain_is_an_unrecognized_subcommand() {
     let (exit, _stdout, stderr) = run_fq(&["drain"], Duration::from_secs(5));
