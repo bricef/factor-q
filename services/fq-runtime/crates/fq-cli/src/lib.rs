@@ -1,7 +1,7 @@
 //! The `fq`/`fqd` binaries' library half: the composition root.
 //!
 //! What lives here is the wiring nothing else can own — the two entry points,
-//! the dispatch from a parsed [`cli::Commands`] to the verb that serves it,
+//! the dispatch from a parsed `cli::Commands` to the verb that serves it,
 //! the handful of primitives every verb shares (store paths, the read views),
 //! and the daemon itself. Every verb group is a module: `status`, `doctor`,
 //! `invocations`, `trigger`, `workers`, `events`, and so on (#189).
