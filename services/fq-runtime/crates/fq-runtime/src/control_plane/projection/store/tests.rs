@@ -653,7 +653,9 @@ async fn inserts_and_counts_events() {
 
 /// Heartbeats are an operational signal, not data: `insert_event`
 /// drops them, and the migration sweep evicts rows older builds
-/// accumulated.
+/// accumulated. Both derive from `events::transient` — the same list
+/// that keeps them off `event.stream`, so the operator surface's two
+/// reads over this substrate cannot drift apart again.
 #[tokio::test]
 async fn heartbeats_are_not_projected_and_legacy_rows_are_swept() {
     use crate::events::WorkerHeartbeatPayload;

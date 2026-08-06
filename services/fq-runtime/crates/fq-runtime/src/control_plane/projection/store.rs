@@ -151,13 +151,16 @@ impl ProjectionStore {
                     .await?;
             }
         }
-        // One-time sweep (idempotent, cheap once empty via the
-        // type index): heartbeats stopped being projected — see
-        // `insert_event` — and this evicts the rows older builds
-        // accumulated so the events surface reads as history again.
-        sqlx::query("DELETE FROM events WHERE event_type = 'worker_heartbeat'")
-            .execute(&self.pool)
-            .await?;
+        // Sweep the transients (cheap once empty via the type index):
+        // they stopped being projected — see `insert_event` — and this
+        // evicts what older builds accumulated. Derived from
+        // `events::transient`, so adding a type there needs no edit here.
+        for event_type in crate::events::transient::types() {
+            sqlx::query("DELETE FROM events WHERE event_type = ?")
+                .bind(event_type)
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -215,13 +218,11 @@ impl ProjectionStore {
     /// directly, or a row from before the column existed. Such a row
     /// still lists; its payload just cannot be located.
     ///
-    /// Worker heartbeats are NOT projected: a heartbeat is an
-    /// operational liveness signal that goes stale the moment the next
-    /// one lands (every 10s — ~13k rows/day of noise that buried the
-    /// events surface), not history. Liveness lives where it is
-    /// consumed: the control-plane worker table's `last_heartbeat`.
+    /// **Transient events are NOT projected**: which types, and why,
+    /// is [`crate::events::transient`] — the same list `event.stream`
+    /// excludes, so the surface's two reads answer one population.
     pub async fn insert_event(&self, event: &Event, seq: Option<u64>) -> Result<(), StoreError> {
-        if matches!(event.payload, EventPayload::WorkerHeartbeat(_)) {
+        if event.payload.is_transient() {
             return Ok(());
         }
         let fields = extract_fields(event);

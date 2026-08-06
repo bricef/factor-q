@@ -26,6 +26,21 @@
 //! coordinates; identities may not.** `min_seq` and `from_seq` are
 //! cursors and are unchanged.
 //!
+//! **Two stores, one population.** Two stores is a fact about where
+//! the answers come from; it must not become a fact about *what the
+//! answers are*. It had: the projection never indexed transients while
+//! the log served them, and `agent` narrowed List by the envelope's
+//! `agent_id` and Stream by the consumer subject `fq.agent.<id>.>` —
+//! so the same filter selected different events, and the declared
+//! description claimed one row per event while saying nothing about
+//! either gap. Both are closed at the source rather than documented:
+//! the transient set lives in `fq_runtime::events::transient` and
+//! every reader derives from it, and `agent` is the envelope's field
+//! on both verbs. What remains different is the *window* — the
+//! projection's retention against the log's 30 days, with cost-bearing
+//! rows outliving both — which the atom's declared description states
+//! rather than glosses.
+//!
 //! Its own module rather than more of `operator_surface.rs`: that file
 //! is the daemon's assembly point and is near its size budget (#189).
 
@@ -59,7 +74,11 @@ pub(crate) struct EventKey {
 /// `fq events query` offers, which is the same narrowing a tail wants.
 #[derive(Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct EventFilter {
-    /// One agent's events. Absent reads the whole log.
+    /// One agent's events — the events whose **envelope** names that
+    /// agent, which is the domain's answer to whose event this is.
+    /// Not the events on `fq.agent.<id>.>`: an agent's archive ack is
+    /// published on a worker subject, and agent `system` has no
+    /// `fq.agent.*` subject at all. Absent reads every agent.
     #[serde(default)]
     pub(crate) agent: Option<String>,
     /// One event type, as the payload names itself (`llm_response`,
@@ -107,9 +126,12 @@ const EVENT_MAX_WAIT_CEILING_MS: u64 = 60_000;
 /// Compiled once per call, and deliberately store-agnostic: the same
 /// value narrows the log (Stream) and the projection (List), so a
 /// filter *means* one thing across the atom and the two verbs differ
-/// only in where they go looking for it. Rendering the narrowing as
-/// bus coordinates or SQL bindings happens at the edges of this type,
-/// never inside a handler.
+/// only in where they go looking for it. This type holds the
+/// narrowing in the domain's own terms; what a store makes of it —
+/// SQL bindings, or the predicate in [`Self::matches`] — happens at
+/// its edges. Never bus coordinates: a subject is where the transport
+/// put a message, and narrowing by one made `agent` mean something
+/// different here than it meant on List.
 #[derive(Debug)]
 struct EventSelection {
     agent: Option<String>,
@@ -123,10 +145,10 @@ impl EventSelection {
             op: op.to_string(),
             message,
         };
-        // An id that is not a subject token cannot name any event, and
-        // interpolating it would build a malformed consumer filter —
-        // so it is a verdict on the request, on both verbs, whether or
-        // not the store that answers would have minded.
+        // An id that is not a valid agent id cannot name any event —
+        // no envelope was ever stamped with one — so it is a verdict
+        // on the request, on both verbs, rather than an empty answer a
+        // caller would read as "that agent has been quiet".
         if let Some(agent) = filter.agent.as_deref() {
             fq_runtime::AgentId::new(agent)
                 .map_err(|e| invalid(format!("agent `{agent}`: {e}")))?;
@@ -149,19 +171,6 @@ impl EventSelection {
         })
     }
 
-    /// The consumer subject the log read is scoped to. Empty means
-    /// "every subject this stream captures" — the event log is
-    /// `fq.agent.>` + `fq.system.>` + `fq.worker.>`, which no single
-    /// pattern names. Only the agent narrowing pushes down; the log is
-    /// partitioned that way and the rest is not, so the rest is
-    /// [`Self::matches`].
-    fn subject(&self) -> String {
-        match self.agent.as_deref() {
-            Some(agent) => format!("fq.agent.{agent}.>"),
-            None => String::new(),
-        }
-    }
-
     /// `since` as the projection stores its timestamps. The column is
     /// text and the comparison lexical, so re-rendering the parsed
     /// instant — rather than passing the caller's spelling through —
@@ -171,10 +180,36 @@ impl EventSelection {
         self.since.map(|t| t.to_rfc3339())
     }
 
+    /// Whether one event is in this selection — the whole narrowing,
+    /// applied to the event itself.
+    ///
+    /// The projection answers the same question in SQL over the
+    /// columns it extracted from these same fields, which is what
+    /// makes List and Stream one selection rather than two that
+    /// resemble each other.
+    ///
+    /// **`agent` is the envelope's `agent_id`.** It used to be the
+    /// consumer subject `fq.agent.<id>.>`, and the two disagree for
+    /// every event that is not agent-partitioned: an
+    /// `invocation_archive_acked` is published on `fq.worker.<worker>`
+    /// under its *agent's* envelope, and `system_startup` on
+    /// `fq.system.*` under agent `system` — so rows that listed under
+    /// `--agent system` could never be tailed with the same filter. A
+    /// filter means one thing, and that thing is the domain's: a
+    /// subject is where the transport put the message.
     fn matches(&self, event: &Event) -> bool {
-        self.event_type
-            .as_deref()
-            .is_none_or(|want| event.payload.event_type() == want)
+        // Transients are not on this surface at all — the projection
+        // does not index them, so serving them here is the population
+        // gap that made the same filter mean two things.
+        !event.payload.is_transient()
+            && self
+                .agent
+                .as_deref()
+                .is_none_or(|want| event.envelope.agent_id.as_str() == want)
+            && self
+                .event_type
+                .as_deref()
+                .is_none_or(|want| event.payload.event_type() == want)
             && self
                 .since
                 .is_none_or(|since| event.envelope.timestamp >= since)
@@ -197,7 +232,7 @@ pub(crate) fn register_event_atom(
         "One recorded event: the substrate every other resource folds from.",
         fq_ops::Stability::Experimental,
     )
-    .description(
+    .description(concat!(
         "`event_id` is an Event's identity — the UUIDv7 the event stamps on \
          itself when it is constructed, and the projection index's primary \
          key. It is NOT the log sequence: a sequence is a transport \
@@ -217,16 +252,35 @@ pub(crate) fn register_event_atom(
          collapsed into `not found`: `Unlocatable` (the row is indexed but \
          its log position was never recorded, so we know the event and not \
          where its payload is) and `Gone` (the position is known and the \
-         log has aged past it, or was replaced). Cost-bearing rows are kept \
-         indefinitely while the log keeps 30 days, so `Gone` is the normal \
-         answer for old spend, not a fault. Read payloads in bulk by \
-         streaming, not by listing. List is a projection read and honours \
-         `min_seq`; Stream long-polls via next_batch from a sequence, and \
-         `from_seq = u64::MAX` seeks the tail without consuming anything. \
-         Resuming at a cursor loses nothing: the log is durable and the \
-         consumer is positional — a cursor may be a transport coordinate, \
-         an identity may not.",
-    );
+         log has aged past it, or was replaced). Read payloads in bulk by \
+         streaming, not by listing. ",
+        "LIST AND STREAM SELECT THE SAME EVENTS FOR THE SAME FILTER. \
+         `agent` means the envelope's `agent_id` on both — the domain's \
+         answer to whose event this is, never the bus subject the message \
+         was routed on, which disagrees for every event that is not \
+         agent-partitioned (an `invocation_archive_acked` rides \
+         `fq.worker.*` under its agent's envelope; `system_startup` rides \
+         `fq.system.*` under agent `system`). And NEITHER VERB SERVES A \
+         TRANSIENT EVENT TYPE (",
+        fq_runtime::transient_event_types!(),
+        "): a heartbeat is operational signal rather than part of this \
+         interface, and the fact it carries is on `worker.list` as \
+         `last_heartbeat_ms` — tap the transport directly to watch the raw \
+         ones. WHAT THE TWO STILL DIFFER ON IS THE WINDOW, not which \
+         events are in it. List sees the projection, which sweeps non-cost \
+         rows older than `state.retention_days` (30 by default) and keeps \
+         COST-BEARING ROWS INDEFINITELY; Stream sees the log, which keeps \
+         30 days of everything and exempts nothing. So old spend lists \
+         after it can no longer be streamed or Got — `Gone` is the normal \
+         answer there, not a fault — and the two are two windows over one \
+         substrate rather than one set. ",
+        "List is a projection read and honours `min_seq`; Stream \
+         long-polls via next_batch from a sequence, and `from_seq = \
+         u64::MAX` seeks the tail without consuming anything. Resuming at \
+         a cursor loses nothing: the log is durable and the consumer is \
+         positional — a cursor may be a transport coordinate, an identity \
+         may not.",
+    ));
 
     let get_bus = bus.clone();
     let get_views = views.clone();
@@ -414,10 +468,16 @@ async fn stream_events(
     };
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_millis(max_wait_ms.min(EVENT_MAX_WAIT_CEILING_MS));
-    let mut events = bus
-        .events_from(&selection.subject(), from_seq)
-        .await
-        .map_err(internal)?;
+    // The whole log, narrowed in [`EventSelection::matches`] rather
+    // than by a consumer subject. A subject pattern is only ever a
+    // *pre*-filter, and no sound one exists here: the narrowing a
+    // caller asks for is `agent`, and an agent's events are not all on
+    // `fq.agent.<id>.>` (an archive ack rides `fq.worker.*` under the
+    // agent's envelope, and agent `system` has no `fq.agent.*` subject
+    // at all). Pushing it down cost the daemon a scan it now does
+    // itself, and bought a filter that meant something different here
+    // than it did on List.
+    let mut events = bus.events_from("", from_seq).await.map_err(internal)?;
     let mut items = Vec::new();
     let mut next_from_seq = from_seq;
     loop {
@@ -551,19 +611,122 @@ mod tests {
         );
     }
 
+    /// An event stamped for `agent`, published on whatever subject
+    /// its payload routes to.
+    fn event_for(agent: &str, payload: fq_runtime::events::EventPayload) -> Event {
+        Event::new(
+            fq_runtime::AgentId::new(agent).unwrap(),
+            uuid::Uuid::now_v7(),
+            payload,
+        )
+    }
+
+    fn heartbeat_payload() -> fq_runtime::events::EventPayload {
+        fq_runtime::events::EventPayload::WorkerHeartbeat(
+            fq_runtime::events::WorkerHeartbeatPayload {
+                worker_id: fq_runtime::worker::WorkerId::new("w-1".to_string()).unwrap(),
+            },
+        )
+    }
+
+    fn archive_acked_payload() -> fq_runtime::events::EventPayload {
+        fq_runtime::events::EventPayload::InvocationArchiveAcked(
+            fq_runtime::events::InvocationArchiveAckedPayload {
+                worker_id: fq_runtime::worker::WorkerId::new("w-1".to_string()).unwrap(),
+            },
+        )
+    }
+
+    fn selection_for(filter: EventFilter) -> EventSelection {
+        EventSelection::compile(&filter, "event.stream").expect("a valid filter")
+    }
+
+    /// **The narrowing is the envelope's, not the transport's.**
+    ///
+    /// `agent` used to compile to the consumer subject
+    /// `fq.agent.<id>.>`, which is a different question from the one
+    /// `event.list` answers against the index's `agent_id` column —
+    /// and the two disagree for every event that is not
+    /// agent-partitioned. This is that case, sharpened: an archive ack
+    /// is stamped with its agent's envelope and published on
+    /// `fq.worker.<worker>.…`, so the subject-scoped stream could
+    /// never deliver a row the list had just handed back.
     #[test]
-    fn an_agent_filter_scopes_the_consumer_to_that_agent_subject() {
-        let filter = EventFilter {
+    fn an_agent_filter_selects_by_the_envelope_not_the_subject() {
+        let mine = selection_for(EventFilter {
             agent: Some("researcher".into()),
             ..EventFilter::default()
-        };
-        let selection = EventSelection::compile(&filter, "event.stream").unwrap();
-        assert_eq!(selection.subject(), "fq.agent.researcher.>");
-        // No agent means no consumer filter at all: the log spans
-        // `fq.agent.>`, `fq.system.>` and `fq.worker.>`, and no single
-        // pattern covers those three.
-        let all = EventSelection::compile(&EventFilter::default(), "event.stream").unwrap();
-        assert_eq!(all.subject(), "");
+        });
+        let acked = event_for("researcher", archive_acked_payload());
+        assert!(
+            !acked.subject().starts_with("fq.agent."),
+            "this fixture is only interesting because the subject is not the agent's: {}",
+            acked.subject()
+        );
+        assert!(
+            mine.matches(&acked),
+            "an agent's event is its agent's wherever the transport routed it"
+        );
+        assert!(!mine.matches(&event_for("fixer", archive_acked_payload())));
+
+        // The case that could not be tailed at all: `system` has no
+        // `fq.agent.*` subject, so the old narrowing selected nothing.
+        let system = selection_for(EventFilter {
+            agent: Some("system".into()),
+            ..EventFilter::default()
+        });
+        let startup = Event::system(
+            uuid::Uuid::now_v7(),
+            fq_runtime::events::EventPayload::SystemStartup(
+                fq_runtime::events::SystemStartupPayload {
+                    runtime_id: uuid::Uuid::now_v7(),
+                    version: "0".into(),
+                    nats_url: String::new(),
+                    agents_loaded: 0,
+                    pricing_entries: 0,
+                },
+            ),
+        );
+        assert!(startup.subject().starts_with("fq.system."));
+        assert!(system.matches(&startup));
+        assert!(!mine.matches(&startup));
+
+        // No agent selects every agent, which is what it always meant.
+        let all = selection_for(EventFilter::default());
+        assert!(all.matches(&acked) && all.matches(&startup));
+    }
+
+    /// A transient is not on this surface, so the stream does not
+    /// serve it — under any filter, including one that names it. The
+    /// projection never indexed it either, and that agreement is the
+    /// point: `event.list` and `event.stream` answer the same
+    /// population because they consult the same predicate, not
+    /// because two comments agree.
+    #[test]
+    fn a_transient_matches_no_filter_at_all() {
+        let heartbeat = Event::system(uuid::Uuid::now_v7(), heartbeat_payload());
+        for filter in [
+            EventFilter::default(),
+            EventFilter {
+                agent: Some("system".into()),
+                ..EventFilter::default()
+            },
+            EventFilter {
+                event_type: Some(heartbeat.payload.event_type().to_string()),
+                ..EventFilter::default()
+            },
+        ] {
+            let asked = filter.describe();
+            assert!(
+                !selection_for(filter).matches(&heartbeat),
+                "a heartbeat must not be streamed, and `{asked}` did"
+            );
+        }
+        // …while the durable event on the same worker subject still is.
+        assert!(
+            selection_for(EventFilter::default())
+                .matches(&event_for("researcher", archive_acked_payload()))
+        );
     }
 
     /// The two stores must not disagree about which instant a caller
