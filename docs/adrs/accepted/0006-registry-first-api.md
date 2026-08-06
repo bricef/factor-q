@@ -522,3 +522,67 @@ category is a declared op.
   reconciliation, together with a post-migration sweep of every doc
   that offers NATS as an external interface. This appendix describes
   the decision, not yet the state of the documentation.
+
+## Appendix D — Amendment: a synthetic has no Get (2026-08-06)
+
+Supersedes one sentence of Appendix B. Everything else in B stands.
+
+### What changes
+
+Appendix B recorded that **"`Probe` dissolves into `control.get` — the
+synthetic Control resource describing the machinery in one generic
+read."** It does not. Probe dissolves into **reports on the `Control`
+scope**: `control.status` (version, liveness, and the daemon
+registry's own state, load errors included) and `control.doctor`.
+
+Correspondingly, the `Synthetic` nature in Appendix B's five value
+types loses its read surface entirely: **a synthetic has no Get, no
+key, no filter and no state schema.** It is a permission scope that
+hosts bespoke verbs, which is what the domain model always said
+synthetics were *for* — `Control` still hosts `control.down` /
+`control.reload` and still scopes authority for the machinery reports.
+
+### Why
+
+The trigger was naming. The daemon's agent registry is live machinery,
+so registry state — including per-file load errors — belongs on the
+machinery scope rather than polluting `agent.list`'s index rows with a
+sum type. Naming that op `control.status` collided with the rendering
+rule, since a synthetic's derived Get renders `control.get`.
+
+Every repair aimed at the *name* was worse than the defect: keeping
+`control.get` ignores that a synthetic has no key for "get" to look up;
+giving the synthetic a named read verb puts a second kind of read on a
+surface whose read side is wholly generic; a per-nature rendering
+exception buys one name with a permanent special case. Declaring the
+op a report initially looked worst of all, because the domain model
+cautions that *reports are not Gets on a pretend-resource*.
+
+That objection turned out to depend on the Get being real work. It is
+not: machinery state has no atoms behind it and is not a fold, so the
+synthetic's Get was a read of nothing in particular, and the caution
+has no target once it is gone. The naming collision was a symptom —
+the defect was a generic read on a nature with nothing to read
+generically.
+
+The honest cost, recorded rather than smoothed over: calling the
+registry's stored load errors a "named, typed computation over
+resources" stretches the report definition. `control.doctor` already
+stretches it the same way. The alternative is a second read mechanism
+carved out for one nature, which is the larger cost.
+
+### Not yet realised in code
+
+`fq_ops::Synthetic` still carries a `state_schema`, and the registry
+still derives `Get` for it — so the contract crate and this decision
+disagree until cohort 4.4 of the
+[Phase-4 inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md),
+where the `Control` declaration lands. The correction is not a
+one-liner: it touches `Synthetic::new`'s type parameter, the
+registry's `derived_ops` and its synthetic-Get resolve arm, three
+assertions in `fq-ops/tests/registry.rs`, the `ControlState` fixture,
+`opid.rs`'s module documentation, and the committed schema-snapshot
+oracle `tests/snapshots/exemplar_registry.json`, whose `synthetic`
+entry serialises a `state_schema` today. It also needs `Control`
+report identities that do not exist yet. Sequenced with 4.4
+deliberately; noted here so the gap is a known one rather than drift.

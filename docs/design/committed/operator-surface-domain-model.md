@@ -18,8 +18,13 @@ actions on the same resource should be reachable different ways). The
 model states plainly that **NATS is not an external control surface**,
 recorded as
 [ADR-0006 Appendix C](../../adrs/accepted/0006-registry-first-api.md).
-Registry state, load errors included, moves onto the machinery
-resource, leaving `agent.list` homogeneous. And two entries that
+Registry state, load errors included, moves onto the machinery scope
+as `control.status`, leaving `agent.list` homogeneous — which in turn
+forced the sharper correction of **2026-08-06**: a synthetic has no
+Get at all, and the machinery reads (`control.status`,
+`control.doctor`) are reports, recorded as
+[ADR-0006 Appendix D](../../adrs/accepted/0006-registry-first-api.md).
+And two entries that
 described the world inaccurately — `traversal.run`, which does not
 exist, and `deadletter.requeue`, which is not how the codebase spells
 it — are reconciled before cohort 4.3 mints them into code. Unblocks
@@ -56,16 +61,24 @@ distinguishes two natures, and the distinction is load-bearing:
   dashboard's snapshot-then-cursor transcript already works exactly this
   way.)
 - **Synthetic** resources stand for live machinery rather than recorded
-  truth. There are no atoms behind them, no key (a machinery singleton
-  needs none) and no filter; Get alone derives, answering with the
-  machinery's current state. They exist to give the machinery's bespoke
-  verbs a home — and a permission scope. Authority on a synthetic
-  resource's verbs is always declared manually, given its nature.
+  truth. There are no atoms behind them, no key, no filter, no state
+  schema — and **no generic read at all: a synthetic derives nothing.**
+  It exists to give the machinery's bespoke verbs a home and a
+  permission scope, and that is the whole of its job. Authority on a
+  synthetic resource's verbs is always declared manually, given its
+  nature. Machinery *state* is read through reports scoped to it
+  (`control.status`, `control.doctor`) — see [the meta
+  surface](#the-meta-surface).
 
 In code the natures are **explicit value types** (`Atom` / `View` /
 `Synthetic`), constructed with exactly the type parameters their
 nature has and registered directly: the value handed to the registry
-*is* the definition, and the verb set derives from the type.
+*is* the definition, and the verb set derives from the type. A
+synthetic's type parameters are therefore **none** — it declares a
+domain, a summary and a stability, and nothing else, because it
+derives nothing. `fq_ops::Synthetic` still carries a `state_schema`
+and still derives a Get, from the earlier reading; [the meta
+surface](#the-meta-surface) records what that costs to correct.
 
 The initial catalogue:
 
@@ -78,7 +91,7 @@ The initial catalogue:
 | Invocation | view | fold: phase, totals, archive status |
 | Worker | view | fold: registration + heartbeats + ownership |
 | Agent | view | the daemon's registry snapshot (reload swaps it); its index rows are agent definitions and nothing else — a file that failed to parse never became an agent, so it belongs to the machinery |
-| Control | synthetic | the daemon machinery itself — the machinery read answers with its state, **including the registry's own (load errors and all)**, and it carries the lifecycle verbs (down, reload; room for future ones such as peer join) |
+| Control | synthetic | the daemon machinery itself — a permission scope with **no generic reads**, carrying the lifecycle verbs (down, reload; room for future ones such as peer join) and scoping the machinery reports (`control.status`, which answers with machinery state **including the registry's own, load errors and all**; `control.doctor`) |
 | Operation | view | the surface describing itself: the catalogue of promises |
 
 Domains need not all carry catalogue resources: `Cost` exists purely as
@@ -93,8 +106,9 @@ through the same generic verbs it describes.
 Resources take **generic verbs** — defined once, derived for every
 resource in the catalogue:
 
-- **Get** — one resource by identity. Views answer as of a watermark;
-  a synthetic resource's Get takes no input.
+- **Get** — one resource by identity: atoms and views only. Views
+  answer as of a watermark. Synthetics have no Get — nothing on the
+  generic surface reads them.
 - **List** — resources matching a typed, per-resource filter (agent,
   status, since, limit — *not* a query language), plus the watermark the
   answer reflects.
@@ -211,10 +225,24 @@ overtaken and its effect cannot outrun its answer.**
 
 The kind the earlier taxonomy was missing. A report is a **named, typed
 computation over resources**: `cost.summary`, `cost.by_agent`,
-`control.doctor`. Reports are not Gets on a pretend-resource and not a
-query language — each is an individually named promise with typed
-parameters and a typed result, few by design, and watermarked like any
-read.
+`control.doctor`, `control.status`. Reports are not Gets on a
+pretend-resource and not a query language — each is an individually
+named promise with typed parameters and a typed result, few by design,
+and watermarked like any read.
+
+**The machinery reports stretch that definition, and the stretch is
+declared rather than hidden.** `control.status` answers largely with
+state the daemon is holding — the registry's agents and its stored load
+errors — which is not obviously a "computation over resources", and
+`control.doctor` has always had the same character. Two things make it
+acceptable. First, the caution the definition exists to enforce is
+against reports that are *Gets on a pretend-resource*; since a
+synthetic has no Get, there is no read for a machinery report to
+duplicate or disguise, and the failure mode the caution names cannot
+occur. Second, machinery state genuinely has no atoms behind it — it is
+not a fold of anything — so the alternative is not a purer Get but a
+second read mechanism carved out for one nature. A slightly stretched
+definition of "computation" is the smaller cost.
 
 A report attaches to a domain as its **permission scope** — authority
 is Read on that scope, *not* on its inputs. That makes aggregates a
@@ -229,20 +257,25 @@ machinery.
 Health, status, version — questions about the *machinery*, not the
 records. This was the misfit "Probe" kind: probes were never operations
 on this domain, and during realization they collapsed further than
-first drafted: the machinery describes itself through **one generic
-read, `control.get`**, answering with the control state (version,
-liveness) — no separate meta category, no per-probe operations, the
-same access-control semantics as everything else (Read control), on
-the same resource whose lifecycle verbs write it. Bring taxonomy back
-only if the machinery surface stops being small.
+first drafted — no separate meta category, no per-probe operations, the
+same access-control semantics as everything else (Read control), on the
+same domain whose lifecycle verbs write it. Bring taxonomy back only if
+the machinery surface stops being small.
 
-### The machinery read is the accumulation point (`control.status`)
+*Amended 2026-08-06.* Probe collapses into **reports on the `Control`
+scope** — `control.status` (version, liveness, registry state) and
+`control.doctor` — not into a generic read. The first drafting said
+`control.get`, on the reading that a synthetic answers by Get alone;
+that reading is withdrawn above. A synthetic is a permission scope that
+hosts bespoke verbs, and nothing more.
 
-*Amended 2026-08-05.* **The registry's current state — load errors
-included — rides the machinery read, and `agent.list` returns
-homogeneous agent rows.** The machinery read is also where further
-machinery information accumulates, by growing one schema rather than
-by growing the op roster.
+### `control.status` — the accumulation point for machinery state
+
+*Amended 2026-08-05, resolved 2026-08-06.* **The registry's current
+state — load errors included — rides `control.status`, and `agent.list`
+returns homogeneous agent rows.** `control.status` is also where
+further machinery information accumulates, by growing one schema rather
+than by growing the op roster.
 
 The forcing case was `agent.list`, whose index row is a sum today
 (`AgentEntryView::Agent(..) | ::LoadError { message }`) because a
@@ -258,49 +291,70 @@ stand for live machinery rather than recorded truth, and the daemon's
 agent registry is live machinery by construction — `control.reload`
 rebuilds it, which is why the Agent row is a view over a registry
 snapshot rather than a fold of atoms. Registry state is machinery
-state; it belongs on the machinery resource, where a load error is not
-an anomalous row but an ordinary field.
+state; it belongs on the machinery scope, where a load error is not an
+anomalous row but an ordinary field.
 
 This generalises. The question "where does *this* piece of machinery
 state go?" now has one answer, which is what stops the next such value
 being smuggled into whichever listing happens to be nearby.
 
-**Unsettled: what this op renders as.** The model says a synthetic
-answers by Get alone, and `OpId::Get(Domain::Control)` renders
-`control.get` — the name ADR-0006's Appendix B and the Phase-4
-inventory both use. `control.status` is not that string. Three ways
-out, and they are not equivalent:
+#### What it renders as, and why the Get had to go
 
-1. **Keep `control.get`, treat "status" as the informal name.** Costs
-   nothing, changes nothing — but the op was named deliberately, and
-   `get` is a poor word for it.
-2. **Let the synthetic carry a named read verb.** This would put a
-   second kind of read on a surface whose entire read side is generic
-   and derives Read and nothing else. Largest change, smallest gain.
-3. **Give the rendering rule one more word: a synthetic's read renders
-   `<domain>.status`, not `<domain>.get`.**
+Naming the op `control.status` collided with a rendering rule: a
+synthetic was said to answer by Get alone, and `OpId::Get(Domain::Control)`
+renders `control.get`. The obvious repairs were all bad. Keeping
+`control.get` ignores that the op was named deliberately and that
+"get" names an identity lookup a synthetic has no key for. Letting a
+synthetic carry a *named read verb* would put a second kind of read on
+a surface whose entire read side is generic and derives Read and
+nothing else. Adding a rendering exception for one nature buys a name
+with a special case.
 
-Option 3 looks right, and its justification is already in this
-document: a synthetic has **no key**, and its Get **takes no input**.
-"Get" names an identity lookup a synthetic does not have — so the
-current rendering has been slightly wrong since synthetics were
-introduced, and this is the occasion to notice. Naming that nature's
-read `status` is a rule about a nature, not an exception for one op,
-and it leaves authority derivation (Read on `Control`) and the
-one-machinery-read shape untouched.
+Declaring `control.status` a **report** on scope `Control` was the
+remaining option, and it initially looked worse rather than better,
+for a reason this document states plainly: *reports are not Gets on a
+pretend-resource*. `Control` is not a pretend-resource, so a report
+that duplicated its Get would be exactly what that caution is about.
 
-A fourth option should be rejected explicitly, because it is the
-cheapest and therefore the tempting one: declaring `control.status` a
-**report** on scope `Control` renders the right string with no new
-mechanism at all (`control.doctor` is already that shape). But it
-would leave a synthetic whose read answers nothing much sitting beside
-a report that answers everything — a worse model bought with a smaller
-diff.
+**But that objection only holds while the Get is doing work.** The
+model said two things about synthetics — that Get alone derives, and
+that they exist to give the machinery's bespoke verbs a home and a
+permission scope. The second is the load-bearing one. Once machinery
+state is a report, the first is not a rule with an awkward exception;
+it is simply false, and the honest response is to delete it rather
+than build a naming rule on top of it.
 
-**This needs settling before cohort 4.4 declares the op.** Whichever
-way it goes, it is a three-place edit: this section, ADR-0006's
-Appendix B ("Probe dissolves into `control.get`"), and the inventory's
-verbs 14/16.
+So the resolution is not "status as a report *despite* the Get". It is:
+
+- **A synthetic has no Get** — no key, no filter, no state schema, no
+  derived read of any kind. It is a permission scope that hosts
+  bespoke verbs. That is the amendment made in *Resources* above.
+- **`control.status` and `control.doctor` are both reports** on that
+  scope. The read side stays uniform, no rendering rule gains an
+  exception, and the pretend-resource caution stops applying because
+  there is no Get left to duplicate.
+- **`Control` keeps doing what synthetics are for**: hosting
+  `control.down` / `control.reload` and scoping authority (Read
+  `Control` for the reports, manually declared Write for the verbs).
+
+The lesson worth keeping is that the naming collision was a symptom.
+Two rounds were spent looking for the right *name* for the machinery
+read, when the defect was the *existence* of a generic read on a
+nature that has nothing to read generically.
+
+**What this costs, honestly.** `fq_ops::Synthetic` still carries a
+`state_schema` and the registry still derives `Get` for it, so code
+and model now disagree until cohort 4.4. That is deliberate: the
+correction is not free, and a documentation amendment is not the place
+to force it. Removing it touches `Synthetic::new`'s type
+parameter, the registry's `derived_ops` and its synthetic-Get resolve
+arm, three assertions in `fq-ops/tests/registry.rs`, the `ControlState`
+fixture, `opid.rs`'s module doc, and — decisively — the committed
+schema-snapshot oracle `tests/snapshots/exemplar_registry.json`, whose
+`synthetic` entry serialises a `state_schema` today. It also needs the
+`Control` report identities (`control.status`, `control.doctor`) that
+do not exist yet. Do it with cohort 4.4, where the declaration lands
+anyway.
 
 ## Access control, uniformly
 
@@ -308,7 +362,9 @@ One vocabulary across the whole surface — verb × scope, where scope is
 a domain (which may exist purely as a scope, like `Cost`):
 
 - Get / List / Stream ⇒ Read on the resource's domain — derived, and
-  the *only* derived authority: the generic surface is read-only
+  the *only* derived authority: the generic surface is read-only.
+  Atoms and views only; a synthetic derives no read, so it derives no
+  authority either
 - Domain verbs ⇒ declare their verb (see table); verbs on the synthetic
   Control resource always declare manually
 - Reports ⇒ Read on their own domain (never their inputs — aggregates
@@ -369,8 +425,10 @@ finding about the verb — not a reason to reach for the bus.
 - **D2's kinds refine.** Command / Query / Stream / Probe becomes:
   generic resource reads (Get, List) + Stream overlay + domain verbs
   (the Command survivors, including the atom-minting ones) +
-  **Reports** (new). Probe dissolves entirely into `control.get`, and
-  Create does not exist — the generic surface is read-only.
+  **Reports** (new). Probe dissolves entirely into reports on the
+  `Control` scope (`control.status`, `control.doctor`) — *not* into a
+  generic read; a synthetic has no Get (amended 2026-08-06). Create
+  does not exist — the generic surface is read-only.
 - **P8 inverts.** Names are derived from structure (resource + generic
   verb, or the declared `(domain, word)` of a verb/report), never
   parsed; grammar-by-vocabulary is gone entirely. Identity is native
@@ -385,7 +443,7 @@ finding about the verb — not a reason to reach for the bus.
   `invocation.get` were never domain facts — they are the catalogue ×
   generic-verb cross-product, derivable. What remains hand-declared is
   exactly what is semantically bespoke: the catalogue itself, seven
-  domain verbs, three reports.
+  domain verbs, four reports.
 - **D6's generic envelopes are edge artifacts**, designed with the
   Phase-2 tarpc service rather than in the contract crate.
 - Everything else stands: receipts (D3), watermarks (D4), sequence
@@ -422,8 +480,8 @@ remains declared is declared on purpose.
 | `traversal.status` / `.tail` — **planned** | Get(Traversal) / Stream(TraversalEvent) |
 | `trigger.publish` · `invocation.drop` · `invocation.resume` · `dead_letter.requeue` · `worker.prune` · `control.down` · `control.reload` | domain verbs |
 | `traversal.run` — **planned** | a domain verb, when there is a graph executor to run |
-| `cost.summary` · `cost.by_agent` (scope `Cost`) · `control.doctor` (scope `Control`) | reports |
-| `runtime.health` · `runtime.status` · `runtime.version` | `control.get` — one machinery read |
+| `cost.summary` · `cost.by_agent` (scope `Cost`) · `control.doctor` · `control.status` (scope `Control`) | reports |
+| `runtime.health` · `runtime.status` · `runtime.version` | `control.status` — one machinery report |
 
 **Planned rows are not surface.** Nothing named `traversal` exists in
 the codebase: the graph executor is deliberately held (#414), so those
@@ -457,6 +515,9 @@ Findings worth keeping:
   synthetic resource. Verbs attach to resources everywhere else in the
   model; the machinery's verbs attach to the machinery's resource, with
   manual authority, and future control verbs (peer join, …) have a home.
+  The 2026-08-06 amendment sharpens this rather than unsettling it:
+  once the synthetic's Get is gone, hosting verbs and scoping authority
+  is *all* it does, which is what the finding said it was for.
 - **Phase-7 preview:** CAS blobs/objects are atoms par excellence;
   object-version history is atoms under a named-view fold — the model
   extends to the fq-store registry instance without strain.
