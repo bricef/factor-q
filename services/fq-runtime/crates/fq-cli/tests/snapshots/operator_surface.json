@@ -964,8 +964,9 @@
           },
           "limit": {
             "default": null,
-            "description": "Cap on one List page — the most recent N matching rows.\nIgnored by Stream, which is cursored rather than paged.",
+            "description": "Cap on one List page — the most recent N matching rows, and at\nmost 2000 of them (this property's `maximum`). Absent asks for\nthe default 50.\n\n**A larger N is refused, never quietly shrunk.** So the count\nthat comes back is always the one you asked for or the whole\nanswer, and it reads unambiguously: fewer rows than you asked\nfor means there are no more; exactly as many means there may\nbe. For more than a page, narrow (`agent`, `event_type`,\n`since`) or read the same population from `event.stream`,\nwhich is cursored.\n\nIgnored by Stream, which is cursored rather than paged.",
             "format": "uint32",
+            "maximum": 2000,
             "minimum": 0,
             "type": [
               "integer",

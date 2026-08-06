@@ -240,10 +240,32 @@ pub(crate) async fn query_events(
             agent: agent.map(str::to_string),
             event_type: event_type.map(str::to_string),
             since: since.map(str::to_string),
-            // A negative `--limit` is SQLite's "no limit" through the
-            // old local path; keep that reading rather than wrapping it
-            // into a tiny page.
-            limit: Some(u32::try_from(limit).unwrap_or(u32::MAX)),
+            // `--limit` travels as the caller wrote it, and the daemon
+            // is the one authority on how big a page may be — so the
+            // only thing decided here is the number that has no page
+            // to travel as at all.
+            //
+            // It used to be `u32::MAX`, meaning "no limit", because a
+            // negative LIMIT is unbounded to SQLite and this query read
+            // `projection.db` itself. It no longer does: the read runs
+            // in the daemon, where an unbounded page is the whole table
+            // in memory and then a frame too big to send. So "no limit"
+            // is not a thing to preserve — it is a promise nothing
+            // keeps — and saying so here beats sending `4294967295`
+            // for the daemon to reject with a number the operator
+            // never typed.
+            limit: Some(u32::try_from(limit).map_err(|_| {
+                anyhow::anyhow!(
+                    "--limit {limit} is not a page size: one page is at most {cap} rows. \
+                     If you meant \"no limit\", there is no longer such a thing — a \
+                     negative --limit was unbounded while this query read the projection \
+                     file directly, and it now runs in the daemon, which will not \
+                     materialise an unbounded answer. For more than a page, narrow with \
+                     --agent/--type/--since, or use `fq events tail`, which is cursored \
+                     and selects the same events for the same filter.",
+                    cap = crate::event_atom::EVENT_LIST_MAX_LIMIT
+                )
+            })?),
         })?,
     )
     .await?

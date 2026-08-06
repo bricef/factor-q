@@ -482,7 +482,9 @@ pub(crate) enum EventCommands {
         /// Events at or after this time: a date, a UTC date-time, or RFC3339
         #[arg(long, value_parser = fq_runtime::views::since::lower_bound)]
         since: Option<String>,
-        /// Maximum number of rows to return
+        /// Maximum rows in one page, at most 2000. A bigger ask is
+        /// refused, not shortened — so fewer rows than you asked for
+        /// means there are no more. For more, narrow the query or tail.
         #[arg(long, default_value_t = 50)]
         limit: i64,
         /// Emit JSON instead of human-readable output.
