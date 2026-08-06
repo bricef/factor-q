@@ -23,7 +23,9 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use fq_runtime::control_plane::store::{ControlPlaneStore, InvocationArchiveRow, OwnerStatus};
+use fq_runtime::control_plane::store::{
+    ControlPlaneStore, InvocationArchiveRow, OwnerStatus, WorkerStatus,
+};
 use fq_runtime::events::{
     CostMetadata, Event, EventPayload, FailureKind, FailurePhase, InvocationTotals, LlmCallOrigin,
     Message, MessageRole, StopReason, TokenUsage, TriggerSource, TriggeredPayload,
@@ -273,7 +275,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
         triggered(AGENT_RESEARCHER, INV_INFLIGHT, 7, base_ms + 20_000),
         triggered(AGENT_FIXER, INV_ARCHIVED, 8, base_ms + 30_000),
     ] {
-        proj.insert_event(&event).await.expect("insert event");
+        proj.insert_event(&event, None).await.expect("insert event");
     }
 
     // Worker WAL: a full llm+tool transcript for INV_COMPLETED, an open
@@ -782,24 +784,47 @@ fn golden_costs_json() {
     check_golden("costs_json", &["costs", "--json"], Nats::Closed, &[]);
 }
 
+// REVIEWED GOLDEN CHANGE (plan Phase 4, verb 12) — the second in this
+// migration, and the same correction as the first (see the roster
+// rationale at `golden_workers_list_human`). It is not a golden
+// weakened to make a flip pass.
+//
+// The previous expectation was nine events and nothing else. That
+// listing could only be produced by reading the projection with the
+// daemon absent — and for THIS surface that is not merely an unusual
+// state, it is a contradictory one: the daemon is what publishes
+// events and what projects them, so a store holding events that no
+// daemon ever touched describes a world in which nothing could have
+// produced them. The projection consumer runs with `filter_subjects:
+// Vec::new()` and indexes every subject, so a real `fq events query`
+// has ALWAYS shown the daemon's own events — `system_startup`,
+// `system_recovery`, and whatever its boot recovery had to say about
+// the seeded in-flight work.
+//
+// Production output does not change with this flip. What changed is
+// that the TEST now runs a daemon, so its world finally contains what
+// production's always did. The nine seeded rows are still here, still
+// in order, with every timestamp, agent, event type, cost and
+// invocation byte-identical to before; the daemon's rows join them,
+// newest first, and only the values a running daemon minted are
+// redacted — by value, not by field list (see
+// `redact_event_index_json`). A regression that turned a seeded
+// timestamp into `now`, or dropped the log position off a projected
+// row, fails here rather than being absorbed.
+//
+// The rows are also the Event atom's INDEX rows now, not events: no
+// payload, plus the `seq` that reads one back whole through
+// `event.get`. That contract is declared on the atom itself, and
+// `edge_event_tail::a_list_row_walks_to_its_whole_event` executes the
+// walk.
 #[test]
 fn golden_events_query_human() {
-    check_golden(
-        "events_query_human",
-        &["events", "query"],
-        Nats::Closed,
-        &[],
-    );
+    check_golden_events("events_query_human", &["events", "query"]);
 }
 
 #[test]
 fn golden_events_query_json() {
-    check_golden(
-        "events_query_json",
-        &["events", "query", "--json"],
-        Nats::Closed,
-        &[],
-    );
+    check_golden_events("events_query_json", &["events", "query", "--json"]);
 }
 
 // ------------------------------------------------------------------
@@ -1110,6 +1135,48 @@ impl EdgeFixture {
                 // contradiction the sweep exists to repair, and a
                 // fixture should not ask a golden to pin a state the
                 // system is actively correcting.
+                //
+                // Let the sweep finish repairing first, though. It
+                // publishes one `worker.orphaned` per alive→stale
+                // transition it wins, and freshening mid-sweep steals
+                // transitions from it — so how many of those events
+                // exist would be decided by a race, and `fq events
+                // query` renders them (plan Phase 4, verb 12). Waiting
+                // for every ancient-heartbeat row to have been promoted
+                // makes the count a fact of the fixture (`worker-beta`,
+                // `fixer`, `researcher`; `worker-alpha` is seeded stale
+                // and `worker-omega` shutdown, and the sweep only
+                // promotes alive rows). The freshening below then puts
+                // all three back to `alive`, which is what the roster
+                // golden pins — and now pins as an outcome rather than
+                // as a race won.
+                let threshold =
+                    fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                loop {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let pending: Vec<String> = cp
+                        .list_workers()
+                        .await
+                        .expect("read worker roster")
+                        .into_iter()
+                        .filter(|w| {
+                            w.status == WorkerStatus::Alive
+                                && now_ms - w.last_heartbeat >= threshold
+                        })
+                        .map(|w| w.worker_id)
+                        .collect();
+                    if pending.is_empty() {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the daemon's stale sweep never promoted {pending:?}; the fixture \
+                         freshens after it so the orphan events are counted, not raced"
+                    );
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+
                 for worker in ["fixer", "researcher", "worker-beta"] {
                     cp.heartbeat_worker(worker, chrono::Utc::now().timestamp_millis())
                         .await
@@ -1407,6 +1474,140 @@ fn field_spans(line: &str) -> Vec<(usize, &str)> {
         at = from + field.len();
     }
     spans
+}
+
+/// The wall-clock floor as the event index writes its timestamps —
+/// the same rule and the same instant as [`WALL_CLOCK_FLOOR_MS`], in
+/// the units this surface renders. RFC3339 with a fixed `+00:00`
+/// offset compares lexically in instant order, which is also why the
+/// projection can range-scan the column.
+fn wall_clock_floor_rfc3339() -> String {
+    chrono::DateTime::from_timestamp_millis(WALL_CLOCK_FLOOR_MS)
+        .expect("floor is a valid instant")
+        .to_rfc3339()
+}
+
+/// Every identity the events fixture pins, so [`redact_uuids`] can
+/// tell a seeded row's ids from a running daemon's. Derived from the
+/// fixture's own constants rather than listed again: a new seeded
+/// event joins this set by being seeded.
+fn seeded_identities() -> Vec<String> {
+    let mut keep: Vec<String> = (1..=99).map(|n| fixed_uuid(n).to_string()).collect();
+    keep.extend(
+        [INV_COMPLETED, INV_FAILED, INV_INFLIGHT, INV_ARCHIVED]
+            .iter()
+            .map(|id| id.to_string()),
+    );
+    keep
+}
+
+/// The event index's volatile values, redacted **by value**: every
+/// deterministic figure in the answer stays literal, and only values a
+/// running daemon minted are replaced.
+///
+/// Three kinds, and each rule is a property of the value rather than a
+/// field name — so a regression that turned a seeded value into a
+/// runtime one still fails here rather than being absorbed:
+///
+/// * **UUIDs** — every id outside the fixture's own set
+///   ([`seeded_identities`]) is runtime-minted. The daemon's system
+///   events correlate on its runtime id, so that is their invocation.
+/// * **Timestamps** — at or after the wall-clock floor (a full day
+///   past the fixture epoch), a clock read rather than a seeded
+///   constant.
+/// * **Log positions** — the fixture seeds its index rows directly, so
+///   they have none and render `null`; every row a daemon projected
+///   carries the position it was delivered at. A present `seq` is
+///   therefore a runtime value, and a `null` one is the fixture
+///   saying, accurately, that no log ever carried that row.
+///
+/// Every rule is a property of one value, so this walks lines rather
+/// than re-serialising a parsed document: the golden is the verb's own
+/// rendering, field order included, and a round trip through
+/// `serde_json::Value` would re-sort it.
+fn redact_event_index_json(raw: &str) -> String {
+    let keep = seeded_identities();
+    let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+    let floor = wall_clock_floor_rfc3339();
+    redact_uuids(raw, &keep)
+        .lines()
+        .map(|line| {
+            let Some((key, value)) = json_field(line) else {
+                return line.to_string();
+            };
+            let redacted = match key {
+                "timestamp" if *value.trim_matches('"') >= *floor => "\"<TIME>\"",
+                "seq" if value != "null" => "\"<SEQ>\"",
+                _ => return line.to_string(),
+            };
+            let indent = line.len() - line.trim_start().len();
+            let comma = if line.ends_with(',') { "," } else { "" };
+            format!("{}\"{key}\": {redacted}{comma}", " ".repeat(indent))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// [`redact_event_index_json`]'s rules applied to the human table,
+/// where a row is `timestamp agent event cost invocation` and the
+/// invocation is its first 8 characters — too short for
+/// [`redact_uuids`] to recognise, so the row's own timestamp is what
+/// says whether that prefix was minted at run time.
+fn redact_event_index_human(raw: &str) -> String {
+    let floor = wall_clock_floor_rfc3339();
+    let seeded: Vec<String> = seeded_identities()
+        .iter()
+        .map(|id| id.chars().take(8).collect())
+        .collect();
+    raw.lines()
+        .map(|line| {
+            let fields = field_spans(line);
+            // The timestamp column is rendered to second precision.
+            let runtime = fields
+                .first()
+                .is_some_and(|(_, ts)| ts.len() == 19 && *ts >= &floor[..19]);
+            if !runtime {
+                return line.to_string();
+            }
+            let mut line = line.to_string();
+            // Invocation last-but-one in the replace order: the
+            // timestamp column is fixed-width, so rewriting it first
+            // would shift the span the invocation was found at.
+            if let Some((at, inv)) = fields.get(4)
+                && !seeded.iter().any(|s| s == inv)
+            {
+                line.replace_range(at..&(at + inv.len()), "<INV>");
+            }
+            // The whole 20-wide column, not just the token: the
+            // padding after it is what keeps the row byte-stable.
+            let (at, _) = fields[0];
+            let width = 20.min(line.len() - at);
+            line.replace_range(at..at + width, &format!("{:<width$}", "<TIME>"));
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// The event-index goldens' harness (plan Phase 4, verb 12): a live
+/// daemon, and the answer redacted by value.
+fn check_golden_events(name: &str, args: &[&str]) {
+    let fixture = EdgeFixture::start();
+    let (exit, stdout, stderr) = fixture.run_fq(args);
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
+    );
+    let plain = redact(&stdout, &Nats::Closed, &[]);
+    let actual = if args.contains(&"--json") {
+        redact_event_index_json(&plain)
+    } else {
+        redact_event_index_human(&plain)
+    };
+    compare_golden(name, &actual);
 }
 
 /// The roster goldens' harness: [`check_golden_edge`] with the

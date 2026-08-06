@@ -475,6 +475,20 @@ impl World {
         op: fq_ops::OpId,
         input: serde_json::Value,
     ) -> serde_json::Value {
+        self.invoke_gated(client, op, input, None)
+    }
+
+    /// [`Self::invoke`], watermarked. `event.list` reads the
+    /// projection, so "publish then list" is a read-your-writes
+    /// question: without the gate the test would race the fold and
+    /// flake, and sleeping instead would only hide it.
+    fn invoke_gated(
+        &self,
+        client: &fq_edge::EdgeClient,
+        op: fq_ops::OpId,
+        input: serde_json::Value,
+        min_seq: Option<u64>,
+    ) -> serde_json::Value {
         self.rt
             .block_on(client.rpc.invoke(
                 tarpc::context::current(),
@@ -482,7 +496,7 @@ impl World {
                     op,
                     version: 1,
                     input,
-                    min_seq: None,
+                    min_seq,
                 },
             ))
             .expect("rpc")
@@ -534,10 +548,14 @@ impl World {
         }
     }
 
-    fn publish(&self, events: &[Event]) {
+    /// Publish, returning the last event's log sequence — the
+    /// watermark a following projection read gates on.
+    fn publish(&self, events: &[Event]) -> u64 {
+        let mut last = 0;
         for event in events {
-            self.rt.block_on(self.bus.publish(event)).expect("publish");
+            last = self.rt.block_on(self.bus.publish(event)).expect("publish");
         }
+        last
     }
 }
 
@@ -748,9 +766,15 @@ fn a_stream_resumed_at_its_cursor_loses_nothing() {
     assert_eq!(ids, vec![uuid_at(4).to_string()], "no gap, no repeat");
 }
 
-/// `event.list` answers with the most recent window of the log, and
-/// its filter is typed: agent, event type, since, limit — the same
-/// narrowing `fq events query` offers today, moved onto the wire.
+/// `event.list` answers with the most recent window of the projection
+/// index, and its filter is typed: agent, event type, since, limit —
+/// the same narrowing `fq events query` offers, moved onto the wire.
+///
+/// The rows are index rows, not events (plan Phase 4, cohort 4.2):
+/// extracted fields, no payload. What keeps that from being a lossy
+/// answer is the `seq` on every row, and
+/// [`a_list_row_walks_to_its_whole_event`] is that half of the
+/// contract.
 #[test]
 fn list_answers_the_recent_window_through_a_typed_filter() {
     let world = World::start();
@@ -758,7 +782,7 @@ fn list_answers_the_recent_window_through_a_typed_filter() {
     let list = fq_ops::OpId::List(fq_ops::Domain::Event);
 
     world.publish(&fixture_events());
-    world.publish(&[triggered(
+    let watermark = world.publish(&[triggered(
         OTHER_AGENT,
         "2f000000-0000-7000-8000-000000000002",
         50,
@@ -768,62 +792,71 @@ fn list_answers_the_recent_window_through_a_typed_filter() {
     let event_ids = |value: &serde_json::Value| -> Vec<String> {
         value
             .as_array()
-            .expect("a list of events")
+            .expect("a list of index rows")
             .iter()
-            .map(|e| {
-                e["event"]["envelope"]["event_id"]
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
+            .map(|e| e["event_id"].as_str().unwrap().to_string())
             .collect()
+    };
+    let listed = |input: serde_json::Value| {
+        world.invoke_gated(&client, list.clone(), input, Some(watermark))
     };
 
     // Unfiltered: everything the fixture published, plus whatever the
     // daemon's own boot wrote — so assert on the fixture's own ids.
-    let all = event_ids(&world.invoke(&client, list.clone(), serde_json::json!({})));
+    let all = listed(serde_json::json!({}));
+    let all_ids = event_ids(&all);
     for n in [1u32, 2, 3, 50] {
         assert!(
-            all.contains(&uuid_at(n).to_string()),
-            "event {n} missing from the unfiltered list: {all:?}"
+            all_ids.contains(&uuid_at(n).to_string()),
+            "event {n} missing from the unfiltered list: {all_ids:?}"
         );
     }
 
-    // By agent: the log consumer is scoped, so the other agent's
-    // event never leaves the daemon.
-    let mine = event_ids(&world.invoke(&client, list.clone(), serde_json::json!({"agent": AGENT})));
+    // The declared contract, asserted: a row is the index's fields,
+    // and the payload is not among them. A regression that started
+    // serving whole events here would be a silent performance cliff on
+    // the verb an operator reaches for when the log is largest, so it
+    // is pinned rather than left to the schema snapshot.
+    let row = &all.as_array().unwrap()[0];
+    assert!(
+        row.get("event").is_none() && row.get("payload").is_none(),
+        "an index row must not carry the payload: {row}"
+    );
+    for field in ["event_id", "seq", "timestamp", "agent_id", "event_type"] {
+        assert!(row.get(field).is_some(), "index row lacks `{field}`: {row}");
+    }
+
+    // By agent: the query is narrowed at the daemon, so the other
+    // agent's event never leaves it.
+    let mine = event_ids(&listed(serde_json::json!({"agent": AGENT})));
     assert!(
         !mine.contains(&uuid_at(50).to_string()),
         "an agent filter must exclude other agents: {mine:?}"
     );
 
     // By type.
-    let responses = event_ids(&world.invoke(
-        &client,
-        list.clone(),
+    let responses = event_ids(&listed(
         serde_json::json!({"agent": AGENT, "event_type": "llm_response"}),
     ));
     assert_eq!(responses, vec![uuid_at(2).to_string()]);
 
     // By instant: `since` is inclusive, so the tool result at
-    // +2500ms is in and the trigger at +0 is out.
-    let recent = event_ids(&world.invoke(
-        &client,
-        list.clone(),
+    // +2500ms is in and the trigger at +0 is out. The `Z` spelling is
+    // deliberate — the index stores `+00:00`, and the two are the same
+    // instant only because the filter is parsed rather than pasted.
+    let recent = event_ids(&listed(
         serde_json::json!({"agent": AGENT, "since": "2026-01-02T03:04:07.500Z"}),
     ));
     assert_eq!(recent, vec![uuid_at(3).to_string()]);
 
     // By limit: the *most recent* N, not the first N.
-    let last_one = event_ids(&world.invoke(
-        &client,
-        list.clone(),
-        serde_json::json!({"agent": AGENT, "limit": 1}),
-    ));
+    let last_one = event_ids(&listed(serde_json::json!({"agent": AGENT, "limit": 1})));
     assert_eq!(last_one, vec![uuid_at(3).to_string()]);
 
     // An unparseable instant is a verdict on the request, not an
-    // empty answer the caller would read as "no such events".
+    // empty answer the caller would read as "no such events". The
+    // index compares text, so without the parse this would have been
+    // the quietest possible wrong answer.
     let refused = world.rt.block_on(client.rpc.invoke(
         tarpc::context::current(),
         fq_edge::InvokeRequest {
@@ -839,6 +872,59 @@ fn list_answers_the_recent_window_through_a_typed_filter() {
             Err(fq_edge::wire::WireError::InvalidInput { .. })
         ),
         "an unparseable `since` must be refused, not silently matched"
+    );
+}
+
+/// The condition that makes a payload-free `event.list` legitimate:
+/// **every row names the identity `event.get` takes**, so a consumer
+/// walks from any listing to the whole event without constructing a
+/// key of its own.
+///
+/// This is the hard half of the contract. `event.list` excludes
+/// payloads on the strength of it, so the walk is executed here — a
+/// row is listed, its `seq` is handed straight back to `event.get`,
+/// and the event that comes out has to be the one the row described.
+/// A projection that stopped recording log positions would still list
+/// perfectly well and would fail exactly here.
+#[test]
+fn a_list_row_walks_to_its_whole_event() {
+    let world = World::start();
+    let client = world.edge_client();
+
+    let watermark = world.publish(&fixture_events());
+    let listed = world.invoke_gated(
+        &client,
+        fq_ops::OpId::List(fq_ops::Domain::Event),
+        serde_json::json!({"agent": AGENT, "event_type": "llm_response"}),
+        Some(watermark),
+    );
+    let rows = listed.as_array().expect("index rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "one priced response in the fixture: {listed}"
+    );
+    let row = &rows[0];
+    let seq = row["seq"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a listed row must carry its `event.get` key: {row}"));
+
+    // The walk itself — nothing constructed, the row's own number.
+    let whole = world.invoke(
+        &client,
+        fq_ops::OpId::Get(fq_ops::Domain::Event),
+        serde_json::json!({ "seq": seq }),
+    );
+    assert_eq!(
+        whole["event"]["envelope"]["event_id"].as_str(),
+        row["event_id"].as_str(),
+        "the walk must land on the event the row described"
+    );
+    // …and what the walk buys is the payload the row does not carry.
+    assert_eq!(
+        whole["event"]["payload"]["payload"]["content"].as_str(),
+        Some("Reading the fixture file first."),
+        "event.get answers with the whole event: {whole}"
     );
 }
 

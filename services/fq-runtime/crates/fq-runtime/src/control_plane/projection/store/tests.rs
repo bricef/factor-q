@@ -54,8 +54,8 @@ async fn sweep_events_deletes_old_rows_and_keeps_fresh_rows() {
         .unwrap();
     let old = sample_triggered("old", Uuid::now_v7());
     let fresh = sample_triggered("fresh", Uuid::now_v7());
-    store.insert_event(&old).await.unwrap();
-    store.insert_event(&fresh).await.unwrap();
+    store.insert_event(&old, None).await.unwrap();
+    store.insert_event(&fresh, None).await.unwrap();
     sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
         .bind("2020-01-01T00:00:00+00:00")
         .bind(old.envelope.event_id.to_string())
@@ -83,7 +83,7 @@ async fn sweep_events_batches_until_backlog_clear() {
         .unwrap();
     for name in ["old-a", "old-b", "old-c"] {
         let event = sample_triggered(name, Uuid::now_v7());
-        store.insert_event(&event).await.unwrap();
+        store.insert_event(&event, None).await.unwrap();
         sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
             .bind("2020-01-01T00:00:00+00:00")
             .bind(event.envelope.event_id.to_string())
@@ -92,7 +92,7 @@ async fn sweep_events_batches_until_backlog_clear() {
             .unwrap();
     }
     let fresh = sample_triggered("fresh", Uuid::now_v7());
-    store.insert_event(&fresh).await.unwrap();
+    store.insert_event(&fresh, None).await.unwrap();
 
     let cutoff = chrono::DateTime::parse_from_rfc3339("2021-01-01T00:00:00Z")
         .unwrap()
@@ -115,8 +115,8 @@ async fn sweep_events_preserves_cost_bearing_rows() {
         .unwrap();
     let costed = sample_llm_response_with_cost("biller", Uuid::now_v7(), 0.25);
     let uncosted = sample_triggered("biller", Uuid::now_v7());
-    store.insert_event(&costed).await.unwrap();
-    store.insert_event(&uncosted).await.unwrap();
+    store.insert_event(&costed, None).await.unwrap();
+    store.insert_event(&uncosted, None).await.unwrap();
     for event in [&costed, &uncosted] {
         sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
             .bind("2020-01-01T00:00:00+00:00")
@@ -158,7 +158,7 @@ async fn agent_id_for_invocation_ignores_operator_only_tombstone() {
         ),
     );
 
-    store.insert_event(&event).await.unwrap();
+    store.insert_event(&event, None).await.unwrap();
     assert_eq!(
         store
             .agent_id_for_invocation(&inv.to_string())
@@ -181,8 +181,8 @@ async fn agent_id_for_invocation_uses_first_real_agent_not_summary() {
 
     // Insert the real event first while giving the sentinel row an earlier
     // timestamp, pinning both sentinel exclusion and timestamp ordering.
-    store.insert_event(&triggered).await.unwrap();
-    store.insert_event(&summary).await.unwrap();
+    store.insert_event(&triggered, None).await.unwrap();
+    store.insert_event(&summary, None).await.unwrap();
     assert_eq!(
         store
             .agent_id_for_invocation(&inv.to_string())
@@ -205,19 +205,25 @@ async fn summary_events_are_costed_and_upsert_the_current_line() {
     let inv = Uuid::now_v7();
 
     store
-        .insert_event(&summary_event(
-            inv,
-            crate::events::SummaryKind::Start,
-            "Fixing #7: starting",
-        ))
+        .insert_event(
+            &summary_event(
+                inv,
+                crate::events::SummaryKind::Start,
+                "Fixing #7: starting",
+            ),
+            None,
+        )
         .await
         .unwrap();
     store
-        .insert_event(&summary_event(
-            inv,
-            crate::events::SummaryKind::Progress,
-            "Fixing #7: editing widget.rs",
-        ))
+        .insert_event(
+            &summary_event(
+                inv,
+                crate::events::SummaryKind::Progress,
+                "Fixing #7: editing widget.rs",
+            ),
+            None,
+        )
         .await
         .unwrap();
 
@@ -465,11 +471,11 @@ async fn cost_queries_include_recovered_failure_spend() {
     let (store, _dir) = open_store().await;
     let inv = Uuid::now_v7();
     store
-        .insert_event(&sample_llm_response_with_cost("biller", inv, 0.25))
+        .insert_event(&sample_llm_response_with_cost("biller", inv, 0.25), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_llm_failure("biller", inv, Some(0.01)))
+        .insert_event(&sample_llm_failure("biller", inv, Some(0.01)), None)
         .await
         .unwrap();
 
@@ -497,8 +503,8 @@ async fn failure_without_usage_is_swept_like_any_other_row() {
     let (store, _dir) = open_store().await;
     let unbilled = sample_llm_failure("biller", Uuid::now_v7(), None);
     let billed = sample_llm_failure("biller", Uuid::now_v7(), Some(0.01));
-    store.insert_event(&unbilled).await.unwrap();
-    store.insert_event(&billed).await.unwrap();
+    store.insert_event(&unbilled, None).await.unwrap();
+    store.insert_event(&billed, None).await.unwrap();
     for event in [&unbilled, &billed] {
         sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
             .bind("2020-01-01T00:00:00+00:00")
@@ -555,11 +561,10 @@ async fn migrates_existing_projection_with_cache_columns() {
 
     let store = ProjectionStore::open(&path).await.unwrap();
     store
-        .insert_event(&sample_llm_response_with_cost(
-            "alpha",
-            Uuid::now_v7(),
-            0.01,
-        ))
+        .insert_event(
+            &sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.01),
+            None,
+        )
         .await
         .unwrap();
     let summary = store.cost_summary(None, None).await.unwrap();
@@ -572,15 +577,15 @@ async fn inserts_and_counts_events() {
     let (store, _dir) = open_store().await;
     let inv = Uuid::now_v7();
     store
-        .insert_event(&sample_triggered("alpha", inv))
+        .insert_event(&sample_triggered("alpha", inv), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.0011))
+        .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.0011), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_completed("alpha", inv))
+        .insert_event(&sample_completed("alpha", inv), None)
         .await
         .unwrap();
 
@@ -602,10 +607,10 @@ async fn heartbeats_are_not_projected_and_legacy_rows_are_swept() {
             worker_id: WorkerId::new("w1".to_string()).unwrap(),
         }),
     );
-    store.insert_event(&heartbeat).await.unwrap();
+    store.insert_event(&heartbeat, None).await.unwrap();
     // A real event still lands; the heartbeat never did.
     store
-        .insert_event(&sample_triggered("alpha", Uuid::now_v7()))
+        .insert_event(&sample_triggered("alpha", Uuid::now_v7()), None)
         .await
         .unwrap();
     assert_eq!(store.count().await.unwrap(), 1);
@@ -632,14 +637,53 @@ async fn heartbeats_are_not_projected_and_legacy_rows_are_swept() {
     assert_eq!(reopened.count().await.unwrap(), 1, "legacy heartbeat swept");
 }
 
+/// The projection is an index over the log, so a row records where in
+/// the log it points. That number is the `event.get` key an
+/// `event.list` row hands its caller (plan Phase 4, cohort 4.2): an
+/// index that dropped it would list events nobody could then read
+/// whole.
+///
+/// `None` is the honest answer for a row seeded straight into the
+/// index, and is what rows written before the column existed read —
+/// so it round-trips as `None` rather than as a zero that would claim
+/// to be a position.
+#[tokio::test]
+async fn a_projected_row_records_the_log_position_it_indexes() {
+    let (store, _dir) = open_store().await;
+    let positioned = sample_triggered("alpha", Uuid::now_v7());
+    let seeded = sample_triggered("beta", Uuid::now_v7());
+    store.insert_event(&positioned, Some(4_242)).await.unwrap();
+    store.insert_event(&seeded, None).await.unwrap();
+
+    let position_of = |agent: &'static str| {
+        let store = store.clone();
+        async move {
+            let rows = store
+                .query_events(
+                    &EventFilter {
+                        agent: Some(agent),
+                        ..Default::default()
+                    },
+                    10,
+                )
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            rows[0].seq
+        }
+    };
+    assert_eq!(position_of("alpha").await, Some(4_242));
+    assert_eq!(position_of("beta").await, None);
+}
+
 #[tokio::test]
 async fn insert_is_idempotent_by_event_id() {
     let (store, _dir) = open_store().await;
     let inv = Uuid::now_v7();
     let event = sample_triggered("alpha", inv);
-    store.insert_event(&event).await.unwrap();
-    store.insert_event(&event).await.unwrap(); // re-delivery
-    store.insert_event(&event).await.unwrap();
+    store.insert_event(&event, None).await.unwrap();
+    store.insert_event(&event, None).await.unwrap(); // re-delivery
+    store.insert_event(&event, None).await.unwrap();
     assert_eq!(store.count().await.unwrap(), 1);
 }
 
@@ -648,11 +692,11 @@ async fn queries_filter_by_agent() {
     let (store, _dir) = open_store().await;
     let inv = Uuid::now_v7();
     store
-        .insert_event(&sample_triggered("alpha", inv))
+        .insert_event(&sample_triggered("alpha", inv), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_triggered("beta", Uuid::now_v7()))
+        .insert_event(&sample_triggered("beta", Uuid::now_v7()), None)
         .await
         .unwrap();
 
@@ -670,15 +714,15 @@ async fn queries_filter_by_event_type() {
     let (store, _dir) = open_store().await;
     let inv = Uuid::now_v7();
     store
-        .insert_event(&sample_triggered("alpha", inv))
+        .insert_event(&sample_triggered("alpha", inv), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.01))
+        .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.01), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_completed("alpha", inv))
+        .insert_event(&sample_completed("alpha", inv), None)
         .await
         .unwrap();
 
@@ -700,7 +744,7 @@ async fn queries_respect_limit() {
     let (store, _dir) = open_store().await;
     for _ in 0..5 {
         store
-            .insert_event(&sample_triggered("alpha", Uuid::now_v7()))
+            .insert_event(&sample_triggered("alpha", Uuid::now_v7()), None)
             .await
             .unwrap();
     }
@@ -713,23 +757,24 @@ async fn queries_respect_limit() {
 async fn cost_summary_aggregates_by_agent() {
     let (store, _dir) = open_store().await;
     store
-        .insert_event(&sample_llm_response_with_cost(
-            "alpha",
-            Uuid::now_v7(),
-            0.10,
-        ))
+        .insert_event(
+            &sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.10),
+            None,
+        )
         .await
         .unwrap();
     store
-        .insert_event(&sample_llm_response_with_cost(
-            "alpha",
-            Uuid::now_v7(),
-            0.05,
-        ))
+        .insert_event(
+            &sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.05),
+            None,
+        )
         .await
         .unwrap();
     store
-        .insert_event(&sample_llm_response_with_cost("beta", Uuid::now_v7(), 0.20))
+        .insert_event(
+            &sample_llm_response_with_cost("beta", Uuid::now_v7(), 0.20),
+            None,
+        )
         .await
         .unwrap();
 
@@ -760,13 +805,16 @@ async fn cost_detail_groups_by_invocation_and_model() {
     let inv2 = Uuid::now_v7();
     for (inv, cost) in [(inv1, 0.10), (inv1, 0.05), (inv2, 0.20)] {
         store
-            .insert_event(&sample_llm_response_with_cost("alpha", inv, cost))
+            .insert_event(&sample_llm_response_with_cost("alpha", inv, cost), None)
             .await
             .unwrap();
     }
     // Another agent's spend must not leak into alpha's drill-down.
     store
-        .insert_event(&sample_llm_response_with_cost("beta", Uuid::now_v7(), 9.0))
+        .insert_event(
+            &sample_llm_response_with_cost("beta", Uuid::now_v7(), 9.0),
+            None,
+        )
         .await
         .unwrap();
 
@@ -842,11 +890,10 @@ async fn cost_buckets_partition_the_spend() {
     let (store, _dir) = open_store().await;
     for cost in [0.10, 0.05, 0.20] {
         store
-            .insert_event(&sample_llm_response_with_cost(
-                "alpha",
-                Uuid::now_v7(),
-                cost,
-            ))
+            .insert_event(
+                &sample_llm_response_with_cost("alpha", Uuid::now_v7(), cost),
+                None,
+            )
             .await
             .unwrap();
     }
@@ -876,15 +923,17 @@ async fn cost_buckets_partition_the_spend() {
 async fn cost_summary_filters_by_agent() {
     let (store, _dir) = open_store().await;
     store
-        .insert_event(&sample_llm_response_with_cost(
-            "alpha",
-            Uuid::now_v7(),
-            0.10,
-        ))
+        .insert_event(
+            &sample_llm_response_with_cost("alpha", Uuid::now_v7(), 0.10),
+            None,
+        )
         .await
         .unwrap();
     store
-        .insert_event(&sample_llm_response_with_cost("beta", Uuid::now_v7(), 0.20))
+        .insert_event(
+            &sample_llm_response_with_cost("beta", Uuid::now_v7(), 0.20),
+            None,
+        )
         .await
         .unwrap();
 
@@ -925,7 +974,7 @@ async fn projected_failure_kinds_match_wire_serialization() {
             .as_str()
             .unwrap()
             .to_owned();
-        store.insert_event(&event).await.unwrap();
+        store.insert_event(&event, None).await.unwrap();
         let projected = store
             .query_events(&EventFilter::default(), 100)
             .await
@@ -942,32 +991,29 @@ async fn projected_failure_kinds_match_wire_serialization() {
 async fn failure_summary_groups_by_kind() {
     let (store, _dir) = open_store().await;
     store
-        .insert_event(&sample_failed_kind(
-            "a",
-            Uuid::now_v7(),
-            FailureKind::BudgetExceeded,
-        ))
+        .insert_event(
+            &sample_failed_kind("a", Uuid::now_v7(), FailureKind::BudgetExceeded),
+            None,
+        )
         .await
         .unwrap();
     store
-        .insert_event(&sample_failed_kind(
-            "a",
-            Uuid::now_v7(),
-            FailureKind::BudgetExceeded,
-        ))
+        .insert_event(
+            &sample_failed_kind("a", Uuid::now_v7(), FailureKind::BudgetExceeded),
+            None,
+        )
         .await
         .unwrap();
     store
-        .insert_event(&sample_failed_kind(
-            "b",
-            Uuid::now_v7(),
-            FailureKind::ToolError,
-        ))
+        .insert_event(
+            &sample_failed_kind("b", Uuid::now_v7(), FailureKind::ToolError),
+            None,
+        )
         .await
         .unwrap();
     // A non-failed event must not be counted.
     store
-        .insert_event(&sample_completed("a", Uuid::now_v7()))
+        .insert_event(&sample_completed("a", Uuid::now_v7()), None)
         .await
         .unwrap();
 
@@ -990,7 +1036,7 @@ async fn failure_summary_groups_by_kind() {
 async fn failure_summary_empty_when_no_failures() {
     let (store, _dir) = open_store().await;
     store
-        .insert_event(&sample_completed("a", Uuid::now_v7()))
+        .insert_event(&sample_completed("a", Uuid::now_v7()), None)
         .await
         .unwrap();
     assert!(store.failure_summary().await.unwrap().is_empty());
@@ -1001,27 +1047,27 @@ async fn extract_fields_covers_all_event_types() {
     let (store, _dir) = open_store().await;
     let inv = Uuid::now_v7();
     store
-        .insert_event(&sample_triggered("alpha", inv))
+        .insert_event(&sample_triggered("alpha", inv), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_llm_request("alpha", inv))
+        .insert_event(&sample_llm_request("alpha", inv), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_llm_response("alpha", inv))
+        .insert_event(&sample_llm_response("alpha", inv), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.01))
+        .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.01), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_completed("alpha", inv))
+        .insert_event(&sample_completed("alpha", inv), None)
         .await
         .unwrap();
     store
-        .insert_event(&sample_failed("alpha", Uuid::now_v7()))
+        .insert_event(&sample_failed("alpha", Uuid::now_v7()), None)
         .await
         .unwrap();
     // No panic, all inserts succeed.
@@ -1033,7 +1079,7 @@ async fn failed_event_error_message_is_projected_and_returned() {
     let (store, _dir) = open_store().await;
     let invocation_id = Uuid::now_v7();
     store
-        .insert_event(&sample_failed("alpha", invocation_id))
+        .insert_event(&sample_failed("alpha", invocation_id), None)
         .await
         .unwrap();
 
@@ -1060,7 +1106,7 @@ async fn read_only_open_succeeds_after_write_open() {
     {
         let writer = ProjectionStore::open(&path).await.unwrap();
         writer
-            .insert_event(&sample_triggered("alpha", Uuid::now_v7()))
+            .insert_event(&sample_triggered("alpha", Uuid::now_v7()), None)
             .await
             .unwrap();
     }

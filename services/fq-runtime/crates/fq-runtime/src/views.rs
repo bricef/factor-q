@@ -353,10 +353,15 @@ impl From<InvocationArchiveRow> for ArchiveView {
     }
 }
 
-/// One event row from the projection.
+/// One event row from the projection — the Event atom's **index**
+/// row (`event.list`). Extracted fields, never the payload; `seq`
+/// addresses the whole event through `event.get`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct EventView {
     pub event_id: String,
+    /// The `event.get` key for this row — `None` only where the log
+    /// position was never recorded (a directly seeded index).
+    pub seq: Option<u64>,
     pub timestamp: String,
     pub agent_id: String,
     pub invocation_id: String,
@@ -372,6 +377,7 @@ impl From<EventRow> for EventView {
     fn from(r: EventRow) -> Self {
         EventView {
             event_id: r.event_id,
+            seq: r.seq,
             timestamp: r.timestamp,
             agent_id: r.agent_id,
             invocation_id: r.invocation_id,

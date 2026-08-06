@@ -3,12 +3,26 @@
 //! window, and the sequence-resumable Stream that replaces `fq events
 //! tail`'s silent-drop core-NATS subscription.
 //!
+//! **Two stores, one atom.** Get and Stream answer from the event log,
+//! because the payload only lives there. List answers from the
+//! projection's index, because the question `fq events query` asks —
+//! "what happened recently, narrowed and capped" — is what an index is
+//! for, and answering it from the log makes the verb an operator
+//! reaches for exactly when the log is largest into a scan of that
+//! log. The index carries extracted fields, not payloads, so the rows
+//! carry `seq`: any row walks to its whole event through `event.get`.
+//! The general rule is recorded in
+//! `docs/design/committed/operator-surface-domain-model.md`.
+//!
 //! Its own module rather than more of `operator_surface.rs`: that file
 //! is the daemon's assembly point and is near its size budget (#189).
+
+use std::sync::Arc;
 
 use fq_edge::wire::WireError;
 use fq_runtime::event_tail::EventState;
 use fq_runtime::events::Event;
+use fq_runtime::views::{EventView, Views};
 
 /// Get identity for an Event: its event-log sequence.
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -37,7 +51,8 @@ pub(crate) struct EventFilter {
     /// Only events at or after this RFC3339 instant.
     #[serde(default)]
     pub(crate) since: Option<String>,
-    /// Cap on one List page — the most recent N matching events.
+    /// Cap on one List page — the most recent N matching rows.
+    /// Ignored by Stream, which is cursored rather than paged.
     #[serde(default)]
     pub(crate) limit: Option<u32>,
 }
@@ -66,19 +81,18 @@ const EVENT_LIST_DEFAULT_LIMIT: u32 = 50;
 /// Ceiling on a `next_batch` long poll, whatever the caller asks.
 const EVENT_MAX_WAIT_CEILING_MS: u64 = 60_000;
 
-/// A filter compiled for one read: the subject the log consumer is
-/// scoped to, plus the predicates applied per event.
+/// A filter validated for one read — the narrowing, in domain terms,
+/// with every value the request supplied already checked.
 ///
-/// The agent narrowing becomes a consumer filter because the log is
-/// already partitioned that way; the rest cannot be, so they are
-/// applied here. Compiling once per call keeps the per-event work to
-/// comparisons.
+/// Compiled once per call, and deliberately store-agnostic: the same
+/// value narrows the log (Stream) and the projection (List), so a
+/// filter *means* one thing across the atom and the two verbs differ
+/// only in where they go looking for it. Rendering the narrowing as
+/// bus coordinates or SQL bindings happens at the edges of this type,
+/// never inside a handler.
 #[derive(Debug)]
 struct EventSelection {
-    /// Empty means "every subject this stream captures" — the event
-    /// log is `fq.agent.>` + `fq.system.>` + `fq.worker.>`, which no
-    /// single pattern names.
-    subject: String,
+    agent: Option<String>,
     event_type: Option<String>,
     since: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -89,17 +103,14 @@ impl EventSelection {
             op: op.to_string(),
             message,
         };
-        let subject = match filter.agent.as_deref() {
-            Some(agent) => {
-                // An id that is not a subject token cannot name any
-                // event, and interpolating it would build a malformed
-                // filter — so it is a verdict on the request.
-                fq_runtime::AgentId::new(agent)
-                    .map_err(|e| invalid(format!("agent `{agent}`: {e}")))?;
-                format!("fq.agent.{agent}.>")
-            }
-            None => String::new(),
-        };
+        // An id that is not a subject token cannot name any event, and
+        // interpolating it would build a malformed consumer filter —
+        // so it is a verdict on the request, on both verbs, whether or
+        // not the store that answers would have minded.
+        if let Some(agent) = filter.agent.as_deref() {
+            fq_runtime::AgentId::new(agent)
+                .map_err(|e| invalid(format!("agent `{agent}`: {e}")))?;
+        }
         let since = filter
             .since
             .as_deref()
@@ -110,10 +121,32 @@ impl EventSelection {
             })
             .transpose()?;
         Ok(EventSelection {
-            subject,
+            agent: filter.agent.clone(),
             event_type: filter.event_type.clone(),
             since,
         })
+    }
+
+    /// The consumer subject the log read is scoped to. Empty means
+    /// "every subject this stream captures" — the event log is
+    /// `fq.agent.>` + `fq.system.>` + `fq.worker.>`, which no single
+    /// pattern names. Only the agent narrowing pushes down; the log is
+    /// partitioned that way and the rest is not, so the rest is
+    /// [`Self::matches`].
+    fn subject(&self) -> String {
+        match self.agent.as_deref() {
+            Some(agent) => format!("fq.agent.{agent}.>"),
+            None => String::new(),
+        }
+    }
+
+    /// `since` as the projection stores its timestamps. The column is
+    /// text and the comparison lexical, so re-rendering the parsed
+    /// instant — rather than passing the caller's spelling through —
+    /// is what makes `…07.500Z` and `…07.500+00:00` the same instant
+    /// to the query as they are to the reader.
+    fn since_as_stored(&self) -> Option<String> {
+        self.since.map(|t| t.to_rfc3339())
     }
 
     fn matches(&self, event: &Event) -> bool {
@@ -126,46 +159,53 @@ impl EventSelection {
     }
 }
 
-/// Register the Event atom: the log read directly, with no projection
-/// in the path. Get and List follow the Turn atom's shape; Stream is
-/// the one this cohort exists for — an ephemeral consumer started at a
-/// sequence, so a caller that reconnects from its cursor is handed
-/// everything after it instead of whatever core NATS still had in
-/// flight.
+/// Register the Event atom. Get and Stream read the log directly, with
+/// no projection in the path — the payload lives nowhere else. List
+/// reads the projection's index, and declares that it does: the atom
+/// carries a distinct `index_schema`, and the contract text below is
+/// the surface saying so about itself rather than a reader having to
+/// find this comment.
 pub(crate) fn register_event_atom(
     registry: &mut fq_edge::EdgeRegistry,
     bus: fq_runtime::EventBus,
+    views: Arc<Views>,
 ) -> anyhow::Result<()> {
-    let decl = fq_ops::Atom::new::<EventKey, EventState, EventFilter>(
+    let decl = fq_ops::Atom::with_index::<EventKey, EventState, EventView, EventFilter>(
         fq_ops::Domain::Event,
         "One recorded event: the substrate every other resource folds from.",
         fq_ops::Stability::Experimental,
     )
     .description(
-        "Event-log-backed: `seq` is the stream sequence — the same cursor \
-         receipts, `min_seq` gates and `turn` sequences speak. List answers \
-         with the most recent `limit` matching events in sequence order, \
-         bounded by the tip observed at entry; Stream long-polls via \
-         next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail \
-         without consuming anything. Resuming at a cursor loses nothing: the \
-         log is durable and the consumer is positional.",
+        "`seq` is the event-log stream sequence — the same cursor receipts, \
+         `min_seq` gates and `turn` sequences speak. Get and Stream answer \
+         from the log with the whole event, payload included. LIST DOES NOT \
+         RETURN PAYLOADS: it answers from the projection's index, one row of \
+         extracted fields (timestamp, agent, invocation, event type, model, \
+         cost, error, duration) per event, most recent `limit` first. Every \
+         row carries the `seq` that reads the whole event back through \
+         `event.get`, so a listing is always a step away from the fact; \
+         `seq` is null only for a row projected before the index recorded \
+         log positions. Read payloads in bulk by streaming, not by listing. \
+         List is a projection read and honours `min_seq`; Stream long-polls \
+         via next_batch from a sequence, and `from_seq = u64::MAX` seeks the \
+         tail without consuming anything. Resuming at a cursor loses \
+         nothing: the log is durable and the consumer is positional.",
     );
 
     let get_bus = bus.clone();
-    let list_bus = bus.clone();
     registry
-        .atom::<EventKey, EventState, EventFilter, _, _, _, _, _, _>(
+        .atom::<EventKey, EventState, EventView, EventFilter, _, _, _, _, _, _>(
             decl,
             move |key: EventKey| {
                 let bus = get_bus.clone();
                 async move { event_at(&bus, key.seq).await }
             },
             move |filter: EventFilter| {
-                let bus = list_bus.clone();
+                let views = views.clone();
                 async move {
                     let selection = EventSelection::compile(&filter, "event.list")?;
-                    let limit = filter.limit.unwrap_or(EVENT_LIST_DEFAULT_LIMIT) as usize;
-                    list_events(&bus, &selection, limit).await
+                    let limit = filter.limit.unwrap_or(EVENT_LIST_DEFAULT_LIMIT);
+                    list_events(&views, &selection, limit).await
                 }
             },
             move |filter: EventFilter, from_seq, max_wait_ms| {
@@ -212,48 +252,34 @@ async fn event_at(bus: &fq_runtime::EventBus, seq: u64) -> Result<EventState, Wi
     })
 }
 
-/// The most recent `limit` matching events, in sequence order,
-/// bounded by the tip observed at entry.
+/// The most recent `limit` matching index rows, newest first.
 ///
-/// The scan is the whole log (the Turn atom's List has the same shape)
-/// because the event log is the only place the payload lives: the
-/// projection's index carries columns, not facts. A caller that wants
-/// a cheap recent-window read narrows with `agent`, which the consumer
-/// pushes down to the subject.
+/// Answered from the projection, which is the store that already holds
+/// this question's answer: it is timestamp-ordered and indexed on
+/// exactly the columns this filter narrows by, so a capped recent
+/// window costs a `LIMIT` rather than a walk of the log. The rows are
+/// the index's — extracted fields, no payload — and each carries the
+/// `seq` that reads its event back whole. The alternative, scanning
+/// the log the way `turn.list` does, put the cost of an operator's
+/// most-reached-for read in direct proportion to how much history the
+/// system had accumulated, which is the wrong way round.
 async fn list_events(
-    bus: &fq_runtime::EventBus,
+    views: &Views,
     selection: &EventSelection,
-    limit: usize,
-) -> Result<Vec<EventState>, WireError> {
-    use futures::StreamExt;
-    // The bound is the last sequence this filter matches, not the
-    // stream's: a scan that waited for the stream tip would wait
-    // forever whenever the tip is a message the filter excludes.
-    let tip = bus
-        .last_event_seq_matching(&selection.subject)
+    limit: u32,
+) -> Result<Vec<EventView>, WireError> {
+    let since = selection.since_as_stored();
+    views
+        .events(
+            selection.agent.as_deref(),
+            selection.event_type.as_deref(),
+            since.as_deref(),
+            i64::from(limit),
+        )
         .await
-        .map_err(internal)?;
-    if tip == 0 || limit == 0 {
-        return Ok(Vec::new());
-    }
-    let mut events = bus
-        .events_from(&selection.subject, 1)
-        .await
-        .map_err(internal)?;
-    let mut window: std::collections::VecDeque<EventState> = std::collections::VecDeque::new();
-    while let Some(next) = events.next().await {
-        let (seq, event) = next.map_err(internal)?;
-        if selection.matches(&event) {
-            if window.len() == limit {
-                window.pop_front();
-            }
-            window.push_back(EventState { seq, event });
-        }
-        if seq >= tip {
-            break;
-        }
-    }
-    Ok(window.into())
+        .map_err(|e| WireError::Internal {
+            message: e.to_string(),
+        })
 }
 
 /// One long-poll batch of events at or after `from_seq`; `u64::MAX`
@@ -274,7 +300,7 @@ async fn stream_events(
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_millis(max_wait_ms.min(EVENT_MAX_WAIT_CEILING_MS));
     let mut events = bus
-        .events_from(&selection.subject, from_seq)
+        .events_from(&selection.subject(), from_seq)
         .await
         .map_err(internal)?;
     let mut items = Vec::new();
@@ -364,11 +390,55 @@ mod tests {
             ..EventFilter::default()
         };
         let selection = EventSelection::compile(&filter, "event.stream").unwrap();
-        assert_eq!(selection.subject, "fq.agent.researcher.>");
+        assert_eq!(selection.subject(), "fq.agent.researcher.>");
         // No agent means no consumer filter at all: the log spans
         // `fq.agent.>`, `fq.system.>` and `fq.worker.>`, and no single
         // pattern covers those three.
         let all = EventSelection::compile(&EventFilter::default(), "event.stream").unwrap();
-        assert_eq!(all.subject, "");
+        assert_eq!(all.subject(), "");
+    }
+
+    /// The two stores must not disagree about which instant a caller
+    /// asked for. The log compares parsed instants; the projection
+    /// compares stored text — so `since` is re-rendered the way the
+    /// projection writes its timestamps, and a `Z` spelling and a
+    /// `+00:00` spelling become the same query rather than two.
+    #[test]
+    fn since_is_normalised_to_the_way_the_projection_stores_it() {
+        let compiled = |s: &str| {
+            EventSelection::compile(
+                &EventFilter {
+                    since: Some(s.into()),
+                    ..EventFilter::default()
+                },
+                "event.list",
+            )
+            .expect("a valid RFC3339 instant")
+            .since_as_stored()
+        };
+        let stored = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:07.500Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339();
+        assert_eq!(
+            compiled("2026-01-02T03:04:07.500Z").as_deref(),
+            Some(&*stored)
+        );
+        assert_eq!(
+            compiled("2026-01-02T03:04:07.500+00:00").as_deref(),
+            Some(&*stored)
+        );
+        // Same instant, other side of the world: the offset is a
+        // spelling, and the query must not be sensitive to it.
+        assert_eq!(
+            compiled("2026-01-02T08:34:07.500+05:30").as_deref(),
+            Some(&*stored)
+        );
+        assert_eq!(
+            EventSelection::compile(&EventFilter::default(), "event.list")
+                .unwrap()
+                .since_as_stored(),
+            None
+        );
     }
 }

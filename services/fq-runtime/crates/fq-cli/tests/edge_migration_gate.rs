@@ -93,17 +93,28 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// daemon stopped by watching a subscription that drops messages
 /// silently and cannot be resumed. Cohort 4.3 flips it.
 ///
-/// Verb 12 (`fq events query`) did **not** flip in cohort 4.2, so its
-/// `open_views(` is still counted: a daemon-backed `event.list`
-/// necessarily includes the daemon's own events (`system_startup`,
-/// `system_recovery`, `worker_orphaned`), which the `events_query_*`
-/// goldens — seeded into a store no daemon had ever touched — do not
-/// contain.
+/// It went 9 -> 7 with cohort 4.2's last two flips, which land
+/// together and each remove one site.
 ///
-/// It went 9 -> 8 with verb 7 (`fq dead-letters list`), which now
+/// Verb 12 (`fq events query`) closes the cohort: `event.list` now
+/// answers from the daemon's projection index over the edge, so the
+/// verb's `open_views(` is gone. Two `open_views(` calls remain — `fq
+/// doctor` (verb 15) and `fq costs` (verb 13) — plus the helper's own
+/// definition, which is why the terminal state is zero rather than
+/// one: the last caller's departure takes the helper with it.
+///
+/// What held verb 12 up was not the plumbing. A daemon-backed
+/// `event.list` necessarily includes the daemon's own events
+/// (`system_startup`, `system_recovery`, …), which the
+/// `events_query_*` goldens — seeded into a store no daemon had ever
+/// touched — did not contain. Those goldens are now a daemon's world,
+/// redacted by value; see the rationale at the fixture in
+/// `tests/golden.rs`.
+///
+/// Verb 7 (`fq dead-letters list`) is the other of the two, and now
 /// reads the DeadLetter atom. Verb 8's `operator::requeue_dead_letter`
 /// is the one dead-letter call point left, and cohort 4.3 takes it.
-const REMAINING: usize = 8;
+const REMAINING: usize = 7;
 
 /// Every `.rs` file under `dir`, recursively, in a stable order.
 fn rust_sources(dir: &Path) -> Vec<PathBuf> {

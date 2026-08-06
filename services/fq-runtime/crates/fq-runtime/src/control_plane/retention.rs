@@ -288,9 +288,9 @@ mod tests {
         // insert binds the envelope timestamp), one fresh.
         let mut old_event = triggered("old-agent");
         old_event.envelope.timestamp = Utc::now() - chrono::Duration::days(3);
-        projection.insert_event(&old_event).await.unwrap();
+        projection.insert_event(&old_event, None).await.unwrap();
         projection
-            .insert_event(&triggered("fresh-agent"))
+            .insert_event(&triggered("fresh-agent"), None)
             .await
             .unwrap();
 

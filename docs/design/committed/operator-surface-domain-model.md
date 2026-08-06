@@ -49,7 +49,9 @@ distinguishes two natures, and the distinction is load-bearing:
 
 - **Atoms** are immutable once created. They are facts: once one exists it
   never changes and never disappears (retention aside). Atoms are the only
-  streamable resources.
+  streamable resources. An atom's List answers with the atoms themselves
+  by default; it may instead answer from an index, under the rule in
+  [Generic verbs](#an-atoms-list-may-answer-from-a-different-store-than-its-get).
 - **Views** (projections) have stable identity and changing state — but a
   view's state is a fold of atoms, so views change *only because new atoms
   exist*. A view is read as "the fold as of watermark W"; it is never
@@ -127,6 +129,51 @@ List and Stream compose into one idiom, not two operations: List answers
 "what exists, as of watermark W"; Stream continues "and from W onward,
 live." Snapshot-then-follow, resumable by construction because sequence is
 the cursor.
+
+### An atom's List may answer from a different store than its Get
+
+A view's List has always returned index rows rather than folds. An
+**atom's** List returns the atoms themselves *by default* — listing facts
+hands back facts, which is what `turn.list` does and must keep doing. But
+the default is a default, not a law, and an atom may declare a distinct
+index (`Atom::with_index`) whose List is served from a cheaper store.
+
+The rule, in full, because the next atom that wants a cheap listing should
+have a rule to follow rather than a precedent to reverse-engineer:
+
+> **An atom's List may answer from a different store than its Get, and
+> may therefore answer with something narrower than the atom — provided
+> every list row carries the identity Get takes, and the declaration says
+> so.**
+
+Both halves are load-bearing.
+
+- **The row names what Get needs.** A listing that a caller cannot walk
+  from is a dead end: they would have to reconstruct a key from fields
+  that were never promised to reconstruct one, and the first schema change
+  breaks them silently. Carrying the key makes the narrower row a
+  *summary of a reachable fact* rather than a lossy substitute for it.
+- **The declaration says so, in its `description`.** Not in prose a reader
+  has to go and find — in the declared text, which is what
+  `List(Operation)` publishes and what lands in `operator_surface.json`.
+  The surface describes its own contract or the contract does not exist.
+
+The shape of the answer, then, is a property of the *question*, not of
+the storage that happens to be convenient: Get asks "this fact, whole",
+List asks "what happened, narrowed and capped", and Stream asks "tell me
+as they happen". **A reader who needs payloads in bulk streams; it does
+not list.** Stream therefore always answers with the atom's state, never
+its index — a stream is creation-notification, and half a fact is not a
+notification of one.
+
+`Event` is the first atom to take the opt-in. Its Get and Stream read the
+event log, where the payload lives; its List reads the projection's
+index — timestamp-ordered, indexed on the columns the filter narrows by,
+and holding extracted fields rather than payloads. Serving that List from
+the log would have made the operator's most-reached-for read cost a scan
+in direct proportion to how much history the system had accumulated,
+which is the wrong way round. Every index row carries its `seq`, so
+`event.get` is one call away from any row.
 
 ## Domain verbs
 

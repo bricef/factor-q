@@ -20,6 +20,7 @@ use crate::events::{Event, EventPayload};
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS events (
     event_id        TEXT PRIMARY KEY,
+    seq             INTEGER,
     timestamp       TEXT NOT NULL,
     agent_id        TEXT NOT NULL,
     invocation_id   TEXT NOT NULL,
@@ -136,6 +137,12 @@ impl ProjectionStore {
             ("cache_read_tokens", "INTEGER"),
             ("cache_write_tokens", "INTEGER"),
             ("error_message", "TEXT"),
+            // The log position this row indexes — the `event.get` key
+            // an `event.list` row hands its caller. Forward-only like
+            // the rest: rows projected before this column existed read
+            // NULL, and a caller that wants their payloads streams the
+            // log instead of listing.
+            ("seq", "INTEGER"),
         ] {
             if !columns.iter().any(|c| c == column) {
                 sqlx::query(&format!("ALTER TABLE events ADD COLUMN {column} {ty}"))
@@ -198,12 +205,21 @@ impl ProjectionStore {
     /// Insert an event into the store. Idempotent on `event_id` —
     /// re-delivery from a durable consumer is a no-op.
     ///
+    /// `seq` is the event's position in the log this row indexes. It
+    /// is what makes a projected row addressable as the atom it stands
+    /// for: `event.list` hands it back and `event.get` takes it, so a
+    /// consumer walks from a listing to the whole event without
+    /// constructing a key. `None` says the caller does not know the
+    /// position — a fixture seeding the index directly, or a row from
+    /// before the column existed. Such a row still lists; it just
+    /// cannot be walked from.
+    ///
     /// Worker heartbeats are NOT projected: a heartbeat is an
     /// operational liveness signal that goes stale the moment the next
     /// one lands (every 10s — ~13k rows/day of noise that buried the
     /// events surface), not history. Liveness lives where it is
     /// consumed: the control-plane worker table's `last_heartbeat`.
-    pub async fn insert_event(&self, event: &Event) -> Result<(), StoreError> {
+    pub async fn insert_event(&self, event: &Event, seq: Option<u64>) -> Result<(), StoreError> {
         if matches!(event.payload, EventPayload::WorkerHeartbeat(_)) {
             return Ok(());
         }
@@ -213,12 +229,13 @@ impl ProjectionStore {
         sqlx::query(
             r#"
             INSERT OR IGNORE INTO events
-                (event_id, timestamp, agent_id, invocation_id, event_type,
+                (event_id, seq, timestamp, agent_id, invocation_id, event_type,
                  model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_cost, error_kind, error_message, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(event.envelope.event_id.to_string())
+        .bind(seq.map(|s| s as i64))
         .bind(event.envelope.timestamp.to_rfc3339())
         .bind(event.envelope.agent_id.as_str())
         .bind(event.envelope.invocation_id.to_string())
@@ -300,7 +317,7 @@ impl ProjectionStore {
         // Build the WHERE clause dynamically but safely — each
         // condition uses a placeholder.
         let mut sql = String::from(
-            "SELECT event_id, timestamp, agent_id, invocation_id, event_type, \
+            "SELECT event_id, seq, timestamp, agent_id, invocation_id, event_type, \
              model, total_cost, error_kind, error_message, duration_ms \
              FROM events",
         );
@@ -337,15 +354,16 @@ impl ProjectionStore {
             .into_iter()
             .map(|row| EventRow {
                 event_id: row.get::<String, _>(0),
-                timestamp: row.get::<String, _>(1),
-                agent_id: row.get::<String, _>(2),
-                invocation_id: row.get::<String, _>(3),
-                event_type: row.get::<String, _>(4),
-                model: row.get::<Option<String>, _>(5),
-                total_cost: row.get::<Option<f64>, _>(6),
-                error_kind: row.get::<Option<String>, _>(7),
-                error_message: row.get::<Option<String>, _>(8),
-                duration_ms: row.get::<Option<i64>, _>(9),
+                seq: row.get::<Option<i64>, _>(1).map(|s| s as u64),
+                timestamp: row.get::<String, _>(2),
+                agent_id: row.get::<String, _>(3),
+                invocation_id: row.get::<String, _>(4),
+                event_type: row.get::<String, _>(5),
+                model: row.get::<Option<String>, _>(6),
+                total_cost: row.get::<Option<f64>, _>(7),
+                error_kind: row.get::<Option<String>, _>(8),
+                error_message: row.get::<Option<String>, _>(9),
+                duration_ms: row.get::<Option<i64>, _>(10),
             })
             .collect();
         Ok(events)
@@ -631,6 +649,10 @@ impl ProjectionStore {
 #[derive(Debug, Clone)]
 pub struct EventRow {
     pub event_id: String,
+    /// This row's position in the event log — the `event.get` key.
+    /// `None` for a row whose position was never recorded (see
+    /// [`ProjectionStore::insert_event`]).
+    pub seq: Option<u64>,
     pub timestamp: String,
     pub agent_id: String,
     pub invocation_id: String,

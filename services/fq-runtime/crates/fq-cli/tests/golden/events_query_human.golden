@@ -1,4 +1,10 @@
 timestamp            agent                                    event          cost         invocation
+<TIME>               system                                   worker_orphaned -            <INV>
+<TIME>               system                                   worker_orphaned -            <INV>
+<TIME>               system                                   worker_orphaned -            <INV>
+<TIME>               system                                   system_startup -            <INV>
+<TIME>               researcher                               invocation_ambiguous -            3a000000
+<TIME>               system                                   system_recovery -            <INV>
 2026-01-02T03:04:35  fixer                                    triggered      -            4e000000
 2026-01-02T03:04:25  researcher                               triggered      -            3a000000
 2026-01-02T03:04:17  fixer                                    failed         $0.003100    2f000000

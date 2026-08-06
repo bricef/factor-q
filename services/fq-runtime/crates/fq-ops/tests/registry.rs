@@ -187,6 +187,62 @@ fn natures_and_categories() {
     assert!(registry.resolve_named("invocation.frobnicate").is_none());
 }
 
+/// An atom's List answers with its index, its Stream with its state —
+/// and by default those are the same schema, because listing facts
+/// hands back facts.
+///
+/// The default is the half worth pinning: `turn.list` returns full
+/// payloads by design, and `Atom::with_index` exists precisely so that
+/// an atom which wants a cheaper listing has to say so at its
+/// declaration rather than by quietly returning something narrower.
+/// Stream is unaffected either way — a stream is
+/// creation-notification, and an index row is not the fact that was
+/// created.
+#[test]
+fn an_atom_lists_its_index_and_streams_its_state() {
+    let registry = exemplar_registry();
+    let list = registry.resolve_named("turn.list").unwrap();
+    let stream = registry.resolve_named("turn.stream").unwrap();
+    let get = registry.resolve_named("turn.get").unwrap();
+    assert_eq!(
+        list.output_schema, stream.output_schema,
+        "an atom declaring no index lists what it streams"
+    );
+    assert_eq!(
+        list.output_schema, get.output_schema,
+        "…and what it Gets: the default index IS the state"
+    );
+
+    // Declaring an index moves List and leaves Get and Stream alone.
+    let mut indexed = Registry::new();
+    indexed
+        .register(fq_ops::Atom::with_index::<
+            fq_ops::fixtures::EntryKey,
+            fq_ops::fixtures::EntryState,
+            fq_ops::fixtures::InvocationIndexRow,
+            fq_ops::fixtures::EntryFilter,
+        >(
+            Domain::Turn,
+            "an atom whose List is served from an index",
+            fq_ops::Stability::Experimental,
+        ))
+        .unwrap();
+    let list = indexed.resolve_named("turn.list").unwrap();
+    let stream = indexed.resolve_named("turn.stream").unwrap();
+    let get = indexed.resolve_named("turn.get").unwrap();
+    assert_ne!(
+        list.output_schema, stream.output_schema,
+        "a declared index is what List answers with"
+    );
+    assert_eq!(
+        stream.output_schema, get.output_schema,
+        "Stream still answers with the atom itself"
+    );
+    // Categories are unmoved by any of this.
+    assert_eq!(list.category, OpCategory::List);
+    assert_eq!(stream.category, OpCategory::Stream);
+}
+
 /// Watermarks are per-domain: sequences from different domains are
 /// not comparable, and read-your-writes watermarks a read of one
 /// domain.

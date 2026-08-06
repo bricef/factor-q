@@ -105,8 +105,12 @@ impl ProjectionConsumer {
             stream_seq,
             "projecting event"
         );
+        // The delivery's position is projected with the row: it is the
+        // `event.get` key an `event.list` row hands its caller, so an
+        // index that dropped it could list events nobody could then
+        // read whole.
         self.store
-            .insert_event(&event)
+            .insert_event(&event, stream_seq)
             .await
             .map_err(HandlerError::transient)?;
         if let (Some(watermark), Some(seq)) = (&self.watermark, stream_seq) {
@@ -248,11 +252,11 @@ mod tests {
                 &bus_for_loop,
                 config,
                 shutdown_rx,
-                |Delivery { event, .. }| {
+                |Delivery { event, stream_seq }| {
                     let store = store_for_loop.clone();
                     async move {
                         store
-                            .insert_event(&event)
+                            .insert_event(&event, stream_seq)
                             .await
                             .map_err(HandlerError::transient)
                     }

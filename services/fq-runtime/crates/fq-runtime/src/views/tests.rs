@@ -278,14 +278,17 @@ async fn summary_line_joins_onto_invocation_surfaces() {
             trigger_payload: None,
         };
         ws.upsert_invocation_state(&row).await.unwrap();
-        proj.insert_event(&Event::new(
-            AgentId::summary(),
-            inv,
-            EventPayload::InvocationSummary(InvocationSummaryPayload {
-                kind: SummaryKind::Progress,
-                summary: "Fixing #7: editing widget.rs".to_string(),
-            }),
-        ))
+        proj.insert_event(
+            &Event::new(
+                AgentId::summary(),
+                inv,
+                EventPayload::InvocationSummary(InvocationSummaryPayload {
+                    kind: SummaryKind::Progress,
+                    summary: "Fixing #7: editing widget.rs".to_string(),
+                }),
+            ),
+            None,
+        )
         .await
         .unwrap();
     }
