@@ -1,7 +1,7 @@
 //! The Event atom (plan Phase 4, cohort 4.2): the substrate itself on
-//! the operator surface — Get by log sequence, List over the recent
-//! window, and the sequence-resumable Stream that replaces `fq events
-//! tail`'s silent-drop core-NATS subscription.
+//! the operator surface — Get by the event's own identity, List over
+//! the recent window, and the sequence-resumable Stream that replaces
+//! `fq events tail`'s silent-drop core-NATS subscription.
 //!
 //! **Two stores, one atom.** Get and Stream answer from the event log,
 //! because the payload only lives there. List answers from the
@@ -10,9 +10,21 @@
 //! for, and answering it from the log makes the verb an operator
 //! reaches for exactly when the log is largest into a scan of that
 //! log. The index carries extracted fields, not payloads, so the rows
-//! carry `seq`: any row walks to its whole event through `event.get`.
-//! The general rule is recorded in
+//! carry `event_id`: any row walks to its whole event through
+//! `event.get`. The general rule is recorded in
 //! `docs/design/committed/operator-surface-domain-model.md`.
+//!
+//! **The identity is the domain's, not the transport's.** Get was
+//! keyed on the JetStream stream sequence, which is a *position*
+//! doing an *identity's* job — and the two come apart in ordinary
+//! operation: recreate `fq-events` and sequences restart at 1 while
+//! `projection.db` survives, so a stored sequence silently addresses
+//! a different event; and cost-bearing rows are exempt from the
+//! retention sweep and kept indefinitely, while the log keeps 30
+//! days, so their sequence resolves to nothing — or to a neighbour.
+//! The rule the atom now follows: **cursors may be transport
+//! coordinates; identities may not.** `min_seq` and `from_seq` are
+//! cursors and are unchanged.
 //!
 //! Its own module rather than more of `operator_surface.rs`: that file
 //! is the daemon's assembly point and is near its size budget (#189).
@@ -22,12 +34,20 @@ use std::sync::Arc;
 use fq_edge::wire::WireError;
 use fq_runtime::event_tail::EventState;
 use fq_runtime::events::Event;
-use fq_runtime::views::{EventView, Views};
+use fq_runtime::views::{EventLocation, EventView, Views};
 
-/// Get identity for an Event: its event-log sequence.
+/// Get identity for an Event: the `event_id` the event stamps on
+/// itself at construction (`Uuid::now_v7`), which is also the
+/// projection index's primary key — stable, transport-independent,
+/// time-ordered, and already indexed.
+///
+/// **Not the log sequence**, which is where this started: see the
+/// module docs for the two ways a stored position comes to address
+/// the wrong event, both of which happen without anybody doing
+/// anything wrong.
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct EventKey {
-    pub(crate) seq: u64,
+    pub(crate) event_id: String,
 }
 
 /// List/Stream selection for Events — the typed, schema'd filter.
@@ -178,29 +198,45 @@ pub(crate) fn register_event_atom(
         fq_ops::Stability::Experimental,
     )
     .description(
-        "`seq` is the event-log stream sequence — the same cursor receipts, \
-         `min_seq` gates and `turn` sequences speak. Get and Stream answer \
-         from the log with the whole event, payload included. LIST DOES NOT \
-         RETURN PAYLOADS: it answers from the projection's index, one row of \
-         extracted fields (timestamp, agent, invocation, event type, model, \
-         cost, error, duration) per event, most recent `limit` first. Every \
-         row carries the `seq` that reads the whole event back through \
-         `event.get`, so a listing is always a step away from the fact; \
-         `seq` is null only for a row projected before the index recorded \
-         log positions. Read payloads in bulk by streaming, not by listing. \
-         List is a projection read and honours `min_seq`; Stream long-polls \
-         via next_batch from a sequence, and `from_seq = u64::MAX` seeks the \
-         tail without consuming anything. Resuming at a cursor loses \
-         nothing: the log is durable and the consumer is positional.",
+        "`event_id` is an Event's identity — the UUIDv7 the event stamps on \
+         itself when it is constructed, and the projection index's primary \
+         key. It is NOT the log sequence: a sequence is a transport \
+         coordinate, and recreating the event stream restarts it at 1 while \
+         the index survives. Get resolves an identity in two O(1) hops (the \
+         index for the log position, then the log) and VERIFIES that the \
+         event it read carries the identity asked for, so a rewound or \
+         recreated log fails loudly instead of answering with a neighbour. \
+         Get and Stream answer from the log with the whole event, payload \
+         included. LIST DOES NOT RETURN PAYLOADS: it answers from the \
+         projection's index, one row of extracted fields (identity, \
+         timestamp, agent, invocation, event type, model, cost, error, \
+         duration) per event, most recent `limit` first. Every row carries \
+         the identity that reads the whole event back through `event.get` \
+         WHEN THE PAYLOAD IS STILL RETAINED, so a listing is a step away \
+         from the fact — with the two unavailable cases named rather than \
+         collapsed into `not found`: `Unlocatable` (the row is indexed but \
+         its log position was never recorded, so we know the event and not \
+         where its payload is) and `Gone` (the position is known and the \
+         log has aged past it, or was replaced). Cost-bearing rows are kept \
+         indefinitely while the log keeps 30 days, so `Gone` is the normal \
+         answer for old spend, not a fault. Read payloads in bulk by \
+         streaming, not by listing. List is a projection read and honours \
+         `min_seq`; Stream long-polls via next_batch from a sequence, and \
+         `from_seq = u64::MAX` seeks the tail without consuming anything. \
+         Resuming at a cursor loses nothing: the log is durable and the \
+         consumer is positional — a cursor may be a transport coordinate, \
+         an identity may not.",
     );
 
     let get_bus = bus.clone();
+    let get_views = views.clone();
     registry
         .atom::<EventKey, EventState, EventView, EventFilter, _, _, _, _, _, _>(
             decl,
             move |key: EventKey| {
                 let bus = get_bus.clone();
-                async move { event_at(&bus, key.seq).await }
+                let views = get_views.clone();
+                async move { event_by_id(&bus, &views, &key.event_id).await }
             },
             move |filter: EventFilter| {
                 let views = views.clone();
@@ -228,30 +264,107 @@ fn internal(e: fq_runtime::bus::BusError) -> WireError {
     }
 }
 
-/// Get one event by log sequence — the read `AtomRef { domain: Event,
-/// seq }` in a receipt resolves.
-async fn event_at(bus: &fq_runtime::EventBus, seq: u64) -> Result<EventState, WireError> {
-    use futures::StreamExt;
-    let not_found = || WireError::NotFound {
+/// Get one event by its identity — two O(1) hops and a self-check.
+///
+/// The identity resolves in the projection (a primary-key lookup for
+/// the log position that row records), and the position reads the
+/// payload out of the log. Neither hop scans, which is what made the
+/// sequence tempting as a key in the first place: an id lookup *in
+/// the log* would have walked it.
+///
+/// **The event that comes back is checked against the one asked
+/// for.** The position is a transport coordinate held across a
+/// boundary the transport makes no promise about — recreate the
+/// stream and sequence 42 is a different event, or none — so an
+/// unverified second hop answers confidently with a neighbour. This
+/// check is the whole reason the identity moved: without it, keying
+/// on `event_id` would only have relocated the lie.
+async fn event_by_id(
+    bus: &fq_runtime::EventBus,
+    views: &Views,
+    event_id: &str,
+) -> Result<EventState, WireError> {
+    // A string that is not a UUID cannot name any event: every
+    // `event_id` in the index was written from one. So it is a
+    // verdict on the request, as an unparseable `since` is — and
+    // re-rendering the parsed value normalises the spelling the
+    // lookup binds.
+    let asked = uuid::Uuid::parse_str(event_id).map_err(|e| WireError::InvalidInput {
         op: "event.get".into(),
-        message: format!("no event at sequence {seq}"),
-    };
-    let mut events = bus.events_from("", seq).await.map_err(internal)?;
-    let (got_seq, event) = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
+        message: format!("event_id `{event_id}`: {e}"),
+    })?;
+    let location = views
+        .event_location(&asked.to_string())
         .await
-        .map_err(|_| not_found())?
-        .ok_or_else(not_found)?
-        .map_err(internal)?;
-    // A sequence the stream skipped (retention, a subject this stream
-    // never captured) hands back the next one along; that is a
-    // different atom, so it is a miss.
-    if got_seq != seq {
-        return Err(not_found());
+        .map_err(|e| WireError::Internal {
+            message: e.to_string(),
+        })?;
+    let seq = match location {
+        EventLocation::Unindexed => {
+            return Err(WireError::NotFound {
+                op: "event.get".into(),
+                message: format!("no event `{asked}`"),
+            });
+        }
+        // Indexed, but we do not know where its payload is. Not a
+        // miss: the event is a fact this daemon has seen.
+        EventLocation::Unlocated => {
+            return Err(WireError::Unlocatable {
+                op: "event.get".into(),
+                message: format!(
+                    "event `{asked}` is indexed but its log position was never recorded — \
+                     the event is known, where its payload sits is not"
+                ),
+            });
+        }
+        EventLocation::At(seq) => seq,
+    };
+    let gone = |detail: String| WireError::Gone {
+        op: "event.get".into(),
+        message: format!("event `{asked}` is indexed at log position {seq} but {detail}"),
+    };
+    let state = event_at(bus, seq)
+        .await?
+        .ok_or_else(|| gone("the log no longer holds that position".into()))?;
+    if state.event.envelope.event_id != asked {
+        return Err(gone(format!(
+            "that position holds event `{}` — the log was rewound or recreated under \
+             an index that outlived it, so the position no longer means what it did",
+            state.event.envelope.event_id
+        )));
     }
-    Ok(EventState {
+    Ok(state)
+}
+
+/// The event at one log position, or `None` when the log does not
+/// hold that position.
+async fn event_at(bus: &fq_runtime::EventBus, seq: u64) -> Result<Option<EventState>, WireError> {
+    use futures::StreamExt;
+    // Ask the server where the log ends before opening a consumer: a
+    // position past the tip is now an ordinary outcome (a recreated
+    // stream restarts at 1 under an index that remembers the old
+    // numbers), and discovering it by waiting out a five-second read
+    // would make the expected case the slow one.
+    if seq == 0 || seq > bus.last_event_seq().await.map_err(internal)? {
+        return Ok(None);
+    }
+    let mut events = bus.events_from("", seq).await.map_err(internal)?;
+    let Ok(Some(next)) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), events.next()).await
+    else {
+        return Ok(None);
+    };
+    let (got_seq, event) = next.map_err(internal)?;
+    // A position the stream skipped (retention, a subject this stream
+    // never captured) hands back the next one along — so the position
+    // asked for holds nothing, whatever the read returned.
+    if got_seq != seq {
+        return Ok(None);
+    }
+    Ok(Some(EventState {
         seq: got_seq,
         event,
-    })
+    }))
 }
 
 /// The most recent `limit` matching index rows, newest first.
@@ -261,7 +374,7 @@ async fn event_at(bus: &fq_runtime::EventBus, seq: u64) -> Result<EventState, Wi
 /// exactly the columns this filter narrows by, so a capped recent
 /// window costs a `LIMIT` rather than a walk of the log. The rows are
 /// the index's — extracted fields, no payload — and each carries the
-/// `seq` that reads its event back whole. The alternative, scanning
+/// `event_id` that reads its event back whole. The alternative, scanning
 /// the log the way `turn.list` does, put the cost of an operator's
 /// most-reached-for read in direct proportion to how much history the
 /// system had accumulated, which is the wrong way round.

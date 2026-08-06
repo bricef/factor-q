@@ -43,6 +43,8 @@ use crate::control_plane::store::{
 use crate::db::RuntimeDbPaths;
 use crate::worker::store::{LlmDispatchRow, ToolDispatchRow, WorkerStore, WorkerStoreError};
 
+pub use crate::control_plane::projection::store::EventLocation;
+
 /// How many recent events to scan / retain when assembling an invocation
 /// detail view. Mirrors the CLI's `invocation show`: the projection has no
 /// per-invocation query, so we over-fetch by agent and filter in memory —
@@ -358,14 +360,12 @@ impl From<InvocationArchiveRow> for ArchiveView {
 }
 
 /// One event row from the projection — the Event atom's **index**
-/// row (`event.list`). Extracted fields, never the payload; `seq`
-/// addresses the whole event through `event.get`.
+/// row (`event.list`). Extracted fields, never the payload;
+/// `event_id` is the identity that reads the whole event back
+/// through `event.get`, whenever the payload is still retained.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct EventView {
     pub event_id: String,
-    /// The `event.get` key for this row — `None` only where the log
-    /// position was never recorded (a directly seeded index).
-    pub seq: Option<u64>,
     pub timestamp: String,
     pub agent_id: String,
     pub invocation_id: String,
@@ -381,7 +381,6 @@ impl From<EventRow> for EventView {
     fn from(r: EventRow) -> Self {
         EventView {
             event_id: r.event_id,
-            seq: r.seq,
             timestamp: r.timestamp,
             agent_id: r.agent_id,
             invocation_id: r.invocation_id,
@@ -729,6 +728,13 @@ impl Views {
     /// Total event count in the projection.
     pub async fn event_count(&self) -> Result<i64, ViewsError> {
         Ok(self.projection.count().await?)
+    }
+
+    /// Where one event's payload sits in the log — `event.get`'s
+    /// first hop, resolving an identity to a position the log can be
+    /// read at. See [`EventLocation`] for why three answers.
+    pub async fn event_location(&self, event_id: &str) -> Result<EventLocation, ViewsError> {
+        Ok(self.projection.event_location(event_id).await?)
     }
 
     /// Recent events, newest first, filtered by agent / type / since.

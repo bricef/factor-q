@@ -276,7 +276,7 @@ that serves it, and `run_daemon`. `bin/fq.rs` and `bin/fqd.rs` are shims.
 | `fq trigger` | In-process execution or `--via-nats` publish |
 | `fq agent list/validate` | Registry inspection |
 | `fq events tail` | Live event stream |
-| `fq events query` | Historical query — `event.list` over the edge, answered from the daemon's projection index (no payloads; each row's `seq` reads the whole event back via `event.get`) |
+| `fq events query` | Historical query — `event.list` over the edge, answered from the daemon's projection index (no payloads; each row's `event_id` reads the whole event back via `event.get`, for as long as the log still holds its payload) |
 | `fq costs` | Per-agent cost aggregation |
 | `fq status` | Runtime health check |
 

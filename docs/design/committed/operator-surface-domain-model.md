@@ -148,11 +148,27 @@ have a rule to follow rather than a precedent to reverse-engineer:
 
 Both halves are load-bearing.
 
-- **The row names what Get needs.** A listing that a caller cannot walk
-  from is a dead end: they would have to reconstruct a key from fields
-  that were never promised to reconstruct one, and the first schema change
-  breaks them silently. Carrying the key makes the narrower row a
-  *summary of a reachable fact* rather than a lossy substitute for it.
+- **The row names what Get needs — and what Get needs is the identity.**
+  A listing that a caller cannot walk from is a dead end: they would have
+  to reconstruct a key from fields that were never promised to reconstruct
+  one, and the first schema change breaks them silently. Carrying the key
+  makes the narrower row a *summary of a reachable fact* rather than a
+  lossy substitute for it.
+
+  The key a row carries must be the **domain's** identity, never a
+  coordinate of the store that happens to hold the fact. **Cursors may be
+  transport coordinates; identities may not.** The two come apart in
+  ordinary operation, and quietly: `Event` was first keyed on the
+  JetStream stream sequence, but recreate the stream and sequences restart
+  at 1 while the projection survives — so a stored sequence addresses a
+  *different* event and the read answers, confidently, with a neighbour.
+  A row keyed on a transport coordinate is a walk that works until an
+  operator does something ordinary.
+
+  Which is why the walk is also **checked**. Get resolves the identity to
+  a position in whatever store holds the payload, then verifies the fact
+  it read carries the identity that was asked for. Without that check,
+  moving the key into the domain would only have relocated the lie.
 - **The declaration says so, in its `description`.** Not in prose a reader
   has to go and find — in the declared text, which is what
   `List(Operation)` publishes and what lands in `operator_surface.json`.
@@ -172,8 +188,22 @@ index — timestamp-ordered, indexed on the columns the filter narrows by,
 and holding extracted fields rather than payloads. Serving that List from
 the log would have made the operator's most-reached-for read cost a scan
 in direct proportion to how much history the system had accumulated,
-which is the wrong way round. Every index row carries its `seq`, so
-`event.get` is one call away from any row.
+which is the wrong way round. Every index row carries its `event_id` —
+the UUIDv7 the event stamps on itself, and the index's own primary key —
+so `event.get` is one call away from any row: a primary-key lookup for
+the log position, then the log, then the identity check.
+
+Two stores also means two retention policies, and the walk has to be
+honest about the gap between them rather than pretend it away.
+Cost-bearing rows are exempt from the retention sweep and kept
+indefinitely; the log keeps thirty days. So a row outliving its payload
+is not a fault, it is the design working — and `event.get` names the two
+unavailable states separately instead of collapsing both into "not
+found": the **locator is unknown** (indexed, but its position was never
+recorded), and the **payload is gone** (the position is known and the log
+no longer holds it). "I asked wrongly" and "the fact is no longer whole"
+are different answers, and a consumer that cannot tell them apart cannot
+act on either.
 
 ## Domain verbs
 

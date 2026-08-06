@@ -813,8 +813,10 @@ fn golden_costs_json() {
 // row, fails here rather than being absorbed.
 //
 // The rows are also the Event atom's INDEX rows now, not events: no
-// payload, plus the `seq` that reads one back whole through
-// `event.get`. That contract is declared on the atom itself, and
+// payload, plus the `event_id` that reads one back whole through
+// `event.get`. The log position is deliberately absent — it is an
+// internal locator `event.get` resolves through, not something a
+// caller holds. That contract is declared on the atom itself, and
 // `edge_event_tail::a_list_row_walks_to_its_whole_event` executes the
 // walk.
 #[test]

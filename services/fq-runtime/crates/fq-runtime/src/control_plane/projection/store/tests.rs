@@ -697,42 +697,39 @@ async fn heartbeats_are_not_projected_and_legacy_rows_are_swept() {
 }
 
 /// The projection is an index over the log, so a row records where in
-/// the log it points. That number is the `event.get` key an
-/// `event.list` row hands its caller (plan Phase 4, cohort 4.2): an
-/// index that dropped it would list events nobody could then read
-/// whole.
+/// the log it points. `event.get` resolves an *identity* through that
+/// column (plan Phase 4, cohort 4.2): an index that dropped the
+/// position would list events nobody could then read whole.
 ///
-/// `None` is the honest answer for a row seeded straight into the
-/// index, and is what rows written before the column existed read —
-/// so it round-trips as `None` rather than as a zero that would claim
-/// to be a position.
+/// The three answers are the contract, and none of them collapses
+/// into another. An unknown id is not an unlocated row, and an
+/// unlocated row is not a missing event: a row seeded straight into
+/// the index — which is also how rows written before the column
+/// existed read — knows the event and not where its payload sits, and
+/// says exactly that rather than a zero claiming to be a position.
 #[tokio::test]
-async fn a_projected_row_records_the_log_position_it_indexes() {
+async fn an_identity_resolves_to_the_log_position_it_indexes() {
     let (store, _dir) = open_store().await;
     let positioned = sample_triggered("alpha", Uuid::now_v7());
     let seeded = sample_triggered("beta", Uuid::now_v7());
     store.insert_event(&positioned, Some(4_242)).await.unwrap();
     store.insert_event(&seeded, None).await.unwrap();
 
-    let position_of = |agent: &'static str| {
+    let located = |event: &Event| {
         let store = store.clone();
-        async move {
-            let rows = store
-                .query_events(
-                    &EventFilter {
-                        agent: Some(agent),
-                        ..Default::default()
-                    },
-                    10,
-                )
-                .await
-                .unwrap();
-            assert_eq!(rows.len(), 1);
-            rows[0].seq
-        }
+        let id = event.envelope.event_id.to_string();
+        async move { store.event_location(&id).await.unwrap() }
     };
-    assert_eq!(position_of("alpha").await, Some(4_242));
-    assert_eq!(position_of("beta").await, None);
+    assert_eq!(located(&positioned).await, EventLocation::At(4_242));
+    assert_eq!(located(&seeded).await, EventLocation::Unlocated);
+    assert_eq!(
+        store
+            .event_location(&Uuid::now_v7().to_string())
+            .await
+            .unwrap(),
+        EventLocation::Unindexed,
+        "an id the index has never seen is not an unlocated row"
+    );
 }
 
 #[tokio::test]
