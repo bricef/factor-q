@@ -314,7 +314,9 @@ pub(crate) enum DeadLetterCommands {
         /// Filter by agent
         #[arg(long)]
         agent: Option<String>,
-        /// Maximum number of rows
+        /// Maximum rows in one page, at most 500. A bigger ask is
+        /// refused, not shortened — so fewer rows than you asked for
+        /// means there are no more. For more, narrow with --agent.
         #[arg(long, default_value_t = 50)]
         limit: usize,
         /// Emit JSON instead of human-readable output.

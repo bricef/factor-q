@@ -1105,8 +1105,9 @@
           },
           "limit": {
             "default": null,
-            "description": "Cap on one List page — the most recent N matching dead letters.",
+            "description": "Cap on one List page — the most recent N matching dead\nletters, and at most 500 of them (this property's `maximum`).\nAbsent asks for the default 50.\n\n**A larger N is refused, never quietly shrunk.** So the count\nthat comes back is always the one you asked for or the whole\nanswer, and it reads unambiguously: fewer rows than you asked\nfor means there are no more; exactly as many means there may\nbe. For more than a page, narrow with `agent` — the only\nnarrowing this filter offers — or read the same dead letters\nfrom `dead_letter.stream`, which is cursored.\n\nIgnored by Stream, which is cursored rather than paged.",
             "format": "uint32",
+            "maximum": 500,
             "minimum": 0,
             "type": [
               "integer",

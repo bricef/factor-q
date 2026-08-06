@@ -37,10 +37,32 @@ pub(crate) async fn list_dead_letters(
 ) -> anyhow::Result<()> {
     let filter = DeadLetterFilter {
         agent: agent.map(str::to_string),
-        // The flag is `usize` and the wire contract `u32`: a limit past
-        // four billion asks for everything a page can hold, which is
-        // what saturating says.
-        limit: Some(u32::try_from(limit).unwrap_or(u32::MAX)),
+        // `--limit` travels as the caller wrote it, and the daemon is
+        // the one authority on how big a page may be — so the only
+        // thing decided here is the number that has no page to travel
+        // as at all. The flag is `usize`, the wire contract `u32`, so
+        // that is exactly the values above `u32::MAX`: nothing
+        // negative can be typed, and everything else converts.
+        //
+        // It used to saturate to `u32::MAX`, on the reading that a
+        // limit past four billion "asks for everything a page can
+        // hold". Nothing holds everything — one List answer is one
+        // frame, and the edge frames at 8 MiB — and `u32::MAX` is
+        // itself far over the cap, so saturating swapped the
+        // operator's number for one they never typed and then had
+        // *that* refused, quoting the substitute back at them.
+        limit: Some(u32::try_from(limit).map_err(|_| {
+            anyhow::anyhow!(
+                "--limit {limit} is not a page size: one page is at most {cap} dead \
+                 letters. There is no spelling of \"all of them\" here — this used to \
+                 substitute the largest number the wire can carry and let the daemon \
+                 refuse that instead, reporting a limit you never typed. For more than a \
+                 page, narrow with --agent — the only narrowing this listing offers; the \
+                 cursored read of the same dead letters is `dead_letter.stream` on the \
+                 operator surface, which no `fq` verb consumes yet.",
+                cap = crate::dead_letter_atom::DEAD_LETTER_LIST_MAX_LIMIT
+            )
+        })?),
     };
     let output = edge_invoke(
         global,

@@ -9,6 +9,11 @@
 //! ops: the Get whose key is the log sequence, and the Stream that
 //! the atom's nature derives and no verb consumes yet. A declared op
 //! nothing exercises is a declared op nothing keeps honest.
+//!
+//! It also covers what the surface *declares* about List, not only
+//! what List does: the cap on a page is read back off the published
+//! operation the way a consumer would read it, so a declaration that
+//! drifted from the daemon's behaviour fails from either side.
 
 #![cfg(unix)]
 
@@ -83,53 +88,113 @@ fn dead_letter(agent: &str, trigger_seq: u64, source: &str, payload: serde_json:
     .annotate(DEAD_LETTER_SOURCE_KEY, json!(source))
 }
 
+/// A live `fqd`, an edge client pinned to its certificate, and a bus
+/// connection to the same broker — the fixture every test in this file
+/// drives.
+///
+/// Extracted rather than copied when the second test arrived: two
+/// daemons started by two hand-written copies of the same forty lines
+/// is how the copies drift, and one of them would have been the one
+/// that stopped proving anything.
+struct World {
+    scratch: std::path::PathBuf,
+    daemon: std::process::Child,
+    client: fq_edge::EdgeClient,
+    bus: fq_runtime::EventBus,
+}
+
+impl World {
+    async fn start(nats_url: &str) -> World {
+        let scratch = unique_scratch();
+        let log_path = scratch.join("daemon.log");
+        let log = std::fs::File::create(&log_path).expect("create daemon log");
+        let log_err = log.try_clone().expect("clone log handle");
+        let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
+            .env("FQ_CONFIG", scratch.join("fq.toml"))
+            .env("FQ_NATS_URL", nats_url)
+            .env("FQ_CACHE_DIR", scratch.join("cache"))
+            .env("FQ_STATE_DIR", scratch.join("state"))
+            .env("FQ_AGENTS_DIR", scratch.join("agents"))
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err))
+            .spawn()
+            .expect("spawn fqd");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let text = loop {
+            if let Some(status) = daemon.try_wait().expect("poll fqd") {
+                panic!("fqd exited during startup with {status:?}");
+            }
+            let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if text.contains("Runtime ready") {
+                break text;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "fqd never ready");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let fingerprint = parse_fingerprint(suffix_of(
+            &text,
+            "edge: certificate fingerprint (clients pin this): ",
+        ));
+        let token = {
+            let mut lines = text.lines();
+            lines.find(|l| l.contains("edge: admin token")).unwrap();
+            lines.next().unwrap().trim().to_string()
+        };
+        let addr = suffix_of(&text, "- edge is listening on ").to_string();
+
+        let client = fq_edge::EdgeClient::connect(&addr, fingerprint, &token)
+            .await
+            .expect("connect edge");
+        let bus = fq_runtime::EventBus::connect(nats_url)
+            .await
+            .expect("connect bus");
+        World {
+            scratch,
+            daemon,
+            client,
+            bus,
+        }
+    }
+
+    /// One read op, with the daemon's verdict left intact — for the
+    /// requests it is supposed to refuse, where the error *is* the
+    /// answer under test.
+    async fn invoke(
+        &self,
+        op: OpId,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, fq_edge::wire::WireError> {
+        self.client
+            .rpc
+            .invoke(
+                tarpc::context::current(),
+                fq_edge::InvokeRequest {
+                    op,
+                    version: 1,
+                    input,
+                    min_seq: None,
+                },
+            )
+            .await
+            .expect("rpc")
+            .map(|response| response.output)
+    }
+
+    fn shutdown(mut self) {
+        let rc = unsafe { libc::kill(self.daemon.id() as i32, libc::SIGTERM) };
+        assert_eq!(rc, 0);
+        let status = self.daemon.wait().expect("wait");
+        assert!(status.success());
+        let _ = std::fs::remove_dir_all(&self.scratch);
+    }
+}
+
 #[tokio::test]
 async fn the_dead_letter_atom_lives_end_to_end() {
     let server = fq_test_support::NatsServer::start();
-    let scratch = unique_scratch();
-
-    let log_path = scratch.join("daemon.log");
-    let log = std::fs::File::create(&log_path).expect("create daemon log");
-    let log_err = log.try_clone().expect("clone log handle");
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
-        .env("FQ_CONFIG", scratch.join("fq.toml"))
-        .env("FQ_NATS_URL", server.url())
-        .env("FQ_CACHE_DIR", scratch.join("cache"))
-        .env("FQ_STATE_DIR", scratch.join("state"))
-        .env("FQ_AGENTS_DIR", scratch.join("agents"))
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let text = loop {
-        if let Some(status) = daemon.try_wait().expect("poll fqd") {
-            panic!("fqd exited during startup with {status:?}");
-        }
-        let text = std::fs::read_to_string(&log_path).unwrap_or_default();
-        if text.contains("Runtime ready") {
-            break text;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "fqd never ready");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    let fingerprint = parse_fingerprint(suffix_of(
-        &text,
-        "edge: certificate fingerprint (clients pin this): ",
-    ));
-    let token = {
-        let mut lines = text.lines();
-        lines.find(|l| l.contains("edge: admin token")).unwrap();
-        lines.next().unwrap().trim().to_string()
-    };
-    let addr = suffix_of(&text, "- edge is listening on ").to_string();
-
-    let client = fq_edge::EdgeClient::connect(&addr, fingerprint, &token)
-        .await
-        .expect("connect edge");
-    let bus = fq_runtime::EventBus::connect(server.url())
-        .await
-        .expect("connect bus");
+    let world = World::start(server.url()).await;
+    let client = &world.client;
+    let bus = &world.bus;
 
     let stream_op = OpId::Stream(Domain::DeadLetter);
     let all: serde_json::Value = json!({});
@@ -356,9 +421,144 @@ async fn the_dead_letter_atom_lives_end_to_end() {
     assert!(idle.items.is_empty());
     assert!(idle.next_from_seq >= batch.next_from_seq);
 
-    let rc = unsafe { libc::kill(daemon.id() as i32, libc::SIGTERM) };
-    assert_eq!(rc, 0);
-    let status = daemon.wait().expect("wait");
-    assert!(status.success());
-    let _ = std::fs::remove_dir_all(&scratch);
+    world.shutdown();
+}
+
+/// The agent this file's cap test publishes under — its own, so the
+/// row counts below are exact rather than "at least".
+const CAPPED_AGENT: &str = "capped";
+
+/// The largest page `dead_letter.list` will serve, as a consumer reads
+/// it: off the declared surface, not out of the source.
+fn declared_list_cap(surface: &serde_json::Value) -> u64 {
+    surface
+        .as_array()
+        .expect("the surface describes itself as a list of entries")
+        .iter()
+        .filter_map(|entry| entry.get("atom"))
+        .find(|atom| atom["domain"] == "dead_letter")
+        .expect("the DeadLetter atom is on the surface")["filter_schema"]["properties"]["limit"]
+        ["maximum"]
+        .as_u64()
+        .expect("the declared filter says how large a page may be")
+}
+
+async fn page(world: &World, limit: u64) -> Result<serde_json::Value, fq_edge::wire::WireError> {
+    world
+        .invoke(
+            OpId::List(Domain::DeadLetter),
+            json!({"agent": CAPPED_AGENT, "limit": limit}),
+        )
+        .await
+}
+
+async fn rows(world: &World, limit: u64) -> usize {
+    page(world, limit)
+        .await
+        .unwrap_or_else(|e| panic!("dead_letter.list must serve a page of {limit}; got {e:?}"))
+        .as_array()
+        .expect("a list of dead letters")
+        .len()
+}
+
+/// **A List page is bounded, the bound is declared, and an ask above
+/// it is refused rather than quietly shortened.**
+///
+/// `dead_letter.list` served whatever `limit` it was handed, and the
+/// CLI made that worse by saturating anything past `u32::MAX` into
+/// "everything a page can hold" — a page that holds everything does
+/// not exist. One List answer is one frame, the edge's codec stops at
+/// 8 MiB, and a dead letter is a fat row: it carries the trigger
+/// payload that died with it, opaque JSON nothing truncates. So a
+/// large enough listing was a scan of the whole subject followed by a
+/// response too large to encode, and the operator paid for the scan.
+///
+/// Clamping would have fixed the frame and broken the answer. List
+/// hands back a bare array — no envelope, no cursor, nowhere to say
+/// "there is more" — so a page the daemon shortened is
+/// indistinguishable from a listing that ended, and on *this* listing
+/// that reads as "nothing else fell on the floor".
+///
+/// So the three properties that make a cap honest, asserted end to
+/// end:
+///
+/// 1. **The cap is on the surface.** It is read here off
+///    `List(Operation)`, the way a consumer would, rather than
+///    hardcoded — and since the refusal and the served page are both
+///    measured against that number, a declared cap that disagreed with
+///    the enforced one fails this test from either side.
+/// 2. **Above it is a refusal**, naming the cap and the cursored read
+///    that serves more than a page, so the caller's next request is an
+///    edit rather than a guess.
+/// 3. **Below it the page is the caller's own number** — which is what
+///    makes a row count readable at all: fewer rows than you asked for
+///    means there are no more.
+#[tokio::test]
+async fn a_list_page_is_bounded_by_a_cap_the_surface_declares() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let cap = declared_list_cap(
+        &world
+            .invoke(OpId::List(Domain::Operation), json!({}))
+            .await
+            .expect("operation.list"),
+    );
+
+    // A corpus only this test can have published: its own agent, which
+    // the filter narrows to. The daemon mints events of its own
+    // throughout and none of them is a dead letter (that needs a
+    // trigger to actually exhaust), but the assertions here are exact
+    // counts rather than set membership, so the window admits nothing
+    // else by construction.
+    const CORPUS: u64 = 3;
+    for i in 0..CORPUS {
+        world
+            .bus
+            .publish(&dead_letter(
+                CAPPED_AGENT,
+                100 + i,
+                "inline",
+                json!({"n": i}),
+            ))
+            .await
+            .expect("publish a dead letter");
+    }
+
+    let err = page(&world, cap + 1)
+        .await
+        .expect_err("a page over the cap must be refused, not served short");
+    assert!(
+        matches!(&err, fq_edge::wire::WireError::InvalidInput { op, message }
+            if op == "dead_letter.list"
+                && message.contains(&cap.to_string())
+                && message.contains("dead_letter.stream")),
+        "the refusal must name the cap and the cursored read; got {err:?}"
+    );
+
+    // The declared cap is servable, not one the daemon trips over —
+    // and asking for it over a three-row corpus answers with three, so
+    // "fewer rows than I asked for" is a complete listing rather than
+    // a shortened one.
+    assert_eq!(
+        rows(&world, cap).await,
+        CORPUS as usize,
+        "a page at the declared cap must be served, and must not be padded to it"
+    );
+
+    // Under the cap, `limit` is the caller's own bound in both
+    // directions: never rounded up to the cap, never rounded down to
+    // some number the daemon preferred.
+    assert_eq!(
+        rows(&world, CORPUS + 5).await,
+        CORPUS as usize,
+        "asking for more than exists must answer with everything"
+    );
+    assert_eq!(
+        rows(&world, CORPUS - 1).await,
+        (CORPUS - 1) as usize,
+        "asking for fewer than exists must answer with exactly that many"
+    );
+
+    world.shutdown();
 }
