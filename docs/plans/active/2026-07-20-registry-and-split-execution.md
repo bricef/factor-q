@@ -198,9 +198,10 @@ and independent. Order:
    surface): `Worker`, `Agent`, `Event` (its atom registration
    includes `event.stream`, upgrading today's silent-drop core-NATS
    `events tail` to sequence-resumable), `DeadLetter`, and the
-   synthetic `Control` (`control.get` absorbs `runtime.version`/
-   `health`/`status` — JetStream introspection moves daemon-side; it
-   cannot live in a thin client). Per-method call on `failures`/
+   synthetic `Control` (the `control.status` **report** absorbs
+   `runtime.version`/`health`/`status` — JetStream introspection moves
+   daemon-side; it cannot live in a thin client. Not `control.get`: a
+   synthetic has no Get, per ADR-0006 Appendix D, 2026-08-06). Per-method call on `failures`/
    `recovery`/`executions`/`event_count`: report input vs. internal to
    the `control.doctor` composite.
 2. **Commands:** `trigger.publish`, `deadletter.requeue`

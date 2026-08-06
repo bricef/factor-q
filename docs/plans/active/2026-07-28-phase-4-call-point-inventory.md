@@ -34,7 +34,7 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 11 | `fq events tail` | core-NATS subscribe, silent-drop, non-resumable | — | `event.stream` atom | no |
 | 12 | `fq events query` | direct Views → `Views::events` | `events_query_*` | `event.list` atom | no |
 | 13 | `fq costs` | direct Views → `Views::costs` | `costs_*` | `cost.summary` report | ReportId + fixture exist; not registered |
-| 14 | `fq status` | direct JetStream probe + direct Views (`CLI:1772-1875`) | `status_*` (only Nats::Live goldens) | `control.get` on the synthetic | no |
+| 14 | `fq status` | direct JetStream probe + direct Views (`CLI:1772-1875`) | `status_*` (only Nats::Live goldens) | `control.status` report (scope `Control`) — **not** `control.get`; a synthetic has no Get (2026-08-06) | no |
 | 15 | `fq doctor` | direct Views ×4 | `doctor_*` | `control.doctor` report (D-5 gates the roster) | no |
 | 16 | `fq invocation list` | **edge** | `invocation_list_*` | — | ✅ DONE (3b) |
 | 17 | `fq invocation show` | **edge** | `invocation_show_*` | — | ✅ DONE (3b) |
@@ -47,7 +47,7 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 24 | `fq connect` | edge (TOFU pairing) | (edge_client_cli.rs) | — | ✅ DONE |
 | 25 | `fq ops list` | edge | (edge_client_cli.rs) | — | ✅ DONE |
 | 26 | `fq token attenuate` | offline (fq-edge) | — | — | ✅ DONE |
-| 27 | `fq version` | build-time consts | — | local stays; daemon build via `control.get` | n/a |
+| 27 | `fq version` | build-time consts | — | local stays; daemon build via `control.status` | n/a |
 
 **Count check**: flips remaining 3, 4, 6, 7, 8, 11, 12, 13, 14, 15,
 19, 23 = **12**. Verbs 18 and 20 landed 2026-07-28 (cohort 4.0);
@@ -298,19 +298,30 @@ amendment landed 2026-08-05 — see section C)*
 
 **4.4 — reports, synthetic, dashboard**
 15. `cost.summary` report + verb 13 flip.
-16. `control.get` (status: version, health, stream probes move
+16. `control.status` **report** (version, health, stream probes move
     daemon-side) + verb 14 flip; `control.doctor` report + verb 15
-    flip (D-5 decides the exposed roster). **Two decisions land here,
-    both from the 2026-08-05 model amendment.** (a) The machinery read
-    also carries the **registry's state, load errors included** — so
-    `agent.list`'s sum-typed index row (`AgentEntryView::LoadError`)
-    retires and verb 9's rendering re-sources its error block from
-    here; a reviewed golden change, not byte-identical. (b) The op's
-    **name is unsettled**: the maintainer named it `control.status`,
-    but a synthetic's Get renders `control.get`. The model recommends
-    changing the rendering rule for the synthetic nature and rejects
-    declaring it a report; **settle it before declaring the op**, and
-    edit all three places (model, ADR-0006 Appendix B, this row).
+    flip (D-5 decides the exposed roster). **Three things land here,
+    from the 2026-08-05/06 model amendment**
+    ([ADR-0006 Appendix D](../../adrs/accepted/0006-registry-first-api.md)):
+    - **The machinery reads are reports, not a Get.** A synthetic has
+      no Get, no key, no filter and no state schema — it is a
+      permission scope hosting `control.down`/`control.reload`. Declare
+      `Control` report identities (`control.status`, `control.doctor`)
+      rather than reaching for `OpId::Get(Domain::Control)`.
+    - **Realise it in `fq-ops` in this cohort**, since the declaration
+      lands here anyway: drop `state_schema` from `Synthetic` and its
+      `new::<State>` type parameter, drop `OpId::Get` from
+      `derived_ops` for synthetics and the matching resolve arm, fix
+      the three synthetic assertions in `fq-ops/tests/registry.rs`, the
+      `ControlState` fixture, and `opid.rs`'s module doc — then
+      **regenerate `tests/snapshots/exemplar_registry.json`**, whose
+      `synthetic` entry serialises a `state_schema` today. A reviewed
+      snapshot change, not a mechanical one.
+    - **`control.status` carries the registry's state, load errors
+      included** — so `agent.list`'s sum-typed index row
+      (`AgentEntryView::LoadError`) retires and verb 9's rendering
+      re-sources its error block from here. A reviewed golden change,
+      not byte-identical.
 17. Dashboard re-point over an attenuated read-only token; read
     service retires; `version`-probe freeze honoured explicitly.
     **Resolves a live divergence**: `read_service.rs` still answers
@@ -343,6 +354,6 @@ amendment landed 2026-08-05 — see section C)*
 - **H3** (verb 4): `deploy.sh` treats `fq down` exit 0 as confirmed
   shutdown; the flip must keep that contract.
 - **H4** (verb 14): `fq status` does JetStream admin introspection a
-  thin client cannot keep; it moves inside `control.get`, and the
+  thin client cannot keep; it moves inside `control.status`, and the
   read service's frozen `version` probe semantics must be preserved
   deliberately or dropped deliberately — not inherited by accident.
