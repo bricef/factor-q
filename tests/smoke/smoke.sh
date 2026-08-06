@@ -32,6 +32,34 @@ TMP_ROOT="$(mktemp -d -t fq-smoke-XXXXXX)"
 TESTS_RUN=0
 TESTS_FAILED=0
 
+# Everything this run touches lives under TMP_ROOT, including the three
+# things `fq` would otherwise reach for in the operator's own home:
+#
+#   FQ_CONFIG        carries the edge bind below and nothing else, so
+#                    the rest of the runtime still runs on its defaults
+#   FQ_STATE_DIR     the edge identity is durable state, and a fresh
+#                    directory is what makes this a *first* run — the
+#                    only time the daemon mints and prints the admin
+#                    token we need in order to pair
+#   XDG_CONFIG_HOME  `fq connect` writes the pairing to
+#                    $XDG_CONFIG_HOME/factor-q/connections.toml, so
+#                    without this a smoke run would overwrite the
+#                    operator's real pairing on their own machine
+#
+# Exported rather than passed as flags so that the daemon and every
+# client call agree without threading the same arguments through each.
+export FQ_CONFIG="${TMP_ROOT}/fq.toml"
+export FQ_STATE_DIR="${TMP_ROOT}/state"
+export XDG_CONFIG_HOME="${TMP_ROOT}/config"
+
+# Port 0: the kernel picks a free port and the daemon reports the one it
+# got. Picking a port here instead would mean binding a socket to find a
+# free one and closing it before the daemon binds, and whatever takes it
+# in that gap breaks the run (the race #454 already tracks). The default
+# 9472 is not an option either — on a developer box it is usually held
+# by the daemon or dashboard they are already running.
+printf '[edge]\nbind = "127.0.0.1:0"\n' > "${FQ_CONFIG}"
+
 cleanup() {
     # Kill any background fq run we may have left behind.
     if [[ -n "${RUN_PID:-}" ]] && kill -0 "${RUN_PID}" 2>/dev/null; then
@@ -318,19 +346,89 @@ start_fq_run() {
         run >"${RUN_LOG}" 2>&1 &
     RUN_PID=$!
 
-    # Wait for the runtime to finish starting up (the projection
-    # consumer logs "projection consumer starting" once it's ready
-    # to receive). Bail out if it never becomes ready.
+    # Wait for the runtime to finish starting up. Two lines have to
+    # arrive, not one: the projection consumer logs "projection consumer
+    # starting" once it can receive, and the edge logs the address it
+    # actually bound — which, on port 0, is the only place that address
+    # exists at all.
     local deadline=$((SECONDS + 10))
+    local ready=""
     while (( SECONDS < deadline )); do
-        if grep -q "projection consumer starting" "${RUN_LOG}" 2>/dev/null; then
-            return 0
+        if grep -q "projection consumer starting" "${RUN_LOG}" 2>/dev/null \
+            && grep -q "edge is listening on" "${RUN_LOG}" 2>/dev/null; then
+            ready=1
+            break
         fi
         sleep 0.1
     done
-    fail "fq run did not start within 10s"
-    cat "${RUN_LOG}" | head -30
-    return 1
+    if [[ -z "${ready}" ]]; then
+        fail "fq run did not start within 10s"
+        head -30 "${RUN_LOG}"
+        return 1
+    fi
+
+    pair_with_edge
+}
+
+# Pair this script's `fq` with the daemon it just started.
+#
+# Every verb that reads runtime state now goes through the edge, which
+# authenticates, so a smoke run that never pairs is a smoke run that
+# cannot read anything back — `fq events query` below depends on this
+# having happened.
+#
+# Both values come out of RUN_LOG because neither exists anywhere else:
+# the address was chosen by the kernel, and the admin token is minted
+# and printed exactly once, on a first run against a fresh state
+# directory. Both are matched by content and never by line number — the
+# daemon's stdout and its tracing output share this file, so a line can
+# land between a banner and the value it introduces. Reading "the line
+# after the marker" is the assumption that makes #454 flaky, and there
+# is no reason to repeat it here.
+pair_with_edge() {
+    local addr token
+    addr="$(sed -n 's/.*edge is listening on \([0-9.]*:[0-9]*\).*/\1/p' \
+        "${RUN_LOG}" | tail -1)"
+    if [[ -z "${addr}" ]]; then
+        fail "could not read the edge address from ${RUN_LOG}"
+        head -30 "${RUN_LOG}"
+        return 1
+    fi
+
+    # The token is a biscuit: one long run of base64url alone on its
+    # line. Requiring that shape means an interleaved tracing line
+    # cannot be mistaken for it, however the two streams land.
+    token="$(awk '
+        /edge: admin token/ { seen = 1; next }
+        seen {
+            line = $0
+            gsub(/[[:space:]]/, "", line)
+            if (line ~ /^[A-Za-z0-9_=-]+$/ && length(line) >= 40) {
+                print line
+                exit
+            }
+        }
+    ' "${RUN_LOG}")"
+    if [[ -z "${token}" ]]; then
+        fail "could not read the admin token from ${RUN_LOG}"
+        head -30 "${RUN_LOG}"
+        return 1
+    fi
+
+    # Client verbs dial `[edge] bind` from config, while `fq connect`
+    # stores the pairing under the address it is handed — so the two
+    # have to name the same place, and with port 0 that place is not
+    # known until now. The daemon read this file once at startup and
+    # nothing rereads it, so writing the resolved address back is safe.
+    printf '[edge]\nbind = "%s"\n' "${addr}" > "${FQ_CONFIG}"
+
+    if ! "${FQ_BIN}" connect "${addr}" --token "${token}" \
+        > "${TMP_ROOT}/connect.log" 2>&1; then
+        fail "fq connect failed"
+        head -20 "${TMP_ROOT}/connect.log"
+        return 1
+    fi
+    pass "paired with the daemon's edge at ${addr}"
 }
 
 stop_fq_run() {
