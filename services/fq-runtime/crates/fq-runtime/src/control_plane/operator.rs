@@ -13,11 +13,7 @@ use crate::bus::{BusError, EventBus, STREAM_NAME, TRIGGER_STREAM_NAME};
 use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::projection::store::StoreError;
 use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError};
-use crate::events::{
-    DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-    DEAD_LETTER_SUBJECT_KEY, Event, EventPayload, FailureKind, InvocationOperatorRecoveredPayload,
-    subjects,
-};
+use crate::events::{Event, EventPayload, InvocationOperatorRecoveredPayload, subjects};
 
 /// Outcome of a successful [`drop_invocation`].
 #[derive(Debug, Clone)]
@@ -139,21 +135,11 @@ pub async fn drop_invocation(
 /// on the bus. The event — not the projection — is the source of
 /// truth here: the projection stores no annotations, and the original
 /// trigger ages out of its stream long before the event does.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DeadLetter {
-    pub event_id: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub agent_id: String,
-    pub trigger_subject: String,
-    /// The original trigger's sequence on the trigger stream — the
-    /// key that reconciles the inline and advisory emitters, and the
-    /// selector for [`requeue_dead_letter`].
-    pub trigger_stream_seq: Option<u64>,
-    /// Which emitter surfaced it: `"inline"` | `"advisory"`.
-    pub source: String,
-    pub trigger_payload: serde_json::Value,
-    pub error_message: String,
-}
+///
+/// The type itself now lives in [`crate::dead_letter`], which is also
+/// where the operator surface's DeadLetter atom serves it from; this
+/// re-export keeps `requeue`'s established path working.
+pub use crate::dead_letter::DeadLetter;
 
 /// Failure modes for the dead-letter verbs.
 #[derive(Debug, thiserror::Error)]
@@ -221,40 +207,12 @@ pub async fn list_dead_letters(
         let Ok(event) = serde_json::from_slice::<Event>(&msg.payload) else {
             continue;
         };
-        let EventPayload::Failed(failed) = &event.payload else {
-            continue;
-        };
-        if !matches!(failed.error_kind, FailureKind::TriggerExhausted) {
-            continue;
+        // One definition of "is a dead letter", shared with the atom
+        // the operator surface serves — so the two readings of the
+        // same log cannot drift.
+        if let Some(dead) = DeadLetter::from_event(&event) {
+            out.push(dead);
         }
-        let get_str = |key: &str| {
-            event
-                .annotations
-                .0
-                .get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string()
-        };
-        out.push(DeadLetter {
-            event_id: event.envelope.event_id.to_string(),
-            timestamp: event.envelope.timestamp,
-            agent_id: event.envelope.agent_id.as_str().to_string(),
-            trigger_subject: get_str(DEAD_LETTER_SUBJECT_KEY),
-            trigger_stream_seq: event
-                .annotations
-                .0
-                .get(DEAD_LETTER_STREAM_SEQ_KEY)
-                .and_then(|v| v.as_u64()),
-            source: get_str(DEAD_LETTER_SOURCE_KEY),
-            trigger_payload: event
-                .annotations
-                .0
-                .get(DEAD_LETTER_PAYLOAD_KEY)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-            error_message: failed.error_message.clone(),
-        });
     }
     // Stream order is oldest-first; the operator wants newest first.
     out.reverse();
@@ -334,6 +292,10 @@ pub async fn requeue_dead_letter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{
+        DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
+        DEAD_LETTER_SUBJECT_KEY, FailureKind,
+    };
     use serde_json::json;
 
     /// A dead-letter event exactly as both emitters shape it (#165's

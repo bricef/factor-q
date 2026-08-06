@@ -1026,6 +1026,125 @@
     }
   },
   {
+    "atom": {
+      "description": "Event-log-backed, not a stored table: `seq` is the stream sequence of the `failed` event that recorded the exhaustion — the same cursor receipts, `min_seq` gates and the Event and Turn atoms speak. `trigger_stream_seq` is a different number entirely (the original trigger's, on the trigger stream) and may be absent. List answers with the most recent `limit` matching dead letters in sequence order, bounded by the tip observed at entry; Stream long-polls via next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail. Visibility is bounded by event-stream retention (30 days by default); the trigger payload a requeue needs is bounded by the trigger stream's, which is shorter.",
+      "domain": "dead_letter",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List/Stream selection for DeadLetters — the typed, schema'd filter,\nnever a query language.\n\nIt carries exactly the narrowing `fq dead-letters list` offers\n(`--agent`, `--limit`) and nothing invented alongside: a filter is a\npromise the surface has to keep, so it grows when a caller needs it\nto (P11), not when a field looks plausible.",
+        "properties": {
+          "agent": {
+            "default": null,
+            "description": "One agent's dead letters. Absent reads every agent's.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Cap on one List page — the most recent N matching dead letters.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "title": "DeadLetterFilter",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for a DeadLetter: its event-log sequence.\n\n**Not** the trigger sequence the human listing prints and\n`dead_letter.requeue` selects by — that is a coordinate on the\ntrigger stream, is not unique across agents, and is absent whenever\nthe trigger aged out before the advisory landed. See\n[`DeadLetterState`] for the full reasoning.",
+        "properties": {
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq"
+        ],
+        "title": "DeadLetterKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "DeadLetter": {
+            "description": "One dead-lettered trigger, as its terminal event records it.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "error_message": {
+                "type": "string"
+              },
+              "event_id": {
+                "type": "string"
+              },
+              "source": {
+                "description": "Which emitter surfaced it: `\"inline\"` | `\"advisory\"`.",
+                "type": "string"
+              },
+              "timestamp": {
+                "description": "When the exhaustion was recorded, RFC3339.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`chrono::DateTime` would need schemars' chrono integration —\na wider change than this atom (the Event atom made the same\ncall for its payload tree).",
+                "type": "string"
+              },
+              "trigger_payload": true,
+              "trigger_stream_seq": {
+                "description": "The original trigger's sequence on the **trigger** stream — the\nkey that reconciles the inline and advisory emitters, and the\nselector `dead_letter.requeue` takes.\n\nAbsent when the advisory arrived after the trigger had aged\nout, which is why it is not this atom's identity: an identity\nthat can be missing is not one. The atom is addressed by its\n**event-log** sequence — see [`DeadLetterState`].",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "trigger_subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "event_id",
+              "timestamp",
+              "agent_id",
+              "trigger_subject",
+              "source",
+              "trigger_payload",
+              "error_message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "A dead letter addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `dead_letter.stream`,\nfeeds `min_seq` gates, and rides in a command receipt's `AtomRef`.\n\nThe identity is the log sequence and not the trigger sequence for\nthree reasons, in ascending order of force: the trigger sequence is\na coordinate on a *different* stream, it is not unique across\nagents, and it can be absent altogether. The Event and Turn atoms\nare keyed the same way, so a sequence read out of any of the three\nstreams means the same thing.",
+        "properties": {
+          "dead_letter": {
+            "$ref": "#/$defs/DeadLetter",
+            "description": "The fact itself. Nested rather than flattened so the identity\nis visibly the atom's and not one of the trigger's own fields."
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "dead_letter"
+        ],
+        "title": "DeadLetterState",
+        "type": "object"
+      },
+      "summary": "A trigger that exhausted its delivery budget, as its terminal event records it.",
+      "version": 1
+    }
+  },
+  {
     "command": {
       "authority": {
         "scope": "invocation",

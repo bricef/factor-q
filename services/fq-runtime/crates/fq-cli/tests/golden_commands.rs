@@ -342,9 +342,16 @@ fn golden_trigger_via_nats() {
 }
 
 // ------------------------------------------------------------------
-// dead-letters list / requeue — JetStream-backed reads and writes.
-// Each test gets a fresh broker, so stream sequences in the output
-// are deterministic (a fresh trigger stream numbers from 1).
+// dead-letters requeue — a JetStream-backed write. A fresh broker per
+// test, so stream sequences in the output are deterministic (a fresh
+// trigger stream numbers from 1) — and no daemon, deliberately: a
+// requeue publishes a real trigger, and a daemon would dispatch it.
+//
+// `dead-letters list` used to be snapshotted here beside it. It moved
+// to `golden.rs`'s edge fixture with verb 7's Phase-4 flip: the
+// listing is now `dead_letter.list` on the authenticated edge, which
+// this harness — a bare `fq` against a broker, no daemon — cannot
+// serve. The golden files are unchanged.
 // ------------------------------------------------------------------
 
 /// Two dead letters for `researcher` (older trigger seq 11, newer 12)
@@ -389,35 +396,6 @@ fn seed_dead_letters(nats_url: &str) {
         .await
         .unwrap();
     });
-}
-
-#[test]
-fn golden_dead_letters_list() {
-    let server = fq_test_support::NatsServer::start();
-    let scratch = Scratch::new();
-    seed_dead_letters(server.url());
-
-    let keep = [fixed_uuid(21).to_string(), fixed_uuid(22).to_string()];
-    let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
-
-    let (exit, stdout, stderr) = run_fq(&scratch, server.url(), &["dead-letters", "list"]);
-    assert_eq!(exit, Some(0), "list should exit 0; stderr:\n{stderr}");
-    assert_golden(
-        "dead_letters_list_human",
-        &redact(&stdout, &scratch, server.url(), &keep),
-    );
-
-    let (exit, stdout, stderr) =
-        run_fq(&scratch, server.url(), &["dead-letters", "list", "--json"]);
-    assert_eq!(
-        exit,
-        Some(0),
-        "list --json should exit 0; stderr:\n{stderr}"
-    );
-    assert_golden(
-        "dead_letters_list_json",
-        &redact(&stdout, &scratch, server.url(), &keep),
-    );
 }
 
 #[test]
