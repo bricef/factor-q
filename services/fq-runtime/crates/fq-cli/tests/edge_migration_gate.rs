@@ -41,10 +41,11 @@
 //!
 //! The scanner deliberately mirrors `store_open_gate.rs`: walk `src/`
 //! at runtime so a module split joins the gate automatically rather
-//! than silently shrinking it (#189), and strip `#[cfg(test)]` module
-//! bodies so fixtures are exempt. It is duplicated rather than shared
-//! because a tripwire that depends on another test's helpers can be
-//! disarmed from a distance.
+//! than silently shrinking it (#189), and exempt fixtures in both the
+//! forms they take — an inline `#[cfg(test)]` module body, and the
+//! sibling `foo/tests.rs` AGENTS.md prescribes. It is duplicated rather
+//! than shared because a tripwire that depends on another test's
+//! helpers can be disarmed from a distance.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -116,6 +117,26 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// is the one dead-letter call point left, and cohort 4.3 takes it.
 const REMAINING: usize = 7;
 
+/// True when `path` is the test half of a module split — `foo/tests.rs`
+/// beside a `foo.rs` that declares `#[cfg(test)] mod tests;`.
+///
+/// AGENTS.md puts unit tests in a sibling file so a module's production
+/// code is not buried under its own tests, and `fq-lint` resolves the same
+/// declaration to exclude them from both size budgets. This gate has to
+/// agree: that code is `#[cfg(test)]` either way, and a scan that counted
+/// it would report a module split (#189) as a ratchet regression purely
+/// because the fixtures changed shape. The declaration is what is checked,
+/// not the filename, so a `tests.rs` nobody declares still gets scanned.
+fn is_sibling_test_file(path: &Path) -> bool {
+    if path.file_name().is_none_or(|name| name != "tests.rs") {
+        return false;
+    }
+    path.parent()
+        .map(|dir| dir.with_extension("rs"))
+        .and_then(|declaring| fs::read_to_string(declaring).ok())
+        .is_some_and(|src| src.contains("#[cfg(test)]\nmod tests;"))
+}
+
 /// Every `.rs` file under `dir`, recursively, in a stable order.
 fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -125,7 +146,9 @@ fn rust_sources(dir: &Path) -> Vec<PathBuf> {
             let path = entry.expect("read source dir entry").path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && !is_sibling_test_file(&path)
+            {
                 files.push(path);
             }
         }

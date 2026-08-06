@@ -9,12 +9,18 @@
 //! the listing disagree with what would actually run. The registry is
 //! the daemon's, so the read is the daemon's.
 //!
-//! `fq agent validate` deliberately stays local: linting a file
-//! someone is about to add is an offline operation, and it is why
-//! removing this verb's local read costs nothing.
+//! `fq agent validate` sits here too and deliberately stays local:
+//! linting a file someone is about to add is an offline operation, and
+//! it is why removing the listing's local read costs nothing.
 
-use super::*;
+use std::path::Path;
+
+use fq_runtime::agent::definition::parse_agent;
 use fq_runtime::agent_view::{AgentEntryView, AgentSummaryView};
+
+use crate::cli::GlobalArgs;
+use crate::edge_call::edge_invoke;
+use crate::operator_surface::AgentListFilter;
 
 fn format_agent_row_human(agent: &AgentSummaryView) -> String {
     format!(
@@ -72,6 +78,38 @@ pub(crate) async fn list_agents(global: &GlobalArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// `fq agent validate` — lint one definition file offline. Local by
+/// design: the daemon's registry has nothing to say about a file
+/// nobody has added yet, and the check needs neither a broker nor a
+/// pairing.
+pub(crate) fn validate_agent(path: &Path) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+
+    match parse_agent(&content) {
+        Ok(agent) => {
+            println!("✓ {} is valid", path.display());
+            println!("  id:      {}", agent.id().as_str());
+            println!("  model:   {}", agent.model());
+            println!("  tools:   {}", agent.tools().len());
+            if let Some(budget) = agent.budget() {
+                println!("  budget:  ${budget:.2}");
+            }
+            // #35: valid, but do not let "✓ is valid" imply the declared
+            // network boundary holds — nothing enforces it yet.
+            if let Some(declared) = agent.sandbox().unenforced_network() {
+                println!();
+                println!("  ⚠ sandbox.network is declared but NOT enforced (#35)");
+                println!("    declared: {}", declared.join(", "));
+                println!("    This agent has ambient network access — it can reach any");
+                println!("    host regardless. Enforcement: #208 (proxy), #209 (ADR-0010).");
+            }
+            Ok(())
+        }
+        Err(err) => Err(anyhow::anyhow!("{} is invalid: {err}", path.display())),
+    }
 }
 
 #[cfg(test)]

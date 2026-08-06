@@ -261,7 +261,13 @@ either dies before a Ctrl-C, the daemon publishes
 `system.task_failed`, shuts down the other task, and exits
 non-zero.
 
-### CLI (`fq-cli/src/main.rs`)
+### CLI (`fq-cli/src/`)
+
+One module per verb group — `status.rs`, `doctor.rs`, `invocations.rs`,
+`trigger.rs`, `workers.rs`, `events.rs`, and so on (#189). `cli.rs` holds
+the clap declarations every module shares; `lib.rs` is the composition
+root: the two entry points, the dispatch from a parsed command to the verb
+that serves it, and `run_daemon`. `bin/fq.rs` and `bin/fqd.rs` are shims.
 
 | Command | What it does |
 |---|---|
