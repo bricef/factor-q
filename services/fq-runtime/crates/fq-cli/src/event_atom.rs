@@ -111,13 +111,15 @@ impl EventSelection {
             fq_runtime::AgentId::new(agent)
                 .map_err(|e| invalid(format!("agent `{agent}`: {e}")))?;
         }
+        // The grammar is `views::since`'s, not this atom's: `fq costs
+        // --since` narrows the same projection by the same column, and
+        // an operator who copies an argument from one verb to the other
+        // must not discover that they disagree.
         let since = filter
             .since
             .as_deref()
             .map(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .map_err(|e| invalid(format!("since `{s}` is not an RFC3339 instant: {e}")))
+                fq_runtime::views::since::instant(s).map_err(|e| invalid(format!("since {e}")))
             })
             .transpose()?;
         Ok(EventSelection {
@@ -369,6 +371,54 @@ mod tests {
         );
     }
 
+    /// Compile just the `since` narrowing, which is what both stores
+    /// disagree about when this goes wrong.
+    fn compiled_since(spelling: &str) -> EventSelection {
+        EventSelection::compile(
+            &EventFilter {
+                since: Some(spelling.into()),
+                ..EventFilter::default()
+            },
+            "event.list",
+        )
+        .unwrap_or_else(|e| panic!("`{spelling}` must name an instant; got {e:?}"))
+    }
+
+    /// The grammar an operator already types. Before `event.list`
+    /// crossed the edge, `since` was handed to a lexical `timestamp >=
+    /// ?` against a column of RFC3339 text, so a *prefix* of a stored
+    /// timestamp was a working lower bound — `--since 2026-04-25` (the
+    /// spelling QUICKSTART prints, one page away from `fq costs
+    /// --since 2026-04-25`) and `--since 2026-04-25T10:00:00` both
+    /// selected what an operator meant by them. Parsing the argument
+    /// must not narrow that: a bare date still names the day's first
+    /// moment, or a query for "the 25th onwards" silently drops that
+    /// morning, and an offset-less time is still read as UTC.
+    #[test]
+    fn an_operators_date_is_still_a_lower_bound_on_the_whole_day() {
+        assert_eq!(
+            compiled_since("2026-04-25").since_as_stored().as_deref(),
+            Some("2026-04-25T00:00:00+00:00")
+        );
+        assert_eq!(
+            compiled_since("2026-04-25T10:00:00")
+                .since_as_stored()
+                .as_deref(),
+            Some("2026-04-25T10:00:00+00:00")
+        );
+        // The log and the projection must be narrowed to one instant,
+        // not to a parsed instant and a re-parsed string: `matches`
+        // compares against this, `since_as_stored` renders it.
+        assert_eq!(
+            compiled_since("2026-04-25").since,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-04-25T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
+    }
+
     #[test]
     fn an_unparseable_since_is_a_verdict_on_the_request() {
         let filter = EventFilter {
@@ -376,10 +426,15 @@ mod tests {
             ..EventFilter::default()
         };
         let err = EventSelection::compile(&filter, "event.list").expect_err("must refuse");
+        // The refusal quotes what was written and names what would
+        // have worked — an operator is one edit away either way.
         assert!(
             matches!(&err, WireError::InvalidInput { op, message }
-                if op == "event.list" && message.contains("RFC3339")),
-            "expected an InvalidInput naming the format; got {err:?}"
+                if op == "event.list"
+                    && message.contains("yesterday")
+                    && message.contains("RFC3339")
+                    && message.contains("2026-04-25")),
+            "expected an InvalidInput naming the accepted forms; got {err:?}"
         );
     }
 

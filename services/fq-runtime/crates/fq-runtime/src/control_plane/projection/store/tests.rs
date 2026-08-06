@@ -300,6 +300,65 @@ fn sample_triggered(agent: &str, inv: Uuid) -> Event {
     )
 }
 
+/// What a `since` bound actually does here, and why
+/// [`crate::views::since`] renders one rather than passing an
+/// operator's spelling through: `timestamp` is TEXT and `timestamp >=
+/// ?` is a **lexical** comparison against RFC3339 as `insert_event`
+/// wrote it. So a bare date lowered to that day's first moment selects
+/// the whole day — sub-second events at midnight included — and nothing
+/// from the day before. `cost_summary` compares the same column the
+/// same way, which is why both `--since` verbs can share one grammar.
+#[tokio::test]
+async fn a_date_since_selects_that_whole_day_and_nothing_before_it() {
+    let dir = tempdir().unwrap();
+    let store = ProjectionStore::open(&dir.path().join("projection.db"))
+        .await
+        .unwrap();
+    // Spelled the way `insert_event` spells it, so the comparison
+    // under test is the one production runs.
+    let stored = |rfc3339: &str| {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339()
+    };
+    for (agent, timestamp) in [
+        ("eve", stored("2026-04-24T23:59:59.999Z")),
+        ("midnight", stored("2026-04-25T00:00:00Z")),
+        ("morning", stored("2026-04-25T09:15:00.500Z")),
+        ("tomorrow", stored("2026-04-26T00:00:00Z")),
+    ] {
+        let event = sample_triggered(agent, Uuid::now_v7());
+        store.insert_event(&event, None).await.unwrap();
+        sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
+            .bind(timestamp)
+            .bind(event.envelope.event_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+    }
+
+    let since = crate::views::since::lower_bound("2026-04-25").expect("a date is a since");
+    let selected = store
+        .query_events(
+            &EventFilter {
+                agent: None,
+                event_type: None,
+                since: Some(&since),
+            },
+            10,
+        )
+        .await
+        .unwrap();
+    let mut agents: Vec<&str> = selected.iter().map(|r| r.agent_id.as_str()).collect();
+    agents.sort_unstable();
+    assert_eq!(
+        agents,
+        ["midnight", "morning", "tomorrow"],
+        "`--since 2026-04-25` must select the 25th onwards, midnight included"
+    );
+}
+
 /// LLM response with cost attached via envelope. After step 3
 /// of the envelope-refactor plan, cost rides on the
 /// `llm.response` envelope rather than as its own event.
