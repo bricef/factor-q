@@ -508,5 +508,5 @@ fq agent list
 fq trigger my-agent "Your prompt here."
 
 # Watch events as they flow (in another terminal)
-fq events tail --subject "fq.agent.my-agent.>"
+fq events tail --agent my-agent
 ```
