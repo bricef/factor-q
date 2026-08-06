@@ -58,6 +58,13 @@ const FIXTURE_MARK: &str = "1c000000";
 /// lines after it are unchanged.
 const PREAMBLE_CONNECTING: &str = "Connecting to the edge at ";
 
+/// The second line of the human preamble, unfiltered. A constant for
+/// the same reason as the one above: it used to echo the raw NATS
+/// subject the verb subscribed to (`Subscribing to fq.>`), and now
+/// says the typed filter back in domain terms, because the subject
+/// argument retired with D8.
+const PREAMBLE_SCOPE_ALL: &str = "Tailing all events";
+
 fn uuid_at(n: u32) -> Uuid {
     Uuid::parse_str(&format!("00000000-0000-7000-8000-0000000020{n:02}")).unwrap()
 }
@@ -259,10 +266,22 @@ impl Tail {
     /// readiness would publish the fixture into a window nothing was
     /// listening to.
     fn wait_until_listening(&mut self, bus: &EventBus, rt: &tokio::runtime::Runtime) {
+        self.wait_until_listening_for(bus, rt, || triggered(AGENT, WARMUP_INV, 99, BASE_MS));
+    }
+
+    /// [`Self::wait_until_listening`] for a tail whose filter the
+    /// default warm-up would not survive: readiness has to be proven
+    /// with an event the tail under test actually admits.
+    fn wait_until_listening_for(
+        &mut self,
+        bus: &EventBus,
+        rt: &tokio::runtime::Runtime,
+        warmup: impl Fn() -> Event,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let warmup = triggered(AGENT, WARMUP_INV, 99, BASE_MS);
-            rt.block_on(bus.publish(&warmup)).expect("publish warm-up");
+            rt.block_on(bus.publish(&warmup()))
+                .expect("publish warm-up");
             while let Some(line) = self.next_line(Duration::from_millis(250)) {
                 if line.contains(WARMUP_MARK) {
                     return;
@@ -553,7 +572,7 @@ fn tail_renders_every_published_event() {
     );
     assert_eq!(
         tail.next_line(Duration::from_secs(5)).as_deref(),
-        Some("Subscribing to fq.>")
+        Some(PREAMBLE_SCOPE_ALL)
     );
     assert_eq!(
         tail.next_line(Duration::from_secs(5)).as_deref(),
@@ -597,14 +616,15 @@ fn tail_json_emits_one_whole_event_per_line() {
     );
 }
 
-/// `--subject` narrows the tail. The flag predates the operator
-/// surface and is the one selection the verb has ever offered, so it
-/// keeps working across the flip — including for subjects no typed
-/// filter names.
+/// `--agent` narrows the tail. This is the narrowing the retired
+/// `--subject fq.agent.<id>.>` expressed, and the assertion is
+/// unchanged by the swap — what changed is where the narrowing
+/// happens: the typed filter travels, so the other agent's event never
+/// leaves the daemon rather than being sieved out at the terminal.
 #[test]
-fn tail_honours_a_subject_filter() {
+fn tail_honours_an_agent_filter() {
     let world = World::start();
-    let mut tail = world.tail(&["--subject", &format!("fq.agent.{AGENT}.>")]);
+    let mut tail = world.tail(&["--agent", AGENT]);
 
     tail.wait_until_listening(&world.bus, &world.rt);
     // The other agent's event is published FIRST, so if it were going
@@ -621,8 +641,40 @@ fn tail_honours_a_subject_filter() {
     assert_eq!(lines, EXPECTED_LINES);
     assert!(
         !lines.iter().any(|l| l.contains(OTHER_AGENT)),
-        "a subject-scoped tail must not render another agent's events: {lines:?}"
+        "an agent-scoped tail must not render another agent's events: {lines:?}"
     );
+}
+
+/// `--event-type` narrows to one event type across every agent — the
+/// other half of the typed filter, and the replacement for the subject
+/// patterns that named a leaf (`fq.agent.*.triggered`).
+#[test]
+fn tail_honours_an_event_type_filter() {
+    let world = World::start();
+    let mut tail = world.tail(&["--json", "--event-type", "tool_result"]);
+
+    // A trigger cannot prove readiness for this tail — the filter
+    // excludes it — so the warm-up is a tool result on the warm-up
+    // invocation, which the filter admits.
+    tail.wait_until_listening_for(&world.bus, &world.rt, || {
+        let mut warmup = fixture_events().pop().expect("the fixture's tool result");
+        warmup.envelope.invocation_id = Uuid::parse_str(WARMUP_INV).unwrap();
+        warmup
+    });
+
+    world.publish(&fixture_events());
+
+    // The fixture is a trigger, a priced llm.response and a tool
+    // result; only the last is this tail's, so the *first* fixture
+    // line it renders is the assertion.
+    let line = tail.fixture_lines(1).pop().expect("one fixture line");
+    let event: Event = serde_json::from_str(&line).expect("a whole event per line");
+    assert!(
+        matches!(event.payload, EventPayload::ToolResult(_)),
+        "a type-filtered tail renders only that type; got {:?}",
+        event.payload
+    );
+    assert_eq!(event.envelope.event_id, uuid_at(3));
 }
 
 // ------------------------------------------------------------------
@@ -900,17 +952,25 @@ fn a_list_scan_ends_when_the_stream_tip_is_not_its_own() {
 /// as a test it fails intermittently and as a *negative control* it
 /// passes with the bug reinstated — the worst of both.
 ///
-/// Scoping the tail to one agent removes the race entirely. Heartbeats
-/// are `fq.worker.*.heartbeat` and cannot match, so nothing ends the
-/// poll early, the daemon holds it for its full 30s, and a client with
-/// a 10s deadline dies **every time**. The idle window then only has
-/// to outlast that deadline, which is why it is 15 seconds and not 35.
+/// Scoping the tail to one agent removes the race entirely, and the
+/// scoping has to reach the *daemon* to do it: `--agent` compiles to
+/// the consumer subject `fq.agent.<id>.>` (`EventSelection::compile`),
+/// so a heartbeat on `fq.worker.*.heartbeat` is never delivered to the
+/// poll at all. Nothing ends it early, the daemon holds it for its
+/// full 30s, and a client with a 10s deadline dies **every time**. The
+/// idle window then only has to outlast that deadline, which is why it
+/// is 15 seconds and not 35.
+///
+/// This narrowing used to be spelled `--subject fq.agent.<id>.>`,
+/// which reached the daemon by the same route (the client pushed the
+/// pattern's agent into the same typed filter). The flag retired with
+/// D8; the determinism it bought did not.
 #[test]
 fn an_idle_tail_survives_its_own_long_poll() {
     let world = World::start();
     // Agent-scoped deliberately: see above. This is also the realistic
     // case — an operator watching one quiet agent.
-    let mut tail = world.tail(&["--json", "--subject", &format!("fq.agent.{AGENT}.>")]);
+    let mut tail = world.tail(&["--json", "--agent", AGENT]);
     // Readiness first, and it is a rendered event rather than a sleep:
     // from here the idle window measures idleness and nothing else.
     tail.wait_until_listening(&world.bus, &world.rt);

@@ -512,9 +512,13 @@ enum TranscriptFormat {
 enum EventCommands {
     /// Tail the event stream in real time
     Tail {
-        /// Subject filter (defaults to all factor-q events)
-        #[arg(long, default_value = "fq.>")]
-        subject: String,
+        /// Follow one agent's events (defaults to every agent)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Follow one event type (triggered, llm_request, llm_response,
+        /// llm_failure, tool_call, tool_result, completed, failed)
+        #[arg(long, name = "type")]
+        event_type: Option<String>,
         /// Emit one JSON event per line.
         #[arg(long)]
         json: bool,
@@ -668,9 +672,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             AgentCommands::Validate { path } => validate_agent(&path)?,
         },
         Commands::Events { command } => match command {
-            EventCommands::Tail { subject, json } => {
-                tail_events(&cli.global, &subject, json).await?
-            }
+            EventCommands::Tail {
+                agent,
+                event_type,
+                json,
+            } => tail_events(&cli.global, agent, event_type, json).await?,
             EventCommands::Query {
                 agent,
                 event_type,
@@ -1117,7 +1123,7 @@ mod edge_call;
 use edge_call::*;
 
 mod event_atom;
-use event_atom::{filter_for_subject, subject_matches};
+use event_atom::EventFilter;
 
 mod agents;
 use agents::list_agents;
@@ -1526,13 +1532,24 @@ async fn trigger_agent(
 /// sequence, so a slow terminal costs latency rather than events, and
 /// the cursor below is a real resume point.
 ///
-/// `--subject` keeps its full NATS meaning: the pattern is matched
-/// here, on the way out, because a subject is a coordinate of the
-/// infrastructure the edge maps and does not belong in a wire filter
-/// (D8). What the pattern says about the *agent* does travel, so a
-/// tail scoped to one agent is scoped at the log.
-async fn tail_events(global: &GlobalArgs, subject: &str, json: bool) -> anyhow::Result<()> {
-    let filter = filter_for_subject(subject);
+/// Selection is the Event atom's typed filter — `--agent`,
+/// `--event-type`, the flags `fq events query` takes — and it travels
+/// whole rather than being applied here, so a narrowed tail is
+/// narrowed at the log rather than at the terminal. The raw NATS
+/// subject argument this verb used to take is gone (D8): a subject is
+/// a coordinate of the infrastructure the edge maps, not a selection
+/// the surface speaks.
+async fn tail_events(
+    global: &GlobalArgs,
+    agent: Option<String>,
+    event_type: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let filter = EventFilter {
+        agent,
+        event_type,
+        ..EventFilter::default()
+    };
     let config = global.resolve_config()?;
 
     if !json {
@@ -1549,7 +1566,7 @@ async fn tail_events(global: &GlobalArgs, subject: &str, json: bool) -> anyhow::
     let mut cursor = seek.next_from_seq;
 
     if !json {
-        println!("Subscribing to {subject}");
+        println!("Tailing {}", filter.describe());
         println!("Press Ctrl-C to exit.");
         println!();
     }
@@ -1561,9 +1578,6 @@ async fn tail_events(global: &GlobalArgs, subject: &str, json: bool) -> anyhow::
         cursor = batch.next_from_seq;
         for item in batch.items {
             let state: fq_runtime::event_tail::EventState = serde_json::from_value(item.item)?;
-            if !subject_matches(subject, &state.event.subject()) {
-                continue;
-            }
             if json {
                 println!("{}", serde_json::to_string(&state.event)?);
             } else {

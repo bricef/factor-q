@@ -85,7 +85,7 @@ just fq events tail
 
 Then run `just fq trigger sample-agent ...` again. You'll see each event scroll past as it happens: `triggered`, `llm.request`, `llm.response`, `tool.call`, `tool.result`, `cost`, `completed`. Every decision the agent made is on the bus.
 
-`fq events tail --subject fq.agent.sample-agent.>` narrows to one agent. `--subject fq.agent.>.tool.call` narrows to all tool calls across all agents. Subjects compose; see [`docs/design/committed/event-schema.md`](docs/design/committed/event-schema.md) for the full hierarchy.
+`fq events tail --agent sample-agent` narrows to one agent. `fq events tail --event-type tool_call` narrows to all tool calls across all agents. The two compose, and they are the same narrowing `fq events query` takes; see [`docs/design/committed/event-schema.md`](docs/design/committed/event-schema.md) for every event type.
 
 ## 6. Query history and costs
 
@@ -96,7 +96,7 @@ The runtime also materialises every event into a SQLite projection so you can qu
 just fq events query --limit 20
 
 # All tool.result events for sample-agent
-just fq events query --agent sample-agent --type tool_result
+just fq events query --agent sample-agent --event-type tool_result
 
 # Per-agent cost totals
 just fq costs

@@ -5,10 +5,6 @@
 //!
 //! Its own module rather than more of `operator_surface.rs`: that file
 //! is the daemon's assembly point and is near its size budget (#189).
-//! Both halves of the seam live here — the daemon's handlers and the
-//! client's `--subject` translation — because they are two ends of one
-//! contract; Phase 5 splits them along the same line `edge_call.rs`
-//! and `operator_surface.rs` are already split along.
 
 use fq_edge::wire::WireError;
 use fq_runtime::event_tail::EventState;
@@ -44,6 +40,23 @@ pub(crate) struct EventFilter {
     /// Cap on one List page — the most recent N matching events.
     #[serde(default)]
     pub(crate) limit: Option<u32>,
+}
+
+impl EventFilter {
+    /// What this filter selects, in words — `fq events tail` says it
+    /// back in its preamble so an operator can see at a glance that
+    /// the narrowing they asked for is the one in force. Domain terms,
+    /// like the filter itself: the verb used to echo the raw NATS
+    /// subject it had subscribed to, which named a coordinate of the
+    /// infrastructure rather than anything the operator selected.
+    pub(crate) fn describe(&self) -> String {
+        match (self.agent.as_deref(), self.event_type.as_deref()) {
+            (None, None) => "all events".to_string(),
+            (Some(agent), None) => format!("all events for agent {agent}"),
+            (None, Some(event_type)) => format!("all {event_type} events"),
+            (Some(agent), Some(event_type)) => format!("{event_type} events for agent {agent}"),
+        }
+    }
 }
 
 /// Cap on one stream batch.
@@ -304,98 +317,30 @@ async fn stream_events(
     })
 }
 
-// ---------------------------------------------------------------------
-// Client side: `fq events tail --subject`, translated.
-// ---------------------------------------------------------------------
-
-/// Push what a `--subject` pattern says about the agent into the typed
-/// filter, so a tail scoped to one agent is scoped at the log rather
-/// than at the terminal. Everything the pattern says beyond that is
-/// applied by [`subject_matches`] on the way out.
-///
-/// `fq events tail` predates the operator surface and selects by NATS
-/// subject — a query language over bus coordinates the surface does
-/// not speak. Rather than narrow the flag (which would break every
-/// pattern that is not an agent) or put subjects on the wire (which
-/// would leak the infrastructure), the pattern stays a client-side
-/// concern and only its domain content travels.
-pub(crate) fn filter_for_subject(subject: &str) -> EventFilter {
-    let agent = subject
-        .strip_prefix("fq.agent.")
-        .and_then(|rest| rest.split('.').next())
-        .filter(|token| !token.is_empty() && *token != "*" && *token != ">")
-        .map(str::to_string);
-    EventFilter {
-        agent,
-        ..EventFilter::default()
-    }
-}
-
-/// NATS subject matching: `*` matches one token, `>` matches one or
-/// more trailing tokens, everything else is literal. The client's half
-/// of `--subject`, so the flag keeps meaning exactly what it meant
-/// when the verb held its own subscription.
-pub(crate) fn subject_matches(pattern: &str, subject: &str) -> bool {
-    let mut tokens = subject.split('.');
-    for (i, want) in pattern.split('.').enumerate() {
-        if want == ">" {
-            // `>` is only a wildcard as the final token, and it needs
-            // at least one token to match.
-            return i < subject.split('.').count();
-        }
-        match tokens.next() {
-            Some(got) if want == "*" || want == got => {}
-            _ => return false,
-        }
-    }
-    tokens.next().is_none()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn subject_matching_follows_nats_rules() {
-        assert!(subject_matches("fq.>", "fq.agent.researcher.triggered"));
-        assert!(subject_matches(
-            "fq.agent.>",
-            "fq.agent.researcher.llm.response"
-        ));
-        assert!(subject_matches(
-            "fq.agent.*.triggered",
-            "fq.agent.fixer.triggered"
-        ));
-        assert!(subject_matches("fq.system.startup", "fq.system.startup"));
-        assert!(!subject_matches("fq.system.>", "fq.agent.fixer.triggered"));
-        assert!(!subject_matches(
-            "fq.agent.*.triggered",
-            "fq.agent.fixer.llm.response"
-        ));
-        // `>` needs something to match; a bare prefix is not the
-        // subject itself.
-        assert!(!subject_matches("fq.agent.fixer.>", "fq.agent.fixer"));
-        assert!(!subject_matches("fq.system.startup", "fq.system"));
-    }
-
-    #[test]
-    fn a_subject_naming_one_agent_narrows_the_wire_filter() {
+    fn a_filter_describes_itself_in_domain_terms() {
+        let described = |agent: Option<&str>, event_type: Option<&str>| {
+            EventFilter {
+                agent: agent.map(str::to_string),
+                event_type: event_type.map(str::to_string),
+                ..EventFilter::default()
+            }
+            .describe()
+        };
+        assert_eq!(described(None, None), "all events");
         assert_eq!(
-            filter_for_subject("fq.agent.researcher.>").agent.as_deref(),
-            Some("researcher")
+            described(Some("researcher"), None),
+            "all events for agent researcher"
         );
+        assert_eq!(described(None, Some("tool_call")), "all tool_call events");
         assert_eq!(
-            filter_for_subject("fq.agent.researcher.llm.response")
-                .agent
-                .as_deref(),
-            Some("researcher")
+            described(Some("researcher"), Some("tool_call")),
+            "tool_call events for agent researcher"
         );
-        // The default and the wildcards name no agent, so the tail
-        // reads the whole log and sieves it on arrival.
-        assert_eq!(filter_for_subject("fq.>").agent, None);
-        assert_eq!(filter_for_subject("fq.agent.>").agent, None);
-        assert_eq!(filter_for_subject("fq.agent.*.triggered").agent, None);
-        assert_eq!(filter_for_subject("fq.system.>").agent, None);
     }
 
     #[test]

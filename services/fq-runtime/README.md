@@ -73,8 +73,8 @@ fq trigger <agent> [payload]                # run an agent in-process via the re
 fq trigger --via-nats <agent> [payload]     # publish a trigger to NATS for fq run to dispatch
 fq agent list                               # list agents in the configured directory
 fq agent validate <path>                    # validate an agent definition
-fq events tail [--subject fq.>]             # tail the live event stream
-fq events query [--agent] [--type] [--since] [--limit 50]
+fq events tail [--agent] [--event-type]     # tail the live event stream
+fq events query [--agent] [--event-type] [--since] [--limit 50]
                                             # query the SQLite projection
 fq costs [--agent] [--since]                # show per-agent cost totals
 fq status                                   # runtime health: NATS, streams, consumers, projection
