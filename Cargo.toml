@@ -91,3 +91,15 @@ warnings = "deny"
 # and perf. We don't currently enable pedantic / nursery / cargo
 # groups because they trade false-positives for marginal value.
 all = "deny"
+
+[profile.dev]
+# Debug info dominates a target directory, and this workspace keeps one
+# per git worktree — a full build runs to roughly 20G, so a handful of
+# agent worktrees outgrow the rest of the machine and ENOSPC starts
+# truncating files in working trees. `line-tables-only` keeps backtraces
+# useful (file and line survive, which is what a panic or a failing test
+# actually needs) and drops the variable-inspection data a debugger
+# would want. `profile.test` inherits from here, so test builds get it
+# too. If you need full debug info for a session, override it locally
+# rather than changing this: `RUSTFLAGS="-C debuginfo=2" cargo test`.
+debug = "line-tables-only"
