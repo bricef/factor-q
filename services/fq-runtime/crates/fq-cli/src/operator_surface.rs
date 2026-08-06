@@ -5,7 +5,9 @@
 //! filters) live here until 3e's codegen decision settles their
 //! final home.
 
-use super::*;
+use std::sync::Arc;
+
+use fq_runtime::views::Views;
 
 // ---------------------------------------------------------------------
 // The operator surface (plan Phase 3): the real declarations, bound
@@ -35,6 +37,24 @@ pub(crate) struct InvocationListFilter {
 
 fn default_invocation_list_limit() -> i64 {
     50
+}
+
+/// Parse a `--status` filter into an `OwnerStatus`. Returns
+/// `Err` on unknown values so the CLI exits with a clear
+/// message rather than silently matching no rows.
+pub(crate) fn parse_invocation_status_filter(
+    s: &str,
+) -> anyhow::Result<fq_runtime::control_plane::store::OwnerStatus> {
+    use fq_runtime::control_plane::store::OwnerStatus;
+    match s {
+        "in_flight" => Ok(OwnerStatus::InFlight),
+        "ambiguous" => Ok(OwnerStatus::Ambiguous),
+        "completed" => Ok(OwnerStatus::Completed),
+        "failed" => Ok(OwnerStatus::Failed),
+        other => Err(anyhow::anyhow!(
+            "unknown status filter `{other}` — try in_flight | ambiguous | completed | failed"
+        )),
+    }
 }
 
 /// Get identity for the Worker view.

@@ -19,6 +19,17 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 `services/fq-runtime/crates/fq-cli/src/lib.rs`, `OPSURF` =
 `…/fq-cli/src/operator_surface.rs`.
 
+`CLI:<lines>` coordinates are as of the survey commit. Since 2026-08-06
+that file is split one module per verb group (#189) — `control.rs` for
+verbs 3–4, `trigger.rs` for 5–6, `dead_letters.rs` for 7–8, `agents.rs`
+for 9–10, `costs.rs` for 13, `status.rs` for 14, `doctor.rs` for 15,
+`invocations.rs` for 16–20, `resume.rs` for 19's daemon half,
+`workers.rs` for 21–23, `connections.rs` for 24–26, `version.rs` for 27 —
+so read a `CLI:` reference as "the verb", not as a live line number. The
+migration gate's count is unchanged by the split: it scans every file
+under `src/` and exempts sibling `foo/tests.rs` fixtures the same way it
+exempts inline `#[cfg(test)]` modules.
+
 | # | Verb | Data path today | Goldens | Target op | Op exists? |
 |---|---|---|---|---|---|
 | 1 | `fq init` | local file writes | — | stays local | n/a |

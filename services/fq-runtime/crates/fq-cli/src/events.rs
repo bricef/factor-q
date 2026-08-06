@@ -9,7 +9,11 @@
 //! splits the binary along — the daemon half of the same atom is
 //! `event_atom.rs`.
 
-use super::*;
+use fq_runtime::events::{Event, EventPayload};
+
+use crate::cli::GlobalArgs;
+use crate::edge_call::{edge_client_for, edge_invoke, next_event_batch};
+use crate::event_atom::EventFilter;
 
 /// Tail the event stream, formatting each event as a single readable
 /// line.

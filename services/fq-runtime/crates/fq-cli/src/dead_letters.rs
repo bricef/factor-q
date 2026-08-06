@@ -10,12 +10,19 @@
 //! narrows at the log rather than after the fact, and a client needs
 //! no broker credentials to ask.
 //!
-//! `fq dead-letters requeue` stays in `lib.rs` until cohort 4.3 makes
-//! it a `dead_letter.requeue` command — the same split `fq agent
-//! validate` sits on, and for the same reason: a verb moves out when
-//! it is flipped, not before.
+//! `fq dead-letters requeue` sits alongside it but is not flipped: it
+//! still publishes its own trigger over a direct broker connection,
+//! and becomes a `dead_letter.requeue` command in cohort 4.3 — the
+//! same split `fq agent validate` sits on, and for the same reason: a
+//! verb rides the edge once it is flipped, not before.
 
-use super::*;
+use anyhow::Context;
+use fq_runtime::EventBus;
+
+use crate::cli::GlobalArgs;
+use crate::dead_letter_atom::DeadLetterFilter;
+use crate::edge_call::edge_invoke;
+use crate::truncate_json;
 
 /// The rendered listing, newest first.
 ///
@@ -71,5 +78,34 @@ pub(crate) async fn list_dead_letters(
         println!("      payload: {}", truncate_json(&d.trigger_payload, 120));
     }
     println!("\n-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one");
+    Ok(())
+}
+
+/// `fq dead-letters requeue`: re-publish a dead-lettered trigger as a
+/// fresh trigger. Not idempotent — see the command help.
+pub(crate) async fn requeue_dead_letter(
+    global: &GlobalArgs,
+    agent: &str,
+    trigger_seq: Option<u64>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = global.resolve_config()?;
+    fq_runtime::AgentId::new(agent).with_context(|| format!("invalid agent name '{agent}'"))?;
+    let bus = EventBus::connect(&config.nats.url)
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    let result =
+        fq_runtime::control_plane::operator::requeue_dead_letter(&bus, agent, trigger_seq).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    println!(
+        "Requeued dead-lettered trigger for '{}' as trigger seq {} (from event {}).",
+        result.agent_id, result.new_trigger_seq, result.source_event_id
+    );
+    println!("  payload: {}", truncate_json(&result.trigger_payload, 120));
+    println!("A running `fq run` daemon will pick this up with a fresh delivery budget.");
     Ok(())
 }

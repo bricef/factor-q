@@ -10,7 +10,10 @@
 //! size budget is what forced the issue, but the line was already the
 //! right one.
 
-use super::*;
+use anyhow::Context;
+
+use crate::cli::GlobalArgs;
+use crate::connections::{edge_client, parse_fingerprint_hex, stored_connection};
 use crate::event_atom::EventFilter;
 use crate::operator_surface::TurnFilter;
 
