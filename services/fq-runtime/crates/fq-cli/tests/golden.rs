@@ -723,6 +723,7 @@ fn flipped_verb_without_a_pairing_says_how_to_pair() {
         ["invocation", "list"],
         ["agent", "list"],
         ["events", "tail"],
+        ["dead-letters", "list"],
     ] {
         let xdg = tempfile::tempdir().expect("xdg dir");
         let out = Command::new(env!("CARGO_BIN_EXE_fq"))
@@ -1790,5 +1791,169 @@ fn agent_list_without_a_daemon_reports_why() {
     assert!(
         stderr.contains("could not reach the edge at") && stderr.contains("Connection refused"),
         "the failure must name the edge it could not reach; got:\n{stderr}"
+    );
+}
+
+// ------------------------------------------------------------------
+// The DeadLetter atom goldens (plan Phase 4, verb 7).
+//
+// The same argv and the same golden files, now `dead_letter.list` on
+// the authenticated edge instead of the CLI running its own ephemeral
+// scan against the bus. They moved here from `golden_commands.rs`
+// because that harness drives `fq` against a broker with no daemon,
+// which is exactly what this flip retires. Byte-identical output
+// across the change of substrate is the whole claim, so the files are
+// untouched.
+//
+// A live daemon does NOT change the answer, and that is worth stating
+// because it is where two earlier flips found their goldens pinning an
+// impossible world. A dead letter is a `Failed` event with
+// `error_kind = TriggerExhausted`, published only by the dispatcher's
+// inline emitter or by the advisory watcher — both of which need a
+// trigger to actually exhaust its deliveries. The fixture publishes no
+// triggers, so none of the daemon's own events (startup, recovery,
+// worker registration, heartbeats) is one: the roster grew when `fq
+// workers list` gained a daemon, and this listing does not.
+// ------------------------------------------------------------------
+
+/// A dead-letter event exactly as both emitters shape it (the
+/// operator-module broker tests pin the emitters to this contract).
+fn dead_letter_event(
+    agent: &str,
+    trigger_seq: u64,
+    source: &str,
+    payload: serde_json::Value,
+    seq: u32,
+    at_ms: i64,
+) -> Event {
+    use fq_runtime::events::{
+        DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
+        DEAD_LETTER_SUBJECT_KEY,
+    };
+    let event = Event::new(
+        AgentId::new(agent).unwrap(),
+        Uuid::now_v7(),
+        EventPayload::Failed(fq_runtime::events::FailedPayload {
+            error_kind: FailureKind::TriggerExhausted,
+            error_message: format!("trigger exhausted after 5 deliveries (limit 5) [{source}]"),
+            phase: FailurePhase::Setup,
+            partial_totals: InvocationTotals::default(),
+        }),
+    )
+    .annotate(
+        DEAD_LETTER_SUBJECT_KEY,
+        serde_json::json!(fq_runtime::bus::trigger_subject(agent)),
+    )
+    .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
+    .annotate(DEAD_LETTER_STREAM_SEQ_KEY, serde_json::json!(trigger_seq))
+    .annotate(DEAD_LETTER_SOURCE_KEY, serde_json::json!(source));
+    stamp(event, seq, at_ms)
+}
+
+/// Two dead letters for `researcher` (older trigger seq 11, newer 12)
+/// plus one ordinary failure. The third is the negative control: it
+/// lands on the very same `fq.agent.researcher.failed` subject the
+/// atom reads, so only the `error_kind` predicate keeps it out of the
+/// listing.
+fn dead_letter_events() -> Vec<Event> {
+    vec![
+        dead_letter_event(
+            AGENT_RESEARCHER,
+            11,
+            "inline",
+            serde_json::json!({"n": 1}),
+            21,
+            BASE_MS,
+        ),
+        dead_letter_event(
+            AGENT_RESEARCHER,
+            12,
+            "advisory",
+            serde_json::json!({"n": 2}),
+            22,
+            BASE_MS + 1_000,
+        ),
+        stamp(
+            Event::new(
+                AgentId::new(AGENT_RESEARCHER).unwrap(),
+                Uuid::now_v7(),
+                EventPayload::Failed(fq_runtime::events::FailedPayload {
+                    error_kind: FailureKind::RuntimeError,
+                    error_message: "ordinary failure".into(),
+                    phase: FailurePhase::Setup,
+                    partial_totals: InvocationTotals::default(),
+                }),
+            ),
+            23,
+            BASE_MS + 2_000,
+        ),
+    ]
+}
+
+#[test]
+fn golden_dead_letters_list_human() {
+    check_golden_on(
+        EdgeFixture::start_with_events(dead_letter_events()),
+        "dead_letters_list_human",
+        &["dead-letters", "list"],
+        &[],
+    );
+}
+
+#[test]
+fn golden_dead_letters_list_json() {
+    check_golden_on(
+        EdgeFixture::start_with_events(dead_letter_events()),
+        "dead_letters_list_json",
+        &["dead-letters", "list", "--json"],
+        &[],
+    );
+}
+
+/// The narrowing the verb offers, now applied at the log rather than
+/// after the fact — and the proof that it is applied at all: the
+/// fixture's dead letters belong to `researcher`, so `--agent fixer`
+/// must come back empty rather than listing them.
+///
+/// Not a golden, because "no dead letters" is one line that two very
+/// different bugs produce (a filter that excludes everything, and a
+/// read that found nothing); the positive case above is the oracle,
+/// and this is the discrimination it needs beside it.
+#[test]
+fn the_agent_filter_narrows_the_listing() {
+    let fixture = EdgeFixture::start_with_events(dead_letter_events());
+
+    let (exit, stdout, stderr) =
+        fixture.run_fq(&["dead-letters", "list", "--agent", AGENT_RESEARCHER]);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+    assert!(
+        stdout.contains("2 dead-lettered trigger(s)"),
+        "the agent's own dead letters still list; got:\n{stdout}"
+    );
+
+    let (exit, stdout, stderr) = fixture.run_fq(&["dead-letters", "list", "--agent", AGENT_FIXER]);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+    assert_eq!(
+        stdout, "No dead-lettered triggers.\n",
+        "another agent's listing must be empty; got:\n{stdout}"
+    );
+}
+
+/// `--limit` is the atom's, not the renderer's: asking for one row
+/// must return the NEWEST one, because the listing leads with it. A
+/// limit applied to the wrong end of the scan would still print one
+/// row, and would print the wrong one.
+#[test]
+fn a_limit_keeps_the_newest_rows() {
+    let fixture = EdgeFixture::start_with_events(dead_letter_events());
+    let (exit, stdout, stderr) = fixture.run_fq(&["dead-letters", "list", "--limit", "1"]);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+    assert!(
+        stdout.contains("1 dead-lettered trigger(s)") && stdout.contains("seq=12 via advisory"),
+        "one row, and it is the newest; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("seq=11"),
+        "the older dead letter must not survive the limit; got:\n{stdout}"
     );
 }

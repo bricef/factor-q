@@ -21,6 +21,7 @@ pub mod agent_view;
 pub mod bus;
 pub mod config;
 pub mod db;
+pub mod dead_letter;
 pub mod event_tail;
 pub mod events;
 pub mod health;

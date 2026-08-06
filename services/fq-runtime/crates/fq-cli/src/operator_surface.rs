@@ -176,8 +176,8 @@ fn arm_drop_halt(
 /// Build the daemon's operator registry: the Invocation and Worker
 /// views served from [`Views`], the Agent view served from the live
 /// registry, reads gated at the read horizon (every consumer feeding a
-/// view's fold), the Turn and Event atoms served from the log, and
-/// `invocation.drop` returning a receipt. Public for the
+/// view's fold), the Turn, Event and DeadLetter atoms served from the
+/// log, and `invocation.drop` returning a receipt. Public for the
 /// operator-surface snapshot test.
 pub fn operator_registry(
     views: Arc<Views>,
@@ -190,6 +190,7 @@ pub fn operator_registry(
     // Cloned up front: the registrations below each move their own
     // handles into 'static closures.
     let event_bus = deps.bus.clone();
+    let dead_letter_bus = deps.bus.clone();
     let turn_bus = deps.bus.clone();
     let turn_views = views.clone();
     let worker_views = views.clone();
@@ -271,6 +272,7 @@ pub fn operator_registry(
     register_worker_view(&mut registry, worker_views)?;
     register_agent_view(&mut registry, agent_registry)?;
     crate::event_atom::register_event_atom(&mut registry, event_bus)?;
+    crate::dead_letter_atom::register_dead_letter_atom(&mut registry, dead_letter_bus)?;
 
     let decl = fq_ops::Command::new::<DropCommandInput>(
         fq_ops::Invocation::Drop,

@@ -99,7 +99,11 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// `system_recovery`, `worker_orphaned`), which the `events_query_*`
 /// goldens — seeded into a store no daemon had ever touched — do not
 /// contain.
-const REMAINING: usize = 9;
+///
+/// It went 9 -> 8 with verb 7 (`fq dead-letters list`), which now
+/// reads the DeadLetter atom. Verb 8's `operator::requeue_dead_letter`
+/// is the one dead-letter call point left, and cohort 4.3 takes it.
+const REMAINING: usize = 8;
 
 /// Every `.rs` file under `dir`, recursively, in a stable order.
 fn rust_sources(dir: &Path) -> Vec<PathBuf> {

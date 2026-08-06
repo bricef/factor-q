@@ -27,11 +27,11 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 4 | `fq down [--now]` | NATS publish `fq.control.down` + heartbeat liveness gate + shutdown-event wait (`CLI:3909-3992`) | `down_human`, `down_now_human` | `control.down` command | enum + fixture exist; not registered |
 | 5 | `fq trigger <agent>` (in-process) | full second execution path: disk registry, WAL write, MCP spawns, real LLM (`CLI:1326-1546`) | none (deliberate) | **retire (D-1)** | n/a |
 | 6 | `fq trigger --via-nats` | NATS publish `fq.trigger.<agent>` | `trigger_via_nats_human` | `trigger.publish` command | enum + fixture exist; not registered |
-| 7 | `fq dead-letters list` | bus + `operator::list_dead_letters` ephemeral scan | `dead_letters_list_*` | `dead_letter.list` atom | no |
+| 7 | `fq dead-letters list` | bus + `operator::list_dead_letters` ephemeral scan | `dead_letters_list_*` (**byte-identical**) | `dead_letter.list` atom, keyed on the log sequence | ✅ **DONE 2026-08-06** |
 | 8 | `fq dead-letters requeue` | bus + `operator::requeue_dead_letter` | `dead_letters_requeue_*` | `dead_letter.requeue` command | no enum variant |
 | 9 | `fq agent list` | CLI's own disk read (skew vs daemon's live registry) | **created in 4.1** (none existed) | `agent.list` view | ✅ **DONE 2026-08-01** |
 | 10 | `fq agent validate` | local file parse | — | stays local | n/a |
-| 11 | `fq events tail` | core-NATS subscribe, silent-drop, non-resumable | — | `event.stream` atom | no |
+| 11 | `fq events tail` | core-NATS subscribe, silent-drop, non-resumable | **created in 4.2** (none existed) | `event.stream` atom | ✅ **DONE 2026-08-05** |
 | 12 | `fq events query` | direct Views → `Views::events` | `events_query_*` | `event.list` atom | no |
 | 13 | `fq costs` | direct Views → `Views::costs` | `costs_*` | `cost.summary` report | ReportId + fixture exist; not registered |
 | 14 | `fq status` | direct JetStream probe + direct Views (`CLI:1772-1875`) | `status_*` (only Nats::Live goldens) | `control.status` report (scope `Control`) — **not** `control.get`; a synthetic has no Get (2026-08-06) | no |
@@ -49,9 +49,10 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 26 | `fq token attenuate` | offline (fq-edge) | — | — | ✅ DONE |
 | 27 | `fq version` | build-time consts | — | local stays; daemon build via `control.status` | n/a |
 
-**Count check**: flips remaining 3, 4, 6, 7, 8, 11, 12, 13, 14, 15,
-19, 23 = **12**. Verbs 18 and 20 landed 2026-07-28 (cohort 4.0);
-verbs 21, 22 and 9 landed 2026-08-01 (cohort 4.1).
+**Count check**: flips remaining 3, 4, 6, 8, 12, 13, 14, 15, 19, 23 =
+**10**. Verbs 18 and 20 landed 2026-07-28 (cohort 4.0); verbs 21, 22
+and 9 landed 2026-08-01 (cohort 4.1); verbs 11 and 7 landed
+2026-08-05/06 (cohort 4.2). Verb 12 is the cohort's remainder.
 
 **Migration gate** (`edge_migration_gate.rs`, added with cohort 4.0):
 the remaining legacy call points are counted and asserted, so a flip
