@@ -22,6 +22,10 @@
 // reads here that are not header folds.
 mod transcript;
 
+// The `since` argument every time-narrowed read here takes, and the one
+// grammar its callers share.
+pub mod since;
+
 // DTOs are Deserialize as well as Serialize so they can travel over the
 // read service's bincode wire (#105 layer 2), not just out as JSON.
 use serde::{Deserialize, Serialize};
