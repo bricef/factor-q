@@ -136,7 +136,7 @@
             "type": "object"
           },
           "EventView": {
-            "description": "One event row from the projection.",
+            "description": "One event row from the projection — the Event atom's **index**\nrow (`event.list`). Extracted fields, never the payload; `seq`\naddresses the whole event through `event.get`.",
             "properties": {
               "agent_id": {
                 "type": "string"
@@ -172,6 +172,15 @@
               "model": {
                 "type": [
                   "string",
+                  "null"
+                ]
+              },
+              "seq": {
+                "description": "The `event.get` key for this row — `None` only where the log\nposition was never recorded (a directly seeded index).",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
                   "null"
                 ]
               },
@@ -940,7 +949,7 @@
   },
   {
     "atom": {
-      "description": "Event-log-backed: `seq` is the stream sequence — the same cursor receipts, `min_seq` gates and `turn` sequences speak. List answers with the most recent `limit` matching events in sequence order, bounded by the tip observed at entry; Stream long-polls via next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail without consuming anything. Resuming at a cursor loses nothing: the log is durable and the consumer is positional.",
+      "description": "`seq` is the event-log stream sequence — the same cursor receipts, `min_seq` gates and `turn` sequences speak. Get and Stream answer from the log with the whole event, payload included. LIST DOES NOT RETURN PAYLOADS: it answers from the projection's index, one row of extracted fields (timestamp, agent, invocation, event type, model, cost, error, duration) per event, most recent `limit` first. Every row carries the `seq` that reads the whole event back through `event.get`, so a listing is always a step away from the fact; `seq` is null only for a row projected before the index recorded log positions. Read payloads in bulk by streaming, not by listing. List is a projection read and honours `min_seq`; Stream long-polls via next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail without consuming anything. Resuming at a cursor loses nothing: the log is durable and the consumer is positional.",
       "domain": "event",
       "filter_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -964,7 +973,7 @@
           },
           "limit": {
             "default": null,
-            "description": "Cap on one List page — the most recent N matching events.",
+            "description": "Cap on one List page — the most recent N matching rows.\nIgnored by Stream, which is cursored rather than paged.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -982,6 +991,77 @@
           }
         },
         "title": "EventFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One event row from the projection — the Event atom's **index**\nrow (`event.list`). Extracted fields, never the payload; `seq`\naddresses the whole event through `event.get`.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seq": {
+            "description": "The `event.get` key for this row — `None` only where the log\nposition was never recorded (a directly seeded index).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "total_cost": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "event_id",
+          "timestamp",
+          "agent_id",
+          "invocation_id",
+          "event_type"
+        ],
+        "title": "EventView",
         "type": "object"
       },
       "key_schema": {
@@ -1053,6 +1133,74 @@
           }
         },
         "title": "DeadLetterFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$defs": {
+          "DeadLetter": {
+            "description": "One dead-lettered trigger, as its terminal event records it.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "error_message": {
+                "type": "string"
+              },
+              "event_id": {
+                "type": "string"
+              },
+              "source": {
+                "description": "Which emitter surfaced it: `\"inline\"` | `\"advisory\"`.",
+                "type": "string"
+              },
+              "timestamp": {
+                "description": "When the exhaustion was recorded, RFC3339.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`chrono::DateTime` would need schemars' chrono integration —\na wider change than this atom (the Event atom made the same\ncall for its payload tree).",
+                "type": "string"
+              },
+              "trigger_payload": true,
+              "trigger_stream_seq": {
+                "description": "The original trigger's sequence on the **trigger** stream — the\nkey that reconciles the inline and advisory emitters, and the\nselector `dead_letter.requeue` takes.\n\nAbsent when the advisory arrived after the trigger had aged\nout, which is why it is not this atom's identity: an identity\nthat can be missing is not one. The atom is addressed by its\n**event-log** sequence — see [`DeadLetterState`].",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "trigger_subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "event_id",
+              "timestamp",
+              "agent_id",
+              "trigger_subject",
+              "source",
+              "trigger_payload",
+              "error_message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "A dead letter addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `dead_letter.stream`,\nfeeds `min_seq` gates, and rides in a command receipt's `AtomRef`.\n\nThe identity is the log sequence and not the trigger sequence for\nthree reasons, in ascending order of force: the trigger sequence is\na coordinate on a *different* stream, it is not unique across\nagents, and it can be absent altogether. The Event and Turn atoms\nare keyed the same way, so a sequence read out of any of the three\nstreams means the same thing.",
+        "properties": {
+          "dead_letter": {
+            "$ref": "#/$defs/DeadLetter",
+            "description": "The fact itself. Nested rather than flattened so the identity\nis visibly the atom's and not one of the trigger's own fields."
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "dead_letter"
+        ],
+        "title": "DeadLetterState",
         "type": "object"
       },
       "key_schema": {
@@ -1209,6 +1357,183 @@
           "invocation_id"
         ],
         "title": "TurnFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$defs": {
+          "AssistantToolCall": {
+            "properties": {
+              "parameters": true,
+              "tool_call_id": {
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool_call_id",
+              "tool_name",
+              "parameters"
+            ],
+            "type": "object"
+          },
+          "TurnAction": {
+            "description": "What happened: the turn's content, full payload by default.",
+            "oneOf": [
+              {
+                "description": "The invocation's opening prompt: the system prompt the agent\nwas configured with and the user message its trigger became.\nFolded from the opening `llm.request` — see\n[`TurnFold::apply`]. First in the enum because it is first in\nthe conversation.",
+                "properties": {
+                  "kind": {
+                    "const": "prompt",
+                    "type": "string"
+                  },
+                  "system": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "user": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "content": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "cost_usd": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "is_error": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "assistant",
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "tool_calls": {
+                    "items": {
+                      "$ref": "#/$defs/AssistantToolCall"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "model",
+                  "tool_calls"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "is_error": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "tool_result",
+                    "type": "string"
+                  },
+                  "output": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "parameters": {
+                    "description": "Joined from the initiating call when it is in the fold's\nwindow; `null` for a lone turn fetched by key."
+                  },
+                  "tool_call_id": {
+                    "type": "string"
+                  },
+                  "tool_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tool_call_id",
+                  "tool_name",
+                  "parameters"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One turn, addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `turn.stream`, feeds\n`min_seq` gates, and appears in command receipts.",
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/TurnAction",
+            "description": "The action itself — the fact this atom records."
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "initiating_turn": {
+            "description": "For a tool-result turn: the sequence of the assistant turn\nwhose call it answers — tracing in log coordinates. Absent\nwhen the initiating turn predates the stream window, and on\nturns no other turn initiated (assistant turns, the prompt).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "round": {
+            "description": "The Round grouping key: one Round is an assistant action plus\nthe tool results it initiated (the model-turn count\n`max_iterations` gates). 0 on the opening prompt, which\nprecedes every Round, and on turns derived from events\npredating the field.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timestamp_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "invocation_id",
+          "agent_id",
+          "round",
+          "timestamp_ms",
+          "action"
+        ],
+        "title": "TurnState",
         "type": "object"
       },
       "key_schema": {

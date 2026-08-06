@@ -32,7 +32,7 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 9 | `fq agent list` | CLI's own disk read (skew vs daemon's live registry) | **created in 4.1** (none existed) | `agent.list` view | ✅ **DONE 2026-08-01** |
 | 10 | `fq agent validate` | local file parse | — | stays local | n/a |
 | 11 | `fq events tail` | core-NATS subscribe, silent-drop, non-resumable | **created in 4.2** (none existed) | `event.stream` atom | ✅ **DONE 2026-08-05** |
-| 12 | `fq events query` | direct Views → `Views::events` | `events_query_*` | `event.list` atom | no |
+| 12 | `fq events query` | direct Views → `Views::events` | `events_query_*` (**reviewed change** — a daemon-backed listing contains the daemon's own events; same correction as 4.1's roster) | `event.list` atom, served from the projection index (`Atom::with_index`; rows carry `seq` so `event.get` walks from any of them) | ✅ **DONE 2026-08-06** |
 | 13 | `fq costs` | direct Views → `Views::costs` | `costs_*` | `cost.summary` report | ReportId + fixture exist; not registered |
 | 14 | `fq status` | direct JetStream probe + direct Views (`CLI:1772-1875`) | `status_*` (only Nats::Live goldens) | `control.status` report (scope `Control`) — **not** `control.get`; a synthetic has no Get (2026-08-06) | no |
 | 15 | `fq doctor` | direct Views ×4 | `doctor_*` | `control.doctor` report (D-5 gates the roster) | no |
@@ -49,10 +49,10 @@ Verb numbering is stable and referenced by the cohorts. `CLI` =
 | 26 | `fq token attenuate` | offline (fq-edge) | — | — | ✅ DONE |
 | 27 | `fq version` | build-time consts | — | local stays; daemon build via `control.status` | n/a |
 
-**Count check**: flips remaining 3, 4, 6, 8, 12, 13, 14, 15, 19, 23 =
-**10**. Verbs 18 and 20 landed 2026-07-28 (cohort 4.0); verbs 21, 22
-and 9 landed 2026-08-01 (cohort 4.1); verbs 11 and 7 landed
-2026-08-05/06 (cohort 4.2). Verb 12 is the cohort's remainder.
+**Count check**: flips remaining 3, 4, 6, 8, 13, 14, 15, 19, 23 =
+**9**. Verbs 18 and 20 landed 2026-07-28 (cohort 4.0); verbs 21, 22
+and 9 landed 2026-08-01 (cohort 4.1); verbs 11, 7 and 12 landed
+2026-08-05/06, which completes cohort 4.2.
 
 **Migration gate** (`edge_migration_gate.rs`, added with cohort 4.0):
 the remaining legacy call points are counted and asserted, so a flip
@@ -62,9 +62,11 @@ are exempt: fq-cli hosts both client and daemon until the Phase-5
 binary split, so the edge's own command handlers calling runtime
 internals is the architecture, not debt.
 
-It counts `open_views(`, `control_plane::operator::` and — since
-cohort 4.1 — `AgentRegistry::load_from_directory`. **10 at the start
-of Phase 4, 7 now, zero at the end.**
+It counts `open_views(`, `control_plane::operator::`, and — since
+cohort 4.1 — `AgentRegistry::load_from_directory`, and — since cohort
+4.2 — client-side `.subscribe`. **10 at the start of Phase 4, 7 now,
+zero at the end** — but read that 7 against a pattern set twice as
+wide as the one the 10 was measured with.
 
 The count went **6 -> 7** with verb 9, and that is worth reading
 carefully, because a rising ratchet normally means debt was added.
@@ -81,7 +83,7 @@ falling count over a too-narrow pattern can flatter the work.
 An eighth marker sanctioned nothing — orphaned above an unrelated
 comment when the open it guarded moved — and was removed with verb
 18, which is why the earlier count of 8 here was wrong. The unmarked
-bypass class is `open_views` — now used only by verbs 12, 13 and 15 —
+bypass class is `open_views` — now used only by verbs 13 and 15 —
 which that gate does not match; the migration gate does.
 
 ## B. Read service / dashboard

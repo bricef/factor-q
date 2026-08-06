@@ -190,6 +190,7 @@ pub fn operator_registry(
     // Cloned up front: the registrations below each move their own
     // handles into 'static closures.
     let event_bus = deps.bus.clone();
+    let event_views = views.clone();
     let dead_letter_bus = deps.bus.clone();
     let turn_bus = deps.bus.clone();
     let turn_views = views.clone();
@@ -271,7 +272,7 @@ pub fn operator_registry(
 
     register_worker_view(&mut registry, worker_views)?;
     register_agent_view(&mut registry, agent_registry)?;
-    crate::event_atom::register_event_atom(&mut registry, event_bus)?;
+    crate::event_atom::register_event_atom(&mut registry, event_bus, event_views)?;
     crate::dead_letter_atom::register_dead_letter_atom(&mut registry, dead_letter_bus)?;
 
     let decl = fq_ops::Command::new::<DropCommandInput>(
@@ -354,7 +355,7 @@ pub fn operator_registry(
     let list_views = turn_views.clone();
     let stream_views = turn_views;
     registry
-        .atom::<TurnKey, fq_runtime::turn::TurnState, TurnFilter, _, _, _, _, _, _>(
+        .atom::<TurnKey, fq_runtime::turn::TurnState, fq_runtime::turn::TurnState, TurnFilter, _, _, _, _, _, _>(
             decl,
             move |key: TurnKey| {
                 let bus = get_bus.clone();

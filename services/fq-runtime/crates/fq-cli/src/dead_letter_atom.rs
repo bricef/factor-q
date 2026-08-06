@@ -111,7 +111,7 @@ pub(crate) fn register_dead_letter_atom(
     let get_bus = bus.clone();
     let list_bus = bus.clone();
     registry
-        .atom::<DeadLetterKey, DeadLetterState, DeadLetterFilter, _, _, _, _, _, _>(
+        .atom::<DeadLetterKey, DeadLetterState, DeadLetterState, DeadLetterFilter, _, _, _, _, _, _>(
             decl,
             move |key: DeadLetterKey| {
                 let bus = get_bus.clone();

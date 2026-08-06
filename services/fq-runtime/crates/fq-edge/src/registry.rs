@@ -176,8 +176,16 @@ impl EdgeRegistry {
     /// the full derived surface of the only streamable nature. Get
     /// and List follow the view discipline; Stream binds the
     /// long-poll handler `next_batch` dispatches to.
+    ///
+    /// `X` is the List row. It is `S` for an atom declared with
+    /// [`fq_ops::Atom::new`] — listing facts hands back facts — and
+    /// the declared index row for one declared with
+    /// `Atom::with_index`. The slot is spelled out for the same reason
+    /// [`EdgeRegistry::view`] spells it out: the declaration and the
+    /// handler must agree on the shape List answers with, and this is
+    /// the only place a handler exists to check it against.
     #[allow(clippy::type_complexity)]
-    pub fn atom<K, S, F, F1, F2, F3, Fut1, Fut2, Fut3>(
+    pub fn atom<K, S, X, F, F1, F2, F3, Fut1, Fut2, Fut3>(
         &mut self,
         decl: fq_ops::Atom,
         get: F1,
@@ -187,18 +195,19 @@ impl EdgeRegistry {
     where
         K: DeserializeOwned + Send + 'static,
         S: Serialize,
+        X: Serialize,
         F: DeserializeOwned + Send + 'static,
         F1: Fn(K) -> Fut1 + Send + Sync + 'static,
         Fut1: Future<Output = Result<S, WireError>> + Send + 'static,
         F2: Fn(F) -> Fut2 + Send + Sync + 'static,
-        Fut2: Future<Output = Result<Vec<S>, WireError>> + Send + 'static,
+        Fut2: Future<Output = Result<Vec<X>, WireError>> + Send + 'static,
         F3: Fn(F, u64, u64) -> Fut3 + Send + Sync + 'static,
         Fut3: Future<Output = Result<crate::wire::StreamBatch, WireError>> + Send + 'static,
     {
         let domain = decl.domain;
         self.registry.register(decl)?;
         self.bind::<K, S, _, _>(&OpId::Get(domain), get);
-        self.bind::<F, Vec<S>, _, _>(&OpId::List(domain), list);
+        self.bind::<F, Vec<X>, _, _>(&OpId::List(domain), list);
         let stream = Arc::new(stream);
         let stream_op = OpId::Stream(domain).to_string();
         self.stream_handlers.insert(

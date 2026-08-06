@@ -169,6 +169,10 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
 fn event_rows() -> Vec<EventView> {
     let mk = |ts: &str, agent: &str, inv: &str, ty: &str, cost: Option<f64>| EventView {
         event_id: format!("evt-{ty}-{inv}"),
+        // These rows were built here, not projected from a log, so
+        // there is no position to point back at. The dashboard renders
+        // the extracted fields and never the key.
+        seq: None,
         timestamp: ts.to_string(),
         agent_id: agent.to_string(),
         invocation_id: inv.to_string(),

@@ -54,6 +54,39 @@
           "content"
         ]
       },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "EntryState",
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "round": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "seq",
+          "invocation_id",
+          "round",
+          "role",
+          "content"
+        ]
+      },
       "filter_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "EntryFilter",
@@ -185,6 +218,27 @@
         ]
       },
       "state_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "TriggerState",
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "payload": true,
+          "seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "seq",
+          "agent_id",
+          "payload"
+        ]
+      },
+      "index_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "TriggerState",
         "type": "object",

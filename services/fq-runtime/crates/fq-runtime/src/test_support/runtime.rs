@@ -317,7 +317,7 @@ impl TestRuntime {
     /// `control_plane::operator::drop_invocation`) succeed.
     pub async fn seed_projection_event(&self, event: &Event) -> Result<(), String> {
         self.proj_store
-            .insert_event(event)
+            .insert_event(event, None)
             .await
             .map_err(|e| format!("insert_event: {e}"))
     }

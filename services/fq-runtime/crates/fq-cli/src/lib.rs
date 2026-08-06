@@ -1131,6 +1131,9 @@ use dead_letters::list_dead_letters;
 mod event_atom;
 use event_atom::EventFilter;
 
+mod events;
+use events::{query_events, tail_events};
+
 mod agents;
 use agents::list_agents;
 
@@ -1526,203 +1529,6 @@ async fn trigger_agent(
     }
 
     Ok(())
-}
-
-/// Tail the event stream, formatting each event as a single readable
-/// line.
-///
-/// Rides `event.stream` over the authenticated edge (plan Phase 4,
-/// verb 11). It used to hold its own core-NATS subscription, which
-/// **drops messages silently** when the consumer falls behind and
-/// cannot be resumed; the stream is an ephemeral consumer positioned by
-/// sequence, so a slow terminal costs latency rather than events, and
-/// the cursor below is a real resume point.
-///
-/// Selection is the Event atom's typed filter — `--agent`,
-/// `--event-type`, the flags `fq events query` takes — and it travels
-/// whole rather than being applied here, so a narrowed tail is
-/// narrowed at the log rather than at the terminal. The raw NATS
-/// subject argument this verb used to take is gone (D8): a subject is
-/// a coordinate of the infrastructure the edge maps, not a selection
-/// the surface speaks.
-async fn tail_events(
-    global: &GlobalArgs,
-    agent: Option<String>,
-    event_type: Option<String>,
-    json: bool,
-) -> anyhow::Result<()> {
-    let filter = EventFilter {
-        agent,
-        event_type,
-        ..EventFilter::default()
-    };
-    let config = global.resolve_config()?;
-
-    if !json {
-        println!("Connecting to the edge at {}...", config.edge.bind);
-    }
-    let client = edge_client_for(global).await?;
-
-    // Seek the tail before printing "listening": from here on the
-    // cursor is ours, and every batch resumes from where the last one
-    // ended — no gap, no silent drop.
-    let seek = next_event_batch(&client, &filter, u64::MAX, 0)
-        .await?
-        .map_err(|e| anyhow::anyhow!("event.stream: {e}"))?;
-    let mut cursor = seek.next_from_seq;
-
-    if !json {
-        println!("Tailing {}", filter.describe());
-        println!("Press Ctrl-C to exit.");
-        println!();
-    }
-
-    loop {
-        let batch = next_event_batch(&client, &filter, cursor, 30_000)
-            .await?
-            .map_err(|e| anyhow::anyhow!("event.stream: {e}"))?;
-        cursor = batch.next_from_seq;
-        for item in batch.items {
-            let state: fq_runtime::event_tail::EventState = serde_json::from_value(item.item)?;
-            if json {
-                println!("{}", serde_json::to_string(&state.event)?);
-            } else {
-                print_event(&state.event);
-            }
-        }
-    }
-    // The tail loop runs until Ctrl-C or a transport error (`?`).
-}
-
-/// Format one event as a single readable line.
-fn print_event(event: &Event) {
-    let timestamp = event.envelope.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ");
-    let invocation = event.envelope.invocation_id.as_simple().to_string();
-    let invocation_short: String = invocation.chars().take(8).collect();
-
-    let summary = match &event.payload {
-        EventPayload::Triggered(p) => format!("triggered source={:?}", p.trigger_source),
-        EventPayload::InvocationSummary(p) => {
-            format!("invocation.summary [{:?}] {}", p.kind, p.summary)
-        }
-        EventPayload::LlmRequest(p) => format!(
-            "llm.request model={} messages={}",
-            p.model,
-            p.messages.len()
-        ),
-        EventPayload::LlmResponse(p) => {
-            // Cost rides on the llm.response envelope (envelope-refactor
-            // plan step 3). Render it inline when present so the
-            // operator gets the same per-call cost visibility the
-            // separate cost event used to provide.
-            let cost_suffix = event
-                .envelope
-                .cost
-                .as_ref()
-                .map(|c| {
-                    format!(
-                        " cost=${:.6} cumulative=${:.6}",
-                        c.total_cost, c.cumulative_invocation_cost
-                    )
-                })
-                .unwrap_or_default();
-            format!(
-                "llm.response tokens={}/{} stop={:?}{cost_suffix}",
-                p.usage.input_tokens, p.usage.output_tokens, p.stop_reason
-            )
-        }
-        EventPayload::LlmFailure(p) => {
-            // Cost only when the provider's usage was recoverable — an
-            // empty completion. Absent otherwise, and rendering a `$0`
-            // would claim we know the call was free.
-            let cost_suffix = event
-                .envelope
-                .cost
-                .as_ref()
-                .map(|c| format!(" cost=${:.6}", c.total_cost))
-                .unwrap_or_default();
-            format!(
-                "llm.failure {:?} model={} {}{cost_suffix}",
-                p.error_kind, p.model, p.error_message
-            )
-        }
-        EventPayload::ToolCall(p) => format!("tool.call {}", p.tool_name),
-        EventPayload::ToolDispatched(p) => format!("tool.dispatched {}", p.tool_name),
-        EventPayload::LlmDispatched(p) => format!("llm.dispatched model={}", p.model),
-        EventPayload::ToolResult(p) => {
-            format!("tool.result {}", if p.is_error { "error" } else { "ok" })
-        }
-        EventPayload::HostNotice(p) => format!("host.notice kind={} {}", p.kind, p.body),
-        EventPayload::Completed(p) => format!(
-            "completed duration={}ms cost=${:.6}",
-            p.total_duration_ms, p.total_cost
-        ),
-        EventPayload::Failed(p) => {
-            format!("failed {:?} {}", p.error_kind, p.error_message)
-        }
-        EventPayload::InvocationAmbiguous(p) => format!(
-            "invocation.ambiguous entity={} call_id={}",
-            p.stuck_entity, p.stuck_call_id
-        ),
-        EventPayload::InvocationArchived(p) => format!(
-            "invocation.archived worker_id={} phase={}",
-            p.worker_id, p.final_phase
-        ),
-        EventPayload::InvocationArchiveAcked(p) => {
-            format!("invocation.archive_acked worker_id={}", p.worker_id)
-        }
-        EventPayload::SystemStartup(p) => format!(
-            "system.startup version={} agents={} nats={}",
-            p.version, p.agents_loaded, p.nats_url
-        ),
-        EventPayload::SystemShutdown(p) => {
-            format!("system.shutdown reason={} clean={}", p.reason, p.clean)
-        }
-        EventPayload::SystemRecovery(p) => format!(
-            "system.recovery total={} safe_resume={} safe_replay={} ambiguous={}",
-            p.total, p.safe_resume, p.safe_replay, p.ambiguous
-        ),
-        EventPayload::SystemTaskFailed(p) => format!(
-            "system.task_failed task={} error={}",
-            p.task_name, p.error_message
-        ),
-        EventPayload::WorkerHeartbeat(p) => format!("worker.heartbeat worker_id={}", p.worker_id),
-        EventPayload::WorkerOrphaned(p) => format!(
-            "worker.orphaned worker_id={} last_heartbeat_ms={}",
-            p.worker_id, p.last_heartbeat_ms
-        ),
-        EventPayload::McpServerLog(p) => {
-            format!("mcp.log server={} level={} {}", p.server, p.level, p.data)
-        }
-        EventPayload::InvocationOperatorRecovered(p) => format!(
-            "invocation.operator_recovered action={} phase={}{}",
-            p.action,
-            p.final_phase,
-            p.reason
-                .as_deref()
-                .map(|r| format!(" reason={r:?}"))
-                .unwrap_or_default()
-        ),
-        EventPayload::InvocationOperatorResumed(p) => format!(
-            "invocation.operator_resumed calls={}{}",
-            p.completed_call_ids.join(","),
-            p.reason
-                .as_deref()
-                .map(|r| format!(" reason={r:?}"))
-                .unwrap_or_default()
-        ),
-        // A newer daemon's event type. The envelope still renders; say
-        // plainly that the payload is unreadable rather than pretend
-        // the line is complete.
-        EventPayload::Unknown => {
-            "unknown event_type (published by a newer fq; upgrade to read it)".to_string()
-        }
-    };
-
-    println!(
-        "{timestamp} [{invocation_short}] {agent}: {summary}",
-        agent = event.envelope.agent_id
-    );
 }
 
 /// Per-store SQLite database paths under the configured cache
@@ -4075,9 +3881,6 @@ fn truncate_json(value: &serde_json::Value, max: usize) -> String {
     }
 }
 
-/// Query the SQLite projection for events matching the given
-/// filters. Read-only — does not require the projector to be
-/// currently running, only that it has been run at some point.
 /// Open the read-only `Views` handle every CLI read command formats over
 /// (the CLI is a formatter over `fq_runtime::views`, not a read layer of
 /// its own — see the operator-dashboard plan, layer 1).
@@ -4101,46 +3904,6 @@ async fn open_views(global: &GlobalArgs) -> anyhow::Result<Views> {
             config.cache.directory.display()
         )
     })
-}
-
-async fn query_events(
-    global: &GlobalArgs,
-    agent: Option<&str>,
-    event_type: Option<&str>,
-    since: Option<&str>,
-    limit: i64,
-    json: bool,
-) -> anyhow::Result<()> {
-    let views = open_views(global).await?;
-    let rows = views.events(agent, event_type, since, limit).await?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-        return Ok(());
-    }
-
-    if rows.is_empty() {
-        println!("No events matched.");
-        return Ok(());
-    }
-
-    println!(
-        "{:<20} {:<40} {:<14} {:<12} invocation",
-        "timestamp", "agent", "event", "cost"
-    );
-    for row in rows {
-        let ts = row.timestamp.get(..19).unwrap_or(&row.timestamp);
-        let inv_short: String = row.invocation_id.chars().take(8).collect();
-        let cost = row
-            .total_cost
-            .map(|c| format!("${c:.6}"))
-            .unwrap_or_else(|| "-".to_string());
-        println!(
-            "{:<20} {:<40} {:<14} {:<12} {}",
-            ts, row.agent_id, row.event_type, cost, inv_short
-        );
-    }
-    Ok(())
 }
 
 /// Show per-agent cost totals from the SQLite projection.
@@ -4966,7 +4729,7 @@ mod invocation_tests {
                     .to_snapshot(),
             }),
         );
-        proj_store.insert_event(&seed).await.unwrap();
+        proj_store.insert_event(&seed, None).await.unwrap();
 
         let control_store = ControlPlaneStore::open(&db_paths.control_plane)
             .await

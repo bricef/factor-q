@@ -179,12 +179,25 @@ pub struct Atom {
     pub stability: Stability,
     pub key_schema: Schema,
     pub state_schema: Schema,
+    /// The shape of one List row. **Defaults to the state** — an atom
+    /// is a fact, and listing facts hands back facts, which is what
+    /// `turn.list` does and must keep doing.
+    ///
+    /// An atom whose List answers from a cheaper store than its Get
+    /// declares this separately ([`Atom::with_index`]): the index row
+    /// is then a different shape from the state, and the declaration
+    /// says so rather than leaving a caller to discover it from the
+    /// payload. Stream always answers with the state — a stream is
+    /// creation-notification, and half a fact is not a notification of
+    /// it.
+    pub index_schema: Schema,
     pub filter_schema: Schema,
 }
 
 impl Atom {
-    /// Declare an atom. The generic parameters are the declaration:
-    /// `Key` (Get identity), `State` (the immutable content), `Filter`
+    /// Declare an atom whose List answers with the atoms themselves.
+    /// The generic parameters are the declaration: `Key` (Get
+    /// identity), `State` (the immutable content), `Filter`
     /// (List/Stream selection); their schemas are captured here, at
     /// the one declaration site.
     pub fn new<Key, State, Filter>(
@@ -197,6 +210,38 @@ impl Atom {
         State: Serialize + DeserializeOwned + JsonSchema,
         Filter: Serialize + DeserializeOwned + JsonSchema,
     {
+        Self::with_index::<Key, State, State, Filter>(domain, summary, stability)
+    }
+
+    /// Declare an atom whose List answers with an **index** row rather
+    /// than the atom — `Index` is that row's shape.
+    ///
+    /// The opt-in exists because an atom's List may legitimately be
+    /// served from a different store than its Get: an index that
+    /// carries extracted fields answers "what happened recently"
+    /// cheaply, where a scan of the substrate would not. The rule that
+    /// makes it safe is a contract on `Index`, not on this
+    /// constructor — **an index row must carry the identity `Get`
+    /// takes**, so a caller can walk from any row to the whole atom —
+    /// and the declaration's `description` must say so, because that
+    /// text is what the surface publishes about itself.
+    ///
+    /// A separate constructor rather than a fourth type parameter on
+    /// [`Atom::new`]: the default is not "some index" but *the state
+    /// itself*, and spelling that as `Atom::new::<K, S, S, F>` at every
+    /// existing site would state the default by repetition — noise that
+    /// a transposition could silently get wrong.
+    pub fn with_index<Key, State, Index, Filter>(
+        domain: Domain,
+        summary: &'static str,
+        stability: Stability,
+    ) -> Self
+    where
+        Key: Serialize + DeserializeOwned + JsonSchema,
+        State: Serialize + DeserializeOwned + JsonSchema,
+        Index: Serialize + DeserializeOwned + JsonSchema,
+        Filter: Serialize + DeserializeOwned + JsonSchema,
+    {
         Atom {
             domain,
             version: 1,
@@ -205,6 +250,7 @@ impl Atom {
             stability,
             key_schema: schema_for!(Key),
             state_schema: schema_for!(State),
+            index_schema: schema_for!(Index),
             filter_schema: schema_for!(Filter),
         }
     }

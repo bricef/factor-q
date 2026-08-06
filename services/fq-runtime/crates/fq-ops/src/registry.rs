@@ -194,9 +194,24 @@ impl Registry {
                 input_schema: Some(&a.key_schema),
                 output_schema: Some(&a.state_schema),
             },
-            (Entry::Atom(a), OpId::List(_) | OpId::Stream(_)) => Resolved {
+            // List answers with the atom's index rows. That is the
+            // state itself unless the declaration said otherwise
+            // (`Atom::with_index`), so this arm is the same answer as
+            // Stream's for every atom that declares no index.
+            (Entry::Atom(a), OpId::List(_)) => Resolved {
                 op: op.clone(),
-                category: op.category(),
+                category: OpCategory::List,
+                authority: read(a.domain),
+                version: a.version,
+                input_schema: Some(&a.filter_schema),
+                output_schema: Some(&a.index_schema),
+            },
+            // Stream always answers with the state: streaming is
+            // creation-notification, and an index row is not the fact
+            // that was created.
+            (Entry::Atom(a), OpId::Stream(_)) => Resolved {
+                op: op.clone(),
+                category: OpCategory::Stream,
                 authority: read(a.domain),
                 version: a.version,
                 input_schema: Some(&a.filter_schema),

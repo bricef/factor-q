@@ -270,7 +270,7 @@ non-zero.
 | `fq trigger` | In-process execution or `--via-nats` publish |
 | `fq agent list/validate` | Registry inspection |
 | `fq events tail` | Live event stream |
-| `fq events query` | Historical query via SQLite |
+| `fq events query` | Historical query — `event.list` over the edge, answered from the daemon's projection index (no payloads; each row's `seq` reads the whole event back via `event.get`) |
 | `fq costs` | Per-agent cost aggregation |
 | `fq status` | Runtime health check |
 
