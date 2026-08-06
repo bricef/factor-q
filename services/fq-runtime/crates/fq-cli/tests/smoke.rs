@@ -87,6 +87,48 @@ fn fq_help_lists_expected_subcommands() {
     }
 }
 
+/// `--limit -1` no longer means "no limit", and says so before it
+/// costs anybody anything.
+///
+/// It used to be mapped to `u32::MAX` — SQLite's reading of a negative
+/// LIMIT, preserved from when this query opened `projection.db`
+/// itself. That read now happens in the daemon, where an unbounded
+/// page is the whole projection table materialised in memory and then
+/// a response frame too large to send, so the operator paid for the
+/// scan and got a transport error back. There is nothing left for
+/// "no limit" to mean, and pretending otherwise is the lie.
+///
+/// The refusal is local — no daemon, no connection, nothing allocated
+/// — and it names both the cap and the way past it, so the operator's
+/// next command is one edit away rather than a guess. `fq events
+/// query` is the one verb where a wrong `--limit` used to be
+/// expensive, which is why the check runs before the request leaves.
+#[test]
+fn fq_events_query_refuses_an_unbounded_limit() {
+    let (exit, _stdout, stderr) = run_fq(
+        // `--limit=-1`, attached: clap reads a bare `-1` as a flag.
+        &["events", "query", "--limit=-1"],
+        Duration::from_secs(5),
+    );
+    assert_eq!(exit, Some(1), "an unbounded page must be refused; {stderr}");
+    for needle in [
+        // What was asked for, the cap, and the two ways to get more
+        // than one page.
+        "-1", "2000", "--since", "tail",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "expected `{needle}` in the refusal; got: {stderr}"
+        );
+    }
+    // Refused, not quietly turned into a page of some size the
+    // operator never asked for.
+    assert!(
+        !stderr.contains("No events matched"),
+        "an unbounded page must not be answered at all; got: {stderr}"
+    );
+}
+
 #[test]
 fn fq_drain_is_an_unrecognized_subcommand() {
     let (exit, _stdout, stderr) = run_fq(&["drain"], Duration::from_secs(5));

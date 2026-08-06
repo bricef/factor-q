@@ -493,6 +493,20 @@ impl World {
         input: serde_json::Value,
         min_seq: Option<u64>,
     ) -> serde_json::Value {
+        self.invoke_result(client, op, input, min_seq)
+            .expect("read op")
+    }
+
+    /// [`Self::invoke_gated`], with the op's verdict left intact — for
+    /// the requests the daemon is supposed to refuse, where the error
+    /// *is* the answer under test.
+    fn invoke_result(
+        &self,
+        client: &fq_edge::EdgeClient,
+        op: fq_ops::OpId,
+        input: serde_json::Value,
+        min_seq: Option<u64>,
+    ) -> Result<serde_json::Value, fq_edge::wire::WireError> {
         self.rt
             .block_on(client.rpc.invoke(
                 tarpc::context::current(),
@@ -504,8 +518,7 @@ impl World {
                 },
             ))
             .expect("rpc")
-            .expect("read op")
-            .output
+            .map(|response| response.output)
     }
 
     fn tail(&self, args: &[&str]) -> Tail {
@@ -914,6 +927,139 @@ fn list_and_stream_answer_the_same_population_for_every_filter() {
             selection.describe()
         );
     }
+}
+
+/// The largest page `event.list` will serve, as a consumer reads it:
+/// off the declared surface, not out of the source.
+fn declared_list_cap(surface: &serde_json::Value) -> u64 {
+    surface
+        .as_array()
+        .expect("the surface describes itself as a list of entries")
+        .iter()
+        .filter_map(|entry| entry.get("atom"))
+        .find(|atom| atom["domain"] == "event")
+        .expect("the Event atom is on the surface")["filter_schema"]["properties"]["limit"]
+        ["maximum"]
+        .as_u64()
+        .expect("the declared filter says how large a page may be")
+}
+
+/// **A List page is bounded, the bound is declared, and an ask above it
+/// is refused rather than quietly shortened.**
+///
+/// `event.list` served whatever `limit` it was handed. That was
+/// harmless while `fq events query` read `projection.db` itself, and
+/// stopped being harmless when the read moved into the daemon:
+/// `--limit -1` arrived as `u32::MAX`, so `LIMIT 4294967295`
+/// materialised the whole projection table as one `Vec<EventView>` in
+/// daemon memory and then failed to encode, because one List answer is
+/// one frame and the edge's codec stops at 8 MiB. The operator paid for
+/// the scan and got a transport error for it, and any paired client
+/// could ask for that.
+///
+/// Clamping would have fixed the allocation and broken the answer.
+/// List hands back a bare array of index rows — no envelope, no cursor,
+/// nowhere to say "there is more" — so a page the daemon shortened is
+/// indistinguishable from a listing that ended, and the operator reads
+/// a partial answer as the whole one. This is the same failure shape as
+/// the population and identity findings on this atom: a surface saying
+/// less than it means.
+///
+/// So the three properties that make a cap honest, asserted end to end:
+///
+/// 1. **The cap is on the surface.** It is read here off
+///    `List(Operation)`, the way a consumer would, rather than
+///    hardcoded — and since the refusal and the served page are both
+///    measured against that number, a declared cap that disagreed with
+///    the enforced one fails this test from either side.
+/// 2. **Above it is a refusal**, naming the cap and the cursored read
+///    that serves more than a page, so the caller's next request is an
+///    edit rather than a guess.
+/// 3. **Below it the page is the caller's own number** — which is what
+///    makes a row count readable at all: fewer rows than you asked for
+///    means there are no more.
+#[test]
+fn a_list_page_is_bounded_by_a_cap_the_surface_declares() {
+    let world = World::start();
+    let client = world.edge_client();
+
+    let cap = declared_list_cap(&world.invoke(
+        &client,
+        fq_ops::OpId::List(fq_ops::Domain::Operation),
+        serde_json::json!({}),
+    ));
+
+    // A corpus only this test can have published: one agent, one event
+    // type, and a `since` below the first of them. The daemon mints
+    // events of its own throughout, and the assertions here are about
+    // exact counts rather than set membership, so the window has to
+    // admit nothing else.
+    const CORPUS: u32 = 6;
+    let base_ms = chrono::Utc::now().timestamp_millis() + 1_000;
+    let since = chrono::DateTime::from_timestamp_millis(base_ms - 500)
+        .expect("a valid instant")
+        .to_rfc3339();
+    let corpus: Vec<Event> = (0..CORPUS)
+        .map(|i| triggered(AGENT, INV, 80 + i, base_ms + i64::from(i)))
+        .collect();
+    let tip = world.publish(&corpus);
+
+    let page = |limit: u64| {
+        world.invoke_result(
+            &client,
+            fq_ops::OpId::List(fq_ops::Domain::Event),
+            serde_json::json!({
+                "agent": AGENT,
+                "event_type": "triggered",
+                "since": since,
+                "limit": limit,
+            }),
+            // `event.list` reads the projection: without the watermark
+            // the counts below would race the fold.
+            Some(tip),
+        )
+    };
+    let rows = |limit: u64| {
+        page(limit)
+            .unwrap_or_else(|e| panic!("event.list must serve a page of {limit}; got {e:?}"))
+            .as_array()
+            .expect("a list of index rows")
+            .len()
+    };
+
+    let err = page(cap + 1).expect_err("a page over the cap must be refused, not served short");
+    assert!(
+        matches!(&err, fq_edge::wire::WireError::InvalidInput { op, message }
+            if op == "event.list"
+                && message.contains(&cap.to_string())
+                && message.contains("event.stream")),
+        "the refusal must name the cap and the cursored read; got {err:?}"
+    );
+
+    // The declared cap is servable, not one the daemon trips over —
+    // and asking for it over a six-event window answers with six, so
+    // "fewer rows than I asked for" is a complete listing rather than
+    // a shortened one.
+    assert_eq!(
+        rows(cap),
+        CORPUS as usize,
+        "a page at the declared cap must be served, and must not be padded to it"
+    );
+
+    // Under the cap, `limit` is the caller's own bound in both
+    // directions: never rounded up to the cap, never rounded down to
+    // some number the daemon preferred.
+    let all = u64::from(CORPUS);
+    assert_eq!(
+        rows(all + 5),
+        CORPUS as usize,
+        "asking for more than exists must answer with everything"
+    );
+    assert_eq!(
+        rows(all - 1),
+        (CORPUS - 1) as usize,
+        "asking for fewer than exists must answer with exactly that many"
+    );
 }
 
 /// The surface stops serving a transient; the machinery that consumes
