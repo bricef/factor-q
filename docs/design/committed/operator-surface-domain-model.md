@@ -193,7 +193,21 @@ the UUIDv7 the event stamps on itself, and the index's own primary key —
 so `event.get` is one call away from any row: a primary-key lookup for
 the log position, then the log, then the identity check.
 
-Two stores also means two retention policies, and the walk has to be
+Two stores must not mean two **populations**. Which store answers is an
+implementation of the question, so the same filter has to select the same
+events whichever verb is asked — and that is a property to arrange at the
+source, not to document. `Event` failed it twice: the projection never
+indexed worker heartbeats while the log served every one, and `agent`
+narrowed List by the envelope's `agent_id` and Stream by the consumer
+subject `fq.agent.<id>.>` — the same question only for events that happen
+to be agent-partitioned. Both are settled in one place each now: which
+event types are **transient**, and therefore on neither verb, lives in
+`fq_runtime::events::transient` and every reader derives from it; and a
+filter field means the *domain's* field on every verb that takes it.
+**Cursors may be transport coordinates; identities may not — and neither
+may selections.**
+
+Two stores does still mean two retention policies, and the walk has to be
 honest about the gap between them rather than pretend it away.
 Cost-bearing rows are exempt from the retention sweep and kept
 indefinitely; the log keeps thirty days. So a row outliving its payload

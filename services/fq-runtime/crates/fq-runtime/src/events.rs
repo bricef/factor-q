@@ -62,6 +62,10 @@ pub mod subjects;
 /// stays the import path for every one of these types.
 pub mod llm;
 
+/// Which event types are transient — operational signal the operator
+/// surface does not serve, written down once.
+pub mod transient;
+
 pub use llm::{
     Effort, LlmCallOrigin, LlmDispatchedPayload, LlmErrorKind, LlmFailurePayload,
     LlmRequestPayload, LlmResponsePayload, Message, MessageRole, MessageToolCall, RequestParams,
@@ -393,6 +397,14 @@ impl EventPayload {
             .unwrap()
             .strip_suffix("@1")
             .unwrap()
+    }
+
+    /// Whether this event is **transient** — operational signal the
+    /// operator surface does not serve. A property of the type, not
+    /// of the instance: see [`transient`] for what that means and why
+    /// the set lives in one place.
+    pub fn is_transient(&self) -> bool {
+        transient::includes(self.event_type())
     }
 }
 

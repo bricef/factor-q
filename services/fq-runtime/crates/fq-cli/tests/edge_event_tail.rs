@@ -20,15 +20,19 @@
 
 #![cfg(unix)]
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use fq_runtime::events::{
-    CostMetadata, Event, EventPayload, LlmCallOrigin, LlmResponsePayload, StopReason, TokenUsage,
-    ToolCallId, ToolResultPayload, TriggerSource, TriggeredPayload,
+    CostMetadata, Event, EventPayload, InvocationArchiveAckedPayload, LlmCallOrigin,
+    LlmResponsePayload, StopReason, SystemRecoveryPayload, TokenUsage, ToolCallId,
+    ToolResultPayload, TriggerSource, TriggeredPayload, WorkerHeartbeatPayload,
+    WorkerOrphanedPayload,
 };
+use fq_runtime::worker::WorkerId;
 use fq_runtime::{AgentId, EventBus};
 use uuid::Uuid;
 
@@ -548,6 +552,59 @@ impl World {
         }
     }
 
+    /// Every `event.list` row's identity for one filter, read at the
+    /// log's current tip so the projection is certain to have caught
+    /// up with everything published so far.
+    fn listed_ids(&self, client: &fq_edge::EdgeClient, filter: &serde_json::Value) -> Ids {
+        let tip = self
+            .rt
+            .block_on(self.bus.last_event_seq())
+            .expect("the log's tip");
+        self.invoke_gated(
+            client,
+            fq_ops::OpId::List(fq_ops::Domain::Event),
+            filter.clone(),
+            Some(tip),
+        )
+        .as_array()
+        .expect("a list of index rows")
+        .iter()
+        .map(|row| {
+            row["event_id"]
+                .as_str()
+                .expect("a row identity")
+                .to_string()
+        })
+        .collect()
+    }
+
+    /// Every identity `event.stream` serves for one filter, from the
+    /// start of the log to wherever it currently ends. Drains rather
+    /// than reads one batch: a batch is capped, and the question here
+    /// is what the whole log answers.
+    fn streamed_ids(&self, client: &fq_edge::EdgeClient, filter: &serde_json::Value) -> Ids {
+        let mut cursor = 1;
+        let mut ids = BTreeSet::new();
+        // An empty batch means the poll waited out its window with
+        // nothing matching — the end of the log, not a pause.
+        for _ in 0..64 {
+            let batch = self.next_batch(client, filter.clone(), cursor, 500);
+            if batch.items.is_empty() {
+                break;
+            }
+            for item in &batch.items {
+                ids.insert(
+                    item.item["event"]["envelope"]["event_id"]
+                        .as_str()
+                        .expect("a streamed event's identity")
+                        .to_string(),
+                );
+            }
+            cursor = batch.next_from_seq;
+        }
+        ids
+    }
+
     /// Publish, returning the last event's log sequence — the
     /// watermark a following projection read gates on.
     fn publish(&self, events: &[Event]) -> u64 {
@@ -606,6 +663,328 @@ impl Drop for World {
             let _ = daemon.wait();
         }
     }
+}
+
+// ------------------------------------------------------------------
+// One population, two verbs
+// ------------------------------------------------------------------
+
+/// A set of event identities — what both verbs answer with, once the
+/// shape of the answer is set aside.
+type Ids = BTreeSet<String>;
+
+/// The worker the corpus below names. Not the daemon's own: the
+/// events are fixtures, and nothing in the control plane should move
+/// because a test published one.
+const CORPUS_WORKER: &str = "w-population";
+/// The corpus's system-scoped invocation.
+const SYS_INV: &str = "5c000000-0000-7000-8000-000000000005";
+/// [`OTHER_AGENT`]'s invocation in the corpus.
+const OTHER_INV: &str = "2f000000-0000-7000-8000-000000000002";
+
+/// One selection, in the two spellings this test needs: the JSON that
+/// travels to both verbs, and the predicate the corpus is scored
+/// against.
+struct Selection {
+    agent: Option<&'static str>,
+    event_type: Option<&'static str>,
+}
+
+impl Selection {
+    fn json(&self, since: &str) -> serde_json::Value {
+        let mut filter = serde_json::json!({ "since": since, "limit": 500 });
+        if let Some(agent) = self.agent {
+            filter["agent"] = agent.into();
+        }
+        if let Some(event_type) = self.event_type {
+            filter["event_type"] = event_type.into();
+        }
+        filter
+    }
+
+    /// Whether this selection admits one corpus event — the test's
+    /// own reading of the contract, written out rather than borrowed
+    /// from the code under test. `agent` is the **envelope's**, and a
+    /// heartbeat is admitted by nothing: a predicate that called
+    /// `is_transient` would agree with the implementation by
+    /// construction and prove nothing about what it contains.
+    fn admits(&self, event: &Event) -> bool {
+        event.payload.event_type() != "worker_heartbeat"
+            && self
+                .agent
+                .is_none_or(|a| event.envelope.agent_id.as_str() == a)
+            && self
+                .event_type
+                .is_none_or(|t| event.payload.event_type() == t)
+    }
+
+    fn describe(&self) -> String {
+        format!("agent={:?} event_type={:?}", self.agent, self.event_type)
+    }
+}
+
+/// Every shape the two verbs have to agree about, stamped from
+/// `base_ms` onwards.
+///
+/// The interesting property of this corpus is the relationship
+/// between an event's **envelope agent** and the **subject** it is
+/// published on, because that is exactly where the two verbs used to
+/// part company:
+///
+/// | event                       | envelope agent | subject          |
+/// |-----------------------------|----------------|------------------|
+/// | `triggered`                 | `researcher`   | `fq.agent.…`     |
+/// | `invocation_archive_acked`  | `researcher`   | `fq.worker.…`    |
+/// | `system_recovery`           | `system`       | `fq.system.…`    |
+/// | `worker_orphaned`           | `system`       | `fq.worker.…`    |
+/// | `worker_heartbeat`          | `system`       | `fq.worker.…`    |
+///
+/// Only the first row is agent-partitioned. The last is transient.
+fn population_corpus(base_ms: i64) -> Vec<Event> {
+    let worker = || WorkerId::new(CORPUS_WORKER.to_string()).unwrap();
+    let system = |n: u32, at_ms: i64, payload: EventPayload| {
+        stamp(
+            Event::system(Uuid::parse_str(SYS_INV).unwrap(), payload),
+            n,
+            at_ms,
+        )
+    };
+    vec![
+        triggered(AGENT, INV, 60, base_ms),
+        triggered(OTHER_AGENT, OTHER_INV, 61, base_ms + 100),
+        // An agent's own event, published on a worker's subject. The
+        // subject-scoped stream could never deliver this one, while
+        // `event.list` returned it for the same `--agent researcher`.
+        stamp(
+            Event::new(
+                AgentId::new(AGENT).unwrap(),
+                Uuid::parse_str(INV).unwrap(),
+                EventPayload::InvocationArchiveAcked(InvocationArchiveAckedPayload {
+                    worker_id: worker(),
+                }),
+            ),
+            62,
+            base_ms + 200,
+        ),
+        // Agent `system`, which has no `fq.agent.*` subject at all —
+        // so `--agent system` listed rows that could not be tailed.
+        system(
+            63,
+            base_ms + 300,
+            EventPayload::SystemRecovery(SystemRecoveryPayload {
+                runtime_id: Uuid::parse_str(SYS_INV).unwrap(),
+                worker_id: CORPUS_WORKER.into(),
+                safe_resume: 0,
+                safe_replay: 0,
+                ambiguous: 0,
+                total: 0,
+            }),
+        ),
+        system(
+            64,
+            base_ms + 400,
+            EventPayload::WorkerOrphaned(WorkerOrphanedPayload {
+                worker_id: worker(),
+                last_heartbeat_ms: base_ms,
+            }),
+        ),
+        // The transient. Neither verb serves it.
+        system(
+            65,
+            base_ms + 500,
+            EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
+                worker_id: worker(),
+            }),
+        ),
+    ]
+}
+
+/// The selections swept below: each narrowing on its own, the two
+/// composed, and the ones that must answer with nothing.
+fn population_selections() -> Vec<Selection> {
+    let sel = |agent, event_type| Selection { agent, event_type };
+    vec![
+        sel(None, None),
+        sel(Some(AGENT), None),
+        sel(Some(OTHER_AGENT), None),
+        sel(Some("system"), None),
+        // An agent with nothing of its own: both answer empty, and
+        // neither leaks somebody else's rows.
+        sel(Some("nobody"), None),
+        sel(None, Some("triggered")),
+        sel(None, Some("invocation_archive_acked")),
+        sel(None, Some("system_recovery")),
+        sel(None, Some("worker_orphaned")),
+        sel(None, Some("worker_heartbeat")),
+        sel(Some(AGENT), Some("invocation_archive_acked")),
+        sel(Some("system"), Some("worker_heartbeat")),
+    ]
+}
+
+/// **The test both findings on this atom exist for.** `event.list`
+/// and `event.stream` are two reads over one substrate, and the same
+/// filter must select the same events from either.
+///
+/// It did not. The two disagreed twice over, and each disagreement was
+/// invisible from the other side:
+///
+/// - **Population.** List answers from the projection, which never
+///   indexed a heartbeat; Stream answers from the log, which holds
+///   every one. The declared description said "one row per event".
+/// - **What `agent` means.** List narrowed by the envelope's
+///   `agent_id`; Stream narrowed by the consumer subject
+///   `fq.agent.<id>.>`. Those are the same question only for events
+///   that happen to be agent-partitioned — so an archive ack, and
+///   every event of agent `system`, listed and could not be tailed.
+///
+/// So the assertion is not three cases: it is every selection the
+/// filter can express over a corpus built to span the shapes, scored
+/// against what the corpus itself says the answer is. Both findings
+/// fail it, and so would the next one of the same kind.
+#[test]
+fn list_and_stream_answer_the_same_population_for_every_filter() {
+    let world = World::start();
+    let client = world.edge_client();
+
+    // `since` bounds both reads to the corpus's own window, so the
+    // events the daemon minted while booting are out of scope for
+    // both. Millisecond precision on the bound and a second of
+    // clearance below it: the projection compares stored text and the
+    // log compares parsed instants, and only a bound no event sits
+    // exactly on is certainly the same bound to both.
+    let base_ms = chrono::Utc::now().timestamp_millis();
+    let since = chrono::DateTime::from_timestamp_millis(base_ms)
+        .expect("a valid instant")
+        .to_rfc3339();
+    let corpus = population_corpus(base_ms + 1_000);
+    world.publish(&corpus);
+
+    let universe: Ids = corpus
+        .iter()
+        .map(|e| e.envelope.event_id.to_string())
+        .collect();
+
+    for selection in population_selections() {
+        let filter = selection.json(&since);
+        let expected: Ids = corpus
+            .iter()
+            .filter(|e| selection.admits(e))
+            .map(|e| e.envelope.event_id.to_string())
+            .collect();
+
+        // Re-read on disagreement rather than assert on the first
+        // pass: an event the daemon published between the two reads
+        // is in one answer and not the other for reasons that have
+        // nothing to do with the contract, and it is in both on the
+        // next pass. A real disagreement never converges.
+        let mut attempts = 0;
+        let (listed, streamed) = loop {
+            let listed = world.listed_ids(&client, &filter);
+            let streamed = world.streamed_ids(&client, &filter);
+            attempts += 1;
+            if listed == streamed || attempts == 3 {
+                break (listed, streamed);
+            }
+        };
+
+        assert_eq!(
+            listed,
+            streamed,
+            "event.list and event.stream disagree for {} — \
+             only in list: {:?}; only in stream: {:?}",
+            selection.describe(),
+            &listed - &streamed,
+            &streamed - &listed,
+        );
+        // …and they agree on the right answer, not merely with each
+        // other: both must serve exactly the corpus events the
+        // selection admits. Restricted to the corpus because a live
+        // daemon keeps minting events of its own, which is not what
+        // this is measuring.
+        assert_eq!(
+            &listed & &universe,
+            expected,
+            "event.list answered the wrong corpus events for {}",
+            selection.describe()
+        );
+        assert_eq!(
+            &streamed & &universe,
+            expected,
+            "event.stream answered the wrong corpus events for {}",
+            selection.describe()
+        );
+    }
+}
+
+/// The surface stops serving a transient; the machinery that consumes
+/// one must not notice.
+///
+/// A heartbeat leaves the operator surface because it is operational
+/// signal rather than part of the external interface — not because it
+/// stopped mattering. It still has to reach the daemon's heartbeat
+/// consumer and land as worker liveness, which is where an operator
+/// reads it: `worker.list`'s `last_heartbeat_ms`. A change that
+/// achieved the population fix by dropping heartbeats earlier — at the
+/// producer, or out of the stream's subjects — would pass every
+/// assertion above and break the roster, silently.
+#[test]
+fn a_transient_still_reaches_the_daemons_own_consumers() {
+    let world = World::start();
+    let client = world.edge_client();
+    let workers = fq_ops::OpId::List(fq_ops::Domain::Worker);
+
+    let roster = world.invoke(&client, workers.clone(), serde_json::json!({}));
+    // The daemon self-registers its own worker at startup — the row
+    // whose heartbeat is a live signal rather than fixture data.
+    let worker_id = roster
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["status"] == "alive"))
+        .and_then(|row| row["worker_id"].as_str())
+        .unwrap_or_else(|| panic!("the daemon runs a worker of its own: {roster}"))
+        .to_string();
+
+    // A minute ahead, so nothing but this heartbeat can produce it —
+    // the daemon's own are stamped `now` and land every 10s.
+    let marker_ms = chrono::Utc::now().timestamp_millis() + 60_000;
+    let heartbeat = stamp(
+        Event::system(
+            Uuid::parse_str(SYS_INV).unwrap(),
+            EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
+                worker_id: WorkerId::new(worker_id.clone()).unwrap(),
+            }),
+        ),
+        70,
+        marker_ms,
+    );
+    world.publish(std::slice::from_ref(&heartbeat));
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let roster = world.invoke(&client, workers.clone(), serde_json::json!({}));
+        let seen = roster
+            .as_array()
+            .expect("a roster")
+            .iter()
+            .find(|row| row["worker_id"].as_str() == Some(worker_id.as_str()))
+            .and_then(|row| row["last_heartbeat_ms"].as_i64())
+            .unwrap_or_default();
+        if seen >= marker_ms {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the heartbeat never reached the control plane — `worker.list` still \
+             reports {seen} for {worker_id}, and the marker was {marker_ms}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // The same event is on neither operator read, which is the whole
+    // arrangement: consumed by the machinery, absent from the surface.
+    let filter = serde_json::json!({ "event_type": "worker_heartbeat", "limit": 500 });
+    let id = heartbeat.envelope.event_id.to_string();
+    assert!(!world.listed_ids(&client, &filter).contains(&id));
+    assert!(!world.streamed_ids(&client, &filter).contains(&id));
 }
 
 // ------------------------------------------------------------------
@@ -1283,22 +1662,32 @@ fn a_list_scan_ends_when_the_stream_tip_is_not_its_own() {
 /// failed: DeadlineExceeded`.
 ///
 /// The obvious version of this test — tail everything, idle, publish —
-/// does **not** catch it, and I wrote that version first. An
-/// unfiltered tail sees the daemon's worker heartbeat, which lands
-/// every 10s (`DEFAULT_INTERVAL_MS`) and ends the poll in a photo
-/// finish with the 10s deadline: measured at 9.908s, 9.997s, then
-/// 10.004s and death. That is a coin flip decided by machine load, so
-/// as a test it fails intermittently and as a *negative control* it
-/// passes with the bug reinstated — the worst of both.
+/// did **not** catch it when the tail served heartbeats, and I wrote
+/// that version first. An unfiltered tail saw the daemon's worker
+/// heartbeat, which lands every 10s (`DEFAULT_INTERVAL_MS`) and ended
+/// the poll in a photo finish with the 10s deadline: measured at
+/// 9.908s, 9.997s, then 10.004s and death. That is a coin flip decided
+/// by machine load, so as a test it failed intermittently and as a
+/// *negative control* it passed with the bug reinstated — the worst of
+/// both.
 ///
-/// Scoping the tail to one agent removes the race entirely, and the
-/// scoping has to reach the *daemon* to do it: `--agent` compiles to
-/// the consumer subject `fq.agent.<id>.>` (`EventSelection::compile`),
-/// so a heartbeat on `fq.worker.*.heartbeat` is never delivered to the
-/// poll at all. Nothing ends it early, the daemon holds it for its
-/// full 30s, and a client with a 10s deadline dies **every time**. The
-/// idle window then only has to outlast that deadline, which is why it
-/// is 15 seconds and not 35.
+/// What removes the race is that **a heartbeat no longer ends any
+/// poll**: it is transient, so `event.stream` does not serve it, and
+/// an idle window is genuinely idle whatever the filter says (see
+/// `fq_runtime::events::transient`). The scoping this test still asks
+/// for is the realistic case — an operator watching one quiet agent —
+/// rather than the mechanism. It used to be the mechanism: `--agent`
+/// compiled to the consumer subject `fq.agent.<id>.>`, so a heartbeat
+/// on `fq.worker.*.heartbeat` was never delivered to the poll. That
+/// narrowing was also a lie about what `--agent` means (it is the
+/// envelope's agent, and an agent's events are not all on its
+/// subject), and it went with the population fix; the determinism it
+/// used to buy now comes from the transient exclusion instead.
+///
+/// Nothing ends the poll early, the daemon holds it for its full 30s,
+/// and a client with a 10s deadline dies **every time**. The idle
+/// window then only has to outlast that deadline, which is why it is
+/// 15 seconds and not 35.
 ///
 /// This narrowing used to be spelled `--subject fq.agent.<id>.>`,
 /// which reached the daemon by the same route (the client pushed the
