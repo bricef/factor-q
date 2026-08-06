@@ -63,6 +63,12 @@ impl ProjectionStore {
     /// Used by the CLI query commands. Does not create the file; if
     /// the database doesn't exist, returns an error indicating the
     /// projector has not run yet.
+    ///
+    /// Unlike [`Self::open`], this cannot migrate what it finds, so it
+    /// verifies instead (`verify_readable`, in the `schema` module). A
+    /// file written by an older build is rejected here, by name,
+    /// rather than surfacing later as a driver error from whichever
+    /// query first mentions a column that is not there.
     pub async fn open_read_only(path: &Path) -> Result<Self, StoreError> {
         if !path.exists() {
             return Err(StoreError::NotInitialised(path.to_path_buf()));
@@ -73,7 +79,9 @@ impl ProjectionStore {
             .max_connections(2)
             .connect_with(options)
             .await?;
-        Ok(Self { pool })
+        let store = Self { pool };
+        store.verify_readable(path).await?;
+        Ok(store)
     }
 
     /// Delete projected events older than `cutoff_ms` (Unix epoch
@@ -381,6 +389,17 @@ pub enum StoreError {
 
     #[error("projection database not initialised at {0} (has `fq run` been started?)")]
     NotInitialised(PathBuf),
+
+    /// A database written by an older build, opened by a handle that
+    /// cannot bring it forward. Named rather than left to surface as a
+    /// driver error, because the fix is an action the operator takes
+    /// and not something to deduce from missing SQL.
+    #[error(
+        "projection database at {path} was written by an older build and is missing \
+         {missing}. A read-only handle cannot migrate it — run `fq run` once against \
+         this state directory and it will bring the schema forward."
+    )]
+    SchemaOutdated { path: PathBuf, missing: String },
 }
 
 impl From<sqlx::Error> for StoreError {

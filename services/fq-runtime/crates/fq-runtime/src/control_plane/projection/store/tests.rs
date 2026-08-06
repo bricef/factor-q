@@ -1171,3 +1171,71 @@ async fn read_only_open_succeeds_after_write_open() {
     let reader = ProjectionStore::open_read_only(&path).await.unwrap();
     assert_eq!(reader.count().await.unwrap(), 1);
 }
+
+/// A database from an older build is refused by name, not by the
+/// driver error the first mismatched query would otherwise raise.
+///
+/// The fixture rewinds a current database to an older shape by
+/// dropping the columns that have been added since, which is exactly
+/// the set a read-only handle cannot put back. Both are dropped, not
+/// one, so the error has to report a set rather than the first thing
+/// it noticed.
+#[tokio::test]
+async fn read_only_open_rejects_a_database_from_an_older_build() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    {
+        let writer = ProjectionStore::open(&path).await.unwrap();
+        writer
+            .insert_event(&sample_triggered("alpha", Uuid::now_v7()), None)
+            .await
+            .unwrap();
+        for column in ["seq", "error_message"] {
+            sqlx::query(&format!("ALTER TABLE events DROP COLUMN {column}"))
+                .execute(&writer.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    let err = ProjectionStore::open_read_only(&path).await.unwrap_err();
+    let StoreError::SchemaOutdated { missing, .. } = &err else {
+        panic!("expected SchemaOutdated, got: {err:?}");
+    };
+    assert!(
+        missing.contains("seq") && missing.contains("error_message"),
+        "the error should name every missing column, got: {missing}"
+    );
+
+    // The check is what produced that error, so opening read-write —
+    // which migrates — has to clear it. Otherwise the message would be
+    // telling operators to do something that does not work.
+    {
+        ProjectionStore::open(&path).await.unwrap();
+    }
+    ProjectionStore::open_read_only(&path).await.unwrap();
+}
+
+/// A file that exists but was never projected into is "not
+/// initialised", not "outdated". `pragma_table_info` answers with no
+/// rows in both cases, so the two are only distinguishable if the
+/// check looks — and an operator sent to run a migration that would
+/// not help is worse off than one told the projector never ran.
+#[tokio::test]
+async fn read_only_open_reports_an_empty_database_as_uninitialised() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    {
+        let writer = ProjectionStore::open(&path).await.unwrap();
+        sqlx::query("DROP TABLE events")
+            .execute(&writer.pool)
+            .await
+            .unwrap();
+    }
+
+    let err = ProjectionStore::open_read_only(&path).await.unwrap_err();
+    assert!(
+        matches!(err, StoreError::NotInitialised(_)),
+        "expected NotInitialised, got: {err:?}"
+    );
+}
