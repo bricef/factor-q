@@ -217,9 +217,10 @@ fn print_event(event: &Event) {
 ///
 /// The rows are index rows and carry no payload — see the Event atom's
 /// declared description, which is where that contract is published.
-/// Each carries the `seq` `fq events tail`'s cursor and `event.get`
-/// speak, so a row here is one call away from the whole event; an
-/// operator who wants payloads in bulk tails rather than queries.
+/// Each carries the `event_id` `event.get` takes, so a row here is one
+/// call away from the whole event for as long as the log still holds
+/// its payload; an operator who wants payloads in bulk tails rather
+/// than queries.
 ///
 /// The narrowing travels with the request rather than being applied
 /// after the rows have crossed, so a filtered query costs the daemon a

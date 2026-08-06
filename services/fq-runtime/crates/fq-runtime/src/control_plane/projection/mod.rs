@@ -26,4 +26,6 @@ mod fields;
 pub mod store;
 
 pub use consumer::{ConsumerError, ProjectionConsumer};
-pub use store::{CostSummary, EventRow, FailureSummary, ProjectionStore, StoreError};
+pub use store::{
+    CostSummary, EventLocation, EventRow, FailureSummary, ProjectionStore, StoreError,
+};

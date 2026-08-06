@@ -557,6 +557,44 @@ impl World {
         }
         last
     }
+
+    /// Index one event at `position` **without publishing it** — the
+    /// row exists, the log does not know about it.
+    ///
+    /// The unavailable cases `event.get` names arise in production
+    /// from a stream recreated under a projection that outlived it,
+    /// and from a cost-bearing row kept past the log's 30-day
+    /// retention. Neither is something a test can wait for, and both
+    /// are ordinary states of a real system — so the row is written
+    /// the way the projection would have written it, with the
+    /// position the situation leaves behind.
+    fn index_only(&self, event: &Event, position: Option<u64>) {
+        let paths = fq_runtime::db::RuntimeDbPaths::under(&self.dir.join("cache"));
+        let store = self
+            .rt
+            .block_on(
+                fq_runtime::control_plane::projection::ProjectionStore::open(&paths.projection),
+            )
+            .expect("open the daemon's projection");
+        self.rt
+            .block_on(store.insert_event(event, position))
+            .expect("index event");
+    }
+
+    /// Drop one message from the event log, leaving its index row
+    /// behind — retention, without the thirty days.
+    fn drop_from_log(&self, seq: u64) {
+        let js = self.bus.jetstream();
+        let dropped = self.rt.block_on(async {
+            js.get_stream(fq_runtime::bus::STREAM_NAME)
+                .await
+                .expect("the event stream")
+                .delete_message(seq)
+                .await
+                .expect("delete message from the event log")
+        });
+        assert!(dropped, "the log must have held sequence {seq}");
+    }
 }
 
 impl Drop for World {
@@ -772,7 +810,7 @@ fn a_stream_resumed_at_its_cursor_loses_nothing() {
 ///
 /// The rows are index rows, not events (plan Phase 4, cohort 4.2):
 /// extracted fields, no payload. What keeps that from being a lossy
-/// answer is the `seq` on every row, and
+/// answer is the `event_id` on every row, and
 /// [`a_list_row_walks_to_its_whole_event`] is that half of the
 /// contract.
 #[test]
@@ -822,9 +860,18 @@ fn list_answers_the_recent_window_through_a_typed_filter() {
         row.get("event").is_none() && row.get("payload").is_none(),
         "an index row must not carry the payload: {row}"
     );
-    for field in ["event_id", "seq", "timestamp", "agent_id", "event_type"] {
+    for field in ["event_id", "timestamp", "agent_id", "event_type"] {
         assert!(row.get(field).is_some(), "index row lacks `{field}`: {row}");
     }
+    // And the log position is NOT among them: it is an internal
+    // locator `event.get` resolves through, not something a caller
+    // holds. A row that handed one back would be inviting a consumer
+    // to store a transport coordinate as an identity, which is the
+    // habit this atom was corrected out of.
+    assert!(
+        row.get("seq").is_none(),
+        "an index row must not hand back the log position: {row}"
+    );
 
     // By agent: the query is narrowed at the daemon, so the other
     // agent's event never leaves it.
@@ -882,10 +929,10 @@ fn list_answers_the_recent_window_through_a_typed_filter() {
 ///
 /// This is the hard half of the contract. `event.list` excludes
 /// payloads on the strength of it, so the walk is executed here — a
-/// row is listed, its `seq` is handed straight back to `event.get`,
-/// and the event that comes out has to be the one the row described.
-/// A projection that stopped recording log positions would still list
-/// perfectly well and would fail exactly here.
+/// row is listed, its `event_id` is handed straight back to
+/// `event.get`, and the event that comes out has to be the one the
+/// row described. A projection that stopped recording log positions
+/// would still list perfectly well and would fail exactly here.
 #[test]
 fn a_list_row_walks_to_its_whole_event() {
     let world = World::start();
@@ -905,19 +952,20 @@ fn a_list_row_walks_to_its_whole_event() {
         "one priced response in the fixture: {listed}"
     );
     let row = &rows[0];
-    let seq = row["seq"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("a listed row must carry its `event.get` key: {row}"));
+    let event_id = row["event_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a listed row must carry its `event.get` identity: {row}"));
 
-    // The walk itself — nothing constructed, the row's own number.
+    // The walk itself — nothing constructed, the row's own identity,
+    // in the domain's terms rather than the transport's.
     let whole = world.invoke(
         &client,
         fq_ops::OpId::Get(fq_ops::Domain::Event),
-        serde_json::json!({ "seq": seq }),
+        serde_json::json!({ "event_id": event_id }),
     );
     assert_eq!(
         whole["event"]["envelope"]["event_id"].as_str(),
-        row["event_id"].as_str(),
+        Some(event_id),
         "the walk must land on the event the row described"
     );
     // …and what the walk buys is the payload the row does not carry.
@@ -928,10 +976,10 @@ fn a_list_row_walks_to_its_whole_event() {
     );
 }
 
-/// `event.get` addresses one event by log sequence — the number a
-/// command receipt's `AtomRef` carries, resolved back to the fact.
+/// `event.get` addresses one event by the identity the event stamps
+/// on itself, not by where the transport happened to put it.
 #[test]
-fn get_answers_by_log_sequence() {
+fn get_answers_by_the_events_own_identity() {
     let world = World::start();
     let client = world.edge_client();
     let get = fq_ops::OpId::Get(fq_ops::Domain::Event);
@@ -940,30 +988,235 @@ fn get_answers_by_log_sequence() {
         .rt
         .block_on(world.bus.publish(&triggered(AGENT, INV, 1, BASE_MS)))
         .expect("publish");
+    // The index is the first hop, so the read is only answerable once
+    // the fold has seen the event.
+    world.invoke_gated(
+        &client,
+        fq_ops::OpId::List(fq_ops::Domain::Event),
+        serde_json::json!({"agent": AGENT}),
+        Some(seq),
+    );
 
-    let got = world.invoke(&client, get.clone(), serde_json::json!({"seq": seq}));
-    assert_eq!(got["seq"].as_u64(), Some(seq));
+    let got = world.invoke(
+        &client,
+        get.clone(),
+        serde_json::json!({"event_id": uuid_at(1).to_string()}),
+    );
     assert_eq!(
         got["event"]["envelope"]["event_id"].as_str(),
         Some(uuid_at(1).to_string().as_str())
     );
 
-    // A sequence past the tip is a miss, not the next event along.
-    let missing = world.rt.block_on(client.rpc.invoke(
-        tarpc::context::current(),
-        fq_edge::InvokeRequest {
-            op: get,
-            version: 1,
-            input: serde_json::json!({"seq": seq + 10_000}),
-            min_seq: None,
-        },
-    ));
+    let refused = |input: serde_json::Value| {
+        world
+            .rt
+            .block_on(client.rpc.invoke(
+                tarpc::context::current(),
+                fq_edge::InvokeRequest {
+                    op: get.clone(),
+                    version: 1,
+                    input,
+                    min_seq: None,
+                },
+            ))
+            .expect("rpc")
+            .expect_err("must not answer")
+    };
+
+    // An identity nothing has ever carried is a plain miss — the
+    // request was fine, the entity isn't there.
     assert!(
         matches!(
-            missing.expect("rpc"),
-            Err(fq_edge::wire::WireError::NotFound { .. })
+            refused(serde_json::json!({"event_id": Uuid::now_v7().to_string()})),
+            fq_edge::wire::WireError::NotFound { .. }
         ),
-        "a sequence the log has never reached is NotFound"
+        "an unknown identity is NotFound"
+    );
+
+    // A string that is not a UUID cannot name any event — every id in
+    // the index was written from one — so it is a verdict on the
+    // request rather than an empty answer.
+    let err = refused(serde_json::json!({"event_id": "the-second-one"}));
+    assert!(
+        matches!(&err, fq_edge::wire::WireError::InvalidInput { op, message }
+            if op == "event.get" && message.contains("the-second-one")),
+        "expected an InvalidInput naming what was written; got {err:?}"
+    );
+}
+
+/// **The test this change exists for.** A stored log position is a
+/// transport coordinate held across a boundary the transport makes no
+/// promise about: recreate `fq-events` and sequence 42 belongs to a
+/// different event, under an index that survived. `event.get` must
+/// notice, because the alternative is not an error — it is a
+/// confident answer with somebody else's payload in it.
+///
+/// The stale locator is arranged the way production produces one: an
+/// index row whose recorded position addresses an event that is
+/// genuinely there, and is genuinely not the one asked for. The
+/// neighbour is proven to be sitting at that position, readable by
+/// its own identity — so what stops it being returned is the
+/// identity check inside `event.get` and nothing else. Remove that
+/// check and this test does not error differently; it passes back
+/// the wrong event.
+#[test]
+fn a_stale_locator_is_caught_rather_than_answered_with_a_neighbour() {
+    let world = World::start();
+    let client = world.edge_client();
+    let get = fq_ops::OpId::Get(fq_ops::Domain::Event);
+
+    // The event that really is in the log, at a real position.
+    let neighbour = triggered(AGENT, INV, 1, BASE_MS);
+    let occupied = world.publish(std::slice::from_ref(&neighbour));
+    world.invoke_gated(
+        &client,
+        fq_ops::OpId::List(fq_ops::Domain::Event),
+        serde_json::json!({"agent": AGENT}),
+        Some(occupied),
+    );
+
+    // The event whose index row lies about where its payload is —
+    // never published, indexed at the neighbour's position, exactly
+    // as a surviving projection describes a recreated log.
+    let stale = triggered(AGENT, INV, 7, BASE_MS + 7_000);
+    world.index_only(&stale, Some(occupied));
+
+    // The neighbour is right there to be handed back by mistake.
+    let its_own = world.invoke(
+        &client,
+        get.clone(),
+        serde_json::json!({"event_id": neighbour.envelope.event_id.to_string()}),
+    );
+    assert_eq!(
+        its_own["event"]["envelope"]["event_id"].as_str(),
+        Some(neighbour.envelope.event_id.to_string().as_str()),
+        "the position genuinely holds a readable event"
+    );
+
+    let err = world
+        .rt
+        .block_on(client.rpc.invoke(
+            tarpc::context::current(),
+            fq_edge::InvokeRequest {
+                op: get,
+                version: 1,
+                input: serde_json::json!({
+                    "event_id": stale.envelope.event_id.to_string(),
+                }),
+                min_seq: None,
+            },
+        ))
+        .expect("rpc")
+        .expect_err("a stale locator must not be answered");
+    assert!(
+        matches!(&err, fq_edge::wire::WireError::Gone { op, message }
+            if op == "event.get"
+                && message.contains(&stale.envelope.event_id.to_string())
+                && message.contains(&neighbour.envelope.event_id.to_string())),
+        "the failure must name both the event asked for and the one found at that \
+         position, or an operator cannot tell a rewound log from a missing event; \
+         got {err:?}"
+    );
+}
+
+/// The first unavailable case: **the locator is unknown.** The row
+/// predates the `seq` column, or the delivery's JetStream metadata
+/// could not be read — the event is indexed, and where its payload
+/// sits is not.
+///
+/// Not a `NotFound`: this daemon has seen the event and says so.
+#[test]
+fn an_indexed_event_with_no_recorded_position_says_which_half_is_missing() {
+    let world = World::start();
+    let client = world.edge_client();
+
+    let unlocated = triggered(AGENT, INV, 3, BASE_MS + 3_000);
+    world.index_only(&unlocated, None);
+
+    // It lists — the row is whole as an index row.
+    let listed = world.invoke(
+        &client,
+        fq_ops::OpId::List(fq_ops::Domain::Event),
+        serde_json::json!({"agent": AGENT}),
+    );
+    let ids: Vec<&str> = listed
+        .as_array()
+        .expect("index rows")
+        .iter()
+        .filter_map(|row| row["event_id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&unlocated.envelope.event_id.to_string().as_str()),
+        "an unlocated row still lists: {ids:?}"
+    );
+
+    let err = world
+        .rt
+        .block_on(client.rpc.invoke(
+            tarpc::context::current(),
+            fq_edge::InvokeRequest {
+                op: fq_ops::OpId::Get(fq_ops::Domain::Event),
+                version: 1,
+                input: serde_json::json!({
+                    "event_id": unlocated.envelope.event_id.to_string(),
+                }),
+                min_seq: None,
+            },
+        ))
+        .expect("rpc")
+        .expect_err("an unlocated row cannot be read whole");
+    assert!(
+        matches!(&err, fq_edge::wire::WireError::Unlocatable { op, .. } if op == "event.get"),
+        "expected Unlocatable, not a miss — the event is known; got {err:?}"
+    );
+}
+
+/// The second unavailable case: **the payload is gone.** The position
+/// is known and the log no longer holds it.
+///
+/// This is not hypothetical arithmetic. Cost-bearing rows are exempt
+/// from the retention sweep and kept indefinitely, while the event
+/// log keeps thirty days — so every retained row eventually reaches
+/// this state, and `Gone` is the true answer about an old fact rather
+/// than a fault. The thirty days are compressed here into one
+/// deleted message; the row is untouched, which is the point.
+#[test]
+fn a_row_the_log_has_dropped_says_the_payload_is_gone_not_the_event() {
+    let world = World::start();
+    let client = world.edge_client();
+
+    let aged = triggered(AGENT, INV, 5, BASE_MS + 5_000);
+    let seq = world.publish(std::slice::from_ref(&aged));
+    // Publish after it, so the read finds a live log that simply no
+    // longer has this message — not an empty one.
+    let tip = world.publish(&[triggered(OTHER_AGENT, INV, 6, BASE_MS + 6_000)]);
+    // Let the fold record the position before the message goes.
+    world.invoke_gated(
+        &client,
+        fq_ops::OpId::List(fq_ops::Domain::Event),
+        serde_json::json!({}),
+        Some(tip),
+    );
+    world.drop_from_log(seq);
+
+    let err = world
+        .rt
+        .block_on(client.rpc.invoke(
+            tarpc::context::current(),
+            fq_edge::InvokeRequest {
+                op: fq_ops::OpId::Get(fq_ops::Domain::Event),
+                version: 1,
+                input: serde_json::json!({
+                    "event_id": aged.envelope.event_id.to_string(),
+                }),
+                min_seq: None,
+            },
+        ))
+        .expect("rpc")
+        .expect_err("the payload is no longer readable");
+    assert!(
+        matches!(&err, fq_edge::wire::WireError::Gone { op, .. } if op == "event.get"),
+        "expected Gone — the row is retained by policy, the payload is not; got {err:?}"
     );
 }
 

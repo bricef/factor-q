@@ -285,7 +285,6 @@ fn summary_renders_on_detail_and_transcript_pages() {
     let mut failed = detail.clone();
     failed.recent_events = vec![fq_runtime::views::EventView {
         event_id: "event-1".into(),
-        seq: Some(41),
         timestamp: "2026-07-18T00:00:00Z".into(),
         agent_id: "m0-issue-fix".into(),
         invocation_id: "inv-1".into(),

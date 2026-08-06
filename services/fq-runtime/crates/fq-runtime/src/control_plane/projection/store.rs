@@ -137,11 +137,12 @@ impl ProjectionStore {
             ("cache_read_tokens", "INTEGER"),
             ("cache_write_tokens", "INTEGER"),
             ("error_message", "TEXT"),
-            // The log position this row indexes — the `event.get` key
-            // an `event.list` row hands its caller. Forward-only like
-            // the rest: rows projected before this column existed read
-            // NULL, and a caller that wants their payloads streams the
-            // log instead of listing.
+            // The log position this row indexes — where `event.get`
+            // reads the payload once the identity has resolved here.
+            // Forward-only like the rest: rows projected before this
+            // column existed read NULL, which is why "we do not know
+            // where its payload is" is a state `event.get` names
+            // rather than rounds down to "no such event".
             ("seq", "INTEGER"),
         ] {
             if !columns.iter().any(|c| c == column) {
@@ -205,14 +206,14 @@ impl ProjectionStore {
     /// Insert an event into the store. Idempotent on `event_id` —
     /// re-delivery from a durable consumer is a no-op.
     ///
-    /// `seq` is the event's position in the log this row indexes. It
-    /// is what makes a projected row addressable as the atom it stands
-    /// for: `event.list` hands it back and `event.get` takes it, so a
-    /// consumer walks from a listing to the whole event without
-    /// constructing a key. `None` says the caller does not know the
-    /// position — a fixture seeding the index directly, or a row from
-    /// before the column existed. Such a row still lists; it just
-    /// cannot be walked from.
+    /// `seq` is the event's position in the log this row indexes — an
+    /// internal locator, never an identity. `event.get` takes the
+    /// `event_id` and resolves it *through* this column
+    /// ([`ProjectionStore::event_location`]) to read the payload back
+    /// out of the log, so the number never crosses the wire. `None`
+    /// says we do not know the position — a fixture seeding the index
+    /// directly, or a row from before the column existed. Such a row
+    /// still lists; its payload just cannot be located.
     ///
     /// Worker heartbeats are NOT projected: a heartbeat is an
     /// operational liveness signal that goes stale the moment the next
@@ -307,6 +308,24 @@ impl ProjectionStore {
         Ok(row.get::<i64, _>(0))
     }
 
+    /// Where one event's payload sits in the log — `event.get`'s
+    /// first hop, resolving an identity to a position the log can
+    /// then be read at. A primary-key lookup (`event_id` is the
+    /// table's key), so an identity costs no more to resolve than the
+    /// raw sequence it replaced; see [`EventLocation`] for why the
+    /// answer has three states.
+    pub async fn event_location(&self, event_id: &str) -> Result<EventLocation, StoreError> {
+        let row = sqlx::query("SELECT seq FROM events WHERE event_id = ?")
+            .bind(event_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row.map(|r| r.get::<Option<i64>, _>(0)) {
+            None => EventLocation::Unindexed,
+            Some(None) => EventLocation::Unlocated,
+            Some(Some(seq)) => EventLocation::At(seq as u64),
+        })
+    }
+
     /// Query events with optional filters. Returns up to `limit`
     /// rows ordered by timestamp descending (most recent first).
     pub async fn query_events(
@@ -317,7 +336,7 @@ impl ProjectionStore {
         // Build the WHERE clause dynamically but safely — each
         // condition uses a placeholder.
         let mut sql = String::from(
-            "SELECT event_id, seq, timestamp, agent_id, invocation_id, event_type, \
+            "SELECT event_id, timestamp, agent_id, invocation_id, event_type, \
              model, total_cost, error_kind, error_message, duration_ms \
              FROM events",
         );
@@ -354,16 +373,15 @@ impl ProjectionStore {
             .into_iter()
             .map(|row| EventRow {
                 event_id: row.get::<String, _>(0),
-                seq: row.get::<Option<i64>, _>(1).map(|s| s as u64),
-                timestamp: row.get::<String, _>(2),
-                agent_id: row.get::<String, _>(3),
-                invocation_id: row.get::<String, _>(4),
-                event_type: row.get::<String, _>(5),
-                model: row.get::<Option<String>, _>(6),
-                total_cost: row.get::<Option<f64>, _>(7),
-                error_kind: row.get::<Option<String>, _>(8),
-                error_message: row.get::<Option<String>, _>(9),
-                duration_ms: row.get::<Option<i64>, _>(10),
+                timestamp: row.get::<String, _>(1),
+                agent_id: row.get::<String, _>(2),
+                invocation_id: row.get::<String, _>(3),
+                event_type: row.get::<String, _>(4),
+                model: row.get::<Option<String>, _>(5),
+                total_cost: row.get::<Option<f64>, _>(6),
+                error_kind: row.get::<Option<String>, _>(7),
+                error_message: row.get::<Option<String>, _>(8),
+                duration_ms: row.get::<Option<i64>, _>(9),
             })
             .collect();
         Ok(events)
@@ -645,14 +663,28 @@ impl ProjectionStore {
     }
 }
 
+/// Where the projection says one event's payload sits in the log —
+/// [`ProjectionStore::event_location`]'s answer. Three states rather
+/// than an `Option`, because two of them are different kinds of "you
+/// cannot have the payload", and a caller that cannot tell them apart
+/// cannot tell "I asked wrongly" from "the fact is no longer whole".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventLocation {
+    /// No such row: the identity names no event this index has seen.
+    Unindexed,
+    /// The row is here, and so is its payload's log position — though
+    /// whether the log still *holds* it is the log's answer, not this
+    /// index's.
+    At(u64),
+    /// The row is here; where its payload sits was never recorded.
+    /// The event is known, its payload is not addressable.
+    Unlocated,
+}
+
 /// One row from a [`ProjectionStore::query_events`] call.
 #[derive(Debug, Clone)]
 pub struct EventRow {
     pub event_id: String,
-    /// This row's position in the event log — the `event.get` key.
-    /// `None` for a row whose position was never recorded (see
-    /// [`ProjectionStore::insert_event`]).
-    pub seq: Option<u64>,
     pub timestamp: String,
     pub agent_id: String,
     pub invocation_id: String,

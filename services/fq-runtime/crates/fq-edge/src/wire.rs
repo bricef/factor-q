@@ -76,6 +76,27 @@ pub enum WireError {
     /// isn't there.
     #[error("`{op}`: {message}")]
     NotFound { op: String, message: String },
+    /// The entity is indexed, but where its content lives was never
+    /// recorded — the row is here, the locator that reads the whole
+    /// fact back is not.
+    ///
+    /// Deliberately not a `NotFound`: the entity exists, and
+    /// answering "no such thing" would be a lie about the world. A
+    /// caller that cannot tell these apart cannot tell "I asked
+    /// wrongly" from "the fact is no longer whole".
+    #[error("`{op}`: {message}")]
+    Unlocatable { op: String, message: String },
+    /// The content's location is known and the store no longer holds
+    /// it — retention has passed the payload, or the log that held it
+    /// was replaced under an index that outlived it.
+    ///
+    /// Also not a `NotFound`, and for a sharper reason: retention
+    /// policies differ per store, so a row kept indefinitely
+    /// (factor-q keeps cost-bearing rows forever) routinely outlives
+    /// the log its position pointed into. `Gone` is then a normal
+    /// answer about an old fact, not a fault.
+    #[error("`{op}`: {message}")]
+    Gone { op: String, message: String },
     /// The token's grants do not cover the operation's required
     /// authority — the read-only-dashboard case, as an error.
     #[error("denied `{op}`: {message}")]

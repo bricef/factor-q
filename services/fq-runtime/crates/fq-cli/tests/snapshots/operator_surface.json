@@ -136,7 +136,7 @@
             "type": "object"
           },
           "EventView": {
-            "description": "One event row from the projection — the Event atom's **index**\nrow (`event.list`). Extracted fields, never the payload; `seq`\naddresses the whole event through `event.get`.",
+            "description": "One event row from the projection — the Event atom's **index**\nrow (`event.list`). Extracted fields, never the payload;\n`event_id` is the identity that reads the whole event back\nthrough `event.get`, whenever the payload is still retained.",
             "properties": {
               "agent_id": {
                 "type": "string"
@@ -172,15 +172,6 @@
               "model": {
                 "type": [
                   "string",
-                  "null"
-                ]
-              },
-              "seq": {
-                "description": "The `event.get` key for this row — `None` only where the log\nposition was never recorded (a directly seeded index).",
-                "format": "uint64",
-                "minimum": 0,
-                "type": [
-                  "integer",
                   "null"
                 ]
               },
@@ -949,7 +940,7 @@
   },
   {
     "atom": {
-      "description": "`seq` is the event-log stream sequence — the same cursor receipts, `min_seq` gates and `turn` sequences speak. Get and Stream answer from the log with the whole event, payload included. LIST DOES NOT RETURN PAYLOADS: it answers from the projection's index, one row of extracted fields (timestamp, agent, invocation, event type, model, cost, error, duration) per event, most recent `limit` first. Every row carries the `seq` that reads the whole event back through `event.get`, so a listing is always a step away from the fact; `seq` is null only for a row projected before the index recorded log positions. Read payloads in bulk by streaming, not by listing. List is a projection read and honours `min_seq`; Stream long-polls via next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail without consuming anything. Resuming at a cursor loses nothing: the log is durable and the consumer is positional.",
+      "description": "`event_id` is an Event's identity — the UUIDv7 the event stamps on itself when it is constructed, and the projection index's primary key. It is NOT the log sequence: a sequence is a transport coordinate, and recreating the event stream restarts it at 1 while the index survives. Get resolves an identity in two O(1) hops (the index for the log position, then the log) and VERIFIES that the event it read carries the identity asked for, so a rewound or recreated log fails loudly instead of answering with a neighbour. Get and Stream answer from the log with the whole event, payload included. LIST DOES NOT RETURN PAYLOADS: it answers from the projection's index, one row of extracted fields (identity, timestamp, agent, invocation, event type, model, cost, error, duration) per event, most recent `limit` first. Every row carries the identity that reads the whole event back through `event.get` WHEN THE PAYLOAD IS STILL RETAINED, so a listing is a step away from the fact — with the two unavailable cases named rather than collapsed into `not found`: `Unlocatable` (the row is indexed but its log position was never recorded, so we know the event and not where its payload is) and `Gone` (the position is known and the log has aged past it, or was replaced). Cost-bearing rows are kept indefinitely while the log keeps 30 days, so `Gone` is the normal answer for old spend, not a fault. Read payloads in bulk by streaming, not by listing. List is a projection read and honours `min_seq`; Stream long-polls via next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail without consuming anything. Resuming at a cursor loses nothing: the log is durable and the consumer is positional — a cursor may be a transport coordinate, an identity may not.",
       "domain": "event",
       "filter_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -995,7 +986,7 @@
       },
       "index_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "One event row from the projection — the Event atom's **index**\nrow (`event.list`). Extracted fields, never the payload; `seq`\naddresses the whole event through `event.get`.",
+        "description": "One event row from the projection — the Event atom's **index**\nrow (`event.list`). Extracted fields, never the payload;\n`event_id` is the identity that reads the whole event back\nthrough `event.get`, whenever the payload is still retained.",
         "properties": {
           "agent_id": {
             "type": "string"
@@ -1034,15 +1025,6 @@
               "null"
             ]
           },
-          "seq": {
-            "description": "The `event.get` key for this row — `None` only where the log\nposition was never recorded (a directly seeded index).",
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
           "timestamp": {
             "type": "string"
           },
@@ -1066,16 +1048,14 @@
       },
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Get identity for an Event: its event-log sequence.",
+        "description": "Get identity for an Event: the `event_id` the event stamps on\nitself at construction (`Uuid::now_v7`), which is also the\nprojection index's primary key — stable, transport-independent,\ntime-ordered, and already indexed.\n\n**Not the log sequence**, which is where this started: see the\nmodule docs for the two ways a stored position comes to address\nthe wrong event, both of which happen without anybody doing\nanything wrong.",
         "properties": {
-          "seq": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+          "event_id": {
+            "type": "string"
           }
         },
         "required": [
-          "seq"
+          "event_id"
         ],
         "title": "EventKey",
         "type": "object"
@@ -1083,12 +1063,13 @@
       "stability": "experimental",
       "state_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "One recorded event, addressed by its event-log sequence — the\nuniversal cursor (P5): the same number that cursors `event.stream`,\nfeeds `min_seq` gates, and rides in a command receipt's `AtomRef`.\n\nThe Event atom's state is the event itself, unabridged. It is the\nsubstrate every other resource folds from, so an atom that dropped\nthe payload would not be the fact; the projection's `events` table\nis an *index* over these, not the atom.",
+        "description": "One recorded event, with the log position it was read at.\n\nThe Event atom's state is the event itself, unabridged. It is the\nsubstrate every other resource folds from, so an atom that dropped\nthe payload would not be the fact; the projection's `events` table\nis an *index* over these, not the atom. The event's **identity**\nis `event.envelope.event_id`, which is what `event.get` takes.",
         "properties": {
           "event": {
             "description": "The event exactly as published.\n\nDeclared to the surface as an opaque object rather than a\nreflected schema: an event already names its own payload\ncontract in `envelope.schema_id` (`factor-q/llm_response@1`),\nwhich is the versioned reference a reader resolves, and\nreflecting the whole payload tree here would need schemars'\nchrono and uuid integrations — a wider change than this atom."
           },
           "seq": {
+            "description": "Where in the log this event sits — the universal cursor (P5):\nthe same number that cursors `event.stream`, feeds `min_seq`\ngates, and rides in a command receipt's `AtomRef`.\n\nA cursor, never an identity. It says where the read landed,\nand it is only meaningful against the log that produced it:\nrecreate the stream and the number means something else. Ask\nfor an event by `event_id`; use this to resume.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"

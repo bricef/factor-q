@@ -9,16 +9,23 @@ use async_nats::jetstream::consumer;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// One recorded event, addressed by its event-log sequence — the
-/// universal cursor (P5): the same number that cursors `event.stream`,
-/// feeds `min_seq` gates, and rides in a command receipt's `AtomRef`.
+/// One recorded event, with the log position it was read at.
 ///
 /// The Event atom's state is the event itself, unabridged. It is the
 /// substrate every other resource folds from, so an atom that dropped
 /// the payload would not be the fact; the projection's `events` table
-/// is an *index* over these, not the atom.
+/// is an *index* over these, not the atom. The event's **identity**
+/// is `event.envelope.event_id`, which is what `event.get` takes.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EventState {
+    /// Where in the log this event sits — the universal cursor (P5):
+    /// the same number that cursors `event.stream`, feeds `min_seq`
+    /// gates, and rides in a command receipt's `AtomRef`.
+    ///
+    /// A cursor, never an identity. It says where the read landed,
+    /// and it is only meaningful against the log that produced it:
+    /// recreate the stream and the number means something else. Ask
+    /// for an event by `event_id`; use this to resume.
     pub seq: u64,
     /// The event exactly as published.
     ///
