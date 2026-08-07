@@ -1070,7 +1070,7 @@
             "description": "The event exactly as published.\n\nDeclared to the surface as an opaque object rather than a\nreflected schema: an event already names its own payload\ncontract in `envelope.schema_id` (`factor-q/llm_response@1`),\nwhich is the versioned reference a reader resolves, and\nreflecting the whole payload tree here would need schemars'\nchrono and uuid integrations — a wider change than this atom."
           },
           "seq": {
-            "description": "Where in the log this event sits — the universal cursor (P5):\nthe same number that cursors `event.stream`, feeds `min_seq`\ngates, and rides in a command receipt's `AtomRef`.\n\nA cursor, never an identity. It says where the read landed,\nand it is only meaningful against the log that produced it:\nrecreate the stream and the number means something else. Ask\nfor an event by `event_id`; use this to resume.",
+            "description": "Where in the log this event sits — the universal cursor (P5):\nthe same number that cursors `event.stream`, feeds `min_seq`\ngates, and appears in a command receipt's `watermarks`.\n\nIt does *not* appear in the receipt's `AtomRef`, which names\nthe event by `event_id`. A receipt separates the two on\npurpose: what was written is addressed by identity, how far the\nlog got is addressed by position.\n\nA cursor, never an identity. It says where the read landed,\nand it is only meaningful against the log that produced it:\nrecreate the stream and the number means something else. Ask\nfor an event by `event_id`; use this to resume.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
@@ -1167,7 +1167,7 @@
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "A dead letter addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `dead_letter.stream`,\nfeeds `min_seq` gates, and rides in a command receipt's `AtomRef`.\n\nThe identity is the log sequence and not the trigger sequence for\nthree reasons, in ascending order of force: the trigger sequence is\na coordinate on a *different* stream, it is not unique across\nagents, and it can be absent altogether. The Event and Turn atoms\nare keyed the same way, so a sequence read out of any of the three\nstreams means the same thing.",
+        "description": "A dead letter addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `dead_letter.stream` and\nfeeds `min_seq` gates.\n\nIt does not ride in a command receipt's `AtomRef`, which names an\natom by identity — and this domain has no identity to give it, so\nno command mints a DeadLetter reference today. That is the gap\n#464 tracks; addressing a dead letter positionally is why it is a\ngap rather than a design.\n\nThe identity is the log sequence and not the trigger sequence for\nthree reasons, in ascending order of force: the trigger sequence is\na coordinate on a *different* stream, it is not unique across\nagents, and it can be absent altogether. The Event and Turn atoms\nare keyed the same way, so a sequence read out of any of the three\nstreams means the same thing.",
         "properties": {
           "dead_letter": {
             "$ref": "#/$defs/DeadLetter",
@@ -1252,7 +1252,7 @@
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "A dead letter addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `dead_letter.stream`,\nfeeds `min_seq` gates, and rides in a command receipt's `AtomRef`.\n\nThe identity is the log sequence and not the trigger sequence for\nthree reasons, in ascending order of force: the trigger sequence is\na coordinate on a *different* stream, it is not unique across\nagents, and it can be absent altogether. The Event and Turn atoms\nare keyed the same way, so a sequence read out of any of the three\nstreams means the same thing.",
+        "description": "A dead letter addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `dead_letter.stream` and\nfeeds `min_seq` gates.\n\nIt does not ride in a command receipt's `AtomRef`, which names an\natom by identity — and this domain has no identity to give it, so\nno command mints a DeadLetter reference today. That is the gap\n#464 tracks; addressing a dead letter positionally is why it is a\ngap rather than a design.\n\nThe identity is the log sequence and not the trigger sequence for\nthree reasons, in ascending order of force: the trigger sequence is\na coordinate on a *different* stream, it is not unique across\nagents, and it can be absent altogether. The Event and Turn atoms\nare keyed the same way, so a sequence read out of any of the three\nstreams means the same thing.",
         "properties": {
           "dead_letter": {
             "$ref": "#/$defs/DeadLetter",
