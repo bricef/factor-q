@@ -2,10 +2,15 @@
 
 **Design-ahead** (this doc lives in `aspirational/`): almost nothing here is
 decided. It records a friction that is real and measurable today, surveys the
-options for resolving it at both the operator edge and the internal bus, and
-states the tradeoffs as honestly as it can. Two things *have* been decided in
-discussion and are marked as such; everything else is open. Treat the option
-survey as a thinking tool, not a shortlist.
+options for resolving it at the operator edge, at the internal bus, and at a
+possible third surface for remote workers, and states the tradeoffs as honestly
+as it can. A short list of things *have* been decided in discussion and are
+marked as such; everything else is open. Treat the option survey as a thinking
+tool, not a shortlist.
+
+Note that the last section raises three decisions — assignment leases, provider
+credential placement, and workspace retention — which are **not** transport
+questions and would outlive any choice made here.
 
 External-ecosystem claims here reflect the state of things around mid-2026 and
 should be re-checked before any of them is load-bearing.
@@ -280,9 +285,16 @@ subscription. That leaves **migration and NAT traversal** as QUIC's only
 un-substitutable advantages, which are worth little for a localhost daemon and
 a great deal once remote daemon access is real.
 
-**Remote daemon access is expected.** That tilts the balance toward quinn,
-though on one leg rather than two — see [the identity split](#the-identity-split)
-for the argument that was withdrawn.
+**Remote daemon access is expected.** That tilts the balance toward quinn.
+
+It tilts a little further if the [remote worker
+surface](#a-third-surface-remote-workers-over-adversarial-transport) is built,
+because that surface wants the same properties for the same reasons — key-based
+identity, traversal, and migration across links that drop. Note this is a
+*second constituency*, not the original consolidation argument, which remains
+withdrawn: the worker surface is deliberately separate from the operator edge,
+so it does not unify anything. It only means a single transport choice would
+serve two places instead of one.
 
 ## The core
 
@@ -327,21 +339,18 @@ subject-scoped publish/subscribe permissions.
 - **Tradeoff:** worse than C1 on almost every axis unless an external CA is
   already mandated.
 
-**C3 — Workers as edge clients (considered, not taken).** Workers authenticate
-to the operator edge instead of the bus.
+**C3 — Workers as clients of the operator edge (rejected on shape).** Workers
+authenticate to the *operator* edge instead of the bus.
 
-- **Strengths:** one identity model for both trust boundaries; the bus returns
-  to being purely internal, which is what
-  [ADR-0006](../../adrs/accepted/0006-registry-first-api.md)'s appendix says it
-  should be. Combined with an iroh-style transport it would give NAT traversal
-  for workers behind firewalls.
+- **Strengths:** one identity model for both trust boundaries.
 - **Weaknesses:** the edge is shaped for operators poking at views and issuing
   commands. Workers want something else — receiving assignments, streaming
-  results, heartbeating: bidirectional, long-lived, high-volume. Sharing
-  identity and transport is the win; jamming a worker protocol into the
-  *operator surface* because they share a socket would be a mistake.
-- **Status:** not taken. Recorded because the argument for it was the second
-  reason to prefer quinn+iroh, and that reason is now withdrawn.
+  results, heartbeating: bidirectional, long-lived, high-volume. Jamming a
+  worker protocol into the *operator surface* because they share a socket
+  would be a mistake.
+- **Status:** rejected, but note precisely what is rejected — reusing the
+  *operator surface*, not remote workers. A purpose-built worker surface is a
+  different proposition and has its own section below.
 
 **C4 — Replace NATS.** Not seriously evaluated. JetStream's durability, replay
 and subject model are load-bearing throughout, and nothing in the friction
@@ -401,34 +410,162 @@ A plausible split is a small in-band set for scheduling and a richer OTLP
 export for humans, but that is exactly the kind of thing that should be decided
 deliberately rather than arrived at.
 
+## A third surface: remote workers over adversarial transport
+
+C1–C4 all assume workers reach the control plane over a network someone has
+made trustworthy. This section assumes the opposite, and it is the most
+consequential idea in this document.
+
+**Not an alternative to the bus — an additional deployment mode.** Local
+workers keep NATS and change nothing. A remote worker surface is what a worker
+uses when it is not on the same trusted network, which makes "on the bus" and
+"remote client" two ways to deploy the same role rather than two architectures
+to choose between.
+
+### The argument
+
+The weak version is "we would rather not run a VPN". The strong version is that
+**security stops depending on network placement**, and once that is true,
+deployment topology becomes a free variable.
+
+A mesh network makes the network trustworthy so the protocol does not have to
+be. Assuming adversarial transport makes the protocol trustworthy so the
+network does not have to be. Only the second composes: local, multi-region,
+multi-cloud, on-prem, and a spare box under a desk are all the same case. The
+first grows an operational burden with every placement decision.
+
+Two supporting arguments:
+
+- **A publicly reachable JetStream server is an uncomfortable object.** NATS is
+  a large, general-purpose protocol with a great deal of capability behind one
+  credential. A worker surface can be minimal — take work, report progress,
+  return results, heartbeat — and a small surface is both a smaller attack
+  surface and something that can actually be audited.
+- **It is cheaper to assume now than to retrofit.** Assume adversarial
+  transport and local deployment is the degenerate case. Assume a trusted
+  network and adding adversarial transport later means re-auditing every
+  assumption about who could observe or inject what.
+
+### The cost that bites: delivery guarantees now span two hops
+
+Today a worker's assignment is a JetStream delivery: durable, acked,
+redelivered on failure. A remote worker surface puts a second hop between the
+stream and the executing process, and **at-least-once across two hops with
+independently chosen deadlines is a known failure mode in this system.**
+
+The trigger redelivery storm is the precedent: a 1s ack deadline against the
+async-nats client's pull buffering produced duplicate PRs per issue under fleet
+saturation. That was *one* hop with mismatched ack semantics. A remote worker
+surface makes two-hop acks structural rather than incidental.
+
+The mitigation shape is knowable in advance:
+
+- Keep JetStream internal; the worker surface is a **bridge**, not a
+  replacement, so durability and replay stay where they already work.
+- **Never ack upstream until the worker has durably accepted downstream.** Ack
+  translation is precisely where this class of bug lives.
+- Worker-side **idempotency becomes mandatory**, not advisory, because
+  at-least-once across two hops means genuine duplicate delivery.
+
+### Partition stops being exceptional
+
+[The data architecture](../committed/data-architecture.md) states that once an
+invocation is assigned to a worker, **the assignment is immutable for that
+invocation's lifetime**, with heartbeats, a stale threshold and
+`worker.orphaned` handling failure. That is a model in which partition is rare.
+
+Across regions, clouds, or an adversarial network, partition is routine — and
+immutable assignment plus a partitioned worker means work that stalls with no
+legal reassignment. The standard answer is **leases with fencing tokens**, so a
+worker returning from a partition cannot complete work that has already been
+reassigned to someone else.
+
+That is an amendment to a committed design, not an implementation detail, and
+it is the single most likely thing to be discovered too late.
+
+### Who holds the provider credentials
+
+Possibly the larger decision, and independent of transport.
+
+The LLM client and API-key resolution live in `fq-runtime` — the same crate a
+worker runs. A remote worker executing invocations therefore needs provider
+credentials **in whatever cloud it is deployed to**.
+
+The alternative is for the daemon to proxy LLM calls so keys never leave the
+control plane. That costs latency, sends every token through the control plane,
+and turns the daemon into a throughput bottleneck exactly when workers were
+distributed to remove one.
+
+Neither is obviously right. It should be decided deliberately, because it
+determines how much trust a worker placement implies.
+
+### Workspace locality
+
+Workspaces are worker-local today, and `workspace_ref` is a reserved column
+with nothing behind it — the store's own migration notes call it a placeholder
+for a future, "likely content-addressed" workspace-storage layer.
+
+Remote workers make that layer load-bearing: artifacts, archives and results
+all have to cross the boundary, and what a worker is permitted to *retain*
+after an invocation completes becomes a question with a security answer rather
+than a convenience answer.
+
+### The recommendation this section carries
+
+**Design the boundary now; defer the wire.**
+
+What a worker may know, what it may do, how delivery and acknowledgement behave
+across a link that can vanish, and what happens to an invocation when its
+worker partitions — these are answerable today, they are the expensive things
+to retrofit, and none of them depends on choosing a wire protocol. The protocol
+can follow once the edge transport question settles, since it will likely want
+the same transport.
+
+This also keeps the "NATS for now" position intact rather than forcing a
+migration: local workers keep the fast path, and the remote surface arrives as
+an additional deployment mode when it is needed.
+
 ## The identity split
 
-If C1 is taken, the system has two credential models:
+If C1 is taken and the remote worker surface is eventually built, the system
+has three surfaces rather than two:
 
-| | mechanism | principals | authorization |
-|---|---|---|---|
-| **Bus** | nkeys / JWT | workers, control plane | subject-scoped permissions |
-| **Edge** | biscuits + pinned TLS | operators, dashboard, integrations | capability attenuation |
+| | mechanism | principals | authorization | trust assumption |
+|---|---|---|---|---|
+| **Bus** | nkeys / JWT | workers, control plane | subject-scoped permissions | trusted network |
+| **Edge** | biscuits + pinned TLS | operators, dashboard, integrations | capability attenuation | adversarial |
+| **Worker surface** | undecided | remote workers | scoped to assigned invocations | adversarial |
 
-Two systems is a cost. It is defensible here because the boundary is **by
-role** — machine-to-machine inside the trust domain versus human-facing at the
-perimeter — rather than accidental. The test to keep applying: can the split be
-explained in a sentence without reference to history? If it ever cannot, that
-is the signal to revisit C3.
+Three is more than two, and that is a real cost. It is defensible because the
+boundaries are **by role and by trust assumption** rather than accidental: the
+bus is machine-to-machine where placement can be trusted, the edge is
+human-facing at the perimeter, and the worker surface is machine-to-machine
+where placement cannot be trusted.
 
-Note what this withdraws. The strongest argument for an iroh-style transport
-was that it would let *one* identity model cover both boundaries. With workers
-staying on the bus, that argument is void, and iroh's remaining value is NAT
-traversal and migration for **operators** reaching a remote daemon — real, but
-one leg rather than two. quinn can be adopted without iroh, and iroh added
-later if it earns its place, since iroh is built on quinn.
+The test to keep applying: can the split be explained in a sentence without
+reference to history? If it ever cannot, the surfaces have drifted and one of
+them should absorb another.
+
+Note what this does to the transport argument. The original case for an
+iroh-style transport was that *one* identity model could cover both boundaries
+— an argument that died when workers stayed on the bus. A remote worker surface
+does **not** revive it, because that surface is deliberately separate from the
+operator edge. What it revives is weaker but still real: a second *constituency*
+wanting the same transport properties — key-based identity, NAT traversal,
+connection migration across networks that drop. quinn can still be adopted
+without iroh, and iroh added later if it earns its place, since iroh is built
+on quinn.
 
 ## What is decided, and what is not
 
 **Decided in discussion:**
 
-- Workers stay inside the bus (C3 not taken).
+- Workers stay inside the bus **for now**. NATS/JetStream remains the
+  worker↔control-plane path, and nothing has to migrate.
 - Remote daemon access is expected, not hypothetical.
+- Reusing the *operator edge* for worker traffic is rejected on shape (C3).
+- A *purpose-built* remote worker surface is **in scope as a future deployment
+  mode**, not ruled out. Local and remote become deployment modes of one role.
 
 **Not decided — the substance of this document:**
 
@@ -437,6 +574,17 @@ later if it earns its place, since iroh is built on quinn.
 - Which core credential model, and when it lands relative to worker separation.
 - Whether metrics feed the scheduler.
 - Whether iroh is adopted alongside quinn.
+- Everything about the remote worker surface except that it is worth having.
+
+**Decisions that are not transport questions at all**, but which the remote
+worker surface forces, and which are listed here because they are easy to
+mistake for implementation detail:
+
+- Whether assignment stays immutable for an invocation's lifetime, or becomes a
+  lease with fencing tokens.
+- Whether remote workers hold provider credentials, or the daemon proxies LLM
+  calls.
+- What a remote worker may retain after an invocation completes.
 
 ## Open questions
 
@@ -458,6 +606,23 @@ later if it earns its place, since iroh is built on quinn.
 6. **What is the smallest change that removes the deadline defect?** If the
    answer is much cheaper than any option here, it should be taken first, and
    this document allowed to proceed at its own pace.
+7. **Does assignment stay immutable, or become a lease?** Immutable assignment
+   assumes partition is rare. A remote worker surface makes it routine, and
+   stalled-with-no-legal-reassignment is the failure that follows. Leases with
+   fencing tokens are the standard answer, and this amends a committed design.
+8. **Do remote workers hold provider credentials, or does the daemon proxy LLM
+   calls?** The first puts your keys in someone else's cloud; the second sends
+   every token through the control plane and rebuilds the bottleneck that
+   distributing workers was meant to remove. Independent of transport, and
+   arguably the larger decision.
+9. **What may a remote worker retain after an invocation completes?**
+   `workspace_ref` is a reserved column with nothing behind it. Remote workers
+   make the content-addressed workspace layer load-bearing, and retention stops
+   being a convenience question and becomes a security one.
+10. **Where does the two-hop ack boundary sit, and who owns idempotency?** The
+    trigger redelivery storm was one hop with mismatched ack semantics. Two
+    hops make that structural, so the answer needs to exist before the first
+    remote worker does.
 
 ## Relationship to open tickets
 
