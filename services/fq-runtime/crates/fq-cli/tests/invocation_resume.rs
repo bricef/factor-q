@@ -38,6 +38,10 @@ fn fq_binary() -> &'static str {
 /// parallel tests never collide.
 struct Scratch {
     root: std::path::PathBuf,
+    /// Held so `fq.toml` can be rewritten in full once the daemon
+    /// reports the edge address it actually bound — see
+    /// [`Scratch::pin_edge_bind`].
+    mock_base_url: String,
 }
 
 impl Scratch {
@@ -53,27 +57,6 @@ impl Scratch {
         std::fs::create_dir_all(root.join("workspace")).unwrap();
         std::fs::create_dir_all(root.join("xdg")).unwrap();
 
-        // A pinned free port (not :0): daemons restart in these tests,
-        // and the client pairing must survive the restart — same
-        // address, same persisted identity, same token.
-        let edge_port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
-
-        // The pricing guarantee (#62) requires the model declared; the
-        // haiku name resolves in the LiteLLM table. base_url points the
-        // daemon's LLM client at this test's mock server. The edge
-        // takes an ephemeral port so parallel daemons don't fight.
-        std::fs::write(
-            root.join("fq.toml"),
-            format!(
-                "[edge]\nbind = \"127.0.0.1:{edge_port}\"\n\n\
-                 [providers.anthropic]\nmodels = [\"claude-haiku-4-5\"]\nbase_url = \"{mock_base_url}\"\n"
-            ),
-        )
-        .unwrap();
-
         // The agent under test: one exec tool, sandboxed to the
         // scratch workspace. The mock decides what it "asks" for; the
         // definition only has to permit it.
@@ -88,11 +71,78 @@ impl Scratch {
         )
         .unwrap();
 
-        Self { root }
+        let scratch = Self {
+            root,
+            mock_base_url: mock_base_url.to_string(),
+        };
+
+        // Port 0: the kernel picks, the daemon reports what it got, and
+        // the first `Daemon::pair` writes that back here
+        // (`pin_edge_bind`).
+        //
+        // The shape this replaces bound a socket to find a free port,
+        // dropped it, and wrote the number into this file for the
+        // daemon to bind seconds later. The wrong assumption is that a
+        // port observed free stays free: across that gap nothing owns
+        // it, so it belongs to whoever asks next. The four tests in
+        // this file run in parallel and reach this constructor within
+        // milliseconds of each other, and every other suite standing up
+        // its own daemon, broker and mock is drawing from the same
+        // ephemeral range at the same time, so two draws can return the
+        // same number. It only bites under load, because only under
+        // load do the starts overlap.
+        //
+        // What it costs is a daemon that dies on `fq_edge::bind` before
+        // it ever prints `Runtime ready` (`fq-cli/src/lib.rs` — the
+        // bind is fatal and precedes the banner), so the test that lost
+        // the race reports "daemon exited while waiting for
+        // \"Runtime ready\"" and the operator-visible reason — someone
+        // else has the port — appears nowhere in it. `:0` has no gap in
+        // which to lose the port, so the first start cannot race at
+        // all.
+        scratch.write_config("127.0.0.1:0");
+        scratch
     }
 
     fn path(&self, rel: &str) -> std::path::PathBuf {
         self.root.join(rel)
+    }
+
+    /// Write `fq.toml` with `edge_bind` as the edge address.
+    ///
+    /// The pricing guarantee (#62) requires the model declared; the
+    /// haiku name resolves in the LiteLLM table. `base_url` points the
+    /// daemon's LLM client at this test's mock server.
+    fn write_config(&self, edge_bind: &str) {
+        let mock_base_url = &self.mock_base_url;
+        std::fs::write(
+            self.path("fq.toml"),
+            format!(
+                "[edge]\nbind = \"{edge_bind}\"\n\n\
+                 [providers.anthropic]\nmodels = [\"claude-haiku-4-5\"]\nbase_url = \"{mock_base_url}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Freeze the address the first daemon actually bound, so every
+    /// later start of this scratch lands on the same one.
+    ///
+    /// The pin itself is load-bearing and always was: these tests
+    /// restart the daemon, and the client pairing has to survive the
+    /// restart — same address, same persisted identity, same token.
+    /// Client verbs dial `[edge] bind` out of this file while `fq
+    /// connect` stores the pairing under the address it is handed, so
+    /// the two have to name the same place; leaving `:0` here would
+    /// hand every restart a fresh port and break the pairing under
+    /// test. What was wrong before was the *timing*, not the pinning —
+    /// an address chosen before anything owned it is a bet, whereas the
+    /// one the daemon is already listening on is a fact.
+    ///
+    /// The daemon reads this file once at startup and nothing rereads
+    /// it, so rewriting it under a live daemon is safe.
+    fn pin_edge_bind(&self, addr: &str) {
+        self.write_config(addr);
     }
 }
 
@@ -150,7 +200,14 @@ impl Daemon {
     /// edge, so tests that verify through them need the stored
     /// pairing. Only the FIRST daemon of a scratch prints the admin
     /// token; later daemons reuse the persisted identity, and the
-    /// pinned port keeps the stored pairing valid across restarts.
+    /// address pinned here keeps the stored pairing valid across
+    /// restarts.
+    ///
+    /// Both values come out of the daemon log because neither exists
+    /// anywhere else — the kernel chose the address, and the token is
+    /// minted and printed exactly once — and both are matched by
+    /// content, never by line number. (`tests/smoke/smoke.sh` reads the
+    /// same two values from the same output for the same reasons.)
     fn pair(&self, scratch: &Scratch) {
         if scratch
             .path("xdg")
@@ -166,13 +223,12 @@ impl Daemon {
             .expect("edge addr in daemon log")
             .trim()
             .to_string();
-        let token = {
-            let mut lines = log.lines();
-            lines
-                .find(|l| l.contains("edge: admin token"))
-                .expect("admin token in first daemon log");
-            lines.next().expect("token line").trim().to_string()
-        };
+        // First daemon of this scratch, so `fq.toml` still says `:0`.
+        // Record what the kernel actually handed it before any client
+        // verb — or the restarted daemon — reads `[edge] bind` back out
+        // of that file.
+        scratch.pin_edge_bind(&addr);
+        let token = admin_token_from_log(&log).expect("admin token in first daemon log");
         let out = Command::new(fq_binary())
             .args(["connect", &addr, "--token", &token])
             .env("FQ_CONFIG", scratch.path("fq.toml"))
@@ -228,6 +284,98 @@ impl Daemon {
         }
         let _ = self.child.kill();
     }
+}
+
+/// Extract the admin token from a first-run daemon log: from the
+/// banner, scan forward for the first line whose *shape* is a token.
+///
+/// The shape is the whole point. The obvious reading — "the line after
+/// the marker" — assumes the banner and the token it introduces are
+/// adjacent in the file, and nothing makes that true. `Daemon::spawn`
+/// points the child's stdout and stderr at one file: the banner is a
+/// `println!` on stdout, every startup tracing event is a separate
+/// write to stderr, and the banner is emitted mid-startup while a dozen
+/// tasks are announcing themselves. Nothing orders the two streams, so
+/// a tracing line can land in the gap. `lines.next()` then hands `fq
+/// connect` a log event as a credential; the daemon fails to parse it
+/// and answers "token rejected", which the CLI dresses up as an
+/// identity that may have been rotated — an error describing something
+/// that did not happen, and a diagnosis cycle away from the truth
+/// (#454).
+///
+/// A biscuit is one unbroken run of base64url alone on its line,
+/// comfortably over 40 characters. No tracing line can wear that shape:
+/// JSON records carry braces, quotes and colons, and the human format
+/// carries spaces and timestamps — all outside the charset. So the scan
+/// walks past whatever landed in the gap and stops on the token however
+/// the two streams interleaved.
+///
+/// `None` rather than a best-effort line is deliberate: an extraction
+/// that cannot find a token must fail here, where the reason is
+/// legible, instead of forwarding a non-credential and letting the
+/// daemon's rejection explain it wrongly.
+fn admin_token_from_log(log: &str) -> Option<String> {
+    let mut lines = log.lines();
+    lines.find(|l| l.contains("edge: admin token"))?;
+    lines
+        .map(str::trim)
+        .find(|l| {
+            l.len() >= 40
+                && l.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '='))
+        })
+        .map(str::to_string)
+}
+
+/// The #454 flake in miniature, without a daemon: the shape scan has to
+/// survive tracing output landing between the banner and the token, and
+/// it has to stay anchored on the banner. This is the piece most likely
+/// to regress silently — the positional read came back clean from every
+/// one of a few hundred local scratches before CI caught it once.
+#[test]
+fn admin_token_read_by_shape_not_by_position() {
+    // Biscuit shape: base64url, no internal whitespace, long.
+    let token =
+        "Ep0BCjMKCXByaW5jaXBhbAoFYWRtaW4YAyIKCggIChIDGIAIEiQIABIgQmFzZTY0VXJsX3J1bi13aXRoLXBhZD0=";
+    let token_line = format!("  {token}");
+    let banner = "edge: admin token (printed once; store it securely):";
+    let fingerprint = "edge: certificate fingerprint (clients pin this): \
+                       0adfe5f1c0ffee00deadbeef1234567890abcdef1234567890abcdef12345678";
+    // The two formats the daemon's tracing can take. Neither is
+    // token-shaped; the hex fingerprint above is long enough but rides
+    // on a line with punctuation, so it is not either.
+    let json_line = r#"{"timestamp":"2026-07-24T10:11:12.493056Z","level":"INFO","fields":{"message":"trigger dispatcher starting"}}"#;
+    let text_line = "2026-07-24T10:11:12.494128Z  INFO fq_cli: advisory watch starting";
+
+    // Adjacent — nothing landed in the gap. The common case, and the
+    // only one the positional read ever handled.
+    let clean = [fingerprint, banner, token_line.as_str(), "Runtime ready."].join("\n");
+    assert_eq!(admin_token_from_log(&clean).as_deref(), Some(token));
+
+    // Interleaved. Position picks `json_line` and the pairing fails
+    // with a message about identity rotation; shape picks the token.
+    let interleaved = [
+        fingerprint,
+        banner,
+        json_line,
+        text_line,
+        "",
+        token_line.as_str(),
+        "Runtime ready.",
+    ]
+    .join("\n");
+    assert_eq!(admin_token_from_log(&interleaved).as_deref(), Some(token));
+
+    // Nothing token-shaped after the banner: `None`, so the caller
+    // panics here rather than handing a log line to `fq connect`.
+    let truncated = [banner, json_line, text_line].join("\n");
+    assert!(admin_token_from_log(&truncated).is_none());
+
+    // A restarted daemon reuses its persisted identity and prints no
+    // banner at all. The scan starts from the marker, so it must not
+    // fall back to the first base64-ish line in the file.
+    let restarted = ["edge: identity loaded from state", token_line.as_str()].join("\n");
+    assert!(admin_token_from_log(&restarted).is_none());
 }
 
 /// Extract the invocation id from the daemon log — the single
