@@ -252,24 +252,75 @@ fn receipt_watermark_is_per_domain() {
         atoms: vec![
             fq_ops::AtomRef {
                 domain: Domain::Event,
-                seq: 41,
-            },
-            fq_ops::AtomRef {
-                domain: Domain::Event,
-                seq: 43,
+                key: serde_json::json!({ "event_id": "0192-event-a" }),
             },
             fq_ops::AtomRef {
                 domain: Domain::Turn,
-                seq: 7,
+                key: serde_json::json!({ "seq": 7 }),
             },
         ],
+        watermarks: [(Domain::Event, 43), (Domain::Turn, 7)]
+            .into_iter()
+            .collect(),
     };
     assert_eq!(receipt.watermark(Domain::Event), Some(43));
     assert_eq!(receipt.watermark(Domain::Turn), Some(7));
     assert_eq!(receipt.watermark(Domain::Worker), None);
-    assert_eq!(
-        fq_ops::Receipt { atoms: vec![] }.watermark(Domain::Event),
-        None
+    assert_eq!(fq_ops::Receipt::empty().watermark(Domain::Event), None);
+}
+
+/// The watermark is recorded, not derived from the atoms.
+///
+/// It used to be `max(seq)` over the atoms, which only worked while
+/// every atom carried a position. Now that atoms are named by
+/// identity, a command can still report how far the log got — for a
+/// domain whose atoms it names, and for one whose atoms it does not
+/// enumerate at all.
+#[test]
+fn a_watermark_needs_no_atom_to_carry_it() {
+    let receipt = fq_ops::Receipt {
+        atoms: vec![],
+        watermarks: [(Domain::Event, 12)].into_iter().collect(),
+    };
+    assert_eq!(receipt.watermark(Domain::Event), Some(12));
+}
+
+/// `Receipt::one` fills the identity and the watermark together, so
+/// the two cannot be filled in inconsistently at a call site — which
+/// is the failure the constructor exists to prevent as more commands
+/// start minting receipts.
+#[test]
+fn one_names_the_atom_and_marks_its_domain() {
+    let receipt = fq_ops::Receipt::one(
+        Domain::Event,
+        serde_json::json!({ "event_id": "0192-event-b" }),
+        9,
+    );
+    assert_eq!(receipt.atoms.len(), 1);
+    assert_eq!(receipt.atoms[0].domain, Domain::Event);
+    assert_eq!(receipt.atoms[0].key["event_id"], "0192-event-b");
+    assert_eq!(receipt.watermark(Domain::Event), Some(9));
+}
+
+/// A receipt's atom reference is the key its domain's Get takes, so
+/// "here is what I appended" walks to "here is the thing itself".
+/// Pinned because the whole point of the reshape is that this holds:
+/// an identity that Get would not accept is not an identity.
+#[test]
+fn an_atom_reference_is_shaped_like_its_domains_key() {
+    let receipt = fq_ops::Receipt::one(
+        Domain::Event,
+        serde_json::json!({ "event_id": "0192-event-c" }),
+        3,
+    );
+    let key = &receipt.atoms[0].key;
+    assert!(
+        key.get("event_id").is_some(),
+        "the Event key names `event_id`; got {key}"
+    );
+    assert!(
+        key.get("seq").is_none(),
+        "a position is not an identity and must not ride in the reference; got {key}"
     );
 }
 

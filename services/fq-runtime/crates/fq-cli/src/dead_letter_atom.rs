@@ -250,8 +250,11 @@ fn internal(e: fq_runtime::bus::BusError) -> WireError {
     }
 }
 
-/// Get one dead letter by log sequence — the read an `AtomRef {
-/// domain: DeadLetter, seq }` resolves.
+/// Get one dead letter by log sequence.
+///
+/// Not the read an `AtomRef` resolves: a receipt names atoms by
+/// identity, and this domain has none, so no command hands a caller a
+/// DeadLetter reference (#464).
 ///
 /// A sequence that holds something else — an ordinary failure, another
 /// agent's turn, a heartbeat — is a miss, not an error: the atom is the

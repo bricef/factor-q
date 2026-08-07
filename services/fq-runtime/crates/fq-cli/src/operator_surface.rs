@@ -351,10 +351,19 @@ pub fn operator_registry(
                     },
                 })?;
                 Ok(fq_ops::Receipt {
+                    // The drop event, named by the identity `event.get`
+                    // takes — the same `event_id` its listing carries,
+                    // so the receipt walks to the whole event.
                     atoms: vec![fq_ops::AtomRef {
                         domain: fq_ops::Domain::Event,
-                        seq: result.event_seq,
+                        key: serde_json::json!({ "event_id": result.event_id }),
                     }],
+                    // The position is still here, where being a log
+                    // coordinate is the point: it is what a gated read
+                    // passes as `min_seq` for read-your-writes.
+                    watermarks: [(fq_ops::Domain::Event, result.event_seq)]
+                        .into_iter()
+                        .collect(),
                 })
             }
         })
