@@ -54,6 +54,18 @@ const INV_ARCHIVED: &str = "4e000000-0000-7000-8000-000000000004";
 const AGENT_RESEARCHER: &str = "researcher";
 const AGENT_FIXER: &str = "fixer";
 
+/// The worker rows this fixture seeds `alive` with a 2026-01-02
+/// heartbeat — a contradiction the daemon's stale sweep exists to
+/// repair. It promotes each one to `stale`, publishing one
+/// `worker.orphaned` apiece, and the fixture then freshens all three
+/// back to `alive`, which is the state the roster golden pins.
+///
+/// One list with two readers, deliberately: the barrier that waits for
+/// the sweep to finish and the freshening that follows it must name the
+/// same rows, or the fixture waits for something it never restores (or
+/// restores something it never waited for).
+const SEEDED_ANCIENT_ALIVE: [&str; 3] = ["fixer", "researcher", "worker-beta"];
+
 fn fixed_uuid(n: u32) -> Uuid {
     Uuid::parse_str(&format!("00000000-0000-7000-8000-0000000010{n:02}")).unwrap()
 }
@@ -1152,19 +1164,35 @@ impl EdgeFixture {
                 // all three back to `alive`, which is what the roster
                 // golden pins — and now pins as an outcome rather than
                 // as a race won.
-                let threshold =
-                    fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
+                // Wait for exactly the rows this fixture seeded ancient
+                // and alive, by name.
+                //
+                // The obvious barrier — "no alive row is older than the
+                // threshold" — restates the sweep's predicate, and a
+                // restatement can disagree with the original. This one
+                // did, twice. It compared `now - heartbeat >= threshold`
+                // while the sweep selects `heartbeat < now - threshold`,
+                // so a row sitting exactly on the threshold was pending
+                // here and untouched there. And it considered every
+                // alive row, including the daemon's own, which the sweep
+                // skips via `self_worker_id` and so will never promote —
+                // if that row's heartbeat ever aged past the threshold,
+                // the loop could only end at the deadline.
+                //
+                // Naming the rows removes both, and removes the coupling
+                // that produced them: the fixture waits on a fact it
+                // established itself rather than on a re-derivation of
+                // someone else's rule.
                 let deadline = std::time::Instant::now() + Duration::from_secs(30);
                 loop {
-                    let now_ms = chrono::Utc::now().timestamp_millis();
                     let pending: Vec<String> = cp
                         .list_workers()
                         .await
                         .expect("read worker roster")
                         .into_iter()
                         .filter(|w| {
-                            w.status == WorkerStatus::Alive
-                                && now_ms - w.last_heartbeat >= threshold
+                            SEEDED_ANCIENT_ALIVE.contains(&w.worker_id.as_str())
+                                && w.status == WorkerStatus::Alive
                         })
                         .map(|w| w.worker_id)
                         .collect();
@@ -1179,7 +1207,7 @@ impl EdgeFixture {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
 
-                for worker in ["fixer", "researcher", "worker-beta"] {
+                for worker in SEEDED_ANCIENT_ALIVE {
                     cp.heartbeat_worker(worker, chrono::Utc::now().timestamp_millis())
                         .await
                         .expect("freshen live worker heartbeat");
