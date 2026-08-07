@@ -1622,16 +1622,21 @@ fn redact_event_index_json(raw: &str) -> String {
 }
 
 /// [`redact_event_index_json`]'s rules applied to the human table,
-/// where a row is `timestamp agent event cost invocation` and the
-/// invocation is its first 8 characters — too short for
-/// [`redact_uuids`] to recognise, so the row's own timestamp is what
-/// says whether that prefix was minted at run time.
+/// where a row is `timestamp agent event cost event-id`.
+///
+/// The last column used to be an invocation truncated to 8 characters,
+/// which [`redact_uuids`] could not recognise as an id at all — so the
+/// row's own timestamp had to say whether that prefix was minted at run
+/// time. It is now the event's whole identity, the one `fq events get`
+/// takes, and it is matched against the seeded set in full rather than
+/// by prefix.
+///
+/// The timestamp test still leads, because it is what distinguishes a
+/// seeded row from a daemon-minted one; the identity check is what
+/// keeps a seeded id literal if it ever meets it.
 fn redact_event_index_human(raw: &str) -> String {
     let floor = wall_clock_floor_rfc3339();
-    let seeded: Vec<String> = seeded_identities()
-        .iter()
-        .map(|id| id.chars().take(8).collect())
-        .collect();
+    let seeded = seeded_identities();
     raw.lines()
         .map(|line| {
             let fields = field_spans(line);
@@ -1643,13 +1648,13 @@ fn redact_event_index_human(raw: &str) -> String {
                 return line.to_string();
             }
             let mut line = line.to_string();
-            // Invocation last-but-one in the replace order: the
+            // The identity last-but-one in the replace order: the
             // timestamp column is fixed-width, so rewriting it first
-            // would shift the span the invocation was found at.
-            if let Some((at, inv)) = fields.get(4)
-                && !seeded.iter().any(|s| s == inv)
+            // would shift the span the identity was found at.
+            if let Some((at, event_id)) = fields.get(4)
+                && !seeded.iter().any(|s| s == event_id)
             {
-                line.replace_range(at..&(at + inv.len()), "<INV>");
+                line.replace_range(at..&(at + event_id.len()), "<EVENT_ID>");
             }
             // The whole 20-wide column, not just the token: the
             // padding after it is what keeps the row byte-stable.

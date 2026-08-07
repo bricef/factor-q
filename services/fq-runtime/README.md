@@ -75,7 +75,8 @@ fq agent list                               # list agents in the configured dire
 fq agent validate <path>                    # validate an agent definition
 fq events tail [--agent] [--event-type]     # tail the live event stream
 fq events query [--agent] [--event-type] [--since] [--limit 50]
-                                            # query the SQLite projection
+                                            # query the SQLite projection (no payloads)
+fq events get <event-id> [--json]           # read one whole event back, payload included
 fq costs [--agent] [--since]                # show per-agent cost totals
 fq status                                   # runtime health: NATS, streams, consumers, projection
 ```

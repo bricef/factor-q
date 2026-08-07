@@ -493,6 +493,27 @@ pub(crate) enum EventCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Read one whole event back by its identity — the `event-id`
+    /// `fq events query` prints in its last column, passed through
+    /// unchanged. Query answers from the projection's index and
+    /// carries no payloads; this reads the event itself out of the
+    /// log, payload included, for as long as the log still holds it.
+    ///
+    /// Three answers mean the event is not readable, and they are
+    /// different facts about this system: `not found` (no such event
+    /// here), `unlocatable` (the event is indexed and where its
+    /// payload sits was never recorded) and `gone` (the log has aged
+    /// past it — routine for an old cost-bearing row, which the index
+    /// keeps indefinitely while the log keeps thirty days).
+    Get {
+        /// The event's identity, exactly as `fq events query` prints
+        /// it. A whole UUID: there is no prefix matching, so a
+        /// shortened id is refused rather than guessed at.
+        event_id: String,
+        /// Emit the event as JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Initialise the global tracing subscriber. Both branches share the
