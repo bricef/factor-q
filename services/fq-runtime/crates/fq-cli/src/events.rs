@@ -1,6 +1,6 @@
-//! The `fq events` verbs (plan Phase 4, verbs 11–12): the live tail
-//! and the history query, both read over the authenticated edge from
-//! the daemon's Event atom.
+//! The `fq events` verbs (plan Phase 4, verbs 11–12): the live tail,
+//! the history query and the read of one whole event, all three over
+//! the authenticated edge from the daemon's Event atom.
 //!
 //! Split out of `lib.rs` (#189) on the `workers.rs` precedent: the
 //! transplant of `fq events query` onto `event.list` is what pushed
@@ -8,12 +8,24 @@
 //! its own module anyway. This is the client half of the seam Phase 5
 //! splits the binary along — the daemon half of the same atom is
 //! `event_atom.rs`.
+//!
+//! **The listing and the read are one verb pair, not two verbs.**
+//! `event.list` is allowed to answer without payloads only because
+//! every row it returns names the identity that reads its event back
+//! — so a listing an operator cannot walk from is a listing that has
+//! quietly lost the payload rather than deferred it. That is why the
+//! human table prints the identity in full (see [`query_events`]) and
+//! why [`get_event`] exists at all: the walk the atom's declared
+//! description promises had no path through this surface, so it was
+//! reachable by piping `--json` through `jq` and no other way.
 
+use fq_edge::wire::WireError;
+use fq_runtime::event_tail::EventState;
 use fq_runtime::events::{Event, EventPayload};
 
 use crate::cli::GlobalArgs;
 use crate::edge_call::{edge_client_for, edge_invoke, next_event_batch};
-use crate::event_atom::EventFilter;
+use crate::event_atom::{EventFilter, EventKey};
 
 /// Tail the event stream, formatting each event as a single readable
 /// line.
@@ -70,7 +82,7 @@ pub(crate) async fn tail_events(
             .map_err(|e| anyhow::anyhow!("event.stream: {e}"))?;
         cursor = batch.next_from_seq;
         for item in batch.items {
-            let state: fq_runtime::event_tail::EventState = serde_json::from_value(item.item)?;
+            let state: EventState = serde_json::from_value(item.item)?;
             if json {
                 println!("{}", serde_json::to_string(&state.event)?);
             } else {
@@ -86,8 +98,22 @@ fn print_event(event: &Event) {
     let timestamp = event.envelope.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ");
     let invocation = event.envelope.invocation_id.as_simple().to_string();
     let invocation_short: String = invocation.chars().take(8).collect();
+    println!(
+        "{timestamp} [{invocation_short}] {agent}: {summary}",
+        agent = event.envelope.agent_id,
+        summary = event_summary(event),
+    );
+}
 
-    let summary = match &event.payload {
+/// What this event *is*, in one line — the payload said back in the
+/// terms an operator reads it in.
+///
+/// Extracted from [`print_event`] so `fq events get` can head its
+/// detail with the same sentence the tail prints. One renderer, so a
+/// payload variant cannot come to mean two things depending on which
+/// verb an operator happened to reach for.
+fn event_summary(event: &Event) -> String {
+    match &event.payload {
         EventPayload::Triggered(p) => format!("triggered source={:?}", p.trigger_source),
         EventPayload::InvocationSummary(p) => {
             format!("invocation.summary [{:?}] {}", p.kind, p.summary)
@@ -204,12 +230,7 @@ fn print_event(event: &Event) {
         EventPayload::Unknown => {
             "unknown event_type (published by a newer fq; upgrade to read it)".to_string()
         }
-    };
-
-    println!(
-        "{timestamp} [{invocation_short}] {agent}: {summary}",
-        agent = event.envelope.agent_id
-    );
+    }
 }
 
 /// The event history, over the edge (plan Phase 4, verb 12):
@@ -222,14 +243,30 @@ fn print_event(event: &Event) {
 /// its payload; an operator who wants payloads in bulk tails rather
 /// than queries.
 ///
+/// **The table prints that identity in full**, which is the whole
+/// reason `--json` is not the only way out of this verb: the walk to
+/// `fq events get` is what buys List the right to answer without
+/// payloads, and an identity an operator cannot copy off the screen is
+/// not a walk. Full, and never a prefix — `event.get` resolves an
+/// exact `event_id` and has no prefix search, so a shortened id would
+/// make the walk *look* reachable and fail, which is worse than the
+/// honest absence it replaced.
+///
+/// It costs the `invocation` column, which was already the wrong
+/// thing to spend the width on: it was truncated to eight characters,
+/// and eight characters is not an invocation id — `fq invocation show`
+/// would refuse it, so that column could not be walked either. The
+/// full invocation id is still one `fq events get` away, and `--json`
+/// carries it unchanged.
+///
 /// The narrowing travels with the request rather than being applied
 /// after the rows have crossed, so a filtered query costs the daemon a
 /// filtered query.
 pub(crate) async fn query_events(
     global: &GlobalArgs,
-    agent: Option<&str>,
-    event_type: Option<&str>,
-    since: Option<&str>,
+    agent: Option<String>,
+    event_type: Option<String>,
+    since: Option<String>,
     limit: i64,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -237,9 +274,9 @@ pub(crate) async fn query_events(
         global,
         fq_ops::OpId::List(fq_ops::Domain::Event),
         serde_json::to_value(EventFilter {
-            agent: agent.map(str::to_string),
-            event_type: event_type.map(str::to_string),
-            since: since.map(str::to_string),
+            agent,
+            event_type,
+            since,
             // `--limit` travels as the caller wrote it, and the daemon
             // is the one authority on how big a page may be — so the
             // only thing decided here is the number that has no page
@@ -283,20 +320,137 @@ pub(crate) async fn query_events(
     }
 
     println!(
-        "{:<20} {:<40} {:<14} {:<12} invocation",
+        "{:<20} {:<40} {:<14} {:<12} event-id",
         "timestamp", "agent", "event", "cost"
     );
     for row in rows {
         let ts = row.timestamp.get(..19).unwrap_or(&row.timestamp);
-        let inv_short: String = row.invocation_id.chars().take(8).collect();
         let cost = row
             .total_cost
             .map(|c| format!("${c:.6}"))
             .unwrap_or_else(|| "-".to_string());
+        // Last column, and unpadded: nothing follows it, so the full
+        // 36-character identity costs the table no alignment. The
+        // width is the price of the walk and the trade was made
+        // deliberately — see this function's docs.
         println!(
             "{:<20} {:<40} {:<14} {:<12} {}",
-            ts, row.agent_id, row.event_type, cost, inv_short
+            ts, row.agent_id, row.event_type, cost, row.event_id
         );
     }
     Ok(())
+}
+
+/// One whole event, over the edge: `event.get`, taking the identity
+/// `fq events query` prints (plan Phase 4, cohort 4.2).
+///
+/// This is the second half of the walk, and neither half is worth
+/// anything alone. `event.list` answers with index rows and no
+/// payloads on the strength of every row naming the identity that
+/// reads its event back; until this verb existed, that promise was
+/// declared on the surface, exercised over the edge, and unreachable
+/// from a terminal.
+///
+/// **The three unavailable states are rendered apart.** `event.get`
+/// resolves an identity in two hops — the index for a log position,
+/// then the log — and there are three ways that ends without an
+/// event. They are three different facts about the system, and
+/// [`WireError`] carries them as three variants precisely so a
+/// consumer does not have to read English to tell them apart:
+///
+/// * `NotFound` — no row. Nothing here has ever seen that event.
+/// * `Unlocatable` — a row, and no position. The event is known; where
+///   its payload sits is not, and no retry will change that.
+/// * `Gone` — a position the log has passed, or a log recreated under
+///   an index that outlived it. Routine rather than a fault:
+///   cost-bearing rows are kept indefinitely and the log keeps thirty
+///   days, so every retained row reaches this state eventually.
+///
+/// Collapsing them into one "not found" would undo the reason the
+/// distinction exists. So each renders as its own verdict line, and
+/// the daemon's own message rides along because it carries facts this
+/// side does not have: the log position, and the identity of the event
+/// found sitting at it.
+pub(crate) async fn get_event(
+    global: &GlobalArgs,
+    event_id: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let output = edge_invoke(
+        global,
+        fq_ops::OpId::Get(fq_ops::Domain::Event),
+        serde_json::to_value(EventKey {
+            event_id: event_id.to_string(),
+        })?,
+    )
+    .await?;
+    let state: EventState = match output {
+        Ok(value) => serde_json::from_value(value)?,
+        Err(unavailable) => {
+            let (verdict, means) = unavailable_event(&unavailable)?;
+            eprintln!("{verdict}");
+            eprintln!("{means}");
+            std::process::exit(1);
+        }
+    };
+
+    let event = &state.event;
+    if json {
+        // The event as published, which is the shape `fq events tail
+        // --json` emits line by line — one parser reads either verb.
+        // `seq` is deliberately not here: it is where this read landed
+        // in the log, a cursor for resuming a stream, and handing it
+        // back from a Get invites a consumer to store a transport
+        // coordinate as an identity. That habit is exactly what this
+        // atom was corrected out of.
+        println!("{}", serde_json::to_string_pretty(event)?);
+        return Ok(());
+    }
+
+    println!("Event: {}", event.envelope.event_id);
+    println!(
+        "  time:        {}",
+        event.envelope.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ")
+    );
+    println!("  agent:       {}", event.envelope.agent_id);
+    println!("  invocation:  {}", event.envelope.invocation_id);
+    println!("  type:        {}", event.payload.event_type());
+    println!("  summary:     {}", event_summary(event));
+    // What the walk was for. The listing showed every line above; the
+    // payload is the one thing an index row does not carry.
+    println!("\nPayload:");
+    println!("{}", serde_json::to_string_pretty(&event.payload)?);
+    Ok(())
+}
+
+/// How one unavailable event reads to an operator: the verdict, and
+/// what it means about this system.
+///
+/// Split out so the three states are legible side by side — the
+/// failure mode this guards against is not a wrong message but three
+/// messages quietly becoming one. Anything that is not one of the
+/// three is somebody else's error (a denied token, a lagging read)
+/// and surfaces unchanged.
+fn unavailable_event(err: &WireError) -> anyhow::Result<(String, &'static str)> {
+    Ok(match err {
+        WireError::NotFound { message, .. } => (
+            format!("not found: {message}"),
+            "This daemon's index has no row for that identity — nothing here has ever seen \
+             that event. `fq events query` lists the identities it will answer for.",
+        ),
+        WireError::Unlocatable { message, .. } => (
+            format!("unlocatable: {message}"),
+            "The event is not missing: `fq events query` still lists its row, and --json \
+             carries every field the index extracted from it. Only the payload is \
+             unreachable, and no retry will produce it — a row projected before the index \
+             recorded log positions stays in this state.",
+        ),
+        WireError::Gone { message, .. } => (
+            format!("gone: {message}"),
+            "The index outlives the log: cost-bearing rows are kept indefinitely while the \
+             log keeps thirty days, so an old event that lists without a readable payload \
+             is the ordinary answer here rather than a fault.",
+        ),
+        other => anyhow::bail!("{other}"),
+    })
 }

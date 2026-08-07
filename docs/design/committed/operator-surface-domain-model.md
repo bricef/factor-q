@@ -193,6 +193,15 @@ the UUIDv7 the event stamps on itself, and the index's own primary key —
 so `event.get` is one call away from any row: a primary-key lookup for
 the log position, then the log, then the identity check.
 
+**The walk has to be reachable, not merely declared.** A payload-free
+List is only legitimate because any row completes to the whole fact, so
+an operator surface that publishes the promise and offers no path to it
+has not deferred the payload — it has lost it. `fq events query` prints
+the `event_id` in full and `fq events get` takes it back unchanged;
+never a prefix, because Get resolves an exact identity and has no
+prefix search, and a walk that looks reachable and fails is worse than
+one that is honestly absent.
+
 Two stores must not mean two **populations**. Which store answers is an
 implementation of the question, so the same filter has to select the same
 events whichever verb is asked — and that is a property to arrange at the
@@ -217,7 +226,11 @@ found": the **locator is unknown** (indexed, but its position was never
 recorded), and the **payload is gone** (the position is known and the log
 no longer holds it). "I asked wrongly" and "the fact is no longer whole"
 are different answers, and a consumer that cannot tell them apart cannot
-act on either.
+act on either. The terminal keeps the distinction the wire draws:
+`fq events get` opens with `not found`, `unlocatable` or `gone` and says
+what each means about this system. A state named for consumers and
+flattened for operators is only named for the readers who were least
+likely to be confused by it.
 
 ## Domain verbs
 

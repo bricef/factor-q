@@ -40,7 +40,7 @@ use crate::control::{down_daemon, reload_daemon};
 use crate::costs::show_costs;
 use crate::dead_letters::{list_dead_letters, requeue_dead_letter};
 use crate::doctor::doctor;
-use crate::events::{query_events, tail_events};
+use crate::events::{get_event, query_events, tail_events};
 use crate::invocations::{
     invocation_drop, invocation_list, invocation_resume, invocation_show, invocation_transcript,
 };
@@ -154,16 +154,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 since,
                 limit,
                 json,
-            } => {
-                query_events(
-                    &cli.global,
-                    agent.as_deref(),
-                    event_type.as_deref(),
-                    since.as_deref(),
-                    limit,
-                    json,
-                )
-                .await?
+            } => query_events(&cli.global, agent, event_type, since, limit, json).await?,
+            EventCommands::Get { event_id, json } => {
+                get_event(&cli.global, &event_id, json).await?
             }
         },
         Commands::Costs { agent, since, json } => {

@@ -565,6 +565,40 @@ impl World {
         }
     }
 
+    /// Run one terminating `fq` verb against this world's daemon,
+    /// with the pairing `fq connect` stored — the operator's own route
+    /// in, flags and all.
+    ///
+    /// [`Self::tail`] spawns instead of running, because a tail never
+    /// exits. Every other verb on this atom does, and the thing under
+    /// test for those is the whole run: what it printed, and what it
+    /// exited with.
+    fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+            .args(args)
+            .env("FQ_CONFIG", self.dir.join("fq.toml"))
+            .env("FQ_NATS_URL", self.broker.url())
+            .env("FQ_CACHE_DIR", self.dir.join("cache"))
+            .env("FQ_STATE_DIR", self.dir.join("state"))
+            .env("FQ_AGENTS_DIR", self.dir.join("agents"))
+            .env("XDG_CONFIG_HOME", self.xdg.path())
+            .env("RUST_LOG", "off")
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run fq");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// `fq events get <id>`, as an operator types it: the identity
+    /// goes across as a string, unexamined and unmodified.
+    fn get_from_the_command_line(&self, event_id: &str) -> (Option<i32>, String, String) {
+        self.run_fq(&["events", "get", event_id])
+    }
+
     /// Every `event.list` row's identity for one filter, read at the
     /// log's current tip so the projection is certain to have caught
     /// up with everything published so far.
@@ -1501,6 +1535,119 @@ fn a_list_row_walks_to_its_whole_event() {
     );
 }
 
+/// **The same walk, from a terminal.** The atom's half of this is
+/// pinned above; this is the half an operator has.
+///
+/// It was unreachable. `event.get` worked, was declared, and was
+/// exercised over the edge — and no CLI verb called it, while the
+/// human `fq events query` table printed timestamp / agent / event /
+/// cost / an eight-character invocation prefix and no identity at
+/// all. So the walk the atom's declared description promises existed
+/// only for a consumer willing to pipe `--json` through `jq`, which
+/// is not the operator surface saying what it does.
+///
+/// The test takes the walk the way an operator takes it: **the
+/// identity is read off the rendered table** and handed to `fq events
+/// get` unchanged. Nothing is constructed here and nothing is looked
+/// up out of band, which is what makes this a test of the surface
+/// rather than of the atom underneath it.
+///
+/// That is also what pins the constraint the column design turns on:
+/// an identity truncated to fit the table — the tempting fix, and the
+/// precedent the `invocation` column set — passes every assertion
+/// about which columns exist and fails here, because `event.get`
+/// resolves an exact `event_id` and has no prefix search. A walk that
+/// looks reachable and is not would be worse than the honest absence
+/// this replaced.
+#[test]
+fn a_listed_event_walks_to_its_whole_event_from_the_command_line() {
+    let world = World::start();
+    let client = world.edge_client();
+
+    let watermark = world.publish(&fixture_events());
+    // `fq events query` reads the projection, so wait for the fold
+    // rather than racing it — the same read-your-writes gate the
+    // atom-level walk uses, taken here so the CLI run is deterministic.
+    world.invoke_gated(
+        &client,
+        fq_ops::OpId::List(fq_ops::Domain::Event),
+        serde_json::json!({"agent": AGENT, "event_type": "llm_response"}),
+        Some(watermark),
+    );
+
+    let (exit, listing, stderr) = world.run_fq(&[
+        "events",
+        "query",
+        "--agent",
+        AGENT,
+        "--event-type",
+        "llm_response",
+    ]);
+    assert_eq!(exit, Some(0), "`fq events query` failed:\n{stderr}");
+    let mut rows = listing.lines();
+    let header = rows.next().expect("a header line");
+    assert!(
+        header.ends_with("event-id"),
+        "the listing must name the identity column it prints; got {header:?}"
+    );
+    let row = rows
+        .next()
+        .unwrap_or_else(|| panic!("one priced response in the fixture, so one row:\n{listing}"));
+    assert_eq!(rows.next(), None, "exactly one row:\n{listing}");
+
+    // What an operator would copy: the last field of the row.
+    let printed = row.split_whitespace().last().expect("a last column");
+    // Whole, not a prefix — asserted here as well as walked below,
+    // because a truncation that happened to still resolve (it cannot,
+    // but a future prefix search might) would otherwise hide the
+    // change in contract.
+    assert_eq!(
+        printed,
+        uuid_at(2).to_string(),
+        "the listing must print the identity in full:\n{listing}"
+    );
+
+    // The walk itself, through the verb.
+    let (exit, whole, stderr) = world.get_from_the_command_line(printed);
+    assert_eq!(exit, Some(0), "`fq events get {printed}` failed:\n{stderr}");
+    // The detail is the row's event, said back whole. Every line is a
+    // literal because every field it renders is pinned by the fixture.
+    let expected = format!(
+        "Event: {id}\n  \
+         time:        2026-01-02T03:04:06.000Z\n  \
+         agent:       researcher\n  \
+         invocation:  {INV}\n  \
+         type:        llm_response\n  \
+         summary:     llm.response tokens=1200/340 stop=ToolUse cost=$0.012500 \
+         cumulative=$0.012500\n",
+        id = uuid_at(2)
+    );
+    assert!(
+        whole.starts_with(&expected),
+        "expected the detail to open:\n{expected}\n…but it was:\n{whole}"
+    );
+    // …and the invocation the listing no longer has room for is here,
+    // in full, which is what makes dropping that column a move rather
+    // than a loss.
+    assert!(whole.contains(INV), "the whole event names its invocation");
+    // What the walk buys: the payload an index row does not carry.
+    assert!(
+        whole.contains("Reading the fixture file first."),
+        "`fq events get` must answer with the payload:\n{whole}"
+    );
+
+    // The machine route agrees, and emits the same shape `fq events
+    // tail --json` does, so one parser reads either verb.
+    let (exit, json, stderr) = world.run_fq(&["events", "get", printed, "--json"]);
+    assert_eq!(exit, Some(0), "`fq events get --json` failed:\n{stderr}");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("one JSON event");
+    assert_eq!(parsed["envelope"]["event_id"].as_str(), Some(printed));
+    assert_eq!(
+        parsed["payload"]["payload"]["content"].as_str(),
+        Some("Reading the fixture file first.")
+    );
+}
+
 /// `event.get` addresses one event by the identity the event stamps
 /// on itself, not by where the transport happened to put it.
 #[test]
@@ -1742,6 +1889,111 @@ fn a_row_the_log_has_dropped_says_the_payload_is_gone_not_the_event() {
     assert!(
         matches!(&err, fq_edge::wire::WireError::Gone { op, .. } if op == "event.get"),
         "expected Gone — the row is retained by policy, the payload is not; got {err:?}"
+    );
+}
+
+/// **The three states, told apart at a terminal.**
+///
+/// `EventLocation` answers `Unindexed`, `At(seq)` or `Unlocated`, and
+/// the wire carries `NotFound`, `Unlocatable` and `Gone`. Those names
+/// exist because these are three different facts about a real system:
+/// no row at all; a row whose payload we cannot locate; a payload the
+/// log has passed. The two tests above prove the daemon distinguishes
+/// them. This one proves the *operator* can, which is a separate
+/// claim — every one of the three renders through `WireError`'s
+/// `Display`, and all three of those impls are the same
+/// `` `{op}`: {message} `` string, so a verb that simply surfaced the
+/// error would hand back three sentences of prose that differ only in
+/// their middle.
+///
+/// So the assertion is not that each errors. It is that each names
+/// **its own** state and **neither of the other two** — which is what
+/// a collapse would break, and what a test asserting "it failed"
+/// would sail straight past. The verdicts are scored against each
+/// other rather than checked one at a time, so any two of them
+/// becoming one word fails here.
+#[test]
+fn the_three_unavailable_states_read_differently_from_the_command_line() {
+    let world = World::start();
+    let client = world.edge_client();
+
+    // 1. Unindexed — an identity this daemon has never seen.
+    let missing = Uuid::now_v7();
+
+    // 2. Unlocated — a row, and no position. Exactly what a row
+    //    projected before the index recorded log positions looks like.
+    let unlocated = triggered(AGENT, INV, 3, BASE_MS + 3_000);
+    world.index_only(&unlocated, None);
+
+    // 3. Gone — a position the log has since passed. Publish after it
+    //    so the log is alive and simply no longer holds this message,
+    //    and gate on the tip so the fold has recorded the position
+    //    before it is deleted.
+    let aged = triggered(AGENT, INV, 5, BASE_MS + 5_000);
+    let seq = world.publish(std::slice::from_ref(&aged));
+    let tip = world.publish(&[triggered(OTHER_AGENT, INV, 6, BASE_MS + 6_000)]);
+    world.invoke_gated(
+        &client,
+        fq_ops::OpId::List(fq_ops::Domain::Event),
+        serde_json::json!({}),
+        Some(tip),
+    );
+    world.drop_from_log(seq);
+
+    // The word each state must own, and — by construction — must not
+    // share. `gone` is a substring of nothing else here, and `not
+    // found` and `unlocatable` share no word, so "names mine, names
+    // neither of theirs" is a total scoring of the three.
+    let cases = [
+        ("not found", missing.to_string()),
+        ("unlocatable", unlocated.envelope.event_id.to_string()),
+        ("gone", aged.envelope.event_id.to_string()),
+    ];
+    for (verdict, event_id) in &cases {
+        let (exit, stdout, stderr) = world.get_from_the_command_line(event_id);
+        assert_eq!(
+            exit,
+            Some(1),
+            "an unreadable event must exit non-zero; got stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.is_empty(),
+            "nothing may reach stdout when there is no event to print; got:\n{stdout}"
+        );
+        assert!(
+            stderr.starts_with(&format!("{verdict}:")),
+            "the verdict must open with the state's own name `{verdict}`; got:\n{stderr}"
+        );
+        // The event's identity is echoed, so an operator reading a
+        // scrollback knows which of several reads this verdict is
+        // about.
+        assert!(
+            stderr.contains(event_id),
+            "the verdict must name the event asked for; got:\n{stderr}"
+        );
+        // …and not one of the others' names. This is the assertion
+        // that bites when three states become one message.
+        for (other, _) in &cases {
+            assert!(
+                other == verdict || !stderr.contains(other),
+                "`{verdict}` must not also read as `{other}` — the three states are three \
+                 facts, not three spellings of one; got:\n{stderr}"
+            );
+        }
+    }
+
+    // A fourth outcome, kept outside the three: an id that is not a
+    // UUID names no event and never could, so it is a verdict on the
+    // request rather than a state of the system. It must not be
+    // absorbed into any of the three above — an operator who typed the
+    // id wrongly is not being told their event aged out of the log.
+    let (exit, _, stderr) = world.get_from_the_command_line("the-second-one");
+    assert_eq!(exit, Some(1), "a malformed id is refused");
+    assert!(
+        stderr.contains("the-second-one")
+            && cases.iter().all(|(verdict, _)| !stderr.contains(verdict)),
+        "a malformed id must quote what was written and claim none of the three states; \
+         got:\n{stderr}"
     );
 }
 
