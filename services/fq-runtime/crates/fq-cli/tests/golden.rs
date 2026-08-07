@@ -1207,6 +1207,48 @@ impl EdgeFixture {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
 
+                // Then wait for the events, which is a strictly later
+                // fact than the roster flips above.
+                //
+                // The sweep flips the row first and publishes
+                // `worker.orphaned` afterwards, so a barrier watching
+                // only the roster clears while the events are still in
+                // flight — and these goldens pin an exact set of rows
+                // that includes them. The usual gate for "read what was
+                // just written" is `min_seq`, but the fixture has no
+                // sequence to gate with: the daemon minted these, not
+                // us. Waiting for the fold to actually hold them is
+                // what is left, and it is the fact the golden depends
+                // on anyway.
+                let proj = ProjectionStore::open_read_only(&paths.projection)
+                    .await
+                    .expect("open projection read-only");
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                loop {
+                    let orphaned = proj
+                        .query_events(
+                            &fq_runtime::control_plane::projection::store::EventFilter {
+                                agent: None,
+                                event_type: Some("worker_orphaned"),
+                                since: None,
+                            },
+                            100,
+                        )
+                        .await
+                        .expect("read projected orphan events");
+                    if orphaned.len() >= SEEDED_ANCIENT_ALIVE.len() {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "only {} of {} `worker_orphaned` events reached the projection; \
+                         these goldens pin all of them",
+                        orphaned.len(),
+                        SEEDED_ANCIENT_ALIVE.len()
+                    );
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+
                 for worker in SEEDED_ANCIENT_ALIVE {
                     cp.heartbeat_worker(worker, chrono::Utc::now().timestamp_millis())
                         .await
