@@ -20,7 +20,12 @@ use serde::{Deserialize, Serialize};
 pub struct EventState {
     /// Where in the log this event sits — the universal cursor (P5):
     /// the same number that cursors `event.stream`, feeds `min_seq`
-    /// gates, and rides in a command receipt's `AtomRef`.
+    /// gates, and appears in a command receipt's `watermarks`.
+    ///
+    /// It does *not* appear in the receipt's `AtomRef`, which names
+    /// the event by `event_id`. A receipt separates the two on
+    /// purpose: what was written is addressed by identity, how far the
+    /// log got is addressed by position.
     ///
     /// A cursor, never an identity. It says where the read landed,
     /// and it is only meaningful against the log that produced it:

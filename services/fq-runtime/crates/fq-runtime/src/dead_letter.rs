@@ -97,8 +97,14 @@ impl DeadLetter {
 }
 
 /// A dead letter addressed by its event-log sequence — the universal
-/// cursor (P5): the same number that cursors `dead_letter.stream`,
-/// feeds `min_seq` gates, and rides in a command receipt's `AtomRef`.
+/// cursor (P5): the same number that cursors `dead_letter.stream` and
+/// feeds `min_seq` gates.
+///
+/// It does not ride in a command receipt's `AtomRef`, which names an
+/// atom by identity — and this domain has no identity to give it, so
+/// no command mints a DeadLetter reference today. That is the gap
+/// #464 tracks; addressing a dead letter positionally is why it is a
+/// gap rather than a design.
 ///
 /// The identity is the log sequence and not the trigger sequence for
 /// three reasons, in ascending order of force: the trigger sequence is
