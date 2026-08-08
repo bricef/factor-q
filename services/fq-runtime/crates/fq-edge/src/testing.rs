@@ -15,7 +15,7 @@ use fq_ops::fixtures::{
     InvocationState, PublishInput, control, control_down, cost_summary, invocation,
     invocation_drop, trigger_publish,
 };
-use fq_ops::{AtomRef, Domain, Receipt};
+use fq_ops::{Domain, Receipt};
 
 use crate::auth::EdgeIdentity;
 use crate::registry::EdgeRegistry;
@@ -114,12 +114,17 @@ impl MockDomain {
                         });
                     };
                     row.phase = "failed".to_string();
-                    Ok(Receipt {
-                        atoms: vec![AtomRef {
-                            domain: Domain::Event,
-                            seq: state.next_seq(),
-                        }],
-                    })
+                    // A synthetic identity derived from the sequence, so
+                    // the double stays deterministic — the fake is here
+                    // to exercise the edge, not to mint real events.
+                    let seq = state.next_seq();
+                    Ok(Receipt::one(
+                        Domain::Event,
+                        serde_json::json!({
+                            "event_id": format!("00000000-0000-7000-8000-{seq:012}")
+                        }),
+                        seq,
+                    ))
                 }
             })
             .expect("register drop");
@@ -129,19 +134,21 @@ impl MockDomain {
             .command::<PublishInput, _, _>(trigger_publish(), move |_input: PublishInput| {
                 let state = state.clone();
                 async move {
-                    Ok(Receipt {
-                        atoms: vec![AtomRef {
-                            domain: Domain::Trigger,
-                            seq: state.next_seq(),
-                        }],
-                    })
+                    let seq = state.next_seq();
+                    Ok(Receipt::one(
+                        Domain::Trigger,
+                        serde_json::json!({
+                            "trigger_id": format!("00000000-0000-7000-8000-{seq:012}")
+                        }),
+                        seq,
+                    ))
                 }
             })
             .expect("register publish");
 
         registry
             .command::<DownInput, _, _>(control_down(), |_input: DownInput| async move {
-                Ok(Receipt { atoms: vec![] })
+                Ok(Receipt::empty())
             })
             .expect("register down");
 

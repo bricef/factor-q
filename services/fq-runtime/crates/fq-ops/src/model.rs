@@ -25,6 +25,8 @@
 //! receipts), so every mutation is a declared [`Command`]. Adding a
 //! resource to [`Domain`] is the P11 curation gate.
 
+use std::collections::BTreeMap;
+
 use schemars::{JsonSchema, Schema, schema_for};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,11 @@ use crate::opid::OpId;
     Copy,
     PartialEq,
     Eq,
+    // Ord so a receipt can key its watermarks by domain in a map whose
+    // serialised form is stable — the ordering carries no meaning
+    // beyond that.
+    PartialOrd,
+    Ord,
     Hash,
     Serialize,
     Deserialize,
@@ -127,36 +134,83 @@ pub enum Stability {
 }
 
 /// Reference to one atom a command appended (D3): the domain it
-/// belongs to and its sequence — the universal cursor (P5), the same
-/// number that cursors streams and watermarks reads. Deliberately
-/// model-native: bus coordinates (subjects, stream names) are
-/// internal infrastructure (D8), mapped by the edge, never exposed in
-/// a receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// belongs to, and **its identity** — exactly the key that domain's
+/// Get takes, so a receipt reads back as "here is what I appended, and
+/// here is how to fetch it".
+///
+/// It used to be the atom's sequence, and the doc that accompanied it
+/// claimed bus coordinates were "never exposed in a receipt" while
+/// exposing one: a JetStream sequence is a position in a log, not a
+/// name for a thing. A caller who stored it and re-presented it later
+/// could be answered with a different atom — the log is recreatable
+/// and sequences restart at 1, while the index that outlives it does
+/// not.
+///
+/// The rule this settles, and which the rest of the surface follows:
+/// **cursors may be transport coordinates; identities may not.** The
+/// cursor did not disappear — it moved to [`Receipt::watermarks`],
+/// where being a log position is the point rather than an accident.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AtomRef {
     pub domain: Domain,
-    pub seq: u64,
+    /// The atom's key, shaped by its domain's declared `key_schema` —
+    /// hand it to `<domain>.get` unchanged.
+    pub key: serde_json::Value,
 }
 
 /// A command's output: references to the atoms it appended, never
 /// state (D3, P4). Freshness is the caller's to compose — a receipt's
 /// watermark feeds the next read's `min_seq` for read-your-writes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// The two fields answer two different questions, which is why they
+/// are no longer the same field: `atoms` says *what was written* and
+/// is addressed by identity; `watermarks` says *how far the log got*
+/// and is addressed by position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Receipt {
     pub atoms: Vec<AtomRef>,
+    /// Per-domain high-water marks: the highest sequence this command
+    /// appended in each domain it touched. Per-domain because
+    /// sequences from different domains are not comparable, and a
+    /// `BTreeMap` rather than a list because a caller looks one up by
+    /// domain and the ordering keeps the serialised form stable.
+    #[serde(default)]
+    pub watermarks: BTreeMap<Domain, u64>,
 }
 
 impl Receipt {
     /// The highest appended sequence in one domain — what a caller
     /// passes as `min_seq` to watermark a read of that domain (D4).
-    /// Per-domain because sequences from different domains are not
-    /// comparable.
+    ///
+    /// This was derived from the atoms by taking a maximum, which
+    /// only worked while every atom carried a position. It is now
+    /// recorded directly, so a command can report a watermark for a
+    /// domain whose atoms it names by identity — or, for that matter,
+    /// for a domain whose atoms it does not enumerate at all.
     pub fn watermark(&self, domain: Domain) -> Option<u64> {
-        self.atoms
-            .iter()
-            .filter(|a| a.domain == domain)
-            .map(|a| a.seq)
-            .max()
+        self.watermarks.get(&domain).copied()
+    }
+
+    /// A receipt for a command that appended exactly one atom — the
+    /// common case, and the one every command in the migration's
+    /// remaining cohorts wants. Keeping it a constructor means the
+    /// identity and the watermark cannot be filled in inconsistently
+    /// at each call site.
+    pub fn one(domain: Domain, key: serde_json::Value, seq: u64) -> Self {
+        Receipt {
+            atoms: vec![AtomRef { domain, key }],
+            watermarks: [(domain, seq)].into_iter().collect(),
+        }
+    }
+
+    /// A receipt for a command that appended nothing. It did
+    /// something — a command always does — but there is no atom to
+    /// point a caller at and no position to wait for.
+    pub fn empty() -> Self {
+        Receipt {
+            atoms: Vec::new(),
+            watermarks: BTreeMap::new(),
+        }
     }
 }
 
