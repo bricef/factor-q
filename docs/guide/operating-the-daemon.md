@@ -78,6 +78,41 @@ fq reload    # daemon re-reads the agents directory for the NEXT trigger
 In-flight invocations keep the config they snapshotted at trigger time
 (ADR-0020); the reload affects the next trigger only.
 
+## Stale workers: nothing to do
+
+A worker that stops heartbeating for ~30s is marked `stale`. You will
+see these after any crash or `pkill`, and after an unclean stop that
+skipped the deregistration `fq down` does for you:
+
+```sh
+fq workers list --stale-only    # what died, and when it was last seen
+```
+
+**This is a diagnostic, not a queue of work.** There is no verb to
+clear it, deliberately: each daemon run registers under a fresh id, so
+the roster would grow by a row per restart if reclaiming it were
+something you had to remember. The daemon collects stale registrations
+itself, on the same scheduled sweep that bounds the invocation archive.
+
+Two knobs, both under `[state]` in `fq.toml`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `stale_worker_retention_days` | `7` | how long a stale registration is kept before the sweep deletes it; `-1` disables collection |
+| `sweep_interval_seconds` | `3600` | how often the sweep runs |
+
+`stale_worker_retention_days` is **not** the staleness threshold — that
+is a fixed ~30s and is what `--stale-only` filters on. This is how long
+the evidence sticks around afterwards, which is why it is measured in
+days: the default leaves a Friday-night failure still on the roster on
+Monday morning.
+
+A stale worker that still owns unresolved (`in_flight` or `ambiguous`)
+invocations is **never** collected, however old it is — its row is how
+`fq recovery` finds that work. If you see one persisting well past the
+window, the daemon is logging a warning about it, and the real problem
+is the unrecovered invocation rather than the leftover row.
+
 ## Quick reference
 
 | Goal | Command |
@@ -87,9 +122,12 @@ In-flight invocations keep the config they snapshotted at trigger time
 | Redeploy (suspend for the next binary) | `fq down` |
 | Hot-reload agent definitions | `fq reload` |
 | Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` |
+| Clear stale workers | *nothing — the daemon sweeps them* |
 
 ## See also
 
 - ADR-0027 — graceful drain for deploys (the machinery used by `fq down`).
+- ADR-0006 Appendix E — why stale-worker reclamation is a daemon sweep
+  and not an operator verb.
 - `fq status`, `fq doctor`, `fq workers list` — confirm the daemon and
   worker state after a stop or a deploy.

@@ -292,12 +292,6 @@ pub(crate) enum WorkerCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Remove stale worker registrations; alive and shutdown workers are untouched.
-    Prune {
-        /// Report workers that would be removed without changing the store.
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Show one worker's detail: host, status, heartbeat age,
     /// and current in-flight invocation count.
     Show {

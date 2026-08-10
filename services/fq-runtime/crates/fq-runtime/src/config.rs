@@ -198,7 +198,13 @@ impl ExecToolConfig {
 
 /// `[state]` — durable runtime state: where it lives, and how long
 /// the sweepable parts of it are kept. Drives the scheduled sweeps for
-/// the `invocation_archive` and rebuildable projection `events` tables.
+/// the `invocation_archive` and rebuildable projection `events` tables,
+/// and for stale rows in `coordination_worker`.
+///
+/// Two independent retention windows, because they hold different
+/// things: `retention_days` bounds the record of work that finished,
+/// `stale_worker_retention_days` bounds the roster of daemons that
+/// died. Each disables on its own `-1`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StateConfig {
     /// Directory for data factor-q must never regenerate — today the
@@ -216,15 +222,43 @@ pub struct StateConfig {
     /// are exempt and kept indefinitely regardless of this setting.
     #[serde(default = "default_retention_days")]
     pub retention_days: i64,
+    /// How long a worker registration that has already gone **stale** is
+    /// kept before the retention sweep deletes its row. Default 7 days.
+    /// Set to `-1` to disable stale-worker collection entirely.
+    ///
+    /// **This is not the stale threshold, and must not be set as if it
+    /// were.** A worker is *marked* stale after roughly 30s of missed
+    /// heartbeats (`DEFAULT_STALE_THRESHOLD_MS`); that value is
+    /// deliberately aggressive so orphan recovery reacts while the work
+    /// is still fresh. Deletion is the opposite trade. The row is the
+    /// operator's evidence that a worker died — it is what `fq workers
+    /// list --stale-only` shows and what an owned invocation is
+    /// recovered through — so it has to outlive the diagnosis, not race
+    /// it. Days, not seconds: the default survives a weekend, so a
+    /// Friday-night failure is still on the roster on Monday.
+    ///
+    /// The sweep exists because `worker_id` is the daemon's `runtime_id`,
+    /// a fresh UUID per run, so `coordination_worker` gains a row on
+    /// every restart. Reclaiming them was an operator verb (`fq workers
+    /// prune`) until it wasn't: the system should not depend on operator
+    /// remediations to work normally.
+    #[serde(default = "default_stale_worker_retention_days")]
+    pub stale_worker_retention_days: i64,
     /// How often the retention sweep runs, in seconds.
     /// Default 1 hour. Production doesn't need faster; tests
-    /// override via `[state]` in their config.
+    /// override via `[state]` in their config. Shared by both
+    /// windows above — an hourly tick is right for a sweep whose
+    /// shortest window is measured in days.
     #[serde(default = "default_sweep_interval_seconds")]
     pub sweep_interval_seconds: u64,
 }
 
 fn default_retention_days() -> i64 {
     30
+}
+
+fn default_stale_worker_retention_days() -> i64 {
+    7
 }
 
 fn default_sweep_interval_seconds() -> u64 {
@@ -236,6 +270,7 @@ impl Default for StateConfig {
         Self {
             directory: default_state_dir_for_config(),
             retention_days: default_retention_days(),
+            stale_worker_retention_days: default_stale_worker_retention_days(),
             sweep_interval_seconds: default_sweep_interval_seconds(),
         }
     }
@@ -998,7 +1033,26 @@ api_key_env = "SOMETHING"
     fn state_config_defaults_when_absent() {
         let config = Config::from_toml_str("").unwrap();
         assert_eq!(config.state.retention_days, 30);
+        assert_eq!(config.state.stale_worker_retention_days, 7);
         assert_eq!(config.state.sweep_interval_seconds, 3_600);
+    }
+
+    /// The default worker-retention window must stay orders of
+    /// magnitude above the 30s stale threshold. Conflating the two is
+    /// the failure mode the knob's doc comment warns about, and a
+    /// default in seconds is how it would arrive.
+    #[test]
+    fn stale_worker_retention_default_dwarfs_the_stale_threshold() {
+        let config = Config::from_toml_str("").unwrap();
+        let window_ms = config.state.stale_worker_retention_days * 24 * 60 * 60 * 1_000;
+        let stale_threshold_ms =
+            crate::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
+        assert!(
+            window_ms > stale_threshold_ms * 1_000,
+            "deletion window ({window_ms}ms) must not be within \
+             three orders of magnitude of the stale threshold \
+             ({stale_threshold_ms}ms)"
+        );
     }
 
     #[test]
@@ -1006,23 +1060,28 @@ api_key_env = "SOMETHING"
         let toml = r#"
 [state]
 retention_days = 7
+stale_worker_retention_days = 90
 sweep_interval_seconds = 300
 "#;
         let config = Config::from_toml_str(toml).unwrap();
         assert_eq!(config.state.retention_days, 7);
+        assert_eq!(config.state.stale_worker_retention_days, 90);
         assert_eq!(config.state.sweep_interval_seconds, 300);
     }
 
+    /// Each window disables on its own `-1`, and neither default drags
+    /// the other with it.
     #[test]
     fn state_config_accepts_negative_retention_to_disable() {
-        let toml = r#"
-[state]
-retention_days = -1
-"#;
-        let config = Config::from_toml_str(toml).unwrap();
+        let config = Config::from_toml_str("[state]\nretention_days = -1\n").unwrap();
         assert_eq!(config.state.retention_days, -1);
+        assert_eq!(config.state.stale_worker_retention_days, 7);
         // sweep_interval_seconds still defaults.
         assert_eq!(config.state.sweep_interval_seconds, 3_600);
+
+        let config = Config::from_toml_str("[state]\nstale_worker_retention_days = -1\n").unwrap();
+        assert_eq!(config.state.stale_worker_retention_days, -1);
+        assert_eq!(config.state.retention_days, 30);
     }
 
     #[test]

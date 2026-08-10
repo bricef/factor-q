@@ -1,20 +1,26 @@
-//! The `fq workers` verbs (plan Phase 4, verbs 21–23): the roster
-//! and one worker's fold, both read over the authenticated edge from
-//! the daemon's Worker view, plus the prune that still writes the
-//! control-plane store directly (verb 23, cohort 4.3).
+//! The `fq workers` verbs (plan Phase 4, verbs 21–22): the roster and
+//! one worker's fold, both read over the authenticated edge from the
+//! daemon's Worker view.
+//!
+//! `fq workers` is read-only. It used to carry a third verb, `prune`,
+//! which deleted stale registration rows straight out of the
+//! control-plane store — the one write in the tree that bypassed every
+//! boundary, and the only thing reclaiming a table that gains a row per
+//! daemon restart. That made an unbounded table an operator's job to
+//! remember, and *the system should not depend on operator remediations
+//! to work normally*, so the reclamation became a daemon retention
+//! sweep ([`fq_runtime::control_plane::retention`]) and the verb was
+//! retired rather than transplanted onto the edge.
 //!
 //! Split out of `lib.rs` (#189) rather than grown in place: the
 //! transplant onto `worker.get`/`worker.list` is what pushed that file
 //! past its budget, and a subcommand's rendering is exactly the kind
 //! of thing that belongs in its own module.
 
-use fq_runtime::ControlPlaneStore;
 use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
-use fq_runtime::control_plane::store::WorkerStatus;
 
 use crate::cli::GlobalArgs;
 use crate::edge_call::edge_invoke;
-use crate::ensure_split_dbs;
 use crate::operator_surface::{WorkerListFilter, WorkerViewKey};
 
 /// Human-readable heartbeat age. Stays in step with the
@@ -101,39 +107,6 @@ pub(crate) async fn workers_list(
                 format_worker_list_row_human(item, now_ms, stale_threshold_ms)
             );
         }
-    }
-    Ok(())
-}
-
-pub(crate) async fn workers_prune(global: &GlobalArgs, dry_run: bool) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    // Prune deletes control-plane rows, so this path runs the
-    // legacy split if one is pending.
-    let db_paths = ensure_split_dbs(&config).await?;
-    // allow-direct-store-open: operator write path (`fq workers prune` deletes rows).
-    let store = ControlPlaneStore::open(&db_paths.control_plane).await?;
-    let stale: Vec<String> = store
-        .list_workers()
-        .await?
-        .into_iter()
-        .filter(|worker| worker.status == WorkerStatus::Stale)
-        .map(|worker| worker.worker_id)
-        .collect();
-    if dry_run {
-        println!(
-            "Would remove {} stale worker(s): {}",
-            stale.len(),
-            stale.join(", ")
-        );
-    } else if stale.is_empty() {
-        println!("0 stale workers removed.");
-    } else {
-        let removed = store.prune_stale_workers().await?;
-        println!(
-            "Removed {} stale worker(s): {}",
-            removed.len(),
-            removed.join(", ")
-        );
     }
     Ok(())
 }

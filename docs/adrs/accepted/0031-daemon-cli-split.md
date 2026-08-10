@@ -187,3 +187,19 @@ client with TLS, pinning, and token presentation), depending on
 `fq-ops` and still free of sqlx and NATS. The thin `fq` of the split
 links `fq-edge` → `fq-ops`. This supersedes the corresponding
 sentence of ADR-0006 Appendix A.
+
+## Appendix B — Amendment: the command surface loses `workers prune` (2026-08-10)
+
+Narrows one enumeration in the Decision. The split itself is unaffected.
+
+The Decision lists the command surface as *"`reload`, `down`, `trigger`,
+`invocation drop`, `workers prune`, dead-letter `requeue`"*. **`workers
+prune` is not on it.** The verb was deleted rather than moved behind the
+daemon's control interface: reclaiming stale `coordination_worker` rows
+is now a periodic retention sweep the daemon runs itself, because the
+system should not depend on operator remediations to work normally.
+
+`fq workers` is read-only — `list` and `show` — and the worker domain
+contributes no command RPC. The reasoning, and the two design points
+that came out of it, are in
+[ADR-0006 Appendix E](0006-registry-first-api.md#appendix-e--amendment-workerprune-is-retired-not-evented-2026-08-10).

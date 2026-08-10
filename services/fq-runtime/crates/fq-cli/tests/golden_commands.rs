@@ -40,7 +40,6 @@ use std::time::{Duration, Instant};
 
 use fq_runtime::AgentId;
 use fq_runtime::bus::EventBus;
-use fq_runtime::control_plane::store::ControlPlaneStore;
 use fq_runtime::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
     DEAD_LETTER_SUBJECT_KEY,
@@ -57,9 +56,6 @@ use uuid::Uuid;
 const BASE_MS: i64 = 1_767_323_045_000;
 
 const AGENT_RESEARCHER: &str = "researcher";
-
-/// A guaranteed-closed port: proves a command needs no NATS.
-const NATS_CLOSED: &str = "nats://127.0.0.1:1";
 
 fn fixed_uuid(n: u32) -> Uuid {
     Uuid::parse_str(&format!("00000000-0000-7000-8000-0000000010{n:02}")).unwrap()
@@ -254,62 +250,14 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
-// ------------------------------------------------------------------
-// workers prune — the direct-store write (no NATS, proven by the
-// closed port). Dry-run first against the same fixture, then the
-// mutation, then the now-empty re-run: one seeded scratch exercises
-// all three contract outputs in mutation order.
-// ------------------------------------------------------------------
-
-fn seed_workers(scratch: &Scratch) {
-    block_on(async {
-        let paths = fq_runtime::db::RuntimeDbPaths::under(scratch.dir.path());
-        let cp = ControlPlaneStore::open(&paths.control_plane)
-            .await
-            .expect("open control plane");
-        cp.register_worker("worker-alpha", "golden-host", BASE_MS)
-            .await
-            .unwrap();
-        cp.register_worker("worker-beta", "golden-host", BASE_MS + 1_000)
-            .await
-            .unwrap();
-        assert!(cp.mark_worker_stale("worker-alpha").await.unwrap());
-    });
-}
-
-#[test]
-fn golden_workers_prune() {
-    let scratch = Scratch::new();
-    seed_workers(&scratch);
-
-    let (exit, stdout, stderr) = run_fq(&scratch, NATS_CLOSED, &["workers", "prune", "--dry-run"]);
-    assert_eq!(exit, Some(0), "dry-run should exit 0; stderr:\n{stderr}");
-    assert_golden(
-        "workers_prune_dry_run_human",
-        &redact(&stdout, &scratch, NATS_CLOSED, &[]),
-    );
-
-    // The dry run must not have mutated: the real prune still finds
-    // worker-alpha.
-    let (exit, stdout, stderr) = run_fq(&scratch, NATS_CLOSED, &["workers", "prune"]);
-    assert_eq!(exit, Some(0), "prune should exit 0; stderr:\n{stderr}");
-    assert_golden(
-        "workers_prune_human",
-        &redact(&stdout, &scratch, NATS_CLOSED, &[]),
-    );
-
-    // And pruning an already-clean store reports zero, exit 0.
-    let (exit, stdout, stderr) = run_fq(&scratch, NATS_CLOSED, &["workers", "prune"]);
-    assert_eq!(
-        exit,
-        Some(0),
-        "empty prune should exit 0; stderr:\n{stderr}"
-    );
-    assert_golden(
-        "workers_prune_empty_human",
-        &redact(&stdout, &scratch, NATS_CLOSED, &[]),
-    );
-}
+// `workers prune` used to be pinned here — the one CLI write that
+// opened the control-plane store directly, covered by three goldens
+// against a locally-seeded fixture, run against a deliberately closed
+// NATS port to prove it needed no broker. The verb is gone: reclaiming
+// stale registration rows is a daemon retention sweep now, not something
+// an operator has to remember to run, so there is no CLI output left to
+// pin — and with it went the last golden here that ran without a broker.
+// The sweep's own coverage is in `fq_runtime::control_plane::retention`.
 
 // ------------------------------------------------------------------
 // The paired-daemon harness: a live `fq run`, a client paired with its
