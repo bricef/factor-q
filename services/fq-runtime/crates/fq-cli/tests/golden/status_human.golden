@@ -23,4 +23,4 @@ Stores
 Recovery state
   Stale workers: 2
     -> `fq workers list --stale-only` to inspect
-    -> `fq workers prune` to remove them (`--dry-run` to preview)
+    -> rows are reclaimed by the daemon's retention sweep; no action needed

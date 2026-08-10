@@ -586,3 +586,72 @@ oracle `tests/snapshots/exemplar_registry.json`, whose `synthetic`
 entry serialises a `state_schema` today. It also needs `Control`
 report identities that do not exist yet. Sequenced with 4.4
 deliberately; noted here so the gap is a known one rather than drift.
+
+## Appendix E — Amendment: `worker.prune` is retired, not evented (2026-08-10)
+
+Supersedes the `worker.prune` clauses of D3 and of the Consequences.
+Everything else in both stands, including the principle they were
+arguing for.
+
+### What changes
+
+D3 lists `worker.prune` among the **Domain commands** and says of it:
+*"Where a handler must also touch coordination state (prune's stale-row
+removal), it co-emits the corresponding events."* The Consequences say
+*"prune becomes an evented command."*
+
+Neither happens. **`fq workers prune` is deleted rather than
+transplanted**, and no `worker_pruned` event type is added. Reclaiming
+stale `coordination_worker` rows is now a periodic retention sweep
+inside the daemon, configured by `state.stale_worker_retention_days`.
+
+The other two boundary-bypassing paths resolve as written: in-process
+`fq trigger` retires (D-1), `agent.list` answers from the daemon's
+registry.
+
+### Why
+
+This ADR diagnosed prune correctly and prescribed the wrong cure. The
+defect it named — a CLI-side store write that mutated coordination
+state with no event and no boundary — is real, and the census in
+Context is accurate. But "make it an evented command" assumed the
+answer to *who decides when a stale row goes away* was **an operator,
+better audited**. It isn't.
+
+`worker_id` is the daemon's `runtime_id`, a fresh UUID per run, so
+`coordination_worker` gains a row on every restart and grows without
+bound. Prune was the only thing reclaiming it. That makes an unbounded
+table a chore a human has to remember, and **the system should not
+depend on operator remediations to work normally.** Once reclamation is
+the daemon's own housekeeping, on a schedule, there is no operator
+decision left to audit: no receipt to fill, and nothing an event would
+record that a log line does not. The alive→stale transition that *is*
+interesting already publishes `worker.orphaned`.
+
+So the write did not move behind the boundary — it moved inside the
+daemon, which is the far side of the boundary. P3 (no silent mutation)
+is satisfied the way every other scheduled sweep satisfies it: the
+existing `invocation_archive` retention sweep is not evented either.
+
+### The correction this forced
+
+The retirement exposed a second defect the evented design would have
+inherited. Prune deleted on `status = 'stale'` alone, and `stale` means
+*~30 seconds of missed heartbeats* — a threshold kept aggressive on
+purpose so orphan recovery reacts while work is fresh. Deleting on it
+destroys the diagnostic (`fq workers list --stale-only`) it exists to
+feed, and can remove a row an unhandled `worker.orphaned` still needs.
+
+Deletion therefore gets its own window, in days rather than seconds,
+and its own ownership guard: a worker that still owns `in_flight` or
+`ambiguous` invocations is never collected, because `fq recovery`
+follows `worker_id` back to them. As an occasional human act prune got
+away with omitting that check. On a timer it would not have.
+
+### Consequence for the surface
+
+`fq workers` is read-only — `list` and `show`, both over the edge. The
+worker domain has no command verb, so ADR-0031's command-surface
+enumeration loses `workers prune` (see that ADR's Appendix B), the
+`store_open_gate` sanctioned-open count falls from 4 to 3, and the
+three that remain are all `run_daemon` opening its own stores.

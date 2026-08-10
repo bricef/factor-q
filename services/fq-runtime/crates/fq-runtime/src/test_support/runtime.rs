@@ -51,6 +51,7 @@ pub struct TestRuntimeBuilder {
     sweep_interval_ms: u64,
     archive_retry_interval_ms: u64,
     retention_days: i64,
+    stale_worker_retention_days: i64,
     retention_sweep_interval_seconds: u64,
 }
 
@@ -68,6 +69,10 @@ impl Default for TestRuntimeBuilder {
             // care about retention. Tests that do override
             // both knobs.
             retention_days: -1,
+            // Also disabled by default, and separately: a harness
+            // that swept worker rows out from under a scenario's
+            // roster assertions would be a confusing default.
+            stale_worker_retention_days: -1,
             retention_sweep_interval_seconds: 1,
         }
     }
@@ -110,6 +115,15 @@ impl TestRuntimeBuilder {
     /// sweep tick.
     pub fn retention_days(mut self, days: i64) -> Self {
         self.retention_days = days;
+        self
+    }
+
+    /// Enable stale-worker collection with the given retention
+    /// in days. Default is `-1` (disabled). Independent of
+    /// [`Self::retention_days`] — the two windows bound
+    /// different tables.
+    pub fn stale_worker_retention_days(mut self, days: i64) -> Self {
+        self.stale_worker_retention_days = days;
         self
     }
 
@@ -210,14 +224,18 @@ impl TestRuntimeBuilder {
             let _ = retry_sweeper.run(retry_rx).await;
         });
 
-        // RetentionSweeper (CP-side). Disabled by default
-        // via `retention_days = -1`; scenarios that care
-        // override via `retention_days(N)`.
+        // RetentionSweeper (CP-side). Both windows disabled by
+        // default (`-1`); scenarios that care override via
+        // `retention_days(N)` / `stale_worker_retention_days(N)`.
         let (retention_tx, retention_rx) = oneshot::channel();
         let retention_sweeper = RetentionSweeper::new(
             cp_store.clone(),
-            self.retention_days,
-            self.retention_sweep_interval_seconds,
+            &crate::config::StateConfig {
+                retention_days: self.retention_days,
+                stale_worker_retention_days: self.stale_worker_retention_days,
+                sweep_interval_seconds: self.retention_sweep_interval_seconds,
+                ..Default::default()
+            },
         );
         let retention_handle = tokio::spawn(retention_sweeper.run(retention_rx));
 

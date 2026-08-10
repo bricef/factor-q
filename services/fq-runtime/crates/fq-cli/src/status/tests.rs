@@ -30,7 +30,10 @@ fn render_recovery_guidance_for_stale_only() {
     let out = render_recovery_guidance(0, 2);
     assert!(out.contains("Stale workers: 2"));
     assert!(out.contains("fq workers list --stale-only"));
-    assert!(out.contains("fq workers prune"));
+    // Inspection is offered; removal is not. The retired `fq workers
+    // prune` must not come back as advice.
+    assert!(!out.contains("prune"), "got: {out:?}");
+    assert!(out.contains("retention sweep"));
     assert!(!out.contains("Ambiguous"), "got: {out:?}");
     assert!(!out.contains("All clear"));
 }
@@ -42,5 +45,5 @@ fn render_recovery_guidance_for_both() {
     assert!(out.contains("Stale workers: 1"));
     assert!(out.contains("fq invocation drop"));
     assert!(out.contains("fq workers list --stale-only"));
-    assert!(out.contains("fq workers prune"));
+    assert!(!out.contains("prune"), "got: {out:?}");
 }

@@ -153,12 +153,23 @@ fn read_handlers_never_open_stores_directly() {
     // It went 5 -> 4 with cohort 4.3, and the marker it lost is the one
     // worth naming: the in-process `fq trigger` opened the worker WAL
     // *as a writer*, from the client, sanctioned on the grounds that it
-    // was "a one-shot worker". Retiring that mode (decision D-1) leaves
-    // the four remaining opens all inside `run_daemon` — the runtime
-    // opening its own stores, which is the architecture rather than a
-    // concession.
+    // was "a one-shot worker". Retiring that mode (decision D-1) took
+    // that one.
+    //
+    // 4 -> 3 retires the last exemption that was not the runtime opening
+    // its own stores: `fq workers prune` opened the control-plane store
+    // to delete stale registration rows. Reclaiming those rows is a
+    // daemon retention sweep now — the system should not depend on
+    // operator remediations to work normally — so the write moved inside
+    // the daemon and the verb was deleted rather than transplanted.
+    //
+    // The three that remain are all inside `run_daemon`: the runtime
+    // opening its own projection, control-plane, and worker stores,
+    // which is the architecture rather than a concession. A fourth
+    // marker appearing means someone re-opened a store from the client
+    // side, and that is the thing this gate exists to make loud.
     assert_eq!(
-        sanctioned, 4,
+        sanctioned, 3,
         "sanctioned direct-store-open count changed — update this gate alongside the marker"
     );
 }

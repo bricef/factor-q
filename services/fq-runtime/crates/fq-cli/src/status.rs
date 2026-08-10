@@ -265,9 +265,13 @@ fn render_recovery_guidance(ambiguous_count: i64, stale_worker_count: i64) -> St
     }
     if stale_worker_count > 0 {
         out.push_str(&format!(
+            // No remediation to offer, deliberately: a stale row is
+            // evidence, and reclaiming it is the daemon's scheduled
+            // retention sweep, not an operator chore. The line says so
+            // rather than leaving the count looking like a to-do.
             "  Stale workers: {stale_worker_count}\n\
              \x20\x20  -> `fq workers list --stale-only` to inspect\n\
-             \x20\x20  -> `fq workers prune` to remove them (`--dry-run` to preview)\n"
+             \x20\x20  -> rows are reclaimed by the daemon's retention sweep; no action needed\n"
         ));
     }
     out

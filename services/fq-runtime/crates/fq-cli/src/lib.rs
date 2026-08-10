@@ -50,7 +50,7 @@ use crate::resume::ResumeControl;
 use crate::status::show_status;
 use crate::trigger::publish_trigger;
 use crate::version::{FQ_VERSION, print_version};
-use crate::workers::{workers_list, workers_prune, workers_show};
+use crate::workers::{workers_list, workers_show};
 
 /// The `fq` entry point: the operator CLI (and, until the Phase-5
 /// split completes, the daemon via `fq run`).
@@ -220,7 +220,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 json,
             } => workers_list(&cli.global, stale_only, alive_only, json).await?,
             WorkerCommands::Show { id, json } => workers_show(&cli.global, &id, json).await?,
-            WorkerCommands::Prune { dry_run } => workers_prune(&cli.global, dry_run).await?,
         },
         Commands::Connect {
             addr,
@@ -780,17 +779,17 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let mut archive_retry_handle =
         tokio::spawn(async move { archive_retry_sweeper.run(archive_retry_shutdown_rx).await });
 
-    // Spawn the retention sweep (step 10). Deletes
-    // invocation_archive rows and projected `events` rows older
-    // than state.retention_days — except cost-bearing event rows,
-    // which are kept indefinitely (spend figures must survive
-    // retention). Setting retention_days < 0 disables the task
-    // (it exits immediately on startup); see `[state]` in fq.toml.
+    // Spawn the retention sweeps. Two windows, both from `[state]`.
+    // `retention_days` bounds invocation_archive and projected `events`
+    // rows (step 10), except cost-bearing rows, kept indefinitely so
+    // spend figures survive retention. `stale_worker_retention_days`
+    // bounds stale coordination_worker rows, which accrue one per
+    // daemon restart and used to need `fq workers prune`. Either at
+    // < 0 skips its own sweep; both < 0 exits the task.
     let (retention_shutdown_tx, retention_shutdown_rx) = tokio::sync::oneshot::channel();
     let retention_sweeper = fq_runtime::control_plane::retention::RetentionSweeper::new(
         cp_store.clone(),
-        config.state.retention_days,
-        config.state.sweep_interval_seconds,
+        &config.state,
     )
     .with_projection_store(store.clone());
     let mut retention_handle =

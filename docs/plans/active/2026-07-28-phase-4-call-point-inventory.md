@@ -54,7 +54,7 @@ exempts inline `#[cfg(test)]` modules.
 | 20 | `fq invocation transcript` | snapshot: direct Views; `--follow`: **edge** (3d) | `transcript_*` (snapshot path) | snapshot → `turn.list`, and nothing else (the prompt is a Turn) | ✅ **DONE 2026-07-28** |
 | 21 | `fq workers list` | direct Views, client-side filtering | `workers_list_*` (**reviewed change** — see 4.1) | `worker.list` view (filter moved server-side) | ✅ **DONE 2026-08-01** |
 | 22 | `fq workers show` | direct Views | `workers_show_*` | `worker.get` view | ✅ **DONE 2026-08-01** |
-| 23 | `fq workers prune` | **direct store write**, no events emitted | `workers_prune_*` ×3 | `worker.prune` command, evented | no — **behaviour change** (see hazards) |
+| 23 | ~~`fq workers prune`~~ | **direct store write**, no events emitted | ~~`workers_prune_*` ×3~~ | **none — verb deleted**, replaced by a daemon retention sweep | ✅ **RETIRED 2026-08-10** |
 | 24 | `fq connect` | edge (TOFU pairing) | (edge_client_cli.rs) | — | ✅ DONE |
 | 25 | `fq ops list` | edge | (edge_client_cli.rs) | — | ✅ DONE |
 | 26 | `fq token attenuate` | offline (fq-edge) | — | — | ✅ DONE |
@@ -307,26 +307,47 @@ amendment landed 2026-08-05 — see section C)* — items 8, 9, 10 and 14
 10. `control.reload` (+ `Control::Reload` variant) + verb 3 flip —
     gains an ack the fire-and-forget path never had.
 11. `dead_letter.requeue` (+ enum variant) + verb 8 flip.
-12. `worker.prune` (+ enum variant) + verb 23 flip — **evented**
-    mutation; reviewed golden change, not byte-identical (hazard H2).
-    **Blocked, and the blocker is structural rather than incidental.**
-    The evented design is not optional decoration: a receipt carries no
-    state (D3), so the only way the flipped verb can still name the
-    workers it removed — which its goldens pin — is to co-emit one audit
-    atom per eviction and let the client walk the receipt's `AtomRef`s
-    with a gated `event.get`. That needs an event type
-    (`worker_pruned`), and no existing payload means it: `worker.orphaned`
-    is the sweep's alive→stale transition, already published for every
-    row a prune can find. The variant and its two match arms have to land
-    in `events.rs`, which is pinned at its exact size in
-    `.file-size-baseline` (zero slack), and `fq-lint` answers a growth
-    there with "do not restructure this file as a side effect — say on
-    the PR that the change genuinely needs to land in this file and let a
-    human decide". So it is a human decision, not a workaround: bless a
-    small budget bump for `events.rs`, or split it first. Migrating the
-    verb *without* the events was rejected — it would trade a silent
-    mutation for a lossier one, since the output would drop the worker
-    names it prints today.
+12. ~~`worker.prune` (+ enum variant) + verb 23 flip~~ — **done
+    2026-08-10, by deletion.** The verb is gone, there is no
+    `Worker::Prune` variant, and **no `worker_pruned` event type was
+    added.** Reclaiming stale `coordination_worker` rows is a daemon
+    retention sweep (`state.stale_worker_retention_days`, default 7
+    days, `-1` disables). See
+    [ADR-0006 Appendix E](../../adrs/accepted/0006-registry-first-api.md#appendix-e--amendment-workerprune-is-retired-not-evented-2026-08-10).
+
+    The blocker recorded below was real, and the way out was to
+    question its premise rather than pay it. It read:
+
+    > **Blocked, and the blocker is structural rather than incidental.**
+    > The evented design is not optional decoration: a receipt carries no
+    > state (D3), so the only way the flipped verb can still name the
+    > workers it removed — which its goldens pin — is to co-emit one audit
+    > atom per eviction and let the client walk the receipt's `AtomRef`s
+    > with a gated `event.get`. That needs an event type
+    > (`worker_pruned`), and no existing payload means it. The variant and
+    > its two match arms have to land in `events.rs`, which is pinned at
+    > its exact size in `.file-size-baseline` (zero slack) […] bless a
+    > small budget bump for `events.rs`, or split it first.
+
+    Every branch of that cost — the event type, the `events.rs` budget,
+    the receipt walk — was being paid to preserve **an operator verb
+    that should not exist**. `worker_id` is the daemon's `runtime_id`, a
+    fresh UUID per run, so `coordination_worker` grows by a row per
+    restart and prune was the only thing reclaiming it. The system
+    should not depend on operator remediations to work normally. Once
+    the sweep is the daemon's own housekeeping there is no operator
+    decision to audit, so no receipt to fill and no event to mint:
+    `events.rs` is untouched and its budget is unchanged.
+
+    Two things the evented design would have inherited, and which the
+    rewrite had to fix instead:
+    - **`stale` is not `prunable`.** Prune deleted on `status = 'stale'`
+      alone — a ~30s heartbeat lapse. On a timer that destroys
+      `fq workers list --stale-only` as a diagnostic. Deletion got its
+      own window, in days.
+    - **The ownership guard.** `coordination_invocation_owner.worker_id`
+      had no check at all. A latent bug, not a can't-happen — see the
+      note under hazard H2.
 13. `invocation.resume` — the amendment is done; this is now
     `Invocation::Resume` + registration + verb 19 flip, retiring the
     request/reply control subject with it. **Implement the invariant
@@ -390,9 +411,27 @@ amendment landed 2026-08-05 — see section C)* — items 8, 9, 10 and 14
   carries AtomRefs and never state, so a verb printing ids the client
   cannot mint needs a gated follow-up read — the 3c read-your-writes
   idiom, which every remaining command flip will also need.
-- **H2** (verb 23): `worker.prune` currently mutates silently; the
-  flip adds events, so observable behaviour changes — its golden
-  update is reviewed, not mechanical.
+- **H2** (verb 23) — **resolved 2026-08-10, differently than planned.**
+  The hazard was "the flip adds events, so observable behaviour
+  changes". There is no flip and no events: the verb is deleted and its
+  three goldens with it. `status_human.golden` changed too — `fq status`
+  no longer offers prune as a remediation, because there is nothing for
+  the operator to do.
+
+  Retiring it surfaced a **latent bug** worth recording, since a timer
+  would have made it routine. `prune_stale_workers` deleted on worker
+  status alone, with no check on `coordination_invocation_owner`, whose
+  `worker_id` is a plain column and not a foreign key — so a delete
+  stranded the ownership row silently rather than failing. It is
+  reachable, not theoretical: **nothing consumes `worker.orphaned`.**
+  It is published for observability and never handled, so the only
+  things that clear an `in_flight` owner row are the worker's own
+  `invocation.archived` (which a dead worker never sends) and the
+  operator recovery path. A worker can therefore sit stale owning live
+  work indefinitely, well past any retention window. The sweep now
+  refuses to collect a worker that still owns `in_flight` or
+  `ambiguous` invocations, and logs a warning when it declines —
+  because that state means a stuck invocation nobody has recovered.
 - **H3** (verb 4): `deploy.sh` treats `fq down` exit 0 as confirmed
   shutdown; the flip must keep that contract.
 - **H4** (verb 14): `fq status` does JetStream admin introspection a

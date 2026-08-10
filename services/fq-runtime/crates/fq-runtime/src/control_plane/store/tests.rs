@@ -251,20 +251,27 @@ async fn mark_worker_stale_consumes_transition_exactly_once() {
     assert!(!store.mark_worker_stale("w-down").await.unwrap());
 }
 
+/// `delete_worker` is the bare primitive the retention sweep drives: it
+/// removes exactly the named row, reports whether one was there, and is a
+/// no-op the second time. It carries no policy of its own — the sweep decides
+/// *which* ids to hand it, and that decision is tested in
+/// `control_plane::retention`.
 #[tokio::test]
-async fn prune_stale_workers_removes_only_stale_rows_idempotently() {
+async fn delete_worker_removes_exactly_one_row_idempotently() {
     let (store, _dir) = open_fresh().await;
     store.register_worker("alive", "h", 1).await.unwrap();
     store.register_worker("stale", "h", 1).await.unwrap();
-    store.register_worker("shutdown", "h", 1).await.unwrap();
     store.mark_worker_stale("stale").await.unwrap();
-    store.mark_worker_shutdown("shutdown").await.unwrap();
 
-    assert_eq!(store.prune_stale_workers().await.unwrap(), vec!["stale"]);
-    assert!(store.get_worker("alive").await.unwrap().is_some());
-    assert!(store.get_worker("shutdown").await.unwrap().is_some());
+    assert!(store.delete_worker("stale").await.unwrap());
     assert!(store.get_worker("stale").await.unwrap().is_none());
-    assert!(store.prune_stale_workers().await.unwrap().is_empty());
+    assert!(
+        store.get_worker("alive").await.unwrap().is_some(),
+        "delete_worker must not touch any row but the one named"
+    );
+    // Second delete finds nothing, and says so rather than erroring.
+    assert!(!store.delete_worker("stale").await.unwrap());
+    assert!(!store.delete_worker("never-existed").await.unwrap());
 }
 
 #[tokio::test]

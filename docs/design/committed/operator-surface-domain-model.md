@@ -91,7 +91,7 @@ The initial catalogue:
 | DeadLetter | atom | born of trigger exhaustion |
 | Trigger | atom | minted by `trigger.publish` (a domain verb) and by **co-located** first-party adapters via the wire-contract SPI — ingress, not control (see the control-surface principle) |
 | Invocation | view | fold: phase, totals, archive status |
-| Worker | view | fold: registration + heartbeats + ownership |
+| Worker | view | presents as a fold — registration + heartbeats + ownership — but `coordination_worker` is **primary state, not derived**: `register_worker` writes the row directly and the coordination sweep flips `status` on heartbeat timeout, so nothing replays it back. Hence retention rather than rebuild: `worker_id` is the daemon's `runtime_id`, a fresh UUID per run, so the table gains a row per restart and the daemon collects stale ones on a schedule (`state.stale_worker_retention_days`) |
 | Agent | view | the daemon's registry snapshot (reload swaps it); its index rows are agent definitions and nothing else — a file that failed to parse never became an agent, so it belongs to the machinery |
 | Control | synthetic | the daemon machinery itself — a permission scope with **no generic reads**, carrying the lifecycle verbs (down, reload; room for future ones such as peer join) and scoping the machinery reports (`control.status`, which answers with machinery state **including the registry's own, load errors and all**; `control.doctor`) |
 | Operation | view | the surface describing itself: the catalogue of promises |
@@ -244,7 +244,6 @@ idempotency, caveats), never hidden behind a generic verb:
 | invocation.resume | Write invocation | the counterpart to drop — reconciles unknown execution instead of abandoning it: durably completes every stuck tool dispatch with an honest interrupted result, then re-drives the invocation through ordinary SafeReplay recovery. Refused on anything not **Ambiguous**, and each refusal is distinct because the operator must be able to tell them apart: terminal (including operator-dropped), live on this daemon, stuck in an *LLM* dispatch (injection reconciles tool calls only), or already resumed |
 | trigger.publish | Write trigger | dispatch work: at-least-once with a bounded budget; the receipt references the appended trigger atom |
 | dead_letter.requeue | Write trigger | selects the newest dead letter; **not idempotent**; fresh delivery budget |
-| worker.prune | Delete worker | evicts stale registrations; co-emits its events (no silent mutation) |
 | control.down | Write control (manual) | drain-to-step-boundary then exit; confirmation is the shutdown event |
 | control.reload | Write control (manual) | registry swap affects next trigger only |
 
@@ -582,7 +581,7 @@ remains declared is declared on purpose.
 | `agent.list` / `.show` | List / Get(Agent) |
 | `registry.describe` | List(Operation) |
 | `traversal.status` / `.tail` — **planned** | Get(Traversal) / Stream(TraversalEvent) |
-| `trigger.publish` · `invocation.drop` · `invocation.resume` · `dead_letter.requeue` · `worker.prune` · `control.down` · `control.reload` | domain verbs |
+| `trigger.publish` · `invocation.drop` · `invocation.resume` · `dead_letter.requeue` · `control.down` · `control.reload` | domain verbs |
 | `traversal.run` — **planned** | a domain verb, when there is a graph executor to run |
 | `cost.summary` · `cost.by_agent` (scope `Cost`) · `control.doctor` · `control.status` (scope `Control`) | reports |
 | `runtime.health` · `runtime.status` · `runtime.version` | `control.status` — one machinery report |

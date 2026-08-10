@@ -469,26 +469,25 @@ impl ControlPlaneStore {
         rows.into_iter().map(row_to_worker).collect()
     }
 
-    /// Remove rows already classified as stale. Returns their ids so callers
-    /// can report exactly what was removed. Alive and shutdown workers are
-    /// deliberately untouched; repeating the operation is a no-op.
-    pub async fn prune_stale_workers(&self) -> Result<Vec<String>, ControlPlaneStoreError> {
-        let ids: Vec<String> = sqlx::query(
-            "SELECT worker_id FROM coordination_worker WHERE status = ? ORDER BY worker_id",
-        )
-        .bind(WorkerStatus::Stale.as_str())
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(|row| row.get("worker_id"))
-        .collect();
-        if !ids.is_empty() {
-            sqlx::query("DELETE FROM coordination_worker WHERE status = ?")
-                .bind(WorkerStatus::Stale.as_str())
+    /// Remove one worker registration row. Returns whether a row existed.
+    ///
+    /// Deliberately unconditional, and deliberately singular: this replaced a
+    /// `prune_stale_workers` that deleted on `status = 'stale'` alone. That
+    /// predicate is wrong for a sweep — `stale` is a ~30s heartbeat lapse, and
+    /// deleting on it would race the very diagnosis it exists for — so the
+    /// policy (age past the retention window, and no live invocation still
+    /// pointing at this `worker_id`) lives in
+    /// [`crate::control_plane::retention`], where it is a pure function with
+    /// no pool to stand up. This stays the bare primitive it decides to call.
+    pub async fn delete_worker(&self, worker_id: &str) -> Result<bool, ControlPlaneStoreError> {
+        Ok(
+            sqlx::query("DELETE FROM coordination_worker WHERE worker_id = ?")
+                .bind(worker_id)
                 .execute(&self.pool)
-                .await?;
-        }
-        Ok(ids)
+                .await?
+                .rows_affected()
+                > 0,
+        )
     }
 
     /// Remove an invocation's coordination owner row. Returns whether a

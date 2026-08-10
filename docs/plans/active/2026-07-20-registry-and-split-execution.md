@@ -39,10 +39,12 @@ the substrate the ADRs bet on:
   of Phase 0. `fq-cli` still links `fq-runtime`, `async-nats`, and
   (transitively) `sqlx`; `events tail` / `transcript --follow` are still raw
   NATS subscriptions.
-- **The three boundary-bypassing paths** (all verified live): `fq trigger`
-  defaults to in-process execution of the whole runtime; `fq workers prune`
-  deletes control-plane rows CLI-side with no event; `fq agent list` reads
-  the local filesystem, not the daemon's registry.
+- **The three boundary-bypassing paths** (all verified live *at the time
+  of writing*): `fq trigger` defaults to in-process execution of the
+  whole runtime; `fq workers prune` deletes control-plane rows CLI-side
+  with no event; `fq agent list` reads the local filesystem, not the
+  daemon's registry. (`fq workers prune` no longer exists — deleted
+  2026-08-10, not transplanted; see Phase 3 below.)
 - **Auth reality.** The only in-process auth primitive is fq-store's biscuit
   tokens + `Verb { Read, Write, Delete, List, Grant }` × scope grant model —
   shipped but wired to *no* transport. The dashboard's "auth front" is a
@@ -90,7 +92,8 @@ the substrate the ADRs bet on:
 Extend the golden harness to the write/control verbs it does not cover:
 `reload`, `down [--now]`, `trigger --via-nats`, `invocation drop`,
 `dead-letters list/requeue`, `workers prune [--dry-run]` — human and
-`--json` forms. `daemon_shutdown.rs` (spawns `fq run` + private broker via
+`--json` forms. (Phase 0 shipped all of these; the `workers prune`
+goldens were deleted with the verb on 2026-08-10.) `daemon_shutdown.rs` (spawns `fq run` + private broker via
 `fq-test-support`) is the template for the daemon-backed ones. Do **not**
 snapshot in-process `fq trigger` output as contract — that mode is scheduled
 to retire (D-1 below); snapshot the `--via-nats` form. Determinism (fixed
@@ -208,10 +211,13 @@ and independent. Order:
    (non-idempotency in its description), `control.reload`/`control.down`
    (become in-process handlers; the NATS control-subject hop retires
    from the operator path — `daemon_shutdown.rs` re-targets the RPC),
-   and the three bypass-path resolutions: `worker.prune` becomes an
-   evented command (co-emitted events, audit for free), `agent.list`
-   answers from the daemon's `SharedRegistry`, in-process trigger
-   retires (D-1).
+   and the three bypass-path resolutions: `agent.list` answers from the
+   daemon's `SharedRegistry`, in-process trigger retires (D-1), and
+   `worker.prune` — which this plan expected to become an evented
+   command — is **retired outright** instead (2026-08-10). Reclaiming
+   stale worker rows became a daemon retention sweep, so there is no
+   command to event and no `worker_pruned` event type; see
+   [ADR-0006 Appendix E](../../adrs/accepted/0006-registry-first-api.md#appendix-e--amendment-workerprune-is-retired-not-evented-2026-08-10).
 3. **Reports:** `cost.summary`/`cost.by_agent` (scope `Cost`) and
    `control.doctor`.
 4. **Deletions:** dashboard re-points to the generated client (its in-crate
