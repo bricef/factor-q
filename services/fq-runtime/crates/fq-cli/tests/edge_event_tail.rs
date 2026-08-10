@@ -95,6 +95,7 @@ fn triggered(agent: &str, invocation: &str, n: u32, at_ms: i64) -> Event {
             AgentId::new(agent).unwrap(),
             Uuid::parse_str(invocation).unwrap(),
             EventPayload::Triggered(TriggeredPayload {
+                trigger_id: None,
                 trigger_source: TriggerSource::Manual,
                 trigger_subject: None,
                 trigger_payload: serde_json::Value::String("tail fixture".into()),

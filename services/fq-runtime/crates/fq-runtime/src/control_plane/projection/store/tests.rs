@@ -284,6 +284,7 @@ fn sample_triggered(agent: &str, inv: Uuid) -> Event {
         aid(agent),
         inv,
         EventPayload::Triggered(TriggeredPayload {
+            trigger_id: None,
             trigger_source: TriggerSource::Manual,
             trigger_subject: None,
             trigger_payload: json!({}),

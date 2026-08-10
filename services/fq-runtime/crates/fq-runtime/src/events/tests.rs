@@ -34,6 +34,7 @@ fn round_trip_triggered_event() {
         AgentId::new("researcher").unwrap(),
         invocation_id,
         EventPayload::Triggered(TriggeredPayload {
+            trigger_id: None,
             trigger_source: TriggerSource::Manual,
             trigger_subject: None,
             trigger_payload: json!({"topic": "rust async"}),
@@ -75,6 +76,63 @@ fn round_trip_triggered_event() {
             assert_eq!(p.config_snapshot.name, "researcher");
         }
         _ => panic!("wrong payload type"),
+    }
+}
+
+/// A `triggered` event written before triggers had an identity — no
+/// `trigger_id` key at all — still deserialises, and reads as "no
+/// identity recorded" rather than failing.
+///
+/// This is the replay / older-peer case, and the reason the field is
+/// optional: the log is append-only and full of events that predate it,
+/// so a required field would break every reader of the existing log at
+/// once (the required `EventView::seq` that broke the dashboard is the
+/// same mistake, already paid for once).
+#[test]
+fn a_triggered_event_written_before_the_identity_still_deserialises() {
+    let json = json!({
+        "envelope": {
+            "schema_version": SCHEMA_VERSION,
+            "event_id": "01890000-0000-7000-8000-000000000001",
+            "parent_event_id": null,
+            "trace_id": "01890000-0000-7000-8000-000000000002",
+            "agent_id": "researcher",
+            "invocation_id": "01890000-0000-7000-8000-000000000002",
+            "schema_id": "factor-q/triggered@1",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "cost": null
+        },
+        "payload": {
+            "event_type": "triggered",
+            "payload": {
+                "trigger_source": "subject",
+                "trigger_subject": "fq.trigger.researcher",
+                "trigger_payload": {"topic": "rust async"},
+                "config_snapshot": {
+                    "name": "researcher",
+                    "model": "claude-haiku",
+                    "system_prompt": "You are a research agent.",
+                    "tools": [],
+                    "sandbox": {
+                        "fs_read": [], "fs_write": [], "network": [], "env": [], "exec_cwd": []
+                    },
+                    "budget": null
+                }
+            }
+        }
+    })
+    .to_string();
+
+    let event: Event = serde_json::from_str(&json).expect("an event without trigger_id parses");
+    match event.payload {
+        EventPayload::Triggered(p) => {
+            assert!(
+                p.trigger_id.is_none(),
+                "an event that never carried an identity has none to report"
+            );
+            assert_eq!(p.trigger_subject.as_deref(), Some("fq.trigger.researcher"));
+        }
+        other => panic!("expected Triggered, got {other:?}"),
     }
 }
 
@@ -370,6 +428,7 @@ fn annotations_skip_serialise_when_empty() {
         AgentId::new("test-agent").unwrap(),
         invocation_id,
         EventPayload::Triggered(TriggeredPayload {
+            trigger_id: None,
             trigger_source: TriggerSource::Manual,
             trigger_subject: None,
             trigger_payload: json!({}),
@@ -734,6 +793,7 @@ fn event_annotate_inserts_key() {
         AgentId::new("agent").unwrap(),
         invocation_id,
         EventPayload::Triggered(TriggeredPayload {
+            trigger_id: None,
             trigger_source: TriggerSource::Manual,
             trigger_subject: None,
             trigger_payload: json!({}),
@@ -904,6 +964,7 @@ fn schema_id_for_every_payload_variant() {
     let inv = Uuid::now_v7();
     let cases: Vec<EventPayload> = vec![
         EventPayload::Triggered(TriggeredPayload {
+            trigger_id: None,
             trigger_source: TriggerSource::Manual,
             trigger_subject: None,
             trigger_payload: json!({}),

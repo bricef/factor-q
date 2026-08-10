@@ -41,10 +41,11 @@ use std::time::{Duration, Instant};
 use fq_runtime::AgentId;
 use fq_runtime::bus::EventBus;
 use fq_runtime::control_plane::store::ControlPlaneStore;
-use fq_runtime::events::{
+use fq_runtime::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-    DEAD_LETTER_SUBJECT_KEY, Event, EventPayload, FailureKind, FailurePhase, InvocationTotals,
+    DEAD_LETTER_SUBJECT_KEY,
 };
+use fq_runtime::events::{Event, EventPayload, FailureKind, FailurePhase, InvocationTotals};
 use serde_json::json;
 use uuid::Uuid;
 

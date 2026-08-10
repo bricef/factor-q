@@ -19,10 +19,33 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::events::{
-    DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-    DEAD_LETTER_SUBJECT_KEY, Event, EventPayload, FailureKind,
-};
+use crate::events::{Event, EventPayload, FailureKind};
+
+/// Annotation keys shared by the two dead-letter emitters (#49/#169):
+/// the dispatcher's inline path and the advisory watch. `trigger_*`
+/// carries what a requeue needs; `trigger_stream_seq` is the dedup /
+/// reconciliation key; `dead_letter_source` says which path emitted
+/// (`"inline"` | `"advisory"`).
+///
+/// They live here, with the atom that reads them, rather than in
+/// `events.rs`: this is the dead letter's own vocabulary, not the event
+/// envelope's.
+pub const DEAD_LETTER_SUBJECT_KEY: &str = "trigger_subject";
+pub const DEAD_LETTER_PAYLOAD_KEY: &str = "trigger_payload";
+pub const DEAD_LETTER_STREAM_SEQ_KEY: &str = "trigger_stream_seq";
+pub const DEAD_LETTER_SOURCE_KEY: &str = "dead_letter_source";
+
+/// The identity of the trigger that dead-lettered
+/// ([`crate::trigger`]) — the name of the thing, alongside
+/// `trigger_stream_seq`'s position of it.
+///
+/// Best-effort like its siblings, and absent for the same kind of
+/// reason: the advisory path records it only when the original trigger
+/// is still on the stream *and* carried the header, because the one
+/// thing worse than an unnamed dead letter is one named with an id that
+/// exists nowhere else. A requeue that wants to be idempotent keys on
+/// this when it is there.
+pub const DEAD_LETTER_TRIGGER_ID_KEY: &str = "trigger_id";
 
 /// One dead-lettered trigger, as its terminal event records it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -242,6 +242,7 @@ mod tests {
                 AgentId::new(agent).expect("test agent id must be valid"),
                 Uuid::now_v7(),
                 EventPayload::Triggered(TriggeredPayload {
+                    trigger_id: None,
                     trigger_source: TriggerSource::Manual,
                     trigger_subject: None,
                     trigger_payload: serde_json::json!({}),

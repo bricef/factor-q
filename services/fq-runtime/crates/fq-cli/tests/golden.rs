@@ -98,6 +98,7 @@ fn snapshot_for(agent: &str) -> fq_runtime::events::ConfigSnapshot {
 
 fn triggered(agent: &str, invocation: &str, seq: u32, at_ms: i64) -> Event {
     let payload = EventPayload::Triggered(TriggeredPayload {
+        trigger_id: None,
         trigger_source: TriggerSource::Manual,
         trigger_subject: None,
         trigger_payload: serde_json::Value::String("golden fixture trigger".into()),
@@ -2108,7 +2109,7 @@ fn dead_letter_event(
     seq: u32,
     at_ms: i64,
 ) -> Event {
-    use fq_runtime::events::{
+    use fq_runtime::dead_letter::{
         DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
         DEAD_LETTER_SUBJECT_KEY,
     };

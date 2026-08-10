@@ -264,6 +264,7 @@ mod tests {
             aid("test-agent"),
             invocation_id,
             EventPayload::Triggered(TriggeredPayload {
+                trigger_id: None,
                 trigger_source: TriggerSource::Manual,
                 trigger_subject: None,
                 trigger_payload: json!({}),

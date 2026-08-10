@@ -35,11 +35,44 @@ JetStream stream:
 | **Stream** | `fq-triggers` — subjects `fq.trigger.>`, file storage, `Limits` retention, max age **24h** |
 | **Subject** | `fq.trigger.<agent_id>` — one subject per agent |
 | **Body** | a single **JSON value** — the trigger *payload* (see below) |
+| **Headers** | `Fq-Trigger-Id` — optional, the trigger's identity (see below) |
 | **Publish** | JetStream publish, **await the ack** — the ack confirms the trigger is durably persisted |
 
 `<agent_id>` must be a valid agent id (the same id the agent's definition
 declares). Producers should validate it locally before publishing; a trigger
 for an unknown agent is durably stored but never dispatched.
+
+### Trigger identity (`Fq-Trigger-Id`)
+
+Every trigger the runtime acts on has an identity: a **UUIDv7**, in
+canonical hyphenated text. It travels as a NATS **header**, never in the
+body — the body is contractually the payload and nothing else, so there
+is nowhere in it a runtime-owned field could go without breaking every
+producer that writes the payload directly.
+
+The identity exists from the moment the system takes responsibility for
+the trigger:
+
+| Case | Who names it |
+|---|---|
+| `trigger.publish` (the daemon's own command) | The daemon mints the id as it publishes, and returns it to the caller. |
+| An inbound trigger carrying `Fq-Trigger-Id` | **Honoured verbatim** — never re-minted. |
+| An inbound trigger with no header | The dispatcher assigns one when it first handles the message. |
+
+For a producer this header is **optional**, and omitting it costs
+nothing: the trigger is dispatched exactly as before. Setting it buys two
+things — the producer can name the trigger it published in its own
+records, and the identity is *stable across redeliveries* (an assigned id
+is chosen per handling, so a redelivered header-less trigger is named
+afresh each time). A producer that sets it should use a UUIDv7 and must
+not reuse one across logically distinct triggers. A value that is not a
+readable UUID is treated as absent rather than rejected — a typo must not
+silence an agent.
+
+Downstream, the identity appears on the invocation's `triggered` event as
+`trigger_id` (see [event schema](event-schema.md)), which is what links
+an invocation to the trigger that caused it, and on the dead-letter
+event's `trigger_id` annotation when a trigger exhausts its deliveries.
 
 ### The payload
 
@@ -99,6 +132,13 @@ body    = "\"Implement the fix described in GitHub issue #6 (bricef/factor-q). T
 js.Publish(subject, body)   // await ack
 ```
 
+Optionally, name the trigger so you can refer to it later:
+
+```
+headers = { "Fq-Trigger-Id": uuidv7() }
+js.PublishMsg(subject, body, headers)   // await ack
+```
+
 That is the whole contract. A producer needs nothing from `fq-runtime` — only
 a NATS client and this document.
 
@@ -109,3 +149,9 @@ JetStream transport, and the opaque-JSON-payload rule are stable; changes are
 versioned and announced. The task-oriented convention is recommended semantics
 for adapters, pending typed trigger signatures; individual agents still own their
 payload meaning.
+
+`Fq-Trigger-Id` was added on 2026-08-10. It is an **additive** change: it
+is optional on the producing side and the body is untouched, so every
+producer written against the earlier contract keeps working unchanged and
+un-recompiled. Header names are part of this contract from here on — a
+future header follows the same rule, and the payload stays opaque.

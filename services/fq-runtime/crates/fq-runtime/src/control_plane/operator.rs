@@ -280,11 +280,14 @@ pub async fn requeue_dead_letter(
         dead_letter.trigger_payload.clone()
     };
 
-    let new_trigger_seq = bus.publish_trigger(agent_id, &payload).await?;
+    // The requeue publishes a *fresh* trigger, so it gets a fresh
+    // identity; the dead letter's own `trigger_id` annotation is the key
+    // an idempotent requeue would test before getting here.
+    let published = bus.publish_trigger(agent_id, &payload).await?;
     Ok(RequeueResult {
         agent_id: agent_id.to_string(),
         trigger_payload: payload,
-        new_trigger_seq,
+        new_trigger_seq: published.stream_seq,
         source_event_id: dead_letter.event_id.clone(),
     })
 }
@@ -292,10 +295,11 @@ pub async fn requeue_dead_letter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{
+    use crate::dead_letter::{
         DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-        DEAD_LETTER_SUBJECT_KEY, FailureKind,
+        DEAD_LETTER_SUBJECT_KEY,
     };
+    use crate::events::FailureKind;
     use serde_json::json;
 
     /// A dead-letter event exactly as both emitters shape it (#165's

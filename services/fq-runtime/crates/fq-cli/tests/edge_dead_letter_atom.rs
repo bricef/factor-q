@@ -21,10 +21,12 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use fq_ops::{Domain, OpId};
-use fq_runtime::events::{
+use fq_runtime::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-    DEAD_LETTER_SUBJECT_KEY, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
-    InvocationTotals,
+    DEAD_LETTER_SUBJECT_KEY,
+};
+use fq_runtime::events::{
+    Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals,
 };
 use serde_json::json;
 

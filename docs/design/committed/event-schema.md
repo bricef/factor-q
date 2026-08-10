@@ -163,6 +163,7 @@ Published when an agent invocation begins. Carries a snapshot of the agent's con
 
 ```json
 {
+  "trigger_id": "01890000-0000-7000-8000-000000000001",
   "trigger_source": "manual | subject | schedule",
   "trigger_subject": "tasks.research.topic-x",
   "trigger_payload": { "...arbitrary input data..." },
@@ -182,6 +183,8 @@ Published when an agent invocation begins. Carries a snapshot of the agent's con
 
 **Design notes:**
 - **`config_snapshot` is a full capture.** This is what makes replay meaningful — if the agent definition is later changed, the trace still shows exactly what was running.
+- **`trigger_id` names the trigger this invocation came from.** UUIDv7, minted or honoured per the [trigger wire contract](trigger-wire-contract.md#trigger-identity-fq-trigger-id), where it travels as the `Fq-Trigger-Id` header. Before it existed, an invocation was linked to its trigger only by *content* — matching subject and payload — which cannot distinguish two identical triggers and cannot be keyed on. This is that link, by identity.
+- **`trigger_id` is optional on read, always written.** Every `triggered` event published since 2026-08-10 carries one; events already on the log do not, and the field deserialises as absent for them. It is optional for exactly that reason and no other — a required field would fail replay of the existing log and refuse events from older peers (invariant 11).
 - **`trigger_source` indicates who initiated.** `manual`, `subject`, or `schedule`.
 - **`trigger_payload` is opaque.** Any JSON value, defined by the trigger source.
 
@@ -557,6 +560,16 @@ The following invariants hold across the event stream and are assumed by consume
 8. **`invocation.archived` immediately follows the terminal lifecycle event** (`completed` or `failed`) in the same invocation chain. The worker's retry sweeper may republish `invocation.archived` if the control-plane ack does not arrive; republishes keep the same `invocation_id` and the control-plane's insert is idempotent on it. `invocation.archive_acked` is the control-plane's reply on the worker-scoped subject and closes the hand-off.
 9. **`invocation.operator_recovered` is operator-initiated** and rooted on its own envelope (the operator's `fq` process is not the original worker, so the chain is fresh). Terminal status set by this event is sticky — the coordination consumer's `invocation.archived` handler will not downgrade an already-terminal owner status if a still-alive worker emits `archived` after the operator's drop.
 10. **`worker.orphaned` fires exactly once per alive→stale transition** — the coordination sweep's conditional store update consumes the transition, and a publish failure after that is logged, not retried (at-most-once; the stale row remains visible via `fq workers list --stale-only`).
+11. **A payload field added after events exist is optional on read, and
+    only for that reason.** Deserialisers accept its absence and readers
+    treat absence as "not recorded", never as a default value that could
+    be mistaken for a recorded one — the log is append-only, so a
+    required addition breaks replay of everything already written and
+    refuses events from peers that predate it. (This is a rule the tree
+    has already paid for once: a required `EventView::seq` broke the
+    dashboard.) It is *not* licence to write the field inconsistently:
+    every producer of the new shape writes it. `trigger_id` on
+    `triggered` is the current instance.
 
 ## Storage and Retention
 

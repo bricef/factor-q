@@ -94,6 +94,7 @@ async fn drop_then_gated_get_sees_every_effect() {
         agent,
         invocation_id,
         fq_runtime::events::EventPayload::Triggered(fq_runtime::events::TriggeredPayload {
+            trigger_id: None,
             trigger_source: fq_runtime::events::TriggerSource::Manual,
             trigger_subject: None,
             trigger_payload: json!({}),

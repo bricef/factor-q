@@ -506,6 +506,7 @@ mod tests {
                 self.agent.clone(),
                 inv,
                 EventPayload::Triggered(TriggeredPayload {
+                    trigger_id: None,
                     trigger_source: TriggerSource::Manual,
                     trigger_subject: None,
                     trigger_payload: serde_json::json!({

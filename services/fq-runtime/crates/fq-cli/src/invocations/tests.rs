@@ -139,6 +139,7 @@ async fn drop_invocation_emits_operator_recovered_for_agent() {
         agent_id.clone(),
         invocation_id,
         EP::Triggered(TriggeredPayload {
+            trigger_id: None,
             trigger_source: TriggerSource::Manual,
             trigger_subject: None,
             trigger_payload: serde_json::Value::Null,
