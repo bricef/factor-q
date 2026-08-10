@@ -433,12 +433,18 @@ fn kind(payload: &EventPayload) -> &'static str {
 
 /// The observational projection of a trace (reducer verification
 /// plan, R4): per event, its kind plus the payload with volatile
-/// fields masked — per-call UUIDs, measured durations, and clock
-/// stamps whose values depend on *when* work ran rather than *what*
-/// ran. Everything else (messages, tool parameters and outputs,
+/// fields masked — per-run and per-call UUIDs, measured durations, and
+/// clock stamps whose values depend on *when* work ran rather than
+/// *what* ran. Everything else (messages, tool parameters and outputs,
 /// stop reasons, token usage, totals, the final state blob) is load-
 /// bearing and kept. Two runs are observationally equivalent iff
 /// their projections are equal.
+///
+/// `trigger_id` is masked for the same reason `call_id` is: it names
+/// *this* trigger, and two runs of the same script are two different
+/// triggers. That the id is present and stable *within* a run is a
+/// property of the trigger path, checked there — not something a
+/// cross-run equivalence could ever assert.
 ///
 /// The comparison is **modulo host notices** (#155): once producers
 /// exist, a resumed trace legitimately differs from its uninterrupted
@@ -448,6 +454,7 @@ fn kind(payload: &EventPayload) -> &'static str {
 pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
     const VOLATILE_KEYS: &[&str] = &[
         "call_id",
+        "trigger_id",
         "duration_ms",
         "total_duration_ms",
         "started_at_ms",

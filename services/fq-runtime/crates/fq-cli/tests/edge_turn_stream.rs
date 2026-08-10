@@ -144,6 +144,7 @@ async fn the_turn_atom_lives_end_to_end() {
             agent.clone(),
             invocation,
             fq_runtime::events::EventPayload::Triggered(fq_runtime::events::TriggeredPayload {
+                trigger_id: None,
                 trigger_source: fq_runtime::events::TriggerSource::Manual,
                 trigger_subject: None,
                 trigger_payload: json!({}),

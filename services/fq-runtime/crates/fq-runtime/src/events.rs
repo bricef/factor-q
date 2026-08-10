@@ -678,19 +678,15 @@ pub struct InvocationSummaryPayload {
     pub summary: String,
 }
 
-/// Annotation keys shared by the two dead-letter emitters (#49/#169):
-/// the dispatcher's inline path and the advisory watch. `trigger_*`
-/// carries what a requeue needs; `trigger_stream_seq` is the dedup /
-/// reconciliation key; `dead_letter_source` says which path emitted
-/// (`"inline"` | `"advisory"`).
-pub const DEAD_LETTER_SUBJECT_KEY: &str = "trigger_subject";
-pub const DEAD_LETTER_PAYLOAD_KEY: &str = "trigger_payload";
-pub const DEAD_LETTER_STREAM_SEQ_KEY: &str = "trigger_stream_seq";
-pub const DEAD_LETTER_SOURCE_KEY: &str = "dead_letter_source";
-
 /// Published when an agent invocation begins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggeredPayload {
+    /// Which trigger this invocation answers ([`crate::trigger`]).
+    /// Optional in the *deserialised* form only: events on the log
+    /// predate the identity, and a required field would break replay
+    /// and older peers. Every event written since carries one.
+    #[serde(default)]
+    pub trigger_id: Option<Uuid>,
     pub trigger_source: TriggerSource,
     pub trigger_subject: Option<String>,
     pub trigger_payload: Value,

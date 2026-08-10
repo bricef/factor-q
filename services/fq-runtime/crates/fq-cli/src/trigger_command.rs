@@ -7,28 +7,25 @@
 //! the thin client — for a fact the daemon already owns. Now the daemon
 //! publishes and the client asks it to.
 //!
-//! **The receipt is empty because a trigger has no identity.** The domain
-//! model's verb table says this one "references the appended trigger
-//! atom"; there is no such atom to reference. `Domain::Trigger` carries
-//! verbs and an authority scope, not a catalogue entry, so there is no
-//! `trigger.get` and no key one would take — and the thing that was
-//! appended cannot supply one either. The trigger wire contract
-//! (`docs/design/committed/trigger-wire-contract.md`) makes the message
-//! body *the payload itself*, a single opaque JSON value that external
-//! publishers like the github-watcher adapter write directly, so nothing
-//! in it is an id; `EventBus::publish_trigger` hands back only the
-//! JetStream ack sequence, which is a position in a log rather than a
-//! name for a thing ([`fq_ops::AtomRef`]).
+//! **The receipt is empty because a trigger has no atom yet — not
+//! because it has no identity.** That identity now exists: the daemon
+//! mints a UUIDv7 as it publishes and it rides the `Fq-Trigger-Id`
+//! header beside the body, so `EventBus::publish_trigger` hands back a
+//! [`fq_runtime::PublishedTrigger`] naming what was queued (the body
+//! itself stays exactly what the wire contract says it is — one opaque
+//! JSON value external publishers write directly).
 //!
-//! So the receipt is empty rather than carrying that position. Putting a
-//! sequence in an `AtomRef.key` is exactly the mistake the receipt
-//! refactor removed, and minting a trigger id here would be a
-//! wire-contract change with external consumers — **that decision is
-//! being taken separately and is deliberately not taken here.** What the
-//! command says is what is true: it did something, and there is nothing
-//! to point a caller at yet. The invocation the trigger becomes *is*
-//! nameable, and appears under `invocation.list` once the dispatcher
-//! picks it up.
+//! What is still missing is the *atom*. The domain model's verb table
+//! says this command "references the appended trigger atom"; there is
+//! no such atom to reference. `Domain::Trigger` carries verbs and an
+//! authority scope, not a catalogue entry, so there is no `trigger.get`
+//! — and an `AtomRef.key` must be the key that domain's Get takes.
+//! Naming a trigger in a receipt before anything can resolve that name
+//! would hand a caller a reference it cannot follow, so the receipt
+//! stays empty until Trigger is declared. What the command says is what
+//! is true: it did something, and there is nothing to point a caller at
+//! yet. The invocation the trigger becomes *is* nameable, and appears
+//! under `invocation.list` once the dispatcher picks it up.
 
 use fq_edge::wire::WireError;
 
@@ -78,11 +75,22 @@ pub(crate) fn register_trigger_command(
                         message: format!("invalid agent name `{}`: {e}", input.agent_id),
                     }
                 })?;
-                bus.publish_trigger(agent.as_str(), &input.payload)
+                let published = bus
+                    .publish_trigger(agent.as_str(), &input.payload)
                     .await
                     .map_err(|e| WireError::Internal {
                         message: format!("failed to publish trigger for `{agent}`: {e}"),
                     })?;
+                // The trigger now has a name — `published.id`, minted by
+                // the publish and on the message as a header. It goes in
+                // the receipt's `AtomRef` the moment there is a
+                // `trigger.get` to resolve it against, and not before.
+                tracing::info!(
+                    agent_id = %agent,
+                    trigger_id = %published.id,
+                    stream_seq = published.stream_seq,
+                    "published trigger"
+                );
                 Ok(fq_ops::Receipt::empty())
             }
         })

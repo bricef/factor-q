@@ -54,6 +54,7 @@ use crate::mcp::{
 };
 use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
+use crate::trigger::Trigger;
 use crate::validation::ValidatorChain;
 use crate::worker::store::{
     DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow, WorkerStore,
@@ -582,14 +583,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         trigger_subject: Option<String>,
         trigger_payload: Value,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        // Direct callers (CLI `fq trigger`, tests, sim) ack nothing, so
-        // the durable-start signal has no waiter.
+        // Direct callers (tests, sim) ack nothing, so the durable-start
+        // signal has no waiter — and nothing published this trigger, so
+        // nothing has named it: mint the identity here, which is where
+        // the runtime takes responsibility for it.
         self.run_signalling(
             agent,
             llm,
-            trigger_source,
-            trigger_subject,
-            trigger_payload,
+            Trigger::mint(trigger_source, trigger_subject, trigger_payload),
             None,
             DurableStart::noop(),
         )
@@ -600,24 +601,21 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// invocation's first WAL write lands. The trigger dispatcher uses
     /// this (through the [`Worker`](crate::Worker) seam) to ack a
     /// trigger only after the run is recoverable from the WAL, closing
-    /// the ack->first-WAL-write window (issue #41).
-    #[allow(clippy::too_many_arguments)]
+    /// the ack->first-WAL-write window (issue #41). The trigger arrives
+    /// already named — the dispatcher honoured or assigned its identity
+    /// before handing it over.
     pub async fn run_signalling(
         &self,
         agent: &Agent,
         llm: &dyn LlmClient,
-        trigger_source: TriggerSource,
-        trigger_subject: Option<String>,
-        trigger_payload: Value,
+        trigger: Trigger,
         delivery_attempt: Option<u32>,
         durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
         self.run_loop_for(
             agent,
             llm,
-            trigger_source,
-            trigger_subject,
-            trigger_payload,
+            trigger,
             delivery_attempt,
             &self.context.tools(),
             None,
@@ -645,9 +643,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         self.run_loop_for(
             agent,
             llm,
-            trigger_source,
-            trigger_subject,
-            trigger_payload,
+            Trigger::mint(trigger_source, trigger_subject, trigger_payload),
             None,
             &self.context.tools(),
             sampling,
@@ -665,9 +661,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         &self,
         agent: &Agent,
         llm: &dyn LlmClient,
-        trigger_source: TriggerSource,
-        trigger_subject: Option<String>,
-        trigger_payload: Value,
+        trigger: Trigger,
         delivery_attempt: Option<u32>,
         tools: &ToolRegistry,
         sampling: Option<SamplingChannel>,
@@ -810,14 +804,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             )
             .await;
 
-        let trigger = TriggerPayload {
-            source: match trigger_source {
+        let step_trigger = TriggerPayload {
+            source: match trigger.source {
                 TriggerSource::Manual => TriggerSourceKind::Manual,
                 TriggerSource::Subject => TriggerSourceKind::Subject,
                 TriggerSource::Schedule => TriggerSourceKind::Schedule,
             },
-            subject: trigger_subject.clone(),
-            payload: trigger_payload.clone(),
+            subject: trigger.subject.clone(),
+            payload: trigger.payload.clone(),
         };
 
         // Thread parent_event_id through every publish for this
@@ -838,9 +832,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     agent_id.clone(),
                     invocation_id,
                     EventPayload::Triggered(TriggeredPayload {
-                        trigger_source,
-                        trigger_subject,
-                        trigger_payload,
+                        trigger_id: Some(trigger.id),
+                        trigger_source: trigger.source,
+                        trigger_subject: trigger.subject,
+                        trigger_payload: trigger.payload,
                         config_snapshot: agent.to_snapshot(),
                     }),
                 ),
@@ -886,7 +881,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 invocation_id,
                 &agent_id,
                 &agent_config,
-                &trigger,
+                &step_trigger,
                 &sandbox,
                 tools,
                 workspace.as_deref(),

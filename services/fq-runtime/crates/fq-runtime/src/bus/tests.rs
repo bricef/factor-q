@@ -35,6 +35,7 @@ fn sample_event(agent_id: &str) -> Event {
         aid(agent_id),
         Uuid::now_v7(),
         EventPayload::Triggered(TriggeredPayload {
+            trigger_id: None,
             trigger_source: TriggerSource::Manual,
             trigger_subject: None,
             trigger_payload: json!({"input": "hello"}),

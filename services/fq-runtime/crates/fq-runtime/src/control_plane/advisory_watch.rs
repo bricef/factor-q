@@ -36,11 +36,14 @@ use crate::bus::{
     ADVISORY_STREAM_NAME, BusError, EventBus, STREAM_NAME, TRIGGER_MAX_DELIVER,
     TRIGGER_STREAM_NAME, agent_id_from_trigger_subject,
 };
-use crate::events::{
+use crate::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-    DEAD_LETTER_SUBJECT_KEY, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
-    InvocationTotals, subjects,
+    DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
 };
+use crate::events::{
+    Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals, subjects,
+};
+use crate::trigger::trigger_id_in;
 
 /// Name of the durable JetStream consumer the advisory watch creates.
 pub const CONSUMER_NAME: &str = "fq-advisory-watch";
@@ -177,13 +180,20 @@ impl AdvisoryWatch {
             .await
             .ok();
 
-        let (agent_id, trigger_subject, trigger_payload) = match &trigger {
+        // The identity is read, never assigned. This watch did not
+        // dispatch the trigger, so it has no standing to name it: if
+        // the publisher stamped a header the id is recorded, and if the
+        // trigger arrived unnamed (or has aged out of the stream) the
+        // dead letter says so by carrying no name, rather than
+        // inventing one that matches nothing anywhere else.
+        let (agent_id, trigger_subject, trigger_payload, trigger_id) = match &trigger {
             Some(raw) => (
                 agent_id_from_trigger_subject(&raw.subject).and_then(|id| AgentId::new(id).ok()),
                 raw.subject.to_string(),
                 serde_json::from_slice(&raw.payload).unwrap_or(serde_json::Value::Null),
+                trigger_id_in(Some(&raw.headers)),
             ),
-            None => (None, String::new(), serde_json::Value::Null),
+            None => (None, String::new(), serde_json::Value::Null, None),
         };
 
         // Best-effort dedup vs the inline fast path. Its ACK suppresses
@@ -230,6 +240,13 @@ impl AdvisoryWatch {
             DEAD_LETTER_SOURCE_KEY,
             serde_json::Value::String("advisory".to_string()),
         );
+        let event = match trigger_id {
+            Some(id) => event.annotate(
+                DEAD_LETTER_TRIGGER_ID_KEY,
+                serde_json::Value::String(id.to_string()),
+            ),
+            None => event,
+        };
         self.bus.publish(&event).await?;
         error!(
             agent_id = %event.envelope.agent_id,
@@ -312,7 +329,8 @@ mod tests {
         let consumer_name = format!("advisory-e2e-{suffix}");
         let trigger_subject = crate::bus::trigger_subject(&agent_id_str);
 
-        bus.publish_trigger(&agent_id_str, &json!({"input": "poison"}))
+        let published = bus
+            .publish_trigger(&agent_id_str, &json!({"input": "poison"}))
             .await
             .expect("publish trigger");
 
@@ -393,6 +411,14 @@ mod tests {
             event.annotations.0.get(DEAD_LETTER_SOURCE_KEY),
             Some(&json!("advisory"))
         );
+        // Read off the still-present trigger's header, not invented
+        // here: this watch never dispatched the trigger, so the only
+        // name it can record is the one already on the message.
+        assert_eq!(
+            event.annotations.0.get(DEAD_LETTER_TRIGGER_ID_KEY),
+            Some(&json!(published.id.to_string())),
+            "the dead letter names the trigger the publisher named"
+        );
 
         // Redelivered / overlapping advisory: suppressed by the seq
         // dedup against the event just emitted.
@@ -435,6 +461,12 @@ mod tests {
         assert_eq!(
             event.annotations.0.get(DEAD_LETTER_STREAM_SEQ_KEY),
             Some(&json!(18446744073709551u64))
+        );
+        assert_eq!(
+            event.annotations.0.get(DEAD_LETTER_TRIGGER_ID_KEY),
+            None,
+            "with the trigger gone there is no name to record, and this \
+             watch does not invent one"
         );
     }
 

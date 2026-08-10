@@ -51,10 +51,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
 use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER, agent_id_from_trigger_subject};
-use crate::events::{
-    Event, EventPayload, FailureKind, FailurePhase, InvocationTotals, TriggerSource,
-};
+use crate::events::{Event, EventPayload, FailureKind, FailurePhase, InvocationTotals};
 use crate::llm::LlmClient;
+use crate::trigger::Trigger;
 use crate::worker::{DrainState, DurableStart, ExecutorError, Worker};
 
 /// Name of the durable JetStream consumer the dispatcher creates.
@@ -421,13 +420,24 @@ impl TriggerDispatcher {
             }
         };
 
+        // The trigger's *first handling*: the message becomes a named
+        // Trigger here and nowhere else on this path. A publisher's own
+        // `Fq-Trigger-Id` header is honoured; a header-less external
+        // trigger is assigned one now, because this is the moment the
+        // system takes responsibility for it. Everything downstream —
+        // the `triggered` event, the dead letter — reads the name off
+        // this value rather than deciding again.
+        let trigger = Trigger::delivered(msg, payload);
+        let trigger_id = trigger.id;
+
         // Kept for the dead-letter path: an exhausted trigger's event
         // must carry what an operator needs to requeue or diagnose it.
-        let trigger_payload = payload.clone();
+        let trigger_payload = trigger.payload.clone();
 
         debug!(
             agent_id = %agent_id,
             subject = %msg.subject,
+            trigger_id = %trigger_id,
             "dispatching trigger"
         );
 
@@ -465,9 +475,7 @@ impl TriggerDispatcher {
         let mut invocation = std::pin::pin!(self.worker.run_invocation(
             &loaded.agent,
             self.llm.as_ref(),
-            TriggerSource::Subject,
-            Some(msg.subject.to_string()),
-            payload,
+            trigger,
             Some(delivery_attempt),
             durable_start,
         ));
@@ -510,6 +518,7 @@ impl TriggerDispatcher {
                     self.dead_letter_exhausted(
                         &agent_id,
                         msg.subject.as_str(),
+                        trigger_id,
                         &trigger_payload,
                         msg.info().map(|info| info.stream_sequence).unwrap_or(0),
                         delivery_attempt,
@@ -569,10 +578,12 @@ impl TriggerDispatcher {
     /// trigger at upgrade time) is surfaced by the advisory watch
     /// ([`super::advisory_watch`]) from the durable capture stream.
     /// The shared `trigger_stream_seq` annotation reconciles the two.
+    #[allow(clippy::too_many_arguments)]
     async fn dead_letter_exhausted(
         &self,
         agent_id: &AgentId,
         trigger_subject: &str,
+        trigger_id: uuid::Uuid,
         trigger_payload: &serde_json::Value,
         stream_seq: u64,
         delivery_attempt: u32,
@@ -591,19 +602,26 @@ impl TriggerDispatcher {
             }),
         )
         .annotate(
-            crate::events::DEAD_LETTER_SUBJECT_KEY,
+            crate::dead_letter::DEAD_LETTER_SUBJECT_KEY,
             serde_json::Value::String(trigger_subject.to_string()),
         )
         .annotate(
-            crate::events::DEAD_LETTER_PAYLOAD_KEY,
+            crate::dead_letter::DEAD_LETTER_PAYLOAD_KEY,
             trigger_payload.clone(),
         )
         .annotate(
-            crate::events::DEAD_LETTER_STREAM_SEQ_KEY,
+            crate::dead_letter::DEAD_LETTER_STREAM_SEQ_KEY,
             serde_json::json!(stream_seq),
         )
+        // The name of the trigger that died, next to the position of
+        // it. This path always has one: the dispatcher honoured or
+        // assigned it before the invocation started.
         .annotate(
-            crate::events::DEAD_LETTER_SOURCE_KEY,
+            crate::dead_letter::DEAD_LETTER_TRIGGER_ID_KEY,
+            serde_json::Value::String(trigger_id.to_string()),
+        )
+        .annotate(
+            crate::dead_letter::DEAD_LETTER_SOURCE_KEY,
             serde_json::Value::String("inline".to_string()),
         );
         if let Err(publish_err) = self.bus.publish(&event).await {
@@ -1028,6 +1046,146 @@ You are a test agent."#
         let _ = sample_agent("x");
     }
 
+    /// Dispatch one trigger end to end and hand back the `triggered`
+    /// payload the invocation recorded.
+    ///
+    /// `stamp` decides how the trigger reaches the stream: `Some(id)`
+    /// publishes it named, the way the daemon's `trigger.publish` does;
+    /// `None` publishes the wire contract's bare minimum — a subject and
+    /// a JSON body and nothing else — which is what a header-less
+    /// external publisher sends.
+    async fn triggered_payload_for(stamp: Option<Uuid>) -> crate::events::TriggeredPayload {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("trigger-identity");
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join(format!("{agent_id_str}.md"));
+        std::fs::write(
+            &agent_path,
+            format!(
+                "---\nname: {agent_id_str}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nYou are a test agent."
+            ),
+        )
+        .unwrap();
+        let mut registry = AgentRegistry::new();
+        registry.load_file(&agent_path);
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+
+        let llm = Arc::new({
+            let c = FixtureClient::new();
+            for _ in 0..5 {
+                c.push_response(canned_response());
+            }
+            c
+        });
+        let worker_store = Arc::new(
+            WorkerStore::open(&dir.path().join("worker.db"))
+                .await
+                .unwrap(),
+        );
+        let worker: Arc<dyn Worker> = Arc::new(ReducerRunner::new(
+            Arc::new(ReducerContext::builder().tools(test_tools()).build()),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(bus.clone())
+                    .pricing(test_pricing())
+                    .store(worker_store)
+                    .worker_id(
+                        WorkerId::new(format!("trigger-identity-{}", Uuid::now_v7().simple()))
+                            .expect("worker id"),
+                    )
+                    .build(),
+            ),
+            Harness::new(),
+        ));
+        let dispatcher = TestDispatcher {
+            bus: bus.clone(),
+            registry: shared_registry(registry),
+            worker,
+            llm,
+            consumer_name: unique_consumer_name(),
+            filter_subject: crate::bus::trigger_subject(&agent_id_str),
+            max_concurrent: 1,
+        };
+        let (disp_tx, disp_rx) = oneshot::channel();
+        let disp_handle = tokio::spawn(async move { dispatcher.run(disp_rx).await });
+        // Let the durable consumer register before publishing.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let body = json!({"input": "hi"});
+        match stamp {
+            Some(id) => {
+                bus.publish_trigger_named(&agent_id_str, id, &body)
+                    .await
+                    .expect("publish named trigger");
+            }
+            None => {
+                bus.jetstream()
+                    .publish(
+                        crate::bus::trigger_subject(&agent_id_str),
+                        bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+                    )
+                    .await
+                    .expect("publish")
+                    .await
+                    .expect("ack");
+            }
+        }
+
+        let stream = bus
+            .jetstream()
+            .get_stream(crate::bus::STREAM_NAME)
+            .await
+            .expect("event stream");
+        let subject = crate::events::subjects::agent_triggered(&agent_id_str);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let triggered = loop {
+            if let Ok(raw) = stream.get_last_raw_message_by_subject(&subject).await {
+                let event: crate::events::Event =
+                    serde_json::from_slice(&raw.payload).expect("event parses");
+                match event.payload {
+                    EventPayload::Triggered(p) => break p,
+                    other => panic!("expected Triggered, got {other:?}"),
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "timed out waiting for the triggered event"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let _ = disp_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(2), disp_handle).await;
+        triggered
+    }
+
+    /// An inbound trigger that already carries an identity keeps it end
+    /// to end. Re-minting here would fork the name of a trigger its
+    /// publisher can already refer to.
+    #[tokio::test]
+    async fn a_named_trigger_keeps_its_publisher_s_identity() {
+        let stamped = Uuid::now_v7();
+        let triggered = triggered_payload_for(Some(stamped)).await;
+        assert_eq!(
+            triggered.trigger_id,
+            Some(stamped),
+            "the invocation must name the trigger it came from, not a fresh id"
+        );
+    }
+
+    /// A header-less external trigger — everything the wire contract
+    /// requires and nothing more — is assigned an identity at the
+    /// dispatcher's first handling, and the invocation records *that*
+    /// id.
+    #[tokio::test]
+    async fn a_header_less_trigger_is_assigned_an_identity() {
+        let triggered = triggered_payload_for(None).await;
+        let id = triggered
+            .trigger_id
+            .expect("an unnamed trigger is named on first handling");
+        assert_eq!(id.get_version_num(), 7, "assigned ids are UUIDv7");
+    }
+
     /// Regression (M0 dogfood loop, 2026-07-06): the trigger is acked as
     /// soon as the invocation is *dispatched*, not when it *completes* —
     /// so an invocation longer than the consumer's 30s ack-wait is not
@@ -1054,9 +1212,7 @@ You are a test agent."#
                 &self,
                 _agent: &Agent,
                 _llm: &dyn crate::llm::LlmClient,
-                _source: TriggerSource,
-                _subject: Option<String>,
-                _payload: serde_json::Value,
+                _trigger: Trigger,
                 _delivery_attempt: Option<u32>,
                 mut durable_start: crate::worker::DurableStart,
             ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
@@ -1198,9 +1354,7 @@ You are a test agent."#
                 &self,
                 _agent: &Agent,
                 _llm: &dyn crate::llm::LlmClient,
-                _source: TriggerSource,
-                _subject: Option<String>,
-                _payload: serde_json::Value,
+                _trigger: Trigger,
                 _delivery_attempt: Option<u32>,
                 _durable_start: crate::worker::DurableStart,
             ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
@@ -1320,9 +1474,7 @@ You are a test agent."#
             &self,
             _agent: &Agent,
             _llm: &dyn crate::llm::LlmClient,
-            _source: TriggerSource,
-            _subject: Option<String>,
-            _payload: serde_json::Value,
+            _trigger: Trigger,
             _delivery_attempt: Option<u32>,
             _durable_start: crate::worker::DurableStart,
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
@@ -1467,10 +1619,12 @@ You are a test agent."#
         let agent_id = crate::agent::AgentId::new(&agent_id_str).expect("agent id");
         let trigger_subject = crate::bus::trigger_subject(&agent_id_str);
         let trigger_payload = json!({"input": "hi"});
+        let trigger_id = Uuid::now_v7();
         dispatcher
             .dead_letter_exhausted(
                 &agent_id,
                 &trigger_subject,
+                trigger_id,
                 &trigger_payload,
                 4242,
                 TRIGGER_MAX_DELIVER as u32,
@@ -1519,6 +1673,12 @@ You are a test agent."#
             event.annotations.0.get("trigger_stream_seq"),
             Some(&json!(4242)),
             "the stream sequence is the inline/advisory reconciliation key"
+        );
+        assert_eq!(
+            event.annotations.0.get("trigger_id"),
+            Some(&json!(trigger_id.to_string())),
+            "the dead letter names the trigger that died — the key an \
+             idempotent requeue tests"
         );
         assert_eq!(
             event.annotations.0.get("dead_letter_source"),
@@ -1593,9 +1753,7 @@ You are a test agent."#
                 &self,
                 _agent: &Agent,
                 _llm: &dyn crate::llm::LlmClient,
-                _source: TriggerSource,
-                _subject: Option<String>,
-                _payload: serde_json::Value,
+                _trigger: Trigger,
                 _delivery_attempt: Option<u32>,
                 _durable_start: crate::worker::DurableStart,
             ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
@@ -1693,9 +1851,7 @@ You are a test agent."#
             &self,
             _agent: &Agent,
             _llm: &dyn crate::llm::LlmClient,
-            _source: TriggerSource,
-            _subject: Option<String>,
-            _payload: serde_json::Value,
+            _trigger: Trigger,
             _delivery_attempt: Option<u32>,
             mut durable_start: crate::worker::DurableStart,
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {

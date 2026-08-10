@@ -51,14 +51,13 @@ pub use store::{
 };
 
 use async_trait::async_trait;
-use serde_json::Value;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::bus::BusError;
-use crate::events::TriggerSource;
 use crate::llm::{ChatResponse, LlmClient, LlmError};
+use crate::trigger::Trigger;
 
 /// A one-shot "durably started" signal the control-plane hands a
 /// worker through [`Worker::run_invocation`].
@@ -216,18 +215,16 @@ pub trait Worker: Send + Sync {
     /// is recoverable from the WAL (closing the ack→first-WAL-write
     /// window). Direct callers that ack nothing pass
     /// [`DurableStart::noop`].
-    // The invocation seam has grown a handful of trigger-provenance
-    // params (source, subject, payload, delivery_attempt); bundling
-    // them would obscure the Worker boundary more than the arg count
-    // costs, so the lint is allowed here (issue #87).
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// The trigger arrives as one [`Trigger`] value rather than as
+    /// loose provenance params (issue #87): it carries its own
+    /// identity, and a seam that took the pieces separately would let a
+    /// caller hand a worker work with no name on it.
     async fn run_invocation(
         &self,
         agent: &Agent,
         llm: &dyn LlmClient,
-        trigger_source: TriggerSource,
-        trigger_subject: Option<String>,
-        trigger_payload: Value,
+        trigger: Trigger,
         delivery_attempt: Option<u32>,
         durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError>;
@@ -258,22 +255,12 @@ impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for Redu
         &self,
         agent: &Agent,
         llm: &dyn LlmClient,
-        trigger_source: TriggerSource,
-        trigger_subject: Option<String>,
-        trigger_payload: Value,
+        trigger: Trigger,
         delivery_attempt: Option<u32>,
         durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        self.run_signalling(
-            agent,
-            llm,
-            trigger_source,
-            trigger_subject,
-            trigger_payload,
-            delivery_attempt,
-            durable_start,
-        )
-        .await
+        self.run_signalling(agent, llm, trigger, delivery_attempt, durable_start)
+            .await
     }
 
     async fn request_drain(&self, _req: DrainRequest) {

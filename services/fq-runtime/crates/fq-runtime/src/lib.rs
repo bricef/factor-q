@@ -33,6 +33,7 @@ pub mod pricing;
 pub mod prompt;
 pub mod tools;
 pub mod transcript;
+pub mod trigger;
 pub mod turn;
 pub mod validation;
 pub mod views;
@@ -85,6 +86,7 @@ pub use mcp::{
 };
 pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;
+pub use trigger::{PublishedTrigger, TRIGGER_ID_HEADER, Trigger};
 pub use views::Views;
 pub use worker::{
     ArchiveAckConsumer, ArchiveAckError, ArchiveRetryError, ArchiveRetrySweeper, ExecutorError,
