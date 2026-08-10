@@ -293,8 +293,15 @@ looking.
 7. `dead_letter` atom (`dead_letter.list`) + verb 7 flip.
 
 **4.3 — commands** *(each needs its enum variant; resume's model
-amendment landed 2026-08-05 — see section C)*
-8. `trigger.publish` + verb 6 flip.
+amendment landed 2026-08-05 — see section C)* — items 8, 9, 10 and 14
+**done**; 11 and 13 are their own flips; **12 is blocked, see below**.
+8. `trigger.publish` + verb 6 flip. **Its receipt is empty, and that is
+   the finding**: a trigger has no identity to name. The wire contract
+   makes the message body the payload itself — opaque, written directly
+   by external publishers — and `publish_trigger` returns only the
+   JetStream ack sequence, which is a position, not a name. Giving
+   triggers an identity is a wire-contract change with external
+   consumers and is being decided separately.
 9. `control.down` + verb 4 flip — preserve the liveness gate and the
    deploy script's exit contract (hazard H3).
 10. `control.reload` (+ `Control::Reload` variant) + verb 3 flip —
@@ -302,13 +309,34 @@ amendment landed 2026-08-05 — see section C)*
 11. `dead_letter.requeue` (+ enum variant) + verb 8 flip.
 12. `worker.prune` (+ enum variant) + verb 23 flip — **evented**
     mutation; reviewed golden change, not byte-identical (hazard H2).
+    **Blocked, and the blocker is structural rather than incidental.**
+    The evented design is not optional decoration: a receipt carries no
+    state (D3), so the only way the flipped verb can still name the
+    workers it removed — which its goldens pin — is to co-emit one audit
+    atom per eviction and let the client walk the receipt's `AtomRef`s
+    with a gated `event.get`. That needs an event type
+    (`worker_pruned`), and no existing payload means it: `worker.orphaned`
+    is the sweep's alive→stale transition, already published for every
+    row a prune can find. The variant and its two match arms have to land
+    in `events.rs`, which is pinned at its exact size in
+    `.file-size-baseline` (zero slack), and `fq-lint` answers a growth
+    there with "do not restructure this file as a side effect — say on
+    the PR that the change genuinely needs to land in this file and let a
+    human decide". So it is a human decision, not a workaround: bless a
+    small budget bump for `events.rs`, or split it first. Migrating the
+    verb *without* the events was rejected — it would trade a silent
+    mutation for a lossier one, since the output would drop the worker
+    names it prints today.
 13. `invocation.resume` — the amendment is done; this is now
     `Invocation::Resume` + registration + verb 19 flip, retiring the
     request/reply control subject with it. **Implement the invariant
     deliberately** (section C): fallible steps before the injection,
     receipt after it, terminality read at a watermark.
 14. Retire D-1 (in-process trigger) and the remaining `fq.control.*`
-    bindings; daemon banner updated.
+    bindings; daemon banner updated. **Done** for reload and down — both
+    listeners, both subjects, both bus method pairs and the down-mode
+    body markers are deleted. `fq.control.invocation.resume` is the last
+    one standing and retires with item 13.
 
 **4.4 — reports, synthetic, dashboard**
 15. `cost.summary` report + verb 13 flip.

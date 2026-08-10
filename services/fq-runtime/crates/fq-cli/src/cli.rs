@@ -106,23 +106,23 @@ pub(crate) enum Commands {
     },
     /// Run the runtime in the foreground
     Run,
-    /// Ask a running `fq run` daemon to hot-reload its agent
-    /// definitions from disk, without a restart. Publishes a
-    /// control message on `fq.control.reload`; the daemon re-reads
-    /// the agents directory and atomically swaps the registry the
-    /// dispatcher reads. The reload affects the NEXT trigger only
-    /// — in-flight invocations keep the config they snapshotted at
-    /// trigger time (ADR-0020 refresh-between-invocations).
+    /// Ask a running daemon to hot-reload its agent definitions from
+    /// disk, without a restart. The daemon re-reads ITS agents
+    /// directory and atomically swaps the registry the dispatcher
+    /// reads, then answers — so a reload that could not read the
+    /// directory is an error here, not a silence. The reload affects
+    /// the NEXT trigger only — in-flight invocations keep the config
+    /// they snapshotted at trigger time (ADR-0020
+    /// refresh-between-invocations).
     Reload,
-    /// Cleanly stop a running `fq run` daemon and confirm it exited
-    /// (issue #63) — the operator-facing stop verb, so nobody reaches
-    /// for `pkill -INT`. Publishes a control message on `fq.control.down`;
-    /// by default the daemon drains in-flight work to the next step boundary
-    /// (bounded by `drain_deadline_ms`), then tears down its
-    /// infrastructure, deregisters the worker, and exits. This command
-    /// then waits — bounded — for the daemon's `fq.system.shutdown`
-    /// event and reports the runtime that stopped, or a timeout error.
-    /// Use `--now` (or `--no-drain`) to skip the drain.
+    /// Cleanly stop a running daemon and confirm it exited (issue #63)
+    /// — the operator-facing stop verb, so nobody reaches for
+    /// `pkill -INT`. By default the daemon drains in-flight work to the
+    /// next step boundary (bounded by `drain_deadline_ms`), then tears
+    /// down its infrastructure, deregisters the worker, and exits. This
+    /// command then waits — bounded — for the daemon's edge to stop
+    /// answering, and exits 0 only once it has, or with a timeout
+    /// error. Use `--now` (or `--no-drain`) to skip the drain.
     Down {
         /// Skip the drain: clean infra teardown + worker deregister +
         /// immediate exit, accepting that in-flight invocations become
@@ -131,15 +131,18 @@ pub(crate) enum Commands {
         #[arg(long, visible_alias = "no-drain")]
         now: bool,
     },
-    /// Trigger an agent manually
+    /// Trigger an agent manually: the daemon queues the work on its
+    /// durable trigger stream and its dispatcher runs it.
     Trigger {
         /// Agent name
         agent: String,
         /// Optional payload (JSON or plain string)
         payload: Option<String>,
-        /// Publish the trigger to NATS (`fq.trigger.<agent>`) and let a
-        /// running `fq run` daemon dispatch it, instead of running
-        /// the runner in-process.
+        /// Accepted and ignored. It used to select this mode over
+        /// running the reducer in the CLI's own process; that second
+        /// execution path is retired (decision D-1) and every trigger
+        /// goes to the daemon, so the flag is kept only so existing
+        /// scripts keep working.
         #[arg(long)]
         via_nats: bool,
     },

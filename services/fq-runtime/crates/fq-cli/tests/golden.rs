@@ -730,14 +730,18 @@ fn legacy_single_file_layout_is_a_hint_not_a_read() {
 /// The flipped verbs' unpaired error is operator guidance, not a
 /// stack trace: no stored connection means "run fq connect", stated.
 /// Every newly flipped verb joins this list — `agent list` (verb 9) is
-/// the one whose old self needed no daemon at all.
+/// the one whose old self needed no daemon at all, and cohort 4.3 adds
+/// the three that used to need only a broker.
 #[test]
 fn flipped_verb_without_a_pairing_says_how_to_pair() {
     for verb in [
-        ["invocation", "list"],
-        ["agent", "list"],
-        ["events", "tail"],
-        ["dead-letters", "list"],
+        &["invocation", "list"][..],
+        &["agent", "list"],
+        &["events", "tail"],
+        &["dead-letters", "list"],
+        &["reload"],
+        &["down"],
+        &["trigger", "researcher"],
     ] {
         let xdg = tempfile::tempdir().expect("xdg dir");
         let out = Command::new(env!("CARGO_BIN_EXE_fq"))

@@ -83,7 +83,12 @@ pub(crate) fn init_project(force: bool) -> anyhow::Result<()> {
     println!("     docker compose up -d");
     println!("  2. Export your LLM provider API key, e.g.:");
     println!("     export ANTHROPIC_API_KEY='sk-ant-...'");
-    println!("  3. Trigger the sample agent:");
+    println!("  3. Start the daemon (it prints its edge address and an admin");
+    println!("     token once, on first run):");
+    println!("     fq run");
+    println!("  4. In another shell, pair with it:");
+    println!("     fq connect <edge-address> --token <token>");
+    println!("  5. Trigger the sample agent:");
     println!("     fq trigger sample-agent \"Say hello in one sentence.\"");
     Ok(())
 }

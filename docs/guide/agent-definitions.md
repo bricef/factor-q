@@ -456,8 +456,8 @@ The `trigger` field (optional) declares the NATS subject this
 agent responds to. This is a design-time declaration for graph
 definitions (see
 [ADR-0012](../adrs/accepted/0012-graph-definition-format.md));
-for phase 1, triggers are dispatched via `fq trigger` or
-`fq trigger --via-nats`.
+for phase 1, triggers are dispatched via `fq trigger`, which asks the
+daemon to queue the work.
 
 ```yaml
 trigger: tasks.research.*

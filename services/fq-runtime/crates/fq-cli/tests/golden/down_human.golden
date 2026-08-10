@@ -1,1 +1,1 @@
-✓ Daemon stopped (runtime <UUID>, reason=down, clean=true).
+✓ Daemon stopped (mode=drain).

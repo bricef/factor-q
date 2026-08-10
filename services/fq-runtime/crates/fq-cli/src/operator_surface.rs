@@ -107,6 +107,12 @@ pub struct OperatorDeps {
     /// in memory, and the whole point of verb 9's flip is that the
     /// answer comes from what the daemon would actually run.
     pub agents: fq_runtime::SharedRegistry,
+    /// What the machinery verbs command (plan Phase 4, verbs 3 and 4):
+    /// the registry `control.reload` swaps, and the stop switch
+    /// `control.down` throws. Grouped rather than flattened because
+    /// these are the only fields a *command over the daemon itself*
+    /// needs — everything above serves a resource.
+    pub machinery: crate::control_commands::MachineryDeps,
 }
 
 /// Get identity for a Turn: its event-log sequence.
@@ -197,7 +203,8 @@ fn arm_drop_halt(
 /// views served from [`Views`], the Agent view served from the live
 /// registry, reads gated at the read horizon (every consumer feeding a
 /// view's fold), the Turn, Event and DeadLetter atoms served from the
-/// log, and `invocation.drop` returning a receipt. Public for the
+/// log, and the commands — `invocation.drop`, `trigger.publish`, and
+/// the two machinery verbs — each returning a receipt. Public for the
 /// operator-surface snapshot test.
 pub fn operator_registry(
     views: Arc<Views>,
@@ -212,10 +219,12 @@ pub fn operator_registry(
     let event_bus = deps.bus.clone();
     let event_views = views.clone();
     let dead_letter_bus = deps.bus.clone();
+    let trigger_bus = deps.bus.clone();
     let turn_bus = deps.bus.clone();
     let turn_views = views.clone();
     let worker_views = views.clone();
     let agent_registry = deps.agents.clone();
+    let machinery = deps.machinery;
 
     let mut registry = fq_edge::EdgeRegistry::new().with_read_gate(Arc::new(move |min_seq| {
         let horizon = horizon.clone();
@@ -294,6 +303,8 @@ pub fn operator_registry(
     register_agent_view(&mut registry, agent_registry)?;
     crate::event_atom::register_event_atom(&mut registry, event_bus, event_views)?;
     crate::dead_letter_atom::register_dead_letter_atom(&mut registry, dead_letter_bus)?;
+    crate::trigger_command::register_trigger_command(&mut registry, trigger_bus)?;
+    crate::control_commands::register_control_commands(&mut registry, machinery)?;
 
     let decl = fq_ops::Command::new::<DropCommandInput>(
         fq_ops::Invocation::Drop,

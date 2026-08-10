@@ -1,188 +1,138 @@
 //! The client half of the daemon control plane: `fq down` and `fq reload`.
 //!
-//! Split out of `lib.rs` (#189). Each publishes one control message and then
-//! reports what it can honestly observe — `fq down` waits, bounded, for the
-//! daemon's own `fq.system.shutdown` event rather than checking a process.
-//! The daemon half is `listeners.rs`.
+//! Both are declared commands on the authenticated edge now (plan Phase 4,
+//! verbs 3 and 4). They used to publish on `fq.control.*` and hope; the
+//! subjects are gone, and with them two client-side bus subscriptions that
+//! core NATS could drop silently. The daemon half is `control_commands.rs`.
+//!
+//! **What `fq down` can honestly confirm changed with the transport, and
+//! is worth stating.** It used to publish, then wait for the daemon's own
+//! `fq.system.shutdown` event, and report the runtime id and clean flag
+//! that event carried. There is no subscription left to hear that on — and
+//! there could not be one, since the whole point is that the daemon has
+//! stopped. What replaces it is stronger as a liveness proof and weaker as
+//! a description: the command is answered by the daemon, and then its edge
+//! stops answering, which is the process itself going away rather than a
+//! message it sent on the way out. Exit 0 still means "confirmed stopped"
+//! — `ops/dogfood/deploy.sh` depends on exactly that.
 
-use anyhow::Context;
-use fq_runtime::EventBus;
-use fq_runtime::events::EventPayload;
-use futures::StreamExt;
+use std::time::{Duration, Instant};
 
 use crate::cli::GlobalArgs;
+use crate::edge_call::{edge_client_for, edge_invoke};
+
+/// How often the stop wait re-dials the daemon's edge.
+const DOWN_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Headroom past the drain deadline for the daemon's own teardown: the
+/// stores close, the worker deregisters, the shutdown event publishes.
+const DOWN_TEARDOWN_HEADROOM: Duration = Duration::from_secs(10);
 
 /// `fq down` (issue #63): cleanly stop a running daemon and confirm it
-/// exited. Subscribes to `fq.system.shutdown` *before* publishing the
-/// control-down message so the daemon's exit event can't be missed in
-/// the gap, publishes the down request (drain mode, or `--now` to skip
-/// the drain), then waits — bounded — for a `SystemShutdown` event and
-/// reports the runtime that stopped.
+/// exited — the operator-facing stop verb, so nobody reaches for
+/// `pkill -INT`.
 ///
-/// Confirmation is scoped to what v1 can honestly observe: the daemon's
-/// own clean-exit event (published after the worker is deregistered), not
-/// an OS-level process check — there is no PID/supervisor registry yet
-/// (the `fq up`/supervisor story is explicitly out of scope for this
-/// ticket). A timeout is a loud, actionable error rather than a false
+/// Three steps, and the ordering is the contract: dial the daemon (an
+/// unreachable one is a fast, loud failure rather than a publish into the
+/// void), command the stop, then wait — bounded — for its edge to stop
+/// answering. A timeout is a loud, actionable error, never a false
 /// "stopped".
 pub(crate) async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Result<()> {
     let config = global.resolve_config()?;
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    // The liveness gate, and it fails closed: with no daemon listening
+    // there is nothing to dial, so `fq down` reports that instead of
+    // waiting out a deadline for a confirmation nobody will send. The
+    // old gate watched for a worker heartbeat over ~20s to tell "no
+    // daemon" from "a daemon that is stopping"; a refused connection
+    // answers the same question at once.
+    let client = edge_client_for(global).await.map_err(|err| {
+        anyhow::anyhow!(
+            "no running `fq run` daemon reachable at {}: {err:#}\n\
+             `fq down` is a no-op — is the daemon running? (`fq status`)",
+            config.edge.bind
+        )
+    })?;
 
-    // Subscribe to the daemon shutdown event BEFORE publishing the down
-    // request, so a daemon that stops fast can't exit in the window
-    // between publish and subscribe and leave us waiting forever.
-    let mut shutdown_stream = bus
-        .subscribe(fq_runtime::events::subjects::SYSTEM_SHUTDOWN.to_string())
-        .await
-        .context("failed to subscribe to system shutdown events")?;
-
-    // Also watch worker heartbeats (`fq.worker.*.heartbeat`): a running
-    // daemon publishes one on start and every ~10s, which lets us tell
-    // "no daemon is listening" (fast-fail) apart from "a daemon is
-    // stopping" (wait out the drain) below.
-    let mut heartbeat_stream = bus
-        .subscribe("fq.worker.*.heartbeat".to_string())
-        .await
-        .context("failed to subscribe to worker heartbeats")?;
-
-    bus.publish_control_down(now)
-        .await
-        .context("failed to publish control down")?;
-
-    // Progress narration goes to stderr: it is printed before we know
-    // whether a daemon is even running, and stdout must stay clean for
-    // the final confirmation / a machine consumer (issue #190).
+    // Progress narration goes to stderr: it is printed before the stop
+    // is known to have taken, and stdout must stay clean for the final
+    // confirmation / a machine consumer (issue #190).
     if now {
+        eprintln!("Requested an immediate stop (--now).");
         eprintln!(
-            "Published stop (--now) on {}.",
-            fq_runtime::bus::CONTROL_DOWN_SUBJECT
-        );
-        eprintln!(
-            "A running `fq run` daemon will tear down cleanly, deregister its worker, \
-             and exit immediately; in-flight invocations are resumed by recovery \
-             on the next start."
+            "The daemon will tear down cleanly, deregister its worker, and exit at once; \
+             in-flight invocations are resumed by recovery on the next start."
         );
     } else {
+        eprintln!("Requested a graceful stop.");
         eprintln!(
-            "Published stop on {}.",
-            fq_runtime::bus::CONTROL_DOWN_SUBJECT
-        );
-        eprintln!(
-            "A running `fq run` daemon will drain in-flight invocations to a step boundary, \
+            "The daemon will drain in-flight invocations to a step boundary, \
              deregister its worker, and exit."
         );
     }
 
-    // Bound the confirmation wait by the drain deadline (plus headroom for
-    // the daemon's own teardown/publish) in drain mode; `--now` should be
-    // near-instant but gets the same generous ceiling so a busy daemon is
-    // not misreported as hung.
-    let wait = std::time::Duration::from_millis(config.drain_deadline_ms)
-        + std::time::Duration::from_secs(10);
-    // Liveness gate: a running daemon emits a worker heartbeat on start
-    // and every ~10s (`worker::heartbeat::DEFAULT_INTERVAL_MS`). If neither
-    // its shutdown nor any heartbeat arrives within ~2 intervals (capped by
-    // the full wait), nothing is listening — fast-fail instead of blocking
-    // out the whole deadline.
-    let liveness_window = std::time::Duration::from_secs(20).min(wait);
+    crate::edge_call::invoke_on(
+        &client,
+        fq_ops::OpId::Verb(fq_ops::VerbId::Control(fq_ops::Control::Down)),
+        serde_json::json!({ "now": now }),
+    )
+    .await?
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // The command is answered; nothing else may travel this connection,
+    // which is about to be torn down under us by the daemon exiting.
+    drop(client);
+
+    // Bound the confirmation wait by the drain deadline plus headroom in
+    // drain mode; `--now` should be near-instant but gets the same
+    // generous ceiling so a busy daemon is not misreported as hung.
+    let wait = Duration::from_millis(config.drain_deadline_ms) + DOWN_TEARDOWN_HEADROOM;
     eprintln!(
-        "Waiting up to {}s for the daemon to confirm it has stopped...",
+        "Waiting up to {}s for the daemon to stop...",
         wait.as_secs()
     );
-
-    enum Confirm {
-        NoDaemon,
-        StreamClosed,
-        TimedOut,
-    }
-
-    let start = tokio::time::Instant::now();
-    let liveness_deadline = start + liveness_window;
-    let full_deadline = start + wait;
-    let mut seen_daemon = false;
-
-    let result = loop {
-        // Hold to the short liveness gate until we see a sign of life;
-        // after that, wait out the full drain-deadline ceiling.
-        let deadline = if seen_daemon {
-            full_deadline
-        } else {
-            liveness_deadline
-        };
-        tokio::select! {
-            biased;
-            _ = tokio::time::sleep_until(deadline) => {
-                break if seen_daemon {
-                    Confirm::TimedOut
-                } else {
-                    Confirm::NoDaemon
-                };
-            }
-            msg = shutdown_stream.next() => match msg {
-                Some(Ok(event)) => {
-                    if let EventPayload::SystemShutdown(p) = &event.payload {
-                        println!(
-                            "✓ Daemon stopped (runtime {}, reason={}, clean={}).",
-                            p.runtime_id, p.reason, p.clean
-                        );
-                        return Ok(());
-                    }
-                }
-                // A single undeserialisable event must not end the wait —
-                // keep listening for the shutdown event.
-                Some(Err(err)) => {
-                    tracing::warn!(error = %err, "skipping undeserialisable event while waiting");
-                }
-                None => break Confirm::StreamClosed,
-            },
-            hb = heartbeat_stream.next() => {
-                // Any heartbeat proves a daemon is up and (having received
-                // the down request) stopping; wait out the full deadline for
-                // its shutdown event. A closed heartbeat stream is benign.
-                if hb.is_some() {
-                    seen_daemon = true;
-                }
-            }
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        // A dial that fails is the daemon gone: its edge listener dies
+        // with the process. Any error will do — a refused connection, a
+        // closed handshake — because none of them is a daemon serving
+        // operators.
+        if edge_client_for(global).await.is_err() {
+            let mode = if now { "now" } else { "drain" };
+            println!("✓ Daemon stopped (mode={mode}).");
+            return Ok(());
         }
-    };
-
-    match result {
-        Confirm::NoDaemon => anyhow::bail!(
-            "no running `fq run` daemon detected — no worker heartbeat on \
-             `fq.worker.*.heartbeat` within {}s, so `fq down` is a no-op. \
-             Is the daemon running? (`fq status`)",
-            liveness_window.as_secs()
-        ),
-        Confirm::StreamClosed => anyhow::bail!(
-            "the shutdown event stream closed before the daemon confirmed it stopped; \
-             check `fq status` / `fq workers list` for the daemon's state"
-        ),
-        Confirm::TimedOut => anyhow::bail!(
-            "timed out after {}s: a daemon was heartbeating but did not confirm it \
-             stopped — check `fq status` and `fq workers list` for a lingering worker.",
-            wait.as_secs()
-        ),
+        tokio::time::sleep(DOWN_POLL_INTERVAL).await;
     }
+    anyhow::bail!(
+        "timed out after {}s: the daemon accepted the stop but its edge is still \
+         answering — check `fq status` and `fq workers list` for a lingering worker.",
+        wait.as_secs()
+    )
 }
 
+/// `fq reload`: ask the daemon to re-read its agent definitions and swap
+/// the registry the dispatcher reads, without a restart.
+///
+/// The directory is the daemon's, not this client's — which is why the
+/// confirmation no longer names one. A path printed here would be the
+/// caller's own configured directory, and whether that is the directory
+/// the daemon reads is precisely the skew `fq agent list` was moved to
+/// remove (verb 9).
 pub(crate) async fn reload_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
-    bus.publish_control_reload()
-        .await
-        .context("failed to publish control reload")?;
+    edge_invoke(
+        global,
+        fq_ops::OpId::Verb(fq_ops::VerbId::Control(fq_ops::Control::Reload)),
+        serde_json::json!({}),
+    )
+    .await?
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Past tense, and it is earned: the command answers after the swap,
+    // so a reload that could not read the directory came back as an
+    // error above rather than as this line.
+    println!("Reloaded the daemon's agent registry.");
     println!(
-        "Published reload signal on {}.",
-        fq_runtime::bus::CONTROL_RELOAD_SUBJECT
+        "The swap affects the NEXT trigger; in-flight invocations keep the config \
+         they snapshotted at trigger time."
     );
-    println!(
-        "A running `fq run` daemon will re-read {} and swap its registry for the next trigger.",
-        config.agents.directory.display()
-    );
+    println!("`fq agent list` shows what the daemon now holds.");
     Ok(())
 }

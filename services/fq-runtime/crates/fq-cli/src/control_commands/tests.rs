@@ -25,7 +25,7 @@ async fn reload_agents_swaps_in_new_definitions() {
 
     // Add a second agent on disk, then reload.
     write_agent(dir.path(), "second");
-    reload_agents(&shared, dir.path(), None).await;
+    reload_agents(&shared, dir.path(), None).await.unwrap();
 
     let after = shared.read().await.clone();
     assert_eq!(after.len(), 2, "reload should pick up the new agent");
@@ -34,7 +34,9 @@ async fn reload_agents_swaps_in_new_definitions() {
 
 /// A reload against a directory that has gone missing keeps the
 /// current registry rather than blanking it — a bad edit can't
-/// knock out a running daemon.
+/// knock out a running daemon — and now *says so*, which is the
+/// whole gain of moving off the fire-and-forget publish: the
+/// operator learns their reload did not happen.
 #[tokio::test]
 async fn reload_agents_keeps_current_registry_on_load_error() {
     let dir = tempdir().unwrap();
@@ -45,7 +47,13 @@ async fn reload_agents_keeps_current_registry_on_load_error() {
 
     // Point the reload at a directory that does not exist.
     let missing = dir.path().join("does-not-exist");
-    reload_agents(&shared, &missing, None).await;
+    let err = reload_agents(&shared, &missing, None)
+        .await
+        .expect_err("a directory that cannot be read is a failed reload");
+    assert!(
+        err.contains("keeping the definitions already loaded"),
+        "the refusal must say the daemon is unchanged; got: {err}"
+    );
 
     let after = shared.read().await.clone();
     assert_eq!(after.len(), 1, "failed reload must keep the old registry");

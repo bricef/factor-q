@@ -88,15 +88,6 @@ async fn publish_and_subscribe_round_trip() {
     assert_eq!(received.envelope.agent_id.as_str(), agent_id);
 }
 
-#[test]
-fn down_mode_now_from_body_maps_markers() {
-    assert!(down_mode_now_from_body(DOWN_MODE_NOW.as_bytes()));
-    assert!(!down_mode_now_from_body(DOWN_MODE_DRAIN.as_bytes()));
-    // Unknown / empty body defaults to the safe drain path.
-    assert!(!down_mode_now_from_body(b""));
-    assert!(!down_mode_now_from_body(b"garbage"));
-}
-
 /// The pre-flight guard (issue #4) rejects a payload larger than
 /// the server's advertised `max_payload` with a clear, attributable
 /// error, and never reaches NATS. Exercised against the pure seam

@@ -1,2 +1,3 @@
-Published reload signal on fq.control.reload.
-A running `fq run` daemon will re-read <AGENTS_DIR> and swap its registry for the next trigger.
+Reloaded the daemon's agent registry.
+The swap affects the NEXT trigger; in-flight invocations keep the config they snapshotted at trigger time.
+`fq agent list` shows what the daemon now holds.

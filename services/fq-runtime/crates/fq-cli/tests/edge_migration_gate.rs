@@ -113,9 +113,46 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// `tests/golden.rs`.
 ///
 /// Verb 7 (`fq dead-letters list`) is the other of the two, and now
-/// reads the DeadLetter atom. Verb 8's `operator::requeue_dead_letter`
-/// is the one dead-letter call point left, and cohort 4.3 takes it.
-const REMAINING: usize = 7;
+/// reads the DeadLetter atom.
+///
+/// It went 7 -> 4 with cohort 4.3's commands, and the arithmetic is
+/// worth reading because two of the three departures are not the
+/// verbs you would guess. Three sites went:
+///
+/// * Verb 5's in-process `fq trigger` — the `AgentRegistry::load_from_directory`
+///   that raised this count from 6 to 7 in the first place. Retiring
+///   that mode (decision D-1) took the whole second execution path
+///   with it: the client's WAL writer, its MCP child processes, its
+///   pricing loader and its provider client.
+/// * **Both** of verb 4's `fq down` subscribes. It decided whether a
+///   daemon had stopped by watching `fq.system.shutdown` on one
+///   subscription and worker heartbeats on another — two core-NATS
+///   streams that drop messages silently and cannot be resumed, held
+///   by a client, to answer a question the daemon can be asked
+///   directly. `control.down` is a command on the edge now and the
+///   confirmation is the daemon's edge going away.
+///
+/// Verb 3 (`fq reload`) and verb 6 (`fq trigger --via-nats`) flipped in
+/// the same cohort and moved this number **not at all**: their legacy
+/// path was a bare `EventBus::connect` plus a publish, which none of
+/// the four patterns match. That is the cohort-4.1 lesson repeating
+/// (check a verb's legacy path is *counted* before trusting a flip to
+/// move the number) and it is deliberately not fixed by widening the
+/// patterns here: a client connecting to the broker is what
+/// `store_open_gate.rs`'s sibling discipline and the Phase-4 acceptance
+/// criterion ("`fq-cli` … publishes nothing to NATS") cover, and both
+/// are checked by reading the diff at the merge gate rather than by
+/// this count.
+///
+/// What is left is three `open_views(` — `fq doctor` (verb 15), `fq
+/// costs` (verb 13), and the helper's own definition, which is why the
+/// terminal state is zero rather than one — plus verb 8's
+/// `operator::requeue_dead_letter`. Cohort 4.3 deliberately left that
+/// last one alone: `dead_letter.requeue` is a command over a domain
+/// whose key is a raw JetStream sequence, and a receipt names atoms by
+/// identity, so migrating it would decide in passing a design question
+/// that is being decided on its own.
+const REMAINING: usize = 4;
 
 /// True when `path` is the test half of a module split — `foo/tests.rs`
 /// beside a `foo.rs` that declares `#[cfg(test)] mod tests;`.

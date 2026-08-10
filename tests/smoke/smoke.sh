@@ -183,15 +183,40 @@ write_agent() {
 # Run fq trigger with the given agents dir and cache dir. Captures
 # combined stdout+stderr and returns it. Fails loudly if the
 # command itself errors.
+#
+# The daemon lifecycle lives here because `fq trigger` is a request
+# now. It used to run the reducer in this process — loading the agent
+# registry off disk, writing the worker WAL, spawning MCP children —
+# and that path retired with D-1. So a trigger needs a daemon that
+# holds the agents it names, and a pairing to reach it.
+#
+# One daemon per call rather than one for the suite: each caller
+# builds its own project with its own agents directory, and the daemon
+# reads that directory at startup. Startup and shutdown chatter goes
+# to stderr so the caller still captures only the trigger's own
+# output.
 fq_trigger() {
     local agents_dir="$1"
     local cache_dir="$2"
     local agent="$3"
     local payload="$4"
-    "${FQ_BIN}" \
+
+    start_fq_run "${agents_dir}" "${cache_dir}" >&2 || return 1
+
+    # `|| status=$?` rather than a bare assignment plus `$?`: this
+    # script runs under `set -e`, where a failing command substitution
+    # exits before the next line can read the status. Putting it in an
+    # `||` list makes the failure ours to handle — and the daemon
+    # still gets stopped below.
+    local out status=0
+    out="$("${FQ_BIN}" \
         --agents-dir "${agents_dir}" \
         --cache-dir "${cache_dir}" \
-        trigger "${agent}" "${payload}" 2>&1
+        trigger "${agent}" "${payload}" 2>&1)" || status=$?
+
+    stop_fq_run >&2
+    printf '%s\n' "${out}"
+    return "${status}"
 }
 
 # --- tests --------------------------------------------------------------

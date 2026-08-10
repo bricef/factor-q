@@ -1,284 +1,64 @@
-//! The `fq trigger` verb, both halves: the in-process run that drives the
-//! reducer against a real LLM client, and the `--via-nats` publish that hands
-//! the work to a running daemon.
+//! The `fq trigger` verb: hand work to the daemon (plan Phase 4, verb 6).
 //!
-//! Split out of `lib.rs` (#189). The in-process path is a one-shot worker —
-//! it opens the WAL and writes it — which is why it shares the daemon's
-//! pricing validation and workspace wiring rather than a simplified copy.
-
-use std::sync::Arc;
+//! **The in-process mode is gone (decision D-1).** `fq trigger` used to
+//! default to running the reducer *in this process*: it loaded the agent
+//! registry off the caller's disk, opened and wrote the worker WAL,
+//! started the agent's MCP servers as children of the CLI, loaded and
+//! validated the pricing table, and talked to the provider directly. That
+//! is a second execution path with a second set of answers — a client
+//! could run an agent definition the daemon had never loaded, against
+//! pricing the daemon had never validated, writing a WAL the daemon was
+//! also writing — and it is exactly what ADR-0031's thin client cannot
+//! contain. One runtime, one place work runs.
+//!
+//! What is left is the request: the daemon publishes the trigger onto the
+//! durable stream and its dispatcher picks it up. The daemon half is
+//! `trigger_command.rs`.
 
 use anyhow::Context;
-use fq_runtime::agent::{AgentId, AgentRegistry};
-use fq_runtime::events::TriggerSource;
-use fq_runtime::llm::GenAiClient;
-use fq_runtime::worker::InvocationOutcome;
-use fq_runtime::{EventBus, McpClientManager, McpServerConfig, PricingTable, ToolRegistry};
 use serde_json::Value;
 
 use crate::cli::GlobalArgs;
-use crate::pricing::build_validated_pricing;
-use crate::{ensure_split_dbs, workspace_provider};
+use crate::edge_call::edge_invoke;
 
-/// Trigger an agent by name. Loads the registry, resolves the agent,
-/// connects to NATS, loads the pricing table, then drives the
-/// reducer runner against a real LLM client.
-pub(crate) async fn trigger_agent(
-    global: &GlobalArgs,
-    agent_name: &str,
-    payload: Option<&str>,
-) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-
-    // Resolve and load the registry.
-    let registry = AgentRegistry::load_from_directory(
-        &config.agents.directory,
-        config.agents.default_model.as_deref(),
-    )
-    .context("failed to load agent registry")?;
-    let agent_id =
-        AgentId::new(agent_name).with_context(|| format!("invalid agent name '{agent_name}'"))?;
-    let loaded = registry.get_loaded(&agent_id).ok_or_else(|| {
-        let available: Vec<String> = registry
-            .iter()
-            .map(|l| l.agent.id().as_str().to_string())
-            .collect();
-        anyhow::anyhow!(
-            "agent '{agent_name}' not found in {}. Available: {}",
-            config.agents.directory.display(),
-            if available.is_empty() {
-                "(none)".to_string()
-            } else {
-                available.join(", ")
-            }
-        )
-    })?;
-    println!(
-        "Loaded agent '{}' from {}",
-        loaded.agent.id(),
-        loaded.path.display()
-    );
-
-    // Connect to NATS.
-    println!("Connecting to NATS at {}...", config.nats.url);
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
-
-    // Load pricing (cached path on disk, fetches on startup), merge
-    // config overrides, and enforce the coverage guarantee (ADR-0004).
-    let cache_path = config.cache.directory.join("pricing.json");
-    let pricing =
-        build_validated_pricing(&config, &registry, PricingTable::load(&cache_path).await)?;
-    let pricing = Arc::new(pricing);
-    println!("Loaded {} pricing entries", pricing.len());
-
-    // Real LLM client — genai resolves API keys from provider-specific
-    // environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc).
-    // Routes each model to the [providers.<name>] that declares it,
-    // honouring per-provider base_url/api_key_env (ADR-0003).
-    let llm = GenAiClient::from_providers(&config.providers);
-    // Retry transient LLM errors (rate limits, transport failures) with
-    // backoff instead of failing the whole invocation (issue #10).
-    let llm = fq_runtime::llm::RetryingLlmClient::new(llm, config.worker.llm_retry.clone());
-
-    // Parse trigger payload: try JSON first, fall back to string literal.
-    let trigger_payload: Value = match payload {
-        Some(raw) => serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
-        None => Value::Null,
-    };
-
-    // Build tool registry: built-ins + MCP servers declared by this agent.
-    let mut tools = ToolRegistry::with_builtins_exec(config.tools.exec.to_exec_config());
-    let mut mcp_manager = McpClientManager::new();
-    for decl in loaded.agent.mcp_servers() {
-        // A server the agent grants an inbound capability (sampling /
-        // elicitation / roots) runs per-invocation, wired by the runner
-        // (ADR-0018) — not shared here.
-        if loaded.agent.grants_inbound_capability(&decl.server) {
-            continue;
-        }
-        let config = McpServerConfig {
-            name: decl.server.clone(),
-            command: decl.command.clone().unwrap_or_default(),
-            args: decl.args.clone(),
-            env: decl.env.clone(),
-            url: decl.url.clone(),
-        };
-        match mcp_manager.start_server(config).await {
-            Ok(mcp_tools) => {
-                for tool in mcp_tools {
-                    if let Err(error) = tools.register(tool) {
-                        tracing::warn!(server = %decl.server, %error, "refusing MCP tool registration");
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    server = %decl.server,
-                    error = %err,
-                    "failed to start MCP server, its tools will be unavailable"
-                );
-            }
-        }
-    }
-    if !loaded.agent.mcp_servers().is_empty() {
-        println!(
-            "  MCP tools:        {} (from {} server(s))",
-            tools.len() - fq_runtime::tools::BUILTIN_TOOL_COUNT,
-            loaded.agent.mcp_servers().len()
-        );
-    }
-
-    let tools = Arc::new(tools);
-    println!("Running agent...");
-    // Tool/LLM dispatches are persisted through the worker
-    // WAL. The store opens against the same worker.db the
-    // daemon would use; if `fq run` is also active the same
-    // file is shared (locks at the SQLite layer).
-    let db_paths = ensure_split_dbs(&config).await?;
-    let worker_store = Arc::new(
-        // allow-direct-store-open: `fq trigger` is a one-shot worker — it writes the WAL.
-        fq_runtime::WorkerStore::open(&db_paths.worker)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to open worker store at {}",
-                    db_paths.worker.display()
-                )
-            })?,
-    );
-    // Each ad-hoc `fq trigger` is a one-shot worker instance.
-    // The runtime-id-shaped worker_id matches the daemon's
-    // naming so any archive hand-off the runner performs
-    // routes the ack subject
-    // (`fq.worker.{id}.invocation.archive_acked`) consistently.
-    let cli_worker_id = fq_runtime::worker::WorkerId::new(uuid::Uuid::now_v7().to_string())
-        .expect("uuid is a valid worker id");
-    let runner = fq_runtime::ReducerRunner::new(
-        Arc::new(
-            fq_runtime::ReducerContext::builder()
-                .tools(tools)
-                .resources(mcp_manager.resource_reader())
-                .build(),
-        ),
-        Arc::new(
-            fq_runtime::RunnerConfig::builder()
-                .bus(bus)
-                .pricing(pricing)
-                .store(worker_store)
-                .worker_id(cli_worker_id)
-                .max_iterations(config.max_iterations)
-                .enforce_pricing(true)
-                .workspace(workspace_provider(&config))
-                .build(),
-        ),
-        fq_runtime::Harness::new(),
-    );
-    let outcome_result = runner
-        .run(
-            &loaded.agent,
-            &llm,
-            TriggerSource::Manual,
-            None,
-            trigger_payload,
-        )
-        .await;
-    let outcome = match outcome_result {
-        Ok(outcome) => outcome,
-        Err(fq_runtime::ExecutorError::Llm(fq_runtime::LlmError::Auth(msg))) => {
-            mcp_manager.shutdown().await;
-            anyhow::bail!(
-                "LLM authentication failed.\n\
-                 \n\
-                 This usually means the provider-specific API key environment\n\
-                 variable is not set. For Anthropic, export ANTHROPIC_API_KEY\n\
-                 before running `fq trigger`.\n\
-                 \n\
-                 Underlying error: {msg}"
-            );
-        }
-        Err(err) => {
-            mcp_manager.shutdown().await;
-            return Err(err.into());
-        }
-    };
-
-    mcp_manager.shutdown().await;
-
-    println!();
-    match outcome {
-        InvocationOutcome::Completed {
-            invocation_id,
-            response,
-            cost,
-            duration_ms,
-        } => {
-            println!("✓ Completed in {duration_ms}ms (cost: ${cost:.6})");
-            println!("  invocation: {invocation_id}");
-            if let Some(content) = response.content {
-                println!();
-                println!("Response:");
-                for line in content.lines() {
-                    println!("  {line}");
-                }
-            }
-        }
-        InvocationOutcome::BudgetExceeded {
-            invocation_id,
-            cost,
-        } => {
-            println!("✗ Budget exceeded: cost ${cost:.6}");
-            println!("  invocation: {invocation_id}");
-        }
-        InvocationOutcome::Suspended { invocation_id } => {
-            // A drain suspended the run at a step boundary; the row
-            // stays in-flight for recovery to resume under the next
-            // binary. An in-process `fq trigger` has no drain source, so
-            // this is effectively unreachable here — but the match is
-            // total.
-            println!("⏸ Suspended at a step boundary (drained); recovery will resume it");
-            println!("  invocation: {invocation_id}");
-        }
-    }
-
-    Ok(())
-}
-
-/// Publish a trigger to NATS instead of running the executor
-/// in-process. A running `fq run` daemon picks up the trigger and
-/// dispatches it to the named agent.
+/// Ask the daemon to dispatch a trigger to an agent.
 pub(crate) async fn publish_trigger(
     global: &GlobalArgs,
     agent_name: &str,
     payload: Option<&str>,
 ) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-
-    // Validate the agent id format locally before going to NATS.
-    // This catches typos early without round-tripping through the
-    // cluster.
+    // Validate the agent id's *shape* locally before dialling: a typo is
+    // answered offline, in the same breath as `fq agent validate`, rather
+    // than costing a round trip. Whether the agent exists is the daemon's
+    // question and is deliberately not asked here — a trigger for an
+    // unknown agent is a dead letter, which is a durable record an
+    // operator can find, not a client-side refusal that leaves none.
     fq_runtime::AgentId::new(agent_name)
         .with_context(|| format!("invalid agent name '{agent_name}'"))?;
 
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
-
+    // A payload that is not JSON is the string itself — the shorthand
+    // that makes `fq trigger fixer "look at #12"` work.
     let trigger_payload: Value = match payload {
         Some(raw) => serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
         None => Value::Null,
     };
 
-    bus.publish_trigger(agent_name, &trigger_payload)
-        .await
-        .with_context(|| format!("failed to publish trigger for '{agent_name}'"))?;
+    edge_invoke(
+        global,
+        fq_ops::OpId::Verb(fq_ops::VerbId::Trigger(fq_ops::Trigger::Publish)),
+        serde_json::json!({
+            "agent_id": agent_name,
+            "payload": trigger_payload,
+        }),
+    )
+    .await?
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    println!(
-        "Published trigger for '{}' on {}",
-        agent_name,
-        fq_runtime::bus::trigger_subject(agent_name)
-    );
-    println!("A running `fq run` daemon will pick this up and dispatch it.");
+    // The trigger is durable when the daemon answers, so this says what
+    // happened rather than what was published where: the subject it rides
+    // is the daemon's own transport, and a client that does not publish
+    // has no business naming it.
+    println!("Published trigger for '{agent_name}'.");
+    println!("The daemon will pick this up and dispatch it.");
     Ok(())
 }
