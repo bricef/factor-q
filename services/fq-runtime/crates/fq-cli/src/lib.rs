@@ -48,7 +48,7 @@ use crate::pricing::build_validated_pricing;
 use crate::project::init_project;
 use crate::resume::ResumeControl;
 use crate::status::show_status;
-use crate::trigger::{publish_trigger, trigger_agent};
+use crate::trigger::publish_trigger;
 use crate::version::{FQ_VERSION, print_version};
 use crate::workers::{workers_list, workers_prune, workers_show};
 
@@ -68,12 +68,26 @@ pub async fn fq_main() -> ExitCode {
     // so `fq status | head` dies silently like any Unix filter instead
     // of panicking on EPIPE (Rust's startup sets SIGPIPE to ignore,
     // which turns a closed pipe into a write error that `println!`
-    // panics on). The daemon and the in-process trigger keep the
-    // ignore disposition: long-running paths must not be killable by a
-    // closed stdout, and the exec tool's child processes inherit
-    // whatever disposition is in effect at spawn time.
+    // panics on). The daemon keeps the ignore disposition: a
+    // long-running path must not be killable by a closed stdout, and
+    // the exec tool's child processes inherit whatever disposition is
+    // in effect at spawn time. `fq trigger` used to be on that list
+    // because it ran the reducer in-process; it is a request now
+    // (D-1), so it filters like every other command.
+    //
+    // `fq down` joins the daemon on that list, for a reason that only
+    // appeared once it started speaking the edge: it is the one verb
+    // whose job is to make its peer go away, so it is *expected* to be
+    // writing to a socket the daemon has already closed — a tarpc
+    // client shutting down, or the next liveness poll dialling a
+    // process that has exited. Tokio's socket writes are plain
+    // `write(2)`, which raises SIGPIPE on a closed peer, so under the
+    // default disposition the stop verb is killed by the very success
+    // it is waiting to confirm. Caught by `daemon_stops_now_on_fq_down_now`:
+    // `--now` exits fast enough to win that race every time, while the
+    // drain path merely usually lost it.
     #[cfg(unix)]
-    if !matches!(cli.command, Commands::Run | Commands::Trigger { .. }) {
+    if !matches!(cli.command, Commands::Run | Commands::Down { .. }) {
         // SAFETY: changing a process signal disposition before any
         // output has been written; no handler is installed, only the
         // kernel default is restored.
@@ -120,14 +134,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Trigger {
             agent,
             payload,
-            via_nats,
-        } => {
-            if via_nats {
-                publish_trigger(&cli.global, &agent, payload.as_deref()).await?
-            } else {
-                trigger_agent(&cli.global, &agent, payload.as_deref()).await?
-            }
-        }
+            // Retired (D-1): the in-process runner is gone, so both
+            // spellings mean the same thing — ask the daemon.
+            via_nats: _,
+        } => publish_trigger(&cli.global, &agent, payload.as_deref()).await?,
         Commands::DeadLetters { command } => match command {
             DeadLetterCommands::List { agent, limit, json } => {
                 list_dead_letters(&cli.global, agent.as_deref(), limit, json).await?
@@ -237,6 +247,7 @@ mod agents;
 mod cli;
 mod connections;
 mod control;
+mod control_commands;
 mod costs;
 mod dead_letter_atom;
 mod dead_letters;
@@ -253,9 +264,11 @@ mod recovery;
 mod resume;
 mod status;
 mod trigger;
+mod trigger_command;
 mod version;
 mod workers;
 
+pub use crate::control_commands::{DownSignal, MachineryDeps};
 pub use crate::operator_surface::{OperatorDeps, operator_registry};
 mod operator_surface;
 
@@ -791,26 +804,18 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // refresh-between-invocations precedent).
     let shared_registry: SharedRegistry = Arc::new(tokio::sync::RwLock::new(registry));
 
-    // Spawn the control-reload listener. Non-fatal tier: hot-reload is a
-    // convenience, not a critical task — the daemon keeps dispatching triggers
-    // perfectly well without it. So, unlike the dispatcher/consumer tasks,
-    // losing the reload channel must NOT tear the runtime down, and (see the
-    // main select! below) this task's handle is deliberately not watched as a
-    // daemon-fatal arm.
-    let (reload_handle, reload_shutdown_tx) = crate::listeners::spawn_reload_listener(
-        bus.clone(),
-        shared_registry.clone(),
-        config.agents.directory.clone(),
-        config.agents.default_model.clone(),
-    );
-
     let drain_probe: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
 
-    // Spawn the control-down listener (`fq down`, issue #63). Best-effort
-    // core-NATS like reload; non-fatal, so its handle is not watched in the
-    // select — only the mode it reports on `down_requested_rx` is.
-    let (down_handle, down_listener_shutdown_tx, mut down_requested_rx) =
-        crate::listeners::spawn_down_listener(bus.clone(), resume_runner.clone());
+    // The stop switch `control.down` throws (`fq down`, issue #63). Two
+    // listener tasks used to stand here — one per control subject, each
+    // resubscribing on loss — and both are gone with the subjects: the
+    // machinery verbs are commands on the edge, so the daemon answers
+    // them on the transport it already serves rather than on a
+    // best-effort core-NATS channel whose loss it had to survive. What
+    // is left is the one-shot the select below still waits on.
+    let (down_requested_tx, mut down_requested_rx) = tokio::sync::oneshot::channel::<bool>();
+    let down_signal: crate::control_commands::DownSignal =
+        Arc::new(tokio::sync::Mutex::new(Some(down_requested_tx)));
 
     // Operator resume listener (`fq invocation resume`, #373). Best-effort
     // core-NATS like reload/down: non-fatal, resubscribes on loss, and its
@@ -909,6 +914,15 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 // the dispatcher reads, so `fq agent list` answers
                 // with the definitions this daemon would run.
                 agents: shared_registry.clone(),
+                machinery: crate::control_commands::MachineryDeps {
+                    agents: shared_registry.clone(),
+                    agents_dir: config.agents.directory.clone(),
+                    default_model: config.agents.default_model.clone(),
+                    // The same runner `fq down`'s drain suspends and the
+                    // teardown below waits on.
+                    worker: resume_runner.clone(),
+                    down: down_signal,
+                },
             },
         )?);
         let (edge_addr, edge_serving) = fq_edge::bind(&config.edge.bind, &identity, edge_registry)
@@ -927,8 +941,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("Runtime ready. Press Ctrl-C to stop.");
     println!("  - projection consumer is materialising events into SQLite");
     println!("  - trigger dispatcher is listening on fq.trigger.*");
-    println!("  - control-reload listener is listening on fq.control.reload");
-    println!("  - control-down listener is listening on fq.control.down");
     if let Some(addr) = read_service_addr {
         println!("  - read service is listening on {addr}");
     }
@@ -973,11 +985,11 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 other => (other, false, None),
             }
         }
-        // A `fq down` control message asked for an operator-initiated clean
+        // The `control.down` command asked for an operator-initiated clean
         // stop (issue #63). `now == true` skips the drain (SIGINT-equivalent
         // clean stop); `now == false` drains to a step boundary first (the
-        // listener already flipped the drain signal). Both are clean exits,
-        // so the teardown deregisters the worker either way.
+        // command handler already flipped the drain signal). Both are clean
+        // exits, so the teardown deregisters the worker either way.
         maybe_now = &mut down_requested_rx => {
             match maybe_now {
                 Ok(true) => ("down_now", true, None),
@@ -1054,13 +1066,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
             }
         }
     };
-    // NOTE: the control-reload listener handle is intentionally NOT
-    // watched here. Hot-reload is a non-fatal convenience: its task
-    // ending (subscription loss it can't recover, or a panic) must not
-    // classify as a daemon-fatal `task_failed` and tear the runtime
-    // down. It is signalled to stop and joined during the shutdown
-    // sequence below like the other tasks.
-
     // If a task failed, publish a system.task_failed event with
     // its details before we tear everything else down.
     if let Some((task_name, error_message)) = failed_task.as_ref() {
@@ -1118,8 +1123,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let _ = archive_retry_shutdown_tx.send(());
     let _ = retention_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
-    let _ = reload_shutdown_tx.send(());
-    let _ = down_listener_shutdown_tx.send(());
     let _ = resume_listener_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
@@ -1226,16 +1229,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         }
     }
 
-    match tokio::time::timeout(std::time::Duration::from_secs(5), reload_handle).await {
-        Ok(Ok(())) => println!("  control-reload listener stopped cleanly."),
-        Ok(Err(err)) => tracing::error!(error = %err, "control-reload listener task panicked"),
-        Err(_) => tracing::warn!("control-reload listener did not shut down within 5s"),
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(5), down_handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => tracing::error!(error = %err, "control-down listener task panicked"),
-        Err(_) => tracing::warn!("control-down listener did not shut down within 5s"),
-    }
     match tokio::time::timeout(std::time::Duration::from_secs(5), resume_listener_handle).await {
         Ok(Ok(())) => {}
         Ok(Err(err)) => tracing::error!(error = %err, "control-resume listener task panicked"),

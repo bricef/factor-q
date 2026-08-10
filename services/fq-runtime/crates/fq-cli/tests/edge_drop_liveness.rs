@@ -231,6 +231,19 @@ impl Surface {
                 // view is registered either way, so it gets an empty
                 // registry rather than a mock.
                 agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
+                // The machinery verbs are registered like every other
+                // op, and this probe never issues one — the stop
+                // switch is armed so the surface assembles, and
+                // nothing here throws it.
+                machinery: fq_cli::MachineryDeps {
+                    agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
+                    agents_dir: scratch.path().join("agents"),
+                    default_model: None,
+                    worker: runner.clone(),
+                    down: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+                        tokio::sync::oneshot::channel::<bool>().0,
+                    ))),
+                },
             },
         )
         .expect("assemble the operator registry");

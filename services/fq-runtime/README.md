@@ -69,8 +69,9 @@ just fq -- agent list
 ```
 fq init [-f|--force]                        # create a new project (config, agents/, sample)
 fq run                                      # start the daemon (projection + dispatcher)
-fq trigger <agent> [payload]                # run an agent in-process via the reducer runner
-fq trigger --via-nats <agent> [payload]     # publish a trigger to NATS for fq run to dispatch
+fq trigger <agent> [payload]                # ask the daemon to dispatch a trigger to an agent
+                                            # (--via-nats is accepted and ignored: the
+                                            #  in-process runner is retired)
 fq agent list                               # list agents in the configured directory
 fq agent validate <path>                    # validate an agent definition
 fq events tail [--agent] [--event-type]     # tail the live event stream

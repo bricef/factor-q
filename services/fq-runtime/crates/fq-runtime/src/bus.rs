@@ -109,37 +109,14 @@ pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(120),
 ];
 
-/// Control subject a running `fq run` daemon subscribes to for a
-/// hot-reload of agent definitions. Published by `fq reload`
-/// (fire-and-forget, core NATS — deliberately NOT one of the
-/// JetStream stream subjects, so a reload signal is ephemeral: if
-/// no daemon is listening it is simply a no-op, never a queued
-/// backlog). A reload affects the NEXT trigger only; in-flight
-/// invocations keep the config they snapshotted at trigger time
-/// (ADR-0020 refresh-between-invocations precedent).
-pub const CONTROL_RELOAD_SUBJECT: &str = "fq.control.reload";
-
 /// Request/reply control subject for operator recovery of ambiguous invocations.
+///
+/// The last of the `fq.control.*` subjects: reload and down retired with
+/// cohort 4.3, which made the machinery verbs declared commands on the
+/// edge. NATS is the internal event log and coordination substrate, not
+/// an external control surface (domain-model amendment, 2026-08-05), and
+/// resume follows in its own flip.
 pub const CONTROL_RESUME_SUBJECT: &str = "fq.control.invocation.resume";
-
-/// Core-NATS subject an operator-initiated clean stop is requested on
-/// (`fq down`, issue #63). Ephemeral like reload — no daemon
-/// listening is a silent no-op. The message body selects the mode:
-/// [`DOWN_MODE_DRAIN`] (drain in-flight work to a step boundary, then
-/// exit) or [`DOWN_MODE_NOW`] (clean infra teardown + deregister + exit
-/// immediately, the `--now` escape hatch). Either way the daemon
-/// deregisters its worker and publishes `fq.system.shutdown` on exit, so
-/// `fq down` can confirm the process actually stopped.
-pub const CONTROL_DOWN_SUBJECT: &str = "fq.control.down";
-
-/// `fq down` mode marker: drain in-flight work to the next step boundary
-/// (bounded by `drain_deadline_ms`), then exit — the default.
-pub const DOWN_MODE_DRAIN: &str = "drain";
-
-/// `fq down --now` mode marker: skip the drain — clean infra teardown,
-/// worker deregister, and immediate exit (equivalent to today's SIGINT,
-/// but as a proper confirmable command).
-pub const DOWN_MODE_NOW: &str = "now";
 
 /// Default retention for the trigger stream. Triggers are short-lived
 /// — the dispatcher consumes them within seconds under normal
@@ -165,15 +142,6 @@ pub fn agent_id_from_trigger_subject(subject: &str) -> Option<&str> {
         return None;
     }
     Some(third)
-}
-
-/// Parse a control-down message body into "drain now?" — `true` for
-/// [`DOWN_MODE_NOW`], `false` otherwise. Any unrecognised body (including
-/// an empty one) falls back to the safe default: drain to a step boundary
-/// rather than a surprise hard stop. Pure so the daemon's dispatch is
-/// unit-testable without NATS.
-pub fn down_mode_now_from_body(body: &[u8]) -> bool {
-    body == DOWN_MODE_NOW.as_bytes()
 }
 
 /// Errors from the event bus.
@@ -848,40 +816,6 @@ impl EventBus {
         Ok(Box::pin(stream))
     }
 
-    /// Publish a fire-and-forget control message asking any running
-    /// `fq run` daemon to hot-reload its agent definitions. Uses core
-    /// NATS publish (not JetStream): the signal is ephemeral, so if no
-    /// daemon is listening it is silently dropped rather than queued.
-    pub async fn publish_control_reload(&self) -> Result<(), BusError> {
-        debug!(
-            subject = CONTROL_RELOAD_SUBJECT,
-            "publishing control reload"
-        );
-        self.client
-            .publish(CONTROL_RELOAD_SUBJECT, Bytes::new())
-            .await
-            .map_err(|err| BusError::Publish(err.to_string()))?;
-        // Flush so the message actually leaves the client before a
-        // short-lived CLI process exits.
-        self.client
-            .flush()
-            .await
-            .map_err(|err| BusError::Publish(err.to_string()))?;
-        Ok(())
-    }
-
-    /// Subscribe to the daemon control-reload subject. Each item is a
-    /// raw NATS message (the body is unused today); the daemon reacts
-    /// to the arrival of the message, not its contents.
-    pub async fn subscribe_control_reload(&self) -> Result<async_nats::Subscriber, BusError> {
-        debug!(
-            subject = CONTROL_RELOAD_SUBJECT,
-            "subscribing to control reload"
-        );
-        let sub = self.client.subscribe(CONTROL_RELOAD_SUBJECT).await?;
-        Ok(sub)
-    }
-
     /// Ask the running daemon to inject interrupted results and resume an invocation.
     pub async fn request_control_resume(&self, body: Vec<u8>) -> Result<Vec<u8>, BusError> {
         let response = tokio::time::timeout(
@@ -908,45 +842,6 @@ impl EventBus {
             .publish(reply, Bytes::from(body))
             .await
             .map_err(|err| BusError::Publish(err.to_string()))
-    }
-
-    /// Request an operator-initiated clean stop of a running daemon
-    /// (`fq down`, issue #63). Publishes on the core-NATS control-down
-    /// subject with a body of [`DOWN_MODE_DRAIN`] or [`DOWN_MODE_NOW`] and
-    /// flushes. A running `fq run` daemon tears down cleanly, deregisters
-    /// its worker, and exits; in drain mode it first suspends in-flight
-    /// invocations at a step boundary. No daemon listening is a silent
-    /// no-op.
-    pub async fn publish_control_down(&self, now: bool) -> Result<(), BusError> {
-        let body = if now { DOWN_MODE_NOW } else { DOWN_MODE_DRAIN };
-        debug!(
-            subject = CONTROL_DOWN_SUBJECT,
-            mode = body,
-            "publishing control down"
-        );
-        self.client
-            .publish(CONTROL_DOWN_SUBJECT, Bytes::from_static(body.as_bytes()))
-            .await
-            .map_err(|err| BusError::Publish(err.to_string()))?;
-        // Flush so the message leaves the client before the short-lived
-        // CLI process exits.
-        self.client
-            .flush()
-            .await
-            .map_err(|err| BusError::Publish(err.to_string()))?;
-        Ok(())
-    }
-
-    /// Subscribe to the daemon control-down subject. Unlike reload,
-    /// the daemon reads the message *body* to pick the stop mode (see
-    /// [`down_mode_now_from_body`]).
-    pub async fn subscribe_control_down(&self) -> Result<async_nats::Subscriber, BusError> {
-        debug!(
-            subject = CONTROL_DOWN_SUBJECT,
-            "subscribing to control down"
-        );
-        let sub = self.client.subscribe(CONTROL_DOWN_SUBJECT).await?;
-        Ok(sub)
     }
 }
 

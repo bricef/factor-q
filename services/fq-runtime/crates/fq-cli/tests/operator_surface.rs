@@ -66,11 +66,24 @@ async fn operator_surface_matches_the_committed_snapshot() {
             bus,
             projection: projection_store,
             control_plane: control_plane_store,
-            runner,
+            runner: runner.clone(),
             // The Agent view's source. Empty here: the snapshot
             // describes the surface's shape, and a registry's contents
             // are data, not declaration.
             agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
+            // What the machinery verbs command. Wired, never thrown:
+            // the snapshot describes declarations, and a stop switch
+            // nobody touches declares `control.down` just as well as
+            // one that would stop a daemon.
+            machinery: fq_cli::MachineryDeps {
+                agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
+                agents_dir: scratch.path().join("agents"),
+                default_model: None,
+                worker: runner.clone(),
+                down: Arc::new(tokio::sync::Mutex::new(Some(
+                    tokio::sync::oneshot::channel::<bool>().0,
+                ))),
+            },
         },
     )
     .expect("assemble the operator registry");

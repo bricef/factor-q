@@ -1278,6 +1278,85 @@
   {
     "command": {
       "authority": {
+        "scope": "trigger",
+        "verb": "write"
+      },
+      "description": "At-least-once delivery with a bounded budget: the trigger is durable when this answers, and a delivery that keeps failing is dead-lettered (`fq dead-letters list`) rather than retried forever. The answer means accepted, not run — an agent this daemon does not have is a dead letter, not a refusal here. Appends no atom: a queued trigger is consumed rather than kept, so there is nothing to name; the invocation it becomes is.",
+      "domain": "trigger",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `trigger.publish` on the wire.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "payload": {
+            "default": null,
+            "description": "The trigger body, verbatim. Any JSON: agents receive it as the\nuser message their run opens with."
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "PublishCommandInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Dispatch a trigger to an agent via the durable trigger stream.",
+      "verb": "publish",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "control",
+        "verb": "write"
+      },
+      "description": "Affects the NEXT trigger only: in-flight invocations keep the config they snapshotted at trigger time. Answers when the swap has happened, so a reload that could not read the directory is an error rather than a silence — and in that case the definitions already loaded are kept. Appends no atom: the registry is live machinery, not a fold.",
+      "domain": "control",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `control.reload` on the wire. Empty, and declared\nanyway: the daemon reloads from the directory *it* was started with,\nnever one the caller names — that choice is the whole point of the\nverb, and this is where a future option (a `fq.toml` refresh, #114)\nwould appear.",
+        "title": "ReloadCommandInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Re-read the agent definitions from disk and swap the live registry.",
+      "verb": "reload",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "control",
+        "verb": "write"
+      },
+      "description": "Returns as soon as the stop is under way, not when it has finished — the daemon cannot answer a call once it has exited, so confirmation is the caller watching this edge stop answering. `now` skips the drain: clean teardown, worker deregistered, immediate exit, with in-flight invocations left for the next start's recovery. Idempotent: a second call on a daemon already stopping changes nothing. Appends no atom — the `system.shutdown` event is written after this has answered.",
+      "domain": "control",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `control.down` on the wire.",
+        "properties": {
+          "now": {
+            "default": false,
+            "description": "Skip the drain: clean teardown, worker deregistered, immediate\nexit. Defaults false, which is also what a peer that predates\nthe field sends.",
+            "type": "boolean"
+          }
+        },
+        "title": "DownCommandInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Stop this daemon, draining in-flight work to a step boundary.",
+      "verb": "down",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
         "scope": "invocation",
         "verb": "write"
       },

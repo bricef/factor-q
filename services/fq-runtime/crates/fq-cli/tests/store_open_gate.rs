@@ -149,8 +149,16 @@ fn read_handlers_never_open_stores_directly() {
 
     // The sanctioned set is small and intentional; if this count moves,
     // the diff added or removed a marker — make sure the review saw it.
+    //
+    // It went 5 -> 4 with cohort 4.3, and the marker it lost is the one
+    // worth naming: the in-process `fq trigger` opened the worker WAL
+    // *as a writer*, from the client, sanctioned on the grounds that it
+    // was "a one-shot worker". Retiring that mode (decision D-1) leaves
+    // the four remaining opens all inside `run_daemon` — the runtime
+    // opening its own stores, which is the architecture rather than a
+    // concession.
     assert_eq!(
-        sanctioned, 5,
+        sanctioned, 4,
         "sanctioned direct-store-open count changed — update this gate alongside the marker"
     );
 }

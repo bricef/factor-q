@@ -8,19 +8,21 @@
 //! disposition (exit-by-signal 143) that orphans the worker and abandons
 //! in-flight work. (Ctrl-C stays a fast stop.)
 //!
-//! **Drain:** `fq down` publishes on `fq.control.drain`; the daemon's
-//! control-drain listener flips the same shared drain signal (in-flight
-//! invocations suspend at a step boundary, the dispatcher stops consuming),
-//! waits up to `drain_deadline_ms`, then exits cleanly — the NATS-transport
-//! equivalent of the SIGTERM path.
+//! **Drain:** `fq down` invokes the `control.down` command on the daemon's
+//! authenticated edge; the handler flips the same shared drain signal
+//! (in-flight invocations suspend at a step boundary, the dispatcher stops
+//! consuming), and the daemon waits up to `drain_deadline_ms` before exiting
+//! cleanly — the RPC equivalent of the SIGTERM path.
 //!
-//! Each test spawns a full `fq run` daemon that subscribes to the *global*
-//! `fq.control.down` subjects. On a shared broker one
-//! test's control message would reach another test's daemon, so these used
-//! to run under a process-wide lock and skip when `FQ_NATS_URL` was unset.
-//! Each test now spawns its **own** `nats-server` (#233), so they are
-//! isolated by construction — no lock, no skip, and they run in parallel.
-//! The pinned binary comes from `just install-nats` (`FQ_TEST_NATS_SERVER`).
+//! It was a core-NATS publish on `fq.control.down` until cohort 4.3, which is
+//! why each test spawns its **own** `nats-server` (#233): the subject was
+//! global, so on a shared broker one test's control message reached another
+//! test's daemon, and these ran under a process-wide lock. The isolation is
+//! kept — a daemon still needs a broker of its own for its streams — but the
+//! stop itself is point-to-point by construction now: it is addressed to one
+//! daemon's edge, which is also why every `fq down` here has to **pair** with
+//! the daemon it means to stop. The pinned nats binary comes from
+//! `just install-nats` (`FQ_TEST_NATS_SERVER`).
 
 #![cfg(unix)]
 
@@ -31,6 +33,56 @@ use std::time::{Duration, Instant};
 
 fn fq_binary() -> &'static str {
     env!("CARGO_BIN_EXE_fq")
+}
+
+/// A client introduced to one daemon's edge: the pairing store it wrote
+/// to, and the config naming the address it was paired with.
+///
+/// `fq down` is an authenticated command now (plan Phase 4, verb 4), so a
+/// test that means to stop a daemon has to be able to reach it. Both
+/// halves are scratch: `XDG_CONFIG_HOME` so `fq connect` never writes the
+/// developer's real `connections.toml`, and a config of its own because
+/// the daemon asked for port 0 and only its log knows what it got.
+struct Pairing {
+    xdg: tempfile::TempDir,
+    config: std::path::PathBuf,
+}
+
+/// Read the daemon's log for its edge address and once-printed admin
+/// token, then pair with it — what an operator does by hand, once.
+fn pair_with(scratch: &std::path::Path) -> Pairing {
+    let text = std::fs::read_to_string(scratch.join("daemon.log")).expect("read daemon log");
+    let addr = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("- edge is listening on "))
+        .expect("edge addr in the daemon log")
+        .trim()
+        .to_string();
+    let token = {
+        let mut lines = text.lines();
+        lines
+            .find(|l| l.contains("edge: admin token"))
+            .expect("admin token marker in the daemon log");
+        lines.next().expect("token line").trim().to_string()
+    };
+
+    let config = scratch.join("client.toml");
+    std::fs::write(&config, format!("[edge]\nbind = \"{addr}\"\n")).expect("client config");
+    let xdg = tempfile::tempdir().expect("xdg dir");
+    let connect = Command::new(fq_binary())
+        .args(["connect", &addr, "--token", &token])
+        .env("FQ_CONFIG", &config)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("RUST_LOG", "off")
+        .stdin(Stdio::piped())
+        .output()
+        .expect("run fq connect");
+    assert!(
+        connect.status.success(),
+        "fq connect failed:\n{}",
+        String::from_utf8_lossy(&connect.stderr)
+    );
+    Pairing { xdg, config }
 }
 
 /// A unique, isolated scratch dir so the daemon's projection DB / cache
@@ -236,10 +288,12 @@ fn daemon_stops_and_confirms_on_fq_down() {
     assert!(ready, "daemon never reached 'Runtime ready' within 30s");
 
     // `fq down` should stop the daemon AND confirm the exit itself
-    // (exit 0 only after it observes fq.system.shutdown).
+    // (exit 0 only once the daemon's edge has stopped answering).
+    let pairing = pair_with(&scratch);
     let down = Command::new(fq_binary())
         .arg("down")
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_CONFIG", &pairing.config)
+        .env("XDG_CONFIG_HOME", pairing.xdg.path())
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))
@@ -265,7 +319,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
         "`fq down` failed (should exit 0 after confirming the daemon stopped):          stdout={down_out}\nstderr={down_err}"
     );
     assert!(
-        down_out.contains("Daemon stopped"),
+        down_out.contains("Daemon stopped (mode=drain)"),
         "`fq down` did not confirm the daemon stopped:\n{down_out}"
     );
     assert!(
@@ -274,7 +328,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
     );
     assert!(
         log.contains("down requested"),
-        "daemon did not observe the down control message\n--- log ---\n{log}"
+        "daemon did not observe the down command\n--- log ---\n{log}"
     );
     assert!(
         log.contains("trigger dispatcher stopped cleanly"),
@@ -329,9 +383,11 @@ fn daemon_stops_now_on_fq_down_now() {
     }
     assert!(ready, "daemon never reached 'Runtime ready' within 30s");
 
+    let pairing = pair_with(&scratch);
     let down = Command::new(fq_binary())
         .args(["down", "--now"])
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_CONFIG", &pairing.config)
+        .env("XDG_CONFIG_HOME", pairing.xdg.path())
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))
@@ -351,7 +407,7 @@ fn daemon_stops_now_on_fq_down_now() {
         "`fq down --now` failed: stdout={down_out}\nstderr={down_err}"
     );
     assert!(
-        down_out.contains("Daemon stopped"),
+        down_out.contains("Daemon stopped (mode=now)"),
         "`fq down --now` did not confirm the daemon stopped:\n{down_out}"
     );
     assert!(
@@ -364,23 +420,32 @@ fn daemon_stops_now_on_fq_down_now() {
     );
 }
 
-/// `fq down` with no daemon running must fail *fast*: a live daemon
-/// heartbeats within ~10s, so with no heartbeat at all `fq down` reports
-/// "no daemon" inside its ~20s liveness window instead of blocking out the
-/// full drain-deadline ceiling (~130s). Regression guard for the issue #63
-/// review follow-up.
+/// `fq down` with no daemon running must fail *fast*, and it is worth
+/// recording why that got easy. It used to publish into a subject nobody
+/// owned and then watch for a worker heartbeat for ~20s to tell "no daemon"
+/// from "a daemon that is stopping", against a ~130s drain-deadline ceiling
+/// — the liveness gate this test was written to guard (issue #63 review
+/// follow-up). A command has no such ambiguity: there is nothing to dial,
+/// so the refusal is immediate and the guard fails closed by construction.
+/// The bound is kept regardless, because what it protects is an operator
+/// (or a deploy script) not being blocked by a stop that cannot happen.
+///
+/// `XDG_CONFIG_HOME` is scratch deliberately: without it the test reads the
+/// developer's real pairing store and could dial a daemon on this machine.
 #[test]
 fn fq_down_fast_fails_when_no_daemon_running() {
     let server = fq_test_support::NatsServer::start();
     let nats_url = server.url().to_string();
 
     let scratch = unique_scratch();
+    let xdg = tempfile::tempdir().expect("xdg dir");
 
-    // No `fq run` daemon is spawned — nothing is listening on NATS.
+    // No `fq run` daemon is spawned — nothing is listening.
     let started = Instant::now();
     let down = Command::new(fq_binary())
         .arg("down")
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("XDG_CONFIG_HOME", xdg.path())
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))
@@ -401,8 +466,8 @@ fn fq_down_fast_fails_when_no_daemon_running() {
         err.contains("no running `fq run` daemon"),
         "expected a 'no daemon' error on stderr, got:\n{err}"
     );
-    // Fast-fail: well inside the ~20s liveness window, nowhere near the
-    // full ~130s drain-deadline ceiling. Generous slack for CI.
+    // Fast-fail: nowhere near the ~130s ceiling the stop wait is bounded
+    // by. Generous slack for CI.
     assert!(
         elapsed < Duration::from_secs(60),
         "`fq down` did not fast-fail with no daemon (took {elapsed:?})"

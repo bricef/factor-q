@@ -54,6 +54,7 @@ pub enum Invocation {
 #[strum(serialize_all = "snake_case")]
 pub enum Control {
     Down,
+    Reload,
 }
 
 #[derive(

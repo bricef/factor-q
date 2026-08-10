@@ -29,24 +29,28 @@ fq down
 fq down --now        # alias: --no-drain
 ```
 
-`fq down` publishes a control message on `fq.control.down` and then
-**waits — bounded — for the daemon's `fq.system.shutdown` event** before
-returning, so a zero exit means the daemon actually stopped (and, in a
-normal stop, deregistered its worker so it is not left `alive` to age
-into `stale`). A timeout is reported as an error pointing you at
-`fq status` / `fq workers list`, rather than a false "stopped".
+`fq down` invokes the `control.down` command on the daemon's
+authenticated edge and then **waits — bounded — for that edge to stop
+answering** before returning, so a zero exit means the daemon actually
+stopped (and, in a normal stop, deregistered its worker so it is not
+left `alive` to age into `stale`). A timeout is reported as an error
+pointing you at `fq status` / `fq workers list`, rather than a false
+"stopped".
 
-> Confirmation is scoped to the daemon's own clean-exit event, observed
-> over NATS. There is no PID/supervisor registry yet — a supervised
-> `fq up` story is future work — so `fq down` confirms *the daemon it
-> reached said it stopped cleanly*, not an OS-level process check. If no
-> daemon is listening (no worker heartbeat appears), `fq down` fast-fails
-> rather than waiting out the full drain deadline.
+> It needs a pairing, like every other verb that asks the daemon
+> something (`fq connect`). Confirmation is the daemon's edge going
+> away — the process itself, not a message it sent on the way out, which
+> is what the retired `fq.system.shutdown` wait observed. There is still
+> no PID/supervisor registry (a supervised `fq up` story is future work),
+> so `fq down` confirms *the daemon it was paired with is no longer
+> serving*, not an OS-level process check. With no daemon to reach, it
+> fails at once rather than waiting out the drain deadline.
 
 Ctrl-C (SIGINT) in the daemon's own terminal remains a fast clean stop
 for interactive use; SIGTERM (what `docker stop` / systemd send) runs a
 graceful drain (ADR-0027). `fq down` gives you the same clean paths as a
-scriptable, confirmable command from anywhere that can reach NATS.
+scriptable, confirmable command from anywhere that can reach the
+daemon's edge.
 
 ## Redeploying with `fq down`
 

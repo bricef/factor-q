@@ -63,21 +63,31 @@ export ANTHROPIC_API_KEY='sk-ant-...'
 
 The runtime reads provider keys from environment variables (named in `fq.toml` under `[providers.*]`). They're never written back to disk.
 
-## 4. Run an agent
+## 4. Start the daemon and pair with it
+
+Every `fq` verb below asks the daemon a question or gives it an order over its authenticated edge, so the daemon has to be running and this shell has to have been introduced to it. Once, in another terminal:
+
+```sh
+just run
+```
+
+It prints the address its edge is listening on and — on the very first run only — an admin token. Pair with those:
+
+```sh
+just fq connect <edge-address> --token <token>
+```
+
+The pairing is stored in `$XDG_CONFIG_HOME/factor-q/connections.toml` and pins the daemon's certificate, so you do this once per daemon.
+
+## 5. Run an agent
 
 ```sh
 just fq trigger sample-agent "List the files in this directory."
 ```
 
-You'll see:
-- A "Loaded agent..." line.
-- A "Running agent..." line.
-- A short result printed to your terminal.
-- A cost figure ("Completed in NNNms (cost: $0.000NNN)").
+The daemon queues the work and its dispatcher runs it, so this returns as soon as the trigger is durable rather than when the agent finishes — watch it happen in the next step. Behind the scenes the runtime emits ~5–10 events to NATS: one per LLM call, one per tool call, plus the lifecycle events (`triggered`, `completed`).
 
-Behind the scenes the runtime emitted ~5–10 events to NATS — one per LLM call, one per tool call, plus the lifecycle events (`triggered`, `completed`).
-
-## 5. Watch events live (in another terminal)
+## 6. Watch events live (in another terminal)
 
 ```sh
 just fq events tail
@@ -87,7 +97,7 @@ Then run `just fq trigger sample-agent ...` again. You'll see each event scroll 
 
 `fq events tail --agent sample-agent` narrows to one agent. `fq events tail --event-type tool_call` narrows to all tool calls across all agents. The two compose, and they are the same narrowing `fq events query` takes; see [`docs/design/committed/event-schema.md`](docs/design/committed/event-schema.md) for every event type.
 
-## 6. Query history and costs
+## 7. Query history and costs
 
 The runtime also materialises every event into a SQLite projection so you can query historical runs without replaying NATS. `fq events query` asks the running daemon for that index over the edge, so keep `fq run` up; the rows it renders carry no payloads. The last column is each event's identity, printed in full — pass one to `fq events get` and you get that event back whole, payload included, for as long as the log still holds it.
 
@@ -111,33 +121,23 @@ just fq costs --since 2026-04-25
 
 The projection is rebuildable from NATS at any time — NATS is the source of truth.
 
-## 7. Try `builtin__self_inspect` (optional)
+## 8. Try `builtin__self_inspect` (optional)
 
 The `builtin__self_inspect` built-in lets an agent ask the runtime about its own invocation state — budget remaining, iterations used, the configured model — instead of guessing. Try it via the bundled `self-aware` example:
 
+The daemon runs what its own registry holds, so add the example to your project's agents directory and have the daemon re-read it:
+
 ```sh
-just fq --agents-dir agents/examples trigger self-aware \
+cp agents/examples/self-aware.md agents/
+just fq reload
+
+just fq trigger self-aware \
   "What model are you running and how much budget do you have left?"
 ```
 
 The agent calls `builtin__self_inspect`, the runtime synthesises the answer from its own bookkeeping, and the agent reports back with authoritative numbers (e.g. *"Claude Haiku 4.5, $0.049 remaining of $0.05"*). See the [host-fulfilled tools section](docs/guide/reducer-harness.md#host-fulfilled-tools) of the reducer guide for the implementation pattern.
 
-## 8. Run the daemon (optional)
-
-So far each `fq trigger` runs in-process and exits when the agent finishes. The daemon mode keeps the runtime alive: it consumes triggers from NATS, runs agents asynchronously, and keeps the projection up to date.
-
-```sh
-just run
-```
-
-In another terminal:
-
-```sh
-# Publishes a trigger over NATS instead of running in-process.
-just fq trigger sample-agent "Hello." --via-nats
-```
-
-The daemon picks up the trigger, runs the agent, and emits events. The CLI returns immediately because dispatch is asynchronous.
+## 9. Stopping the daemon
 
 To stop the daemon cleanly, use `fq down` (not `pkill`):
 

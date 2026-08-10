@@ -19,7 +19,16 @@
 //!
 //! In-process `fq trigger` is deliberately **not** snapshotted: the
 //! plan schedules that mode's retirement (decision D-1), so the golden
-//! contract is the `--via-nats` form only.
+//! contract is the `--via-nats` form only. That retirement has since
+//! landed — the flag is a compatibility no-op and there is only one
+//! form left — and the golden it pins is the same one.
+//!
+//! **Four of these verbs now need a daemon they did not need before**
+//! (plan Phase 4, cohort 4.3). `reload`, `trigger` and `down` used to
+//! be a bare `fq` publishing at a broker; they are declared commands on
+//! the authenticated edge now, which takes a running daemon and a
+//! pairing — see [`PairedDaemon`]. The harness grew; the goldens are
+//! still this file's stdout contract and nothing else.
 //!
 //! To regenerate after an intentional output change:
 //! `UPDATE_GOLDEN=1 cargo test -p fq-cli --test golden_commands` —
@@ -302,43 +311,234 @@ fn golden_workers_prune() {
 }
 
 // ------------------------------------------------------------------
-// reload / trigger --via-nats — fire-and-forget publishes: a live
-// broker, no daemon.
+// The paired-daemon harness: a live `fq run`, a client paired with its
+// edge, and the scratch both share.
+//
+// Every verb below this line speaks the authenticated edge, so a broker
+// alone is no longer enough — the daemon is what answers, and the
+// client has to have been introduced to it. The pairing dance (read the
+// ephemeral bind address and the once-printed admin token out of the
+// daemon's own log, write a client config naming that address, `fq
+// connect`) is exactly what an operator does once by hand, which is why
+// the tests do it rather than reach behind the transport.
+// ------------------------------------------------------------------
+
+/// A running daemon plus a client that can talk to it.
+struct PairedDaemon {
+    scratch: Scratch,
+    /// The pairing store's root: `fq connect` writes
+    /// `$XDG_CONFIG_HOME/factor-q/connections.toml`, and pointing it at
+    /// a tempdir keeps a test off the developer's real connections.
+    xdg: tempfile::TempDir,
+    /// The *client's* config — it names the daemon's actual bind
+    /// address, which the daemon's own config could not (it asked for
+    /// port 0).
+    client_config: PathBuf,
+    log_path: PathBuf,
+    child: Option<std::process::Child>,
+    server: fq_test_support::NatsServer,
+}
+
+impl PairedDaemon {
+    fn start() -> Self {
+        let server = fq_test_support::NatsServer::start();
+        let scratch = Scratch::new();
+
+        // An ephemeral edge port keeps daemon-spawning tests from
+        // fighting over the fixed default bind when they run in
+        // parallel.
+        let daemon_config = scratch.cache().join("fqd.toml");
+        std::fs::write(&daemon_config, "[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
+
+        let log_path = scratch.cache().join("daemon.log");
+        let log = std::fs::File::create(&log_path).expect("create daemon log");
+        let log_err = log.try_clone().expect("clone daemon log handle");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fq"))
+            .arg("run")
+            .env("FQ_CONFIG", &daemon_config)
+            .env("FQ_NATS_URL", server.url())
+            .env("FQ_CACHE_DIR", scratch.cache())
+            .env("FQ_STATE_DIR", scratch.state())
+            .env("FQ_AGENTS_DIR", scratch.agents())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err))
+            .spawn()
+            .expect("spawn fq run");
+
+        // Wait for steady state; fail loudly if the daemon dies on
+        // startup.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let text = loop {
+            if let Some(status) = child.try_wait().expect("poll fq run") {
+                let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+                panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
+            }
+            let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if text.contains("Runtime ready") {
+                break text;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon never reached 'Runtime ready' within 30s\n--- log ---\n{text}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        let addr = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("- edge is listening on "))
+            .expect("edge addr in log")
+            .trim()
+            .to_string();
+        let token = {
+            let mut lines = text.lines();
+            lines
+                .find(|l| l.contains("edge: admin token"))
+                .expect("admin token marker");
+            lines.next().expect("token line").trim().to_string()
+        };
+
+        let client_config = scratch.cache().join("fq.toml");
+        std::fs::write(&client_config, format!("[edge]\nbind = \"{addr}\"\n"))
+            .expect("client fq.toml");
+
+        let xdg = tempfile::tempdir().expect("xdg dir");
+        let connect = Command::new(env!("CARGO_BIN_EXE_fq"))
+            .args(["connect", &addr, "--token", &token])
+            .env("FQ_CONFIG", &client_config)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("RUST_LOG", "off")
+            .stdin(Stdio::piped())
+            .output()
+            .expect("run fq connect");
+        assert!(
+            connect.status.success(),
+            "fq connect failed:\n{}",
+            String::from_utf8_lossy(&connect.stderr)
+        );
+
+        PairedDaemon {
+            scratch,
+            xdg,
+            client_config,
+            log_path,
+            child: Some(child),
+            server,
+        }
+    }
+
+    /// Run `fq` as the paired client.
+    fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+            .args(args)
+            .env("FQ_CONFIG", &self.client_config)
+            .env("FQ_AGENTS_DIR", self.scratch.agents())
+            .env("FQ_CACHE_DIR", self.scratch.cache())
+            .env("FQ_STATE_DIR", self.scratch.state())
+            .env("FQ_NATS_URL", self.server.url())
+            .env("XDG_CONFIG_HOME", self.xdg.path())
+            .env("RUST_LOG", "off")
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run fq binary");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    fn redact(&self, raw: &str) -> String {
+        redact(raw, &self.scratch, self.server.url(), &[])
+    }
+
+    fn log(&self) -> String {
+        std::fs::read_to_string(&self.log_path).unwrap_or_default()
+    }
+
+    /// Wait for the daemon to exit **on its own**. `None` on timeout,
+    /// which the caller reports as a hung shutdown.
+    fn wait_for_exit(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let child = self.child.as_mut()?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait().expect("poll fq run") {
+                Some(status) => {
+                    self.child = None;
+                    return Some(status);
+                }
+                None => {
+                    if Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PairedDaemon {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// reload / trigger — commands on the edge (plan Phase 4, verbs 3 and 6).
+//
+// Both used to be a fire-and-forget publish from the client, snapshotted
+// against a bare broker with nothing listening — a golden that passed
+// whether or not anything ever received the message. They are answered
+// by a daemon now, so these pin what an operator sees when the work
+// actually happened.
 // ------------------------------------------------------------------
 
 #[test]
 fn golden_reload() {
-    let server = fq_test_support::NatsServer::start();
-    let scratch = Scratch::new();
+    let daemon = PairedDaemon::start();
 
-    let (exit, stdout, stderr) = run_fq(&scratch, server.url(), &["reload"]);
+    let (exit, stdout, stderr) = daemon.run_fq(&["reload"]);
     assert_eq!(exit, Some(0), "reload should exit 0; stderr:\n{stderr}");
-    assert_golden(
-        "reload_human",
-        &redact(&stdout, &scratch, server.url(), &[]),
+    assert_golden("reload_human", &daemon.redact(&stdout));
+    assert!(
+        daemon
+            .log()
+            .contains("reloaded agent definitions from disk"),
+        "the daemon must have actually reloaded\n--- log ---\n{}",
+        daemon.log()
     );
 }
 
 #[test]
 fn golden_trigger_via_nats() {
-    let server = fq_test_support::NatsServer::start();
-    let scratch = Scratch::new();
+    let daemon = PairedDaemon::start();
 
-    let (exit, stdout, stderr) = run_fq(
-        &scratch,
-        server.url(),
-        &[
-            "trigger",
-            AGENT_RESEARCHER,
-            r#"{"topic":"golden"}"#,
-            "--via-nats",
-        ],
-    );
+    let (exit, stdout, stderr) = daemon.run_fq(&[
+        "trigger",
+        AGENT_RESEARCHER,
+        r#"{"topic":"golden"}"#,
+        "--via-nats",
+    ]);
     assert_eq!(exit, Some(0), "trigger should exit 0; stderr:\n{stderr}");
-    assert_golden(
-        "trigger_via_nats_human",
-        &redact(&stdout, &scratch, server.url(), &[]),
-    );
+    assert_golden("trigger_via_nats_human", &daemon.redact(&stdout));
+}
+
+/// `--via-nats` is a compatibility no-op after D-1: with the in-process
+/// runner retired there is one mode left, and both spellings must reach
+/// it. Pinned against the same golden the flagged form uses, so a change
+/// that made them diverge would be a diff here.
+#[test]
+fn trigger_without_the_flag_takes_the_same_path() {
+    let daemon = PairedDaemon::start();
+
+    let (exit, stdout, stderr) =
+        daemon.run_fq(&["trigger", AGENT_RESEARCHER, r#"{"topic":"golden"}"#]);
+    assert_eq!(exit, Some(0), "trigger should exit 0; stderr:\n{stderr}");
+    assert_golden("trigger_via_nats_human", &daemon.redact(&stdout));
 }
 
 // ------------------------------------------------------------------
@@ -457,78 +657,30 @@ fn golden_dead_letters_requeue_json() {
 // down / down --now — the full daemon round-trip (the pattern from
 // daemon_shutdown.rs, which owns the behavioural assertions; these
 // snapshots pin the *stdout contract* only). Progress narration goes
-// to stderr by design (#190) and is not snapshotted. The confirmed
-// runtime id is daemon-minted, so it redacts to <UUID>.
+// to stderr by design (#190) and is not snapshotted.
+//
+// The confirmation changed shape with the flip (plan Phase 4, verb 4):
+// it used to be the daemon's own `fq.system.shutdown` event, read off a
+// client subscription, which is where the runtime id and clean flag in
+// the old golden came from. There is no subscription left — the point
+// of the verb is that the process stops — so what is confirmed now is
+// the daemon's edge going away, and the mode is the only thing the
+// client still knows.
 // ------------------------------------------------------------------
 
 #[cfg(unix)]
 fn golden_down_case(golden_name: &str, down_args: &[&str]) {
-    let server = fq_test_support::NatsServer::start();
-    let scratch = Scratch::new();
+    let mut daemon = PairedDaemon::start();
 
-    // The edge is on by default; an ephemeral port keeps the two
-    // daemon-spawning down goldens from fighting over the fixed
-    // default bind when they run in parallel.
-    let daemon_config = scratch.cache().join("fq.toml");
-    std::fs::write(&daemon_config, "[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
-
-    let log_path = scratch.cache().join("daemon.log");
-    let log = std::fs::File::create(&log_path).expect("create daemon log");
-    let log_err = log.try_clone().expect("clone daemon log handle");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fq"))
-        .arg("run")
-        .env("FQ_CONFIG", &daemon_config)
-        .env("FQ_NATS_URL", server.url())
-        .env("FQ_CACHE_DIR", scratch.cache())
-        .env("FQ_STATE_DIR", scratch.state())
-        .env("FQ_AGENTS_DIR", scratch.agents())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fq run");
-
-    // Wait for steady state; fail loudly if the daemon dies on startup.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut ready = false;
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().expect("poll fq run") {
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
-        }
-        if std::fs::read_to_string(&log_path)
-            .unwrap_or_default()
-            .contains("Runtime ready")
-        {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(ready, "daemon never reached 'Runtime ready' within 30s");
-
-    let (exit, stdout, stderr) = run_fq(&scratch, server.url(), down_args);
+    let (exit, stdout, stderr) = daemon.run_fq(down_args);
 
     // The daemon must exit on its own before the snapshot is trusted.
-    let daemon_deadline = Instant::now() + Duration::from_secs(15);
-    let daemon_status = loop {
-        match child.try_wait().expect("poll fq run") {
-            Some(status) => break status,
-            None => {
-                if Instant::now() >= daemon_deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("daemon did not exit within 15s of `fq {down_args:?}`");
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
-    };
-    assert!(
-        daemon_status.success(),
-        "daemon exit was not clean: {daemon_status:?}"
-    );
+    let status = daemon
+        .wait_for_exit(Duration::from_secs(15))
+        .unwrap_or_else(|| panic!("daemon did not exit within 15s of `fq {down_args:?}`"));
+    assert!(status.success(), "daemon exit was not clean: {status:?}");
     assert_eq!(exit, Some(0), "down should exit 0; stderr:\n{stderr}");
-    assert_golden(golden_name, &redact(&stdout, &scratch, server.url(), &[]));
+    assert_golden(golden_name, &daemon.redact(&stdout));
 }
 
 #[cfg(unix)]

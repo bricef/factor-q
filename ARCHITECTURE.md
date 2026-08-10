@@ -133,8 +133,10 @@ Two JetStream streams:
   event trail: agent lifecycle events plus system lifecycle events
   (startup, shutdown, task failure).
 - **`fq-triggers`** — subject `fq.trigger.>`, Limits retention
-  (24 hours). Holds pending agent triggers published via
-  `fq trigger --via-nats`.
+  (24 hours). Holds pending agent triggers. The daemon publishes them,
+  on its own behalf for `fq trigger` (the `trigger.publish` command) and
+  for the first-party adapters that write the subject directly under the
+  trigger wire contract.
 
 `EventBus::connect()` ensures both streams exist on startup.
 Publishing awaits the JetStream ack. Subscription uses core NATS
@@ -273,7 +275,7 @@ that serves it, and `run_daemon`. `bin/fq.rs` and `bin/fqd.rs` are shims.
 |---|---|
 | `fq init` | Scaffold a project from embedded templates |
 | `fq run` | Long-running daemon (projection + dispatcher) |
-| `fq trigger` | In-process execution or `--via-nats` publish |
+| `fq trigger` | `trigger.publish` over the edge — the daemon queues the work on `fq-triggers` and its dispatcher runs it. In-process execution is retired (D-1) |
 | `fq agent list/validate` | Registry inspection |
 | `fq events tail` | Live event stream |
 | `fq events query` | Historical query — `event.list` over the edge, answered from the daemon's projection index (no payloads; the `event-id` column is the identity `fq events get` takes, printed in full so the walk is one copy-paste) |
