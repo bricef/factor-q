@@ -593,7 +593,7 @@ Supersedes the `worker.prune` clauses of D3 and of the Consequences.
 Everything else in both stands, including the principle they were
 arguing for.
 
-### What changes
+### What changes in D3 and the Consequences
 
 D3 lists `worker.prune` among the **Domain commands** and says of it:
 *"Where a handler must also touch coordination state (prune's stale-row
@@ -609,7 +609,7 @@ The other two boundary-bypassing paths resolve as written: in-process
 `fq trigger` retires (D-1), `agent.list` answers from the daemon's
 registry.
 
-### Why
+### Why retirement rather than an evented command
 
 This ADR diagnosed prune correctly and prescribed the wrong cure. The
 defect it named — a CLI-side store write that mutated coordination
