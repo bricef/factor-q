@@ -2,15 +2,23 @@
 
 ## Status
 
-Committed (2026-07-07). Documents the **trigger transport as a stable,
-language-agnostic public interface**, so an external trigger source — in any
-language — can trigger a factor-q agent without depending on `fq-runtime`'s
-Rust types. This is the boundary an external *trigger adapter* is built
-against; its first consumer is the Go `github-watcher`
+Committed (2026-07-07). Documents the trigger transport as a **language-agnostic
+internal SPI for co-located, first-party adapters**, so an adapter written
+outside the Rust workspace can trigger a factor-q agent without depending on
+`fq-runtime`'s Rust types. Its first consumer is the Go `github-watcher`
 ([`adapters/github-watcher`](../../../adapters/github-watcher/)). It describes
 existing behaviour (`EventBus::publish_trigger` and the trigger dispatcher);
 this doc makes that behaviour a contract rather than an implementation
 detail.
+
+It is **not a public interface for arbitrary external callers**, and has not
+been one since [ADR-0006](../../adrs/accepted/0006-registry-first-api.md)'s D8
+was accepted on 2026-07-20: the bus is internal infrastructure, and remote
+ingress goes through `trigger.publish` on the authenticated edge. This
+paragraph claimed otherwise until 2026-08-13 (#457). Only the framing was
+wrong — every mechanical detail below was accurate throughout, and a reader
+who built against the contract rather than the preamble built the right
+thing.
 
 Related: [event schema](event-schema.md) (the *event* wire format, a separate
 contract).
@@ -29,12 +37,17 @@ the runtime can make them.
 
 ## Why this exists
 
-An external adapter that reused `fq-runtime`'s `EventBus` and payload types
-would be coupled to the runtime's *internals* — an "external" component bound
-to internal Rust. A wire contract makes the boundary a construction, not a
-convention (design principle 3, applied to integrations): a different-language
-adapter can only ever use what is written here. This contract is therefore
-also the seed of a trigger-source SDK.
+An adapter that reused `fq-runtime`'s `EventBus` and payload types would be
+coupled to the runtime's *internals* — a separately built, separately deployed
+component bound to internal Rust. A wire contract makes the boundary a
+construction, not a convention (design principle 3, applied to integrations):
+a different-language adapter can only ever use what is written here.
+
+Note what that argument is and is not. It is about **language** coupling, and
+it holds for a first-party adapter exactly as it did when this was framed as a
+public interface. It is not an argument about trust: writing here does not
+make a publisher external, and the contract carries no authentication, which
+is why the direction above sends new adapters to the edge instead.
 
 ## The contract
 
