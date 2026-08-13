@@ -1276,12 +1276,151 @@
     }
   },
   {
+    "atom": {
+      "description": "`trigger_id` is a Trigger's identity — the UUIDv7 the runtime minted when it published the trigger, or the one an inbound `Fq-Trigger-Id` header supplied. It is what `trigger.publish` hands back in its receipt, and handing that key here unchanged is the whole walk. TRIGGERS ARE KEPT INDEFINITELY, PAYLOADS INCLUDED: the record lives in the projection and the retention sweep never reaches it, so a trigger outlives both the trigger stream (24h) and the event log (30 days). All three verbs answer from that one record, so there is no window in which a trigger lists and then cannot be fetched. LIST DOES NOT RETURN PAYLOADS. It answers with index rows — identity, agent, when the trigger was recorded, and how the runtime came by it — most recently recorded first, and every row carries the identity that reads the whole trigger back through `trigger.get`. Get and Stream answer with the whole Trigger, payload included. The split is not cosmetic: an accepted payload may be up to 512 KiB and one answer is one 8 MiB frame, so a page of whole triggers is a page that can fail to encode. LIST AND STREAM SELECT THE SAME TRIGGERS FOR THE SAME FILTER, from the same store — they differ in shape and in order, not in population. List is newest-first and paged; Stream is sequence-ordered and cursored, long-polling via next_batch, with `from_seq = u64::MAX` seeking the tail of the recorded triggers (not of the event log, which runs ahead of what has been recorded). A trigger whose record arrived without a log position lists and gets but never streams: a cursor is the one thing it has no honest value for. A trigger with NO DURABLE RECORD answers `Unlocatable`, never `not found` — a queued trigger nothing has dispatched yet is real and will resolve, and saying `no such trigger` about the name a receipt just issued would be a lie. The same answer covers a record written before triggers were kept (forward-only, so it can never be found by id) and an id that names nothing; the message names all three, because a primary-key lookup cannot tell them apart.",
+      "domain": "trigger",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List/Stream selection for Triggers — the typed, schema'd filter,\nnever a query language.\n\n**Two axes, and they are the two the record actually has.** A\ntrigger's permanent row carries its identity, its agent, when it was\nrecorded, its source, its subject and its payload. Of those, agent\nand time are what an operator narrows by and what the table is\nindexed on (`idx_triggers_agent_time`, `idx_triggers_time`). Source\nis a closed three-valued set that nobody has asked to filter by, and\npayload is opaque JSON the runtime must not interpret — narrowing by\nit would be the query language this is deliberately not. A filter is\na promise the surface has to keep, so it grows when a caller needs\nit (P11), not when a column looks plausible.",
+        "properties": {
+          "agent": {
+            "default": null,
+            "description": "One agent's triggers. Absent reads every agent's.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Cap on one List page — the most recently recorded N matching\ntriggers, and at most 500 of them (this property's `maximum`).\nAbsent asks for the default 50.\n\n**A larger N is refused, never quietly shrunk.** So the count\nthat comes back is always the one you asked for or the whole\nanswer: fewer rows than you asked for means there are no more;\nexactly as many means there may be. For more than a page,\nnarrow (`agent`, `since`) or read `trigger.stream`, which is\ncursored and selects the same triggers for the same filter.\n\nIgnored by Stream, which is cursored rather than paged.",
+            "format": "uint32",
+            "maximum": 500,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "since": {
+            "default": null,
+            "description": "Only triggers recorded at or after this RFC3339 instant.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "TriggerFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$defs": {
+          "TriggerSource": {
+            "enum": [
+              "manual",
+              "subject",
+              "schedule"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One trigger as `trigger.list` hands it back: the Trigger atom's\n**index** row.\n\n**It carries no payload, deliberately.** A payload is opaque JSON a\nproducer chose, bounded only by [`MAX_TRIGGER_PAYLOAD_BYTES`], and\none List answer is one 8 MiB frame — so a page of whole triggers is\na page that can fail to encode. The split is what\n`fq_ops::Atom::with_index` exists for, and the rule that makes it\nsafe is kept here: **the row carries the identity Get takes**, so\nany row walks to the whole trigger through `trigger.get`.\n\nEverything on it is bounded: two ids, an instant, and a source drawn\nfrom a closed set.",
+        "properties": {
+          "agent_id": {
+            "description": "The agent the trigger was for.",
+            "type": "string"
+          },
+          "recorded_at": {
+            "description": "When the record that named this trigger was written, RFC3339.\nNot when it was published: publishing appends nothing durable,\nso the first moment a trigger is a recorded fact is the moment\nsomething acted on it.",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/TriggerSource",
+            "description": "How the runtime came by it: `manual` | `subject` | `schedule`."
+          },
+          "trigger_id": {
+            "description": "The identity — hand this to `trigger.get` unchanged.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger_id",
+          "agent_id",
+          "recorded_at",
+          "source"
+        ],
+        "title": "TriggerView",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for a Trigger: the `trigger_id` the runtime minted (or\nhonoured) when it took responsibility for the trigger — a UUIDv7 in\ncanonical hyphenated text, and the `triggers` table's primary key.\n\nThis is the shape `trigger.publish`'s receipt hands back, verbatim.",
+        "properties": {
+          "trigger_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger_id"
+        ],
+        "title": "TriggerKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "TriggerSource": {
+            "enum": [
+              "manual",
+              "subject",
+              "schedule"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One trigger, named — the request an invocation answers.\n\nThis is the value the control-plane hands a worker; the worker\nrecords [`Trigger::id`] on the invocation's `triggered` event, which\nis what finally lets a reader say *this invocation came from that\ntrigger* rather than inferring it from matching content.\n\nIt is also the Trigger atom's **state** — what `trigger.get` and\n`trigger.stream` answer with, whole. Not a wrapper around it with a\nlog position bolted on, as [`crate::dead_letter::DeadLetterState`]\nand `EventState` are: those atoms are addressed by position and this\none is addressed by name, which is the entire point of the identity\nlanding first.",
+        "properties": {
+          "id": {
+            "description": "The trigger's identity: a UUIDv7, like every other identity the\nruntime mints (`event_id`, `invocation_id`). Time-sortable, so\nids order the way the triggers did.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`Uuid` would need schemars' uuid integration — a wider change\nthan this atom ([`crate::dead_letter::DeadLetter`] made the same\ncall for its chrono timestamp).",
+            "type": "string"
+          },
+          "payload": {
+            "description": "The trigger body, verbatim — an opaque JSON value the target\nagent interprets (wire contract §The payload)."
+          },
+          "source": {
+            "$ref": "#/$defs/TriggerSource",
+            "description": "How the runtime came by this trigger."
+          },
+          "subject": {
+            "description": "The subject it arrived on, when it arrived on one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "payload"
+        ],
+        "title": "Trigger",
+        "type": "object"
+      },
+      "summary": "One request to run an agent, as the runtime recorded it.",
+      "version": 1
+    }
+  },
+  {
     "command": {
       "authority": {
         "scope": "trigger",
         "verb": "write"
       },
-      "description": "At-least-once delivery with a bounded budget: the trigger is durable when this answers, and a delivery that keeps failing is dead-lettered (`fq dead-letters list`) rather than retried forever. The answer means accepted, not run — an agent this daemon does not have is a dead letter, not a refusal here. Appends no atom: a queued trigger is consumed rather than kept, so there is nothing to name; the invocation it becomes is.",
+      "description": "At-least-once delivery with a bounded budget: the trigger is durable when this answers, and a delivery that keeps failing is dead-lettered (`fq dead-letters list`) rather than retried forever. The answer means accepted, not run — an agent this daemon does not have is a dead letter, not a refusal here. THE RECEIPT NAMES THE TRIGGER: its `AtomRef` carries `{\"trigger_id\": \"…\"}`, which is exactly the key `trigger.get` takes, so a publish walks to the thing it published. The receipt's watermark is the trigger's sequence on the TRIGGER stream, which is a different log from the event stream every other watermark on this surface speaks: it is what `fq dead-letters` reconciles on, and it is NOT a `min_seq` for reading the trigger back. Publishing appends no durable record — the record appears when a worker consumes the trigger — so there is no position a read-your-writes gate could wait for, and `trigger.get` answers `Unlocatable` until then. THE PAYLOAD IS BOUNDED AT 512 KiB (524288 bytes of JSON body), and a larger one is REFUSED, never truncated — a truncated payload is a different task, and an agent handed one would do the wrong work while every record said it did the right work. The bound exists because a trigger is kept indefinitely: 512 KiB is roughly sixteen hundred times a real task payload, sixteen times under the edge's 8 MiB frame so `trigger.get` can always answer with the whole thing, and half a stock broker's default max_payload so an accepted trigger is never one the transport then refuses.",
       "domain": "trigger",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1292,7 +1431,7 @@
           },
           "payload": {
             "default": null,
-            "description": "The trigger body, verbatim. Any JSON: agents receive it as the\nuser message their run opens with."
+            "description": "The trigger body, verbatim. Any JSON: agents receive it as the\nuser message their run opens with. Bounded at\n[`fq_runtime::trigger::MAX_TRIGGER_PAYLOAD_BYTES`] — see the\ncommand's description."
           }
         },
         "required": [

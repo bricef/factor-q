@@ -655,7 +655,7 @@ pub struct InvocationDetailView {
 /// Cheap to construct relative to the queries it serves; a caller can hold
 /// one for the lifetime of a request loop.
 pub struct Views {
-    projection: ProjectionStore,
+    pub(crate) projection: ProjectionStore, // read by `crate::trigger`'s Views block
     control_plane: ControlPlaneStore,
     worker: WorkerStore,
     /// The projection consumer's progress, when one runs in this

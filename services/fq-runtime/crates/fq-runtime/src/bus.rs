@@ -169,6 +169,17 @@ pub enum BusError {
     /// nor poisons the archive-retry sweep. See issue #4.
     #[error("event payload of {size} bytes exceeds NATS max_payload of {limit} bytes")]
     PayloadTooLarge { size: usize, limit: usize },
+
+    /// The trigger body exceeds
+    /// [`crate::trigger::MAX_TRIGGER_PAYLOAD_BYTES`]. A domain limit,
+    /// not the broker's: a trigger is retained indefinitely, so the
+    /// ceiling is on what is *accepted* rather than on what the wire
+    /// happens to carry. Refused before publishing, so an oversized
+    /// trigger never reaches the stream and never becomes a record.
+    #[error(
+        "trigger payload of {size} bytes exceeds the {limit}-byte limit on an accepted trigger"
+    )]
+    TriggerPayloadTooLarge { size: usize, limit: usize },
 }
 
 impl From<async_nats::jetstream::context::CreateStreamError> for BusError {

@@ -46,6 +46,40 @@ CREATE TABLE IF NOT EXISTS invocation_summary (
     kind            TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
+
+-- A trigger's permanent home. Projected from the two events that name
+-- one (see `Trigger::from_event`) and, unlike `events`, NEVER SWEPT: a
+-- trigger is a key domain event and its retention is indefinite. The
+-- exemption is structural rather than a predicate -- `sweep_events`
+-- only ever deletes from `events` -- which is the same way
+-- `invocation_summary` above survives, and the same intent as the
+-- `total_cost IS NOT NULL` exemption that keeps spend after its log has
+-- aged out.
+--
+-- `payload` holds the trigger body verbatim, so a Get needs no second
+-- hop and nothing can be listed and then found missing. It is bounded
+-- at accept time by `MAX_TRIGGER_PAYLOAD_BYTES`. THE SEAM: when the CAS
+-- object store lands, this column becomes a content address and the
+-- body moves there -- the row shape and every query below are otherwise
+-- unchanged, because nothing here reads inside the payload.
+--
+-- `seq` is the log position of the record that named the trigger -- the
+-- universal cursor (P5), what `trigger.stream` resumes from. NULL when
+-- the delivery carried no JetStream metadata. (No semicolons in these
+-- comments -- the schema runner splits statements on them.)
+CREATE TABLE IF NOT EXISTS triggers (
+    trigger_id      TEXT PRIMARY KEY,
+    recorded_at     TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    subject         TEXT,
+    payload         TEXT NOT NULL,
+    seq             INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_triggers_agent_time ON triggers(agent_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_triggers_time ON triggers(recorded_at);
+CREATE INDEX IF NOT EXISTS idx_triggers_seq ON triggers(seq);
 "#;
 
 /// The columns `events` has gained since its first shape.
@@ -153,11 +187,23 @@ impl ProjectionStore {
             return Err(StoreError::NotInitialised(path.to_path_buf()));
         }
 
-        let missing: Vec<&str> = ADDED_EVENT_COLUMNS
+        let mut missing: Vec<&str> = ADDED_EVENT_COLUMNS
             .iter()
             .map(|(column, _)| *column)
             .filter(|column| !columns.iter().any(|have| have == column))
             .collect();
+        // A table rather than a column, checked in the same breath and
+        // for the same reason: `trigger.get` selects from it, so a
+        // handle that cannot migrate must name the upgrade it needs
+        // instead of letting SQLite report an unknown table from SQL
+        // the operator never wrote.
+        let triggers: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('triggers')")
+                .fetch_all(&self.pool)
+                .await?;
+        if triggers.is_empty() {
+            missing.push("the triggers table");
+        }
         if !missing.is_empty() {
             return Err(StoreError::SchemaOutdated {
                 path: path.to_path_buf(),

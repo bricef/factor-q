@@ -15,6 +15,18 @@ detail.
 Related: [event schema](event-schema.md) (the *event* wire format, a separate
 contract).
 
+**Direction (2026-08-13): the edge, not the broker.** Publishing straight to
+`fq.trigger.*` is **deprecated** in favour of `trigger.publish` on the
+authenticated edge. ADR-0006 (D8, and Appendix C) settles that NATS is
+factor-q's internal event bus and coordination substrate rather than a public
+interface, and a trigger is the last write that still arrives on it from
+outside. Nothing described below has been removed and nothing stops working:
+the Go adapters publish this way today and continue to. What changes is where
+new work goes — an adapter written from here on should target the edge, and
+guarantees the runtime makes about a trigger (see [Payload
+size](#payload-size)) are made at `trigger.publish`, which is the only place
+the runtime can make them.
+
 ## Why this exists
 
 An external adapter that reused `fq-runtime`'s `EventBus` and payload types
@@ -74,6 +86,12 @@ Downstream, the identity appears on the invocation's `triggered` event as
 an invocation to the trigger that caused it, and on the dead-letter
 event's `trigger_id` annotation when a trigger exhausts its deliveries.
 
+It is also the identity the operator surface knows a trigger by: `trigger.get`
+takes it, `trigger.publish` returns it in its receipt, and the record it
+resolves — source, subject and payload — is retained indefinitely. A trigger
+the runtime has not yet acted on has no record and reads as such, distinctly
+from an id that names nothing.
+
 ### The payload
 
 The message body is the JSON-serialised trigger payload — an **opaque JSON
@@ -85,6 +103,30 @@ rules:
 - An **empty body** is treated as JSON `null`.
 - A body that is **not valid JSON is dropped** (acked and discarded, with a
   warning) — it never reaches an agent.
+
+### Payload size
+
+**A trigger accepted through `trigger.publish` is at most 512 KiB (524,288
+bytes) of JSON body.** A larger one is *refused* — never truncated, because a
+shortened payload is a different task and the agent would run it as though it
+were the original. The refusal names the limit and the actual size, so the next
+attempt is an edit rather than a guess.
+
+The limit exists because a trigger is now **retained indefinitely**: its
+payload is kept in the runtime's projection long after both this stream (24h)
+and the event log (30 days) have aged past it, and unbounded retention of an
+unbounded field is the one combination that needs a ceiling. 512 KiB is roughly
+sixteen hundred times a real task payload, sixteen times under the 8 MiB frame
+one `trigger.get` answer has to fit inside, and half a stock `nats-server`'s
+default `max_payload`, so an accepted trigger is never one the transport then
+refuses.
+
+**This is a property of `trigger.publish`, not a rule this stream enforces.**
+A producer publishing straight to `fq.trigger.*` — the deprecated path — is
+bounded only by the broker's own `max_payload`, and gets a publish-ack failure
+rather than a named refusal if it exceeds it. That asymmetry is one more reason
+to move to the edge; it is not a gap the runtime intends to close on the
+broker side.
 
 ### Task-oriented payload convention
 
@@ -155,3 +197,10 @@ is optional on the producing side and the body is untouched, so every
 producer written against the earlier contract keeps working unchanged and
 un-recompiled. Header names are part of this contract from here on — a
 future header follows the same rule, and the payload stays opaque.
+
+The transport described here is **deprecated but supported** as of 2026-08-13
+(see [Status](#status)). Deprecated means no new guarantees are added to it —
+the payload limit above is the first one made at `trigger.publish` and not
+here, and later ones will follow it — and that new adapters should target the
+edge. It does not mean scheduled removal: a date, and a migration for the
+existing adapters, are separate decisions not taken here.
