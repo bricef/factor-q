@@ -375,6 +375,7 @@ fn cost_view(agent: &str, calls: i64, cost: f64) -> CostView {
         total_cache_read_tokens: 0,
         total_cache_write_tokens: 0,
         invocation_count: 1,
+        framework_cost: 0.0,
     }
 }
 
@@ -385,6 +386,7 @@ fn cost_report(agents: Vec<CostView>) -> CostReport {
         total_output_tokens: agents.iter().map(|a| a.total_output_tokens).sum(),
         total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
         total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
+        framework_cost: agents.iter().map(|a| a.framework_cost).sum(),
         agents,
         buckets: vec![],
         models: vec![],

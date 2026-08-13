@@ -45,5 +45,17 @@ pub(crate) async fn show_costs(
     }
     println!();
     println!("Total across all agents: ${:.6}", report.total_cost);
+    // The total and the per-invocation figures an operator sees
+    // elsewhere do not match, and that is correct: summariser spend is
+    // the engine's, charged to no invocation (#466). Print the identity
+    // rather than leave the difference to be discovered and filed as a
+    // bug — a remainder that is named reconciles, one that is merely
+    // absent is a support question.
+    println!(
+        "  invocations ${:.6} + framework ${:.6}",
+        report.total_cost - report.framework_cost,
+        report.framework_cost
+    );
+    println!("  framework = engine spend (invocation summaries), charged to no invocation");
     Ok(())
 }

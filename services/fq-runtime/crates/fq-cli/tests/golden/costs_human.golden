@@ -1,5 +1,8 @@
 agent                          events     input_tokens   output_tokens  cache_read     cache_write    total_cost
 researcher                     1          1200           340            0              0              $0.012500
 fixer                          2          2400           680            0              0              $0.003800
+summary                        1          400            20             0              0              $0.000900
 
-Total across all agents: $0.016300
+Total across all agents: $0.017200
+  invocations $0.016300 + framework $0.000900
+  framework = engine spend (invocation summaries), charged to no invocation

@@ -144,6 +144,18 @@
     "duration_ms": null
   },
   {
+    "event_id": "00000000-0000-7000-8000-000000001010",
+    "timestamp": "2026-01-02T03:04:11+00:00",
+    "agent_id": "summary",
+    "invocation_id": "1c000000-0000-7000-8000-000000000001",
+    "event_type": "invocation_summary",
+    "model": "cheap-model",
+    "total_cost": 0.0009,
+    "error_kind": null,
+    "error_message": null,
+    "duration_ms": null
+  },
+  {
     "event_id": "00000000-0000-7000-8000-000000001003",
     "timestamp": "2026-01-02T03:04:10+00:00",
     "agent_id": "researcher",

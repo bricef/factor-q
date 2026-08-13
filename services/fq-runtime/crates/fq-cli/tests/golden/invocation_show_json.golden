@@ -52,7 +52,7 @@
     }
   ],
   "has_transcript": true,
-  "summary": null,
+  "summary": "Fixture run finished clean.",
   "cost": {
     "invocation_id": "1c000000-0000-7000-8000-000000000001",
     "started_at_ms": 1767323046000,

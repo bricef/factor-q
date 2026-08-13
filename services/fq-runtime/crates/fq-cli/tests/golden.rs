@@ -205,6 +205,41 @@ fn llm_failure(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost: 
     .with_cost(cost(seq, total_cost, total_cost))
 }
 
+/// The summariser's own call (#216): published under the reserved
+/// `summary` agent id, bound by `invocation_id` to the invocation it
+/// describes, costed on the envelope exactly like a response, and run
+/// on a cheaper model than the agents.
+///
+/// The fixture carries one so `fq costs` is pinned against the
+/// allocation rule (#466) rather than against a fleet that never pays
+/// for its own framework: this spend belongs in every aggregate the
+/// report shows and against no invocation in it.
+fn invocation_summary(invocation: &str, seq: u32, at_ms: i64, total_cost: f64) -> Event {
+    let payload = EventPayload::InvocationSummary(fq_runtime::events::InvocationSummaryPayload {
+        kind: fq_runtime::events::SummaryKind::Outcome,
+        summary: "Fixture run finished clean.".into(),
+    });
+    stamp(
+        Event::new(AgentId::summary(), inv(invocation), payload),
+        seq,
+        at_ms,
+    )
+    .with_cost(CostMetadata {
+        call_id: fixed_uuid(seq),
+        model: "cheap-model".into(),
+        input_tokens: 400,
+        output_tokens: 20,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        input_cost: total_cost * 0.8,
+        output_cost: total_cost * 0.2,
+        total_cost,
+        cumulative_invocation_cost: total_cost,
+        cumulative_agent_cost: total_cost,
+        origin: LlmCallOrigin::AgentTurn,
+    })
+}
+
 fn state_row(
     invocation: &str,
     agent: &str,
@@ -285,6 +320,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             6,
             base_ms + 12_000,
         ),
+        invocation_summary(INV_COMPLETED, 10, base_ms + 6_000, 0.000_9),
         triggered(AGENT_RESEARCHER, INV_INFLIGHT, 7, base_ms + 20_000),
         triggered(AGENT_FIXER, INV_ARCHIVED, 8, base_ms + 30_000),
     ] {

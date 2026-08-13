@@ -18,6 +18,10 @@
 //! DB-backed counts from here with a NATS probe at the daemon layer; it lands
 //! with the tarpc service, not here.
 
+// The cost reads, and the allocation rule (#466) that decides which of
+// them count spend the engine owes to no invocation.
+mod costs;
+
 // The conversation reads — payload-bearing, WAL-backed, and the only
 // reads here that are not header folds.
 mod transcript;
@@ -406,6 +410,16 @@ pub struct CostView {
     pub total_cache_write_tokens: i64,
     /// Distinct invocations behind the aggregate.
     pub invocation_count: i64,
+    /// The part of `total_cost` that belongs to no invocation: spend
+    /// the engine incurred on this agent's behalf, which today means
+    /// the summariser (#216). In the total because it is real money,
+    /// named here because every per-invocation view excludes it
+    /// (#466) — `total_cost - framework_cost` is what those views
+    /// account for. Zero for an ordinary agent; the whole row for the
+    /// reserved `summary` agent, whose drill-down therefore shows
+    /// spend and no invocations by design.
+    #[serde(default)]
+    pub framework_cost: f64,
 }
 
 impl From<CostSummary> for CostView {
@@ -419,6 +433,7 @@ impl From<CostSummary> for CostView {
             total_cache_read_tokens: r.total_cache_read_tokens,
             total_cache_write_tokens: r.total_cache_write_tokens,
             invocation_count: r.invocation_count,
+            framework_cost: r.framework_cost,
         }
     }
 }
@@ -488,7 +503,8 @@ pub struct AgentCostDetailView {
     /// Biggest spender first.
     pub models: Vec<ModelCostView>,
     /// Newest first, capped by the caller's limit;
-    /// `totals.invocation_count` carries the uncapped count.
+    /// `totals.invocation_count` carries the uncapped count. Sums to
+    /// `totals.total_cost - totals.framework_cost` when uncapped.
     pub invocations: Vec<InvocationCostView>,
 }
 
@@ -527,6 +543,13 @@ pub struct CostReport {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
+    /// The unallocated remainder of `total_cost`, summed over
+    /// `agents`: engine spend that no invocation caused (#466). Named
+    /// on the report so an operator reads `total = invocations +
+    /// framework` off the page instead of filing the difference as a
+    /// bug. See [`CostView::framework_cost`].
+    #[serde(default)]
+    pub framework_cost: f64,
 }
 
 /// One terminal-failure bucket, grouped by kind.
@@ -752,79 +775,6 @@ impl Views {
         };
         let rows = self.projection.query_events(&filter, limit).await?;
         Ok(rows.into_iter().map(EventView::from).collect())
-    }
-
-    /// Per-agent cost/token aggregate plus grand totals.
-    pub async fn costs(
-        &self,
-        agent: Option<&str>,
-        since: Option<&str>,
-        hourly_buckets: bool,
-    ) -> Result<CostReport, ViewsError> {
-        let rows = self.projection.cost_summary(agent, since).await?;
-        let mut report = CostReport::default();
-        for r in rows {
-            report.total_cost += r.total_cost;
-            report.total_input_tokens += r.total_input_tokens;
-            report.total_output_tokens += r.total_output_tokens;
-            report.total_cache_read_tokens += r.total_cache_read_tokens;
-            report.total_cache_write_tokens += r.total_cache_write_tokens;
-            report.agents.push(CostView::from(r));
-        }
-        report.models = self
-            .projection
-            .cost_by_model(agent, since)
-            .await?
-            .into_iter()
-            .map(ModelCostView::from)
-            .collect();
-        // The time series ignores the agent filter deliberately: the
-        // chart answers "what is the fleet burning", the agent filter
-        // narrows the tables. Revisit if a per-agent chart is wanted.
-        report.buckets = self
-            .projection
-            .cost_by_time_bucket(hourly_buckets, since)
-            .await?
-            .into_iter()
-            .map(CostBucketView::from)
-            .collect();
-        Ok(report)
-    }
-
-    /// One agent's cost drill-down — totals plus per-model and
-    /// per-invocation breakdowns (invocations newest first, capped at
-    /// `invocation_limit`). `None` when the agent has no cost events
-    /// in the window.
-    pub async fn agent_costs(
-        &self,
-        agent: &str,
-        since: Option<&str>,
-        invocation_limit: i64,
-    ) -> Result<Option<AgentCostDetailView>, ViewsError> {
-        let mut rows = self.projection.cost_summary(Some(agent), since).await?;
-        let Some(totals) = rows.pop() else {
-            return Ok(None);
-        };
-        let models = self
-            .projection
-            .cost_by_model(Some(agent), since)
-            .await?
-            .into_iter()
-            .map(ModelCostView::from)
-            .collect();
-        let invocations = self
-            .projection
-            .cost_by_invocation(agent, since, invocation_limit)
-            .await?
-            .into_iter()
-            .map(InvocationCostView::from)
-            .collect();
-        Ok(Some(AgentCostDetailView {
-            agent_id: agent.to_string(),
-            totals: CostView::from(totals),
-            models,
-            invocations,
-        }))
     }
 
     /// Terminal failures grouped by kind.

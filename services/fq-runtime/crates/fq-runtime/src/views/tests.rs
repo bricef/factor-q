@@ -47,12 +47,17 @@ fn tool_dispatch_row_maps_to_view() {
 
 #[test]
 fn cost_report_totals_across_agents() {
-    // Build a report the way `costs()` does, from two agents.
+    // Build a report the way `costs()` does, from two agents — one of
+    // them the summariser, whose spend is all framework (#466).
     let mut report = CostReport::default();
-    for (agent, cost, ins, outs) in [("a", 1.5_f64, 10_i64, 20_i64), ("b", 2.0, 5, 7)] {
+    for (agent, cost, framework, ins, outs) in [
+        ("a", 1.5_f64, 0.0_f64, 10_i64, 20_i64),
+        (AgentId::SUMMARY_STR, 2.0, 2.0, 5, 7),
+    ] {
         report.total_cost += cost;
         report.total_input_tokens += ins;
         report.total_output_tokens += outs;
+        report.framework_cost += framework;
         report.agents.push(CostView {
             agent_id: agent.into(),
             event_count: 1,
@@ -62,12 +67,16 @@ fn cost_report_totals_across_agents() {
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
             invocation_count: 1,
+            framework_cost: framework,
         });
     }
     assert_eq!(report.agents.len(), 2);
     assert!((report.total_cost - 3.5).abs() < f64::EPSILON);
     assert_eq!(report.total_input_tokens, 15);
     assert_eq!(report.total_output_tokens, 27);
+    // The report carries the unallocated remainder itself, so the
+    // renderer never has to re-derive it from the rows.
+    assert!((report.framework_cost - 2.0).abs() < f64::EPSILON);
 }
 
 /// The RFC3339 projection timestamp becomes epoch ms on the view;

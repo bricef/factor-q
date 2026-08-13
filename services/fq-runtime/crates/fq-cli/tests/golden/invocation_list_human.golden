@@ -2,4 +2,4 @@ invocation  status     agent                    worker                   arch  s
 4e000000    completed  fixer                    fixer                    no    —
 3a000000    in_flight  researcher               researcher               no    —
 2f000000    failed     fixer                    fixer                    no    —
-1c000000    completed  researcher               researcher               no    —
+1c000000    completed  researcher               researcher               no    Fixture run finished clean.

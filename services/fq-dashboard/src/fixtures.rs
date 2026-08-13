@@ -343,6 +343,7 @@ fn cost_report() -> CostReport {
             total_cache_read_tokens: 98_000_000,
             total_cache_write_tokens: 1_200_000,
             invocation_count: 38,
+            framework_cost: 0.0,
         },
         CostView {
             agent_id: "m0-loop".to_string(),
@@ -353,6 +354,7 @@ fn cost_report() -> CostReport {
             total_cache_read_tokens: 5_900_000,
             total_cache_write_tokens: 74_000,
             invocation_count: 6,
+            framework_cost: 0.0,
         },
         CostView {
             agent_id: "doc-drift".to_string(),
@@ -363,6 +365,7 @@ fn cost_report() -> CostReport {
             total_cache_read_tokens: 380_000,
             total_cache_write_tokens: 5_000,
             invocation_count: 15,
+            framework_cost: 0.0,
         },
         // One-shot e2e instances (uuid-suffixed ids): the costs page
         // folds these into per-family rows so they cannot bury the
@@ -376,6 +379,7 @@ fn cost_report() -> CostReport {
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
             invocation_count: 1,
+            framework_cost: 0.0,
         },
         CostView {
             agent_id: "overspender-019f339b43c47822bdff48bec821d815".to_string(),
@@ -386,6 +390,7 @@ fn cost_report() -> CostReport {
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
             invocation_count: 1,
+            framework_cost: 0.0,
         },
         CostView {
             agent_id: "self-inspect-019f339c171373c189d801651bdee8e5".to_string(),
@@ -396,6 +401,7 @@ fn cost_report() -> CostReport {
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
             invocation_count: 1,
+            framework_cost: 0.0,
         },
     ];
     CostReport {
@@ -404,6 +410,7 @@ fn cost_report() -> CostReport {
         total_output_tokens: agents.iter().map(|a| a.total_output_tokens).sum(),
         total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
         total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
+        framework_cost: agents.iter().map(|a| a.framework_cost).sum(),
         agents,
         // A week of daily spend ending at the frozen "now" — the
         // page-top bar chart in the screenshot.
@@ -462,6 +469,7 @@ fn day_cost_report() -> CostReport {
             total_cache_read_tokens: 15_700_000,
             total_cache_write_tokens: 0,
             invocation_count: 3,
+            framework_cost: 0.0,
         },
         CostView {
             agent_id: "doc-drift".to_string(),
@@ -472,6 +480,7 @@ fn day_cost_report() -> CostReport {
             total_cache_read_tokens: 8_200,
             total_cache_write_tokens: 900,
             invocation_count: 1,
+            framework_cost: 0.0,
         },
     ];
     CostReport {
@@ -480,6 +489,7 @@ fn day_cost_report() -> CostReport {
         total_output_tokens: agents.iter().map(|a| a.total_output_tokens).sum(),
         total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
         total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
+        framework_cost: agents.iter().map(|a| a.framework_cost).sum(),
         agents,
         // Unused by the last-24h merge — only per-agent costs are read.
         buckets: vec![],
@@ -513,6 +523,7 @@ fn agent_cost_detail() -> AgentCostDetailView {
             total_cache_read_tokens: 98_000_000,
             total_cache_write_tokens: 1_200_000,
             invocation_count: 38,
+            framework_cost: 0.0,
         },
         models: vec![
             ModelCostView {
