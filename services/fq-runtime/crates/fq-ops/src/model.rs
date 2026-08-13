@@ -203,6 +203,30 @@ impl Receipt {
         }
     }
 
+    /// A receipt that names the atom it appended but claims no
+    /// position for it — "here is what I made; I cannot tell you when
+    /// it will be readable".
+    ///
+    /// For a command whose atom becomes readable through a fold it
+    /// does not itself perform. `trigger.publish` is the case: it puts
+    /// a trigger on the trigger stream and gets that stream's ack back,
+    /// but the trigger becomes gettable only once the projection folds
+    /// the *event* the dispatcher later emits — a position in a
+    /// different log, and one that does not exist yet at publish time.
+    ///
+    /// Recording the ack as this domain's watermark would be worse
+    /// than recording nothing: [`Receipt::watermark`] is documented as
+    /// the number a caller passes as `min_seq`, so a caller composing
+    /// read-your-writes the documented way would gate a read on a
+    /// coordinate from a log the reader never consults. An absent
+    /// watermark makes them ask; a wrong one lets them proceed.
+    pub fn naming(domain: Domain, key: serde_json::Value) -> Self {
+        Receipt {
+            atoms: vec![AtomRef { domain, key }],
+            watermarks: BTreeMap::new(),
+        }
+    }
+
     /// A receipt for a command that appended nothing. It did
     /// something — a command always does — but there is no atom to
     /// point a caller at and no position to wait for.

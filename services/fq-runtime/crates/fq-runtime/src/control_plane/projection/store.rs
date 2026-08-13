@@ -17,6 +17,7 @@ use crate::events::{Event, EventPayload};
 
 mod costs;
 mod schema;
+mod triggers;
 
 // Explicit rather than a glob: the moved row types keep their public
 // paths (`...projection::store::CostSummary`), and naming each one keeps
@@ -96,6 +97,13 @@ impl ProjectionStore {
     /// cost queries read filters on `total_cost IS NOT NULL`, so the
     /// exemption preserves them exactly.
     ///
+    /// **Triggers are exempt too, structurally rather than by
+    /// predicate**: a trigger's record lives in `triggers`, and this
+    /// deletes only from `events`. Same intent as the cost exemption —
+    /// a key domain fact outliving the log it was recorded on — reached
+    /// without a second clause to keep in step. `invocation_summary` is
+    /// untouched for the same reason.
+    ///
     /// Deletes in batches: the first sweep after an upgrade can face
     /// months of backlog, and one unbounded DELETE would hold the
     /// write lock against the projection consumer for the duration.
@@ -173,6 +181,13 @@ impl ProjectionStore {
         .bind(fields.duration_ms)
         .execute(&self.pool)
         .await?;
+
+        // An event that names a trigger additionally writes that
+        // trigger's own permanent record (`triggers`), which the sweep
+        // never reaches — see the module's schema. Same shape as the
+        // summary line below: one event, one row in `events`, and a
+        // second table maintained beside it.
+        self.insert_trigger(event, seq).await?;
 
         // Summary events additionally maintain the per-invocation
         // current line (#216). Last write wins; `Outcome` lines are

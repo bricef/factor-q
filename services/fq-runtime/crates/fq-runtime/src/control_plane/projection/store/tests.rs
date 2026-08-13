@@ -1240,3 +1240,358 @@ async fn read_only_open_reports_an_empty_database_as_uninitialised() {
         "expected NotInitialised, got: {err:?}"
     );
 }
+
+// ============================================================
+// The `triggers` table — a trigger's permanent record.
+// ============================================================
+
+/// A `triggered` event that names its trigger, the way every event
+/// written since the identity landed does.
+fn named_triggered(agent: &str, trigger_id: Uuid, payload: serde_json::Value) -> Event {
+    let mut event = sample_triggered(agent, Uuid::now_v7());
+    if let EventPayload::Triggered(p) = &mut event.payload {
+        p.trigger_id = Some(trigger_id);
+        p.trigger_source = TriggerSource::Subject;
+        p.trigger_subject = Some(crate::bus::trigger_subject(agent));
+        p.trigger_payload = payload;
+    }
+    event
+}
+
+fn at(event: Event, timestamp: &str) -> Event {
+    let mut event = event;
+    event.envelope.timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    event
+}
+
+/// **A trigger comes back whole, payload included, from one lookup.**
+///
+/// That is the property the Trigger atom is built on: the record holds
+/// the payload, so `trigger.get` has no second hop into the log and
+/// therefore no way to answer "I know of it but cannot show it to you".
+#[tokio::test]
+async fn a_recorded_trigger_reads_back_whole() {
+    let (store, _dir) = open_store().await;
+    let id = Uuid::now_v7();
+    let payload = json!({"task": "look at #12", "refs": ["repo/path"]});
+    store
+        .insert_event(&named_triggered("alpha", id, payload.clone()), Some(77))
+        .await
+        .unwrap();
+
+    let trigger = store
+        .trigger(&id.to_string())
+        .await
+        .unwrap()
+        .expect("a recorded trigger");
+    assert_eq!(trigger.id, id);
+    assert_eq!(trigger.payload, payload, "the body is kept verbatim");
+    assert_eq!(trigger.source, TriggerSource::Subject);
+    assert_eq!(trigger.subject.as_deref(), Some("fq.trigger.alpha"));
+    assert_eq!(
+        store.trigger(&Uuid::now_v7().to_string()).await.unwrap(),
+        None,
+        "an id no record names has no trigger — the caller names that state"
+    );
+}
+
+/// An event that names no trigger writes no trigger row. The lens is
+/// the whole rule: `insert_event` runs it, and anything it declines —
+/// an `llm_response`, a pre-identity `triggered` — leaves the permanent
+/// table alone.
+#[tokio::test]
+async fn an_event_that_names_no_trigger_records_none() {
+    let (store, _dir) = open_store().await;
+    // `sample_triggered` predates the identity: `trigger_id` is None.
+    store
+        .insert_event(&sample_triggered("alpha", Uuid::now_v7()), Some(1))
+        .await
+        .unwrap();
+    store
+        .insert_event(&sample_completed("alpha", Uuid::now_v7()), Some(2))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .query_triggers(None, None, 50)
+            .await
+            .unwrap()
+            .is_empty(),
+        "only an event that names a trigger records one"
+    );
+}
+
+/// **The first record wins.** A trigger redelivered N times has one
+/// `triggered` record per delivery, all naming it; the earliest is when
+/// the runtime first took responsibility for it, which is what
+/// `recorded_at` means — and it is also what makes a redelivery to the
+/// projection consumer a no-op rather than a rewrite.
+#[tokio::test]
+async fn a_redelivered_trigger_is_still_one_trigger() {
+    let (store, _dir) = open_store().await;
+    let id = Uuid::now_v7();
+    let first = at(
+        named_triggered("alpha", id, json!({"n": 1})),
+        "2026-01-01T00:00:00Z",
+    );
+    let second = at(
+        named_triggered("alpha", id, json!({"n": 1})),
+        "2026-01-02T00:00:00Z",
+    );
+    store.insert_event(&first, Some(10)).await.unwrap();
+    store.insert_event(&second, Some(20)).await.unwrap();
+
+    let listed = store.query_triggers(None, None, 50).await.unwrap();
+    assert_eq!(listed.len(), 1, "one trigger, however many records of it");
+    assert_eq!(listed[0].recorded_at, "2026-01-01T00:00:00+00:00");
+    // …and the cursor is the first record's too, so a stream that has
+    // already passed it does not hand it back a second time.
+    let streamed = store.triggers_from(None, None, 11, 64).await.unwrap();
+    assert!(
+        streamed.is_empty(),
+        "a redelivery must not re-notify the same trigger; got {streamed:?}"
+    );
+}
+
+/// A dead-lettered trigger is recorded like any other. It may have no
+/// `triggered` event at all — a trigger for an unknown agent never
+/// starts an invocation — so this is the only record it ever gets.
+#[tokio::test]
+async fn a_dead_lettered_trigger_is_recorded() {
+    let (store, _dir) = open_store().await;
+    let id = Uuid::now_v7();
+    let event = Event::new(
+        aid("alpha"),
+        Uuid::now_v7(),
+        EventPayload::Failed(FailedPayload {
+            error_kind: FailureKind::TriggerExhausted,
+            error_message: "trigger exhausted after 5 deliveries (limit 5)".into(),
+            phase: FailurePhase::Setup,
+            partial_totals: InvocationTotals::default(),
+        }),
+    )
+    .annotate(
+        crate::dead_letter::DEAD_LETTER_TRIGGER_ID_KEY,
+        json!(id.to_string()),
+    )
+    .annotate(
+        crate::dead_letter::DEAD_LETTER_SUBJECT_KEY,
+        json!("fq.trigger.alpha"),
+    )
+    .annotate(
+        crate::dead_letter::DEAD_LETTER_PAYLOAD_KEY,
+        json!({"task": "the one that died"}),
+    );
+    store.insert_event(&event, Some(5)).await.unwrap();
+
+    let trigger = store
+        .trigger(&id.to_string())
+        .await
+        .unwrap()
+        .expect("a dead-lettered trigger is still gettable");
+    assert_eq!(trigger.payload, json!({"task": "the one that died"}));
+}
+
+/// **A trigger is kept forever.** The sweep clears the event row that
+/// recorded it — a `triggered` event bears no cost, so nothing exempts
+/// it — and the trigger itself is untouched, because the sweep only
+/// ever deletes from `events`. Same intent as the cost exemption,
+/// reached structurally instead of by a second predicate.
+#[tokio::test]
+async fn the_retention_sweep_never_removes_a_trigger() {
+    let (store, _dir) = open_store().await;
+    let id = Uuid::now_v7();
+    let event = at(
+        named_triggered("alpha", id, json!({"task": "ancient"})),
+        "2020-01-01T00:00:00Z",
+    );
+    store.insert_event(&event, Some(3)).await.unwrap();
+
+    let cutoff = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(
+        store.sweep_events(cutoff).await.unwrap(),
+        1,
+        "the event row is swept, being older than the cutoff and cost-free"
+    );
+    assert_eq!(store.count().await.unwrap(), 0);
+    assert!(
+        store.trigger(&id.to_string()).await.unwrap().is_some(),
+        "the trigger outlives the event that recorded it"
+    );
+}
+
+/// Each declared filter axis narrows, and they compose. The listing is
+/// newest-first and carries no payload — the index/state split the atom
+/// declares.
+#[tokio::test]
+async fn a_listing_honours_each_declared_axis() {
+    let (store, _dir) = open_store().await;
+    let mine_old = Uuid::now_v7();
+    let mine_new = Uuid::now_v7();
+    let theirs = Uuid::now_v7();
+    for (id, agent, ts) in [
+        (mine_old, "alpha", "2026-01-01T00:00:00Z"),
+        (mine_new, "alpha", "2026-03-01T00:00:00Z"),
+        (theirs, "beta", "2026-03-02T00:00:00Z"),
+    ] {
+        store
+            .insert_event(&at(named_triggered(agent, id, json!({})), ts), Some(1))
+            .await
+            .unwrap();
+    }
+    let ids = |rows: Vec<crate::trigger::TriggerView>| {
+        rows.into_iter().map(|r| r.trigger_id).collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        ids(store.query_triggers(None, None, 50).await.unwrap()),
+        vec![
+            theirs.to_string(),
+            mine_new.to_string(),
+            mine_old.to_string()
+        ],
+        "unnarrowed, newest recorded first"
+    );
+    assert_eq!(
+        ids(store.query_triggers(Some("alpha"), None, 50).await.unwrap()),
+        vec![mine_new.to_string(), mine_old.to_string()],
+        "`agent` narrows to one agent's triggers"
+    );
+    assert_eq!(
+        ids(store
+            .query_triggers(None, Some("2026-02-01T00:00:00+00:00"), 50)
+            .await
+            .unwrap()),
+        vec![theirs.to_string(), mine_new.to_string()],
+        "`since` is a lower bound on when the trigger was recorded"
+    );
+    assert_eq!(
+        ids(store
+            .query_triggers(Some("alpha"), Some("2026-02-01T00:00:00+00:00"), 50)
+            .await
+            .unwrap()),
+        vec![mine_new.to_string()],
+        "the two axes compose"
+    );
+    assert_eq!(
+        ids(store.query_triggers(None, None, 1).await.unwrap()),
+        vec![theirs.to_string()],
+        "`limit` is the caller's own bound, applied to the newest"
+    );
+}
+
+/// The stream reads the same population under the same narrowing, in
+/// sequence order — the seam a List/Stream pair composes on — and skips
+/// a record that arrived with no log position, because there is no
+/// cursor it could honestly be handed back at.
+#[tokio::test]
+async fn a_stream_page_is_the_same_population_in_cursor_order() {
+    let (store, _dir) = open_store().await;
+    let (first, second, unpositioned) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    store
+        .insert_event(&named_triggered("alpha", first, json!({"n": 1})), Some(10))
+        .await
+        .unwrap();
+    store
+        .insert_event(&named_triggered("beta", second, json!({"n": 2})), Some(20))
+        .await
+        .unwrap();
+    store
+        .insert_event(&named_triggered("alpha", unpositioned, json!({})), None)
+        .await
+        .unwrap();
+
+    let page = store.triggers_from(None, None, 0, 64).await.unwrap();
+    assert_eq!(
+        page.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+        vec![10, 20],
+        "sequence order, and no row without a position"
+    );
+    assert_eq!(
+        page[0].1.payload,
+        json!({"n": 1}),
+        "a stream item is the whole trigger, payload included"
+    );
+    assert_eq!(
+        store
+            .triggers_from(Some("beta"), None, 0, 64)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the same narrowing applies to the stream"
+    );
+    assert_eq!(
+        store.triggers_from(None, None, 11, 64).await.unwrap().len(),
+        1,
+        "a cursor resumes past what it has already seen"
+    );
+    assert_eq!(
+        store.max_trigger_seq().await.unwrap(),
+        20,
+        "the tail is this population's, not the log's"
+    );
+}
+
+/// **A cursor beyond every sequence answers with nothing, not with
+/// everything.**
+///
+/// `from_seq` arrives as a `u64` straight off the wire and the column
+/// is a SQLite `INTEGER`, so an unguarded `as i64` turns anything above
+/// `i64::MAX` negative — and `seq >= <negative>` matches every row.
+/// The caller would get the *oldest* page back for a cursor from beyond
+/// the end of the log, and a `next_from_seq` far behind the one it
+/// asked with: silent re-delivery plus a cursor that went backwards,
+/// from a value any client can send. The three probes are the boundary
+/// itself and the two sentinels either side of it.
+#[tokio::test]
+async fn a_cursor_past_every_sequence_answers_empty_rather_than_wrapping() {
+    let (store, _dir) = open_store().await;
+    store
+        .insert_event(
+            &named_triggered("alpha", Uuid::now_v7(), json!({"n": 1})),
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.triggers_from(None, None, 10, 64).await.unwrap().len(),
+        1,
+        "the fixture is only interesting if an in-range cursor finds it"
+    );
+    for cursor in [i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
+        assert!(
+            store
+                .triggers_from(None, None, cursor, 64)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a cursor at {cursor} must answer with nothing, not replay the table"
+        );
+    }
+}
+
+/// A read-only handle cannot migrate, so it says which upgrade is
+/// missing rather than letting SQLite report a table nobody asked for.
+#[tokio::test]
+async fn read_only_open_names_a_missing_triggers_table() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    {
+        let writer = ProjectionStore::open(&path).await.unwrap();
+        sqlx::query("DROP TABLE triggers")
+            .execute(&writer.pool)
+            .await
+            .unwrap();
+    }
+    let err = ProjectionStore::open_read_only(&path).await.unwrap_err();
+    assert!(
+        matches!(&err, StoreError::SchemaOutdated { missing, .. }
+            if missing.contains("triggers")),
+        "expected SchemaOutdated naming the table, got: {err:?}"
+    );
+}
