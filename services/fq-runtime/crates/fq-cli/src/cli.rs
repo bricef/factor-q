@@ -320,9 +320,11 @@ pub(crate) enum DeadLetterCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Re-publish a dead-lettered trigger as a fresh trigger.
-    /// Payloads are recoverable only within trigger-stream retention (24 hours by default).
-    /// NOT idempotent: requeueing twice triggers the agent twice.
+    /// Re-run a dead-lettered trigger, once, with a fresh delivery budget.
+    /// Idempotent on the original trigger: asking twice is refused, and the
+    /// refusal names the trigger the first call made.
+    /// A dead letter recorded without a trigger id cannot be requeued — re-run
+    /// it as new work with `fq trigger` instead.
     Requeue {
         /// Agent whose dead letter to requeue
         agent: String,

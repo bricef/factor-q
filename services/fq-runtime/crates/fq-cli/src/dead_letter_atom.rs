@@ -210,9 +210,10 @@ pub(crate) fn register_dead_letter_atom(
          with the most recent `limit` matching dead letters in sequence \
          order, bounded by the tip observed at entry; Stream long-polls via \
          next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail. \
-         Visibility is bounded by event-stream retention (30 days by default); \
-         the trigger payload a requeue needs is bounded by the trigger \
-         stream's, which is shorter.",
+         Visibility is bounded by event-stream retention (30 days by default). \
+         A row carries the trigger's payload, which is what `dead_letter.requeue` \
+         re-publishes — it reads this record and never the trigger stream, so a \
+         dead letter is requeueable for as long as it is listable.",
     );
 
     let get_bus = bus.clone();

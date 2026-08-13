@@ -25,7 +25,8 @@ use crate::trigger::{Trigger, TriggerView};
 
 /// The columns a whole [`Trigger`] is read from, in the order
 /// [`trigger_at`] expects them.
-const TRIGGER_COLUMNS: &str = "trigger_id, recorded_at, agent_id, source, subject, payload";
+const TRIGGER_COLUMNS: &str =
+    "trigger_id, recorded_at, agent_id, source, subject, payload, requeued_from";
 
 /// `TriggerSource` as the row stores it — its serde name, so the
 /// column's vocabulary and the wire's are one vocabulary rather than
@@ -65,11 +66,16 @@ fn trigger_at(row: &sqlx::sqlite::SqliteRow, at: usize) -> Result<Trigger, Store
     };
     let id = uuid::Uuid::parse_str(&raw_id).map_err(|e| corrupt("id", e.to_string()))?;
     let payload: String = row.try_get(at + 5).map_err(column)?;
+    let requeued_from: Option<String> = row.try_get(at + 6).map_err(column)?;
     Ok(Trigger {
         id,
         source: source_from_name(&row.try_get::<String, _>(at + 3).map_err(column)?)?,
         subject: row.try_get::<Option<String>, _>(at + 4).map_err(column)?,
         payload: serde_json::from_str(&payload).map_err(|e| corrupt("payload", e.to_string()))?,
+        requeued_from: requeued_from
+            .map(|raw| uuid::Uuid::parse_str(&raw))
+            .transpose()
+            .map_err(|e| corrupt("requeued_from", e.to_string()))?,
     })
 }
 
@@ -97,13 +103,28 @@ fn narrow(sql: &mut String, agent: Option<&str>, since: Option<&str>, seeded: bo
 impl ProjectionStore {
     /// Record the trigger this event names, if it names one.
     ///
-    /// **First record wins** (`INSERT OR IGNORE`, the same idempotency
-    /// `events` has on `event_id`). A trigger redelivered N times has N
-    /// `triggered` records naming it, all carrying the same source,
-    /// subject and payload; the earliest is the moment the runtime
-    /// first took responsibility for it, which is what `recorded_at`
-    /// means. It is also what makes re-delivery to the projection
-    /// consumer a no-op here, as it already is for `events`.
+    /// **First record wins**, the same idempotency `events` has on
+    /// `event_id`. A trigger redelivered N times has N `triggered`
+    /// records naming it, all carrying the same source, subject and
+    /// payload; the earliest is the moment the runtime first took
+    /// responsibility for it, which is what `recorded_at` means. It is
+    /// also what makes re-delivery to the projection consumer a no-op
+    /// here, as it already is for `events`.
+    ///
+    /// **`seq` is the one exception, and it is not one.** The conflict
+    /// clause fills a NULL position in from a later record, because a
+    /// log position is a fact about the *record*, not about the
+    /// trigger — first-record-wins governs what the trigger IS, and
+    /// nothing here can rewrite that. It exists for the row a requeue
+    /// writes ([`ProjectionStore::reserve_requeue`]): that row is
+    /// created at publish time, before any log record names the
+    /// trigger, so without this the requeued trigger would list and get
+    /// but never appear in `trigger.stream` — a permanent hole in an
+    /// atom whose whole point is that it is kept.
+    ///
+    /// `requeued_from` is deliberately absent from the column list: an
+    /// event never carries lineage (see [`Trigger::requeue_of`]), so
+    /// the only writer of that column is the requeue itself.
     pub(super) async fn insert_trigger(
         &self,
         event: &Event,
@@ -115,9 +136,11 @@ impl ProjectionStore {
         let payload = serde_json::to_string(&trigger.payload)
             .map_err(|e| StoreError::Backend(format!("serialising trigger payload: {e}")))?;
         sqlx::query(
-            "INSERT OR IGNORE INTO triggers
+            "INSERT INTO triggers
                  (trigger_id, recorded_at, agent_id, source, subject, payload, seq)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(trigger_id) DO UPDATE SET seq = excluded.seq
+                 WHERE triggers.seq IS NULL",
         )
         .bind(trigger.id.to_string())
         .bind(event.envelope.timestamp.to_rfc3339())
@@ -132,6 +155,93 @@ impl ProjectionStore {
         .bind(seq.map(|s| s as i64))
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Claim the right to requeue one dead-lettered trigger, by
+    /// writing the requeued trigger's row before it is published.
+    ///
+    /// **This write IS the idempotency check.** `requeued_from` carries
+    /// a UNIQUE index, so at most one row can ever name a given
+    /// original — and SQLite's unique indexes ignore NULLs, so every
+    /// trigger that is not a requeue is unaffected. `Ok(false)` means
+    /// the claim was lost: some earlier call already requeued this dead
+    /// letter, and [`ProjectionStore::requeue_of`] names what it made.
+    ///
+    /// **Reserve first, publish second**, which is the order that makes
+    /// the guarantee hold under a race. Checking and then publishing
+    /// would let two concurrent requeues both read "not yet" and both
+    /// publish, running the agent twice — which is precisely the harm
+    /// the operator asked to be rid of. A failed publish is compensated
+    /// by [`ProjectionStore::release_requeue`]; the residual window (a
+    /// crash between a failed publish and its release) leaves a
+    /// reservation that blocks a re-attempt, which is the safe
+    /// direction to fail in.
+    ///
+    /// The row carries no `seq`: nothing on the log names this trigger
+    /// yet. `insert_trigger` fills the position in when something does.
+    pub async fn reserve_requeue(
+        &self,
+        trigger: &Trigger,
+        agent_id: &str,
+        recorded_at: &str,
+    ) -> Result<bool, StoreError> {
+        let payload = serde_json::to_string(&trigger.payload)
+            .map_err(|e| StoreError::Backend(format!("serialising trigger payload: {e}")))?;
+        let done = sqlx::query(
+            "INSERT OR IGNORE INTO triggers
+                 (trigger_id, recorded_at, agent_id, source, subject, payload, requeued_from)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(trigger.id.to_string())
+        .bind(recorded_at)
+        .bind(agent_id)
+        .bind(source_name(trigger.source))
+        .bind(trigger.subject.clone())
+        .bind(payload)
+        .bind(trigger.requeued_from.map(|id| id.to_string()))
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// The trigger a previous requeue of `original` produced, if one
+    /// did — the reference the second attempt's refusal carries.
+    ///
+    /// Answers the id alone rather than the whole trigger: this runs on
+    /// a refusal path, and reading back a payload that may be half a
+    /// megabyte to quote a name in an error message would make the
+    /// refusal the most expensive thing the command does.
+    pub async fn requeue_of(&self, original: &str) -> Result<Option<uuid::Uuid>, StoreError> {
+        let row: Option<String> =
+            sqlx::query_scalar("SELECT trigger_id FROM triggers WHERE requeued_from = ?")
+                .bind(original)
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(|raw| {
+            uuid::Uuid::parse_str(&raw)
+                .map_err(|e| StoreError::Backend(format!("stored trigger id `{raw}`: {e}")))
+        })
+        .transpose()
+    }
+
+    /// Give back a reservation whose publish never landed.
+    ///
+    /// Scoped to rows that are requeues *of the original named* — the
+    /// only rows this could ever be asked to remove. `triggers` is the
+    /// one table the retention sweep never touches, so a general
+    /// "delete a trigger" would be a hole in that promise; this cannot
+    /// reach a trigger that was recorded rather than reserved.
+    pub async fn release_requeue(
+        &self,
+        trigger_id: uuid::Uuid,
+        requeued_from: uuid::Uuid,
+    ) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM triggers WHERE trigger_id = ? AND requeued_from = ?")
+            .bind(trigger_id.to_string())
+            .bind(requeued_from.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

@@ -39,7 +39,7 @@ exempts inline `#[cfg(test)]` modules.
 | 5 | `fq trigger <agent>` (in-process) | full second execution path: disk registry, WAL write, MCP spawns, real LLM (`CLI:1326-1546`) | none (deliberate) | **retire (D-1)** | n/a |
 | 6 | `fq trigger --via-nats` | NATS publish `fq.trigger.<agent>` | `trigger_via_nats_human` | `trigger.publish` command | enum + fixture exist; not registered |
 | 7 | `fq dead-letters list` | bus + `operator::list_dead_letters` ephemeral scan | `dead_letters_list_*` (**byte-identical**) | `dead_letter.list` atom, keyed on the log sequence | ✅ **DONE 2026-08-06** |
-| 8 | `fq dead-letters requeue` | bus + `operator::requeue_dead_letter` | `dead_letters_requeue_*` | `dead_letter.requeue` command | no enum variant |
+| 8 | `fq dead-letters requeue` | bus + `operator::requeue_dead_letter` | `dead_letters_requeue_*` (**reviewed change** — a receipt carries no state, so the trigger-stream sequence the old lines printed is replaced by the requeued trigger's name and the name of the trigger it re-ran) | `dead_letter.requeue` command, keyed on the original trigger's identity | ✅ **DONE 2026-08-13** |
 | 9 | `fq agent list` | CLI's own disk read (skew vs daemon's live registry) | **created in 4.1** (none existed) | `agent.list` view | ✅ **DONE 2026-08-01** |
 | 10 | `fq agent validate` | local file parse | — | stays local | n/a |
 | 11 | `fq events tail` | core-NATS subscribe, silent-drop, non-resumable | **created in 4.2** (none existed) | `event.stream` atom | ✅ **DONE 2026-08-05** |
@@ -293,8 +293,9 @@ looking.
 7. `dead_letter` atom (`dead_letter.list`) + verb 7 flip.
 
 **4.3 — commands** *(each needs its enum variant; resume's model
-amendment landed 2026-08-05 — see section C)* — items 8, 9, 10 and 14
-**done**; 11 and 13 are their own flips; **12 is blocked, see below**.
+amendment landed 2026-08-05 — see section C)* — items 8, 9, 10 and 11
+**done**, 14 done but for one subject; 13 is its own flip; **12 is
+retired, see below**.
 8. `trigger.publish` + verb 6 flip. **Its receipt is empty, and that is
    the finding**: a trigger has no identity to name. The wire contract
    makes the message body the payload itself — opaque, written directly
@@ -306,7 +307,39 @@ amendment landed 2026-08-05 — see section C)* — items 8, 9, 10 and 14
    deploy script's exit contract (hazard H3).
 10. `control.reload` (+ `Control::Reload` variant) + verb 3 flip —
     gains an ack the fire-and-forget path never had.
-11. `dead_letter.requeue` (+ enum variant) + verb 8 flip.
+11. `dead_letter.requeue` (+ `DeadLetter::Requeue` variant) + verb 8
+    flip — **done 2026-08-13**, and the design question 4.3 deferred is
+    what unblocked it. It was held because a receipt names atoms by
+    identity while `Domain::DeadLetter` has none (#464, still open).
+    It does not need one: **what a requeue produces is a trigger**, and
+    triggers are named (step A) and permanently recorded (step B), so
+    the command keys on the original's `trigger_id` — which the dead
+    letter carries — and its receipt names a **Trigger**. A reference
+    in a different domain from the verb is what was actually happening;
+    the model now says so.
+
+    It became idempotent in the same change, which is what the flip
+    bought: the record is a `requeued_from` column on the requeued
+    trigger's row, uniquely indexed, written *before* the publish so
+    the claim and the check are one write. A second requeue is refused
+    with a `Conflict` naming the trigger the first one made. A dead
+    letter carrying no `trigger_id` is refused (`Unlocatable`) rather
+    than requeued without the guarantee.
+
+    Two smaller findings, recorded because both were load-bearing:
+    - **The trigger-stream fallback did not survive, and nothing
+      replaced it.** It existed for a dead letter whose
+      `trigger_subject` was empty — the advisory path failing to read
+      the original off the stream — which is the same branch that
+      records no `trigger_id`. Keyed on the identity, that dead letter
+      is refused before a payload is needed, so the fallback's only
+      case became unreachable. The payload has one source: the dead
+      letter's own record of the trigger.
+    - **The internal `list_dead_letters(..., usize::MAX)` is gone.** It
+      materialised every dead letter an agent had ever accumulated in
+      order to take one. Capping it would have made `--trigger-seq`
+      silently unable to reach anything older than the last N; the
+      selection holds one event instead of all of them.
 12. ~~`worker.prune` (+ enum variant) + verb 23 flip~~ — **done
     2026-08-10, by deletion.** The verb is gone, there is no
     `Worker::Prune` variant, and **no `worker_pruned` event type was

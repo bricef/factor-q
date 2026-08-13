@@ -97,6 +97,19 @@ pub enum WireError {
     /// answer about an old fact, not a fault.
     #[error("`{op}`: {message}")]
     Gone { op: String, message: String },
+    /// The request asked for something that has already happened. The
+    /// operation is idempotent on a key, that key has been used, and
+    /// this is the refusal that keeps the guarantee.
+    ///
+    /// Not `InvalidInput`, which says "you asked wrongly" and invites
+    /// an edit — there is no edit here, because the input was right
+    /// and the work is done. Not a silent success either: an operator
+    /// who asks twice is usually unsure whether the first attempt
+    /// landed, and the useful answer names what it produced. **The
+    /// message must carry that name**, so the second call is not a
+    /// dead end but a redirection to the atom the first one made.
+    #[error("`{op}`: {message}")]
+    Conflict { op: String, message: String },
     /// The token's grants do not cover the operation's required
     /// authority — the read-only-dashboard case, as an error.
     #[error("denied `{op}`: {message}")]

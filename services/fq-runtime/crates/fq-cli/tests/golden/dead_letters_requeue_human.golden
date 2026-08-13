@@ -1,3 +1,5 @@
-Requeued dead-lettered trigger for 'researcher' as trigger seq 1 (from event 00000000-0000-7000-8000-000000001022).
+Requeued dead-lettered trigger for 'researcher' as trigger <UUID>.
+  requeued from trigger 00000000-0000-7000-8000-000000001032
   payload: {"n":2}
+Requeueing the same dead letter again is refused, and names this trigger.
 A running `fq run` daemon will pick this up with a fresh delivery budget.

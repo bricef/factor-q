@@ -38,66 +38,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use fq_runtime::AgentId;
-use fq_runtime::bus::EventBus;
-use fq_runtime::dead_letter::{
-    DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-    DEAD_LETTER_SUBJECT_KEY,
-};
-use fq_runtime::events::{Event, EventPayload, FailureKind, FailurePhase, InvocationTotals};
-use serde_json::json;
-use uuid::Uuid;
-
-// ------------------------------------------------------------------
-// Fixed identities, shared vocabulary with golden.rs.
-// ------------------------------------------------------------------
-
-/// Fixture epoch: 2026-01-02 03:04:05 UTC (same instant as golden.rs).
-const BASE_MS: i64 = 1_767_323_045_000;
-
+/// The agent every remaining golden here names. The dead-letter
+/// fixture builder that used to sit beside it went with verb 8's
+/// goldens — `golden.rs` seeds those now, from its own copy of the
+/// same emitter contract.
 const AGENT_RESEARCHER: &str = "researcher";
-
-fn fixed_uuid(n: u32) -> Uuid {
-    Uuid::parse_str(&format!("00000000-0000-7000-8000-0000000010{n:02}")).unwrap()
-}
-
-/// Stamp determinism onto a freshly built event: fixed event id and a
-/// fixed envelope timestamp (`Event::new` uses wall-clock now).
-fn stamp(mut event: Event, seq: u32, at_ms: i64) -> Event {
-    event.envelope.event_id = fixed_uuid(seq);
-    event.envelope.timestamp = chrono::DateTime::from_timestamp_millis(at_ms).unwrap();
-    event
-}
-
-/// A dead-letter event exactly as both emitters shape it (the
-/// operator-module broker tests pin the emitters to this contract).
-fn dead_letter_event(
-    agent: &str,
-    trigger_seq: u64,
-    source: &str,
-    payload: serde_json::Value,
-    seq: u32,
-    at_ms: i64,
-) -> Event {
-    let event = Event::new(
-        AgentId::new(agent).unwrap(),
-        Uuid::now_v7(),
-        EventPayload::Failed(fq_runtime::events::FailedPayload {
-            error_kind: FailureKind::TriggerExhausted,
-            error_message: format!("trigger exhausted after 5 deliveries (limit 5) [{source}]"),
-            phase: FailurePhase::Setup,
-            partial_totals: InvocationTotals::default(),
-        }),
-    )
-    .annotate(
-        DEAD_LETTER_SUBJECT_KEY,
-        json!(fq_runtime::bus::trigger_subject(agent)),
-    )
-    .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
-    .annotate(DEAD_LETTER_STREAM_SEQ_KEY, json!(trigger_seq))
-    .annotate(DEAD_LETTER_SOURCE_KEY, json!(source));
-    stamp(event, seq, at_ms)
-}
 
 // ------------------------------------------------------------------
 // Harness
@@ -129,25 +74,6 @@ impl Scratch {
     fn agents(&self) -> PathBuf {
         self.dir.path().join("agents")
     }
-}
-
-fn run_fq(scratch: &Scratch, nats_url: &str, args: &[&str]) -> (Option<i32>, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_fq"))
-        .args(args)
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
-        .env("FQ_AGENTS_DIR", scratch.agents())
-        .env("FQ_CACHE_DIR", scratch.cache())
-        .env("FQ_STATE_DIR", scratch.state())
-        .env("FQ_NATS_URL", nats_url)
-        .env("RUST_LOG", "off")
-        .env("NO_COLOR", "1")
-        .output()
-        .expect("run fq binary");
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
 }
 
 /// True if `s[i..i + 36]` is a UUID (8-4-4-4-12 lowercase hex).
@@ -242,12 +168,6 @@ fn assert_golden(name: &str, actual: &str) {
             diff.join("\n")
         );
     }
-}
-
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
-    tokio::runtime::Runtime::new()
-        .expect("test runtime")
-        .block_on(fut)
 }
 
 // `workers prune` used to be pinned here — the one CLI write that
@@ -490,111 +410,18 @@ fn trigger_without_the_flag_takes_the_same_path() {
     assert_golden("trigger_via_nats_human", &daemon.redact(&stdout));
 }
 
-// ------------------------------------------------------------------
-// dead-letters requeue — a JetStream-backed write. A fresh broker per
-// test, so stream sequences in the output are deterministic (a fresh
-// trigger stream numbers from 1) — and no daemon, deliberately: a
-// requeue publishes a real trigger, and a daemon would dispatch it.
-//
-// `dead-letters list` used to be snapshotted here beside it. It moved
-// to `golden.rs`'s edge fixture with verb 7's Phase-4 flip: the
-// listing is now `dead_letter.list` on the authenticated edge, which
+// The `dead-letters requeue` goldens used to live here. They moved to
+// `golden.rs`'s edge fixture with verb 8's Phase-4 flip: requeueing is
+// now a `dead_letter.requeue` command on the authenticated edge, which
 // this harness — a bare `fq` against a broker, no daemon — cannot
-// serve. The golden files are unchanged.
-// ------------------------------------------------------------------
-
-/// Two dead letters for `researcher` (older trigger seq 11, newer 12)
-/// plus one ordinary failure that must be excluded from the listing.
-fn seed_dead_letters(nats_url: &str) {
-    block_on(async {
-        let bus = EventBus::connect(nats_url).await.expect("connect NATS");
-        bus.publish(&dead_letter_event(
-            AGENT_RESEARCHER,
-            11,
-            "inline",
-            json!({"n": 1}),
-            21,
-            BASE_MS,
-        ))
-        .await
-        .unwrap();
-        bus.publish(&dead_letter_event(
-            AGENT_RESEARCHER,
-            12,
-            "advisory",
-            json!({"n": 2}),
-            22,
-            BASE_MS + 1_000,
-        ))
-        .await
-        .unwrap();
-        bus.publish(&stamp(
-            Event::new(
-                AgentId::new(AGENT_RESEARCHER).unwrap(),
-                Uuid::now_v7(),
-                EventPayload::Failed(fq_runtime::events::FailedPayload {
-                    error_kind: FailureKind::RuntimeError,
-                    error_message: "ordinary failure".into(),
-                    phase: FailurePhase::Setup,
-                    partial_totals: InvocationTotals::default(),
-                }),
-            ),
-            23,
-            BASE_MS + 2_000,
-        ))
-        .await
-        .unwrap();
-    });
-}
-
-#[test]
-fn golden_dead_letters_requeue_human() {
-    let server = fq_test_support::NatsServer::start();
-    let scratch = Scratch::new();
-    seed_dead_letters(server.url());
-
-    let keep = [fixed_uuid(22).to_string()];
-    let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
-
-    // No --trigger-seq: selects the newest dead letter (seq 12). The
-    // fresh trigger is the first message on this broker's trigger
-    // stream, so the echoed new seq is deterministically 1.
-    let (exit, stdout, stderr) = run_fq(
-        &scratch,
-        server.url(),
-        &["dead-letters", "requeue", AGENT_RESEARCHER],
-    );
-    assert_eq!(exit, Some(0), "requeue should exit 0; stderr:\n{stderr}");
-    assert_golden(
-        "dead_letters_requeue_human",
-        &redact(&stdout, &scratch, server.url(), &keep),
-    );
-}
-
-#[test]
-fn golden_dead_letters_requeue_json() {
-    let server = fq_test_support::NatsServer::start();
-    let scratch = Scratch::new();
-    seed_dead_letters(server.url());
-
-    let keep = [fixed_uuid(22).to_string()];
-    let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
-
-    let (exit, stdout, stderr) = run_fq(
-        &scratch,
-        server.url(),
-        &["dead-letters", "requeue", AGENT_RESEARCHER, "--json"],
-    );
-    assert_eq!(
-        exit,
-        Some(0),
-        "requeue --json should exit 0; stderr:\n{stderr}"
-    );
-    assert_golden(
-        "dead_letters_requeue_json",
-        &redact(&stdout, &scratch, server.url(), &keep),
-    );
-}
+// serve. `dead-letters list` had already moved for the same reason.
+//
+// Unlike the flips whose whole claim was byte-identical output, these
+// golden files CHANGED, and the receipt is why: a receipt names the
+// atoms a command appended and carries no state (D3), so the trigger
+// stream sequence the old lines printed is gone — it was never an
+// identity — and what stands in its place is the requeued trigger's
+// own name, plus the name of the trigger it re-ran.
 
 // The `invocation drop` goldens used to live here. They moved to
 // `golden.rs`'s edge fixture with the verb's Phase-4 flip: dropping is

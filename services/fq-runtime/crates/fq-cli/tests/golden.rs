@@ -2099,11 +2099,26 @@ fn agent_list_without_a_daemon_reports_why() {
 // workers list` gained a daemon, and this listing does not.
 // ------------------------------------------------------------------
 
+/// The trigger identities the fixture's two dead letters carry. Fixed,
+/// and kept byte-exact through redaction, because `dead_letters
+/// requeue` prints the id of the trigger it re-ran: the golden proves
+/// the right dead letter was selected, not merely that some id came
+/// back.
+const DEAD_LETTER_TRIGGER_OLDER: u32 = 31;
+const DEAD_LETTER_TRIGGER_NEWER: u32 = 32;
+
 /// A dead-letter event exactly as both emitters shape it (the
 /// operator-module broker tests pin the emitters to this contract).
+///
+/// `trigger_id` is `Option` because the emitters record one only when
+/// they could read the original trigger — the advisory path never
+/// invents an id for a trigger that has aged off the stream. That is
+/// the shape `dead_letter.requeue` refuses, so the fixture has to be
+/// able to build it.
 fn dead_letter_event(
     agent: &str,
     trigger_seq: u64,
+    trigger_id: Option<Uuid>,
     source: &str,
     payload: serde_json::Value,
     seq: u32,
@@ -2111,7 +2126,7 @@ fn dead_letter_event(
 ) -> Event {
     use fq_runtime::dead_letter::{
         DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-        DEAD_LETTER_SUBJECT_KEY,
+        DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
     };
     let event = Event::new(
         AgentId::new(agent).unwrap(),
@@ -2130,6 +2145,13 @@ fn dead_letter_event(
     .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
     .annotate(DEAD_LETTER_STREAM_SEQ_KEY, serde_json::json!(trigger_seq))
     .annotate(DEAD_LETTER_SOURCE_KEY, serde_json::json!(source));
+    let event = match trigger_id {
+        Some(id) => event.annotate(
+            DEAD_LETTER_TRIGGER_ID_KEY,
+            serde_json::json!(id.to_string()),
+        ),
+        None => event,
+    };
     stamp(event, seq, at_ms)
 }
 
@@ -2138,11 +2160,17 @@ fn dead_letter_event(
 /// lands on the very same `fq.agent.researcher.failed` subject the
 /// atom reads, so only the `error_kind` predicate keeps it out of the
 /// listing.
+///
+/// Both dead letters name their trigger, which is what makes them
+/// requeueable — and which the listing goldens are deliberately blind
+/// to: a `DeadLetter` does not carry the identity as a field, so those
+/// files are untouched by its arrival here.
 fn dead_letter_events() -> Vec<Event> {
     vec![
         dead_letter_event(
             AGENT_RESEARCHER,
             11,
+            Some(fixed_uuid(DEAD_LETTER_TRIGGER_OLDER)),
             "inline",
             serde_json::json!({"n": 1}),
             21,
@@ -2151,6 +2179,7 @@ fn dead_letter_events() -> Vec<Event> {
         dead_letter_event(
             AGENT_RESEARCHER,
             12,
+            Some(fixed_uuid(DEAD_LETTER_TRIGGER_NEWER)),
             "advisory",
             serde_json::json!({"n": 2}),
             22,
@@ -2219,6 +2248,119 @@ fn the_agent_filter_narrows_the_listing() {
     assert_eq!(
         stdout, "No dead-lettered triggers.\n",
         "another agent's listing must be empty; got:\n{stdout}"
+    );
+}
+
+// ------------------------------------------------------------------
+// The requeue goldens (plan Phase 4, verb 8).
+//
+// They moved here from `golden_commands.rs`, which drives `fq` against
+// a broker with no daemon — the arrangement this flip retires. Unlike
+// the other moved goldens the FILES CHANGED, because a receipt names
+// atoms and carries no state (D3): the old lines printed the fresh
+// trigger's sequence on the trigger stream, which was never an
+// identity and is not something the command hands back any more. What
+// stands in its place is the requeued trigger's own name, and the name
+// of the trigger it re-ran — both of which resolve through
+// `trigger.get`.
+//
+// A daemon is now required rather than merely tolerated, and it does
+// change the world here in a way worth naming: the requeue publishes a
+// real trigger, the fixture's registry is empty, so the daemon's
+// dispatcher will eventually dead-letter it. That happens after the
+// verb has printed and touches nothing these goldens pin.
+// ------------------------------------------------------------------
+
+/// The requeue goldens' harness: a private fixture (this MUTATES), and
+/// UUID redaction with the *original* trigger kept byte-exact — the
+/// requeued trigger's id is minted per run, the one it came from is the
+/// fixture's, and holding one fixed is what proves the newest dead
+/// letter was the one selected.
+fn check_golden_requeue(name: &str, args: &[&str]) {
+    let fixture = EdgeFixture::start_with_events(dead_letter_events());
+    let (exit, stdout, stderr) = fixture.run_fq(args);
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
+    );
+    let keep = fixed_uuid(DEAD_LETTER_TRIGGER_NEWER).to_string();
+    let actual = redact_uuids(&redact(&stdout, &Nats::Closed, &[]), &[&keep]);
+    compare_golden(name, &actual);
+}
+
+#[test]
+fn golden_dead_letters_requeue_human() {
+    check_golden_requeue(
+        "dead_letters_requeue_human",
+        &["dead-letters", "requeue", AGENT_RESEARCHER],
+    );
+}
+
+#[test]
+fn golden_dead_letters_requeue_json() {
+    check_golden_requeue(
+        "dead_letters_requeue_json",
+        &["dead-letters", "requeue", AGENT_RESEARCHER, "--json"],
+    );
+}
+
+/// **Requeueing the same dead letter twice is refused, and the refusal
+/// names what the first call made.** This is the guarantee the verb
+/// exists to give, seen from where an operator sees it: a non-zero
+/// exit and a message carrying an id they can act on.
+///
+/// Not a golden: the ids differ per run, and a golden of a redacted
+/// error would assert the sentence rather than the property. What
+/// matters is that the *second* answer names the *first* answer's
+/// trigger, which needs both outputs in hand.
+#[test]
+fn requeueing_twice_is_refused_and_names_the_first_trigger() {
+    let fixture = EdgeFixture::start_with_events(dead_letter_events());
+
+    let (exit, stdout, stderr) = fixture.run_fq(&[
+        "dead-letters",
+        "requeue",
+        AGENT_RESEARCHER,
+        "--trigger-seq",
+        "12",
+        "--json",
+    ]);
+    assert_eq!(
+        exit,
+        Some(0),
+        "the first requeue succeeds; stderr:\n{stderr}"
+    );
+    let first: serde_json::Value = serde_json::from_str(&stdout).expect("json output");
+    let minted = first["trigger_id"]
+        .as_str()
+        .expect("a trigger id")
+        .to_string();
+    assert_eq!(
+        first["requeued_from"].as_str(),
+        Some(fixed_uuid(DEAD_LETTER_TRIGGER_NEWER).to_string().as_str()),
+        "the requeued trigger names the dead letter's own trigger; got:\n{stdout}"
+    );
+
+    let (exit, stdout, stderr) = fixture.run_fq(&[
+        "dead-letters",
+        "requeue",
+        AGENT_RESEARCHER,
+        "--trigger-seq",
+        "12",
+    ]);
+    assert_ne!(
+        exit,
+        Some(0),
+        "the second requeue must fail; stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains(&minted),
+        "the refusal must name the trigger the first call made ({minted}); got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("already been requeued"),
+        "and say why it refused; got:\n{stderr}"
     );
 }
 

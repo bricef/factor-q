@@ -144,15 +144,27 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// are checked by reading the diff at the merge gate rather than by
 /// this count.
 ///
-/// What is left is three `open_views(` — `fq doctor` (verb 15), `fq
-/// costs` (verb 13), and the helper's own definition, which is why the
-/// terminal state is zero rather than one — plus verb 8's
-/// `operator::requeue_dead_letter`. Cohort 4.3 deliberately left that
-/// last one alone: `dead_letter.requeue` is a command over a domain
-/// whose key is a raw JetStream sequence, and a receipt names atoms by
-/// identity, so migrating it would decide in passing a design question
-/// that is being decided on its own.
-const REMAINING: usize = 4;
+/// It went 4 -> 3 with verb 8, the last non-report call point, and the
+/// design question cohort 4.3 deferred is what closed it. Requeue was
+/// left alone then because `dead_letter.requeue` is a command over a
+/// domain whose key is a raw JetStream sequence, while a receipt names
+/// atoms by identity — so flipping it would have decided in passing
+/// whether a DeadLetter has an identity (#464, still open).
+///
+/// It does not, and the flip does not need it to: **what a requeue
+/// produces is a trigger**, triggers were named and then made
+/// permanent records in the two steps before this one, and the dead
+/// letter carries the original's `trigger_id`. So the command keys on
+/// that, records the new trigger's `requeued_from`, and its receipt
+/// names a Trigger — a reference in a different domain from the one
+/// the verb is filed under, which is what was actually happening all
+/// along.
+///
+/// What is left is three `open_views(` and nothing else: `fq doctor`
+/// (verb 15), `fq costs` (verb 13), and the helper's own definition,
+/// which is why the terminal state is zero rather than one. Both
+/// remaining verbs are reports.
+const REMAINING: usize = 3;
 
 /// True when `path` is the test half of a module split — `foo/tests.rs`
 /// beside a `foo.rs` that declares `#[cfg(test)] mod tests;`.

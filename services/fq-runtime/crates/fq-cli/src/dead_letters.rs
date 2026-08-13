@@ -10,18 +10,19 @@
 //! narrows at the log rather than after the fact, and a client needs
 //! no broker credentials to ask.
 //!
-//! `fq dead-letters requeue` sits alongside it but is not flipped: it
-//! still publishes its own trigger over a direct broker connection,
-//! and becomes a `dead_letter.requeue` command in cohort 4.3 — the
-//! same split `fq agent validate` sits on, and for the same reason: a
-//! verb rides the edge once it is flipped, not before.
+//! `fq dead-letters requeue` sits alongside it and is now flipped too
+//! (plan Phase 4, verb 8): it used to open its own broker connection
+//! and publish a fresh trigger from the client, which is also why it
+//! could not be idempotent — a client that publishes has nowhere to
+//! record that it did. The daemon records the requeue and the record
+//! is the guarantee.
 
 use anyhow::Context;
-use fq_runtime::EventBus;
 
 use crate::cli::GlobalArgs;
 use crate::dead_letter_atom::DeadLetterFilter;
-use crate::edge_call::edge_invoke;
+use crate::edge_call::{edge_client_for, edge_invoke, invoke_on};
+use crate::trigger_command::TriggerKey;
 use crate::truncate_json;
 
 /// The rendered listing, newest first.
@@ -103,31 +104,97 @@ pub(crate) async fn list_dead_letters(
     Ok(())
 }
 
-/// `fq dead-letters requeue`: re-publish a dead-lettered trigger as a
-/// fresh trigger. Not idempotent — see the command help.
+/// What `fq dead-letters requeue --json` prints: the requeued trigger,
+/// as the surface answers for it.
+///
+/// Composed from the receipt and the read it walks to, not from
+/// anything this process minted — the client publishes nothing now, so
+/// there is nothing here it could know first-hand.
+#[derive(serde::Serialize)]
+struct RequeueResult {
+    agent_id: String,
+    /// The requeued trigger's identity — `trigger.get` takes this.
+    trigger_id: String,
+    /// The trigger it was requeued from.
+    requeued_from: Option<String>,
+    trigger_payload: serde_json::Value,
+}
+
+/// `fq dead-letters requeue`: re-run a dead-lettered trigger over the
+/// authenticated edge (plan Phase 4, verb 8). One client, two
+/// questions: the `dead_letter.requeue` command, then the Trigger the
+/// receipt names.
+///
+/// The second question is not a nicety, and it is `invocation drop`'s
+/// arrangement for `invocation drop`'s reason: a receipt references the
+/// atoms a command appended and never state (D3/P4), so the payload
+/// this line has always printed now comes from a read rather than from
+/// a result struct the client half-built.
+///
+/// **The read needs no watermark**, which is the difference from drop.
+/// A requeue writes the trigger's permanent record before it publishes
+/// — that write is what makes the requeue idempotent — so by the time
+/// the receipt is in hand the record is there. There is no fold to wait
+/// for and nothing to gate on.
 pub(crate) async fn requeue_dead_letter(
     global: &GlobalArgs,
     agent: &str,
     trigger_seq: Option<u64>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
+    // Answered offline, in the same breath as `fq agent validate`,
+    // rather than costing a round trip. The daemon checks it again —
+    // this is a courtesy, never a substitute.
     fq_runtime::AgentId::new(agent).with_context(|| format!("invalid agent name '{agent}'"))?;
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
-    let result =
-        fq_runtime::control_plane::operator::requeue_dead_letter(&bus, agent, trigger_seq).await?;
+
+    let client = edge_client_for(global).await?;
+    let receipt = invoke_on(
+        &client,
+        fq_ops::OpId::Verb(fq_ops::VerbId::DeadLetter(fq_ops::DeadLetter::Requeue)),
+        serde_json::json!({ "agent_id": agent, "trigger_seq": trigger_seq }),
+    )
+    .await?
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let receipt: fq_ops::Receipt = serde_json::from_value(receipt)?;
+    let key = receipt
+        .atoms
+        .iter()
+        .find(|atom| atom.domain == fq_ops::Domain::Trigger)
+        .map(|atom| atom.key.clone())
+        .context("the requeue receipt named no trigger — cannot confirm the requeue")?;
+    let trigger_id: TriggerKey = serde_json::from_value(key.clone())?;
+
+    let trigger = invoke_on(&client, fq_ops::OpId::Get(fq_ops::Domain::Trigger), key)
+        .await?
+        // The requeue already landed, so this is never "the requeue
+        // failed" — say so, and name what it made.
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "requeued as trigger {}, but reading it back failed: {e}",
+                trigger_id.trigger_id
+            )
+        })?;
+    let trigger: fq_runtime::trigger::Trigger = serde_json::from_value(trigger)?;
+    let result = RequeueResult {
+        agent_id: agent.to_string(),
+        trigger_id: trigger.id.to_string(),
+        requeued_from: trigger.requeued_from.map(|id| id.to_string()),
+        trigger_payload: trigger.payload,
+    };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
     println!(
-        "Requeued dead-lettered trigger for '{}' as trigger seq {} (from event {}).",
-        result.agent_id, result.new_trigger_seq, result.source_event_id
+        "Requeued dead-lettered trigger for '{}' as trigger {}.",
+        result.agent_id, result.trigger_id
     );
+    if let Some(from) = &result.requeued_from {
+        println!("  requeued from trigger {from}");
+    }
     println!("  payload: {}", truncate_json(&result.trigger_payload, 120));
+    println!("Requeueing the same dead letter again is refused, and names this trigger.");
     println!("A running `fq run` daemon will pick this up with a fresh delivery budget.");
     Ok(())
 }

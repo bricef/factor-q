@@ -73,6 +73,27 @@ pub enum Trigger {
     Publish,
 }
 
+/// The DeadLetter domain's verbs. `requeue` is declared here — under
+/// the domain it selects from — while its *authority* is Write over
+/// [`Domain::Trigger`] and its receipt names a Trigger, because what a
+/// requeue produces is a trigger. A command's domain and its effect's
+/// domain are allowed to differ; the declaration says both.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    strum::EnumIter,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum DeadLetter {
+    Requeue,
+}
+
 /// The reports each domain declares, same construction discipline as
 /// the verb enums.
 #[derive(
@@ -108,6 +129,7 @@ pub enum VerbId {
     Invocation(Invocation),
     Control(Control),
     Trigger(Trigger),
+    DeadLetter(DeadLetter),
     Unknown { domain: String, verb: String },
 }
 
@@ -118,6 +140,7 @@ impl VerbId {
             VerbId::Invocation(_) => Some(Domain::Invocation),
             VerbId::Control(_) => Some(Domain::Control),
             VerbId::Trigger(_) => Some(Domain::Trigger),
+            VerbId::DeadLetter(_) => Some(Domain::DeadLetter),
             VerbId::Unknown { .. } => None,
         }
     }
@@ -137,6 +160,7 @@ impl VerbId {
             VerbId::Invocation(v) => (*v).into(),
             VerbId::Control(v) => (*v).into(),
             VerbId::Trigger(v) => (*v).into(),
+            VerbId::DeadLetter(v) => (*v).into(),
             VerbId::Unknown { verb, .. } => verb,
         }
     }
@@ -157,6 +181,12 @@ impl From<Control> for VerbId {
 impl From<Trigger> for VerbId {
     fn from(verb: Trigger) -> Self {
         VerbId::Trigger(verb)
+    }
+}
+
+impl From<DeadLetter> for VerbId {
+    fn from(verb: DeadLetter) -> Self {
+        VerbId::DeadLetter(verb)
     }
 }
 
@@ -187,6 +217,9 @@ impl From<VerbIdWire> for VerbId {
                     .map(VerbId::Invocation),
                 Domain::Control => Control::from_str(&wire.verb).ok().map(VerbId::Control),
                 Domain::Trigger => Trigger::from_str(&wire.verb).ok().map(VerbId::Trigger),
+                Domain::DeadLetter => DeadLetter::from_str(&wire.verb)
+                    .ok()
+                    .map(VerbId::DeadLetter),
                 _ => None,
             });
         typed.unwrap_or(VerbId::Unknown {
