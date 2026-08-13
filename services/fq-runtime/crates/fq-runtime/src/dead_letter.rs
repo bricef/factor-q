@@ -43,8 +43,13 @@ pub const DEAD_LETTER_SOURCE_KEY: &str = "dead_letter_source";
 /// reason: the advisory path records it only when the original trigger
 /// is still on the stream *and* carried the header, because the one
 /// thing worse than an unnamed dead letter is one named with an id that
-/// exists nowhere else. A requeue that wants to be idempotent keys on
-/// this when it is there.
+/// exists nowhere else.
+///
+/// **This is `dead_letter.requeue`'s idempotency key**, which is why
+/// its absence is a refusal rather than a degraded requeue: a dead
+/// letter with no name here can be re-run, but only as new work
+/// (`trigger.publish`), because there would be nothing for a second
+/// requeue to be refused on.
 pub const DEAD_LETTER_TRIGGER_ID_KEY: &str = "trigger_id";
 
 /// One dead-lettered trigger, as its terminal event records it.
@@ -128,6 +133,12 @@ impl DeadLetter {
 /// no command mints a DeadLetter reference today. That is the gap
 /// #464 tracks; addressing a dead letter positionally is why it is a
 /// gap rather than a design.
+///
+/// `dead_letter.requeue` is the one command over this domain and it
+/// does not close the gap — it steps around it. What a requeue makes is
+/// a *trigger*, so its receipt names one, in a different domain from
+/// the verb's own. A DeadLetter reference is still not a thing that
+/// exists.
 ///
 /// The identity is the log sequence and not the trigger sequence for
 /// three reasons, in ascending order of force: the trigger sequence is

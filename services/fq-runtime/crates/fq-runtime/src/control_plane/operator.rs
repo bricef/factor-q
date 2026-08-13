@@ -9,7 +9,7 @@ use futures::StreamExt;
 use uuid::Uuid;
 
 use crate::agent::AgentId;
-use crate::bus::{BusError, EventBus, STREAM_NAME, TRIGGER_STREAM_NAME};
+use crate::bus::{BusError, EventBus, STREAM_NAME};
 use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::projection::store::StoreError;
 use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError};
@@ -141,22 +141,9 @@ pub async fn drop_invocation(
 /// re-export keeps `requeue`'s established path working.
 pub use crate::dead_letter::DeadLetter;
 
-/// Failure modes for the dead-letter verbs.
+/// Failure modes for the dead-letter listing.
 #[derive(Debug, thiserror::Error)]
 pub enum DeadLetterError {
-    #[error("no dead-lettered triggers found for agent `{0}`")]
-    NoDeadLetters(String),
-    #[error(
-        "no dead letter for agent `{agent}` with trigger sequence {seq} — \
-         `fq dead-letters list` shows the known sequences"
-    )]
-    SeqNotFound { agent: String, seq: u64 },
-    #[error(
-        "the trigger behind this dead letter is not recoverable: the event carries no \
-         payload (the trigger had already aged out when the advisory was processed) and \
-         sequence {seq:?} is no longer in the trigger stream"
-    )]
-    PayloadUnavailable { seq: Option<u64> },
     #[error("event bus error: {0}")]
     Bus(#[from] BusError),
     #[error("stream error: {0}")]
@@ -220,77 +207,24 @@ pub async fn list_dead_letters(
     Ok(out)
 }
 
-/// Outcome of a successful [`requeue_dead_letter`].
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RequeueResult {
-    pub agent_id: String,
-    pub trigger_payload: serde_json::Value,
-    /// The fresh trigger's sequence on the trigger stream.
-    pub new_trigger_seq: u64,
-    /// The dead-letter event the trigger was reconstructed from.
-    pub source_event_id: String,
-}
-
-/// Re-publish a dead-lettered trigger as a fresh trigger (new
-/// sequence, fresh delivery budget). Selects the agent's most recent
-/// dead letter, or the one whose original trigger sequence matches
-/// `trigger_seq`. **Not idempotent**: requeueing twice triggers the
-/// agent twice — the fresh trigger is a new message with no memory of
-/// this one.
-pub async fn requeue_dead_letter(
-    bus: &EventBus,
-    agent_id: &str,
-    trigger_seq: Option<u64>,
-) -> Result<RequeueResult, DeadLetterError> {
-    let dead = list_dead_letters(bus, Some(agent_id), usize::MAX).await?;
-    let dead_letter = match trigger_seq {
-        Some(seq) => dead
-            .iter()
-            .find(|d| d.trigger_stream_seq == Some(seq))
-            .ok_or_else(|| DeadLetterError::SeqNotFound {
-                agent: agent_id.to_string(),
-                seq,
-            })?,
-        None => dead
-            .first()
-            .ok_or_else(|| DeadLetterError::NoDeadLetters(agent_id.to_string()))?,
-    };
-
-    // The event's annotations normally carry the payload verbatim. An
-    // empty subject means the advisory path could not resolve the
-    // trigger when it processed the advisory (aged out — or a
-    // transient stream error at that moment). One direct look at the
-    // trigger stream distinguishes the two before giving up.
-    let payload = if dead_letter.trigger_subject.is_empty() {
-        match dead_letter.trigger_stream_seq {
-            Some(seq) => {
-                let raw = bus
-                    .jetstream()
-                    .get_stream(TRIGGER_STREAM_NAME)
-                    .await
-                    .map_err(|err| DeadLetterError::Stream(err.to_string()))?
-                    .get_raw_message(seq)
-                    .await
-                    .map_err(|_| DeadLetterError::PayloadUnavailable { seq: Some(seq) })?;
-                serde_json::from_slice(&raw.payload).unwrap_or(serde_json::Value::Null)
-            }
-            None => return Err(DeadLetterError::PayloadUnavailable { seq: None }),
-        }
-    } else {
-        dead_letter.trigger_payload.clone()
-    };
-
-    // The requeue publishes a *fresh* trigger, so it gets a fresh
-    // identity; the dead letter's own `trigger_id` annotation is the key
-    // an idempotent requeue would test before getting here.
-    let published = bus.publish_trigger(agent_id, &payload).await?;
-    Ok(RequeueResult {
-        agent_id: agent_id.to_string(),
-        trigger_payload: payload,
-        new_trigger_seq: published.stream_seq,
-        source_event_id: dead_letter.event_id.clone(),
-    })
-}
+// `requeue_dead_letter` used to live here, and its departure took the
+// last non-report legacy call point with it (plan Phase 4, verb 8).
+//
+// It selected a dead letter, reconstructed the payload from the
+// annotations — falling back to a direct read of the trigger stream —
+// and republished it as a fresh, unrecorded trigger. **The stream
+// fallback did not survive the move, and not because something
+// replaced it.** It existed for a dead letter whose `trigger_subject`
+// was empty, which is exactly the advisory path failing to read the
+// original off the stream; and that is the same branch, in the same
+// `match`, that records no `trigger_id`. Keyed on the identity, a dead
+// letter like that is now refused before a payload is needed at all —
+// so the fallback's only case became unreachable, and the payload has
+// one source: the dead letter's own record of the trigger it lost.
+//
+// The command lives in `fq-cli`'s `dead_letter_requeue.rs`, where the
+// edge can hold it to a guarantee a client never could: the requeue
+// records what it re-ran, so a second one is refused rather than run.
 
 #[cfg(test)]
 mod tests {
@@ -337,13 +271,16 @@ mod tests {
         .unwrap()
     }
 
-    /// list: finds only dead-letter failed events, newest first,
-    /// scoped by agent; requeue: republishes the payload as a fresh
-    /// trigger (returned seq resolves to the same payload on the
-    /// trigger stream), selects by --trigger-seq, and errors cleanly
-    /// on unknown agents and sequences.
+    /// The listing finds only dead-letter failed events, newest first,
+    /// scoped by agent, and honours its limit at the newest end.
+    ///
+    /// Requeue used to be asserted here too, against the same fixture.
+    /// It is a command on the edge now, and its guarantee is a fact
+    /// about a store this module cannot see — so the assertions moved
+    /// whole to `fq-cli`'s `edge_dead_letter_requeue.rs`, where a
+    /// daemon owns both the log and the record.
     #[tokio::test]
-    async fn dead_letters_list_and_requeue_round_trip() {
+    async fn dead_letters_list_round_trip() {
         let server = crate::test_support::nats::test_nats();
         let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
@@ -392,73 +329,21 @@ mod tests {
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].trigger_stream_seq, Some(12));
 
-        // Requeue default: the newest. The returned seq must resolve
-        // to the republished payload on the trigger stream.
-        let requeued = requeue_dead_letter(&bus, agent.as_str(), None)
+        // Another agent's listing sees only its own.
+        let theirs = list_dead_letters(&bus, Some(other.as_str()), 50)
             .await
             .unwrap();
-        assert_eq!(requeued.trigger_payload, json!({"n": 2}));
-        let raw = bus
-            .jetstream()
-            .get_stream(TRIGGER_STREAM_NAME)
-            .await
-            .unwrap()
-            .get_raw_message(requeued.new_trigger_seq)
-            .await
-            .expect("fresh trigger on the stream");
-        assert_eq!(
-            raw.subject.as_str(),
-            crate::bus::trigger_subject(agent.as_str())
-        );
-        let republished: serde_json::Value = serde_json::from_slice(&raw.payload).unwrap();
-        assert_eq!(republished, json!({"n": 2}));
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].trigger_stream_seq, Some(13));
 
-        // Requeue by original trigger seq: the older one.
-        let requeued = requeue_dead_letter(&bus, agent.as_str(), Some(11))
-            .await
-            .unwrap();
-        assert_eq!(requeued.trigger_payload, json!({"n": 1}));
-
-        // Error modes.
+        // An agent with nothing gets an empty listing, not an error:
+        // "nothing fell on the floor" is an answer.
         let missing = unique_agent("dl-op-none");
-        assert!(matches!(
-            requeue_dead_letter(&bus, missing.as_str(), None).await,
-            Err(DeadLetterError::NoDeadLetters(_))
-        ));
-        assert!(matches!(
-            requeue_dead_letter(&bus, agent.as_str(), Some(9999)).await,
-            Err(DeadLetterError::SeqNotFound { seq: 9999, .. })
-        ));
-    }
-
-    /// The advisory aged-out shape (empty subject, null payload, seq
-    /// no longer on the trigger stream) fails with the explanatory
-    /// error rather than requeueing a null trigger.
-    #[tokio::test]
-    async fn requeue_of_an_unrecoverable_dead_letter_refuses() {
-        let server = crate::test_support::nats::test_nats();
-        let url = server.url().to_string();
-        let bus = EventBus::connect(&url).await.expect("connect NATS");
-        let agent = unique_agent("dl-aged");
-        let event = Event::new(
-            agent.clone(),
-            Uuid::now_v7(),
-            EventPayload::Failed(crate::events::FailedPayload {
-                error_kind: FailureKind::TriggerExhausted,
-                error_message: "aged out".to_string(),
-                phase: crate::events::FailurePhase::Setup,
-                partial_totals: crate::events::InvocationTotals::default(),
-            }),
-        )
-        .annotate(DEAD_LETTER_SUBJECT_KEY, json!(""))
-        .annotate(DEAD_LETTER_PAYLOAD_KEY, serde_json::Value::Null)
-        .annotate(DEAD_LETTER_STREAM_SEQ_KEY, json!(18_446_744_073_709_u64))
-        .annotate(DEAD_LETTER_SOURCE_KEY, json!("advisory"));
-        bus.publish(&event).await.unwrap();
-
-        assert!(matches!(
-            requeue_dead_letter(&bus, agent.as_str(), None).await,
-            Err(DeadLetterError::PayloadUnavailable { .. })
-        ));
+        assert!(
+            list_dead_letters(&bus, Some(missing.as_str()), 50)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

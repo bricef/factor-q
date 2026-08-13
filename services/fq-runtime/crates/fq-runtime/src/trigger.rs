@@ -165,6 +165,27 @@ pub struct Trigger {
     /// The trigger body, verbatim — an opaque JSON value the target
     /// agent interprets (wire contract §The payload).
     pub payload: Value,
+    /// The trigger this one was requeued from, when it was one —
+    /// `dead_letter.requeue`'s record of what it re-ran.
+    ///
+    /// **Absent on every trigger the runtime learns about from the
+    /// wire**, and that is structural rather than an omission: lineage
+    /// rides no header and the body is contractually opaque, so there
+    /// is nowhere on the wire it could come from. [`Trigger::
+    /// requeue_of`] is the only constructor that sets it, which makes
+    /// "this trigger is a requeue" a claim only the requeue path can
+    /// make.
+    ///
+    /// It is also the idempotency key `dead_letter.requeue` turns on:
+    /// the column behind this field is uniquely indexed, so a dead
+    /// letter can be requeued at most once and the second attempt is
+    /// answered with the trigger the first one made.
+    ///
+    /// `serde(default)` because trigger rows written before requeues
+    /// were recorded read NULL, and a required field would break them.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub requeued_from: Option<Uuid>,
 }
 
 impl Trigger {
@@ -184,6 +205,33 @@ impl Trigger {
             source,
             subject,
             payload,
+            requeued_from: None,
+        }
+    }
+
+    /// The trigger a requeue mints from one that dead-lettered: the
+    /// same work, a new name, and a record of where it came from.
+    ///
+    /// **A new identity, not the original's.** Republishing under the
+    /// old id would write no new row — the `triggers` table is
+    /// `INSERT OR IGNORE` on the identity — so nothing would
+    /// distinguish "published once" from "published, then requeued",
+    /// and there would be no record for a second requeue to fail on. A
+    /// requeue is also genuinely a later trigger, so a fresh UUIDv7
+    /// sorts where it belongs.
+    ///
+    /// The payload is the original's, verbatim. Anything else would be
+    /// a different task wearing this one's provenance.
+    pub fn requeue_of(original: &Trigger, subject: String) -> Self {
+        Self {
+            id: Uuid::now_v7(),
+            // How the runtime will come by it: the requeue puts it back
+            // on the agent's trigger subject, which is where the
+            // dispatcher reads it from.
+            source: TriggerSource::Subject,
+            subject: Some(subject),
+            payload: original.payload.clone(),
+            requeued_from: Some(original.id),
         }
     }
 

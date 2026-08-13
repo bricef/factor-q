@@ -65,8 +65,13 @@ CREATE TABLE IF NOT EXISTS invocation_summary (
 --
 -- `seq` is the log position of the record that named the trigger -- the
 -- universal cursor (P5), what `trigger.stream` resumes from. NULL when
--- the delivery carried no JetStream metadata. (No semicolons in these
--- comments -- the schema runner splits statements on them.)
+-- the delivery carried no JetStream metadata.
+--
+-- `requeued_from` names the trigger this one was requeued from, and is
+-- NULL for every trigger that is not a requeue. It is `dead_letter.
+-- requeue`'s idempotency key -- see the UNIQUE index below, which is
+-- created after the column migration rather than here. (No semicolons
+-- in these comments -- the schema runner splits statements on them.)
 CREATE TABLE IF NOT EXISTS triggers (
     trigger_id      TEXT PRIMARY KEY,
     recorded_at     TEXT NOT NULL,
@@ -74,13 +79,31 @@ CREATE TABLE IF NOT EXISTS triggers (
     source          TEXT NOT NULL,
     subject         TEXT,
     payload         TEXT NOT NULL,
-    seq             INTEGER
+    seq             INTEGER,
+    requeued_from   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_triggers_agent_time ON triggers(agent_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_triggers_time ON triggers(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_triggers_seq ON triggers(seq);
 "#;
+
+/// The index that makes "a dead letter is requeued at most once" a
+/// property of the database rather than of a check the caller
+/// remembered to run.
+///
+/// UNIQUE, and SQLite lets any number of rows hold NULL in a unique
+/// index — so this constrains requeues alone and every ordinary trigger
+/// is untouched. `ProjectionStore::reserve_requeue` inserts against it
+/// and reads its own success as the claim.
+///
+/// It is applied **after** [`ADDED_TRIGGER_COLUMNS`] rather than inside
+/// [`SCHEMA_SQL`]: on a database created before the column existed,
+/// `CREATE UNIQUE INDEX ... ON triggers(requeued_from)` names a column
+/// that is not there yet, and the schema block runs before the
+/// additive migration that adds it.
+const TRIGGER_REQUEUE_INDEX_SQL: &str =
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_triggers_requeued_from ON triggers(requeued_from)";
 
 /// The columns `events` has gained since its first shape.
 ///
@@ -105,6 +128,20 @@ const ADDED_EVENT_COLUMNS: [(&str, &str); 4] = [
     // which is why "we do not know where its payload is" is a state
     // `event.get` names rather than rounds down to "no such event".
     ("seq", "INTEGER"),
+];
+
+/// The same story for `triggers`: columns the table has gained since
+/// step B created it, added to databases that predate them.
+///
+/// Two consumers, as above — [`ProjectionStore::run_migrations`] adds
+/// them, [`ProjectionStore::verify_readable`] checks for them — because
+/// `TRIGGER_COLUMNS` selects every one of them on a handle that cannot
+/// migrate.
+const ADDED_TRIGGER_COLUMNS: [(&str, &str); 1] = [
+    // The trigger a requeue re-ran. Forward-only like the rest: rows
+    // written before requeues were recorded read NULL, which is exactly
+    // right — they were not requeues.
+    ("requeued_from", "TEXT"),
 ];
 
 impl ProjectionStore {
@@ -143,6 +180,22 @@ impl ProjectionStore {
                     .await?;
             }
         }
+        let trigger_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('triggers')")
+                .fetch_all(&self.pool)
+                .await?;
+        for (column, ty) in ADDED_TRIGGER_COLUMNS {
+            if !trigger_columns.iter().any(|c| c == column) {
+                sqlx::query(&format!("ALTER TABLE triggers ADD COLUMN {column} {ty}"))
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        // Only now, with the column guaranteed present on old databases
+        // as well as new ones — see [`TRIGGER_REQUEUE_INDEX_SQL`].
+        sqlx::query(TRIGGER_REQUEUE_INDEX_SQL)
+            .execute(&self.pool)
+            .await?;
         // Sweep the transients (cheap once empty via the type index):
         // they stopped being projected — see `insert_event` — and this
         // evicts what older builds accumulated. Derived from
@@ -203,6 +256,15 @@ impl ProjectionStore {
                 .await?;
         if triggers.is_empty() {
             missing.push("the triggers table");
+        } else {
+            // Present but older: the same forward-only story the event
+            // columns have, and `TRIGGER_COLUMNS` selects these too.
+            missing.extend(
+                ADDED_TRIGGER_COLUMNS
+                    .iter()
+                    .map(|(column, _)| *column)
+                    .filter(|column| !triggers.iter().any(|have| have == column)),
+            );
         }
         if !missing.is_empty() {
             return Err(StoreError::SchemaOutdated {

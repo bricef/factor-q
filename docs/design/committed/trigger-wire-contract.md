@@ -92,6 +92,16 @@ resolves — source, subject and payload — is retained indefinitely. A trigger
 the runtime has not yet acted on has no record and reads as such, distinctly
 from an id that names nothing.
 
+**A requeue is a new trigger, and says which one it re-ran.**
+`dead_letter.requeue` publishes a **fresh** id rather than the original's, and
+the requeued trigger's record carries `requeued_from` naming the trigger it
+came from. Nothing about this crosses the wire — lineage is a fact of the
+record, and the header carries the identity alone — but it is what makes the
+verb idempotent: one requeue per original, and a second attempt is refused
+with the name of the trigger the first one made. Re-publishing under the
+original's id would have recorded nothing, since the trigger's row is keyed on
+the identity, so there would have been nothing to refuse on.
+
 ### The payload
 
 The message body is the JSON-serialised trigger payload — an **opaque JSON

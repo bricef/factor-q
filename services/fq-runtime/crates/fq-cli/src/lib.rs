@@ -249,6 +249,7 @@ mod control;
 mod control_commands;
 mod costs;
 mod dead_letter_atom;
+mod dead_letter_requeue;
 mod dead_letters;
 mod doctor;
 mod edge_call;

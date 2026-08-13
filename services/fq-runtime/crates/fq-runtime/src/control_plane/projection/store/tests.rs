@@ -1394,6 +1394,247 @@ async fn a_dead_lettered_trigger_is_recorded() {
     assert_eq!(trigger.payload, json!({"task": "the one that died"}));
 }
 
+/// The trigger a requeue mints, as the store records it.
+fn requeue_of(original: Uuid, agent: &str, payload: serde_json::Value) -> crate::trigger::Trigger {
+    use crate::trigger::Trigger;
+    Trigger::requeue_of(
+        &Trigger::named(
+            original,
+            TriggerSource::Subject,
+            Some(crate::bus::trigger_subject(agent)),
+            payload,
+        ),
+        crate::bus::trigger_subject(agent),
+    )
+}
+
+/// **A dead letter is requeued at most once, and the database is what
+/// says so.** The reservation is the check: the second claim on the
+/// same original loses, and what it lost to is nameable.
+///
+/// Asserted at this layer because the guarantee lives here. A check the
+/// caller performs before writing would pass this file's obvious test
+/// and still let two concurrent requeues both publish; a claim that IS
+/// the write cannot.
+#[tokio::test]
+async fn a_dead_letter_can_be_claimed_for_requeue_only_once() {
+    let (store, _dir) = open_store().await;
+    let original = Uuid::now_v7();
+    let first = requeue_of(original, "alpha", json!({"n": 1}));
+    let second = requeue_of(original, "alpha", json!({"n": 1}));
+    assert_ne!(first.id, second.id, "two attempts, two candidate triggers");
+
+    assert!(
+        store
+            .reserve_requeue(&first, "alpha", "2026-01-01T00:00:00+00:00")
+            .await
+            .unwrap(),
+        "the first claim wins"
+    );
+    assert!(
+        !store
+            .reserve_requeue(&second, "alpha", "2026-01-02T00:00:00+00:00")
+            .await
+            .unwrap(),
+        "the second claim on the same original must lose"
+    );
+    assert_eq!(
+        store.requeue_of(&original.to_string()).await.unwrap(),
+        Some(first.id),
+        "and the loser can name the winner — which is what its refusal carries"
+    );
+    // The losing candidate was never written, so nothing points at it.
+    assert!(
+        store
+            .trigger(&second.id.to_string())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // The winner is a whole, gettable trigger that remembers where it
+    // came from — and the original is untouched by any of this.
+    let requeued = store
+        .trigger(&first.id.to_string())
+        .await
+        .unwrap()
+        .expect("the reserved trigger is a record like any other");
+    assert_eq!(requeued.requeued_from, Some(original));
+    assert_eq!(requeued.payload, json!({"n": 1}));
+    assert_eq!(
+        store.requeue_of(&Uuid::now_v7().to_string()).await.unwrap(),
+        None,
+        "a trigger nobody requeued has no requeue"
+    );
+}
+
+/// The uniqueness is on *requeues*, and constrains nothing else.
+///
+/// SQLite lets any number of rows hold NULL in a unique index, which is
+/// the whole reason the column can live on `triggers` rather than in a
+/// side table: ordinary triggers — every trigger — are unaffected, and
+/// two different dead letters can each be requeued.
+#[tokio::test]
+async fn the_uniqueness_binds_requeues_and_nothing_else() {
+    let (store, _dir) = open_store().await;
+    for i in 0..3 {
+        store
+            .insert_event(
+                &named_triggered("alpha", Uuid::now_v7(), json!({ "n": i })),
+                Some(i + 1),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.query_triggers(None, None, 50).await.unwrap().len(),
+        3,
+        "three triggers, none of them a requeue, all with NULL lineage"
+    );
+
+    for original in [Uuid::now_v7(), Uuid::now_v7()] {
+        assert!(
+            store
+                .reserve_requeue(
+                    &requeue_of(original, "alpha", json!({"n": 9})),
+                    "alpha",
+                    "2026-01-01T00:00:00+00:00"
+                )
+                .await
+                .unwrap(),
+            "different dead letters are different claims"
+        );
+    }
+    assert_eq!(store.query_triggers(None, None, 50).await.unwrap().len(), 5);
+}
+
+/// A claim whose publish never landed is given back — and the release
+/// cannot reach anything that is not that claim.
+///
+/// `triggers` is the one table retention never touches, so a general
+/// "delete a trigger" would be a hole in that promise. This one is
+/// scoped to a row that is a requeue *of the original named*, which is
+/// the only row a failed publish could have created.
+#[tokio::test]
+async fn a_released_claim_can_be_made_again_and_reaches_nothing_else() {
+    let (store, _dir) = open_store().await;
+    let original = Uuid::now_v7();
+    let claimed = requeue_of(original, "alpha", json!({"n": 1}));
+    store
+        .reserve_requeue(&claimed, "alpha", "2026-01-01T00:00:00+00:00")
+        .await
+        .unwrap();
+
+    // A release naming the wrong original removes nothing: the scope is
+    // the pair, so a mistaken id cannot delete a real record.
+    store
+        .release_requeue(claimed.id, Uuid::now_v7())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .trigger(&claimed.id.to_string())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // An ordinary trigger is out of reach even when named exactly.
+    let ordinary = Uuid::now_v7();
+    store
+        .insert_event(
+            &named_triggered("alpha", ordinary, json!({"n": 2})),
+            Some(1),
+        )
+        .await
+        .unwrap();
+    store.release_requeue(ordinary, original).await.unwrap();
+    assert!(
+        store
+            .trigger(&ordinary.to_string())
+            .await
+            .unwrap()
+            .is_some(),
+        "a recorded trigger is not a reservation and must survive"
+    );
+
+    // The real release frees the key, so the operator can try again.
+    store.release_requeue(claimed.id, original).await.unwrap();
+    assert_eq!(store.requeue_of(&original.to_string()).await.unwrap(), None);
+    let retry = requeue_of(original, "alpha", json!({"n": 1}));
+    assert!(
+        store
+            .reserve_requeue(&retry, "alpha", "2026-01-03T00:00:00+00:00")
+            .await
+            .unwrap()
+    );
+}
+
+/// **A requeued trigger becomes streamable once something names it on
+/// the log.** Its row is written at publish time, before any record
+/// exists, so it starts with no cursor; the record that arrives later
+/// fills the position in and changes nothing else.
+///
+/// Without this the requeued trigger would list and get but never
+/// stream — a permanent hole in the one overlay that says "something
+/// new arrived", on exactly the triggers an operator is watching for.
+#[tokio::test]
+async fn a_later_record_gives_a_reserved_trigger_its_cursor() {
+    let (store, _dir) = open_store().await;
+    let original = Uuid::now_v7();
+    let requeued = requeue_of(original, "alpha", json!({"n": 1}));
+    store
+        .reserve_requeue(&requeued, "alpha", "2026-01-01T00:00:00+00:00")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .triggers_from(None, None, 1, 64)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a row with no log position has no cursor it could honestly be served at"
+    );
+
+    // The dispatcher runs it; the projection folds the `triggered`
+    // event. First-record-wins keeps everything the requeue recorded —
+    // the payload it re-ran, the lineage, when it was reserved — and
+    // the one thing that was unknown becomes known.
+    let recorded = at(
+        named_triggered("alpha", requeued.id, json!({"different": true})),
+        "2026-06-01T00:00:00Z",
+    );
+    store.insert_event(&recorded, Some(42)).await.unwrap();
+
+    let streamed = store.triggers_from(None, None, 1, 64).await.unwrap();
+    assert_eq!(streamed.len(), 1, "now it streams");
+    assert_eq!(streamed[0].0, 42, "at the position the record gave it");
+    assert_eq!(streamed[0].1.requeued_from, Some(original));
+    assert_eq!(
+        streamed[0].1.payload,
+        json!({"n": 1}),
+        "first record wins on everything that describes the trigger"
+    );
+    assert_eq!(
+        store.query_triggers(None, None, 50).await.unwrap()[0].recorded_at,
+        "2026-01-01T00:00:00+00:00",
+        "including when the runtime took responsibility for it"
+    );
+    // A third record does not move the cursor either: the fill-in is
+    // for an unknown position, not a last-write-wins.
+    store
+        .insert_event(
+            &named_triggered("alpha", requeued.id, json!({"n": 1})),
+            Some(99),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.triggers_from(None, None, 1, 64).await.unwrap()[0].0,
+        42
+    );
+}
+
 /// **A trigger is kept forever.** The sweep clears the event row that
 /// recorded it — a `triggered` event bears no cost, so nothing exempts
 /// it — and the trigger itself is untouched, because the sweep only
@@ -1594,4 +1835,70 @@ async fn read_only_open_names_a_missing_triggers_table() {
             if missing.contains("triggers")),
         "expected SchemaOutdated naming the table, got: {err:?}"
     );
+}
+
+/// **A database whose `triggers` table predates `requeued_from` is
+/// widened, and only then indexed.**
+///
+/// `CREATE TABLE IF NOT EXISTS` cannot widen a table that exists, so
+/// the column arrives by `ALTER`; and the UNIQUE index on it has to be
+/// created *after* that, or it names a column the older file does not
+/// have. Reopening is the test: the first open below leaves the
+/// pre-column shape, the second must migrate it and still be able to
+/// claim a requeue.
+///
+/// The read-only handle is checked in the same breath, for the reason
+/// its sibling above exists: it cannot migrate, and every trigger read
+/// selects this column, so it must name the upgrade rather than let a
+/// driver report SQL the operator never wrote.
+#[tokio::test]
+async fn an_older_triggers_table_gains_the_requeue_column_before_its_index() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    {
+        let writer = ProjectionStore::open(&path).await.unwrap();
+        // Reproduce the pre-requeue shape exactly: the column and the
+        // index that depends on it, both gone.
+        sqlx::query("DROP INDEX idx_triggers_requeued_from")
+            .execute(&writer.pool)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE triggers DROP COLUMN requeued_from")
+            .execute(&writer.pool)
+            .await
+            .unwrap();
+
+        let err = ProjectionStore::open_read_only(&path).await.unwrap_err();
+        assert!(
+            matches!(&err, StoreError::SchemaOutdated { missing, .. }
+                if missing.contains("requeued_from")),
+            "a handle that cannot migrate must name the column, got: {err:?}"
+        );
+    }
+
+    let store = ProjectionStore::open(&path).await.unwrap();
+    let original = Uuid::now_v7();
+    let requeued = requeue_of(original, "alpha", json!({"n": 1}));
+    assert!(
+        store
+            .reserve_requeue(&requeued, "alpha", "2026-01-01T00:00:00+00:00")
+            .await
+            .unwrap()
+    );
+    // The index came with the column, so the guarantee holds on a
+    // migrated database exactly as on a fresh one.
+    assert!(
+        !store
+            .reserve_requeue(
+                &requeue_of(original, "alpha", json!({"n": 1})),
+                "alpha",
+                "2026-01-02T00:00:00+00:00"
+            )
+            .await
+            .unwrap(),
+        "the UNIQUE index must exist after the migration, not only after a fresh create"
+    );
+    ProjectionStore::open_read_only(&path)
+        .await
+        .expect("a migrated database reads");
 }

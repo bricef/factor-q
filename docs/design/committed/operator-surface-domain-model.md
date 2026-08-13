@@ -243,15 +243,25 @@ idempotency, caveats), never hidden behind a generic verb:
 | invocation.drop | Write invocation | archives as failed; workers observe at the next step boundary. Refused on an invocation the daemon is actively driving unless `--live`, which halts it at its next boundary first (in-flight tools finish) before the drop |
 | invocation.resume | Write invocation | the counterpart to drop — reconciles unknown execution instead of abandoning it: durably completes every stuck tool dispatch with an honest interrupted result, then re-drives the invocation through ordinary SafeReplay recovery. Refused on anything not **Ambiguous**, and each refusal is distinct because the operator must be able to tell them apart: terminal (including operator-dropped), live on this daemon, stuck in an *LLM* dispatch (injection reconciles tool calls only), or already resumed |
 | trigger.publish | Write trigger | dispatch work: at-least-once with a bounded budget; the receipt references the appended trigger atom |
-| dead_letter.requeue | Write trigger | selects the newest dead letter; **not idempotent**; fresh delivery budget |
+| dead_letter.requeue | Write trigger | re-runs a dead-lettered trigger with a fresh delivery budget. **Idempotent on the original trigger**, whose identity the dead letter carries: a second attempt is refused with a `Conflict` naming the trigger the first one made. The receipt names a **Trigger** — a reference in a different domain from the verb, because a trigger is what a requeue produces. A dead letter recorded without a trigger id is refused rather than requeued without the guarantee. Selects the newest dead letter unless given the original's trigger-stream sequence |
 | control.down | Write control (manual) | drain-to-step-boundary then exit; confirmation is the shutdown event |
 | control.reload | Write control (manual) | registry swap affects next trigger only |
 
 (Verbs that mint atoms — `trigger.publish`, `dead_letter.requeue` — are
 still verbs, not generic creation: their semantics (delivery budget,
-non-idempotency) are the contract, and `trigger.publish`'s authority
-(Write trigger) stays separately grantable from the machinery's
-lifecycle authority.)
+idempotency, and what happens when the guarantee cannot be kept) are the
+contract, and `trigger.publish`'s authority (Write trigger) stays
+separately grantable from the machinery's lifecycle authority. Both mint
+in the **Trigger** domain, which is why they share that authority even
+though only one of them is filed under it: a command's domain says what
+it is about, its authority says what it can do, and a receipt names the
+domain of what it made.)
+
+**A command's receipt may name an atom in another domain.** That is not
+a special case for requeue; it is what the model has always said, made
+visible by the first verb whose effect lands outside its own domain. The
+rule is unchanged and is the only one that matters: an `AtomRef.key`
+must be exactly the key that domain's Get takes.
 
 **Names are rendered, never chosen.** A verb's name is its domain's
 segment plus its declared word (P8), and the domain segment is the
