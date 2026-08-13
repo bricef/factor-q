@@ -8,7 +8,8 @@
       "total_output_tokens": 340,
       "total_cache_read_tokens": 0,
       "total_cache_write_tokens": 0,
-      "invocation_count": 1
+      "invocation_count": 1,
+      "framework_cost": 0.0
     },
     {
       "agent_id": "fixer",
@@ -18,13 +19,25 @@
       "total_output_tokens": 680,
       "total_cache_read_tokens": 0,
       "total_cache_write_tokens": 0,
-      "invocation_count": 1
+      "invocation_count": 1,
+      "framework_cost": 0.0
+    },
+    {
+      "agent_id": "summary",
+      "event_count": 1,
+      "total_cost": 0.0009,
+      "total_input_tokens": 400,
+      "total_output_tokens": 20,
+      "total_cache_read_tokens": 0,
+      "total_cache_write_tokens": 0,
+      "invocation_count": 1,
+      "framework_cost": 0.0009
     }
   ],
   "buckets": [
     {
       "bucket": "2026-01-02",
-      "total_cost": 0.016300000000000002
+      "total_cost": 0.0172
     }
   ],
   "models": [
@@ -34,11 +47,19 @@
       "total_cost": 0.016300000000000002,
       "total_input_tokens": 3600,
       "total_output_tokens": 1020
+    },
+    {
+      "model": "cheap-model",
+      "event_count": 1,
+      "total_cost": 0.0009,
+      "total_input_tokens": 400,
+      "total_output_tokens": 20
     }
   ],
-  "total_cost": 0.016300000000000002,
-  "total_input_tokens": 3600,
-  "total_output_tokens": 1020,
+  "total_cost": 0.017200000000000003,
+  "total_input_tokens": 4000,
+  "total_output_tokens": 1040,
   "total_cache_read_tokens": 0,
-  "total_cache_write_tokens": 0
+  "total_cache_write_tokens": 0,
+  "framework_cost": 0.0009
 }

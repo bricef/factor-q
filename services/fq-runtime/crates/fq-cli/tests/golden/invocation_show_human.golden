@@ -1,5 +1,6 @@
 Invocation: 1c000000-0000-7000-8000-000000000001
   agent:    researcher
+  summary:  Fixture run finished clean.
   status:   completed
   worker:   researcher
 

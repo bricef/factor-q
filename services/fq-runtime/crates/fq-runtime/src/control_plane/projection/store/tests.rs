@@ -22,6 +22,15 @@ fn aid(s: &str) -> AgentId {
 }
 
 fn summary_event(inv: Uuid, kind: crate::events::SummaryKind, line: &str) -> Event {
+    summary_event_costing(inv, kind, line, 0.0005)
+}
+
+fn summary_event_costing(
+    inv: Uuid,
+    kind: crate::events::SummaryKind,
+    line: &str,
+    total_cost: f64,
+) -> Event {
     Event::new(
         AgentId::summary(),
         inv,
@@ -37,11 +46,11 @@ fn summary_event(inv: Uuid, kind: crate::events::SummaryKind, line: &str) -> Eve
         output_tokens: 20,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
-        input_cost: 0.0004,
-        output_cost: 0.0001,
-        total_cost: 0.0005,
-        cumulative_invocation_cost: 0.0005,
-        cumulative_agent_cost: 0.0005,
+        input_cost: total_cost * 0.8,
+        output_cost: total_cost * 0.2,
+        total_cost,
+        cumulative_invocation_cost: total_cost,
+        cumulative_agent_cost: total_cost,
         origin: Default::default(),
     })
 }
@@ -551,6 +560,270 @@ async fn cost_queries_include_recovered_failure_spend() {
     );
     let by_model = store.cost_by_model(None, None).await.unwrap();
     assert!((by_model[0].total_cost - 0.26).abs() < 1e-9, "{by_model:?}");
+}
+
+/// The allocation rule (#466), stated as a single fixture: summariser
+/// spend is money, so every *aggregate* reports it; it is the engine's
+/// money, so no *per-invocation* view charges it to a run. Both halves
+/// were wrong before this, in opposite directions — the time series
+/// dropped it, and `cost_by_invocation` billed it to the invocation the
+/// line described.
+#[tokio::test]
+async fn summariser_spend_reaches_every_aggregate_and_no_invocation() {
+    let (store, _dir) = open_store().await;
+    let inv = Uuid::now_v7();
+    store
+        .insert_event(&sample_llm_response_with_cost("biller", inv, 0.25), None)
+        .await
+        .unwrap();
+    store
+        .insert_event(
+            &summary_event(inv, crate::events::SummaryKind::Progress, "summarising"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Aggregates: the fleet total, the per-model split, and the time
+    // series all carry the summariser's $0.0005.
+    let agents = store.cost_summary(None, None).await.unwrap();
+    let fleet: f64 = agents.iter().map(|a| a.total_cost).sum();
+    assert!((fleet - 0.2505).abs() < 1e-9, "{agents:?}");
+    let by_model: f64 = store
+        .cost_by_model(None, None)
+        .await
+        .unwrap()
+        .iter()
+        .map(|m| m.total_cost)
+        .sum();
+    assert!((by_model - 0.2505).abs() < 1e-9);
+    let bucketed: f64 = store
+        .cost_by_time_bucket(false, None)
+        .await
+        .unwrap()
+        .iter()
+        .map(|b| b.total_cost)
+        .sum();
+    assert!(
+        (bucketed - 0.2505).abs() < 1e-9,
+        "the time series must sum to the same money as the agent table"
+    );
+
+    // Per-invocation: neither view charges the summariser's call to
+    // the invocation whose progress it described.
+    let of_inv = store
+        .cost_of_invocation(&inv.to_string())
+        .await
+        .unwrap()
+        .expect("a cost row");
+    assert!((of_inv.total_cost - 0.25).abs() < 1e-9);
+    let biller = store.cost_by_invocation("biller", None, 100).await.unwrap();
+    assert_eq!(biller.len(), 1);
+    assert!((biller[0].total_cost - 0.25).abs() < 1e-9);
+    assert!(
+        store
+            .cost_by_invocation(AgentId::SUMMARY_STR, None, 100)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the summariser has spend but no invocations of its own to charge it to"
+    );
+
+    // And the remainder is named, not left to be inferred from the gap.
+    let summary_row = agents
+        .iter()
+        .find(|a| a.agent_id == AgentId::SUMMARY_STR)
+        .expect("summary agent row");
+    assert!((summary_row.framework_cost - 0.0005).abs() < 1e-9);
+    let biller_row = agents.iter().find(|a| a.agent_id == "biller").unwrap();
+    assert_eq!(biller_row.framework_cost, 0.0);
+}
+
+/// The other half of the fix, pinned on its own because it is the
+/// disagreement operators actually hit: the spend chart and the agent
+/// table sit on the same page over the same window, and before #466
+/// the chart quietly omitted summariser spend. `since` is applied to
+/// both, so the agreement has to survive a bound that cuts through the
+/// data.
+#[tokio::test]
+async fn bucketed_spend_agrees_with_the_agent_table_over_the_same_window() {
+    let (store, _dir) = open_store().await;
+    let inv = Uuid::now_v7();
+    for (event, ts) in [
+        (
+            sample_llm_response_with_cost("biller", inv, 0.25),
+            "2026-04-25T09:00:00+00:00",
+        ),
+        (
+            summary_event(inv, crate::events::SummaryKind::Progress, "in window"),
+            "2026-04-25T09:05:00+00:00",
+        ),
+        (
+            sample_llm_response_with_cost("biller", inv, 4.0),
+            "2026-04-24T09:00:00+00:00",
+        ),
+        (
+            summary_event(inv, crate::events::SummaryKind::Start, "before window"),
+            "2026-04-24T09:05:00+00:00",
+        ),
+    ] {
+        store.insert_event(&event, None).await.unwrap();
+        sqlx::query("UPDATE events SET timestamp = ? WHERE event_id = ?")
+            .bind(ts)
+            .bind(event.envelope.event_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+    }
+
+    let since = crate::views::since::lower_bound("2026-04-25").expect("a date is a since");
+    let agents: f64 = store
+        .cost_summary(None, Some(&since))
+        .await
+        .unwrap()
+        .iter()
+        .map(|a| a.total_cost)
+        .sum();
+    let buckets = store
+        .cost_by_time_bucket(false, Some(&since))
+        .await
+        .unwrap();
+    let bucketed: f64 = buckets.iter().map(|b| b.total_cost).sum();
+    assert!((agents - 0.2505).abs() < 1e-9, "windowed agent total");
+    assert!(
+        (bucketed - agents).abs() < 1e-9,
+        "chart {bucketed} vs table {agents} over the same window: {buckets:?}"
+    );
+}
+
+use proptest::prelude::*;
+
+/// A spend shape: which of four invocations each cost lands on, and
+/// how much (in micro-dollars, so the generator deals in exact
+/// integers and only the summing is floating point).
+fn spend() -> impl Strategy<Value = Vec<(usize, u32)>> {
+    proptest::collection::vec((0usize..4, 1u32..1_000_000), 0..12)
+}
+
+proptest! {
+    /// The law the split has to satisfy, and the reason the shortfall
+    /// is safe to ship: for **every** agent, whatever the spend shape,
+    ///
+    /// ```text
+    /// total_cost = <sum of its per-invocation costs> + framework_cost
+    /// ```
+    ///
+    /// A total that reconciles to its parts plus a named remainder is
+    /// auditable; one that merely fails to reconcile is a support
+    /// question. Stated as a property rather than a fixture because
+    /// the interesting inputs are the ones nobody thinks to write
+    /// down: summariser lines on invocations with no other spend,
+    /// several agents sharing an invocation id, agents with no
+    /// framework spend at all. It fails if any query changes its row
+    /// filter without the remainder following — which is exactly how
+    /// the two queries this fix corrects drifted apart.
+    #[test]
+    fn every_agent_total_is_its_invocations_plus_its_framework_cost(
+        calls in spend(),
+        summaries in spend(),
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (store, _dir) = open_store().await;
+            let invs: Vec<Uuid> = (0..4).map(|_| Uuid::now_v7()).collect();
+            let agents = ["alpha", "beta"];
+            for (n, (which, micros)) in calls.iter().enumerate() {
+                let event = sample_llm_response_with_cost(
+                    agents[n % agents.len()],
+                    invs[*which],
+                    f64::from(*micros) / 1e6,
+                );
+                store.insert_event(&event, None).await.unwrap();
+            }
+            for (which, micros) in &summaries {
+                let event = summary_event_costing(
+                    invs[*which],
+                    crate::events::SummaryKind::Progress,
+                    "line",
+                    f64::from(*micros) / 1e6,
+                );
+                store.insert_event(&event, None).await.unwrap();
+            }
+
+            for row in store.cost_summary(None, None).await.unwrap() {
+                let allocated: f64 = store
+                    .cost_by_invocation(&row.agent_id, None, i64::MAX)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|i| i.total_cost)
+                    .sum();
+                prop_assert!(
+                    (row.total_cost - (allocated + row.framework_cost)).abs() < 1e-9,
+                    "{}: total {} != allocated {} + framework {}",
+                    row.agent_id,
+                    row.total_cost,
+                    allocated,
+                    row.framework_cost,
+                );
+            }
+            Ok(())
+        })?;
+    }
+
+    /// The same money, sliced two ways: an aggregate is an aggregate,
+    /// so bucketing spend by time must sum to bucketing it by agent.
+    /// The pair disagreed for as long as one of them dropped
+    /// summariser rows.
+    #[test]
+    fn bucketed_spend_sums_to_the_fleet_total(calls in spend(), summaries in spend()) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (store, _dir) = open_store().await;
+            let invs: Vec<Uuid> = (0..4).map(|_| Uuid::now_v7()).collect();
+            for (n, (which, micros)) in calls.iter().enumerate() {
+                let agent = if n % 2 == 0 { "alpha" } else { "beta" };
+                let event =
+                    sample_llm_response_with_cost(agent, invs[*which], f64::from(*micros) / 1e6);
+                store.insert_event(&event, None).await.unwrap();
+            }
+            for (which, micros) in &summaries {
+                let event = summary_event_costing(
+                    invs[*which],
+                    crate::events::SummaryKind::Outcome,
+                    "line",
+                    f64::from(*micros) / 1e6,
+                );
+                store.insert_event(&event, None).await.unwrap();
+            }
+
+            let by_agent: f64 = store
+                .cost_summary(None, None)
+                .await
+                .unwrap()
+                .iter()
+                .map(|a| a.total_cost)
+                .sum();
+            let by_bucket: f64 = store
+                .cost_by_time_bucket(true, None)
+                .await
+                .unwrap()
+                .iter()
+                .map(|b| b.total_cost)
+                .sum();
+            prop_assert!(
+                (by_agent - by_bucket).abs() < 1e-9,
+                "by agent {by_agent} != by bucket {by_bucket}"
+            );
+            Ok(())
+        })?;
+    }
 }
 
 /// The other half of "`None` is not zero": a failure whose usage was
