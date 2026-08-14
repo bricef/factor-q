@@ -179,7 +179,7 @@ async fn requeue(
     }
 
     if let Err(err) = bus
-        .publish_trigger_named(agent.as_str(), requeued.id, &requeued.payload)
+        .publish_trigger_named(&agent, requeued.id, &requeued.payload)
         .await
     {
         // The claim was for a publish that never happened; give it

@@ -329,7 +329,10 @@ mod tests {
         let trigger_subject = crate::events::subjects::trigger(&agent_id_str);
 
         let published = bus
-            .publish_trigger(&agent_id_str, &json!({"input": "poison"}))
+            .publish_trigger(
+                &AgentId::new(&agent_id_str).unwrap(),
+                &json!({"input": "poison"}),
+            )
             .await
             .expect("publish trigger");
 

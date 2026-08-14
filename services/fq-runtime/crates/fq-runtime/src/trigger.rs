@@ -503,10 +503,10 @@ impl EventBus {
     /// own size and can decide.
     pub async fn publish_trigger(
         &self,
-        agent_id: &str,
+        agent: &AgentId,
         payload: &Value,
     ) -> Result<PublishedTrigger, BusError> {
-        self.publish_trigger_named(agent_id, Uuid::now_v7(), payload)
+        self.publish_trigger_named(agent, Uuid::now_v7(), payload)
             .await
     }
 
@@ -517,11 +517,11 @@ impl EventBus {
     /// trigger it came from.
     pub async fn publish_trigger_named(
         &self,
-        agent_id: &str,
+        agent: &AgentId,
         id: Uuid,
         payload: &Value,
     ) -> Result<PublishedTrigger, BusError> {
-        let subject = subjects::trigger(agent_id);
+        let subject = subject(agent);
         let body = serde_json::to_vec(payload)?;
         check_payload_size(body.len())?;
         let mut headers = async_nats::HeaderMap::new();
@@ -723,7 +723,7 @@ mod tests {
         assert_eq!(size, MAX_TRIGGER_PAYLOAD_BYTES + 2, "the quotes count");
 
         let err = bus
-            .publish_trigger(&agent, &body)
+            .publish_trigger(&AgentId::new(&agent).unwrap(), &body)
             .await
             .expect_err("an oversized trigger must be refused");
         assert!(
@@ -795,7 +795,7 @@ mod tests {
         let body = serde_json::json!({"task": "look at #12"});
 
         let published = bus
-            .publish_trigger(&agent, &body)
+            .publish_trigger(&AgentId::new(&agent).unwrap(), &body)
             .await
             .expect("publish trigger");
         assert_eq!(
