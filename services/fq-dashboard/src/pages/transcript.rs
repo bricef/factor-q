@@ -39,11 +39,12 @@ const TURN_POLL_WAIT_MS: u64 = 30_000;
 /// the count of entries already rendered, which only worked because
 /// the read service re-read the whole transcript each tick and sliced
 /// it. `turn.stream` is cursored on the event log — every item carries
-/// its sequence (D5) — so the page pins the tail's sequence *before*
-/// it reads its snapshot and hands that number here, which is the same
-/// gap-free seam `fq invocation transcript --follow` uses. A turn that
-/// lands between the two reads is therefore shown once, not lost and
-/// not duplicated.
+/// its sequence (D5) — so the page hands over one past the highest
+/// sequence it rendered, which is the same gap-free seam `fq
+/// invocation transcript --follow` uses. Taking that number from the
+/// snapshot rather than from a separate seek is what makes it exact:
+/// two reads mean two instants, and a turn landing between them is
+/// rendered by one and streamed by the other.
 pub(crate) async fn transcript_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -152,18 +153,22 @@ pub(crate) async fn transcript_stream(
             };
             s.cursor = batch.next_from_seq;
 
+            // A decode failure ends the stream, but the turns that
+            // decoded ahead of it are real and the cursor has already
+            // moved past them — discard them here and this session
+            // cannot get them back, only a reload can. So stop at the
+            // bad item, render what preceded it, and report after.
             let mut entries: Vec<fq_runtime::transcript::TranscriptEntry> = Vec::new();
+            let mut decode_error = None;
             for item in &batch.items {
                 match serde_json::from_value::<fq_runtime::turn::TurnState>(item.item.clone()) {
                     Ok(turn) => entries.push(turn.transcript_entry()),
                     Err(err) => {
-                        s.queue.push_back(status_error(&format!("decode: {err}")));
+                        decode_error = Some(format!("decode: {err}"));
                         s.done = true;
+                        break;
                     }
                 }
-            }
-            if s.done {
-                continue;
             }
             if let Some(max) = s.truncate {
                 fq_runtime::transcript::truncate_entries(&mut entries, max);
@@ -179,6 +184,10 @@ pub(crate) async fn transcript_stream(
                         .mode(ElementPatchMode::Prepend)
                         .write_as_axum_sse_event(),
                 );
+            }
+            if let Some(err) = decode_error {
+                s.queue.push_back(status_error(&err));
+                continue;
             }
             if let Some(phase) = render::transcript_outcome(&entries) {
                 s.queue.push_back(
@@ -214,20 +223,6 @@ pub(crate) async fn transcript_page(
         Err(err) => return unreachable_page(&state, "transcript", &format!("encode: {err}")),
     };
 
-    // Pin the tail BEFORE reading the snapshot: `from_seq = u64::MAX`
-    // seeks without consuming, and the sequence it reports is where the
-    // live tail resumes. Reading the snapshot first would leave a
-    // window in which a turn lands and is then never streamed.
-    let seam = match client
-        .next_batch(OpId::Stream(Domain::Turn), filter.clone(), u64::MAX, 0)
-        .await
-    {
-        Ok(Ok(batch)) => Some(batch.next_from_seq),
-        // A transcript with no turns yet has nothing to seek; the page
-        // still renders, and the tail starts from the tail.
-        Ok(Err(_)) | Err(_) => None,
-    };
-
     let turns: Vec<fq_runtime::turn::TurnState> =
         match call(&client, OpId::List(Domain::Turn), filter).await {
             Ok(turns) => turns,
@@ -244,6 +239,17 @@ pub(crate) async fn transcript_page(
             )),
         );
     }
+    // The seam comes from the snapshot, not from a separate seek: the
+    // tail resumes one past the highest sequence this page rendered.
+    // Deriving it from a prior `from_seq = u64::MAX` probe took the tip
+    // at a different instant from the snapshot's own, so a turn landing
+    // between the two reads was rendered *and* streamed — the delivery
+    // policy is inclusive of the sequence it starts at — and arrived
+    // twice in a panel that prepends without de-duplicating. One read,
+    // one tip, no window. The empty transcript answered above, so there
+    // is always a turn to take the sequence from.
+    let seam = turns.iter().map(|t| t.seq).max().unwrap_or(0) + 1;
+
     // Log order is chronological and `turn.list` answers in sequence
     // order, so no re-sort is needed to reproduce the timeline.
     let mut entries: Vec<fq_runtime::transcript::TranscriptEntry> = turns
@@ -291,7 +297,7 @@ pub(crate) async fn transcript_page(
         body.push_str(&format!(
             r#"<div data-on-load="@get('/invocations/{}/transcript/stream?after={}&full={}')"></div>"#,
             render::esc(&id),
-            seam.unwrap_or(u64::MAX),
+            seam,
             u8::from(full),
         ));
     }
