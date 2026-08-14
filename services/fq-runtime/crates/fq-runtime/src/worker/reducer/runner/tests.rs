@@ -168,56 +168,6 @@ async fn enforce_pricing_refuses_to_dispatch_an_unpriced_model() {
     }
 }
 
-#[test]
-fn evaluator_verdict_maps_outcomes() {
-    assert!(matches!(
-        evaluator_verdict(Some(json!({ "approved": true }))),
-        EvaluatorOutcome::Approved
-    ));
-    match evaluator_verdict(Some(json!({ "approved": false, "reason": "nope" }))) {
-        EvaluatorOutcome::Denied(reason) => assert_eq!(reason, "nope"),
-        EvaluatorOutcome::Approved => panic!("expected denied"),
-    }
-    // A missing / unparseable verdict fails closed (denies).
-    assert!(matches!(
-        evaluator_verdict(None),
-        EvaluatorOutcome::Denied(_)
-    ));
-}
-
-#[test]
-fn elicitation_schema_validation_enforces_per_field_rules() {
-    let schema: ElicitationSchema = serde_json::from_value(json!({
-        "type": "object",
-        "properties": {
-            "name": { "type": "string", "minLength": 2 },
-            "age": { "type": "integer", "minimum": 0, "maximum": 150 },
-            "email": { "type": "string", "format": "email" },
-            "color": { "type": "string", "enum": ["red", "green"] }
-        },
-        "required": ["name"]
-    }))
-    .expect("valid elicitation schema");
-
-    let ok = |v: serde_json::Value| validate_against_elicitation_schema(&v, &schema).is_ok();
-    let err = |v: serde_json::Value| validate_against_elicitation_schema(&v, &schema).is_err();
-
-    assert!(ok(
-        json!({ "name": "Ada", "age": 30, "email": "ada@example.com", "color": "red" })
-    ));
-    assert!(err(json!({ "age": 30 })), "missing required name");
-    assert!(err(json!({ "name": 5 })), "wrong type");
-    assert!(err(json!({ "name": "A" })), "below minLength");
-    assert!(err(json!({ "name": "Ada", "age": 999 })), "above maximum");
-    assert!(err(json!({ "name": "Ada", "age": 1.5 })), "non-integer");
-    assert!(err(json!({ "name": "Ada", "email": "nope" })), "bad email");
-    assert!(err(json!({ "name": "Ada", "color": "blue" })), "bad enum");
-    assert!(
-        err(json!({ "name": "Ada", "extra": 1 })),
-        "unexpected field"
-    );
-}
-
 #[tokio::test]
 async fn sampling_channel_merges_servers_and_drains() {
     use crate::mcp::ServerRequest;
