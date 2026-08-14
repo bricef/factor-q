@@ -5,9 +5,27 @@
 //! the fingerprint out-of-band (the daemon prints it at first run) or
 //! pin whatever the first connection presents; this client always
 //! requires *a* fingerprint.
+//!
+//! Above the transport sit the two calls the edge carries —
+//! [`EdgeClient::invoke`] and [`EdgeClient::next_batch`] — so every
+//! consumer of the edge shares one implementation of the envelope,
+//! the watermark argument, and the long-poll deadline. They live here
+//! rather than in a caller because there is more than one caller: the
+//! `fq` CLI and the operator dashboard both speak this surface, and a
+//! deadline bug fixed in one of them would otherwise stay live in the
+//! other.
+//!
+//! Credentials are **not** here. Which pairing a client presents is a
+//! policy of the program holding it — the CLI reads the operator's
+//! `connections.toml`, a service takes its token from its
+//! environment — and the two must not share a store, since the whole
+//! point of a service's token is that it is narrower than the
+//! operator's.
 
 use std::sync::Arc;
 
+use anyhow::Context as _;
+use fq_ops::OpId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -20,6 +38,7 @@ use tokio_util::codec::LengthDelimitedCodec;
 
 use crate::auth::fingerprint;
 use crate::service::EdgeClient as TarpcEdgeClient;
+use crate::wire::{InvokeRequest, NextBatchRequest, StreamBatch, WireError};
 
 /// Why a connection attempt failed — each case distinct and tested.
 #[derive(Debug, thiserror::Error)]
@@ -249,5 +268,137 @@ impl EdgeClient {
             tarpc::serde_transport::new(framed, tarpc::tokio_serde::formats::Json::default());
         let rpc = TarpcEdgeClient::new(tarpc::client::Config::default(), transport).spawn();
         Ok(EdgeClient { rpc })
+    }
+
+    /// One authenticated call: the outer error is transport, the inner
+    /// is the operation's own verdict — callers that care (a show's
+    /// not-found path) match it, everyone else surfaces it.
+    ///
+    /// Deliberately at the **envelope level**: `(OpId, Value)` in,
+    /// `Value` out. Dispatch is generic and the surface describes
+    /// itself, so this signature does not change when an operation is
+    /// added — which is the registry design paying off. A client with
+    /// a method per operation would track the surface forever, and
+    /// every field addition would become an edit in two places.
+    /// Callers deserialise into the contract types they need.
+    pub async fn invoke(
+        &self,
+        op: OpId,
+        input: serde_json::Value,
+    ) -> anyhow::Result<Result<serde_json::Value, WireError>> {
+        self.invoke_gated(op, input, None).await
+    }
+
+    /// [`invoke`](Self::invoke), watermarked: `min_seq` holds the
+    /// answer until this daemon's fold has applied at least that
+    /// sequence. It is the read half of read-your-writes — the number
+    /// comes from a command's receipt (D4) — and it is a read-only
+    /// argument: the edge refuses a command that carries one.
+    pub async fn invoke_gated(
+        &self,
+        op: OpId,
+        input: serde_json::Value,
+        min_seq: Option<u64>,
+    ) -> anyhow::Result<Result<serde_json::Value, WireError>> {
+        let response = self
+            .rpc
+            .invoke(
+                tarpc::context::current(),
+                InvokeRequest {
+                    op,
+                    version: 1,
+                    input,
+                    min_seq,
+                },
+            )
+            .await
+            .context("edge rpc failed")?;
+        Ok(response.map(|r| r.output))
+    }
+
+    /// One long-poll batch from a Stream operation. `from_seq =
+    /// u64::MAX` seeks the tail without consuming anything — the seam
+    /// a tail starts from, and the same cursor it resumes at, so a
+    /// reconnecting tail picks up exactly where it stopped rather than
+    /// wherever the broker happens to be.
+    pub async fn next_batch(
+        &self,
+        op: OpId,
+        filter: serde_json::Value,
+        from_seq: u64,
+        max_wait_ms: u64,
+    ) -> anyhow::Result<Result<StreamBatch, WireError>> {
+        self.rpc
+            .next_batch(
+                long_poll_context(max_wait_ms),
+                NextBatchRequest {
+                    op,
+                    version: 1,
+                    filter,
+                    from_seq,
+                    max_wait_ms,
+                },
+            )
+            .await
+            .context("edge rpc failed")
+    }
+}
+
+/// Slack on a long poll's deadline: how much longer the caller waits
+/// than the window it asked the daemon to hold. Covers the round trip
+/// and the daemon's own scheduling under load — generous, because the
+/// deadline is a backstop against a hung daemon, not the thing that
+/// ends a poll.
+const LONG_POLL_DEADLINE_SLACK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The RPC context for a long poll: patient enough for the wait it is
+/// asking for.
+///
+/// tarpc's default deadline is a flat ten seconds, which is **shorter
+/// than the window these calls ask the daemon to hold** (30s). A poll
+/// that legitimately waits out its window is then abandoned by the
+/// very client that asked for it, and the call dies with `edge rpc
+/// failed: DeadlineExceeded`.
+///
+/// That this was not obvious is worth recording: `event.stream` reads
+/// the whole log, and the daemon heartbeats every ten seconds — so an
+/// idle tail's poll was ended by a heartbeat in a photo finish with
+/// the deadline, and lost the race only under load. `turn.stream` has
+/// no such cover: it is filtered to one agent's subject, so following
+/// a quiet invocation loses every time.
+fn long_poll_context(max_wait_ms: u64) -> tarpc::context::Context {
+    let mut ctx = tarpc::context::current();
+    ctx.deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(max_wait_ms)
+        + LONG_POLL_DEADLINE_SLACK;
+    ctx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The invariant every long-polling caller depends on, pinned
+    /// where it cannot cost wall-clock time to check: a caller must be
+    /// more patient than the wait it asks for. tarpc's default is a
+    /// flat ten seconds, so this is the one thing that stops a
+    /// 30-second poll from being abandoned at ten.
+    #[test]
+    fn a_long_poll_outlasts_the_wait_it_asks_for() {
+        for max_wait_ms in [0, 30_000, 60_000] {
+            let ctx = long_poll_context(max_wait_ms);
+            let asked = std::time::Instant::now() + std::time::Duration::from_millis(max_wait_ms);
+            assert!(
+                ctx.deadline > asked,
+                "a {max_wait_ms}ms poll must not be abandoned before it is answered"
+            );
+        }
+        // And the default it replaces would not have been: this is
+        // the regression, stated.
+        assert!(
+            tarpc::context::current().deadline
+                < std::time::Instant::now() + std::time::Duration::from_millis(30_000),
+            "tarpc's default deadline is shorter than a 30s poll — the bug this guards"
+        );
     }
 }

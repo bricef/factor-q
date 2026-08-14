@@ -11,10 +11,7 @@ use fq_runtime::EventBus;
 use fq_runtime::agent::AgentId;
 
 use crate::cli::{GlobalArgs, TranscriptFormat};
-use crate::edge_call::{
-    edge_client_for, edge_invoke, edge_transcript_snapshot, invoke_gated_on, invoke_on,
-    next_turn_batch,
-};
+use crate::edge_call::{edge_client_for, edge_invoke, edge_transcript_snapshot, next_turn_batch};
 use crate::operator_surface::{
     InvocationListFilter, InvocationViewKey, parse_invocation_status_filter,
 };
@@ -236,24 +233,24 @@ pub(crate) async fn invocation_drop(
     json: bool,
 ) -> anyhow::Result<()> {
     let client = edge_client_for(global).await?;
-    let receipt = invoke_on(
-        &client,
-        fq_ops::OpId::Verb(fq_ops::VerbId::Invocation(fq_ops::Invocation::Drop)),
-        serde_json::json!({
-            "invocation_id": id,
-            "reason": reason,
-            "live": live,
-        }),
-    )
-    .await?
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let receipt = client
+        .invoke(
+            fq_ops::OpId::Verb(fq_ops::VerbId::Invocation(fq_ops::Invocation::Drop)),
+            serde_json::json!({
+                "invocation_id": id,
+                "reason": reason,
+                "live": live,
+            }),
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let receipt: fq_ops::Receipt = serde_json::from_value(receipt)?;
     let event_seq = receipt
         .watermark(fq_ops::Domain::Event)
         .context("the drop receipt named no event — cannot confirm the drop")?;
 
-    let detail = invoke_gated_on(
-        &client,
+    let detail = client
+        .invoke_gated(
         fq_ops::OpId::Get(fq_ops::Domain::Invocation),
         serde_json::to_value(InvocationViewKey {
             invocation_id: id.to_string(),

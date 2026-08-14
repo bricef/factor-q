@@ -70,13 +70,13 @@ pub(crate) async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Resul
         );
     }
 
-    crate::edge_call::invoke_on(
-        &client,
-        fq_ops::OpId::Verb(fq_ops::VerbId::Control(fq_ops::Control::Down)),
-        serde_json::json!({ "now": now }),
-    )
-    .await?
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    client
+        .invoke(
+            fq_ops::OpId::Verb(fq_ops::VerbId::Control(fq_ops::Control::Down)),
+            serde_json::json!({ "now": now }),
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     // The command is answered; nothing else may travel this connection,
     // which is about to be torn down under us by the daemon exiting.
     drop(client);

@@ -24,7 +24,7 @@
 
 use crate::cli::GlobalArgs;
 use crate::doctor_report::{DOCTOR_STUCK_THRESHOLD_MS, DoctorReport};
-use crate::edge_call::{edge_client_for, invoke_on};
+use crate::edge_call::edge_client_for;
 
 /// Pure: render the human-readable `fq doctor` report, mirroring
 /// `render_recovery_guidance` — an overall verdict, then per-failing-
@@ -136,13 +136,13 @@ pub(crate) async fn doctor(
     fail_on_issues: bool,
 ) -> anyhow::Result<()> {
     let client = doctor_client(global).await?;
-    let output = invoke_on(
-        &client,
-        fq_ops::OpId::Report(fq_ops::ReportId::Control(fq_ops::ControlReport::Doctor)),
-        serde_json::json!({}),
-    )
-    .await?
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let output = client
+        .invoke(
+            fq_ops::OpId::Report(fq_ops::ReportId::Control(fq_ops::ControlReport::Doctor)),
+            serde_json::json!({}),
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let report: DoctorReport = serde_json::from_value(output)?;
 
     if json {
