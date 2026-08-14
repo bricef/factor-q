@@ -2123,7 +2123,7 @@
                 "type": "integer"
               },
               "stuck_ids": {
-                "description": "Short ids of the stuck invocations, for triage.",
+                "description": "Ids of the stuck invocations, in full, for triage — same\nconvention as `working_ids`.",
                 "items": {
                   "type": "string"
                 },
@@ -2135,7 +2135,7 @@
                 "type": "integer"
               },
               "working_ids": {
-                "description": "Short ids of the working invocations, same convention as\n`stuck_ids`.",
+                "description": "Ids of the working invocations, in full — ask about one with\n`invocation.get`. Shorten them for display if you like; the\nshortened form is not an identity and nothing takes it back.",
                 "items": {
                   "type": "string"
                 },

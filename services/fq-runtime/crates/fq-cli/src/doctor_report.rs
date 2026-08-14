@@ -103,16 +103,18 @@ pub(crate) fn build_doctor_report(
         }
     }
 
-    // Short ids (8 chars) for triage, matching the human report.
-    let short = |ids: &[String]| -> Vec<String> {
-        ids.iter().map(|id| id.chars().take(8).collect()).collect()
-    };
+    // Full ids on the wire. They were shortened here to match the human
+    // report, which reads better at 8 characters — but a shortened id is
+    // not an identity: nothing accepts it back. `invocation.get` matches
+    // exactly, so a caller that took one of these and asked about it got
+    // NotFound, and a renderer that linked one produced a dead link.
+    // Shortening is a display choice and belongs to each renderer.
     let ex = DoctorExecutions {
         in_flight: executions.in_flight,
         working: executions.working,
-        working_ids: short(&executions.working_ids),
+        working_ids: executions.working_ids.clone(),
         stuck: executions.stuck,
-        stuck_ids: short(&executions.stuck_ids),
+        stuck_ids: executions.stuck_ids.clone(),
     };
 
     let failures: Vec<DoctorFailure> = failures
