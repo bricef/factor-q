@@ -23,7 +23,7 @@ services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1049
 services/fq-runtime/crates/fq-runtime/src/events.rs 1126
 services/fq-runtime/crates/fq-runtime/src/mcp.rs 1850
 services/fq-runtime/crates/fq-runtime/src/views.rs 1235
-services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 4185
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 4074
 services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1414
 services/fq-store/src/cli.rs 842
 services/fq-store/src/index.rs 849
