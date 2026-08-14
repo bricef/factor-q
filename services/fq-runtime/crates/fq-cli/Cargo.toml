@@ -36,9 +36,7 @@ bin-dir = "fq"
 # client half (`fq connect` / `fq ops` / `fq token`) speaks it too.
 fq-edge = { path = "../fq-edge" }
 fq-ops = { workspace = true }
-# read-service: the daemon hosts the read-only tarpc surface (#105
-# layer 2); whether the listener starts is `[read_service]` in fq.toml.
-fq-runtime = { workspace = true, features = ["read-service"] }
+fq-runtime = { workspace = true }
 fq-tools = { workspace = true }
 anyhow = { workspace = true }
 async-nats = { workspace = true }
@@ -68,7 +66,7 @@ libc = { workspace = true }
 async-trait = { workspace = true }
 # The resume e2e drives a spawned daemon against the in-process mock
 # LLM server; the feature exists for exactly this (test builds only).
-fq-runtime = { workspace = true, features = ["read-service", "test-support"] }
+fq-runtime = { workspace = true, features = ["test-support"] }
 # The shared private-broker guard, for the daemon_shutdown integration
 # tests (#233).
 fq-test-support = { workspace = true }

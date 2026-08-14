@@ -1,8 +1,8 @@
 //! Build script: stamps the git SHA into the binary (mirrors
 //! fq-cli/build.rs). The dashboard compares its own SHA against the
-//! daemon's over the frozen `ReadService::version` probe to detect
-//! build skew (#168), and `--version` prints it so deploy.sh can
-//! verify bundle coherence. Degrades to "unknown" when git or the
+//! daemon's, which `control.status` reports, to detect build skew
+//! (#168), and `--version` prints it so deploy.sh can verify bundle
+//! coherence. Degrades to "unknown" when git or the
 //! `.git` directory is unavailable (e.g. building from a tarball).
 
 use std::process::Command;

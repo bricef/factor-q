@@ -22,9 +22,8 @@ use axum::http::StatusCode;
 use axum::response::Html;
 use fq_edge::EdgeClient;
 use fq_edge::wire::WireError;
-use fq_ops::{ControlReport, CostReport as CostReportId, Domain, OpId, ReportId};
+use fq_ops::{ControlReport, CostReport as CostReportId, Domain, InvocationReport, OpId, ReportId};
 use fq_runtime::agent_view::{AgentDetailView, AgentEntryView, AgentsView};
-use fq_runtime::read_service;
 use fq_runtime::surface::{
     AgentListFilter, AgentViewKey, CostByAgentParams, CostSummaryParams, DoctorReport,
     EVENT_LIST_MAX_LIMIT, EventFilter, InvocationListFilter, InvocationViewKey, StatusReport,
@@ -34,7 +33,6 @@ use fq_runtime::views::{
     InvocationSummaryView,
 };
 use serde::de::DeserializeOwned;
-use tarpc::context;
 
 use crate::{AppState, render, skew};
 
@@ -143,7 +141,7 @@ pub(crate) fn unreachable_page(state: &AppState, title: &str, error: &str) -> Pa
         "{}{}",
         with_skew_banner(
             state,
-            &render::unreachable(&state.read_addr, &error, seen, now_ms()),
+            &render::unreachable(&state.edge_addr, &error, seen, now_ms()),
         ),
         updated_line(now_ms()),
     );
@@ -217,16 +215,13 @@ pub(crate) async fn health_page(State(state): State<Arc<AppState>>) -> Page {
 
 /// The invocations page: the "Active now" table above the list.
 ///
-/// **The active table is the last `ReadService` caller in the tree.**
-/// It renders `ActiveInvocationView`, which is sourced from the worker
-/// WAL rather than the coordination owner table — `views.rs` says why:
-/// trigger dispatch does not populate the owner table's `in_flight`
-/// status (#50), so the WAL is the only place live work is guaranteed
-/// to appear. `invocation.list` reads the owner table, so no filter on
-/// it can answer this, and no other declared operation exposes those
-/// rows. Retiring the read service therefore needs a decision about
-/// declaring one, which is held; until then this half of the page
-/// keeps its old path and the rest of the dashboard has moved.
+/// Two reads, and they are deliberately different kinds. `invocation.
+/// active` is a report — live execution state, no watermark, what is
+/// running as the call is answered. `invocation.list` is a view — a
+/// fold of the log, answered as of a position in it. The page shows
+/// them stacked because an operator wants both at once, but they are
+/// not two slices of one answer and a row can legitimately appear in
+/// one and not the other.
 pub(crate) async fn invocations_page(
     State(state): State<Arc<AppState>>,
     Query(q): Query<HashMap<String, String>>,
@@ -238,20 +233,20 @@ pub(crate) async fn invocations_page(
     };
     let status = q.get("status").cloned();
 
-    let read_client = match read_service::connect(&state.read_addr).await {
-        Ok(c) => c,
-        Err(err) => return unreachable_page(&state, "invocations", &format!("connect: {err}")),
-    };
-    let active: Vec<ActiveInvocationView> =
-        match read_client.active_invocations(context::current()).await {
-            Ok(Ok(active)) => active,
-            Ok(Err(err)) => return unreachable_page(&state, "invocations", &err.to_string()),
-            Err(err) => return unreachable_page(&state, "invocations", &format!("rpc: {err}")),
-        };
-
     let client = match edge_or_unreachable(&state, "invocations").await {
         Ok(c) => c,
         Err(page) => return page,
+    };
+    let active: Vec<ActiveInvocationView> = match call(
+        &client,
+        OpId::Report(ReportId::Invocation(InvocationReport::Active)),
+        serde_json::json!({}),
+    )
+    .await
+    {
+        Ok(active) => active,
+        Err(CallError::NotFound) => Vec::new(),
+        Err(CallError::Failed(err)) => return unreachable_page(&state, "invocations", &err),
     };
     let items: Vec<InvocationSummaryView> = match call(
         &client,

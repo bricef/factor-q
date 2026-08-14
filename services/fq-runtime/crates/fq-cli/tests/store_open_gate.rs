@@ -212,8 +212,14 @@ fn read_handlers_never_open_stores_directly() {
     // lines. So the rise is coverage, not concession; the number of
     // places a store is opened outside the daemon is still zero, and
     // that is the number this gate is really about.
+    //
+    // 5 -> 4 when `ReadService` retired: one of those two daemon-side
+    // `Views::open` calls was the read service's, and it went with the
+    // service. The edge's remains, and it is now the only read path
+    // into the stores — which is the shape the whole migration was
+    // for. A ratchet that only ever tightens is allowed to tighten.
     assert_eq!(
-        sanctioned, 5,
+        sanctioned, 4,
         "sanctioned direct-store-open count changed — update this gate alongside the marker"
     );
 }

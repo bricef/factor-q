@@ -1327,7 +1327,6 @@ dependencies = [
  "serde_yaml",
  "sqlx",
  "strum 0.27.2",
- "tarpc",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

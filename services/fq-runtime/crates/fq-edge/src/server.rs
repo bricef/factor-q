@@ -1,8 +1,8 @@
 //! The edge server: TLS accept → token preamble → tarpc. Born
-//! authenticated — there is no unauthenticated mode, so unlike the
-//! legacy `ReadService` there is no loopback-only refusal: the bind
-//! address is the operator's choice because every connection
-//! authenticates.
+//! authenticated — there is no unauthenticated mode, and that is what
+//! buys the bind address back: there is no loopback-only refusal here
+//! because every connection proves who it is, where an unauthenticated
+//! surface can only be made safe by being unreachable.
 //!
 //! The connection preamble (beneath the RPC contract, per ADR-0031):
 //! after the TLS handshake the client writes its token
