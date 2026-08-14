@@ -1,6 +1,6 @@
-//! The reports over the edge (plan Phase 4, verbs 13 and 15) — the
-//! first three the surface declares: `cost.summary`, `cost.by_agent`,
-//! `control.doctor`.
+//! The reports over the edge (plan Phase 4, verbs 13, 14 and 15) —
+//! every one the surface declares: `cost.summary`, `cost.by_agent`,
+//! `control.doctor`, `control.status`.
 //!
 //! What is proved here is what only the wire can prove. The
 //! aggregation itself is `Views`' and is covered by its tests; the
@@ -255,6 +255,10 @@ fn control_doctor() -> OpId {
     OpId::Report(ReportId::Control(ControlReport::Doctor))
 }
 
+fn control_status() -> OpId {
+    OpId::Report(ReportId::Control(ControlReport::Status))
+}
+
 /// Close enough for money: the figures cross a JSON wire as f64, so
 /// exact equality would be asserting about IEEE-754 rather than about
 /// the report.
@@ -442,6 +446,68 @@ async fn control_doctor_answers_about_the_daemon_that_serves_it() {
         report["failures"].as_array().expect("failures").len(),
         0,
         "nothing failed in this fixture: {report}"
+    );
+}
+
+/// The machinery report answers with things only a running daemon
+/// has: which build it is, the JetStream probe over the connection it
+/// holds, and its own live registry. Every section is present even
+/// when empty — a report that omitted them would read as "not
+/// checked" rather than "nothing found".
+#[tokio::test]
+async fn control_status_answers_with_what_only_a_running_daemon_has() {
+    let server = fq_test_support::NatsServer::start();
+    let daemon = start_daemon(&server).await;
+    let client =
+        fq_edge::EdgeClient::connect(&daemon.addr, daemon.fingerprint, &daemon.admin_token)
+            .await
+            .expect("connect edge");
+
+    let report = invoke(&client, control_status(), json!({}))
+        .await
+        .expect("report");
+
+    for section in [
+        "version",
+        "streams",
+        "registry",
+        "projection_rows",
+        "recovery",
+    ] {
+        assert!(!report[section].is_null(), "missing {section}: {report}");
+    }
+    assert!(
+        report["version"]
+            .as_str()
+            .expect("a version string")
+            .contains('+'),
+        "the build is semver plus the commit it was built from: {report}"
+    );
+    // The probe reached the daemon's own streams — the client never
+    // connects to the broker, so this could not be here otherwise.
+    let streams = report["streams"].as_array().expect("streams");
+    assert_eq!(streams.len(), 2, "both core streams are probed: {report}");
+    assert!(
+        streams.iter().all(|s| s
+            .get("available")
+            .is_some_and(|a| a["consumer"]["active"].get("name").is_some())),
+        "a live daemon's streams have their durable consumers: {report}"
+    );
+    // This fixture's agents directory is empty, and an empty registry
+    // is a zero rather than an omission.
+    assert_eq!(report["registry"]["agents"], 0);
+    assert_eq!(
+        report["registry"]["load_errors"]
+            .as_array()
+            .expect("load errors")
+            .len(),
+        0
+    );
+    // The projection holds the seeded cost events, read by the daemon
+    // that owns the store.
+    assert!(
+        report["projection_rows"].as_i64().expect("row count") >= 2,
+        "the seeded events are folded: {report}"
     );
 }
 

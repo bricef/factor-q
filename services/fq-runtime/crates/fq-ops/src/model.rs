@@ -609,8 +609,15 @@ fn serialize_report_word<S: serde::Serializer>(
 
 /// A named, typed computation over resources, as a value — the kind
 /// the original taxonomy was missing. Not a Get on a pretend-resource
-/// and not a query language: few by design, watermarked like any
-/// read.
+/// and not a query language: few by design.
+///
+/// **Not watermarked, and it cannot be.** A report answers at a point
+/// in time and there is nothing to transact onto, so the edge refuses
+/// `min_seq` on anything that is not a Get or a List. A caller who
+/// needs a specific write reflected gates the *read* the computation
+/// is about, not the computation. This said "watermarked like any
+/// read" until the domain model was corrected; the implementation
+/// never agreed with it.
 ///
 /// A report attaches to a [`Domain`] as its **permission scope** —
 /// authority is Read on that scope, which is what makes aggregates a

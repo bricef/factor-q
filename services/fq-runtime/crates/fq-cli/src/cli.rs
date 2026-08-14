@@ -181,8 +181,18 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show a health overview of the runtime (NATS, streams,
-    /// consumers, projection)
+    /// Show an overview of the runtime: which daemon this client is
+    /// configured to reach, and — from that daemon — its build, its
+    /// streams and consumers, its agent registry, how far its
+    /// projection has folded, and its recovery state
+    ///
+    /// Asks the running daemon (`control.status`). With none reachable
+    /// it does NOT fail outright: it reports the absence as the
+    /// finding, still answers what needed no daemon — the resolved
+    /// configuration, and whether the store files that configuration
+    /// names exist — and exits non-zero, so a script can tell "there
+    /// is a runtime" from "there is not". Counts are reported, not
+    /// judged; `fq doctor --fail-on-issues` is the health gate.
     Status {
         /// Emit the structured report as JSON instead of the
         /// human-readable overview.

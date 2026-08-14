@@ -21,7 +21,12 @@ pub const CORE_STREAMS: [(&str, &str); 2] = [
 /// Health of one JetStream stream plus its primary durable consumer.
 /// Externally tagged (serde's default) — internal tagging is JSON-only
 /// and breaks bincode, the read service's wire format.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+///
+/// Schema'd because `control.status` declares it: the probe is the
+/// daemon's now, and a declared report's output type carries its
+/// schema onto the published surface. The derive adds a schema, never
+/// a serialisation — the bincode wire above is untouched.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamHealth {
     /// The stream (or its info) could not be fetched; `error` carries
@@ -48,8 +53,9 @@ impl StreamHealth {
 }
 
 /// Health of one durable consumer on a stream. Externally tagged, same
-/// bincode rationale as [`StreamHealth`].
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// bincode rationale as [`StreamHealth`], and schema'd for the same
+/// reason.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConsumerHealth {
     /// The durable does not exist yet (no `fq run` has initialised it).
@@ -65,9 +71,10 @@ pub enum ConsumerHealth {
         ack_pending: u64,
         num_pending: u64,
         /// Outstanding redeliveries — messages delivered more than
-        /// once and not yet acked. The retry-pressure signal (#49): a
-        /// non-zero value means triggers are being NAK'd/timing out and
-        /// walking toward the delivery bound.
+        /// once and not yet acked. The retry-pressure signal: a
+        /// non-zero value means work is being NAK'd or timing out and
+        /// walking toward the consumer's delivery bound, past which a
+        /// trigger is dead-lettered rather than retried again.
         num_redelivered: u64,
     },
 }

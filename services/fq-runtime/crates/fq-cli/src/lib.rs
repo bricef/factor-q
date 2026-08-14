@@ -264,6 +264,7 @@ mod project;
 mod recovery;
 mod resume;
 mod status;
+mod status_report;
 mod trigger;
 mod trigger_command;
 mod version;
@@ -855,7 +856,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // take the runtime down; it logs and stays down until restart.
     let read_service_addr = if config.read_service.enabled {
         let views = Arc::new(
-            fq_runtime::views::Views::open(&db_paths) // allow-runtime-internals: daemon's own
+            fq_runtime::views::Views::open(&db_paths) // allow-runtime-internals: allow-direct-store-open: daemon's own
                 .await
                 .context("read service: failed to open the read views")?
                 // The daemon's read path can gate at a watermark: the
@@ -897,7 +898,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         // The operator surface: real declarations over the daemon's
         // read views, gated at the projection watermark (Phase 3).
         let edge_views = Arc::new(
-            fq_runtime::views::Views::open(&db_paths) // allow-runtime-internals: daemon's own
+            fq_runtime::views::Views::open(&db_paths) // allow-runtime-internals: allow-direct-store-open: daemon's own
                 .await
                 .context("edge: failed to open the read views")?,
         );

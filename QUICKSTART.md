@@ -34,7 +34,7 @@ just fq --help
 just fq status
 ```
 
-`fq status` connects to NATS, lists the streams it manages, and reports projection health. If it complains, NATS isn't reachable — re-run `just infra-up` and check `just infra-status`.
+`fq status` reports what this client is configured to reach, and — from the daemon, once one is running — its streams, its consumers and its projection. Nothing is running yet, so it will say so: that answer is the point of the command, and it still prints the configuration and store paths it resolved. It exits non-zero until a daemon answers.
 
 ## 2. Initialise a project
 
@@ -170,7 +170,8 @@ redeploy (suspend in-flight work for the next binary to resume), use
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `fq status` reports NATS unreachable. | NATS isn't running. | `just infra-up`; check `just infra-status`. |
+| `fq status` says no daemon answered. | The daemon isn't running, or this client was never paired with it. | Start it (`fq run`), then `fq connect <edge-addr> --token <token>`. |
+| `fq status` shows a stream as unavailable. | NATS isn't running, or the daemon never provisioned it. | `just infra-up`; check `just infra-status`. |
 | `fq trigger` says "LLM authentication failed". | `ANTHROPIC_API_KEY` is unset or invalid. | Re-export the variable in the same shell that runs `fq`. |
 | `fq trigger` exits with "agent not found". | You're not in the project directory, or the agents directory in `fq.toml` is wrong. | `cd` into the project, or pass `--agents-dir`. |
 | Tools fail with "path not in sandbox". | The agent's `sandbox.fs_read` / `fs_write` / `exec_cwd` doesn't include the path the model tried to use. | Edit the agent definition's sandbox section; nothing is granted by default. |

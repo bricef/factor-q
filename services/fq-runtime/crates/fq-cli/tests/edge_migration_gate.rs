@@ -16,6 +16,10 @@
 //!   zero: the last caller's departure took the helper with it, in
 //!   cohort 4.4. The pattern stays because what it guards against is a
 //!   helper like it reappearing.
+//! * `Views::open(` — the same act one level down, which is how it
+//!   survived the helper's deletion: `fq status` opened the stores by
+//!   calling the constructor `open_views` had wrapped. Added in cohort
+//!   4.4 and emptied by verb 14.
 //! * `control_plane::operator::` — reaching into runtime internals
 //!   directly instead of invoking a declared op.
 //! * `AgentRegistry::load_from_directory` — a client verb loading the
@@ -195,9 +199,22 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// the gate is for. A count that has to be explained away is worth
 /// less than one that is simply true.
 ///
-/// The two that remain are both `fq status`. Verb 14 empties them, and
-/// zero then means what a reader will assume it means.
-const REMAINING: usize = 2;
+/// It went 2 -> 0 with verb 14, and this zero is the plain one. Both
+/// sites were `fq status`, the last client verb that read a store for
+/// itself; it asks the daemon for `control.status` now. No client-side
+/// code in this crate opens a store, calls runtime internals, loads
+/// the agents directory, or holds a bus subscription.
+///
+/// What the zero asserts from here is a boundary rather than progress,
+/// and it is worth being precise about how strong it is. An exemption
+/// marker is invisible to this count: someone could mark a new
+/// client-side call point and the number would not move. That is why
+/// the sibling gate (`store_open_gate.rs`) counts *markers* as well as
+/// violations, and why `Views::open` is now on both lists — between
+/// them, adding a store open to the client half is loud either way.
+/// Phase 5 splits the binary, at which point most of this becomes a
+/// fact about which crate a symbol is in rather than a convention.
+const REMAINING: usize = 0;
 
 /// True when `path` is the test half of a module split — `foo/tests.rs`
 /// beside a `foo.rs` that declares `#[cfg(test)] mod tests;`.

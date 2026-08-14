@@ -121,7 +121,7 @@ is the unrecovered invocation rather than the leftover row.
 | Stop now, skip the drain | `fq down --now` |
 | Redeploy (suspend for the next binary) | `fq down` |
 | Hot-reload agent definitions | `fq reload` |
-| Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` (the last two ask the daemon, so they need one up) |
+| Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` (all three ask the daemon; `fq status` reports its absence as a finding rather than failing) |
 | Clear stale workers | *nothing — the daemon sweeps them* |
 
 ## See also
@@ -130,7 +130,8 @@ is the unrecovered invocation rather than the leftover row.
 - ADR-0006 Appendix E — why stale-worker reclamation is a daemon sweep
   and not an operator verb.
 - `fq status`, `fq doctor`, `fq workers list` — confirm the daemon and
-  worker state after a **deploy**. Not after a stop: `fq doctor` and
-  `fq workers list` ask the daemon, so once it is down the answer is
-  that it is down. `fq status` still probes the broker and the stores
-  directly.
+  worker state after a **deploy**. Not after a stop: all three ask the
+  daemon, so once it is down the answer is that it is down. `fq status`
+  is the one that says so usefully — it names the absence as the
+  finding, still prints the configuration and store paths it resolved
+  locally, and exits non-zero so a deploy script can branch on it.
