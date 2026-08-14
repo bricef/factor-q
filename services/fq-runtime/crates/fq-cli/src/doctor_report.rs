@@ -40,12 +40,18 @@
 //!
 //! The client half — the verb, its exit code, and the human rendering
 //! — is [`crate::doctor`]. That seam is the one Phase 5 splits the
-//! binary along.
+//! binary along, and the report's declared shapes sit on the shared
+//! side of it in [`fq_runtime::surface`]: the dashboard's health page
+//! composes this report with `control.status`, so both ends name the
+//! same types.
 
 use std::sync::Arc;
 
 use fq_edge::wire::WireError;
 use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
+use fq_runtime::surface::{
+    DoctorDeadLetters, DoctorExecutions, DoctorFailure, DoctorParams, DoctorReport, DoctorWorkers,
+};
 use fq_runtime::views::Views;
 
 /// Stuck-work threshold: an in-flight invocation whose
@@ -66,111 +72,6 @@ pub(crate) const DOCTOR_STUCK_THRESHOLD_MS: i64 = DEFAULT_STALE_THRESHOLD_MS;
 /// The projection's failure-kind string for a dead-lettered trigger —
 /// `FailureKind::TriggerExhausted` serialized with the wire vocabulary.
 const DEAD_LETTER_KIND: &str = "trigger_exhausted";
-
-/// The typed parameters of `control.doctor`. Empty, and declared
-/// anyway: every check runs, because a health report an operator can
-/// narrow is one they can narrow past the problem. This is where a
-/// future option — an override for [`DOCTOR_STUCK_THRESHOLD_MS`] —
-/// would appear.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct DoctorParams {}
-
-/// Worker liveness counts plus the ids of any stale workers so
-/// the operator can act without a second `fq workers list` call.
-#[derive(
-    serde::Serialize, serde::Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Default,
-)]
-pub(crate) struct DoctorWorkers {
-    pub(crate) alive: i64,
-    pub(crate) stale: i64,
-    pub(crate) shutdown: i64,
-    /// Worker ids currently past the stale threshold.
-    pub(crate) stale_ids: Vec<String>,
-}
-
-/// In-flight / current-execution view, read from the worker-local
-/// `invocation_state` table (the reliable live view — the CP owner
-/// table's `in_flight` status is not populated by trigger dispatch
-/// yet; see issue #50).
-#[derive(
-    serde::Serialize, serde::Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Default,
-)]
-pub(crate) struct DoctorExecutions {
-    pub(crate) in_flight: i64,
-    /// In-flight invocations with a fresh open dispatch (tool or LLM) —
-    /// actively working, however silent their WAL row.
-    pub(crate) working: i64,
-    /// Short ids of the working invocations, same convention as
-    /// `stuck_ids`.
-    pub(crate) working_ids: Vec<String>,
-    /// In-flight invocations whose `updated_at` is older than
-    /// [`DOCTOR_STUCK_THRESHOLD_MS`].
-    pub(crate) stuck: i64,
-    /// Short ids of the stuck invocations, for triage.
-    pub(crate) stuck_ids: Vec<String>,
-}
-
-/// Availability of the dead-letter section.
-/// Dead-lettered triggers: transient pre-WAL failures that
-/// exhausted the trigger consumer's delivery bound. The dispatcher
-/// consumes the exhausted trigger and emits a terminal `failed` event
-/// with kind [`DEAD_LETTER_KIND`]; this counts that bucket, so the
-/// report needs no extra query. The event's annotations carry the
-/// trigger subject and payload for requeue/diagnosis.
-#[derive(
-    serde::Serialize, serde::Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq,
-)]
-pub(crate) struct DoctorDeadLetters {
-    pub(crate) exhausted_triggers: i64,
-}
-
-/// The full doctor report — `control.doctor`'s declared output, and
-/// what `fq doctor --json` prints verbatim. Built by the pure
-/// [`build_doctor_report`] so the checks are unit-testable without a
-/// live DB.
-#[derive(
-    serde::Serialize, serde::Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq,
-)]
-pub(crate) struct DoctorReport {
-    pub(crate) workers: DoctorWorkers,
-    pub(crate) executions: DoctorExecutions,
-    /// Ambiguous invocations needing operator triage (CP owner
-    /// table, `status='ambiguous'`).
-    pub(crate) ambiguous: i64,
-    /// Terminal failures grouped by `FailureKind` (from the
-    /// projection `events` table, `event_type='failed'`).
-    pub(crate) failures: Vec<DoctorFailure>,
-    pub(crate) dead_letters: DoctorDeadLetters,
-}
-
-/// One failure-kind bucket in the report. Mirrors
-/// [`fq_runtime::views::FailureView`] but owns its data so the report
-/// is a self-contained serialisable value.
-#[derive(
-    serde::Serialize, serde::Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq,
-)]
-pub(crate) struct DoctorFailure {
-    pub(crate) error_kind: String,
-    pub(crate) count: i64,
-}
-
-impl DoctorReport {
-    /// Total terminal failures across all kinds.
-    pub(crate) fn failure_total(&self) -> i64 {
-        self.failures.iter().map(|f| f.count).sum()
-    }
-
-    /// True when any check reports a problem worth an operator's
-    /// attention: stale workers, stuck in-flight work, ambiguous
-    /// invocations, or permanent failures. In-flight work that is
-    /// merely running (not stuck) is healthy, not an issue.
-    pub(crate) fn has_issues(&self) -> bool {
-        self.workers.stale > 0
-            || self.executions.stuck > 0
-            || self.ambiguous > 0
-            || self.failure_total() > 0
-    }
-}
 
 /// Pure: assemble a [`DoctorReport`] from the already-fetched read
 /// views, so it can be unit-tested without a database. The stuck

@@ -19,8 +19,7 @@
 
 use crate::cli::GlobalArgs;
 use crate::connections::{edge_client, stored_connection};
-use crate::event_atom::EventFilter;
-use crate::operator_surface::TurnFilter;
+use fq_runtime::surface::{EventFilter, TurnFilter};
 
 /// Dial the configured daemon's edge with the stored pairing. One
 /// handle per verb, not per call: a verb that asks more than one

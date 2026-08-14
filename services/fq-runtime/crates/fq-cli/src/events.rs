@@ -25,7 +25,9 @@ use fq_runtime::events::{Event, EventPayload};
 
 use crate::cli::GlobalArgs;
 use crate::edge_call::{edge_client_for, edge_invoke, next_event_batch};
-use crate::event_atom::{EventFilter, EventKey};
+use fq_runtime::surface::EventFilter;
+
+use crate::event_atom::EventKey;
 
 /// Tail the event stream, formatting each event as a single readable
 /// line.
@@ -71,7 +73,7 @@ pub(crate) async fn tail_events(
     let mut cursor = seek.next_from_seq;
 
     if !json {
-        println!("Tailing {}", filter.describe());
+        println!("Tailing {}", crate::event_atom::describe_filter(&filter));
         println!("Press Ctrl-C to exit.");
         println!();
     }

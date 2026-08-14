@@ -12,9 +12,9 @@ use fq_runtime::agent::AgentId;
 
 use crate::cli::{GlobalArgs, TranscriptFormat};
 use crate::edge_call::{edge_client_for, edge_invoke, edge_transcript_snapshot, next_turn_batch};
-use crate::operator_surface::{
-    InvocationListFilter, InvocationViewKey, parse_invocation_status_filter,
-};
+use fq_runtime::surface::{InvocationListFilter, InvocationViewKey};
+
+use crate::operator_surface::parse_invocation_status_filter;
 use crate::resume::{InvocationResumeRequest, InvocationResumeResponse};
 
 // ============================================================

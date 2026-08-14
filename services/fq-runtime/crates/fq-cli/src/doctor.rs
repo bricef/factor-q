@@ -23,7 +23,9 @@
 //! ([`doctor_client`]).
 
 use crate::cli::GlobalArgs;
-use crate::doctor_report::{DOCTOR_STUCK_THRESHOLD_MS, DoctorReport};
+use fq_runtime::surface::DoctorReport;
+
+use crate::doctor_report::DOCTOR_STUCK_THRESHOLD_MS;
 use crate::edge_call::edge_client_for;
 
 /// Pure: render the human-readable `fq doctor` report, mirroring

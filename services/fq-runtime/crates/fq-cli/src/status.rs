@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use crate::cli::GlobalArgs;
 use crate::edge_call::edge_invoke;
 use crate::runtime_db_paths;
-use crate::status_report::{StatusParams, StatusRegistry, StatusReport};
+use fq_runtime::surface::{StatusParams, StatusRegistry, StatusReport};
 
 /// The `fq status --json` document: the local blocks, then either the
 /// daemon's report or the reason there is not one.
