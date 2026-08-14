@@ -340,8 +340,22 @@ The kind the earlier taxonomy was missing. A report is a **named, typed
 computation over resources**: `cost.summary`, `cost.by_agent`,
 `control.doctor`, `control.status`. Reports are not Gets on a
 pretend-resource and not a query language — each is an individually
-named promise with typed parameters and a typed result, few by design,
-and watermarked like any read.
+named promise with typed parameters and a typed result, few by design.
+
+**A report is not watermarked, and cannot be.** It answers at a point
+in time; there is nothing to transact onto. `min_seq` gates a read of a
+resource — "do not answer until the fold has reached here" — and that
+question has no meaning for a computation whose result is not a
+resource state. So the edge refuses `min_seq` on anything that is not a
+Get or a List, and a caller cannot compose read-your-writes from a
+receipt into `control.doctor` or `cost.summary`.
+
+That is the nature of a report rather than a gap in one. If a caller
+needs to know that a specific write is reflected in a computation, the
+answer is to gate the *read* the computation is about, not to gate the
+computation. This paragraph said the opposite until 2026-08-14 — that
+reports were "watermarked like any read" — which was never true of the
+implementation.
 
 **The machinery reports stretch that definition, and the stretch is
 declared rather than hidden.** `control.status` answers largely with
