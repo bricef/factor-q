@@ -30,71 +30,19 @@
 //! `control.doctor` states at length: a report's authority is Read on
 //! its own scope and never on its inputs, so declaring them would buy
 //! this report nothing and spend names against the curation gate.
+//!
+//! The report's declared shapes live in [`fq_runtime::surface`]: the
+//! dashboard renders this report too, and a declared shape with two
+//! clients is a shared definition rather than a private one.
 
 use std::sync::Arc;
 
 use fq_edge::wire::WireError;
 use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
+use fq_runtime::surface::{StatusParams, StatusRegistry, StatusReport};
 use fq_runtime::views::Views;
 
 use crate::version::FQ_VERSION;
-
-/// The typed parameters of `control.status`. Empty, and declared
-/// anyway: the report is small enough that every part of it is worth
-/// having, and this is where a future narrowing would appear.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct StatusParams {}
-
-/// The daemon's live agent registry, censused: what it would run right
-/// now, and what it could not load.
-#[derive(
-    serde::Serialize, serde::Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Default,
-)]
-pub(crate) struct StatusRegistry {
-    /// Definitions the registry holds — the agents this daemon would
-    /// run if triggered right now.
-    pub(crate) agents: i64,
-    /// One entry per definition file the registry rejected, phrased as
-    /// the daemon phrased it; each message names the file. A daemon
-    /// with load errors is running fewer agents than its directory
-    /// describes, which is rarely what the operator intended.
-    pub(crate) load_errors: Vec<String>,
-}
-
-impl StatusRegistry {
-    /// Census one registry snapshot.
-    pub(crate) fn of(registry: &fq_runtime::AgentRegistry) -> Self {
-        StatusRegistry {
-            agents: registry.len() as i64,
-            load_errors: registry.errors().iter().map(|e| e.to_string()).collect(),
-        }
-    }
-}
-
-/// `control.status`'s declared output, and what `fq status --json`
-/// nests under `daemon`.
-#[derive(
-    serde::Serialize, serde::Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq,
-)]
-pub(crate) struct StatusReport {
-    /// The build this daemon is running: semver plus the commit it was
-    /// built from, so a deploy check can confirm the live process is on
-    /// the expected revision.
-    pub(crate) version: String,
-    /// JetStream health for the runtime's core streams and their
-    /// primary durable consumers — message counts, byte totals and how
-    /// far each consumer has got. Probed at the daemon, over the
-    /// connection it already holds.
-    pub(crate) streams: Vec<fq_runtime::health::StreamHealth>,
-    /// The live agent registry, censused.
-    pub(crate) registry: StatusRegistry,
-    /// Rows in the daemon's projection index — how much of the event
-    /// log has been folded into readable state.
-    pub(crate) projection_rows: i64,
-    /// Ambiguous invocations awaiting triage and workers past the
-    /// stale threshold, with their ids.
-    pub(crate) recovery: fq_runtime::views::RecoveryView,
-}
 
 /// Register `control.status` on the daemon's edge.
 pub(crate) fn register_status_report(

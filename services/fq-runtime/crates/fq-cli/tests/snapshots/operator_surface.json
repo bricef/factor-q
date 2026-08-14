@@ -1966,7 +1966,7 @@
       "output_schema": {
         "$defs": {
           "DoctorDeadLetters": {
-            "description": "Availability of the dead-letter section.\nDead-lettered triggers: transient pre-WAL failures that\nexhausted the trigger consumer's delivery bound. The dispatcher\nconsumes the exhausted trigger and emits a terminal `failed` event\nwith kind [`DEAD_LETTER_KIND`]; this counts that bucket, so the\nreport needs no extra query. The event's annotations carry the\ntrigger subject and payload for requeue/diagnosis.",
+            "description": "Dead-lettered triggers: transient pre-WAL failures that\nexhausted the trigger consumer's delivery bound. The dispatcher\nconsumes the exhausted trigger and emits a terminal `failed` event\nwith the dead-letter kind; this counts that bucket, so the\nreport needs no extra query. The event's annotations carry the\ntrigger subject and payload for requeue/diagnosis.",
             "properties": {
               "exhausted_triggers": {
                 "format": "int64",
@@ -1986,7 +1986,7 @@
                 "type": "integer"
               },
               "stuck": {
-                "description": "In-flight invocations whose `updated_at` is older than\n[`DOCTOR_STUCK_THRESHOLD_MS`].",
+                "description": "In-flight invocations whose `updated_at` is older than the\nreport's stuck threshold.",
                 "format": "int64",
                 "type": "integer"
               },
@@ -2020,7 +2020,7 @@
             "type": "object"
           },
           "DoctorFailure": {
-            "description": "One failure-kind bucket in the report. Mirrors\n[`fq_runtime::views::FailureView`] but owns its data so the report\nis a self-contained serialisable value.",
+            "description": "One failure-kind bucket in the report. Mirrors\n[`crate::views::FailureView`] but owns its data so the report is a\nself-contained serialisable value.",
             "properties": {
               "count": {
                 "format": "int64",
@@ -2069,7 +2069,7 @@
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "The full doctor report — `control.doctor`'s declared output, and\nwhat `fq doctor --json` prints verbatim. Built by the pure\n[`build_doctor_report`] so the checks are unit-testable without a\nlive DB.",
+        "description": "The full doctor report — `control.doctor`'s declared output, and\nwhat `fq doctor --json` prints verbatim.",
         "properties": {
           "ambiguous": {
             "description": "Ambiguous invocations needing operator triage (CP owner\ntable, `status='ambiguous'`).",
@@ -2105,7 +2105,7 @@
       },
       "params_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "The typed parameters of `control.doctor`. Empty, and declared\nanyway: every check runs, because a health report an operator can\nnarrow is one they can narrow past the problem. This is where a\nfuture option — an override for [`DOCTOR_STUCK_THRESHOLD_MS`] —\nwould appear.",
+        "description": "The typed parameters of `control.doctor`. Empty, and declared\nanyway: every check runs, because a health report an operator can\nnarrow is one they can narrow past the problem. This is where a\nfuture option — an override for the stuck threshold — would appear.",
         "title": "DoctorParams",
         "type": "object"
       },

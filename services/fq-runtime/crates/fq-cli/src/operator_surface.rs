@@ -1,12 +1,18 @@
 //! The operator surface (plan Phase 3): the real declarations bound
 //! to Views-backed handlers — the daemon is where declarations meet
-//! their implementations — plus the generic edge call the flipped
-//! CLI verbs ride. Contract shapes that aren't runtime DTOs (keys,
-//! filters) live here until 3e's codegen decision settles their
-//! final home.
+//! their implementations.
+//!
+//! The declared shapes that acquired a second client moved to
+//! [`fq_runtime::surface`], which is the home 3e's decision settled
+//! on: no codegen means client and daemon share the definition
+//! itself. What stays here is what only this crate calls — the Worker
+//! key and filter, the Turn and Event keys, and the command inputs.
 
 use std::sync::Arc;
 
+use fq_runtime::surface::{
+    AgentListFilter, AgentViewKey, InvocationListFilter, InvocationViewKey, TurnFilter,
+};
 use fq_runtime::views::Views;
 
 // ---------------------------------------------------------------------
@@ -16,28 +22,6 @@ use fq_runtime::views::Views;
 // that aren't runtime DTOs (keys, filters) live beside the assembly
 // until 3e's codegen decision settles their final home.
 // ---------------------------------------------------------------------
-
-/// Get identity for the Invocation view.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct InvocationViewKey {
-    pub(crate) invocation_id: String,
-}
-
-/// List selection for the Invocation view — the typed, schema'd
-/// filter (never a query language).
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct InvocationListFilter {
-    #[serde(default)]
-    pub(crate) status: Option<String>,
-    #[serde(default)]
-    pub(crate) include_archived: bool,
-    #[serde(default = "default_invocation_list_limit")]
-    pub(crate) limit: i64,
-}
-
-fn default_invocation_list_limit() -> i64 {
-    50
-}
 
 /// Parse a `--status` filter into an `OwnerStatus`. Returns
 /// `Err` on unknown values so the CLI exits with a clear
@@ -62,19 +46,6 @@ pub(crate) fn parse_invocation_status_filter(
 pub(crate) struct WorkerViewKey {
     pub(crate) worker_id: String,
 }
-
-/// Get identity for the Agent view.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct AgentViewKey {
-    pub(crate) agent_id: String,
-}
-
-/// List selection for the Agent view. Empty, and declared anyway: a
-/// registry is a directory of definitions the daemon holds entirely in
-/// memory, so there is no narrowing worth a wire contract yet, and the
-/// declaration is where a future one would appear.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct AgentListFilter {}
 
 /// List selection for the Worker view — the typed, schema'd filter
 /// (never a query language). `fq workers list` used to pull the whole
@@ -119,15 +90,6 @@ pub struct OperatorDeps {
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct TurnKey {
     seq: u64,
-}
-
-/// List/Stream selection for Turns — full payloads by default; an
-/// `abbreviate` option waits for a consumer that wants it (P11).
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct TurnFilter {
-    pub(crate) invocation_id: String,
-    #[serde(default)]
-    pub(crate) limit: Option<u32>,
 }
 
 /// The typed input of `invocation.drop` on the wire.

@@ -49,6 +49,7 @@ use std::sync::Arc;
 use fq_edge::wire::WireError;
 use fq_runtime::event_tail::EventState;
 use fq_runtime::events::Event;
+use fq_runtime::surface::EventFilter;
 use fq_runtime::views::{EventLocation, EventView, Views};
 
 /// Get identity for an Event: the `event_id` the event stamps on
@@ -65,139 +66,77 @@ pub(crate) struct EventKey {
     pub(crate) event_id: String,
 }
 
-/// List/Stream selection for Events — the typed, schema'd filter.
+/// What an [`EventFilter`] selects, in words — `fq events tail` says it
+/// back in its preamble so an operator can see at a glance that the
+/// narrowing they asked for is the one in force. Domain terms, like
+/// the filter itself: the verb used to echo the raw NATS subject it
+/// had subscribed to, which named a coordinate of the infrastructure
+/// rather than anything the operator selected.
 ///
-/// Never a query language, and deliberately never a bus subject: a
-/// subject pattern is a coordinate of the infrastructure the edge maps
-/// (D8), so the selection travels in domain terms and the daemon
-/// decides which subjects answer it. It carries exactly the narrowing
-/// `fq events query` offers, which is the same narrowing a tail wants.
-#[derive(Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct EventFilter {
-    /// One agent's events — the events whose **envelope** names that
-    /// agent, which is the domain's answer to whose event this is.
-    /// Not the events on `fq.agent.<id>.>`: an agent's archive ack is
-    /// published on a worker subject, and agent `system` has no
-    /// `fq.agent.*` subject at all. Absent reads every agent.
-    #[serde(default)]
-    pub(crate) agent: Option<String>,
-    /// One event type, as the payload names itself (`llm_response`,
-    /// `tool_call`, `system_startup`, …). An unrecognised value
-    /// matches nothing rather than failing: event types are values,
-    /// and a newer daemon has types this binary has never heard of.
-    #[serde(default)]
-    pub(crate) event_type: Option<String>,
-    /// Only events at or after this RFC3339 instant.
-    #[serde(default)]
-    pub(crate) since: Option<String>,
-    /// Cap on one List page — the most recent N matching rows, and at
-    /// most 2000 of them (this property's `maximum`). Absent asks for
-    /// the default 50.
-    ///
-    /// **A larger N is refused, never quietly shrunk.** So the count
-    /// that comes back is always the one you asked for or the whole
-    /// answer, and it reads unambiguously: fewer rows than you asked
-    /// for means there are no more; exactly as many means there may
-    /// be. For more than a page, narrow (`agent`, `event_type`,
-    /// `since`) or read the same population from `event.stream`,
-    /// which is cursored.
-    ///
-    /// Ignored by Stream, which is cursored rather than paged.
-    #[serde(default)]
-    #[schemars(range(max = EVENT_LIST_MAX_LIMIT))]
-    pub(crate) limit: Option<u32>,
+/// A free function rather than a method because the filter is now a
+/// shared declared shape ([`fq_runtime::surface`]) and this sentence
+/// is the CLI's own — terminal prose has no business travelling with
+/// a wire contract.
+pub(crate) fn describe_filter(filter: &EventFilter) -> String {
+    match (filter.agent.as_deref(), filter.event_type.as_deref()) {
+        (None, None) => "all events".to_string(),
+        (Some(agent), None) => format!("all events for agent {agent}"),
+        (None, Some(event_type)) => format!("all {event_type} events"),
+        (Some(agent), Some(event_type)) => format!("{event_type} events for agent {agent}"),
+    }
 }
 
-impl EventFilter {
-    /// What this filter selects, in words — `fq events tail` says it
-    /// back in its preamble so an operator can see at a glance that
-    /// the narrowing they asked for is the one in force. Domain terms,
-    /// like the filter itself: the verb used to echo the raw NATS
-    /// subject it had subscribed to, which named a coordinate of the
-    /// infrastructure rather than anything the operator selected.
-    pub(crate) fn describe(&self) -> String {
-        match (self.agent.as_deref(), self.event_type.as_deref()) {
-            (None, None) => "all events".to_string(),
-            (Some(agent), None) => format!("all events for agent {agent}"),
-            (None, Some(event_type)) => format!("all {event_type} events"),
-            (Some(agent), Some(event_type)) => format!("{event_type} events for agent {agent}"),
-        }
+/// The page size a filter asks List for: the caller's own number,
+/// checked against the cap, or the default when they named none.
+///
+/// **Over the cap is a refusal, not a shorter page.** Clamping is
+/// the tempting fix and the wrong one. List answers with a bare
+/// array of index rows — no envelope, no cursor, nowhere to say
+/// "there is more" — so a page the daemon silently shortened is
+/// indistinguishable from a listing that ended, and an operator
+/// reads N rows with no way to tell "that is all of them" from
+/// "that is as many as you may have at once". Refusing keeps
+/// `limit` the caller's own bound, which is the whole reason the
+/// row count is readable at all.
+///
+/// And the cap is not a dead end, which is the other half of the
+/// choice: more than a page is served by narrowing, or by
+/// `event.stream`, which is cursored, resumable, and selects the
+/// same events for the same filter — the route the atom's
+/// description already sends bulk reads down. A silent clamp would
+/// have been a dead end *and* a lie.
+///
+/// The daemon's half of the contract, so it stays here while the
+/// filter itself is shared: it speaks `WireError`, which the runtime
+/// core does not know and should not learn.
+fn list_limit(filter: &EventFilter) -> Result<u32, WireError> {
+    let Some(limit) = filter.limit else {
+        return Ok(EVENT_LIST_DEFAULT_LIMIT);
+    };
+    if limit > EVENT_LIST_MAX_LIMIT {
+        return Err(WireError::InvalidInput {
+            op: "event.list".into(),
+            message: format!(
+                "limit {limit} is over the {EVENT_LIST_MAX_LIMIT}-row cap on one List \
+                 page — ask for {EVENT_LIST_MAX_LIMIT} or fewer. The cap is not applied \
+                 silently because a shortened page and a complete one are the same \
+                 answer to look at. For more than a page, narrow with `agent`, \
+                 `event_type` or `since`, or read `event.stream`, which is cursored and \
+                 selects the same events for the same filter."
+            ),
+        });
     }
-
-    /// The page size this filter asks List for: the caller's own
-    /// number, checked against the cap, or the default when they named
-    /// none.
-    ///
-    /// **Over the cap is a refusal, not a shorter page.** Clamping is
-    /// the tempting fix and the wrong one. List answers with a bare
-    /// array of index rows — no envelope, no cursor, nowhere to say
-    /// "there is more" — so a page the daemon silently shortened is
-    /// indistinguishable from a listing that ended, and an operator
-    /// reads N rows with no way to tell "that is all of them" from
-    /// "that is as many as you may have at once". Refusing keeps
-    /// `limit` the caller's own bound, which is the whole reason the
-    /// row count is readable at all.
-    ///
-    /// And the cap is not a dead end, which is the other half of the
-    /// choice: more than a page is served by narrowing, or by
-    /// `event.stream`, which is cursored, resumable, and selects the
-    /// same events for the same filter — the route the atom's
-    /// description already sends bulk reads down. A silent clamp would
-    /// have been a dead end *and* a lie.
-    fn list_limit(&self) -> Result<u32, WireError> {
-        let Some(limit) = self.limit else {
-            return Ok(EVENT_LIST_DEFAULT_LIMIT);
-        };
-        if limit > EVENT_LIST_MAX_LIMIT {
-            return Err(WireError::InvalidInput {
-                op: "event.list".into(),
-                message: format!(
-                    "limit {limit} is over the {EVENT_LIST_MAX_LIMIT}-row cap on one List \
-                     page — ask for {EVENT_LIST_MAX_LIMIT} or fewer. The cap is not applied \
-                     silently because a shortened page and a complete one are the same \
-                     answer to look at. For more than a page, narrow with `agent`, \
-                     `event_type` or `since`, or read `event.stream`, which is cursored and \
-                     selects the same events for the same filter."
-                ),
-            });
-        }
-        Ok(limit)
-    }
+    Ok(limit)
 }
 
 /// Cap on one stream batch.
 const EVENT_BATCH_CAP: usize = 64;
 /// Default List page, matching `fq events query --limit`'s default.
 const EVENT_LIST_DEFAULT_LIMIT: u32 = 50;
-/// The most rows one List page may carry, whatever a caller asks for —
-/// refused rather than quietly applied (see `EventFilter::list_limit`),
-/// and declared on the surface as this filter's `limit` maximum so a
-/// consumer reads it off the schema instead of discovering it by
-/// failing.
-///
-/// **The number is the edge's frame, worked backwards.** One List
-/// answer is one frame, and both ends of the edge frame with
-/// `LengthDelimitedCodec::new()`, whose default ceiling is 8 MiB
-/// (8,388,608 bytes). An index row's fixed part — two UUIDs, an
-/// RFC3339 timestamp, ten keys — is 293 bytes, and whole rows measure
-/// 287 / 294 / 367 bytes (min / median / max) across the golden
-/// listing. So 2,000 rows leaves 8,388,608 / 2,000 = 4,194 bytes for
-/// each of them: fourteen times the median row, or ~3.9 KB of
-/// `error_message` on *every* row — and `error_message` is the one
-/// unbounded field here, an `err.to_string()` from a provider or a
-/// tool that nothing on the way in truncates. A full page of median
-/// rows is 0.56 MiB, 7% of the frame. That is headroom rather than a
-/// squeaker, which is the point: the cap has to survive the listing an
-/// operator reaches for on the worst day, when every row is a failure
-/// carrying a provider's error body.
-///
-/// What it replaces had no bound at all. `--limit -1` arrived here as
-/// `u32::MAX` — `LIMIT 4294967295`, the whole projection table
-/// materialised as one `Vec<EventView>` in daemon memory and then
-/// refused by the codec somewhere past 20,000 rows (5.6 MiB of median
-/// rows, 70% of the frame). The operator paid the allocation and got a
-/// transport error for it, and any paired client could ask for that.
-pub(crate) const EVENT_LIST_MAX_LIMIT: u32 = 2_000;
+/// The List page cap, re-exported at the name this module's handlers
+/// and tests already use. Its reasoning lives with the definition,
+/// which is on the declared filter it bounds.
+pub(crate) use fq_runtime::surface::EVENT_LIST_MAX_LIMIT;
 /// Ceiling on a `next_batch` long poll, whatever the caller asks.
 const EVENT_MAX_WAIT_CEILING_MS: u64 = 60_000;
 
@@ -377,7 +316,7 @@ pub(crate) fn register_event_atom(
                 let views = views.clone();
                 async move {
                     let selection = EventSelection::compile(&filter, "event.list")?;
-                    let limit = filter.list_limit()?;
+                    let limit = list_limit(&filter)?;
                     list_events(&views, &selection, limit).await
                 }
             },
@@ -611,12 +550,12 @@ mod tests {
     #[test]
     fn a_filter_describes_itself_in_domain_terms() {
         let described = |agent: Option<&str>, event_type: Option<&str>| {
-            EventFilter {
+            let filter = EventFilter {
                 agent: agent.map(str::to_string),
                 event_type: event_type.map(str::to_string),
                 ..EventFilter::default()
-            }
-            .describe()
+            };
+            describe_filter(&filter)
         };
         assert_eq!(described(None, None), "all events");
         assert_eq!(
@@ -653,8 +592,7 @@ mod tests {
             // What `--limit -1` used to arrive as: the whole table.
             u32::MAX,
         ] {
-            let err = filter_with_limit(Some(asked))
-                .list_limit()
+            let err = list_limit(&filter_with_limit(Some(asked)))
                 .expect_err("a page over the cap must be refused, not served short");
             // The refusal names the cap, so the caller's next request
             // is one edit away rather than a guess — and names the op,
@@ -692,7 +630,7 @@ mod tests {
     fn under_the_cap_the_page_is_the_callers_own_number() {
         for asked in [0, 1, EVENT_LIST_DEFAULT_LIMIT, EVENT_LIST_MAX_LIMIT] {
             assert_eq!(
-                filter_with_limit(Some(asked)).list_limit().ok(),
+                list_limit(&filter_with_limit(Some(asked))).ok(),
                 Some(asked),
                 "a page within the cap must be exactly the size asked for"
             );
@@ -701,7 +639,7 @@ mod tests {
         // for nothing in particular must not become asking for the
         // largest page the daemon will serve.
         assert_eq!(
-            filter_with_limit(None).list_limit().ok(),
+            list_limit(&filter_with_limit(None)).ok(),
             Some(EVENT_LIST_DEFAULT_LIMIT)
         );
     }
@@ -921,7 +859,7 @@ mod tests {
                 ..EventFilter::default()
             },
         ] {
-            let asked = filter.describe();
+            let asked = describe_filter(&filter);
             assert!(
                 !selection_for(filter).matches(&heartbeat),
                 "a heartbeat must not be streamed, and `{asked}` did"
