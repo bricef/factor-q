@@ -47,8 +47,6 @@ pub struct Config {
     #[serde(default = "default_drain_deadline_ms")]
     pub drain_deadline_ms: u64,
     #[serde(default)]
-    pub read_service: ReadServiceConfig,
-    #[serde(default)]
     pub edge: EdgeConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -56,43 +54,10 @@ pub struct Config {
     pub summary: SummaryConfig,
 }
 
-/// The in-daemon read-only operator service (#105 layer 2) — the tarpc
-/// surface the CLI's remote reads and `fq-dashboard` poll. Off by
-/// default; the daemon refuses a non-loopback bind because the service
-/// is unauthenticated (same posture as NATS / `fq-cas serve`).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ReadServiceConfig {
-    /// Start the service with `fq run`.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Loopback bind address for the tarpc listener.
-    #[serde(default = "default_read_service_bind")]
-    pub bind: String,
-    /// Upper bound on the JetStream health probe inside `health()`, so
-    /// a wedged broker cannot wedge the health surface.
-    #[serde(default = "default_read_service_probe_timeout_ms")]
-    pub probe_timeout_ms: u64,
-}
-
-impl Default for ReadServiceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bind: default_read_service_bind(),
-            probe_timeout_ms: default_read_service_probe_timeout_ms(),
-        }
-    }
-}
-
-fn default_read_service_bind() -> String {
-    "127.0.0.1:9471".to_string()
-}
-
 /// The authenticated operator edge (ADR-0006 + ADR-0031): the tarpc
 /// `invoke`/`next_batch` surface operator clients speak. Born
 /// authenticated — every connection presents a capability token — so
-/// unlike `[read_service]` a non-loopback bind is the operator's
-/// choice, not a refusal. On by default — the edge is the operator
+/// a non-loopback bind is the operator's choice, not a refusal. On by default — the edge is the operator
 /// surface (plan Phase 5 retires the legacy paths); `enabled = false`
 /// disables it explicitly.
 #[derive(Debug, Clone, Deserialize)]
@@ -131,10 +96,6 @@ fn default_edge_enabled() -> bool {
 
 fn default_edge_bind() -> String {
     "127.0.0.1:9472".to_string()
-}
-
-fn default_read_service_probe_timeout_ms() -> u64 {
-    2_000
 }
 
 /// Built-in tool configuration — `[tools]` in `fq.toml`. Today only the
@@ -688,7 +649,6 @@ impl Default for Config {
             summary: SummaryConfig::default(),
             max_iterations: default_max_iterations(),
             drain_deadline_ms: default_drain_deadline_ms(),
-            read_service: ReadServiceConfig::default(),
             edge: EdgeConfig::default(),
             tools: ToolsConfig::default(),
         }

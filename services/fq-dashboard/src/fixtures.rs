@@ -23,7 +23,7 @@ mod health;
 
 pub(crate) use health::{doctor_report, status_report};
 
-fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
+pub(crate) fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
     vec![
         fq_runtime::views::ActiveInvocationView {
             invocation_id: "019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string(),

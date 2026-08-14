@@ -22,10 +22,7 @@ fq-ops = { workspace = true }
 # this compile instead of drifting silently (#105 layer 3). Shared
 # transitive deps resolve under the single workspace Cargo.lock (#194),
 # so runtime and dashboard can never disagree on a pin.
-#
-# read-service: still enabled for the "Active now" table, the one
-# surface with no declared operation yet — see `invocations_page`.
-fq-runtime = { workspace = true, features = ["read-service"] }
+fq-runtime = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 # RFC3339 `since` strings for the costs page's time windows — the same

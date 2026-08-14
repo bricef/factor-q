@@ -15,10 +15,6 @@
 # 127.0.0.1:9472, which is the port this process serves on, so on a host
 # running both the daemon's edge must be moved and named explicitly.
 #
-# Still requires `[read_service] enabled = true` in fq.toml for the
-# "Active now" table alone — the one surface with no declared operation
-# yet. Everything else on the dashboard rides the edge.
-#
 # The dashboard is its own crash domain: if the daemon is down it
 # renders "runtime unreachable" rather than exiting, and killing it
 # never affects the daemon. deploy.sh stops and relaunches it with the
@@ -37,5 +33,4 @@ set +a
 exec ./current/fq-dashboard \
   --bind "${FQ_DASHBOARD_BIND:-127.0.0.1:9472}" \
   --edge "${FQ_EDGE:?set it in .secrets/env to the [edge] bind — see ops/dogfood/README.md}" \
-  --read-service "${FQ_READ_SERVICE:-127.0.0.1:9471}" \
   --refresh "${FQ_DASHBOARD_REFRESH:-5}"

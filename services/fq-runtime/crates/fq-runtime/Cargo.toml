@@ -36,18 +36,11 @@ genai = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 strum = { workspace = true }
-# The read-only operator service (#105 layer 2). Optional so library
-# consumers don't pull tarpc — same shape as fq-store's `service` feature.
-tarpc = { workspace = true, optional = true }
 
 [features]
 # Expose test_support::mock_anthropic to other crates' dev-dependencies
 # (resolver 2 keeps this out of every non-test build of consumers).
 test-support = ["dep:axum"]
-# The in-daemon read-only tarpc service (wire-mirror of `views` plus the
-# JetStream health probe). `fq-cli` enables it; whether the *listener*
-# starts is a runtime decision (`[read_service]` in fq.toml).
-read-service = ["dep:tarpc"]
 
 [dev-dependencies]
 # The shared private-broker guard, re-exported as `test_support::nats` for

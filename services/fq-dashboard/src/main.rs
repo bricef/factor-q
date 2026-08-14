@@ -6,7 +6,7 @@
 //! breaking; if this process dies, the daemon never notices.
 //!
 //! **It reads over the authenticated edge, as a second principal.**
-//! Every page but one invokes declared operations with a token
+//! Every page invokes declared operations with a token
 //! attenuated to six read grants — `agent`, `control`, `cost`,
 //! `event`, `invocation`, `turn` — so a compromised dashboard can read
 //! exactly what it renders and command nothing. The token is minted
@@ -15,9 +15,6 @@
 //! fingerprint is pinned the same way. Both are required: with no
 //! token there is nothing to fail closed *to*, so startup refuses
 //! rather than running unauthenticated.
-//!
-//! The one exception is the "Active now" table, which still rides the
-//! legacy read service — see [`invocations_page`].
 //!
 //! Deliberately naive (v0, per the plan): each browser request dials
 //! the daemon fresh (localhost TCP — microseconds, and it doubles
@@ -83,10 +80,6 @@ struct Args {
     /// prints it when it provisions its identity. Required.
     #[arg(long, env = "FQ_EDGE_FINGERPRINT")]
     edge_fingerprint: Option<String>,
-    /// Address of the runtime's read service (`[read_service]` in
-    /// fq.toml). Still needed for the "Active now" table alone.
-    #[arg(long, default_value = "127.0.0.1:9471", env = "FQ_READ_SERVICE")]
-    read_service: String,
     /// Browser auto-refresh interval, in seconds.
     #[arg(long, default_value_t = 5, env = "FQ_DASHBOARD_REFRESH")]
     refresh: u64,
@@ -141,9 +134,6 @@ pub(crate) struct AppState {
     pub(crate) edge_addr: String,
     pub(crate) edge_fingerprint: [u8; 32],
     pub(crate) edge_token: String,
-    /// The legacy read service, for the one table that has no
-    /// declared operation yet.
-    pub(crate) read_addr: String,
     pub(crate) refresh_secs: u64,
     /// Epoch ms of the last successful read; 0 = never.
     pub(crate) last_seen_ms: AtomicI64,
@@ -335,7 +325,6 @@ async fn main() -> anyhow::Result<()> {
         edge_addr: args.edge.clone(),
         edge_fingerprint,
         edge_token,
-        read_addr: args.read_service.clone(),
         refresh_secs: args.refresh,
         last_seen_ms: AtomicI64::new(0),
         daemon_version: std::sync::Mutex::new(None),
@@ -345,9 +334,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {bind}"))?;
     tracing::info!(
-        "fq-dashboard serving http://{bind} over the edge at {} (active table: read service {})",
-        args.edge,
-        args.read_service
+        "fq-dashboard serving http://{bind} over the edge at {}",
+        args.edge
     );
     axum::serve(listener, app(state)).await?;
     Ok(())
@@ -369,7 +357,8 @@ mod tests {
         EventFilter, InvocationListFilter, InvocationViewKey, StatusReport, TurnFilter,
     };
     use fq_runtime::views::{
-        AgentCostDetailView, CostReport, EventView, InvocationDetailView, InvocationSummaryView,
+        ActiveInvocationView, AgentCostDetailView, CostReport, EventView, InvocationDetailView,
+        InvocationSummaryView,
     };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -438,7 +427,7 @@ mod tests {
     /// and reproducing them here would be a second copy free to drift
     /// from the first.
     fn fixture_registry(version: &str) -> EdgeRegistry {
-        use fq_runtime::surface::{DoctorParams, StatusParams};
+        use fq_runtime::surface::{ActiveParams, DoctorParams, StatusParams};
         use fq_runtime::turn::TurnState;
 
         let mut registry = EdgeRegistry::new();
@@ -567,6 +556,16 @@ mod tests {
             )
             .expect("register control.status");
         registry
+            .report::<ActiveParams, Vec<ActiveInvocationView>, _, _>(
+                fq_ops::Report::new::<ActiveParams, Vec<ActiveInvocationView>>(
+                    fq_ops::InvocationReport::Active,
+                    "live work",
+                    fq_ops::Stability::Experimental,
+                ),
+                |_params: ActiveParams| async move { Ok(crate::fixtures::active_rows()) },
+            )
+            .expect("register invocation.active");
+        registry
             .report::<DoctorParams, DoctorReport, _, _>(
                 fq_ops::Report::new::<DoctorParams, DoctorReport>(
                     fq_ops::ControlReport::Doctor,
@@ -625,12 +624,11 @@ mod tests {
         l.local_addr().unwrap().to_string()
     }
 
-    fn state_for(edge: &TestEdge, read_addr: &str) -> Arc<AppState> {
+    fn state_for(edge: &TestEdge) -> Arc<AppState> {
         Arc::new(AppState {
             edge_addr: edge.addr.clone(),
             edge_fingerprint: edge.fingerprint,
             edge_token: edge.token.clone(),
-            read_addr: read_addr.to_string(),
             refresh_secs: 5,
             last_seen_ms: AtomicI64::new(0),
             daemon_version: std::sync::Mutex::new(None),
@@ -643,7 +641,7 @@ mod tests {
     #[tokio::test]
     async fn pages_render_against_a_live_edge() {
         let edge = spawn_edge(&format!("0.1.0+{OWN_SHA}")).await;
-        let app = app(state_for(&edge, &dead_addr()));
+        let app = app(state_for(&edge));
 
         // The health page composes both Control reports.
         let resp = app
@@ -842,19 +840,22 @@ mod tests {
         assert!(ct.starts_with("text/javascript"), "got: {ct}");
     }
 
-    /// The invocations page still reaches the read service for its
-    /// "Active now" table, so with only the edge up it reports the
-    /// half it could not reach rather than rendering a page that
-    /// silently omits live work.
+    /// The invocations page carries both reads — the live report above
+    /// the folded listing — over one connection and one grant.
     #[tokio::test]
-    async fn the_active_table_still_needs_the_read_service() {
+    async fn the_invocations_page_carries_the_live_table_and_the_listing() {
         let edge = spawn_edge(&format!("0.1.0+{OWN_SHA}")).await;
-        let resp = app(state_for(&edge, &dead_addr()))
+        let resp = app(state_for(&edge))
             .oneshot(Request::get("/invocations").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(body_string(resp).await.contains("runtime unreachable"));
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        // The report answered with a live row, so the section exists…
+        assert!(html.contains("Active now"), "got: {html}");
+        assert!(html.contains("019f5b3f"), "live row rendered: {html}");
+        // …and the empty listing below it still says so.
+        assert!(html.contains("no invocations"), "got: {html}");
     }
 
     /// The attenuation is load-bearing, not decorative: drop one grant
@@ -868,7 +869,7 @@ mod tests {
             .filter(|g| *g != "read:cost")
             .collect();
         let edge = spawn_edge_with(&format!("0.1.0+{OWN_SHA}"), &grants).await;
-        let app = app(state_for(&edge, &dead_addr()));
+        let app = app(state_for(&edge));
 
         let resp = app
             .clone()
@@ -899,7 +900,7 @@ mod tests {
             fingerprint: [0u8; 32],
             token: "not-a-token".to_string(),
         };
-        let resp = app(state_for(&edge, &dead))
+        let resp = app(state_for(&edge))
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -913,7 +914,7 @@ mod tests {
 
         // A poll tick during an outage morphs the unreachable body in —
         // the page goes loud within one interval instead of freezing.
-        let resp = app(state_for(&edge, &dead))
+        let resp = app(state_for(&edge))
             .oneshot(
                 Request::get("/")
                     .header("Datastar-Request", "true")
@@ -934,7 +935,7 @@ mod tests {
     #[tokio::test]
     async fn mismatched_builds_banner_but_still_render() {
         let edge = spawn_edge("0.9.9+deadbeefcafe").await;
-        let state = state_for(&edge, &dead_addr());
+        let state = state_for(&edge);
         let app = app(state.clone());
 
         let resp = app

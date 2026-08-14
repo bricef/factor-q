@@ -132,12 +132,6 @@ commands):
    what it shows and command nothing. The binary refuses to start
    without a token and prints this line when it does.
 
-`[read_service]` must **stay enabled** for now: the "Active now" table
-on `/invocations` reads live work from the worker WAL, which no
-declared operation exposes yet (dispatch does not populate the
-coordination table's `in_flight` status — #50), so that one table is
-still a read-service client while everything else has moved.
-
 Manual launch, if ever needed:
 `setsid ./current/dashboard.sh >> logs/dashboard.log 2>&1 </dev/null &`.
 Reach it via SSH tunnel to `127.0.0.1:9472`, or through the public

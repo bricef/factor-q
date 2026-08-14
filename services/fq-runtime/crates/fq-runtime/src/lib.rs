@@ -40,11 +40,6 @@ pub mod validation;
 pub mod views;
 pub mod watermark;
 
-// The read-only operator service (#105 layer 2) — optional so library
-// consumers don't pull tarpc; `fq-cli` turns it on.
-#[cfg(feature = "read-service")]
-pub mod read_service;
-
 // Role modules. Both stay `pub` so that downstream code (fq-cli,
 // integration tests) can reach typed APIs that haven't been
 // surfaced at the crate root yet (e.g. `control_plane::projection::store::EventFilter`).
