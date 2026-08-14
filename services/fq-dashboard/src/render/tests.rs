@@ -8,8 +8,9 @@ use super::*;
 /// asserted against the same fixture the screenshot gallery renders.
 #[test]
 fn health_links_working_and_stuck_ids() {
-    let report = crate::fixtures::health_report();
-    let html = health(&report);
+    let status = crate::fixtures::status_report();
+    let doctor = crate::fixtures::doctor_report();
+    let html = health(&status, &doctor);
     assert!(html.contains("2 in-flight (1 working"), "got: {html}");
     assert!(
         html.contains(r#"<a href="/invocations/019f5b3f-31fb-7ae0-b130-3d65ccf40375">"#),
@@ -25,7 +26,10 @@ fn health_links_working_and_stuck_ids() {
 /// consumer has outstanding redeliveries.
 #[test]
 fn health_shows_redelivery_pressure() {
-    let html = health(&crate::fixtures::health_report());
+    let html = health(
+        &crate::fixtures::status_report(),
+        &crate::fixtures::doctor_report(),
+    );
     assert!(html.contains("redelivered 4"), "got: {html}");
 }
 
@@ -731,7 +735,7 @@ fn summary_agent_costs_explain_the_empty_invocation_table() {
 /// load errors loudly.
 #[test]
 fn agents_list_links_definitions_and_surfaces_load_errors() {
-    use fq_runtime::read_service::{AgentSummaryView, AgentsView};
+    use fq_runtime::agent_view::{AgentSummaryView, AgentsView};
     let view = AgentsView {
         agents: vec![
             AgentSummaryView {
@@ -781,7 +785,7 @@ fn agents_list_links_definitions_and_surfaces_load_errors() {
 /// arbitrary text.
 #[test]
 fn agent_detail_collapses_and_escapes_the_prompt() {
-    use fq_runtime::read_service::AgentDetailView;
+    use fq_runtime::agent_view::AgentDetailView;
     let d = AgentDetailView {
         agent_id: "m0-issue-fix".to_string(),
         model: "claude-opus-4-8".to_string(),
