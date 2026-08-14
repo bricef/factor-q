@@ -305,13 +305,15 @@ pub struct DoctorExecutions {
     /// In-flight invocations with a fresh open dispatch (tool or LLM) —
     /// actively working, however silent their WAL row.
     pub working: i64,
-    /// Short ids of the working invocations, same convention as
-    /// `stuck_ids`.
+    /// Ids of the working invocations, in full — ask about one with
+    /// `invocation.get`. Shorten them for display if you like; the
+    /// shortened form is not an identity and nothing takes it back.
     pub working_ids: Vec<String>,
     /// In-flight invocations whose `updated_at` is older than the
     /// report's stuck threshold.
     pub stuck: i64,
-    /// Short ids of the stuck invocations, for triage.
+    /// Ids of the stuck invocations, in full, for triage — same
+    /// convention as `working_ids`.
     pub stuck_ids: Vec<String>,
 }
 

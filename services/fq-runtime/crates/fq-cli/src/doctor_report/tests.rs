@@ -95,8 +95,14 @@ fn stuck_in_flight_flagged() {
 
     assert_eq!(report.executions.in_flight, 2);
     assert_eq!(report.executions.stuck, 1);
-    // Short id (8 chars) recorded for triage.
-    assert_eq!(report.executions.stuck_ids, vec!["stuck-ab".to_string()]);
+    // The id survives whole. It was shortened here once, to match the
+    // human report, and a shortened id is not one: `invocation.get`
+    // matches exactly, so nothing took it back. Shorten for display,
+    // never on the wire.
+    assert_eq!(
+        report.executions.stuck_ids,
+        vec!["stuck-abcdef01".to_string()]
+    );
     assert!(report.has_issues());
 }
 
@@ -114,8 +120,12 @@ fn working_in_flight_counted_but_not_an_issue() {
     let report = build_doctor_report(&[], &ex, 0, &[]);
 
     assert!(!report.has_issues());
-    // Short id (8 chars), same convention as stuck_ids.
-    assert_eq!(report.executions.working_ids, vec!["019f5b3f".to_string()]);
+    // Whole, same convention as stuck_ids — this is the id the
+    // dashboard links to and `fq invocation show` is handed.
+    assert_eq!(
+        report.executions.working_ids,
+        vec!["019f5b3f-31fb-7ae0-b130-3d65ccf40375".to_string()]
+    );
 }
 
 /// #49: dead-lettered triggers are counted from the
