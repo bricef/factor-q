@@ -410,14 +410,14 @@ pub struct CostView {
     pub total_cache_write_tokens: i64,
     /// Distinct invocations behind the aggregate.
     pub invocation_count: i64,
-    /// The part of `total_cost` that belongs to no invocation: spend
-    /// the engine incurred on this agent's behalf, which today means
-    /// the summariser (#216). In the total because it is real money,
-    /// named here because every per-invocation view excludes it
-    /// (#466) — `total_cost - framework_cost` is what those views
-    /// account for. Zero for an ordinary agent; the whole row for the
-    /// reserved `summary` agent, whose drill-down therefore shows
-    /// spend and no invocations by design.
+    /// Summary costs: engine spend on this agent's behalf that belongs
+    /// to no one invocation. Included in `total_cost` and excluded
+    /// from every per-invocation figure, so
+    /// `total_cost - framework_cost` is what those account for.
+    ///
+    /// Zero for an ordinary agent. For the reserved `summary` agent it
+    /// is the whole row, which is why that drill-down shows spend with
+    /// no invocations under it.
     #[serde(default)]
     pub framework_cost: f64,
 }
@@ -447,6 +447,8 @@ pub struct InvocationCostView {
     /// fails to parse.
     pub started_at_ms: i64,
     pub event_count: i64,
+    /// This invocation's own spend. Does not include summary costs —
+    /// those are carried by the agent's `framework_cost`.
     pub total_cost: f64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
@@ -503,8 +505,9 @@ pub struct AgentCostDetailView {
     /// Biggest spender first.
     pub models: Vec<ModelCostView>,
     /// Newest first, capped by the caller's limit;
-    /// `totals.invocation_count` carries the uncapped count. Sums to
-    /// `totals.total_cost - totals.framework_cost` when uncapped.
+    /// `totals.invocation_count` carries the uncapped count. Summary
+    /// costs are not here — uncapped, these sum to
+    /// `totals.total_cost - totals.framework_cost`.
     pub invocations: Vec<InvocationCostView>,
 }
 
@@ -543,11 +546,9 @@ pub struct CostReport {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
-    /// The unallocated remainder of `total_cost`, summed over
-    /// `agents`: engine spend that no invocation caused (#466). Named
-    /// on the report so an operator reads `total = invocations +
-    /// framework` off the page instead of filing the difference as a
-    /// bug. See [`CostView::framework_cost`].
+    /// Summary costs across every agent. Included in `total_cost`, and
+    /// named here so `total = invocations + framework` reads off the
+    /// page rather than looking like a discrepancy.
     #[serde(default)]
     pub framework_cost: f64,
 }

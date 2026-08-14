@@ -219,6 +219,7 @@
                 "type": "integer"
               },
               "total_cost": {
+                "description": "This invocation's own spend. Does not include summary costs —\nthose are carried by the agent's `framework_cost`.",
                 "format": "double",
                 "type": "number"
               },
@@ -1542,7 +1543,7 @@
   },
   {
     "report": {
-      "description": "Answers over the whole recorded history unless `since` narrows it: cost-bearing rows are exempt from the retention sweep and kept indefinitely, so this report never silently windows. The time series ignores `agent` deliberately — the chart answers what the fleet is burning, the tables answer who burned it. Reported everywhere, allocated nowhere (#466): an invocation summary's cost is engine spend, counted by every query that answers *what was spent* and by none that answers *what did this invocation cost*. Per-invocation figures therefore do not sum to the agent total, which is correct and must not be silently so — the aggregate carries the shortfall as `framework_cost`, engine spend no invocation caused, and `total_cost = <per-invocation costs> + framework_cost` holds for every agent. Zero for an ordinary agent, the whole row for the reserved `summary` agent.",
+      "description": "Answers over the whole recorded history unless `since` narrows it: cost-bearing rows are exempt from the retention sweep and kept indefinitely, so this report never silently windows. The time series ignores `agent` deliberately — the chart answers what the fleet is burning, the tables answer who burned it. Totals include summary costs; `framework_cost` says how much of the total they are.",
       "domain": "cost",
       "name": "summary",
       "output_schema": {
@@ -1576,7 +1577,7 @@
               },
               "framework_cost": {
                 "default": 0.0,
-                "description": "The part of `total_cost` that belongs to no invocation: spend\nthe engine incurred on this agent's behalf, which today means\nthe summariser (#216). In the total because it is real money,\nnamed here because every per-invocation view excludes it\n(#466) — `total_cost - framework_cost` is what those views\naccount for. Zero for an ordinary agent; the whole row for the\nreserved `summary` agent, whose drill-down therefore shows\nspend and no invocations by design.",
+                "description": "Summary costs: engine spend on this agent's behalf that belongs\nto no one invocation. Included in `total_cost` and excluded\nfrom every per-invocation figure, so\n`total_cost - framework_cost` is what those account for.\n\nZero for an ordinary agent. For the reserved `summary` agent it\nis the whole row, which is why that drill-down shows spend with\nno invocations under it.",
                 "format": "double",
                 "type": "number"
               },
@@ -1670,7 +1671,7 @@
           },
           "framework_cost": {
             "default": 0.0,
-            "description": "The unallocated remainder of `total_cost`, summed over\n`agents`: engine spend that no invocation caused (#466). Named\non the report so an operator reads `total = invocations +\nframework` off the page instead of filing the difference as a\nbug. See [`CostView::framework_cost`].",
+            "description": "Summary costs across every agent. Included in `total_cost`, and\nnamed here so `total = invocations + framework` reads off the\npage rather than looking like a discrepancy.",
             "format": "double",
             "type": "number"
           },
@@ -1750,7 +1751,7 @@
   },
   {
     "report": {
-      "description": "The drill-down behind one row of `cost.summary`. `invocations` is newest first and capped by `invocation_limit`; `totals.invocation_count` carries the uncapped count, so a truncated list is visible as one. An agent with no cost events in the window is not found rather than an empty breakdown — there is no row of the summary to drill into. Reported everywhere, allocated nowhere (#466): an invocation summary's cost is engine spend, counted by every query that answers *what was spent* and by none that answers *what did this invocation cost*. Per-invocation figures therefore do not sum to the agent total, which is correct and must not be silently so — the aggregate carries the shortfall as `framework_cost`, engine spend no invocation caused, and `total_cost = <per-invocation costs> + framework_cost` holds for every agent. Zero for an ordinary agent, the whole row for the reserved `summary` agent.",
+      "description": "The drill-down behind one row of `cost.summary`. `invocations` is newest first and capped by `invocation_limit`; `totals.invocation_count` carries the uncapped count, so a truncated list is visible as one. An agent with no cost events in the window is not found rather than an empty breakdown — there is no row of the summary to drill into. Totals include summary costs; the per-invocation rows do not.",
       "domain": "cost",
       "name": "by_agent",
       "output_schema": {
@@ -1767,7 +1768,7 @@
               },
               "framework_cost": {
                 "default": 0.0,
-                "description": "The part of `total_cost` that belongs to no invocation: spend\nthe engine incurred on this agent's behalf, which today means\nthe summariser (#216). In the total because it is real money,\nnamed here because every per-invocation view excludes it\n(#466) — `total_cost - framework_cost` is what those views\naccount for. Zero for an ordinary agent; the whole row for the\nreserved `summary` agent, whose drill-down therefore shows\nspend and no invocations by design.",
+                "description": "Summary costs: engine spend on this agent's behalf that belongs\nto no one invocation. Included in `total_cost` and excluded\nfrom every per-invocation figure, so\n`total_cost - framework_cost` is what those account for.\n\nZero for an ordinary agent. For the reserved `summary` agent it\nis the whole row, which is why that drill-down shows spend with\nno invocations under it.",
                 "format": "double",
                 "type": "number"
               },
@@ -1833,6 +1834,7 @@
                 "type": "integer"
               },
               "total_cost": {
+                "description": "This invocation's own spend. Does not include summary costs —\nthose are carried by the agent's `framework_cost`.",
                 "format": "double",
                 "type": "number"
               },
@@ -1897,7 +1899,7 @@
             "type": "string"
           },
           "invocations": {
-            "description": "Newest first, capped by the caller's limit;\n`totals.invocation_count` carries the uncapped count. Sums to\n`totals.total_cost - totals.framework_cost` when uncapped.",
+            "description": "Newest first, capped by the caller's limit;\n`totals.invocation_count` carries the uncapped count. Summary\ncosts are not here — uncapped, these sum to\n`totals.total_cost - totals.framework_cost`.",
             "items": {
               "$ref": "#/$defs/InvocationCostView"
             },
