@@ -55,7 +55,10 @@ pub mod annotation_keys {
     pub const FLAGS: &str = "flags";
 }
 
-/// Subject hierarchy for factor-q events.
+// Documented by its own `//!` header. Deliberately no outer doc here:
+// rustdoc merges an outer comment with the module's inner ones and then
+// resolves the whole block in *this* scope, so an intra-doc link to one
+// of `subjects`' own items would not resolve.
 pub mod subjects;
 
 /// The LLM-call payload cluster. Re-exported below, so `crate::events`
