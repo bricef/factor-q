@@ -655,6 +655,76 @@ fn agent_costs_render_models_and_linked_invocations() {
     assert!(html.contains("<td>31m ago</td>"), "got: {html}");
     assert!(html.contains("$2.2137"), "got: {html}");
     assert!(html.contains("showing 1 of 43 invocations"), "got: {html}");
+    // Nothing of this agent's spend is framework spend, so the page
+    // says nothing about it.
+    assert!(!html.contains("framework"), "got: {html}");
+}
+
+/// A summariser's spend is the engine's, charged to no invocation
+/// (#466), so per-invocation figures fall short of the total by
+/// construction. The fleet page states the identity under the total
+/// instead of leaving the reader to subtract and file the gap as a bug.
+#[test]
+fn costs_state_the_framework_remainder_under_the_total() {
+    let mut summary = cost_view("summary", 61, 0.913_4);
+    summary.framework_cost = 0.913_4;
+    summary.invocation_count = 0;
+    let report = cost_report(vec![cost_view("m0-issue-fix", 100, 9.0), summary]);
+    let html = costs_all(&report);
+    assert!(
+        html.contains("total = invocations <b>$9.0000</b> + framework <b>$0.9134</b>"),
+        "got: {html}"
+    );
+    assert!(
+        html.contains("framework is engine spend (invocation summaries), charged to no invocation"),
+        "got: {html}"
+    );
+}
+
+/// The zero case stays silent. `framework_cost` is zero for every agent
+/// but the reserved one, and a caveat that is true of one page must not
+/// ride on all of them.
+#[test]
+fn costs_say_nothing_about_framework_when_there_is_none() {
+    let html = costs_all(&cost_report(vec![cost_view("m0-issue-fix", 100, 9.0)]));
+    assert!(!html.contains("framework"), "got: {html}");
+    assert!(!html.contains("invocations <b>"), "got: {html}");
+}
+
+/// `/costs/summary` is the page the allocation rule made strange: real
+/// spend with no invocation rows under it at all. Correct, and
+/// indistinguishable from data that failed to load unless the page
+/// says why — so it does, instead of rendering an empty table.
+#[test]
+fn summary_agent_costs_explain_the_empty_invocation_table() {
+    let mut totals = cost_view("summary", 61, 0.913_4);
+    totals.framework_cost = 0.913_4;
+    totals.invocation_count = 0;
+    let d = AgentCostDetailView {
+        agent_id: "summary".to_string(),
+        totals,
+        models: vec![],
+        invocations: vec![],
+    };
+    let html = agent_costs(&d, Window::All, TEST_NOW_MS);
+    // All of it is framework, and the identity says so without a
+    // subtraction.
+    assert!(
+        html.contains("total = invocations <b>$0.0000</b> + framework <b>$0.9134</b>"),
+        "got: {html}"
+    );
+    assert!(
+        html.contains("No invocation rows, and none are missing"),
+        "got: {html}"
+    );
+    assert!(
+        html.contains(r#"counted in the fleet total on the <a href="/costs">costs page</a>"#),
+        "got: {html}"
+    );
+    // The header-only table and its "showing 0 of 0" footer are what
+    // read as missing data; neither is rendered.
+    assert!(!html.contains("<th>invocation</th>"), "got: {html}");
+    assert!(!html.contains("showing 0 of 0"), "got: {html}");
 }
 
 /// The agents list links each definition and surfaces registry

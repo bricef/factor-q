@@ -1061,6 +1061,33 @@ fn day_cell(cost: Option<f64>) -> String {
     }
 }
 
+/// The `total = invocations + framework` identity, as one muted line
+/// under a total — shared by the fleet page and the per-agent
+/// drill-down so the two cannot drift apart.
+///
+/// Framework spend is the engine's own (invocation summaries): real
+/// money, counted in the total, and charged to no invocation, so it
+/// appears in none of the per-invocation rows (#466). Per-invocation
+/// figures therefore fall short of the total by construction, and a
+/// reader who has to subtract to find that out files it as a bug — so
+/// the remainder is stated rather than left to be derived. `fq costs`
+/// prints the same identity; a page can say it in one line where the
+/// terminal needs two.
+///
+/// Renders to NOTHING when there is no framework spend, which is every
+/// agent but the reserved `summary` one: a remainder that does not
+/// exist is not a caveat worth carrying on every page.
+fn framework_split(total: f64, framework: f64) -> String {
+    if framework <= 0.0 {
+        return String::new();
+    }
+    format!(
+        r#"<p class="muted">total = invocations <b>${:.4}</b> + framework <b>${:.4}</b> — framework is engine spend (invocation summaries), charged to no invocation.</p>"#,
+        total - framework,
+        framework,
+    )
+}
+
 /// The per-model spend table — shared between the top-level costs page
 /// (all agents) and the per-agent drill-down, so the two by-model
 /// views cannot drift apart. `total` is the share denominator.
@@ -1293,6 +1320,7 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window, now_ms: i64)
             fmt_grouped(report.total_output_tokens)
         },
     ));
+    b.push_str(&framework_split(report.total_cost, report.framework_cost));
     b
 }
 
@@ -1325,11 +1353,28 @@ pub fn agent_costs(d: &AgentCostDetailView, window: Window, now_ms: i64) -> Stri
             fmt_grouped(d.totals.total_output_tokens)
         },
     ));
+    b.push_str(&framework_split(
+        d.totals.total_cost,
+        d.totals.framework_cost,
+    ));
 
     b.push_str("<h2>By model</h2>");
     b.push_str(&by_model_table(&d.models, d.totals.total_cost));
 
     b.push_str("<h2>By invocation</h2>");
+    // Spend with nothing under it is the shape of the reserved `summary`
+    // agent, whose whole row is framework cost — and an empty table is
+    // indistinguishable from data that failed to load, which is the
+    // support question naming the remainder was meant to prevent. So the
+    // page says why instead of rendering a header with no rows. Keyed on
+    // the data, not on the agent id: the reserved name lives in the
+    // runtime, and any row that is all framework reads the same way.
+    if d.invocations.is_empty() && d.totals.framework_cost > 0.0 {
+        b.push_str(
+            r#"<p class="muted">No invocation rows, and none are missing: all of this agent's spend is framework cost — engine spend (invocation summaries), charged to no invocation. There is no per-run breakdown to look for; the money is real, and it is counted in the fleet total on the <a href="/costs">costs page</a>.</p>"#,
+        );
+        return b;
+    }
     b.push_str(
         "<table><tr><th>invocation</th><th>started</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cost</th></tr>",
     );
