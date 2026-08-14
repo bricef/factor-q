@@ -485,17 +485,19 @@ fn register_trigger_command(
                             message: format!("invalid agent name `{}`: {e}", input.agent_id),
                         }
                     })?;
-                    let published = bus
-                        .publish_trigger(agent.as_str(), &input.payload)
-                        .await
-                        .map_err(|e| match e {
-                            // A verdict on the request, not a fault: the
-                            // caller sent something this surface does not
-                            // accept, and the message says by how much so
-                            // the next attempt is an edit rather than a
-                            // guess.
-                            fq_runtime::bus::BusError::TriggerPayloadTooLarge { size, limit } => {
-                                WireError::InvalidInput {
+                    let published =
+                        bus.publish_trigger(&agent, &input.payload)
+                            .await
+                            .map_err(|e| match e {
+                                // A verdict on the request, not a fault: the
+                                // caller sent something this surface does not
+                                // accept, and the message says by how much so
+                                // the next attempt is an edit rather than a
+                                // guess.
+                                fq_runtime::bus::BusError::TriggerPayloadTooLarge {
+                                    size,
+                                    limit,
+                                } => WireError::InvalidInput {
                                     op: "trigger.publish".into(),
                                     message: format!(
                                         "trigger payload is {size} bytes, over the {limit}-byte \
@@ -506,14 +508,13 @@ fn register_trigger_command(
                                      all — put the bulk somewhere addressable and send a \
                                      reference to it."
                                     ),
-                                }
-                            }
-                            other => WireError::Internal {
-                                message: format!(
-                                    "failed to publish trigger for `{agent}`: {other}"
-                                ),
-                            },
-                        })?;
+                                },
+                                other => WireError::Internal {
+                                    message: format!(
+                                        "failed to publish trigger for `{agent}`: {other}"
+                                    ),
+                                },
+                            })?;
                     tracing::info!(
                         agent_id = %agent,
                         trigger_id = %published.id,

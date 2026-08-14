@@ -1000,9 +1000,12 @@ You are a test agent."#
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Publish a trigger.
-        bus.publish_trigger(&agent_id_str, &json!({"input": "hi"}))
-            .await
-            .expect("publish trigger");
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({"input": "hi"}),
+        )
+        .await
+        .expect("publish trigger");
 
         // Wait for events to land in the projection.
         let agent_id = AgentId::new(&agent_id_str).unwrap();
@@ -1116,7 +1119,7 @@ You are a test agent."#
         let body = json!({"input": "hi"});
         match stamp {
             Some(id) => {
-                bus.publish_trigger_named(&agent_id_str, id, &body)
+                bus.publish_trigger_named(&AgentId::new(&agent_id_str).unwrap(), id, &body)
                     .await
                     .expect("publish named trigger");
             }
@@ -1277,9 +1280,12 @@ You are a test agent."#
             .await
             .expect("consumer");
 
-        bus.publish_trigger(&agent_id_str, &json!({"input": "hi"}))
-            .await
-            .expect("publish");
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({"input": "hi"}),
+        )
+        .await
+        .expect("publish");
         let msg = {
             let mut stream = consumer.messages().await.expect("messages");
             tokio::time::timeout(Duration::from_secs(5), stream.next())
@@ -1417,9 +1423,12 @@ You are a test agent."#
             .await
             .expect("consumer");
 
-        bus.publish_trigger(&agent_id_str, &json!({"input": "hi"}))
-            .await
-            .expect("publish");
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({"input": "hi"}),
+        )
+        .await
+        .expect("publish");
         let msg = {
             let mut stream = consumer.messages().await.expect("messages");
             tokio::time::timeout(Duration::from_secs(5), stream.next())
@@ -1547,9 +1556,12 @@ You are a test agent."#
             .await
             .expect("consumer");
 
-        bus.publish_trigger(&agent_id_str, &json!({"input": "hi"}))
-            .await
-            .expect("publish");
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({"input": "hi"}),
+        )
+        .await
+        .expect("publish");
         let mut stream = consumer.messages().await.expect("messages");
         let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
@@ -1820,9 +1832,12 @@ You are a test agent."#
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move { dispatcher.run(shutdown_rx).await });
 
-        bus.publish_trigger(&agent_id_str, &json!({ "input": "hi" }))
-            .await
-            .expect("publish trigger");
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({ "input": "hi" }),
+        )
+        .await
+        .expect("publish trigger");
 
         // The draining dispatcher must exit on its own — without us ever
         // sending `shutdown` — and without dispatching the waiting trigger.
@@ -1947,10 +1962,10 @@ You are a test agent."#
         let (bus, agent_id, started, gate, run, shutdown_tx) =
             gated_fanout_world(&url, "fanout-two", 2).await;
 
-        bus.publish_trigger(&agent_id, &json!({"input": "a"}))
+        bus.publish_trigger(&AgentId::new(&agent_id).unwrap(), &json!({"input": "a"}))
             .await
             .expect("publish 1");
-        bus.publish_trigger(&agent_id, &json!({"input": "b"}))
+        bus.publish_trigger(&AgentId::new(&agent_id).unwrap(), &json!({"input": "b"}))
             .await
             .expect("publish 2");
 
@@ -1977,10 +1992,10 @@ You are a test agent."#
         let (bus, agent_id, started, gate, run, shutdown_tx) =
             gated_fanout_world(&url, "fanout-serial", 1).await;
 
-        bus.publish_trigger(&agent_id, &json!({"input": "a"}))
+        bus.publish_trigger(&AgentId::new(&agent_id).unwrap(), &json!({"input": "a"}))
             .await
             .expect("publish 1");
-        bus.publish_trigger(&agent_id, &json!({"input": "b"}))
+        bus.publish_trigger(&AgentId::new(&agent_id).unwrap(), &json!({"input": "b"}))
             .await
             .expect("publish 2");
 
