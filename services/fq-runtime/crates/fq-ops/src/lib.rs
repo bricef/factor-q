@@ -36,7 +36,7 @@ pub use model::{
     Atom, AtomRef, Authority, Command, Domain, Receipt, Report, Stability, Synthetic, Verb, View,
 };
 pub use opid::{
-    Control, ControlReport, CostReport, DeadLetter, Invocation, OpCategory, OpId, ReportId,
-    Trigger, VerbId,
+    Control, ControlReport, CostReport, DeadLetter, Invocation, InvocationReport, OpCategory, OpId,
+    ReportId, Trigger, VerbId,
 };
 pub use registry::{Entry, Registry, RegistryError, Resolved};

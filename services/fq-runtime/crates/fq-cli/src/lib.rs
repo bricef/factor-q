@@ -241,6 +241,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 // The verb groups and the atoms behind them. One module per group, on the
 // `workers.rs` precedent (#189): a subcommand's rendering, and the daemon-side
 // declaration it rides, each belong in their own file.
+mod active_report;
 mod agents;
 mod cli;
 mod connections;
@@ -850,42 +851,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     );
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
 
-    // The read-only operator service (#105 layer 2): a localhost tarpc
-    // surface over `views` plus the JetStream probe. Deliberately OUTSIDE
-    // the supervised task set below — an ops read surface dying must not
-    // take the runtime down; it logs and stays down until restart.
-    let read_service_addr = if config.read_service.enabled {
-        let views = Arc::new(
-            fq_runtime::views::Views::open(&db_paths) // allow-runtime-internals: allow-direct-store-open: daemon's own
-                .await
-                .context("read service: failed to open the read views")?
-                // The daemon's read path can gate at a watermark: the
-                // projection consumer runs in this process.
-                .with_watermark(projection_watermark.clone()),
-        );
-        let (rs_addr, rs_serving) = fq_runtime::read_service::bind(
-            &config.read_service.bind,
-            views,
-            bus.jetstream(),
-            std::time::Duration::from_millis(config.read_service.probe_timeout_ms),
-            FQ_VERSION.to_string(),
-            // The same hot-swapped handle `fq reload` updates, so the
-            // dashboard's agents pages reflect reloads live — and the
-            // same one the edge's Agent view reads, which is why the
-            // two surfaces cannot disagree while both exist.
-            shared_registry.clone(),
-        )
-        .await
-        .context("read service: failed to bind (check [read_service] in fq.toml)")?;
-        tokio::spawn(async move {
-            rs_serving.await;
-            tracing::warn!("read service exited; reads are down until the daemon restarts");
-        });
-        Some(rs_addr)
-    } else {
-        None
-    };
-
     // The authenticated operator edge (ADR-0006 + ADR-0031, plan
     // Phase 2): TLS + capability tokens over tarpc
     // `invoke`/`next_batch`. Identity (certificate + token root)
@@ -948,9 +913,6 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("Runtime ready. Press Ctrl-C to stop.");
     println!("  - projection consumer is materialising events into SQLite");
     println!("  - trigger dispatcher is listening on fq.trigger.*");
-    if let Some(addr) = read_service_addr {
-        println!("  - read service is listening on {addr}");
-    }
     if let Some(addr) = edge_addr {
         println!("  - edge is listening on {addr}");
     }

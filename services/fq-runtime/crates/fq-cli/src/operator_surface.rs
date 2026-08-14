@@ -190,6 +190,7 @@ pub fn operator_registry(
     let trigger_views = views.clone();
     let turn_bus = deps.bus.clone();
     let turn_views = views.clone();
+    let active_views = views.clone();
     let worker_views = views.clone();
     let cost_views = views.clone();
     let doctor_views = views.clone();
@@ -272,6 +273,7 @@ pub fn operator_registry(
         )
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
 
+    crate::active_report::register_active_report(&mut registry, active_views)?;
     register_worker_view(&mut registry, worker_views)?;
     register_agent_view(&mut registry, agent_registry)?;
     crate::event_atom::register_event_atom(&mut registry, event_bus, event_views)?;
