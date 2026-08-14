@@ -64,29 +64,6 @@ fn default_invocation_limit() -> i64 {
     50
 }
 
-/// The shortfall rule, in the words the event-schema note states it
-/// in. Both declarations carry it: a consumer must not be able to
-/// read it on the fleet report and miss it on the drill-down, which is
-/// where it is most visible (the reserved `summary` agent's breakdown
-/// is spend with no invocations under it at all).
-///
-/// A macro rather than a `const` because
-/// [`fq_ops::Report::description`] takes `&'static str` — a macro
-/// expanding to a literal composes under `concat!`, where a `const`
-/// would force a `format!` and a leak.
-macro_rules! allocation_rule {
-    () => {
-        "Reported everywhere, allocated nowhere (#466): an invocation summary's cost is \
-         engine spend, counted by every query that answers *what was spent* and by none \
-         that answers *what did this invocation cost*. Per-invocation figures therefore \
-         do not sum to the agent total, which is correct and must not be silently so — \
-         the aggregate carries the shortfall as `framework_cost`, engine spend no \
-         invocation caused, and `total_cost = <per-invocation costs> + framework_cost` \
-         holds for every agent. Zero for an ordinary agent, the whole row for the \
-         reserved `summary` agent."
-    };
-}
-
 /// Parse a `since` parameter into the bound the stores compare
 /// against. An unparseable spelling is a verdict on the request, not a
 /// reason to answer over the whole history — the same treatment, and
@@ -115,13 +92,13 @@ pub(crate) fn register_cost_reports(
         "Fleet spend: per-agent rows, the per-model split, the time series, and the totals.",
         fq_ops::Stability::Experimental,
     )
-    .description(concat!(
+    .description(
         "Answers over the whole recorded history unless `since` narrows it: cost-bearing \
          rows are exempt from the retention sweep and kept indefinitely, so this report \
          never silently windows. The time series ignores `agent` deliberately — the chart \
-         answers what the fleet is burning, the tables answer who burned it. ",
-        allocation_rule!()
-    ));
+         answers what the fleet is burning, the tables answer who burned it. Totals \
+         include summary costs; `framework_cost` says how much of the total they are.",
+    );
     registry
         .report::<CostSummaryParams, fq_runtime::views::CostReport, _, _>(
             decl,
@@ -149,14 +126,14 @@ pub(crate) fn register_cost_reports(
         "One agent's spend, broken down by model and by invocation.",
         fq_ops::Stability::Experimental,
     )
-    .description(concat!(
+    .description(
         "The drill-down behind one row of `cost.summary`. `invocations` is newest first \
          and capped by `invocation_limit`; `totals.invocation_count` carries the uncapped \
          count, so a truncated list is visible as one. An agent with no cost events in \
          the window is not found rather than an empty breakdown — there is no row of the \
-         summary to drill into. ",
-        allocation_rule!()
-    ));
+         summary to drill into. Totals include summary costs; the per-invocation rows do \
+         not.",
+    );
     registry
         .report::<CostByAgentParams, fq_runtime::views::AgentCostDetailView, _, _>(
             decl,
