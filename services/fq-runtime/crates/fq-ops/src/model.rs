@@ -334,6 +334,19 @@ impl Atom {
     }
 
     /// The fuller contract text, when the summary doesn't say it all.
+    ///
+    /// **Written for a stranger.** This string is served by `describe`,
+    /// printed by `fq ops list`, and handed to a model choosing a tool
+    /// through the MCP face — so its reader has none of your context,
+    /// no access to the issue tracker, and no way to ask. Say what the
+    /// thing does and what a caller must know: retention bounds,
+    /// delivery semantics, what a number does *not* include.
+    ///
+    /// Not provenance. An issue number, a PR, or why the behaviour
+    /// changed belongs in a doc comment or a commit message; a reader
+    /// here cannot resolve it and does not need it. `surface_prose_gate`
+    /// enforces that half, because thirteen references accumulated
+    /// before anyone noticed.
     pub fn description(mut self, description: &'static str) -> Self {
         self.description = description;
         self
@@ -401,6 +414,19 @@ impl View {
     }
 
     /// The fuller contract text, when the summary doesn't say it all.
+    ///
+    /// **Written for a stranger.** This string is served by `describe`,
+    /// printed by `fq ops list`, and handed to a model choosing a tool
+    /// through the MCP face — so its reader has none of your context,
+    /// no access to the issue tracker, and no way to ask. Say what the
+    /// thing does and what a caller must know: retention bounds,
+    /// delivery semantics, what a number does *not* include.
+    ///
+    /// Not provenance. An issue number, a PR, or why the behaviour
+    /// changed belongs in a doc comment or a commit message; a reader
+    /// here cannot resolve it and does not need it. `surface_prose_gate`
+    /// enforces that half, because thirteen references accumulated
+    /// before anyone noticed.
     pub fn description(mut self, description: &'static str) -> Self {
         self.description = description;
         self
@@ -448,6 +474,19 @@ impl Synthetic {
     }
 
     /// The fuller contract text, when the summary doesn't say it all.
+    ///
+    /// **Written for a stranger.** This string is served by `describe`,
+    /// printed by `fq ops list`, and handed to a model choosing a tool
+    /// through the MCP face — so its reader has none of your context,
+    /// no access to the issue tracker, and no way to ask. Say what the
+    /// thing does and what a caller must know: retention bounds,
+    /// delivery semantics, what a number does *not* include.
+    ///
+    /// Not provenance. An issue number, a PR, or why the behaviour
+    /// changed belongs in a doc comment or a commit message; a reader
+    /// here cannot resolve it and does not need it. `surface_prose_gate`
+    /// enforces that half, because thirteen references accumulated
+    /// before anyone noticed.
     pub fn description(mut self, description: &'static str) -> Self {
         self.description = description;
         self
@@ -522,6 +561,19 @@ impl Command {
     }
 
     /// The fuller contract text, when the summary doesn't say it all.
+    ///
+    /// **Written for a stranger.** This string is served by `describe`,
+    /// printed by `fq ops list`, and handed to a model choosing a tool
+    /// through the MCP face — so its reader has none of your context,
+    /// no access to the issue tracker, and no way to ask. Say what the
+    /// thing does and what a caller must know: retention bounds,
+    /// delivery semantics, what a number does *not* include.
+    ///
+    /// Not provenance. An issue number, a PR, or why the behaviour
+    /// changed belongs in a doc comment or a commit message; a reader
+    /// here cannot resolve it and does not need it. `surface_prose_gate`
+    /// enforces that half, because thirteen references accumulated
+    /// before anyone noticed.
     pub fn description(mut self, description: &'static str) -> Self {
         self.description = description;
         self
@@ -614,6 +666,19 @@ impl Report {
     }
 
     /// The fuller contract text, when the summary doesn't say it all.
+    ///
+    /// **Written for a stranger.** This string is served by `describe`,
+    /// printed by `fq ops list`, and handed to a model choosing a tool
+    /// through the MCP face — so its reader has none of your context,
+    /// no access to the issue tracker, and no way to ask. Say what the
+    /// thing does and what a caller must know: retention bounds,
+    /// delivery semantics, what a number does *not* include.
+    ///
+    /// Not provenance. An issue number, a PR, or why the behaviour
+    /// changed belongs in a doc comment or a commit message; a reader
+    /// here cannot resolve it and does not need it. `surface_prose_gate`
+    /// enforces that half, because thirteen references accumulated
+    /// before anyone noticed.
     pub fn description(mut self, description: &'static str) -> Self {
         self.description = description;
         self
