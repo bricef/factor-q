@@ -73,6 +73,20 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         Ok(ModelOutcome::Response(response))
     }
 
+    /// At-use pricing backstop (ADR-0004): when enabled, refuse a model
+    /// with no pricing rather than dispatch and track its cost as $0 —
+    /// which would silently defeat the budget check.
+    ///
+    /// Called before any WAL write, so a refused call leaves no trace.
+    /// Both agent turns and sampling flow through `dispatch_llm`; each
+    /// applies its own semantics to the returned inner `Err` (a turn
+    /// fails the invocation, a sampling request declines). Unreachable
+    /// when the startup pricing guarantee holds — defence in depth.
+    fn unpriced_model_refusal(&self, model: &str) -> Option<crate::llm::LlmError> {
+        (self.config.enforce_pricing && self.config.pricing.lookup(model).is_none())
+            .then(|| crate::llm::LlmError::UnpricedModel(model.to_string()))
+    }
+
     /// Shared LLM dispatch core (ADR-0018 §2): the single WAL'd /
     /// evented / budgeted path every model call flows through — agent
     /// turns and sampling alike. Writes the §5.5 WAL
@@ -107,19 +121,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             params: request.params.clone(),
         };
 
-        // At-use pricing backstop (ADR-0004): when enabled, refuse a
-        // model with no pricing rather than dispatch and track its cost
-        // as $0 — which would silently defeat the budget check. Runs
-        // before any WAL write, so a refused call leaves no trace. Both
-        // agent turns and sampling flow through here; each applies its
-        // own semantics to the returned inner `Err` (a turn fails the
-        // invocation, a sampling request declines). Unreachable when the
-        // startup pricing guarantee holds — this is defence in depth.
-        if self.config.enforce_pricing && self.config.pricing.lookup(&chat_request.model).is_none()
-        {
-            return Ok(Err(crate::llm::LlmError::UnpricedModel(
-                chat_request.model.clone(),
-            )));
+        if let Some(refusal) = self.unpriced_model_refusal(&chat_request.model) {
+            return Ok(Err(refusal));
         }
 
         // §5.5 write order applied to LLM calls: SQL first, then
