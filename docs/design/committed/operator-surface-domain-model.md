@@ -174,6 +174,30 @@ Both halves are load-bearing.
   `List(Operation)` publishes and what lands in `operator_surface.json`.
   The surface describes its own contract or the contract does not exist.
 
+### Declared prose is contract, and is written for a stranger
+
+Because the declaration *is* the contract, the sentences in it are read
+by people who have none of the context that produced them: `describe`
+serves them, `fq ops list` prints them, and the MCP face hands them to a
+model choosing a tool. That reader cannot ask a follow-up question, and
+has no access to this repository.
+
+So a description says what the thing does and what a caller must know —
+retention bounds, delivery semantics, what a number does *not* include —
+and does not carry provenance. **An issue number is the clearest case of
+getting this wrong**: it is a token that means nothing outside the
+tracker, offered in place of the sentence it stands for. Thirteen of
+them accumulated on the surface before anyone noticed, several written
+and reviewed by people who knew the rule and were checking the text for
+accuracy rather than for whether a stranger could use it.
+
+That last part is why this is a gate (`surface_prose_gate`) and not only
+a paragraph. The mechanical half — no issue numbers, bar a short
+allowlist for a live caveat in `see #N` form — is testable and now
+tested. The half that matters more, whether the sentence is usable by
+someone without your context, is not; it lives at the `description()`
+builders, which say who reads them.
+
 The shape of the answer, then, is a property of the *question*, not of
 the storage that happens to be convenient: Get asks "this fact, whole",
 List asks "what happened, narrowed and capped", and Stream asks "tell me
