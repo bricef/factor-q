@@ -317,6 +317,37 @@ pub fn fingerprint(cert_der: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// The pin's textual form — lowercase hex, what a daemon prints at
+/// first run and what a client stores, passes on a flag, or reads from
+/// its environment. Every client hand-writes this pair otherwise, and
+/// the parser has a sharp edge worth owning once (see below).
+pub fn fingerprint_hex(fingerprint: [u8; 32]) -> String {
+    fingerprint.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Parse a pin from its textual form.
+pub fn parse_fingerprint_hex(hex: &str) -> anyhow::Result<[u8; 32]> {
+    let hex = hex.trim();
+    // Length is checked in bytes but sliced on char boundaries below —
+    // reject non-ASCII first so a 64-byte multi-byte string errors
+    // cleanly instead of panicking mid-codepoint.
+    if !hex.is_ascii() {
+        anyhow::bail!("fingerprint is not valid hex: {hex:?}");
+    }
+    if hex.len() != 64 {
+        anyhow::bail!(
+            "fingerprint must be 64 hex chars (SHA-256), got {} chars",
+            hex.len()
+        );
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
+            .map_err(|_| anyhow::anyhow!("fingerprint is not valid hex: {hex:?}"))?;
+    }
+    Ok(out)
+}
+
 /// A verified connection identity: the parsed token plus its
 /// principal, checked once at connection establishment and consulted
 /// per request.
@@ -369,5 +400,28 @@ impl VerifiedToken {
             };
             az.authorize_with_limits(run_limits()).is_ok()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 64-byte string with a multi-byte codepoint passes the length
+    /// gate; slicing must not panic mid-codepoint (ultrareview
+    /// bug_001) — it errors like any other junk.
+    #[test]
+    fn fingerprint_hex_rejects_non_ascii_without_panicking() {
+        let hostile = format!("a\u{e9}{}", "a".repeat(61));
+        assert_eq!(hostile.len(), 64, "64 bytes, 63 chars — the trap input");
+        let err = parse_fingerprint_hex(&hostile).unwrap_err();
+        assert!(err.to_string().contains("not valid hex"), "{err}");
+    }
+
+    /// The pair round-trips, so a stored pin re-pins the same daemon.
+    #[test]
+    fn a_pin_round_trips_through_its_textual_form() {
+        let pin = fingerprint(b"a certificate");
+        assert_eq!(parse_fingerprint_hex(&fingerprint_hex(pin)).unwrap(), pin);
     }
 }

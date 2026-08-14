@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
+use fq_edge::{fingerprint_hex, parse_fingerprint_hex};
+
 use crate::cli::GlobalArgs;
 
 // ---------------------------------------------------------------------
@@ -129,32 +131,6 @@ fn store_connections(path: &Path, connections: &Connections) -> anyhow::Result<(
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
-}
-
-fn fingerprint_hex(fingerprint: [u8; 32]) -> String {
-    fingerprint.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-pub(crate) fn parse_fingerprint_hex(hex: &str) -> anyhow::Result<[u8; 32]> {
-    let hex = hex.trim();
-    // Length is checked in bytes but sliced on char boundaries below —
-    // reject non-ASCII first so a 64-byte multi-byte string errors
-    // cleanly instead of panicking mid-codepoint.
-    if !hex.is_ascii() {
-        anyhow::bail!("fingerprint is not valid hex: {hex:?}");
-    }
-    if hex.len() != 64 {
-        anyhow::bail!(
-            "fingerprint must be 64 hex chars (SHA-256), got {} chars",
-            hex.len()
-        );
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
-            .map_err(|_| anyhow::anyhow!("fingerprint is not valid hex: {hex:?}"))?;
-    }
-    Ok(out)
 }
 
 /// `fq connect` — establish or refresh the pairing with a daemon's

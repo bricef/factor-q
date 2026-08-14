@@ -21,7 +21,7 @@ use anyhow::Context;
 
 use crate::cli::GlobalArgs;
 use crate::dead_letter_atom::DeadLetterFilter;
-use crate::edge_call::{edge_client_for, edge_invoke, invoke_on};
+use crate::edge_call::{edge_client_for, edge_invoke};
 use crate::trigger_command::TriggerKey;
 use crate::truncate_json;
 
@@ -148,13 +148,13 @@ pub(crate) async fn requeue_dead_letter(
     fq_runtime::AgentId::new(agent).with_context(|| format!("invalid agent name '{agent}'"))?;
 
     let client = edge_client_for(global).await?;
-    let receipt = invoke_on(
-        &client,
-        fq_ops::OpId::Verb(fq_ops::VerbId::DeadLetter(fq_ops::DeadLetter::Requeue)),
-        serde_json::json!({ "agent_id": agent, "trigger_seq": trigger_seq }),
-    )
-    .await?
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let receipt = client
+        .invoke(
+            fq_ops::OpId::Verb(fq_ops::VerbId::DeadLetter(fq_ops::DeadLetter::Requeue)),
+            serde_json::json!({ "agent_id": agent, "trigger_seq": trigger_seq }),
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let receipt: fq_ops::Receipt = serde_json::from_value(receipt)?;
     let key = receipt
         .atoms
@@ -164,7 +164,8 @@ pub(crate) async fn requeue_dead_letter(
         .context("the requeue receipt named no trigger — cannot confirm the requeue")?;
     let trigger_id: TriggerKey = serde_json::from_value(key.clone())?;
 
-    let trigger = invoke_on(&client, fq_ops::OpId::Get(fq_ops::Domain::Trigger), key)
+    let trigger = client
+        .invoke(fq_ops::OpId::Get(fq_ops::Domain::Trigger), key)
         .await?
         // The requeue already landed, so this is never "the requeue
         // failed" — say so, and name what it made.

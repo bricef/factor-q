@@ -1,16 +1,5 @@
 use super::*;
 
-/// A 64-byte string with a multi-byte codepoint passes the length
-/// gate; slicing must not panic mid-codepoint (ultrareview
-/// bug_001) — it errors like any other junk.
-#[test]
-fn fingerprint_hex_rejects_non_ascii_without_panicking() {
-    let hostile = format!("a\u{e9}{}", "a".repeat(61));
-    assert_eq!(hostile.len(), 64, "64 bytes, 63 chars — the trap input");
-    let err = parse_fingerprint_hex(&hostile).unwrap_err();
-    assert!(err.to_string().contains("not valid hex"), "{err}");
-}
-
 /// Concurrent `fq connect` runs must merge, not lose each other's
 /// entries (ultrareview bug_004): every writer re-reads under the
 /// lock, so a slow writer cannot clobber a fast one.
