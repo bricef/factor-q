@@ -367,6 +367,21 @@ fn cost_report() -> CostReport {
             invocation_count: 15,
             framework_cost: 0.0,
         },
+        // The reserved `summary` agent: engine spend on invocation
+        // summaries, charged to no invocation (#466), so its whole row is
+        // framework cost and its invocation count is zero. It is what
+        // gives the total a remainder to name.
+        CostView {
+            agent_id: "summary".to_string(),
+            event_count: 61,
+            total_cost: 0.913_4,
+            total_input_tokens: 812_000,
+            total_output_tokens: 24_600,
+            total_cache_read_tokens: 640_000,
+            total_cache_write_tokens: 0,
+            invocation_count: 0,
+            framework_cost: 0.913_4,
+        },
         // One-shot e2e instances (uuid-suffixed ids): the costs page
         // folds these into per-family rows so they cannot bury the
         // named agents above — the fold is part of the screenshot.
