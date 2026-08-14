@@ -4,10 +4,27 @@
 //! source must carry an explicit allow-marker naming why it is not a
 //! read path (the daemon, an operator write, the trigger WAL writer).
 //!
-//! Read handlers go through `open_views()` / `Views`; adding a new
-//! direct open without a marker fails this test, and adding a marker is
-//! a reviewable, greppable act — the gate makes bypasses loud, not
-//! impossible.
+//! Adding a new direct open without a marker fails this test, and
+//! adding a marker is a reviewable, greppable act — the gate makes
+//! bypasses loud, not impossible.
+//!
+//! **What a read handler does instead has changed under this gate.**
+//! The rule used to be "go through `open_views()` / `Views`": the CLI
+//! was a formatter over a read layer it opened for itself, and the
+//! bypass being caught was a *second* way of doing that. There is no
+//! `open_views()` any more (cohort 4.4 took its last two callers), and
+//! the remedy is now to invoke a declared op over the edge — the
+//! daemon owns the stores. `Views` is what a *handler* reads, on the
+//! other side of that call.
+//!
+//! Which leaves a hole this gate should say out loud rather than
+//! leave to be discovered: `Views::open(` is not one of the three
+//! spellings below, so the gate cannot see `fq status` (verb 14,
+//! unflipped) opening the stores through it. Verb 14's flip is where
+//! that pattern joins this list — added and emptied in one change, so
+//! the gate never goes red for work someone else has to do. See the
+//! same note in `edge_migration_gate.rs`, whose zero has the same
+//! caveat.
 //!
 //! Sources are discovered by walking `src/` at runtime, so a file added
 //! to the tree joins the gate automatically. A compile-time embed (the
@@ -141,9 +158,9 @@ fn read_handlers_never_open_stores_directly() {
 
     assert!(
         violations.is_empty(),
-        "direct store open(s) without an `{ALLOW}` marker — read paths must use \
-         `open_views()`/`Views` (#261); if this is genuinely a write/daemon path, add the \
-         marker with a reason:\n{}",
+        "direct store open(s) without an `{ALLOW}` marker — a client verb asks the daemon \
+         for what it needs by invoking a declared op (#261); if this is genuinely a \
+         write/daemon path, add the marker with a reason:\n{}",
         violations.join("\n")
     );
 
@@ -168,6 +185,13 @@ fn read_handlers_never_open_stores_directly() {
     // which is the architecture rather than a concession. A fourth
     // marker appearing means someone re-opened a store from the client
     // side, and that is the thing this gate exists to make loud.
+    //
+    // Cohort 4.4 moved this number **not at all**, which is worth
+    // stating because it is the cohort that emptied the *other* gate:
+    // `fq costs` and `fq doctor` reached their stores through
+    // `open_views`, never through a `<Store>::open`, so retiring both
+    // verbs' local reads removed nothing this scan was counting. The
+    // exemptions here were always about the daemon; they still are.
     assert_eq!(
         sanctioned, 3,
         "sanctioned direct-store-open count changed — update this gate alongside the marker"

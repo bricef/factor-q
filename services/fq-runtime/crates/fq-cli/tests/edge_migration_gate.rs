@@ -9,11 +9,13 @@
 //! re-derive from the diff. A flip that leaves the old path in place
 //! as a fallback passes its goldens — it does not pass this.
 //!
-//! Four legacy paths are counted:
+//! Five legacy paths are counted:
 //!
 //! * `open_views(` — the CLI opening projection stores for itself.
-//!   Its definition counts too, so the terminal state is a clean zero:
-//!   the last caller's departure takes the helper with it.
+//!   Its definition counted too, so the terminal state was a clean
+//!   zero: the last caller's departure took the helper with it, in
+//!   cohort 4.4. The pattern stays because what it guards against is a
+//!   helper like it reappearing.
 //! * `control_plane::operator::` — reaching into runtime internals
 //!   directly instead of invoking a declared op.
 //! * `AgentRegistry::load_from_directory` — a client verb loading the
@@ -54,6 +56,13 @@ use std::path::{Path, PathBuf};
 /// source lines.
 const LEGACY: &[&str] = &[
     "open_views(",
+    // Added when `open_views` was deleted, because deleting the helper
+    // did not delete the habit: `fq status` opens the same stores by
+    // calling `Views::open` directly. Counting only the helper would
+    // have made this gate report zero while client code still opened a
+    // store — a number that reads as "the phase is done" and is not.
+    // The daemon's own opens carry the exemption below.
+    "Views::open(",
     "control_plane::operator::",
     "AgentRegistry::load_from_directory",
     // The leading dot is load-bearing: it matches `.subscribe(` and
@@ -160,11 +169,35 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// the verb is filed under, which is what was actually happening all
 /// along.
 ///
-/// What is left is three `open_views(` and nothing else: `fq doctor`
-/// (verb 15), `fq costs` (verb 13), and the helper's own definition,
-/// which is why the terminal state is zero rather than one. Both
-/// remaining verbs are reports.
-const REMAINING: usize = 3;
+/// It went 3 -> 0 with cohort 4.4's reports, and the three that went
+/// are one departure, not three: `fq costs` became `cost.summary`, `fq
+/// doctor` became `control.doctor`, and `open_views` — having no
+/// callers left — went with them. That is why the terminal state was
+/// always zero rather than one.
+///
+/// It did **not** go to zero, and the reason is worth stating because
+/// the obvious arithmetic says it should have.
+///
+/// Deleting `open_views` did not delete the habit. `fq status` (verb
+/// 14, unflipped) opens the same stores by calling `Views::open`
+/// directly, twice — which the original four patterns did not match,
+/// and which `store_open_gate.rs` does not match either, since it
+/// looks for the three `<Store>::open` spellings. Left as they were,
+/// both gates would have read clean while fq-cli still opened a store
+/// from client code, and the Phase-4 criterion — "`fq-cli` … opens no
+/// store" — would have been unmet under a number that reads as though
+/// it were met.
+///
+/// So `Views::open(` joined the patterns and the count went 3 -> 2
+/// rather than 3 -> 0. Note which direction that is. This gate has a
+/// standing rule against widening patterns to make the number *fall*;
+/// widening one to make it *rise* is the opposite act, and it is what
+/// the gate is for. A count that has to be explained away is worth
+/// less than one that is simply true.
+///
+/// The two that remain are both `fq status`. Verb 14 empties them, and
+/// zero then means what a reader will assume it means.
+const REMAINING: usize = 2;
 
 /// True when `path` is the test half of a module split — `foo/tests.rs`
 /// beside a `foo.rs` that declares `#[cfg(test)] mod tests;`.

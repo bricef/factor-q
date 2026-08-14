@@ -44,9 +44,9 @@ exempts inline `#[cfg(test)]` modules.
 | 10 | `fq agent validate` | local file parse | — | stays local | n/a |
 | 11 | `fq events tail` | core-NATS subscribe, silent-drop, non-resumable | **created in 4.2** (none existed) | `event.stream` atom | ✅ **DONE 2026-08-05** |
 | 12 | `fq events query` | direct Views → `Views::events` | `events_query_*` (**reviewed change** — a daemon-backed listing contains the daemon's own events; same correction as 4.1's roster) | `event.list` atom, served from the projection index (`Atom::with_index`; rows carry `seq` so `event.get` walks from any of them) | ✅ **DONE 2026-08-06** |
-| 13 | `fq costs` | direct Views → `Views::costs` | `costs_*` | `cost.summary` report | ReportId + fixture exist; not registered |
+| 13 | `fq costs` | direct Views → `Views::costs` | `costs_*` (**byte-identical** — a daemon spends nothing, so it appears in no cost row) | `cost.summary` report, plus `cost.by_agent` for the drill-down the dashboard takes in 4.4 item 17 | ✅ **DONE 2026-08-14** |
 | 14 | `fq status` | direct JetStream probe + direct Views (`CLI:1772-1875`) | `status_*` (only Nats::Live goldens) | `control.status` report (scope `Control`) — **not** `control.get`; a synthetic has no Get (2026-08-06) | no |
-| 15 | `fq doctor` | direct Views ×4 | `doctor_*` | `control.doctor` report (D-5 gates the roster) | no |
+| 15 | `fq doctor` | direct Views ×4 | `doctor_*` (**reviewed change** — a daemon-backed health report counts the daemon's own worker; same correction as 4.1's roster) | `control.doctor` report; the four sub-reads stay internal to the composite (see 4.4 item 16) | ✅ **DONE 2026-08-14** |
 | 16 | `fq invocation list` | **edge** | `invocation_list_*` | — | ✅ DONE (3b) |
 | 17 | `fq invocation show` | **edge** | `invocation_show_*` | — | ✅ DONE (3b) |
 | 18 | `fq invocation drop` | **four legacy paths at once**: legacy-split migration + control request + direct store opens + local `operator::drop_invocation` (`CLI:4764-4813`) | `invocation_drop_*` | `invocation.drop` — **op exists**; flip = delete the local path, move `--live` halting daemon-side | ✅ **DONE 2026-07-28** |
@@ -60,10 +60,12 @@ exempts inline `#[cfg(test)]` modules.
 | 26 | `fq token attenuate` | offline (fq-edge) | — | — | ✅ DONE |
 | 27 | `fq version` | build-time consts | — | local stays; daemon build via `control.status` | n/a |
 
-**Count check**: flips remaining 3, 4, 6, 8, 13, 14, 15, 19, 23 =
-**9**. Verbs 18 and 20 landed 2026-07-28 (cohort 4.0); verbs 21, 22
-and 9 landed 2026-08-01 (cohort 4.1); verbs 11, 7 and 12 landed
-2026-08-05/06, which completes cohort 4.2.
+**Count check**: flips remaining 14, 19 = **2**. Verbs 18 and 20
+landed 2026-07-28 (cohort 4.0); verbs 21, 22 and 9 landed 2026-08-01
+(cohort 4.1); verbs 11, 7 and 12 landed 2026-08-05/06, which completes
+cohort 4.2; verbs 3, 4, 6 and 8 landed 2026-08-13 with verb 5 retired
+and verb 23 deleted, completing cohort 4.3; verbs 13 and 15 landed
+2026-08-14 as the first reports the surface has ever declared.
 
 **Migration gate** (`edge_migration_gate.rs`, added with cohort 4.0):
 the remaining legacy call points are counted and asserted, so a flip
@@ -75,9 +77,15 @@ internals is the architecture, not debt.
 
 It counts `open_views(`, `control_plane::operator::`, and — since
 cohort 4.1 — `AgentRegistry::load_from_directory`, and — since cohort
-4.2 — client-side `.subscribe`. **10 at the start of Phase 4, 7 now,
-zero at the end** — but read that 7 against a pattern set twice as
-wide as the one the 10 was measured with.
+4.2 — client-side `.subscribe`. **10 at the start of Phase 4, zero
+now** — but read that zero against a pattern set twice as wide as the
+one the 10 was measured with, and against what it does *not* cover:
+`fq status` (verb 14) reaches its stores through `Views::open(`, which
+is neither `open_views(` nor one of the three `<Store>::open`
+spellings the store-open gate matches. Both gates are clean while
+fq-cli still opens a store from client code. The gate says so in its
+own prose; verb 14's PR is where that pattern joins a gate, because it
+is the change that can add it and empty it at once.
 
 The count went **6 -> 7** with verb 9, and that is worth reading
 carefully, because a rising ratchet normally means debt was added.
@@ -90,12 +98,14 @@ that a gate's *coverage* is as load-bearing as its number, and a
 falling count over a too-narrow pattern can flatter the work.
 
 **Store-open gate**: 7 sanctioned direct-open sites at Phase-4 start,
-**5 now** (verb 18 took two); end-state is 4 (daemon + init only).
-An eighth marker sanctioned nothing — orphaned above an unrelated
-comment when the open it guarded moved — and was removed with verb
-18, which is why the earlier count of 8 here was wrong. The unmarked
-bypass class is `open_views` — now used only by verbs 13 and 15 —
-which that gate does not match; the migration gate does.
+**3 now** — the three inside `run_daemon`, which is the end state:
+the runtime opening its own stores. An eighth marker sanctioned
+nothing — orphaned above an unrelated comment when the open it
+guarded moved — and was removed with verb 18, which is why the
+earlier count of 8 here was wrong. The unmarked bypass class was
+`open_views`, which that gate never matched and the migration gate
+did; it is gone with verbs 13 and 15. What neither gate matches is
+`Views::open(`, above.
 
 ## B. Read service / dashboard
 
@@ -393,10 +403,21 @@ retired, see below**.
     one standing and retires with item 13.
 
 **4.4 — reports, synthetic, dashboard**
-15. `cost.summary` report + verb 13 flip.
+15. `cost.summary` report + verb 13 flip — ✅ **done 2026-08-14**,
+    together with verb 15 below, as one PR: the two verbs shared
+    `open_views`, so neither could delete it alone. `cost.by_agent`
+    is declared in the same change (the drill-down item 17 re-points
+    the dashboard's `/costs/<agent>` page onto).
 16. `control.status` **report** (version, health, stream probes move
-    daemon-side) + verb 14 flip; `control.doctor` report + verb 15
-    flip (D-5 decides the exposed roster). **Three things land here,
+    daemon-side) + verb 14 flip — **outstanding**; `control.doctor`
+    report + verb 15 flip — ✅ **done 2026-08-14**. The per-method
+    call the plan left open is settled: `failures`, `recovery`,
+    `executions` and `event_count` are **internal to the composite**,
+    not report inputs. A report's authority is Read on its own scope
+    and never on its inputs, so declaring them would buy the composite
+    nothing and cost four names against P11; `event_count` is not a
+    doctor input at all and travels with verb 14. **Three things land
+    here,
     from the 2026-08-05/06 model amendment**
     ([ADR-0006 Appendix D](../../adrs/accepted/0006-registry-first-api.md)):
     - **The machinery reads are reports, not a Get.** A synthetic has

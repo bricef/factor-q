@@ -99,7 +99,7 @@ Then run `just fq trigger sample-agent ...` again. You'll see each event scroll 
 
 ## 7. Query history and costs
 
-The runtime also materialises every event into a SQLite projection so you can query historical runs without replaying NATS. `fq events query` asks the running daemon for that index over the edge, so keep `fq run` up; the rows it renders carry no payloads. The last column is each event's identity, printed in full — pass one to `fq events get` and you get that event back whole, payload included, for as long as the log still holds it.
+The runtime also materialises every event into a SQLite projection so you can query historical runs without replaying NATS. `fq events query` and `fq costs` ask the running daemon for that history over the edge, so keep `fq run` up; the rows it renders carry no payloads. The last column is each event's identity, printed in full — pass one to `fq events get` and you get that event back whole, payload included, for as long as the log still holds it.
 
 ```sh
 # Last 20 events, all agents

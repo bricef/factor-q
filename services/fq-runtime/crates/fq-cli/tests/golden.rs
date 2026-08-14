@@ -730,45 +730,25 @@ fn compare_golden(name: &str, actual: &str) {
 // The snapshots: every DB-backed read command, human + JSON.
 // ------------------------------------------------------------------
 
-/// A leftover v1 single-file layout is a migration hint, not a read:
-/// pin the refusal message so read commands never silently open (or
-/// worse, recreate) the legacy file.
-#[test]
-fn legacy_single_file_layout_is_a_hint_not_a_read() {
-    // `costs` still reads the local stores; the invocation verbs no
-    // longer do (they speak the edge — Phase 3b), so the legacy-layout
-    // hint is pinned on a verb where a local read still happens.
-    let dir = tempfile::tempdir().expect("legacy tempdir");
-    std::fs::write(dir.path().join("events.db"), b"not a real db").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_fq"))
-        .args(["costs"])
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
-        .env("FQ_AGENTS_DIR", "/nonexistent/agents")
-        .env("FQ_CACHE_DIR", dir.path())
-        .env("FQ_STATE_DIR", dir.path().join("state"))
-        .env("FQ_NATS_URL", "nats://127.0.0.1:1")
-        .env("RUST_LOG", "off")
-        .output()
-        .expect("run fq binary");
-    let exit = out.status.code();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_ne!(exit, Some(0), "a legacy layout must not read");
-    assert!(
-        stdout.is_empty(),
-        "fatal error must not pollute stdout; got:\n{stdout}"
-    );
-    assert!(
-        stderr.contains("legacy single-file database"),
-        "stderr should carry the migration hint even with RUST_LOG=off; got:\n{stderr}"
-    );
-}
+// A leftover v1 single-file layout used to be pinned here, as a
+// migration hint a read command printed instead of opening (or worse,
+// recreating) the legacy file. `fq costs` carried that test because it
+// was the last read that still opened a store; cohort 4.4 flipped it,
+// which took the last caller of `open_views` and the hint itself.
+//
+// The property survives its test, structurally and more strongly: a
+// client read cannot meet a legacy layout because it opens nothing at
+// all. That is asserted by `store_open_gate.rs` (no unmarked store
+// opens outside the daemon) and `edge_migration_gate.rs` (no
+// `open_views`, count zero). The split migration itself is the
+// daemon's, and `fq_runtime::db`'s own tests pin it.
 
 /// The flipped verbs' unpaired error is operator guidance, not a
 /// stack trace: no stored connection means "run fq connect", stated.
 /// Every newly flipped verb joins this list — `agent list` (verb 9) is
-/// the one whose old self needed no daemon at all, and cohort 4.3 adds
-/// the three that used to need only a broker.
+/// the one whose old self needed no daemon at all, cohort 4.3 adds the
+/// three that used to need only a broker, and cohort 4.4 the two
+/// reports, which needed neither.
 #[test]
 fn flipped_verb_without_a_pairing_says_how_to_pair() {
     for verb in [
@@ -779,6 +759,8 @@ fn flipped_verb_without_a_pairing_says_how_to_pair() {
         &["reload"],
         &["down"],
         &["trigger", "researcher"],
+        &["costs"],
+        &["doctor"],
     ] {
         let xdg = tempfile::tempdir().expect("xdg dir");
         let out = Command::new(env!("CARGO_BIN_EXE_fq"))
@@ -817,24 +799,143 @@ fn golden_status_json() {
     );
 }
 
-#[test]
-fn golden_doctor_human() {
-    check_golden("doctor_human", &["doctor"], Nats::Closed, &["for "]);
-}
-
-#[test]
-fn golden_doctor_json() {
-    check_golden("doctor_json", &["doctor", "--json"], Nats::Closed, &[]);
-}
+// The cost goldens (plan Phase 4, verb 13): the same argv and the same
+// golden files, now `cost.summary` on the authenticated edge instead
+// of the CLI opening the projection for itself. **Byte-identical**,
+// and unlike the two roster/event flips before it that is not a
+// coincidence worth being surprised by — it is the query. Cost rows
+// are `llm_response`, `llm_failure` and `invocation_summary` with a
+// non-null `total_cost`, and none of the daemon's own events
+// (`system_startup`, `system_recovery`, `worker_orphaned`, heartbeats)
+// is any of those. A daemon in the fixture spends nothing, so it
+// appears in no row and in no total.
+//
+// The files below are therefore untouched, which is the whole claim.
 
 #[test]
 fn golden_costs_human() {
-    check_golden("costs_human", &["costs"], Nats::Closed, &[]);
+    check_golden_edge("costs_human", &["costs"], &[]);
 }
 
 #[test]
 fn golden_costs_json() {
-    check_golden("costs_json", &["costs", "--json"], Nats::Closed, &[]);
+    check_golden_edge("costs_json", &["costs", "--json"], &[]);
+}
+
+// REVIEWED GOLDEN CHANGE (plan Phase 4, verb 15) — the third in this
+// migration, and the same correction as the first two (the roster at
+// `golden_workers_list_human`, the event index at
+// `golden_events_query_human`). It is not a golden weakened to make a
+// flip pass.
+//
+// The previous expectation was "1 alive, 1 stale, 1 shutdown" and no
+// daemon anywhere in it. For a health report that is not merely an
+// unusual world, it is a self-contradictory one: `fq doctor` reports
+// on durable execution — workers, in-flight work, ambiguity — and
+// every one of those is a thing a *running* daemon has. The old
+// golden pinned a verdict on a runtime that could not have produced
+// the state being judged, and the verdict it pinned ("issues found":
+// a stale worker, a stuck invocation) was the shape of a fold nobody
+// was advancing rather than of a system in trouble.
+//
+// What changes, and it is the roster and nothing else: the daemon's
+// own worker row joins the counts, and the fixture's three
+// ancient-heartbeat rows are freshened to `alive` before the verb runs
+// (see `start_with_agents`), so `1 alive` becomes `4 alive` while
+// `1 stale` (worker-alpha, seeded stale) and `1 shutdown`
+// (worker-omega) are unmoved — and `stale_ids` still names
+// `worker-alpha` alone, which is the assertion that the extra rows are
+// healthy ones rather than unnamed additions. Every other section is
+// byte-identical: the same in-flight invocation, still stuck, still
+// `3a000000`; the same single `tool_error`; no ambiguity, because the
+// fixture re-asserts the row startup recovery had (correctly) marked
+// ambiguous; no dead letters, because nothing published a trigger to
+// exhaust.
+//
+// Two things follow that are worth stating rather than leaving to be
+// noticed. The daemon's worker id never reaches this output — it would
+// only appear in `stale_ids`, and a daemon that has gone stale while
+// answering its own health check is a failure this golden should show,
+// not redact. And the report is now a snapshot of a live system, so
+// what pins it is the fixture's barriers (the sweep observed, the
+// heartbeats freshened last), the same ones the roster golden depends
+// on.
+
+#[test]
+fn golden_doctor_human() {
+    check_golden_edge("doctor_human", &["doctor"], &["for "]);
+}
+
+#[test]
+fn golden_doctor_json() {
+    check_golden_edge("doctor_json", &["doctor", "--json"], &[]);
+}
+
+/// What the flip costs, stated: `fq doctor` reports the daemon's
+/// health, so with no daemon there is no report — exit 1, and a
+/// message that names the absence as the finding rather than leaving
+/// `Connection refused` to be read as a bug in the diagnostic.
+///
+/// This is the one verb where the trade every migrated read made lands
+/// on the tool an operator reaches for *because* something is wrong,
+/// so the failure text is contract, not decoration.
+#[test]
+fn doctor_without_a_daemon_says_that_is_the_finding() {
+    let mut fixture = EdgeFixture::start();
+    // Paired and answering first, so this is not the unpaired path.
+    let (exit, stdout, stderr) = fixture.run_fq(&["doctor"]);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+    assert!(stdout.contains("factor-q doctor"), "got: {stdout}");
+
+    fixture.stop_daemon();
+    let (exit, stdout, stderr) = fixture.run_fq(&["doctor"]);
+    assert_eq!(
+        exit,
+        Some(1),
+        "a daemon-less doctor must fail loudly; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a failed report must not print a partial verdict; got:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("could not reach the edge at"),
+        "the failure must name the edge it could not reach; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("that is the finding"),
+        "the failure must read as a diagnosis, not a transport error; got:\n{stderr}"
+    );
+}
+
+/// `--fail-on-issues` and "no daemon" now share exit 1, so the two
+/// have to be distinguishable by what they print: a health gate that
+/// found problems emits the whole report on stdout, and one that could
+/// not ask emits nothing there (asserted above). Without this pair a
+/// cron `fq doctor --fail-on-issues || alert` could not tell "the
+/// fleet is unhealthy" from "I could not look".
+///
+/// The fixture's world has issues by construction — a seeded stale
+/// worker and a stuck in-flight invocation — which is the same state
+/// `doctor_human.golden` pins, so this asserts the exit code the
+/// golden's verdict line implies.
+#[test]
+fn fail_on_issues_exits_nonzero_and_still_prints_the_report() {
+    let fixture = EdgeFixture::start();
+    let (exit, stdout, stderr) = fixture.run_fq(&["doctor", "--fail-on-issues"]);
+    assert_eq!(
+        exit,
+        Some(1),
+        "the fixture's world has issues; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Verdict: issues found"),
+        "a health gate must still hand over the findings; got:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("doctor found issues"),
+        "the non-zero exit must say why; got:\n{stderr}"
+    );
 }
 
 // REVIEWED GOLDEN CHANGE (plan Phase 4, verb 12) — the second in this

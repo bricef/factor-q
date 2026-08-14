@@ -1,6 +1,6 @@
 {
   "workers": {
-    "alive": 1,
+    "alive": 4,
     "stale": 1,
     "shutdown": 1,
     "stale_ids": [

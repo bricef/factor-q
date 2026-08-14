@@ -9,7 +9,10 @@
 
 use std::str::FromStr;
 
-use fq_ops::{Control, Cost, Domain, Invocation, OpId, ReportId, Trigger, VerbId};
+use fq_ops::{
+    Control, ControlReport, CostReport, DeadLetter, Domain, Invocation, OpId, ReportId, Trigger,
+    VerbId,
+};
 use strum::IntoEnumIterator;
 
 /// Every typed verb, across every per-domain enum. Grows with the
@@ -20,11 +23,19 @@ fn all_verbs() -> Vec<VerbId> {
     verbs.extend(Invocation::iter().map(VerbId::Invocation));
     verbs.extend(Control::iter().map(VerbId::Control));
     verbs.extend(Trigger::iter().map(VerbId::Trigger));
+    verbs.extend(DeadLetter::iter().map(VerbId::DeadLetter));
     verbs
 }
 
+/// Every typed report, same discipline. The per-domain enums are
+/// `<Domain>Report` because a domain can declare both verbs and
+/// reports and the type namespace is flat — `Control` above and
+/// `ControlReport` here are the same domain.
 fn all_reports() -> Vec<ReportId> {
-    Cost::iter().map(ReportId::Cost).collect()
+    let mut reports: Vec<ReportId> = Vec::new();
+    reports.extend(CostReport::iter().map(ReportId::Cost));
+    reports.extend(ControlReport::iter().map(ReportId::Control));
+    reports
 }
 
 /// Serde roundtrip never decays a typed variant to `Unknown`: the
@@ -146,7 +157,7 @@ fn colliding_unknown_never_cross_dispatches() {
     // The honest addresses are untouched by the tightening.
     assert!(
         registry
-            .resolve(&OpId::Report(ReportId::Cost(Cost::Summary)))
+            .resolve(&OpId::Report(ReportId::Cost(CostReport::Summary)))
             .is_some()
     );
     assert!(

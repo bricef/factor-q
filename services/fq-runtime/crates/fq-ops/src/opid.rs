@@ -6,9 +6,12 @@
 //! nothing parses them, ever; equality is the only operation the
 //! declared verb strings support.
 //!
-//! Machinery reads have no variant here: Control is a synthetic
-//! resource, so "ask the machinery about itself" is just
-//! `Get(Control)`.
+//! Machinery reads are reports, not a category of their own: a
+//! synthetic resource has no Get (ADR-0006 Appendix D, 2026-08-06), so
+//! "ask the machinery about itself" is `Report(Control(…))` — the
+//! `doctor` variant below, and `status` when verb 14 lands. What the
+//! synthetic still does is host the Control domain's verbs and scope
+//! their authority.
 
 use std::str::FromStr;
 
@@ -95,7 +98,16 @@ pub enum DeadLetter {
 }
 
 /// The reports each domain declares, same construction discipline as
-/// the verb enums.
+/// the verb enums — one enum per domain, one variant per report.
+///
+/// **Named `<Domain>Report`, where the verb enums take the bare domain
+/// name.** A domain may declare both kinds — `Control` declares the
+/// verbs `down`/`reload` *and* the report `doctor` — and Rust's type
+/// namespace is flat, so one of the two families has to carry the
+/// distinction. Reports carry it, because verb enums are named at far
+/// more sites; the payoff is that "this enum lists reports" is legible
+/// wherever one appears, rather than being a fact about which name
+/// happened to be free first.
 #[derive(
     Debug,
     Clone,
@@ -108,8 +120,33 @@ pub enum DeadLetter {
     strum::EnumIter,
 )]
 #[strum(serialize_all = "snake_case")]
-pub enum Cost {
+pub enum CostReport {
+    /// `cost.summary` — fleet spend: per-agent rows, the per-model
+    /// split, the time series, and the totals.
     Summary,
+    /// `cost.by_agent` — one agent's drill-down: its totals, its
+    /// per-model split, and its per-invocation rows.
+    ByAgent,
+}
+
+/// The Control domain's reports. Distinct from [`Control`], which is
+/// the same domain's *verbs*: `control.doctor` asks the machinery how
+/// it is, `control.down` tells it to stop.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    strum::EnumIter,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum ControlReport {
+    /// `control.doctor` — the durable-execution health composite.
+    Doctor,
 }
 
 /// A domain verb's identity, typed: the domain and the verb arrive
@@ -244,7 +281,8 @@ impl JsonSchema for VerbId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(from = "ReportIdWire", into = "ReportIdWire")]
 pub enum ReportId {
-    Cost(Cost),
+    Cost(CostReport),
+    Control(ControlReport),
     Unknown { domain: String, name: String },
 }
 
@@ -252,6 +290,7 @@ impl ReportId {
     pub fn domain(&self) -> Option<Domain> {
         match self {
             ReportId::Cost(_) => Some(Domain::Cost),
+            ReportId::Control(_) => Some(Domain::Control),
             ReportId::Unknown { .. } => None,
         }
     }
@@ -269,14 +308,21 @@ impl ReportId {
     pub fn name_segment(&self) -> &str {
         match self {
             ReportId::Cost(r) => (*r).into(),
+            ReportId::Control(r) => (*r).into(),
             ReportId::Unknown { name, .. } => name,
         }
     }
 }
 
-impl From<Cost> for ReportId {
-    fn from(report: Cost) -> Self {
+impl From<CostReport> for ReportId {
+    fn from(report: CostReport) -> Self {
         ReportId::Cost(report)
+    }
+}
+
+impl From<ControlReport> for ReportId {
+    fn from(report: ControlReport) -> Self {
+        ReportId::Control(report)
     }
 }
 
@@ -300,7 +346,10 @@ impl From<ReportIdWire> for ReportId {
         let typed = Domain::from_str(&wire.domain)
             .ok()
             .and_then(|domain| match domain {
-                Domain::Cost => Cost::from_str(&wire.name).ok().map(ReportId::Cost),
+                Domain::Cost => CostReport::from_str(&wire.name).ok().map(ReportId::Cost),
+                Domain::Control => ControlReport::from_str(&wire.name)
+                    .ok()
+                    .map(ReportId::Control),
                 _ => None,
             });
         typed.unwrap_or(ReportId::Unknown {
