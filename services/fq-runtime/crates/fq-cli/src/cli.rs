@@ -162,6 +162,14 @@ pub(crate) enum Commands {
         command: EventCommands,
     },
     /// Show cost breakdown
+    ///
+    /// Answers over the whole recorded history unless `--since`
+    /// narrows it: cost rows are exempt from the retention sweep, so
+    /// spend never silently windows. The total names its unallocated
+    /// remainder (`framework` — engine spend charged to no
+    /// invocation) rather than leaving the difference to be
+    /// discovered. Asks the daemon (`cost.summary`), so it needs one
+    /// running.
     Costs {
         /// Filter by agent
         #[arg(long)]
@@ -184,10 +192,13 @@ pub(crate) enum Commands {
     /// Aggregate the runtime's durable-execution health signals
     /// into one operator-readable report: worker liveness,
     /// in-flight/stuck work, ambiguous invocations, and permanent
-    /// failures grouped by kind. Read-only against the SQLite
-    /// projection DB — no NATS round-trip, so it works with
-    /// `fq run` stopped. Composes (does not duplicate) `fq status`,
-    /// `fq workers list`, and `fq invocation list`.
+    /// failures grouped by kind. Composes (does not duplicate)
+    /// `fq status`, `fq workers list`, and `fq invocation list`.
+    ///
+    /// Asks the running daemon (`control.doctor`), which is where the
+    /// work being reported on actually is. With no daemon answering
+    /// there is no report and the command exits 1 saying so — that is
+    /// the finding, not a failure to produce one.
     Doctor {
         /// Emit the structured `DoctorReport` as JSON instead of
         /// the human-readable report.

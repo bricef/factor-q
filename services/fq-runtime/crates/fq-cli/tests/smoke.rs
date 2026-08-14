@@ -30,6 +30,12 @@ fn run_fq(args: &[&str], timeout: Duration) -> (Option<i32>, String, String) {
         .env("FQ_AGENTS_DIR", "/nonexistent/agents")
         .env("FQ_CACHE_DIR", "/nonexistent/cache")
         .env("FQ_STATE_DIR", "/nonexistent/state")
+        // The pairing store is user-side, under XDG_CONFIG_HOME, and
+        // it is not covered by the four above — so without this a
+        // flipped verb here would dial whatever daemon the developer
+        // happens to be paired with, and pass or fail by whether one
+        // was running. Every verb these tests reach is flipped now.
+        .env("XDG_CONFIG_HOME", "/nonexistent/config")
         // Quiet logging so stderr stays readable.
         .env("RUST_LOG", "off")
         .stdout(std::process::Stdio::piped())
@@ -320,16 +326,18 @@ fn fq_doctor_help_lists_flags() {
 }
 
 #[test]
-fn fq_doctor_missing_db_exits_nonzero_without_panic() {
-    // FQ_CACHE_DIR points at a nonexistent path, so the per-store
-    // databases are absent. `fq doctor` is DB-backed and needs no
-    // NATS; with no DB it must exit non-zero with an actionable
-    // error rather than panic or hang.
+fn fq_doctor_without_a_daemon_exits_nonzero_without_panic() {
+    // `fq doctor` asks the daemon for the health it reports on
+    // (`control.doctor`), and nothing here is paired with one, so it
+    // must exit non-zero with an actionable error rather than panic or
+    // hang. It used to read the per-store databases directly and this
+    // test withheld those instead; the failure it pins is the same
+    // one, at the layer the verb now fails at.
     let (exit, _stdout, stderr) = run_fq(&["doctor"], Duration::from_secs(5));
     assert_eq!(
         exit,
         Some(1),
-        "missing-db doctor should exit 1; stderr: {stderr}"
+        "daemon-less doctor should exit 1; stderr: {stderr}"
     );
     assert!(
         !stderr.contains("panicked"),

@@ -1541,6 +1541,578 @@
     }
   },
   {
+    "report": {
+      "description": "Answers over the whole recorded history unless `since` narrows it: cost-bearing rows are exempt from the retention sweep and kept indefinitely, so this report never silently windows. The time series ignores `agent` deliberately — the chart answers what the fleet is burning, the tables answer who burned it. Reported everywhere, allocated nowhere (#466): an invocation summary's cost is engine spend, counted by every query that answers *what was spent* and by none that answers *what did this invocation cost*. Per-invocation figures therefore do not sum to the agent total, which is correct and must not be silently so — the aggregate carries the shortfall as `framework_cost`, engine spend no invocation caused, and `total_cost = <per-invocation costs> + framework_cost` holds for every agent. Zero for an ordinary agent, the whole row for the reserved `summary` agent.",
+      "domain": "cost",
+      "name": "summary",
+      "output_schema": {
+        "$defs": {
+          "CostBucketView": {
+            "description": "One time bucket's cost sum — a day or an hour, keyed by its\nfixed-width UTC timestamp prefix (`YYYY-MM-DD` / `YYYY-MM-DDTHH`).",
+            "properties": {
+              "bucket": {
+                "type": "string"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "bucket",
+              "total_cost"
+            ],
+            "type": "object"
+          },
+          "CostView": {
+            "description": "Per-agent cost/token aggregate.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "framework_cost": {
+                "default": 0.0,
+                "description": "The part of `total_cost` that belongs to no invocation: spend\nthe engine incurred on this agent's behalf, which today means\nthe summariser (#216). In the total because it is real money,\nnamed here because every per-invocation view excludes it\n(#466) — `total_cost - framework_cost` is what those views\naccount for. Zero for an ordinary agent; the whole row for the\nreserved `summary` agent, whose drill-down therefore shows\nspend and no invocations by design.",
+                "format": "double",
+                "type": "number"
+              },
+              "invocation_count": {
+                "description": "Distinct invocations behind the aggregate.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "agent_id",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens",
+              "invocation_count"
+            ],
+            "type": "object"
+          },
+          "ModelCostView": {
+            "description": "One model's share of an agent's spend.",
+            "properties": {
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "model": {
+                "type": "string"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "model",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Per-agent costs plus the per-model split and the grand totals, so a\ncaller renders all three without re-summing.",
+        "properties": {
+          "agents": {
+            "items": {
+              "$ref": "#/$defs/CostView"
+            },
+            "type": "array"
+          },
+          "buckets": {
+            "default": [],
+            "description": "Spend over time within the window — daily buckets, or hourly\nwhen the caller asked for them. Sparse: quiet buckets are\nabsent (display layers fill gaps). Oldest first.",
+            "items": {
+              "$ref": "#/$defs/CostBucketView"
+            },
+            "type": "array"
+          },
+          "framework_cost": {
+            "default": 0.0,
+            "description": "The unallocated remainder of `total_cost`, summed over\n`agents`: engine spend that no invocation caused (#466). Named\non the report so an operator reads `total = invocations +\nframework` off the page instead of filing the difference as a\nbug. See [`CostView::framework_cost`].",
+            "format": "double",
+            "type": "number"
+          },
+          "models": {
+            "description": "The same cost rows grouped by model, biggest spender first —\nspend by capability tier rather than by consumer.",
+            "items": {
+              "$ref": "#/$defs/ModelCostView"
+            },
+            "type": "array"
+          },
+          "total_cache_read_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_cache_write_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_cost": {
+            "format": "double",
+            "type": "number"
+          },
+          "total_input_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_output_tokens": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agents",
+          "models",
+          "total_cost",
+          "total_input_tokens",
+          "total_output_tokens",
+          "total_cache_read_tokens",
+          "total_cache_write_tokens"
+        ],
+        "title": "CostReport",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `cost.summary`.",
+        "properties": {
+          "agent": {
+            "default": null,
+            "description": "Narrow the per-agent rows to one agent. Absent reports the\nwhole fleet.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hourly_buckets": {
+            "default": false,
+            "description": "Bucket the time series hourly instead of daily.",
+            "type": "boolean"
+          },
+          "since": {
+            "default": null,
+            "description": "Lower bound on time, in the `views::since` grammar. Absent\nreports the whole recorded history — cost-bearing rows are\nexempt from the retention sweep, so that is a real answer here\nrather than whatever happened to survive it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "CostSummaryParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Fleet spend: per-agent rows, the per-model split, the time series, and the totals.",
+      "version": 1
+    }
+  },
+  {
+    "report": {
+      "description": "The drill-down behind one row of `cost.summary`. `invocations` is newest first and capped by `invocation_limit`; `totals.invocation_count` carries the uncapped count, so a truncated list is visible as one. An agent with no cost events in the window is not found rather than an empty breakdown — there is no row of the summary to drill into. Reported everywhere, allocated nowhere (#466): an invocation summary's cost is engine spend, counted by every query that answers *what was spent* and by none that answers *what did this invocation cost*. Per-invocation figures therefore do not sum to the agent total, which is correct and must not be silently so — the aggregate carries the shortfall as `framework_cost`, engine spend no invocation caused, and `total_cost = <per-invocation costs> + framework_cost` holds for every agent. Zero for an ordinary agent, the whole row for the reserved `summary` agent.",
+      "domain": "cost",
+      "name": "by_agent",
+      "output_schema": {
+        "$defs": {
+          "CostView": {
+            "description": "Per-agent cost/token aggregate.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "framework_cost": {
+                "default": 0.0,
+                "description": "The part of `total_cost` that belongs to no invocation: spend\nthe engine incurred on this agent's behalf, which today means\nthe summariser (#216). In the total because it is real money,\nnamed here because every per-invocation view excludes it\n(#466) — `total_cost - framework_cost` is what those views\naccount for. Zero for an ordinary agent; the whole row for the\nreserved `summary` agent, whose drill-down therefore shows\nspend and no invocations by design.",
+                "format": "double",
+                "type": "number"
+              },
+              "invocation_count": {
+                "description": "Distinct invocations behind the aggregate.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "agent_id",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens",
+              "invocation_count"
+            ],
+            "type": "object"
+          },
+          "InvocationCostView": {
+            "description": "One invocation's share of an agent's spend.",
+            "properties": {
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "description": "Epoch ms of the invocation's first cost event (its effective\nstart as the projection sees it); 0 when the stored timestamp\nfails to parse.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "started_at_ms",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens"
+            ],
+            "type": "object"
+          },
+          "ModelCostView": {
+            "description": "One model's share of an agent's spend.",
+            "properties": {
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "model": {
+                "type": "string"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "model",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One agent's cost drill-down: its own totals plus per-model and\nper-invocation breakdowns — the dashboard's `/costs/<agent>` page\nand any future `fq costs show <agent>`.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "invocations": {
+            "description": "Newest first, capped by the caller's limit;\n`totals.invocation_count` carries the uncapped count. Sums to\n`totals.total_cost - totals.framework_cost` when uncapped.",
+            "items": {
+              "$ref": "#/$defs/InvocationCostView"
+            },
+            "type": "array"
+          },
+          "models": {
+            "description": "Biggest spender first.",
+            "items": {
+              "$ref": "#/$defs/ModelCostView"
+            },
+            "type": "array"
+          },
+          "totals": {
+            "$ref": "#/$defs/CostView"
+          }
+        },
+        "required": [
+          "agent_id",
+          "totals",
+          "models",
+          "invocations"
+        ],
+        "title": "AgentCostDetailView",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `cost.by_agent`.",
+        "properties": {
+          "agent": {
+            "description": "The agent to break down. Required — this report is one agent's\ndrill-down where `cost.summary` is the fleet's.",
+            "type": "string"
+          },
+          "invocation_limit": {
+            "default": 50,
+            "description": "Cap on the per-invocation rows, newest first.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "since": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agent"
+        ],
+        "title": "CostByAgentParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "One agent's spend, broken down by model and by invocation.",
+      "version": 1
+    }
+  },
+  {
+    "report": {
+      "description": "A composite: the four checks are read together, at one instant, by the daemon that owns the work being reported on — which is also the cost of asking. This report cannot describe a daemon that is not running, and the absence of an answer is itself the finding rather than a transport failure to retry. The checks that count as *issues* are stale workers, stuck in-flight work, ambiguous invocations and permanent failures; in-flight work that is merely running is healthy, and the dead-letter line is informational. `stuck` means an in-flight invocation whose WAL row has not advanced within the same threshold that makes a worker stale — not hearing from either for that long is the same order of signal. The threshold is the daemon's and is not a parameter: a health report an operator can narrow is one they can narrow past the problem.",
+      "domain": "control",
+      "name": "doctor",
+      "output_schema": {
+        "$defs": {
+          "DoctorDeadLetters": {
+            "description": "Availability of the dead-letter section. Gated on issue #49:\nDead-lettered triggers (#49): transient pre-WAL failures that\nexhausted the trigger consumer's delivery bound. The dispatcher\nconsumes the exhausted trigger and emits a terminal `failed` event\nwith kind [`DEAD_LETTER_KIND`]; this counts that bucket, so the\nreport needs no extra query. The event's annotations carry the\ntrigger subject and payload for requeue/diagnosis.",
+            "properties": {
+              "exhausted_triggers": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "exhausted_triggers"
+            ],
+            "type": "object"
+          },
+          "DoctorExecutions": {
+            "description": "In-flight / current-execution view, read from the worker-local\n`invocation_state` table (the reliable live view — the CP owner\ntable's `in_flight` status is not populated by trigger dispatch\nyet; see issue #50).",
+            "properties": {
+              "in_flight": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "stuck": {
+                "description": "In-flight invocations whose `updated_at` is older than\n[`DOCTOR_STUCK_THRESHOLD_MS`].",
+                "format": "int64",
+                "type": "integer"
+              },
+              "stuck_ids": {
+                "description": "Short ids of the stuck invocations, for triage.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "working": {
+                "description": "In-flight invocations with a fresh open dispatch (tool or LLM) —\nactively working, however silent their WAL row (#130).",
+                "format": "int64",
+                "type": "integer"
+              },
+              "working_ids": {
+                "description": "Short ids of the working invocations, same convention as\n`stuck_ids`.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "in_flight",
+              "working",
+              "working_ids",
+              "stuck",
+              "stuck_ids"
+            ],
+            "type": "object"
+          },
+          "DoctorFailure": {
+            "description": "One failure-kind bucket in the report. Mirrors\n[`fq_runtime::views::FailureView`] but owns its data so the report\nis a self-contained serialisable value.",
+            "properties": {
+              "count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "error_kind": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error_kind",
+              "count"
+            ],
+            "type": "object"
+          },
+          "DoctorWorkers": {
+            "description": "Worker liveness counts plus the ids of any stale workers so\nthe operator can act without a second `fq workers list` call.",
+            "properties": {
+              "alive": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "shutdown": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "stale": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "stale_ids": {
+                "description": "Worker ids currently past the stale threshold.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "alive",
+              "stale",
+              "shutdown",
+              "stale_ids"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The full doctor report — `control.doctor`'s declared output, and\nwhat `fq doctor --json` prints verbatim. Built by the pure\n[`build_doctor_report`] so the checks are unit-testable without a\nlive DB.",
+        "properties": {
+          "ambiguous": {
+            "description": "Ambiguous invocations needing operator triage (CP owner\ntable, `status='ambiguous'`).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "dead_letters": {
+            "$ref": "#/$defs/DoctorDeadLetters"
+          },
+          "executions": {
+            "$ref": "#/$defs/DoctorExecutions"
+          },
+          "failures": {
+            "description": "Terminal failures grouped by `FailureKind` (from the\nprojection `events` table, `event_type='failed'`).",
+            "items": {
+              "$ref": "#/$defs/DoctorFailure"
+            },
+            "type": "array"
+          },
+          "workers": {
+            "$ref": "#/$defs/DoctorWorkers"
+          }
+        },
+        "required": [
+          "workers",
+          "executions",
+          "ambiguous",
+          "failures",
+          "dead_letters"
+        ],
+        "title": "DoctorReport",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `control.doctor`. Empty, and declared\nanyway: every check runs, because a health report an operator can\nnarrow is one they can narrow past the problem. This is where a\nfuture option — an override for [`DOCTOR_STUCK_THRESHOLD_MS`] —\nwould appear.",
+        "title": "DoctorParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Durable-execution health in one report: workers, current work, ambiguity, failures, dead letters.",
+      "version": 1
+    }
+  },
+  {
     "command": {
       "authority": {
         "scope": "invocation",

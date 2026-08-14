@@ -10,7 +10,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::opid::{Control, Cost, Invocation, Trigger};
+use crate::opid::{Control, CostReport, Invocation, Trigger};
 use crate::{Atom, Authority, Command, Domain, Report, Stability, Synthetic, Verb, View};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -214,7 +214,7 @@ pub struct CostOutput {
 /// event log it computes from.
 pub fn cost_summary() -> Report {
     Report::new::<CostParams, CostOutput>(
-        Cost::Summary,
+        CostReport::Summary,
         "Aggregate cost across all agents.",
         Stability::Experimental,
     )

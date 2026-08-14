@@ -399,7 +399,7 @@ impl From<EventRow> for EventView {
 }
 
 /// Per-agent cost/token aggregate.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct CostView {
     pub agent_id: String,
     pub event_count: i64,
@@ -472,7 +472,7 @@ impl From<InvocationCostSummary> for InvocationCostView {
 }
 
 /// One model's share of an agent's spend.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct ModelCostView {
     pub model: String,
     pub event_count: i64,
@@ -496,7 +496,7 @@ impl From<ModelCostSummary> for ModelCostView {
 /// One agent's cost drill-down: its own totals plus per-model and
 /// per-invocation breakdowns — the dashboard's `/costs/<agent>` page
 /// and any future `fq costs show <agent>`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct AgentCostDetailView {
     pub agent_id: String,
     pub totals: CostView,
@@ -510,7 +510,7 @@ pub struct AgentCostDetailView {
 
 /// One time bucket's cost sum — a day or an hour, keyed by its
 /// fixed-width UTC timestamp prefix (`YYYY-MM-DD` / `YYYY-MM-DDTHH`).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct CostBucketView {
     pub bucket: String,
     pub total_cost: f64,
@@ -527,7 +527,7 @@ impl From<CostBucketSummary> for CostBucketView {
 
 /// Per-agent costs plus the per-model split and the grand totals, so a
 /// caller renders all three without re-summing.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, schemars::JsonSchema)]
 pub struct CostReport {
     pub agents: Vec<CostView>,
     /// Spend over time within the window — daily buckets, or hourly

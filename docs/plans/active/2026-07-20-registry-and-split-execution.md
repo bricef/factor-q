@@ -219,7 +219,14 @@ and independent. Order:
    command to event and no `worker_pruned` event type; see
    [ADR-0006 Appendix E](../../adrs/accepted/0006-registry-first-api.md#appendix-e--amendment-workerprune-is-retired-not-evented-2026-08-10).
 3. **Reports:** `cost.summary`/`cost.by_agent` (scope `Cost`) and
-   `control.doctor`.
+   `control.doctor` — the first reports the surface has ever declared,
+   and the change that takes the migration gate to zero: verbs 13 and
+   15 shared `open_views`, so the last caller's departure took the
+   helper with it. The deferred per-method call is settled —
+   `failures`/`recovery`/`executions`/`event_count` are **internal to
+   the composite**, since a report's authority is Read on its own scope
+   and never on its inputs. `control.status` is verb 14 and is not part
+   of this item.
 4. **Deletions:** dashboard re-points to the generated client (its in-crate
    tests pin the old wire and re-point with it); then delete `ReadService`,
    its forwarding layer, and per-command JSON plumbing (#190 dissolves;

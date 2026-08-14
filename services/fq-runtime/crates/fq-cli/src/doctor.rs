@@ -1,187 +1,30 @@
 //! `fq doctor`: one aggregated durable-execution health report — worker
-//! liveness, in-flight/stuck work, ambiguous invocations, permanent failures
-//! and dead letters.
+//! liveness, in-flight/stuck work, ambiguous invocations, permanent
+//! failures and dead letters.
 //!
-//! Split out of `lib.rs` (#189). Read-only against the projection DB — no
-//! NATS round-trip — so it works with the daemon stopped, and the aggregation
-//! and rendering are pure functions over already-fetched views so the checks
-//! are unit-testable without a database.
-
-use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
+//! The client half of `control.doctor` (plan Phase 4, verb 15): one
+//! edge call, then rendering. The report itself — its shape, its
+//! checks, and the reads behind them — is [`crate::doctor_report`],
+//! daemon-side.
+//!
+//! **This verb used to work with the daemon stopped, and no longer
+//! does.** It read the projection directly, so it answered from
+//! whatever the last daemon left behind. That is the trade every
+//! migrated read has made (`fq events query` made it first), and it
+//! lands harder here than anywhere else, because a diagnostic that
+//! needs the thing it diagnoses is a diagnostic with a blind spot
+//! exactly where an operator reaches for it. Two things make it the
+//! right trade anyway: what the offline read returned was a *stale*
+//! verdict presented as a current one — worker liveness and stuck-work
+//! ages computed against a fold nobody was advancing — and the case it
+//! could not cover was never the one it appeared to. So the answer
+//! when no daemon answers is not a connection error but the finding
+//! itself: nothing is running for these checks to be about
+//! ([`doctor_client`]).
 
 use crate::cli::GlobalArgs;
-use crate::open_views;
-
-// ============================================================
-// fq doctor — one-shot durable-execution health report
-// ============================================================
-
-/// Stuck-work threshold: an in-flight invocation whose
-/// `invocation_state.updated_at` is older than this many ms is
-/// flagged "stuck" by `fq doctor`. Reuses the control-plane's
-/// stale-worker value (`DEFAULT_STALE_THRESHOLD_MS = 30_000`,
-/// `coordination_consumer.rs:66`) rather than inventing a third
-/// hard-coded constant — an invocation that has not touched its
-/// WAL row in as long as a worker has not heartbeated is the same
-/// order of "not making progress" signal.
-const DOCTOR_STUCK_THRESHOLD_MS: i64 = DEFAULT_STALE_THRESHOLD_MS;
-
-/// Worker liveness counts plus the ids of any stale workers so
-/// the operator can act without a second `fq workers list` call.
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
-struct DoctorWorkers {
-    alive: i64,
-    stale: i64,
-    shutdown: i64,
-    /// Worker ids currently past the stale threshold.
-    stale_ids: Vec<String>,
-}
-
-/// In-flight / current-execution view, read from the worker-local
-/// `invocation_state` table (the reliable live view — the CP owner
-/// table's `in_flight` status is not populated by trigger dispatch
-/// yet; see issue #50).
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
-struct DoctorExecutions {
-    in_flight: i64,
-    /// In-flight invocations with a fresh open dispatch (tool or LLM) —
-    /// actively working, however silent their WAL row (#130).
-    working: i64,
-    /// Short ids of the working invocations, same convention as
-    /// `stuck_ids`.
-    working_ids: Vec<String>,
-    /// In-flight invocations whose `updated_at` is older than
-    /// [`DOCTOR_STUCK_THRESHOLD_MS`].
-    stuck: i64,
-    /// Short ids of the stuck invocations, for triage.
-    stuck_ids: Vec<String>,
-}
-
-/// Availability of the dead-letter section. Gated on issue #49:
-/// Dead-lettered triggers (#49): transient pre-WAL failures that
-/// exhausted the trigger consumer's delivery bound. The dispatcher
-/// consumes the exhausted trigger and emits a terminal `failed` event
-/// with kind [`DEAD_LETTER_KIND`]; this counts that bucket, so the
-/// report needs no extra query. The event's annotations carry the
-/// trigger subject and payload for requeue/diagnosis.
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
-struct DoctorDeadLetters {
-    exhausted_triggers: i64,
-}
-
-/// The projection's failure-kind string for a dead-lettered trigger —
-/// `FailureKind::TriggerExhausted` serialized with the wire vocabulary.
-const DEAD_LETTER_KIND: &str = "trigger_exhausted";
-
-/// The full doctor report. Serialisable for `--json`; built by the
-/// pure [`build_doctor_report`] so the checks are unit-testable
-/// without a live DB.
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
-struct DoctorReport {
-    workers: DoctorWorkers,
-    executions: DoctorExecutions,
-    /// Ambiguous invocations needing operator triage (CP owner
-    /// table, `status='ambiguous'`).
-    ambiguous: i64,
-    /// Terminal failures grouped by `FailureKind` (from the
-    /// projection `events` table, `event_type='failed'`).
-    failures: Vec<DoctorFailure>,
-    dead_letters: DoctorDeadLetters,
-}
-
-/// One failure-kind bucket in the report. Mirrors
-/// [`fq_runtime::views::FailureView`] but owns its data so the report
-/// is a self-contained serialisable value.
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
-struct DoctorFailure {
-    error_kind: String,
-    count: i64,
-}
-
-impl DoctorReport {
-    /// Total terminal failures across all kinds.
-    fn failure_total(&self) -> i64 {
-        self.failures.iter().map(|f| f.count).sum()
-    }
-
-    /// True when any check reports a problem worth an operator's
-    /// attention: stale workers, stuck in-flight work, ambiguous
-    /// invocations, or permanent failures. In-flight work that is
-    /// merely running (not stuck) is healthy, not an issue.
-    fn has_issues(&self) -> bool {
-        self.workers.stale > 0
-            || self.executions.stuck > 0
-            || self.ambiguous > 0
-            || self.failure_total() > 0
-    }
-}
-
-/// Pure: assemble a [`DoctorReport`] from the already-fetched read
-/// views, so it can be unit-tested without a database. The stuck
-/// determination (threshold + clock-skew handling) lives in
-/// [`fq_runtime::views::Views::executions`]; this builder only
-/// aggregates and shortens ids for triage.
-fn build_doctor_report(
-    workers: &[fq_runtime::views::WorkerView],
-    executions: &fq_runtime::views::ExecutionsView,
-    ambiguous: i64,
-    failures: &[fq_runtime::views::FailureView],
-) -> DoctorReport {
-    let mut w = DoctorWorkers::default();
-    for row in workers {
-        match row.status.as_str() {
-            "alive" => w.alive += 1,
-            "stale" => {
-                w.stale += 1;
-                w.stale_ids.push(row.worker_id.clone());
-            }
-            "shutdown" => w.shutdown += 1,
-            // The control-plane only records the three statuses above;
-            // an unknown value would mean a store/view drift — count it
-            // as stale so it surfaces as an issue rather than vanishing.
-            _ => {
-                w.stale += 1;
-                w.stale_ids.push(row.worker_id.clone());
-            }
-        }
-    }
-
-    // Short ids (8 chars) for triage, matching the human report.
-    let short = |ids: &[String]| -> Vec<String> {
-        ids.iter().map(|id| id.chars().take(8).collect()).collect()
-    };
-    let ex = DoctorExecutions {
-        in_flight: executions.in_flight,
-        working: executions.working,
-        working_ids: short(&executions.working_ids),
-        stuck: executions.stuck,
-        stuck_ids: short(&executions.stuck_ids),
-    };
-
-    let failures: Vec<DoctorFailure> = failures
-        .iter()
-        .map(|f| DoctorFailure {
-            error_kind: f.error_kind.clone(),
-            count: f.count,
-        })
-        .collect();
-
-    let dead_letters = DoctorDeadLetters {
-        exhausted_triggers: failures
-            .iter()
-            .filter(|f| f.error_kind == DEAD_LETTER_KIND)
-            .map(|f| f.count)
-            .sum(),
-    };
-
-    DoctorReport {
-        workers: w,
-        executions: ex,
-        ambiguous,
-        failures,
-        dead_letters,
-    }
-}
+use crate::doctor_report::{DOCTOR_STUCK_THRESHOLD_MS, DoctorReport};
+use crate::edge_call::{edge_client_for, invoke_on};
 
 /// Pure: render the human-readable `fq doctor` report, mirroring
 /// `render_recovery_guidance` — an overall verdict, then per-failing-
@@ -258,37 +101,49 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
     out
 }
 
-/// `fq doctor`: aggregate the DB-backed durable-execution health
-/// signals into one report. Read-only against the SQLite projection
-/// DB — no NATS round-trip — so it works with `fq run` stopped.
+/// Dial the daemon for a report that is *about* the daemon.
 ///
-/// Opens the three read-only stores against the single projection DB
-/// file, reads each check's source, then hands the raw rows to the
-/// pure [`build_doctor_report`] / [`render_doctor_report_human`] so
-/// the aggregation and formatting stay testable.
+/// A failure to connect here is not an incidental transport problem
+/// that happens to be in the way of the answer — for this one verb it
+/// may **be** the answer, and the most consequential one the checks
+/// below could have returned. Saying so is the difference between an
+/// operator reading `Connection refused` as a bug in `fq doctor` and
+/// reading it as the first thing to fix.
+///
+/// It is stated conditionally on purpose. Two different failures reach
+/// here — an unreachable edge and a client that was never paired — and
+/// only the first is evidence about the runtime. Asserting "nothing is
+/// running" when the truth is "you have not run `fq connect`" would
+/// send an operator to restart a healthy daemon, which is the same
+/// class of misdirection this message exists to prevent.
+async fn doctor_client(global: &GlobalArgs) -> anyhow::Result<fq_edge::EdgeClient> {
+    edge_client_for(global).await.map_err(|e| {
+        anyhow::anyhow!(
+            "{e:#}\n\
+             `fq doctor` reports on a running daemon, so it cannot answer without \
+             reaching one — the line above says what stopped it. If the daemon is simply \
+             not running, that is the finding rather than a missing report: there is no \
+             runtime for these checks to be about."
+        )
+    })
+}
+
+/// `fq doctor`: ask the daemon for the durable-execution health
+/// composite and render it.
 pub(crate) async fn doctor(
     global: &GlobalArgs,
     json: bool,
     fail_on_issues: bool,
 ) -> anyhow::Result<()> {
-    let views = open_views(global).await?;
-    let now_ms = chrono::Utc::now().timestamp_millis();
-
-    let workers = views.workers().await?;
-    let executions = views
-        .executions(
-            now_ms,
-            DOCTOR_STUCK_THRESHOLD_MS,
-            fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
-        )
-        .await?;
-    let ambiguous = views
-        .recovery(now_ms, DOCTOR_STUCK_THRESHOLD_MS)
-        .await?
-        .ambiguous;
-    let failures = views.failures().await?;
-
-    let report = build_doctor_report(&workers, &executions, ambiguous, &failures);
+    let client = doctor_client(global).await?;
+    let output = invoke_on(
+        &client,
+        fq_ops::OpId::Report(fq_ops::ReportId::Control(fq_ops::ControlReport::Doctor)),
+        serde_json::json!({}),
+    )
+    .await?
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let report: DoctorReport = serde_json::from_value(output)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

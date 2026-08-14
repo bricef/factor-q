@@ -2,7 +2,7 @@ factor-q doctor
 
 Verdict: issues found — see below.
 
-Workers: 1 alive, 1 stale, 1 shutdown
+Workers: 4 alive, 1 stale, 1 shutdown
   -> `fq workers list --stale-only` to inspect
 Current executions: 1 in-flight (0 working, 1 stuck)
   -> 1 not advanced in >30s: 3a000000

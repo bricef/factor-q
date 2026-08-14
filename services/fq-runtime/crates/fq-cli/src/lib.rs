@@ -22,7 +22,6 @@ use fq_runtime::events::{
     Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
 };
 use fq_runtime::llm::{GenAiClient, LlmClient};
-use fq_runtime::views::Views;
 use fq_runtime::worker::{DrainReason, DrainRequest};
 use fq_runtime::{
     Config, ControlPlaneStore, EventBus, McpClientManager, McpServerConfig, PricingTable,
@@ -247,11 +246,13 @@ mod cli;
 mod connections;
 mod control;
 mod control_commands;
+mod cost_report;
 mod costs;
 mod dead_letter_atom;
 mod dead_letter_requeue;
 mod dead_letters;
 mod doctor;
+mod doctor_report;
 mod edge_call;
 mod edge_identity;
 mod event_atom;
@@ -300,10 +301,15 @@ pub(crate) fn runtime_db_paths(config: &Config) -> fq_runtime::RuntimeDbPaths {
 }
 
 /// Migrate a leftover v1 single-file `events.db` into the split
-/// layout, then hand back the per-store paths. Every command that
-/// opens a store for *writing* calls this first; read-only commands
-/// never mutate the state directory and surface a "run `fq run`"
-/// hint instead (see `open_views`).
+/// layout, then hand back the per-store paths. The daemon calls this
+/// before it opens anything.
+///
+/// It used to be "every command that opens a store for *writing*",
+/// with read commands surfacing a migration hint instead of running
+/// the split themselves. No client verb opens a store at all now
+/// (plan Phase 4), so the daemon is the only caller and the hint has
+/// no one left to give — `fq status` is the last client-side reader
+/// and it reports a pending split as a line in its own output.
 pub(crate) async fn ensure_split_dbs(
     config: &Config,
 ) -> anyhow::Result<fq_runtime::RuntimeDbPaths> {
@@ -849,7 +855,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // take the runtime down; it logs and stays down until restart.
     let read_service_addr = if config.read_service.enabled {
         let views = Arc::new(
-            fq_runtime::views::Views::open(&db_paths)
+            fq_runtime::views::Views::open(&db_paths) // allow-runtime-internals: daemon's own
                 .await
                 .context("read service: failed to open the read views")?
                 // The daemon's read path can gate at a watermark: the
@@ -891,7 +897,7 @@ async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         // The operator surface: real declarations over the daemon's
         // read views, gated at the projection watermark (Phase 3).
         let edge_views = Arc::new(
-            fq_runtime::views::Views::open(&db_paths)
+            fq_runtime::views::Views::open(&db_paths) // allow-runtime-internals: daemon's own
                 .await
                 .context("edge: failed to open the read views")?,
         );
@@ -1357,29 +1363,4 @@ pub(crate) fn truncate_json(value: &serde_json::Value, max: usize) -> String {
     } else {
         s
     }
-}
-
-/// Open the read-only `Views` handle every CLI read command formats over
-/// (the CLI is a formatter over `fq_runtime::views`, not a read layer of
-/// its own — see the operator-dashboard plan, layer 1).
-pub(crate) async fn open_views(global: &GlobalArgs) -> anyhow::Result<Views> {
-    let config = global.resolve_config()?;
-    let db_paths = runtime_db_paths(&config);
-    // Read commands never mutate the state directory, so a v1
-    // single-file layout is surfaced as a hint rather than migrated
-    // here — exactly the writable paths run the split.
-    let legacy = fq_runtime::db::legacy_db_path(&config.cache.directory);
-    if !db_paths.all_exist() && legacy.exists() {
-        anyhow::bail!(
-            "found legacy single-file database at {}: run `fq run` (or any writing \
-             command) once to migrate to the per-store layout",
-            legacy.display()
-        );
-    }
-    Views::open(&db_paths).await.with_context(|| {
-        format!(
-            "failed to open stores under {}: has `fq run` been started?",
-            config.cache.directory.display()
-        )
-    })
 }
