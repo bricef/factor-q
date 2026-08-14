@@ -661,7 +661,7 @@ fn agent_costs_render_models_and_linked_invocations() {
 /// load errors loudly.
 #[test]
 fn agents_list_links_definitions_and_surfaces_load_errors() {
-    use fq_runtime::read_service::AgentSummaryView;
+    use fq_runtime::read_service::{AgentSummaryView, AgentsView};
     let view = AgentsView {
         agents: vec![
             AgentSummaryView {
@@ -711,6 +711,7 @@ fn agents_list_links_definitions_and_surfaces_load_errors() {
 /// arbitrary text.
 #[test]
 fn agent_detail_collapses_and_escapes_the_prompt() {
+    use fq_runtime::read_service::AgentDetailView;
     let d = AgentDetailView {
         agent_id: "m0-issue-fix".to_string(),
         model: "claude-opus-4-8".to_string(),
