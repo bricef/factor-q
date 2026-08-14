@@ -9,9 +9,8 @@
 //! Machinery reads are reports, not a category of their own: a
 //! synthetic resource has no Get (ADR-0006 Appendix D, 2026-08-06), so
 //! "ask the machinery about itself" is `Report(Control(…))` — the
-//! `doctor` variant below, and `status` when verb 14 lands. What the
-//! synthetic still does is host the Control domain's verbs and scope
-//! their authority.
+//! `doctor` and `status` variants below. What the synthetic still does
+//! is host the Control domain's verbs and scope their authority.
 
 use std::str::FromStr;
 
@@ -132,6 +131,14 @@ pub enum CostReport {
 /// The Control domain's reports. Distinct from [`Control`], which is
 /// the same domain's *verbs*: `control.doctor` asks the machinery how
 /// it is, `control.down` tells it to stop.
+///
+/// The two reports answer different questions and the difference is
+/// worth stating, because an operator reaches for both when something
+/// is wrong. `status` answers *is there a runtime, and which one* —
+/// build, streams, registry, how far the fold has got. `doctor`
+/// answers *is the work healthy* — workers, stuck invocations,
+/// ambiguity, failures. Neither is a superset of the other, and
+/// `status` is the one that stays useful when the answer is "no".
 #[derive(
     Debug,
     Clone,
@@ -147,6 +154,12 @@ pub enum CostReport {
 pub enum ControlReport {
     /// `control.doctor` — the durable-execution health composite.
     Doctor,
+    /// `control.status` — machinery state: the daemon's build, its
+    /// stream health, its live registry, its projection position and
+    /// its recovery counts. The accumulation point the domain model
+    /// names for further machinery state, which grows this one schema
+    /// rather than the op roster.
+    Status,
 }
 
 /// A domain verb's identity, typed: the domain and the verb arrive

@@ -79,7 +79,8 @@ fq events query [--agent] [--event-type] [--since] [--limit 50]
                                             # query the SQLite projection (no payloads)
 fq events get <event-id> [--json]           # read one whole event back, payload included
 fq costs [--agent] [--since]                # per-agent cost totals, over the edge
-fq status                                   # runtime health: NATS, streams, consumers, projection
+fq status                                   # runtime overview, over the edge: build, streams,
+                                            # consumers, registry, projection, recovery
 fq doctor [--json] [--fail-on-issues]       # durable-execution health, over the edge
 ```
 

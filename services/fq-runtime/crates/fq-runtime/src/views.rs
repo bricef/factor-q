@@ -133,7 +133,9 @@ pub struct WorkerDetailView {
 /// Recovery-state counts — the data behind `fq status`'s recovery block and
 /// the dashboard's health tile. Computed against a caller-supplied `now_ms`
 /// and threshold so the view stays pure (no wall-clock inside).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+///
+/// Schema'd because `control.status` declares it as part of its output.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, schemars::JsonSchema)]
 pub struct RecoveryView {
     /// Ambiguous invocations awaiting operator triage.
     pub ambiguous: i64,

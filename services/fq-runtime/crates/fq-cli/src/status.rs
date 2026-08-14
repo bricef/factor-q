@@ -1,196 +1,280 @@
-//! `fq status`: the health overview — NATS and its streams, the per-store
-//! database paths, and the recovery guidance block.
+//! `fq status`: what this client is configured to reach, whether a
+//! daemon answered, and what that daemon says about itself.
 //!
-//! Split out of `lib.rs` (#189). Deliberately does not try to detect whether a
-//! daemon is running; that would need a pidfile or a heartbeat event, both
-//! more surface area than a status command should own.
+//! The client half of `control.status` (plan Phase 4, verb 14): one
+//! edge call, then rendering. The report — the build, the stream
+//! probe, the registry census, the projection position and the
+//! recovery counts — is [`crate::status_report`], daemon-side.
+//!
+//! **This is the verb an operator runs when things are broken, so it
+//! must not become another broken thing.** Every other migrated read
+//! traded "works with the daemon stopped" for "answers from the daemon
+//! that owns the data", and for most of them that trade is clean. Here
+//! it would not be: a `fq status` that answered `Connection refused`
+//! would fail exactly where it is reached for. So the trade is made
+//! deliberately and only halfway.
+//!
+//! * **A daemon that cannot be reached is a finding, not an error.**
+//!   It is reported as one, in the section where the daemon's answers
+//!   would have been, naming what is consequently absent rather than
+//!   leaving the reader to notice.
+//! * **What was never the daemon's stays local.** The resolved
+//!   configuration, the store paths it names and whether the files at
+//!   those paths exist are filesystem facts. Reading them is a `stat`,
+//!   not a store open, so the Phase-4 rule ("`fq-cli` opens no store")
+//!   is kept without giving up the half of the answer that needs
+//!   nothing running.
+//! * **The exit code still separates the two.** A degraded answer
+//!   exits non-zero after printing, so `fq status && deploy` fails
+//!   closed while an operator reading the output still gets everything
+//!   that was knowable.
+//!
+//! What is genuinely lost is that the store *contents* — the
+//! projection row count and the recovery counts — used to be readable
+//! with nothing running. What they described then was a fold nobody
+//! was advancing, presented without the caveat; the honest version of
+//! that answer is the one this verb now gives, which is that there is
+//! no runtime to describe.
 
 use std::path::PathBuf;
 
-use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
-use fq_runtime::views::Views;
-
 use crate::cli::GlobalArgs;
+use crate::edge_call::edge_invoke;
 use crate::runtime_db_paths;
+use crate::status_report::{StatusParams, StatusRegistry, StatusReport};
 
-/// Operational status of the runtime, derived from three sources:
+/// The `fq status --json` document: the local blocks, then either the
+/// daemon's report or the reason there is not one.
 ///
-/// 1. The NATS JetStream API (via the async-nats client that the
-///    EventBus already uses) — gives stream message counts, byte
-///    totals, and consumer positions.
-/// 2. The SQLite projection — row count and latest projected
-///    timestamp, so we can compare against NATS and surface
-///    projection lag directly.
-/// 3. Local config paths that we expect to be present.
-///
-/// Deliberately does not try to detect whether a `fq run` daemon
-/// is currently running; that would need a pidfile or a heartbeat
-/// event, both of which are more surface area than a status
-/// command should own. Operators can use `ps`/`systemctl` for
-/// process state.
-/// The `fq status --json` shape: config echoes, the typed stream probe
-/// ([`fq_runtime::health`]), and the DB-backed counts. `nats_connected`
-/// is always true in an emitted report — an unreachable broker fails
-/// the command, exactly like the human path.
+/// Grouped rather than flat, and the grouping is the contract: it
+/// answers the question a degraded status raises, which is *which of
+/// these did I learn from a running daemon, and which would have been
+/// true anyway*. A consumer testing `daemon == null` is testing
+/// "nothing is running", which is the single most useful thing this
+/// command reports.
 #[derive(serde::Serialize)]
-struct StatusReport {
+struct StatusDocument {
+    config: StatusConfig,
+    stores: StatusStores,
+    /// The daemon's own report, when one answered.
+    daemon: Option<StatusReport>,
+    /// Why none answered, when none did. Exactly one of this and
+    /// `daemon` is ever set.
+    daemon_error: Option<String>,
+}
+
+/// The configuration this client resolved — **its own**, which is not
+/// necessarily the daemon's. It says which broker and which daemon
+/// this `fq` would talk to, and where it would look for state; a
+/// client pointed at a different config file than the daemon it dials
+/// is a real and diagnosable situation, and printing the client's view
+/// is what makes it visible.
+#[derive(serde::Serialize)]
+struct StatusConfig {
     nats_url: String,
     agents_dir: PathBuf,
     cache_dir: PathBuf,
-    nats_connected: bool,
-    streams: Vec<fq_runtime::health::StreamHealth>,
+    /// The edge address this client dials.
+    edge: String,
+}
+
+/// The per-store files the configured cache directory names, and
+/// whether they are there.
+///
+/// Existence only, deliberately: `initialised` is three `stat` calls,
+/// never an open. What is *in* those files is the daemon's to report
+/// (`daemon.projection_rows`, `daemon.recovery`), and asking the
+/// filesystem whether they exist is the part that still works when no
+/// daemon does.
+#[derive(serde::Serialize)]
+struct StatusStores {
     worker_path: PathBuf,
     control_plane_path: PathBuf,
     projection_path: PathBuf,
     /// A v1 single-file `events.db` still awaiting the split
-    /// migration (`fq run` performs it).
+    /// migration (the daemon performs it at startup).
     legacy_events_db: Option<PathBuf>,
+    /// All three per-store files exist.
     initialised: bool,
-    projection_rows: Option<i64>,
-    recovery: Option<fq_runtime::views::RecoveryView>,
-    /// First store-side failure, when any (rows/recovery unreadable).
-    store_error: Option<String>,
 }
 
 pub(crate) async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Result<()> {
-    use async_nats::jetstream;
-    use fq_runtime::health;
-
     let config = global.resolve_config()?;
-
-    if !json {
-        println!("factor-q status");
-        println!();
-        println!("Config");
-        println!("  NATS URL:         {}", config.nats.url);
-        println!("  agents dir:       {}", config.agents.directory.display());
-        println!("  cache dir:        {}", config.cache.directory.display());
-
-        // NATS.
-        println!();
-        println!("NATS");
-    }
-    let client = match fq_runtime::bus::connect_with_url_credentials(&config.nats.url).await {
-        Ok(c) => {
-            if !json {
-                println!("  connection:       ✓ connected at {}", config.nats.url);
-            }
-            c
-        }
-        Err(err) => {
-            if !json {
-                println!("  connection:       ✗ failed: {err}");
-            }
-            anyhow::bail!("cannot reach NATS at {}", config.nats.url);
-        }
-    };
-    let js = jetstream::new(client);
-    let streams = health::probe_core_streams(&js).await;
     let db_paths = runtime_db_paths(&config);
     let legacy = fq_runtime::db::legacy_db_path(&config.cache.directory);
 
-    if json {
-        let initialised = db_paths.all_exist();
-        let mut projection_rows = None;
-        let mut recovery = None;
-        let mut store_error = None;
-        if initialised {
-            match Views::open(&db_paths).await {
-                Ok(views) => {
-                    match views.event_count().await {
-                        Ok(count) => projection_rows = Some(count),
-                        Err(err) => store_error = Some(format!("failed to query rows: {err}")),
-                    }
-                    let now_ms = chrono::Utc::now().timestamp_millis();
-                    match views.recovery(now_ms, DEFAULT_STALE_THRESHOLD_MS).await {
-                        Ok(r) => recovery = Some(r),
-                        Err(err) => {
-                            store_error
-                                .get_or_insert(format!("failed to read recovery state: {err}"));
-                        }
-                    }
-                }
-                Err(err) => store_error = Some(format!("failed to open: {err}")),
-            }
-        }
-        let report = StatusReport {
+    let (daemon, daemon_error) = match daemon_status(global).await {
+        Ok(report) => (Some(report), None),
+        // The whole chain, one line: the outer sentence says which
+        // step failed (dial, pair, invoke) and the inner one says why.
+        Err(err) => (None, Some(format!("{err:#}"))),
+    };
+
+    let document = StatusDocument {
+        config: StatusConfig {
             nats_url: config.nats.url.clone(),
             agents_dir: config.agents.directory.clone(),
             cache_dir: config.cache.directory.clone(),
-            nats_connected: true,
-            streams,
+            edge: config.edge.bind.clone(),
+        },
+        stores: StatusStores {
             worker_path: db_paths.worker.clone(),
             control_plane_path: db_paths.control_plane.clone(),
             projection_path: db_paths.projection.clone(),
             legacy_events_db: legacy.exists().then_some(legacy),
-            initialised,
-            projection_rows,
-            recovery,
-            store_error,
-        };
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
+            initialised: db_paths.all_exist(),
+        },
+        daemon,
+        daemon_error,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&document)?);
+    } else {
+        print!("{}", render_status_human(&document));
     }
 
-    for stream in &streams {
-        render_stream_health_human(stream);
-    }
-
-    // Stores + recovery state, over the read views.
-    println!();
-    println!("Stores");
-    println!("  worker db:        {}", db_paths.worker.display());
-    println!("  control-plane db: {}", db_paths.control_plane.display());
-    println!("  projection db:    {}", db_paths.projection.display());
-    if legacy.exists() {
-        println!(
-            "  legacy events.db: {} (pending split — run `fq run` to migrate)",
-            legacy.display()
-        );
-    }
-    if !db_paths.all_exist() {
-        println!("  state:            not initialised (run `fq run` to create)");
-        println!();
-        println!("Recovery state");
-        println!("  (no coordination data — `fq run` has not initialised the store)");
-        return Ok(());
-    }
-    match Views::open(&db_paths).await {
-        Ok(views) => {
-            match views.event_count().await {
-                Ok(count) => println!("  projection rows:  {count}"),
-                Err(err) => println!("  projection rows:  ✗ failed to query: {err}"),
-            }
-
-            // Recovery state (step 9). Points the operator at the
-            // commands they'd need if anything is off; renders
-            // "All clear." otherwise.
-            println!();
-            println!("Recovery state");
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            match views.recovery(now_ms, DEFAULT_STALE_THRESHOLD_MS).await {
-                Ok(r) => print!("{}", render_recovery_guidance(r.ambiguous, r.stale_workers)),
-                Err(err) => println!("  ✗ failed to read recovery state: {err}"),
-            }
-        }
-        Err(err) => {
-            println!("  state:            ✗ failed to open: {err}");
-        }
+    if let Some(reason) = &document.daemon_error {
+        // Non-zero AFTER the answer, not instead of it. A health gate
+        // (`fq status && …`) has to fail closed when there is no
+        // runtime, and an operator has to keep the half of the report
+        // that did not need one — the same division `fq doctor
+        // --fail-on-issues` makes between stdout and the exit code.
+        anyhow::bail!("{reason} — no daemon answered, so the status above is local facts only");
     }
     Ok(())
 }
 
-/// Render one probed stream exactly as `fq status` always has — the
-/// probe data is typed now ([`fq_runtime::health`], #105 layer 2) but
-/// the human output is unchanged.
-fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) {
+/// Ask the daemon for `control.status`.
+async fn daemon_status(global: &GlobalArgs) -> anyhow::Result<StatusReport> {
+    let output = edge_invoke(
+        global,
+        fq_ops::OpId::Report(fq_ops::ReportId::Control(fq_ops::ControlReport::Status)),
+        serde_json::to_value(StatusParams {})?,
+    )
+    .await?
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(serde_json::from_value(output)?)
+}
+
+/// Pure: render the whole human overview, so every branch of it — and
+/// especially the one an operator only ever sees when something is
+/// wrong — is testable without a daemon, a broker or a store.
+fn render_status_human(doc: &StatusDocument) -> String {
+    let mut out = String::from("factor-q status\n\n");
+    out.push_str("Config\n");
+    out.push_str(&format!("  NATS URL:         {}\n", doc.config.nats_url));
+    out.push_str(&format!(
+        "  agents dir:       {}\n",
+        doc.config.agents_dir.display()
+    ));
+    out.push_str(&format!(
+        "  cache dir:        {}\n",
+        doc.config.cache_dir.display()
+    ));
+
+    out.push_str("\nDaemon\n");
+    let Some(report) = &doc.daemon else {
+        let reason = doc.daemon_error.as_deref().unwrap_or("unknown");
+        out.push_str(&format!(
+            "  connection:       ✗ no daemon answered at {}\n",
+            doc.config.edge
+        ));
+        out.push_str(&format!("  reason:           {reason}\n"));
+        out.push_str(
+            "  -> that is the finding: there is no runtime here to report on.\n\
+             \x20 -> stream health, the agent registry, projection rows and recovery state\n\
+             \x20    are the daemon's to answer, so they are absent below rather than stale.\n",
+        );
+        out.push_str(&render_stores_human(&doc.stores));
+        return out;
+    };
+
+    out.push_str(&format!(
+        "  connection:       ✓ answered at {}\n",
+        doc.config.edge
+    ));
+    out.push_str(&format!("  version:          {}\n", report.version));
+    out.push_str(&render_registry_human(&report.registry));
+    out.push_str(&format!("  projection rows:  {}\n", report.projection_rows));
+
+    for stream in &report.streams {
+        out.push_str(&render_stream_health_human(stream));
+    }
+    out.push_str(&render_stores_human(&doc.stores));
+
+    // Recovery state: points the operator at the commands they'd need
+    // if anything is off; renders "All clear." otherwise.
+    out.push_str("\nRecovery state\n");
+    out.push_str(&render_recovery_guidance(
+        report.recovery.ambiguous,
+        report.recovery.stale_workers,
+    ));
+    out
+}
+
+/// Pure: the registry census as one line, plus a line per rejection.
+/// A rejected definition is named rather than counted, because the
+/// message carries the file and the parse error — everything the
+/// operator needs to go fix it.
+fn render_registry_human(registry: &StatusRegistry) -> String {
+    let mut out = if registry.load_errors.is_empty() {
+        format!("  agents:           {} loaded\n", registry.agents)
+    } else {
+        format!(
+            "  agents:           {} loaded, {} rejected\n",
+            registry.agents,
+            registry.load_errors.len()
+        )
+    };
+    for error in &registry.load_errors {
+        out.push_str(&format!("    -> {error}\n"));
+    }
+    out
+}
+
+/// Pure: the store block — paths from configuration, existence from
+/// the filesystem. Rendered identically whether or not a daemon
+/// answered, because it never depended on one.
+fn render_stores_human(stores: &StatusStores) -> String {
+    let mut out = String::from("\nStores\n");
+    out.push_str(&format!(
+        "  worker db:        {}\n",
+        stores.worker_path.display()
+    ));
+    out.push_str(&format!(
+        "  control-plane db: {}\n",
+        stores.control_plane_path.display()
+    ));
+    out.push_str(&format!(
+        "  projection db:    {}\n",
+        stores.projection_path.display()
+    ));
+    if let Some(legacy) = &stores.legacy_events_db {
+        out.push_str(&format!(
+            "  legacy events.db: {} (pending split — run `fq run` to migrate)\n",
+            legacy.display()
+        ));
+    }
+    if stores.initialised {
+        out.push_str("  state:            initialised — all three store files exist\n");
+    } else {
+        out.push_str("  state:            not initialised (run `fq run` to create)\n");
+    }
+    out
+}
+
+/// Pure: render one probed stream exactly as `fq status` always has.
+/// The probe is the daemon's now (it owns the broker connection) but
+/// the data is the same typed [`fq_runtime::health::StreamHealth`] and
+/// the rendering is unchanged.
+fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) -> String {
     use fq_runtime::health::{ConsumerHealth, StreamHealth};
 
-    println!();
-    println!("Stream: {}", health.stream());
+    let mut out = format!("\nStream: {}\n", health.stream());
     match health {
         StreamHealth::Unavailable { error, .. } => {
-            println!("  state:            ✗ {error}");
+            out.push_str(&format!("  state:            ✗ {error}\n"));
         }
         StreamHealth::Available {
             messages,
@@ -200,13 +284,13 @@ fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) {
             consumer,
             ..
         } => {
-            println!("  messages:         {messages}");
-            println!(
-                "  bytes:            {}",
+            out.push_str(&format!("  messages:         {messages}\n"));
+            out.push_str(&format!(
+                "  bytes:            {}\n",
                 fq_tools::builtin::exec::human_bytes(*bytes)
-            );
-            println!("  first seq:        {first_seq}");
-            println!("  last seq:         {last_seq}");
+            ));
+            out.push_str(&format!("  first seq:        {first_seq}\n"));
+            out.push_str(&format!("  last seq:         {last_seq}\n"));
             match consumer {
                 ConsumerHealth::Active {
                     name,
@@ -223,29 +307,34 @@ fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) {
                     } else {
                         "✗ lagging"
                     };
-                    println!("  consumer {name}: {status} (delivered {delivered}, lag {lag})");
+                    out.push_str(&format!(
+                        "  consumer {name}: {status} (delivered {delivered}, lag {lag})\n"
+                    ));
                     if *ack_pending > 0 {
-                        println!("    ack pending:    {ack_pending}");
+                        out.push_str(&format!("    ack pending:    {ack_pending}\n"));
                     }
                     if *num_pending > 0 {
-                        println!("    num pending:    {num_pending}");
+                        out.push_str(&format!("    num pending:    {num_pending}\n"));
                     }
                     if *num_redelivered > 0 {
-                        println!(
-                            "    redelivered:    {num_redelivered} (retrying; bound {})",
+                        out.push_str(&format!(
+                            "    redelivered:    {num_redelivered} (retrying; bound {})\n",
                             fq_runtime::bus::TRIGGER_MAX_DELIVER
-                        );
+                        ));
                     }
                 }
                 ConsumerHealth::Error { name, error } => {
-                    println!("  consumer {name}: ✗ info failed: {error}");
+                    out.push_str(&format!("  consumer {name}: ✗ info failed: {error}\n"));
                 }
                 ConsumerHealth::Missing { name } => {
-                    println!("  consumer {name}: not present (no `fq run` has initialised it)");
+                    out.push_str(&format!(
+                        "  consumer {name}: not present (no `fq run` has initialised it)\n"
+                    ));
                 }
             }
         }
     }
+    out
 }
 
 /// Pure: render the recovery-guidance block of `fq status`

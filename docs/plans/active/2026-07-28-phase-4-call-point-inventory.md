@@ -45,7 +45,7 @@ exempts inline `#[cfg(test)]` modules.
 | 11 | `fq events tail` | core-NATS subscribe, silent-drop, non-resumable | **created in 4.2** (none existed) | `event.stream` atom | ✅ **DONE 2026-08-05** |
 | 12 | `fq events query` | direct Views → `Views::events` | `events_query_*` (**reviewed change** — a daemon-backed listing contains the daemon's own events; same correction as 4.1's roster) | `event.list` atom, served from the projection index (`Atom::with_index`; rows carry `seq` so `event.get` walks from any of them) | ✅ **DONE 2026-08-06** |
 | 13 | `fq costs` | direct Views → `Views::costs` | `costs_*` (**byte-identical** — a daemon spends nothing, so it appears in no cost row) | `cost.summary` report, plus `cost.by_agent` for the drill-down the dashboard takes in 4.4 item 17 | ✅ **DONE 2026-08-14** |
-| 14 | `fq status` | direct JetStream probe + direct Views (`CLI:1772-1875`) | `status_*` (only Nats::Live goldens) | `control.status` report (scope `Control`) — **not** `control.get`; a synthetic has no Get (2026-08-06) | no |
+| 14 | `fq status` | direct JetStream probe + direct Views (`CLI:1772-1875`) | `status_*` (**reviewed change** — the goldens pin the no-daemon answer, which is the one this verb exists to give; a live consumer's lag cannot be pinned byte-exactly) | `control.status` report (scope `Control`) — **not** `control.get`; a synthetic has no Get (2026-08-06) | ✅ **DONE 2026-08-14** |
 | 15 | `fq doctor` | direct Views ×4 | `doctor_*` (**reviewed change** — a daemon-backed health report counts the daemon's own worker; same correction as 4.1's roster) | `control.doctor` report; the four sub-reads stay internal to the composite (see 4.4 item 16) | ✅ **DONE 2026-08-14** |
 | 16 | `fq invocation list` | **edge** | `invocation_list_*` | — | ✅ DONE (3b) |
 | 17 | `fq invocation show` | **edge** | `invocation_show_*` | — | ✅ DONE (3b) |
@@ -77,15 +77,15 @@ internals is the architecture, not debt.
 
 It counts `open_views(`, `control_plane::operator::`, and — since
 cohort 4.1 — `AgentRegistry::load_from_directory`, and — since cohort
-4.2 — client-side `.subscribe`. **10 at the start of Phase 4, zero
-now** — but read that zero against a pattern set twice as wide as the
-one the 10 was measured with, and against what it does *not* cover:
-`fq status` (verb 14) reaches its stores through `Views::open(`, which
-is neither `open_views(` nor one of the three `<Store>::open`
-spellings the store-open gate matches. Both gates are clean while
-fq-cli still opens a store from client code. The gate says so in its
-own prose; verb 14's PR is where that pattern joins a gate, because it
-is the change that can add it and empty it at once.
+4.2 — client-side `.subscribe`, and — since cohort 4.4 — `Views::open(`.
+**10 at the start of Phase 4, zero now**, and this zero is the plain
+one: read it against a pattern set twice as wide as the one the 10 was
+measured with. The last widening is the one to check, because it was
+added to make the number *rise*. `fq status` reached its stores through
+`Views::open(`, which is neither `open_views(` nor one of the three
+`<Store>::open` spellings the store-open gate matched, so both gates
+read clean while fq-cli still opened a store from client code. Verb 14
+added that pattern to both gates and emptied it in the same change.
 
 The count went **6 -> 7** with verb 9, and that is worth reading
 carefully, because a rising ratchet normally means debt was added.
@@ -409,14 +409,15 @@ retired, see below**.
     is declared in the same change (the drill-down item 17 re-points
     the dashboard's `/costs/<agent>` page onto).
 16. `control.status` **report** (version, health, stream probes move
-    daemon-side) + verb 14 flip — **outstanding**; `control.doctor`
+    daemon-side) + verb 14 flip — ✅ **done 2026-08-14**;
+    `control.doctor`
     report + verb 15 flip — ✅ **done 2026-08-14**. The per-method
     call the plan left open is settled: `failures`, `recovery`,
     `executions` and `event_count` are **internal to the composite**,
     not report inputs. A report's authority is Read on its own scope
     and never on its inputs, so declaring them would buy the composite
     nothing and cost four names against P11; `event_count` is not a
-    doctor input at all and travels with verb 14. **Three things land
+    doctor input at all and travelled with verb 14. **Three things land
     here,
     from the 2026-08-05/06 model amendment**
     ([ADR-0006 Appendix D](../../adrs/accepted/0006-registry-first-api.md)):
@@ -488,7 +489,22 @@ retired, see below**.
   because that state means a stuck invocation nobody has recovered.
 - **H3** (verb 4): `deploy.sh` treats `fq down` exit 0 as confirmed
   shutdown; the flip must keep that contract.
-- **H4** (verb 14): `fq status` does JetStream admin introspection a
-  thin client cannot keep; it moves inside `control.status`, and the
-  read service's frozen `version` probe semantics must be preserved
-  deliberately or dropped deliberately — not inherited by accident.
+- **H4** (verb 14) — **resolved 2026-08-14.** The JetStream admin
+  introspection moved inside `control.status`, probed over the
+  connection the daemon already holds; the client connects to no
+  broker at all now. The `version` probe was preserved deliberately
+  rather than inherited: `control.status` carries the **daemon's**
+  build (semver plus commit, the same `FQ_VERSION` the startup banner
+  prints), while `fq version` stays local and reports the client's —
+  so the two together are a skew check rather than one value pretending
+  to be both. The read service still serves its own frozen probe until
+  item 17 retires it.
+
+  What the hazard did not anticipate is the constraint that shaped the
+  verb: `fq status` is what an operator runs *when things are broken*,
+  so it could not become a verb that fails when the daemon is down.
+  The split is by what is knowable rather than by what is convenient —
+  configuration and store-file existence are `stat` calls and stay
+  client-side; anything reading a store's contents moved. An
+  unreachable daemon is reported as a finding, with the local half
+  intact, and exits non-zero so a script can still tell the two apart.

@@ -2,25 +2,18 @@ factor-q status
 
 Config
   NATS URL:         <NATS_URL>
-  agents dir:       /nonexistent/agents
+  agents dir:       <CACHE_DIR>/agents
   cache dir:        <CACHE_DIR>
 
-NATS
-  connection:       ✓ connected at <NATS_URL>
-
-Stream: fq-events
-  state:            ✗ stream not found: jetstream error: 404 (code stream not found, error code 10059)
-
-Stream: fq-triggers
-  state:            ✗ stream not found: jetstream error: 404 (code stream not found, error code 10059)
+Daemon
+  connection:       ✗ no daemon answered at <EDGE_ADDR>
+  reason:           could not reach the edge at <EDGE_ADDR>: Connection refused (os error #)
+  -> that is the finding: there is no runtime here to report on.
+  -> stream health, the agent registry, projection rows and recovery state
+     are the daemon's to answer, so they are absent below rather than stale.
 
 Stores
   worker db:        <CACHE_DIR>/worker.db
   control-plane db: <CACHE_DIR>/control-plane.db
   projection db:    <CACHE_DIR>/projection.db
-  projection rows:  #
-
-Recovery state
-  Stale workers: 2
-    -> `fq workers list --stale-only` to inspect
-    -> rows are reclaimed by the daemon's retention sweep; no action needed
+  state:            initialised — all three store files exist

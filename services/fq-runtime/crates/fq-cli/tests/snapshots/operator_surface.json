@@ -2115,6 +2115,295 @@
     }
   },
   {
+    "report": {
+      "description": "What is running and what it is running on. Answers `which build is this`, `are the streams and their consumers keeping up`, `which agent definitions did this daemon load and which did it reject`, `how far has the projection folded` and `is anything waiting on operator recovery`. It does not judge: stale workers and ambiguous invocations are reported as counts, and deciding whether they amount to a problem is `control.doctor`'s job. The registry census is the daemon's in-memory handle — what it would run right now, not what is on any caller's disk — so it reflects a reload without a restart. Stream figures are a probe at the instant of the call, not a fold, so two calls a second apart legitimately differ. This report cannot describe a daemon that is not running, and a caller that cannot reach one has learned the single most important thing about the machinery rather than failed to learn anything: absence is the finding.",
+      "domain": "control",
+      "name": "status",
+      "output_schema": {
+        "$defs": {
+          "ConsumerHealth": {
+            "description": "Health of one durable consumer on a stream. Externally tagged, same\nbincode rationale as [`StreamHealth`], and schema'd for the same\nreason.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The durable does not exist yet (no `fq run` has initialised it).",
+                "properties": {
+                  "missing": {
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "missing"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The durable exists but its info could not be fetched.",
+                "properties": {
+                  "error": {
+                    "properties": {
+                      "error": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "error"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "error"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "active": {
+                    "properties": {
+                      "ack_pending": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "delivered": {
+                        "description": "Stream sequence the consumer has been delivered up to.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "lag": {
+                        "description": "`last_seq - delivered` — how far behind the stream head.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "num_pending": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "num_redelivered": {
+                        "description": "Outstanding redeliveries — messages delivered more than\nonce and not yet acked. The retry-pressure signal: a\nnon-zero value means work is being NAK'd or timing out and\nwalking toward the consumer's delivery bound, past which a\ntrigger is dead-lettered rather than retried again.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "delivered",
+                      "lag",
+                      "ack_pending",
+                      "num_pending",
+                      "num_redelivered"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "active"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RecoveryView": {
+            "description": "Recovery-state counts — the data behind `fq status`'s recovery block and\nthe dashboard's health tile. Computed against a caller-supplied `now_ms`\nand threshold so the view stays pure (no wall-clock inside).\n\nSchema'd because `control.status` declares it as part of its output.",
+            "properties": {
+              "ambiguous": {
+                "description": "Ambiguous invocations awaiting operator triage.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "stale_worker_ids": {
+                "description": "Ids of those stale workers, so a caller can act without a second query.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "stale_workers": {
+                "description": "Workers past the stale threshold (and not shut down).",
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "ambiguous",
+              "stale_workers",
+              "stale_worker_ids"
+            ],
+            "type": "object"
+          },
+          "StatusRegistry": {
+            "description": "The daemon's live agent registry, censused: what it would run right\nnow, and what it could not load.",
+            "properties": {
+              "agents": {
+                "description": "Definitions the registry holds — the agents this daemon would\nrun if triggered right now.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "load_errors": {
+                "description": "One entry per definition file the registry rejected, phrased as\nthe daemon phrased it; each message names the file. A daemon\nwith load errors is running fewer agents than its directory\ndescribes, which is rarely what the operator intended.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "agents",
+              "load_errors"
+            ],
+            "type": "object"
+          },
+          "StreamHealth": {
+            "description": "Health of one JetStream stream plus its primary durable consumer.\nExternally tagged (serde's default) — internal tagging is JSON-only\nand breaks bincode, the read service's wire format.\n\nSchema'd because `control.status` declares it: the probe is the\ndaemon's now, and a declared report's output type carries its\nschema onto the published surface. The derive adds a schema, never\na serialisation — the bincode wire above is untouched.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The stream (or its info) could not be fetched; `error` carries\nthe reason verbatim.",
+                "properties": {
+                  "unavailable": {
+                    "properties": {
+                      "error": {
+                        "type": "string"
+                      },
+                      "stream": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "stream",
+                      "error"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "unavailable"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "available": {
+                    "properties": {
+                      "bytes": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "consumer": {
+                        "$ref": "#/$defs/ConsumerHealth"
+                      },
+                      "first_seq": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "last_seq": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "messages": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "stream": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "stream",
+                      "messages",
+                      "bytes",
+                      "first_seq",
+                      "last_seq",
+                      "consumer"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "available"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`control.status`'s declared output, and what `fq status --json`\nnests under `daemon`.",
+        "properties": {
+          "projection_rows": {
+            "description": "Rows in the daemon's projection index — how much of the event\nlog has been folded into readable state.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "recovery": {
+            "$ref": "#/$defs/RecoveryView",
+            "description": "Ambiguous invocations awaiting triage and workers past the\nstale threshold, with their ids."
+          },
+          "registry": {
+            "$ref": "#/$defs/StatusRegistry",
+            "description": "The live agent registry, censused."
+          },
+          "streams": {
+            "description": "JetStream health for the runtime's core streams and their\nprimary durable consumers — message counts, byte totals and how\nfar each consumer has got. Probed at the daemon, over the\nconnection it already holds.",
+            "items": {
+              "$ref": "#/$defs/StreamHealth"
+            },
+            "type": "array"
+          },
+          "version": {
+            "description": "The build this daemon is running: semver plus the commit it was\nbuilt from, so a deploy check can confirm the live process is on\nthe expected revision.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "streams",
+          "registry",
+          "projection_rows",
+          "recovery"
+        ],
+        "title": "StatusReport",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `control.status`. Empty, and declared\nanyway: the report is small enough that every part of it is worth\nhaving, and this is where a future narrowing would appear.",
+        "title": "StatusParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Machinery state: the daemon's build, its stream health, its live registry, its projection position and its recovery counts.",
+      "version": 1
+    }
+  },
+  {
     "command": {
       "authority": {
         "scope": "invocation",

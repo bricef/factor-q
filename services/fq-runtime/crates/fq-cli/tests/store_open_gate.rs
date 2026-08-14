@@ -1,8 +1,9 @@
 //! Regression gate for #261: read commands must never reacquire a raw
 //! store handle. Every direct `ProjectionStore::open*` /
-//! `WorkerStore::open*` / `ControlPlaneStore::open*` in non-test fq-cli
-//! source must carry an explicit allow-marker naming why it is not a
-//! read path (the daemon, an operator write, the trigger WAL writer).
+//! `WorkerStore::open*` / `ControlPlaneStore::open*` / `Views::open*`
+//! in non-test fq-cli source must carry an explicit allow-marker
+//! naming why it is not a read path (the daemon, an operator write,
+//! the trigger WAL writer).
 //!
 //! Adding a new direct open without a marker fails this test, and
 //! adding a marker is a reviewable, greppable act — the gate makes
@@ -17,14 +18,18 @@
 //! daemon owns the stores. `Views` is what a *handler* reads, on the
 //! other side of that call.
 //!
-//! Which leaves a hole this gate should say out loud rather than
-//! leave to be discovered: `Views::open(` is not one of the three
-//! spellings below, so the gate cannot see `fq status` (verb 14,
-//! unflipped) opening the stores through it. Verb 14's flip is where
-//! that pattern joins this list — added and emptied in one change, so
-//! the gate never goes red for work someone else has to do. See the
-//! same note in `edge_migration_gate.rs`, whose zero has the same
-//! caveat.
+//! `Views::open(` is on the list below because verb 14 put it there,
+//! which is the promise the previous version of this paragraph made.
+//! It is a store open one level down — `Views::open` opens all three —
+//! so a gate blind to it was blind to `fq status`, the last client
+//! verb that used it. Added and emptied in the same change, so the
+//! gate never goes red for work someone else has to do.
+//!
+//! Adding it made two daemon-side opens newly visible, and they are
+//! marked in place rather than moved: `run_daemon` sits exactly on its
+//! function-size budget, so a marker on its own line would breach a
+//! ratchet to satisfy a lint. Those two lines carry both gates'
+//! markers, which reads as the marker list it is.
 //!
 //! Sources are discovered by walking `src/` at runtime, so a file added
 //! to the tree joins the gate automatically. A compile-time embed (the
@@ -141,6 +146,10 @@ fn read_handlers_never_open_stores_directly() {
                 "ProjectionStore::open",
                 "WorkerStore::open",
                 "ControlPlaneStore::open",
+                // The read layer's constructor: it opens all three, so
+                // a scan that skipped it could not see the last client
+                // verb that reached for a store (plan Phase 4, verb 14).
+                "Views::open",
             ]
             .iter()
             .any(|needle| line.contains(needle));
@@ -192,8 +201,19 @@ fn read_handlers_never_open_stores_directly() {
     // `open_views`, never through a `<Store>::open`, so retiring both
     // verbs' local reads removed nothing this scan was counting. The
     // exemptions here were always about the daemon; they still are.
+    //
+    // 3 -> 5 with verb 14, and NOT because anything opened a store.
+    // Nothing did: the verb that used to (`fq status`) stopped, which
+    // is the change. The two new entries are the daemon's own
+    // `Views::open` calls — the read service's and the edge's — which
+    // this scan could not see until `Views::open` joined the spellings
+    // above, and which were already marked as daemon-side under the
+    // sibling gate's vocabulary. Both markers now sit on those two
+    // lines. So the rise is coverage, not concession; the number of
+    // places a store is opened outside the daemon is still zero, and
+    // that is the number this gate is really about.
     assert_eq!(
-        sanctioned, 3,
+        sanctioned, 5,
         "sanctioned direct-store-open count changed — update this gate alongside the marker"
     );
 }

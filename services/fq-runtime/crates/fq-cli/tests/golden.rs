@@ -1,18 +1,24 @@
 //! Golden-master output tests for every DB-backed read command (#261).
 //!
-//! A deterministic fixture store (fixed UUIDs, fixed timestamps) is
-//! seeded once per test process; each test drives the real binary via
-//! `CARGO_BIN_EXE_fq` against it and compares stdout to a committed
-//! golden file under `tests/golden/`.
+//! Each test seeds a deterministic store (fixed UUIDs, fixed
+//! timestamps), starts a broker and a daemon over it, pairs a client
+//! once, then drives the real binary via `CARGO_BIN_EXE_fq` and
+//! compares stdout to a committed golden file under `tests/golden/`.
 //!
 //! These snapshots are the acceptance oracle for the Views read-path
 //! refactor: a behavioural change in any read command's output is a
 //! hard diff here, never a silent drift.
 //!
-//! Volatile output (age/duration strings computed from wall-clock now,
-//! the tempdir path, the test broker's random port) is normalised
-//! before comparison — see [`redact`]. Everything else must be
-//! byte-identical.
+//! **Every golden is daemon-backed now.** A per-process fixture store
+//! with no daemon used to sit beside these, for the verbs that read a
+//! store in the client; verb 14 flipped the last of them, and the
+//! harness went with it.
+//!
+//! Volatile output is normalised before comparison and the two halves
+//! are separate on purpose: wall-clock-derived numbers are collapsed
+//! by [`redact`] on lines the caller marks, while a tempdir path or a
+//! random port is replaced by the test that minted it — a value only
+//! its own fixture knows. Everything else must be byte-identical.
 //!
 //! To regenerate after an intentional output change:
 //! `UPDATE_GOLDEN=1 cargo test -p fq-cli --test golden` — then review
@@ -20,7 +26,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use fq_runtime::control_plane::store::{
@@ -264,10 +269,6 @@ fn state_row(
         trigger_subject: None,
         trigger_payload: Some("\"golden fixture trigger\"".into()),
     }
-}
-
-async fn seed(dir: &Path) {
-    seed_at(dir, BASE_MS).await
 }
 
 async fn seed_at(dir: &Path, base_ms: i64) {
@@ -551,83 +552,18 @@ async fn seed_at(dir: &Path, base_ms: i64) {
 // Harness
 // ------------------------------------------------------------------
 
-struct Fixture {
-    dir: tempfile::TempDir,
-}
-
-fn fixture() -> &'static Fixture {
-    static FIXTURE: OnceLock<Fixture> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("fixture tempdir");
-        tokio::runtime::Runtime::new()
-            .expect("fixture runtime")
-            .block_on(seed(dir.path()));
-        Fixture { dir }
-    })
-}
-
-enum Nats {
-    /// A live private broker, for the commands that bail without NATS
-    /// (`status`). The guard is owned by the calling test rather than cached
-    /// in a `static`, and that is load-bearing: `NatsServer` spawns the broker
-    /// with `PR_SET_PDEATHSIG`, which Linux delivers when the spawning
-    /// *thread* exits, not the process. libtest runs each `#[test]` on its own
-    /// thread, so a shared `static` broker is killed the moment whichever test
-    /// happened to initialise it returns, leaving later tests holding a handle
-    /// to a dead server. `fq-test-support` states the constraint outright —
-    /// "every shape here starts the server from a thread that outlives the
-    /// guard" — and a `static` is the one shape that inverts it. Starting per
-    /// test costs one extra spawn and matches every other broker call site in
-    /// the tree.
-    Live(fq_test_support::NatsServer),
-    /// A guaranteed-closed port: proves the command needs no NATS.
-    Closed,
-}
-
-fn run_fq(args: &[&str], nats: &Nats) -> (Option<i32>, String, String) {
-    let fixture = fixture();
-    let nats_url = match nats {
-        Nats::Live(server) => server.url().to_string(),
-        Nats::Closed => "nats://127.0.0.1:1".to_string(),
-    };
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fq"))
-        .args(args)
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
-        .env("FQ_AGENTS_DIR", "/nonexistent/agents")
-        .env("FQ_CACHE_DIR", fixture.dir.path())
-        .env("FQ_STATE_DIR", fixture.dir.path().join("state"))
-        .env("FQ_NATS_URL", &nats_url)
-        .env("RUST_LOG", "off")
-        .env("NO_COLOR", "1")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn fq binary");
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        match child.try_wait().expect("try_wait") {
-            Some(status) => break status,
-            None => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    panic!("fq {args:?} did not exit within 30s");
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
-    };
-    use std::io::Read;
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut s) = child.stdout.take() {
-        let _ = s.read_to_string(&mut stdout);
-    }
-    if let Some(mut s) = child.stderr.take() {
-        let _ = s.read_to_string(&mut stderr);
-    }
-    (status.code(), stdout, stderr)
-}
+// The store-backed fixture that used to live here — a seeded tempdir,
+// a `Nats::Live | Nats::Closed` broker choice, and a `run_fq` that
+// pointed the binary at both — is gone with verb 14.
+//
+// It existed for one reason: a CLI verb that read a store for itself
+// needed a store to read and a broker to probe, and no daemon. `fq
+// status` was the last such verb, so the harness outlived its subject
+// by exactly one flip. Every golden below now runs the real binary
+// against a real daemon over the authenticated edge, which is the only
+// way any of these verbs works.
+//
+// `seed_at` stays: `EdgeFixture` seeds its own private copy from it.
 
 /// Collapse every maximal ASCII-digit run in `line` to a single `#`.
 fn collapse_digits(line: &str) -> String {
@@ -647,23 +583,21 @@ fn collapse_digits(line: &str) -> String {
     out
 }
 
-/// Normalise environment-dependent output so goldens are stable:
-/// the fixture dir path, the broker URL (random port), and — on lines
-/// containing any of `volatile_markers` — wall-clock-derived numbers.
-fn redact(raw: &str, nats: &Nats, volatile_markers: &[&str]) -> String {
-    let fixture_path = fixture().dir.path().display().to_string();
-    let nats_url = match nats {
-        Nats::Live(server) => server.url().to_string(),
-        Nats::Closed => "nats://127.0.0.1:1".to_string(),
-    };
+/// Normalise environment-dependent output so goldens are stable: on
+/// lines containing any of `volatile_markers`, collapse
+/// wall-clock-derived numbers.
+///
+/// Paths are not handled here. They belong to whichever fixture minted
+/// them, so the two goldens that render one (`agent list`'s
+/// definitions, `status`'s store paths) redact their own — the caller
+/// knows which tempdir it made.
+fn redact(raw: &str, volatile_markers: &[&str]) -> String {
     raw.lines()
         .map(|line| {
-            let line = line.replace(&fixture_path, "<CACHE_DIR>");
-            let line = line.replace(&nats_url, "<NATS_URL>");
             if volatile_markers.iter().any(|m| line.contains(m)) {
-                collapse_digits(&line)
+                collapse_digits(line)
             } else {
-                line
+                line.to_string()
             }
         })
         .collect::<Vec<_>>()
@@ -675,19 +609,6 @@ fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
         .join(format!("{name}.golden"))
-}
-
-/// Run one read command and compare its redacted stdout to the
-/// committed golden. `UPDATE_GOLDEN=1` regenerates instead.
-fn check_golden(name: &str, args: &[&str], nats: Nats, volatile_markers: &[&str]) {
-    let (exit, stdout, stderr) = run_fq(args, &nats);
-    assert_eq!(
-        exit,
-        Some(0),
-        "fq {args:?} should exit 0; stderr:\n{stderr}"
-    );
-    let actual = redact(&stdout, &nats, volatile_markers);
-    compare_golden(name, &actual);
 }
 
 fn compare_golden(name: &str, actual: &str) {
@@ -749,6 +670,14 @@ fn compare_golden(name: &str, actual: &str) {
 /// the one whose old self needed no daemon at all, cohort 4.3 adds the
 /// three that used to need only a broker, and cohort 4.4 the two
 /// reports, which needed neither.
+///
+/// `status` (verb 14) joins on the same terms and answers
+/// differently: it still prints its local half on stdout, because a
+/// client that was never paired is one nobody has set up rather than a
+/// system with nothing to say. What this pins is that the reason
+/// reaches stderr with the remedy in it — an operator who has not run
+/// `fq connect` must be told that, not left to read "no daemon
+/// answered" as an outage.
 #[test]
 fn flipped_verb_without_a_pairing_says_how_to_pair() {
     for verb in [
@@ -761,6 +690,7 @@ fn flipped_verb_without_a_pairing_says_how_to_pair() {
         &["trigger", "researcher"],
         &["costs"],
         &["doctor"],
+        &["status"],
     ] {
         let xdg = tempfile::tempdir().expect("xdg dir");
         let out = Command::new(env!("CARGO_BIN_EXE_fq"))
@@ -779,23 +709,177 @@ fn flipped_verb_without_a_pairing_says_how_to_pair() {
     }
 }
 
+// REVIEWED GOLDEN CHANGE (plan Phase 4, verb 14) — the fourth in this
+// migration, and the only one where what the golden pins is a
+// different *scenario* rather than a corrected world.
+//
+// `fq status` reports on a daemon now, so the two obvious candidates
+// for these goldens are "a daemon answered" and "none did". They pin
+// the second, and the reasons are worth stating because the first
+// looks like the better choice until you try it.
+//
+// A daemon-backed `fq status` renders live JetStream figures:
+// per-stream message counts and each consumer's position. The counts
+// are digit-collapsible, but the consumer VERDICT is not — `✓ caught
+// up` becomes `◐ slightly behind` whenever the probe lands between a
+// heartbeat being published and the projector acking it, and the
+// conditional `num pending` line appears and disappears with it. The
+// daemon heartbeats on a timer for as long as the fixture lives, so
+// that window is not something a barrier can close: a byte-exact
+// oracle over it would pin a race, and would eventually fail for
+// reasons no diff explains. The daemon-backed rendering is asserted
+// structurally instead, three tests below.
+//
+// Nothing is lost by that trade, because the old goldens never
+// exercised the live rendering either. They ran against a store no
+// daemon had ever touched, so both streams read `stream not found` and
+// the whole `Available` half of the probe — every line the consumer
+// section can print — was unreached. It is now covered exhaustively by
+// the pure renderer's unit tests (`status/tests.rs`), which can
+// construct all six `StreamHealth` shapes without a broker.
+//
+// What these goldens do pin is the answer this verb exists to give.
+// `fq status` is what an operator runs when something is broken, so
+// "paired, and nothing is answering" is not its failure path; it is
+// its most important output. Byte-exactly: the finding, the reason,
+// the sentence naming which sections are consequently absent, and the
+// local half — configuration and store-file existence — that survives
+// having no daemon at all.
+//
+// The exit code is 1 rather than 0, which is why these do not use
+// `check_golden_edge`: a health gate must fail closed when there is no
+// runtime, and stdout must still carry the report. That division is
+// `fq doctor --fail-on-issues`'s, and `status_no_daemon_exits_nonzero`
+// pins the pair.
+
+/// Run `fq status` against a fixture whose daemon has been stopped,
+/// with the tempdir paths and the daemon's random port redacted.
+fn check_golden_stopped_daemon(name: &str, args: &[&str]) {
+    let mut fixture = EdgeFixture::start();
+    let edge_addr = fixture.edge_addr();
+    fixture.stop_daemon();
+    let (exit, stdout, stderr) = fixture.run_fq(args);
+    assert_eq!(
+        exit,
+        Some(1),
+        "fq {args:?} with no daemon must exit non-zero; stderr:\n{stderr}"
+    );
+    // Paths and the two random ports go first: the digit collapse
+    // below would otherwise eat the address before it could be named,
+    // leaving `#.#.#.#:#` where the golden should say which endpoint
+    // did not answer. What is left to collapse is the errno, which
+    // differs by platform and says nothing the message does not.
+    let named = stdout
+        .replace(&fixture.dir.path().display().to_string(), "<CACHE_DIR>")
+        .replace(&edge_addr, "<EDGE_ADDR>")
+        .replace(fixture.broker.url(), "<NATS_URL>");
+    compare_golden(name, &redact(&named, &["os error"]));
+}
+
 #[test]
 fn golden_status_human() {
-    check_golden(
-        "status_human",
-        &["status"],
-        Nats::Live(fq_test_support::test_nats()),
-        &["connection:", "rows:"],
-    );
+    check_golden_stopped_daemon("status_human", &["status"]);
 }
 
 #[test]
 fn golden_status_json() {
-    check_golden(
-        "status_json",
-        &["status", "--json"],
-        Nats::Live(fq_test_support::test_nats()),
-        &[],
+    check_golden_stopped_daemon("status_json", &["status", "--json"]);
+}
+
+/// The daemon-backed rendering, asserted for the facts a live probe
+/// can promise. Every section is present, the daemon's own build is
+/// named, and the figures that came from the daemon are there — but
+/// nothing here pins a consumer's position, which is the value that
+/// moves between two calls a second apart.
+#[test]
+fn status_with_a_daemon_reports_what_only_the_daemon_knows() {
+    let fixture = EdgeFixture::start();
+    let (exit, stdout, stderr) = fixture.run_fq(&["status"]);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+
+    for section in ["Config", "Daemon", "Stores", "Recovery state"] {
+        assert!(stdout.contains(section), "missing {section}:\n{stdout}");
+    }
+    assert!(stdout.contains("✓ answered at"), "got:\n{stdout}");
+    // The streams exist, which is itself the flip: the CLI never
+    // connected to the broker, and these were unreachable in every
+    // previous incarnation of this golden.
+    for stream in ["Stream: fq-events", "Stream: fq-triggers"] {
+        assert!(stdout.contains(stream), "missing {stream}:\n{stdout}");
+    }
+    assert!(
+        stdout.contains("consumer fq-projector:"),
+        "the probe must reach the durable consumer, not just the stream:\n{stdout}"
+    );
+    // The projection row count is the daemon's read of its own store,
+    // and the seeded fixture has rows in it.
+    let rows = stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("projection rows:"))
+        .expect("a projection row count")
+        .trim()
+        .parse::<i64>()
+        .expect("an integer row count");
+    assert!(rows > 0, "the fixture's projection is seeded:\n{stdout}");
+    // And the recovery block is the seeded world's: `worker-alpha` is
+    // stale, which `doctor_human.golden` pins from the same fixture.
+    assert!(stdout.contains("Stale workers: 1"), "got:\n{stdout}");
+}
+
+/// The daemon's registry census, which is the machinery state
+/// `control.status` is the accumulation point for: what this daemon
+/// would run, and what it rejected. Read from the daemon's live
+/// registry — the client's own agents directory is not consulted.
+#[test]
+fn status_reports_the_daemons_registry_including_what_it_rejected() {
+    let fixture = EdgeFixture::start_with_agents(&agent_definitions());
+    let (exit, stdout, stderr) = fixture.run_fq(&["status"]);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+
+    assert!(
+        stdout.contains("agents:           2 loaded, 1 rejected"),
+        "got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("notes.md"),
+        "a rejected definition is named, not just counted:\n{stdout}"
+    );
+}
+
+/// The exit-code contract, both halves. A script has to be able to
+/// tell "there is a runtime" from "there is not", and an operator has
+/// to keep the local half of the answer when there is not — so the
+/// finding lands on stdout and the non-zero exit is separate.
+#[test]
+fn status_without_a_daemon_still_answers_and_exits_nonzero() {
+    let mut fixture = EdgeFixture::start();
+    let (exit, stdout, stderr) = fixture.run_fq(&["status"]);
+    assert_eq!(exit, Some(0), "a live daemon is a healthy status; {stderr}");
+    assert!(stdout.contains("✓ answered at"), "got:\n{stdout}");
+
+    fixture.stop_daemon();
+    let (exit, stdout, stderr) = fixture.run_fq(&["status"]);
+    assert_eq!(
+        exit,
+        Some(1),
+        "no runtime must fail closed for `fq status && …`; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("no daemon answered"),
+        "the absence is reported, not merely signalled by the exit code:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("that is the finding"),
+        "an unreachable daemon reads as a diagnosis, not a transport error:\n{stdout}"
+    );
+    // The half that never needed a daemon is still there.
+    assert!(
+        stdout.contains("worker db:") && stdout.contains("state:"),
+        "the local half must survive:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("no daemon answered"),
+        "the non-zero exit must say why on stderr too:\n{stderr}"
     );
 }
 
@@ -1106,6 +1190,10 @@ struct EdgeFixture {
     dir: tempfile::TempDir,
     xdg: tempfile::TempDir,
     client_config: std::path::PathBuf,
+    /// The daemon's edge address — a random port, so it is redacted
+    /// out of any golden that renders it (`fq status` names the edge
+    /// it dialled).
+    addr: String,
     broker: fq_test_support::NatsServer,
 }
 
@@ -1425,6 +1513,7 @@ impl EdgeFixture {
             dir,
             xdg,
             client_config,
+            addr,
             broker,
         }
     }
@@ -1468,6 +1557,12 @@ impl EdgeFixture {
         self.dir.path().join("agents")
     }
 
+    /// The address the client dials — captured before a stop, since a
+    /// stopped daemon still has to be named in what `fq status` prints.
+    fn edge_addr(&self) -> String {
+        self.addr.clone()
+    }
+
     /// Stop the daemon and wait for it, leaving the pairing and the
     /// stores behind — a client that is configured and paired, talking
     /// to nothing.
@@ -1500,6 +1595,13 @@ impl EdgeFixture {
             .env("FQ_CACHE_DIR", self.dir.path())
             .env("FQ_STATE_DIR", self.dir.path().join("state"))
             .env("FQ_AGENTS_DIR", agents_dir)
+            // The client's broker, named rather than inherited. No
+            // flipped verb connects to it — that is the point of the
+            // migration — but `fq status` ECHOES the configuration it
+            // resolved, so an inherited `FQ_NATS_URL` (the justfile
+            // exports one for the local suites) would put the
+            // developer's environment in a golden.
+            .env("FQ_NATS_URL", self.broker.url())
             .env("XDG_CONFIG_HOME", self.xdg.path())
             .env("RUST_LOG", "off")
             .env("NO_COLOR", "1")
@@ -1537,7 +1639,7 @@ fn check_golden_on(fixture: EdgeFixture, name: &str, args: &[&str], volatile_mar
         Some(0),
         "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
     );
-    let actual = redact(&stdout, &Nats::Closed, volatile_markers);
+    let actual = redact(&stdout, volatile_markers);
     compare_golden(name, &actual);
 }
 
@@ -1820,7 +1922,7 @@ fn check_golden_events(name: &str, args: &[&str]) {
         Some(0),
         "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
     );
-    let plain = redact(&stdout, &Nats::Closed, &[]);
+    let plain = redact(&stdout, &[]);
     let actual = if args.contains(&"--json") {
         redact_event_index_json(&plain)
     } else {
@@ -1839,7 +1941,7 @@ fn check_golden_roster(name: &str, args: &[&str]) {
         Some(0),
         "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
     );
-    let actual = redact_worker_roster(&redact(&stdout, &Nats::Closed, &[]));
+    let actual = redact_worker_roster(&redact(&stdout, &[]));
     compare_golden(name, &actual);
 }
 
@@ -1857,7 +1959,7 @@ fn check_golden_drop(name: &str, args: &[&str]) {
         Some(0),
         "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
     );
-    let actual = redact_uuids(&redact(&stdout, &Nats::Closed, &[]), &[INV_INFLIGHT]);
+    let actual = redact_uuids(&redact(&stdout, &[]), &[INV_INFLIGHT]);
     compare_golden(name, &actual);
 }
 
@@ -2422,7 +2524,7 @@ fn check_golden_requeue(name: &str, args: &[&str]) {
         "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
     );
     let keep = fixed_uuid(DEAD_LETTER_TRIGGER_NEWER).to_string();
-    let actual = redact_uuids(&redact(&stdout, &Nats::Closed, &[]), &[&keep]);
+    let actual = redact_uuids(&redact(&stdout, &[]), &[&keep]);
     compare_golden(name, &actual);
 }
 

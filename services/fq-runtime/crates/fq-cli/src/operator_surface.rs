@@ -206,9 +206,9 @@ fn arm_drop_halt(
 /// log, the Trigger atom served from its permanent projection record,
 /// the commands — `invocation.drop`, `trigger.publish`,
 /// `dead_letter.requeue`, and the two machinery verbs — each returning
-/// a receipt, and the reports: the two Cost aggregates and the
-/// `control.doctor` composite. Public for the operator-surface
-/// snapshot test.
+/// a receipt, and the reports: the two Cost aggregates and the two
+/// Control machinery reports (`control.doctor`, `control.status`).
+/// Public for the operator-surface snapshot test.
 pub fn operator_registry(
     views: Arc<Views>,
     horizon: fq_runtime::watermark::Horizon,
@@ -231,6 +231,9 @@ pub fn operator_registry(
     let worker_views = views.clone();
     let cost_views = views.clone();
     let doctor_views = views.clone();
+    let status_views = views.clone();
+    let status_bus = deps.bus.clone();
+    let status_registry = deps.agents.clone();
     let agent_registry = deps.agents.clone();
     let machinery = deps.machinery;
 
@@ -320,6 +323,12 @@ pub fn operator_registry(
     crate::control_commands::register_control_commands(&mut registry, machinery)?;
     crate::cost_report::register_cost_reports(&mut registry, cost_views)?;
     crate::doctor_report::register_doctor_report(&mut registry, doctor_views)?;
+    crate::status_report::register_status_report(
+        &mut registry,
+        status_views,
+        status_bus,
+        status_registry,
+    )?;
 
     let decl = fq_ops::Command::new::<DropCommandInput>(
         fq_ops::Invocation::Drop,

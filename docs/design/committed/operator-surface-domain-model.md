@@ -502,10 +502,14 @@ parameter, the registry's `derived_ops` and its synthetic-Get resolve
 arm, three assertions in `fq-ops/tests/registry.rs`, the `ControlState`
 fixture, `opid.rs`'s module doc, and — decisively — the committed
 schema-snapshot oracle `tests/snapshots/exemplar_registry.json`, whose
-`synthetic` entry serialises a `state_schema` today. It also needs the
-`Control` report identities (`control.status`, `control.doctor`) that
-do not exist yet. Do it with cohort 4.4, where the declaration lands
-anyway.
+`synthetic` entry serialises a `state_schema` today. Do it with cohort
+4.4, where the declaration lands anyway.
+
+*Updated 2026-08-14.* Both `Control` report identities now exist:
+`control.doctor` and `control.status` are declared, and `fq doctor`
+and `fq status` invoke them. What is left of this correction is the
+`fq_ops` side alone — the vestigial `state_schema`, the derived `Get`,
+and the snapshot that records them.
 
 ## Access control, uniformly
 
