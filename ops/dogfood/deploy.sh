@@ -20,10 +20,16 @@
 # Every process lookup here resolves /proc/<pid>/exe rather than trusting
 # the process name, so a dev build left running from a worktree cannot
 # shadow the real one — see pids_under() below.
-# The dashboard must move in lockstep with the daemon: the read-service
-# RPC uses a length-framed binary codec, so a dashboard from another
-# build fails to decode the daemon's responses and renders "runtime
-# unreachable" (the #154-skew incident, 2026-07-14).
+# The dashboard must move in lockstep with the daemon. The reason is no
+# longer the codec — it reads over the edge now, which is JSON in a
+# stable envelope, so an added field no longer breaks an older reader
+# the way the length-framed binary read-service wire did (the
+# #154-skew incident, 2026-07-14). It is that the two share the contract
+# types they exchange (fq_runtime::surface, fq_runtime::views): a field
+# REMOVED or renamed on one side is still a decode failure on the
+# other, and the dashboard's "Active now" table is a read-service
+# client until its operation is declared. Lockstep is cheap and the
+# failure is silent-ish, so it stays.
 #
 # Bring-down is graceful (ADR-0027): `fq down` suspends in-flight
 # invocations at a step boundary (state on the WAL) and the process exits
@@ -217,8 +223,8 @@ for wpid in $(pids_installed github-watcher); do
     ok "watcher $wpid stopped"
 done
 
-# The dashboard must not outlive the flip: a stale binary cannot decode
-# the new daemon's read-service responses (see the header contract).
+# The dashboard must not outlive the flip: a stale binary may not decode
+# the new daemon's contract types (see the header contract).
 for dpid in $(pids_installed fq-dashboard); do
     log "Stopping dashboard (PID $dpid)"
     kill -TERM "$dpid" 2>/dev/null || true

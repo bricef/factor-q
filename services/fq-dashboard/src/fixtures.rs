@@ -8,12 +8,9 @@
 
 use std::path::Path;
 
-use fq_runtime::health::{ConsumerHealth, StreamHealth};
-use fq_runtime::read_service::HealthReport;
 use fq_runtime::views::{
-    AgentCostDetailView, CostReport, CostView, EventView, ExecutionsView, FailureView,
-    InvocationCostView, InvocationDetailView, InvocationSummaryView, LiveExecutionView,
-    LlmDispatchView, ModelCostView, RecoveryView, ToolDispatchView,
+    AgentCostDetailView, CostReport, CostView, EventView, InvocationCostView, InvocationDetailView,
+    InvocationSummaryView, LiveExecutionView, LlmDispatchView, ModelCostView, ToolDispatchView,
 };
 
 use crate::render;
@@ -22,70 +19,9 @@ use crate::render;
 const NOW_MS: i64 = 1_783_803_600_000;
 const REFRESH_SECS: u64 = 5;
 
-pub(crate) fn health_report() -> HealthReport {
-    HealthReport {
-        version: "0.1.0+abc123def456".to_string(),
-        streams: vec![
-            StreamHealth::Available {
-                stream: "fq-events".to_string(),
-                messages: 60_744,
-                bytes: 393_248_768,
-                first_seq: 1,
-                last_seq: 60_744,
-                consumer: ConsumerHealth::Active {
-                    name: "fq-projector".to_string(),
-                    delivered: 60_744,
-                    lag: 0,
-                    ack_pending: 0,
-                    num_pending: 0,
-                    num_redelivered: 0,
-                },
-            },
-            StreamHealth::Available {
-                stream: "fq-triggers".to_string(),
-                messages: 3,
-                bytes: 333,
-                first_seq: 30,
-                last_seq: 32,
-                consumer: ConsumerHealth::Active {
-                    name: "fq-dispatcher".to_string(),
-                    delivered: 29,
-                    lag: 3,
-                    ack_pending: 1,
-                    num_pending: 2,
-                    num_redelivered: 4,
-                },
-            },
-        ],
-        event_count: 64_016,
-        recovery: RecoveryView {
-            ambiguous: 3,
-            stale_workers: 2,
-            stale_worker_ids: vec!["019f3383-d8a5".to_string(), "019f339a-9613".to_string()],
-        },
-        executions: ExecutionsView {
-            in_flight: 2,
-            working: 1,
-            working_ids: vec!["019f5b3f-31fb-7ae0-b130-3d65ccf40375".to_string()],
-            stuck: 1,
-            stuck_ids: vec!["019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string()],
-        },
-        failures: vec![
-            FailureView {
-                error_kind: "budgetexceeded".to_string(),
-                count: 2,
-            },
-            FailureView {
-                error_kind: "toolerror".to_string(),
-                count: 1,
-            },
-            FailureView {
-                error_kind: "triggerexhausted".to_string(),
-                count: 1,
-            },
-        ],
-    }
-}
+mod health;
+
+pub(crate) use health::{doctor_report, status_report};
 
 fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
     vec![
@@ -587,8 +523,8 @@ fn agent_cost_detail() -> AgentCostDetailView {
 
 /// The agents-list fixture: the dogfood roster plus one broken
 /// definition, so the load-error surface is part of the screenshot.
-fn agents_view() -> fq_runtime::read_service::AgentsView {
-    use fq_runtime::read_service::AgentSummaryView;
+fn agents_view() -> fq_runtime::agent_view::AgentsView {
+    use fq_runtime::agent_view::AgentSummaryView;
     let mk = |id: &str, model: &str, budget: Option<f64>, trigger: Option<&str>, tools, prompt| {
         AgentSummaryView {
             agent_id: id.to_string(),
@@ -600,7 +536,7 @@ fn agents_view() -> fq_runtime::read_service::AgentsView {
             path: format!("/home/fq/agents/{id}.md"),
         }
     };
-    fq_runtime::read_service::AgentsView {
+    fq_runtime::agent_view::AgentsView {
         agents: vec![
             mk(
                 "doc-drift",
@@ -637,8 +573,8 @@ fn agents_view() -> fq_runtime::read_service::AgentsView {
 
 /// The agent-detail fixture: the multi-tool dogfood fixer with its
 /// system prompt in the collapsed details block.
-fn agent_detail_view() -> fq_runtime::read_service::AgentDetailView {
-    fq_runtime::read_service::AgentDetailView {
+fn agent_detail_view() -> fq_runtime::agent_view::AgentDetailView {
+    fq_runtime::agent_view::AgentDetailView {
         agent_id: "m0-issue-fix".to_string(),
         model: "claude-opus-4-8".to_string(),
         system_prompt: "You are m0-issue-fix. Fix the referenced issue end-to-end: clone the \
@@ -665,7 +601,11 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
     let pages: Vec<(&str, String)> = vec![
         (
             "health",
-            render::live_page("health", REFRESH_SECS, &render::health(&health_report())),
+            render::live_page(
+                "health",
+                REFRESH_SECS,
+                &render::health(&status_report(), &doctor_report()),
+            ),
         ),
         (
             "invocations",

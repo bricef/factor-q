@@ -9,7 +9,7 @@
 mod agents;
 
 use fq_runtime::health::{ConsumerHealth, StreamHealth};
-use fq_runtime::read_service::HealthReport;
+use fq_runtime::surface::{DoctorReport, StatusReport};
 use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
 use fq_runtime::views::{
     ActiveInvocationView, AgentCostDetailView, CostBucketView, CostReport, CostView, EventView,
@@ -248,16 +248,16 @@ fn liveness_badge(liveness: Liveness) -> String {
 }
 
 /// The health page body.
-pub fn health(report: &HealthReport) -> String {
+pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
     let mut b = String::new();
 
     b.push_str(&format!(
         r#"<p>daemon <span class="ok">reachable</span> — version {}</p>"#,
-        esc(&report.version)
+        esc(&status.version)
     ));
 
     b.push_str("<h2>Streams</h2><table><tr><th>stream</th><th>messages</th><th>consumer</th><th>state</th><th>lag</th><th>pending</th></tr>");
-    for s in &report.streams {
+    for s in &status.streams {
         match s {
             StreamHealth::Unavailable { stream, error } => {
                 b.push_str(&format!(
@@ -330,9 +330,9 @@ pub fn health(report: &HealthReport) -> String {
     b.push_str("<h2>Runtime</h2><table>");
     b.push_str(&format!(
         "<tr><th>projection events</th><td>{}</td></tr>",
-        report.event_count
+        status.projection_rows
     ));
-    let exec_class = if report.executions.stuck > 0 {
+    let exec_class = if doctor.executions.stuck > 0 {
         "bad"
     } else {
         "ok"
@@ -340,26 +340,26 @@ pub fn health(report: &HealthReport) -> String {
     b.push_str(&format!(
         r#"<tr><th>executions</th><td class="{}">{} in-flight ({} working{}, {} stuck{})</td></tr>"#,
         exec_class,
-        report.executions.in_flight,
-        report.executions.working,
-        linked_ids(&report.executions.working_ids),
-        report.executions.stuck,
-        linked_ids(&report.executions.stuck_ids)
+        doctor.executions.in_flight,
+        doctor.executions.working,
+        linked_ids(&doctor.executions.working_ids),
+        doctor.executions.stuck,
+        linked_ids(&doctor.executions.stuck_ids)
     ));
-    let rec_class = if report.recovery.ambiguous > 0 || report.recovery.stale_workers > 0 {
+    let rec_class = if status.recovery.ambiguous > 0 || status.recovery.stale_workers > 0 {
         "warn"
     } else {
         "ok"
     };
     b.push_str(&format!(
         r#"<tr><th>recovery</th><td class="{}">{} ambiguous, {} stale workers</td></tr>"#,
-        rec_class, report.recovery.ambiguous, report.recovery.stale_workers
+        rec_class, status.recovery.ambiguous, status.recovery.stale_workers
     ));
     b.push_str("</table>");
 
-    if !report.failures.is_empty() {
+    if !doctor.failures.is_empty() {
         b.push_str("<h2>Permanent failures</h2><table><tr><th>kind</th><th>count</th></tr>");
-        for f in &report.failures {
+        for f in &doctor.failures {
             b.push_str(&format!(
                 "<tr><td>{}</td><td>{}</td></tr>",
                 esc(&f.error_kind),

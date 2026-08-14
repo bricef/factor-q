@@ -7,7 +7,7 @@
 //! of `fq_runtime::views`. The shared cells and shells stay in
 //! [`super`], with the rest of their callers.
 
-use fq_runtime::read_service::{AgentDetailView, AgentsView};
+use fq_runtime::agent_view::{AgentDetailView, AgentsView};
 
 use super::{agent_link, esc, fmt_grouped, fold};
 

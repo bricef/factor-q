@@ -97,13 +97,48 @@ be priced (the ADR-0004 startup guarantee applies, so deploy config-first);
 the summariser's own spend shows in `fq costs` as the reserved `summary`
 agent and is never charged to an invocation. Unset = disabled, zero change.
 
-The operator dashboard (read-only web view, #105) rides in the bundle:
-enable `[read_service]` in `fq.toml` (one-time), and `deploy.sh` stops
-and relaunches it with the daemon and watcher — it must run the same
-build as the daemon, because the read-service RPC is a length-framed
-binary codec and a cross-build dashboard fails to decode responses,
-rendering "runtime unreachable" (the #154-skew incident). Manual
-launch, if ever needed:
+The operator dashboard (read-only web view, #105) rides in the bundle
+and `deploy.sh` stops and relaunches it with the daemon and watcher. It
+must run the same build as the daemon: the two share the contract types
+they exchange, so a field removed or renamed on one side is a decode
+failure on the other.
+
+**One-time setup, and it is new.** The dashboard reads over the
+daemon's authenticated edge, which means it needs an identity — it is
+the first process other than the operator's own CLI to need one. Three
+variables in `.secrets/env` (see `env.example`, which carries the
+commands):
+
+1. **Move the edge off port 9472.** `[edge] bind` defaults to
+   `127.0.0.1:9472`, which is the port the dashboard itself serves on
+   and the one Caddy proxies to. Set `bind = "127.0.0.1:9470"` under
+   `[edge]` in `fq.toml`, restart the daemon, and set `FQ_EDGE` to
+   match. `dashboard.sh` refuses to launch without `FQ_EDGE` rather
+   than defaulting into the collision.
+2. **Pin the daemon.** `FQ_EDGE_FINGERPRINT` is the SHA-256 the daemon
+   printed when it provisioned its identity (`edge: certificate
+   fingerprint`).
+3. **Mint an attenuated token.** `FQ_EDGE_TOKEN` must be an
+   *attenuation* of the admin token, not the admin token itself:
+
+   ```
+   fq token attenuate --addr "$FQ_EDGE" \
+     --grant read:agent --grant read:control --grant read:cost \
+     --grant read:event --grant read:invocation --grant read:turn
+   ```
+
+   Six grants, one per domain the pages render, all `read`. Attenuation
+   only narrows and never widens, so the dashboard can read exactly
+   what it shows and command nothing. The binary refuses to start
+   without a token and prints this line when it does.
+
+`[read_service]` must **stay enabled** for now: the "Active now" table
+on `/invocations` reads live work from the worker WAL, which no
+declared operation exposes yet (dispatch does not populate the
+coordination table's `in_flight` status — #50), so that one table is
+still a read-service client while everything else has moved.
+
+Manual launch, if ever needed:
 `setsid ./current/dashboard.sh >> logs/dashboard.log 2>&1 </dev/null &`.
 Reach it via SSH tunnel to `127.0.0.1:9472`, or through the public
 door: the infra compose runs Caddy serving `https://dev.lambda.works`
@@ -124,10 +159,12 @@ Caddy is the one process deploy.sh does not manage (it is
 docker-supervised, `restart: unless-stopped`).
 
 If the dashboard shows a **"⚠ build skew"** banner (#168), it detected —
-over the frozen `ReadService::version` probe — that the daemon comes
-from a different build than itself. Pages still render whatever
-decodes, but data may be partial or failing (the wire is a binary
-codec); the remedy is always the same: redeploy so both run one build
+from the version `control.status` reports — that the daemon comes from
+a different build than itself. This is less likely to be breaking than
+it once was: the edge is JSON in a stable envelope, so an older
+dashboard reads a newer daemon that has merely added a field. Pages
+still render whatever decodes; the remedy is always the same: redeploy
+so both run one build
 (`deploy.sh` does this by construction — the banner in practice means
 someone launched a process by hand from the wrong `releases/<sha>/`).
 `fq-dashboard --version` prints the dashboard's build SHA.

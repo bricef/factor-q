@@ -11,11 +11,20 @@ name = "fq-dashboard"
 path = "src/main.rs"
 
 [dependencies]
-# The typed contract: the wire client and the view DTOs come straight
-# from the runtime — a trait change fails this compile instead of
-# drifting silently (#105 layer 3). Shared transitive deps resolve under
-# the single workspace Cargo.lock (#194), so runtime and dashboard can
-# never disagree on a pin.
+# The edge client the dashboard reads over — transport, pinning, token
+# presentation, and the generic invoke/next_batch envelope. The same
+# crate `fq` uses, so a deadline or handshake fix lands in both.
+fq-edge = { path = "../fq-runtime/crates/fq-edge" }
+# Operation identities (`OpId`) — the contract half, transport-free.
+fq-ops = { workspace = true }
+# The typed contract: the declared shapes (`fq_runtime::surface`) and
+# the view DTOs come straight from the runtime, so a field rename fails
+# this compile instead of drifting silently (#105 layer 3). Shared
+# transitive deps resolve under the single workspace Cargo.lock (#194),
+# so runtime and dashboard can never disagree on a pin.
+#
+# read-service: still enabled for the "Active now" table, the one
+# surface with no declared operation yet — see `invocations_page`.
 fq-runtime = { workspace = true, features = ["read-service"] }
 anyhow = { workspace = true }
 axum = { workspace = true }
@@ -29,8 +38,10 @@ clap = { workspace = true }
 # vendored at assets/datastar.js — v1.0.0, MIT, served from the binary).
 datastar = { version = "0.3", features = ["axum"] }
 futures = { workspace = true }
-# Decodes the transcript wire payload (canonical JSON — see
-# ReadService::transcript) and pretty-prints tool parameters.
+# The edge envelope carries payloads as JSON, so every read decodes
+# through here into the shared contract types; also pretty-prints tool
+# parameters.
+serde = { workspace = true }
 serde_json = { workspace = true }
 tarpc = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -39,6 +50,9 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 async-nats = { workspace = true }
+# The in-crate tests serve a real edge, and a declaration captures its
+# shapes' schemas — so the test's own stand-in key types derive one.
+schemars = { workspace = true }
 tempfile = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
