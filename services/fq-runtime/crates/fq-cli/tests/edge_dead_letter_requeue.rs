@@ -83,7 +83,7 @@ fn dead_letter(
     )
     .annotate(
         DEAD_LETTER_SUBJECT_KEY,
-        json!(fq_runtime::bus::trigger_subject(AGENT)),
+        json!(fq_runtime::events::subjects::trigger(AGENT)),
     )
     .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
     .annotate(DEAD_LETTER_STREAM_SEQ_KEY, json!(trigger_seq))
@@ -278,7 +278,7 @@ async fn the_receipt_names_a_trigger_that_can_be_walked_to() {
     assert_eq!(requeued.payload, payload, "the same work, verbatim");
     assert_eq!(
         requeued.subject.as_deref(),
-        Some(fq_runtime::bus::trigger_subject(AGENT).as_str())
+        Some(fq_runtime::events::subjects::trigger(AGENT).as_str())
     );
 
     // The original is untouched — still gettable, still carrying no
@@ -298,7 +298,7 @@ async fn the_receipt_names_a_trigger_that_can_be_walked_to() {
         .get_stream(fq_runtime::bus::TRIGGER_STREAM_NAME)
         .await
         .expect("trigger stream")
-        .get_last_raw_message_by_subject(&fq_runtime::bus::trigger_subject(AGENT))
+        .get_last_raw_message_by_subject(&fq_runtime::events::subjects::trigger(AGENT))
         .await
         .expect("the requeued trigger is on the stream");
     assert_eq!(
@@ -467,7 +467,7 @@ async fn a_dead_letter_that_names_no_trigger_is_refused() {
             .get_stream(fq_runtime::bus::TRIGGER_STREAM_NAME)
             .await
             .expect("trigger stream")
-            .get_last_raw_message_by_subject(&fq_runtime::bus::trigger_subject(AGENT))
+            .get_last_raw_message_by_subject(&fq_runtime::events::subjects::trigger(AGENT))
             .await
             .is_err(),
         "a refused requeue must leave the trigger stream untouched"

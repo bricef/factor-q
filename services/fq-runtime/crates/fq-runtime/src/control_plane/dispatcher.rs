@@ -50,10 +50,11 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
-use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER, agent_id_from_trigger_subject};
+use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER};
 use crate::events::{Event, EventPayload, FailureKind, FailurePhase, InvocationTotals};
 use crate::llm::LlmClient;
 use crate::trigger::Trigger;
+use crate::trigger::agent_id_from_subject;
 use crate::worker::{DrainState, DurableStart, ExecutorError, Worker};
 
 /// Name of the durable JetStream consumer the dispatcher creates.
@@ -359,7 +360,7 @@ impl TriggerDispatcher {
 
         // Parse the agent id out of the subject. Invalid format →
         // ack and drop (redelivery won't help).
-        let agent_id_str = match agent_id_from_trigger_subject(&msg.subject) {
+        let agent_id_str = match agent_id_from_subject(&msg.subject) {
             Some(id) => id.to_string(),
             None => {
                 warn!(
@@ -880,22 +881,22 @@ mod tests {
     }
 
     #[test]
-    fn agent_id_from_trigger_subject_happy_path() {
+    fn agent_id_from_subject_happy_path() {
         assert_eq!(
-            agent_id_from_trigger_subject("fq.trigger.researcher"),
+            agent_id_from_subject("fq.trigger.researcher"),
             Some("researcher")
         );
         assert_eq!(
-            agent_id_from_trigger_subject("fq.trigger.some-agent-id-123"),
+            agent_id_from_subject("fq.trigger.some-agent-id-123"),
             Some("some-agent-id-123")
         );
     }
 
     #[test]
-    fn agent_id_from_trigger_subject_rejects_unexpected_prefix() {
-        assert!(agent_id_from_trigger_subject("fq.agent.researcher.triggered").is_none());
-        assert!(agent_id_from_trigger_subject("bad.prefix.name").is_none());
-        assert!(agent_id_from_trigger_subject("fq.trigger.").is_none());
+    fn agent_id_from_subject_rejects_unexpected_prefix() {
+        assert!(agent_id_from_subject("fq.agent.researcher.triggered").is_none());
+        assert!(agent_id_from_subject("bad.prefix.name").is_none());
+        assert!(agent_id_from_subject("fq.trigger.").is_none());
     }
 
     /// End-to-end: publish a trigger to NATS, run the dispatcher,
@@ -989,7 +990,7 @@ You are a test agent."#
             worker: worker.clone(),
             llm: llm.clone(),
             consumer_name: unique_consumer_name(),
-            filter_subject: crate::bus::trigger_subject(&agent_id_str),
+            filter_subject: crate::events::subjects::trigger(&agent_id_str),
             max_concurrent: 1,
         };
         let (disp_tx, disp_rx) = oneshot::channel();
@@ -1104,7 +1105,7 @@ You are a test agent."#
             worker,
             llm,
             consumer_name: unique_consumer_name(),
-            filter_subject: crate::bus::trigger_subject(&agent_id_str),
+            filter_subject: crate::events::subjects::trigger(&agent_id_str),
             max_concurrent: 1,
         };
         let (disp_tx, disp_rx) = oneshot::channel();
@@ -1122,7 +1123,7 @@ You are a test agent."#
             None => {
                 bus.jetstream()
                     .publish(
-                        crate::bus::trigger_subject(&agent_id_str),
+                        crate::events::subjects::trigger(&agent_id_str),
                         bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
                     )
                     .await
@@ -1270,7 +1271,7 @@ You are a test agent."#
         let mut consumer = bus
             .trigger_consumer_with_filter(
                 &unique_consumer_name(),
-                &crate::bus::trigger_subject(&agent_id_str),
+                &crate::events::subjects::trigger(&agent_id_str),
                 crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
             )
             .await
@@ -1410,7 +1411,7 @@ You are a test agent."#
         let mut consumer = bus
             .trigger_consumer_with_filter(
                 &unique_consumer_name(),
-                &crate::bus::trigger_subject(&agent_id_str),
+                &crate::events::subjects::trigger(&agent_id_str),
                 crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
             )
             .await
@@ -1540,7 +1541,7 @@ You are a test agent."#
         let consumer = bus
             .trigger_consumer_with_filter(
                 &unique_consumer_name(),
-                &crate::bus::trigger_subject(&agent_id_str),
+                &crate::events::subjects::trigger(&agent_id_str),
                 crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
             )
             .await
@@ -1617,7 +1618,7 @@ You are a test agent."#
         );
 
         let agent_id = crate::agent::AgentId::new(&agent_id_str).expect("agent id");
-        let trigger_subject = crate::bus::trigger_subject(&agent_id_str);
+        let trigger_subject = crate::events::subjects::trigger(&agent_id_str);
         let trigger_payload = json!({"input": "hi"});
         let trigger_id = Uuid::now_v7();
         dispatcher
@@ -1695,7 +1696,7 @@ You are a test agent."#
         let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
         let name = unique_consumer_name();
-        let filter = crate::bus::trigger_subject(&unique_agent_id("upgrade-path"));
+        let filter = crate::events::subjects::trigger(&unique_agent_id("upgrade-path"));
 
         // Create the durable the way pre-#49 binaries did: no
         // max_deliver, no backoff.
@@ -1813,7 +1814,7 @@ You are a test agent."#
             worker,
             llm,
             consumer_name: unique_consumer_name(),
-            filter_subject: crate::bus::trigger_subject(&agent_id_str),
+            filter_subject: crate::events::subjects::trigger(&agent_id_str),
             max_concurrent: 1,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -1918,7 +1919,7 @@ You are a test agent."#
             worker,
             llm: Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
             consumer_name: unique_consumer_name(),
-            filter_subject: crate::bus::trigger_subject(&agent_id_str),
+            filter_subject: crate::events::subjects::trigger(&agent_id_str),
             max_concurrent,
         };
         let run = tokio::spawn(dispatcher.run(shutdown_rx));

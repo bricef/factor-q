@@ -2277,7 +2277,7 @@ fn dead_letter_event(
     )
     .annotate(
         DEAD_LETTER_SUBJECT_KEY,
-        serde_json::json!(fq_runtime::bus::trigger_subject(agent)),
+        serde_json::json!(fq_runtime::events::subjects::trigger(agent)),
     )
     .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
     .annotate(DEAD_LETTER_STREAM_SEQ_KEY, serde_json::json!(trigger_seq))

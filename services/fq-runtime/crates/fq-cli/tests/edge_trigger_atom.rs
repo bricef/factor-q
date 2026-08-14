@@ -80,7 +80,7 @@ fn triggered(agent: &str, trigger_id: &str, payload: serde_json::Value) -> Event
         EventPayload::Triggered(TriggeredPayload {
             trigger_id: Some(uuid::Uuid::parse_str(trigger_id).expect("a UUID identity")),
             trigger_source: TriggerSource::Subject,
-            trigger_subject: Some(fq_runtime::bus::trigger_subject(agent)),
+            trigger_subject: Some(fq_runtime::events::subjects::trigger(agent)),
             trigger_payload: payload,
             config_snapshot: Default::default(),
         }),
@@ -104,7 +104,7 @@ fn dead_letter(agent: &str, trigger_id: &str, payload: serde_json::Value) -> Eve
     .annotate(DEAD_LETTER_TRIGGER_ID_KEY, json!(trigger_id))
     .annotate(
         DEAD_LETTER_SUBJECT_KEY,
-        json!(fq_runtime::bus::trigger_subject(agent)),
+        json!(fq_runtime::events::subjects::trigger(agent)),
     )
     .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
     .annotate(DEAD_LETTER_SOURCE_KEY, json!("inline"))
