@@ -138,7 +138,7 @@ struct DropCommandInput {
     reason: Option<String>,
     /// Halt the invocation first if this daemon is actively driving
     /// it. Without it, live work is refused outright — the kill
-    /// switch is opt-in, never implied (#107). Defaults false, which
+    /// switch is opt-in, never implied. Defaults false, which
     /// is also what every peer that predates the field sends.
     #[serde(default)]
     live: bool,

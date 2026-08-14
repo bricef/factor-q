@@ -255,7 +255,7 @@ fn internal(e: fq_runtime::bus::BusError) -> WireError {
 ///
 /// Not the read an `AtomRef` resolves: a receipt names atoms by
 /// identity, and this domain has none, so no command hands a caller a
-/// DeadLetter reference (#464).
+/// DeadLetter reference.
 ///
 /// A sequence that holds something else — an ordinary failure, another
 /// agent's turn, a heartbeat — is a miss, not an error: the atom is the

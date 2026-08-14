@@ -179,7 +179,7 @@ pub const DEFAULT_LONG_DISPATCH_THRESHOLD_MS: i64 = 600_000;
 pub enum Liveness {
     /// A fresh open dispatch (tool or LLM) — long runs are fine as
     /// long as the dispatch itself is younger than the long-dispatch
-    /// threshold (#130).
+    /// threshold.
     Working,
     /// Nothing open, but the WAL row advanced recently: the reducer is
     /// between steps. The quiet, healthy in-between.
@@ -243,7 +243,7 @@ pub struct ActiveInvocationView {
     pub open_tools: Vec<OpenToolView>,
     /// Models with an open (non-completed) LLM dispatch right now.
     pub open_llms: Vec<String>,
-    /// One-line operator summary (#216), when the summariser has
+    /// One-line operator summary, when the summariser has
     /// produced one. `None` with the summariser disabled or before
     /// the first line lands.
     #[serde(default)]
@@ -318,7 +318,7 @@ pub struct InvocationSummaryView {
     /// True when the row came from `invocation_archive` (no live
     /// ownership row remains).
     pub archived: bool,
-    /// One-line operator summary (#216); see
+    /// One-line operator summary; see
     /// [`ActiveInvocationView::summary`].
     #[serde(default)]
     pub summary: Option<String>,
@@ -634,7 +634,7 @@ pub struct LiveExecutionView {
     pub liveness: Liveness,
     pub phase: String,
     /// Reducer *step* counter (every model and tool step) — not the
-    /// model-turn count that `max_iterations` gates (issue #109).
+    /// model-turn count that `max_iterations` gates.
     pub step_index: u32,
     pub started_at_ms: i64,
     pub updated_at_ms: i64,
@@ -659,7 +659,7 @@ pub struct InvocationDetailView {
     /// Whether the worker WAL contains dispatch rows for a transcript.
     #[serde(default)]
     pub has_transcript: bool,
-    /// One-line operator summary (#216); see
+    /// One-line operator summary; see
     /// [`ActiveInvocationView::summary`].
     #[serde(default)]
     pub summary: Option<String>,
