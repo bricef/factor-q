@@ -2,7 +2,7 @@
 //!
 //! `views` is the single read model behind every operator surface: the `fq`
 //! CLI read commands (as a formatter over these DTOs) and, later, the
-//! read-only tarpc service that backs the operator dashboard
+//! read surface the daemon serves the operator dashboard from
 //! (`docs/plans/closed/2026-07-10-operator-dashboard.md`). It opens the
 //! projection, control-plane, and worker-WAL stores read-only against their
 //! per-store SQLite files and returns typed, `Serialize` view DTOs whose shape is owned
@@ -16,7 +16,7 @@
 //! This module performs **no NATS access**. The live JetStream health probe
 //! (stream depth / consumer lag) is a separate concern that composes the
 //! DB-backed counts from here with a NATS probe at the daemon layer; it lands
-//! with the tarpc service, not here.
+//! with the edge handler, not here.
 
 // The cost reads, and the allocation rule (#466) that decides which of
 // them count spend the engine owes to no invocation.
@@ -222,12 +222,23 @@ fn classify_liveness(
     }
 }
 
-/// One currently-executing invocation, straight from the worker WAL —
-/// the row form of [`ExecutionsView`]'s counts, for the dashboard's
-/// "active" table. Sourced from the WAL rather than the ownership
-/// table because dispatch does not populate the latter yet (#50), so
-/// the WAL is the only place live work is guaranteed to appear.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// One invocation this daemon is executing right now: how far it has
+/// got, when it last advanced, and which tool or model calls it
+/// currently has open. The row form of [`ExecutionsView`]'s counts.
+// `invocation.active` declares this as its output, which means these
+// comments are PUBLISHED: schemars lifts them onto the operator
+// surface, where the reader has none of this repository's context.
+// Say what a stranger needs; keep the reasons below, off the wire.
+//
+// Implementation note, deliberately not a doc comment so it stays off
+// the surface: these rows are read from the worker-local WAL rather
+// than the control plane's ownership table, because trigger dispatch
+// does not populate the latter's `in_flight` status yet (#50). That is
+// why this report and `invocation.list{status:"in_flight"}` can
+// disagree today. Closing that gap would not merge them — a fold
+// answered at a watermark and live machinery state remain different
+// questions, which is what makes this a report rather than a filter.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ActiveInvocationView {
     pub invocation_id: String,
     pub agent_id: String,
@@ -256,7 +267,10 @@ pub struct ActiveInvocationView {
 /// its command line when the parameters carry one — so the "doing"
 /// column can say WHAT is running, not just which tool has been open
 /// for four minutes.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+///
+/// Schema'd because `invocation.active` declares it as part of its
+/// output.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct OpenToolView {
     pub tool_name: String,
     /// The dispatch's command, when its parameters have a `command`

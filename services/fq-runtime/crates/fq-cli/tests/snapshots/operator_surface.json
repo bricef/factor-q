@@ -563,6 +563,138 @@
     }
   },
   {
+    "report": {
+      "description": "Live execution state, read at the instant of the call. Answers `what is running right now` — the phase and step each invocation has reached, how long since its last advance, and which tool or model calls are open on it. This is not the same question as listing invocations whose status is in-flight, and a caller should know which they want. A listing is a fold of the event log: it answers as of a position in that log, it can be gated on one, and it reports what has been recorded. This reports what is happening, which has no such position — the work advances while the answer is being assembled, so two calls a second apart legitimately differ and neither is stale. Ask the listing for history and for anything you need read-your-writes on; ask this for a live picture. It describes one daemon — the one answering — and not a fleet. An invocation another worker is driving is not here.",
+      "domain": "invocation",
+      "name": "active",
+      "output_schema": {
+        "$defs": {
+          "ActiveInvocationView": {
+            "description": "One invocation this daemon is executing right now: how far it has\ngot, when it last advanced, and which tool or model calls it\ncurrently has open. The row form of [`ExecutionsView`]'s counts.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "liveness": {
+                "$ref": "#/$defs/Liveness",
+                "description": "The health page's verdict for this row, colour-coded on the\ndashboard (see [`Liveness`])."
+              },
+              "open_llms": {
+                "description": "Models with an open (non-completed) LLM dispatch right now.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "open_tools": {
+                "description": "Open (non-completed) tool dispatches right now — name plus\nthe command line when the tool is command-shaped.",
+                "items": {
+                  "$ref": "#/$defs/OpenToolView"
+                },
+                "type": "array"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "step_index": {
+                "description": "Reducer *step* counter — see [`LiveExecutionView::step_index`].",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "summary": {
+                "default": null,
+                "description": "One-line operator summary, when the summariser has\nproduced one. `None` with the summariser disabled or before\nthe first line lands.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "updated_at_ms": {
+                "description": "Last WAL advance; long tool runs legitimately leave this old.",
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "agent_id",
+              "phase",
+              "step_index",
+              "started_at_ms",
+              "updated_at_ms",
+              "liveness",
+              "open_tools",
+              "open_llms"
+            ],
+            "type": "object"
+          },
+          "Liveness": {
+            "description": "The per-invocation liveness verdict the health page counts —\nshared by every surface that shows an in-flight row, so the health\ntile, the active table, and the detail page cannot drift apart.",
+            "oneOf": [
+              {
+                "const": "working",
+                "description": "A fresh open dispatch (tool or LLM) — long runs are fine as\nlong as the dispatch itself is younger than the long-dispatch\nthreshold.",
+                "type": "string"
+              },
+              {
+                "const": "advancing",
+                "description": "Nothing open, but the WAL row advanced recently: the reducer is\nbetween steps. The quiet, healthy in-between.",
+                "type": "string"
+              },
+              {
+                "const": "stuck",
+                "description": "No fresh dispatch AND the WAL row has not advanced within the\nstuck threshold — the row the operator needs to look at.",
+                "type": "string"
+              }
+            ]
+          },
+          "OpenToolView": {
+            "description": "One open tool dispatch on a live invocation: the tool's name, plus\nits command line when the parameters carry one — so the \"doing\"\ncolumn can say WHAT is running, not just which tool has been open\nfor four minutes.\n\nSchema'd because `invocation.active` declares it as part of its\noutput.",
+            "properties": {
+              "command": {
+                "description": "The dispatch's command, when its parameters have a `command`\nfield: exec-style argv arrays join with spaces, shell-style\nstrings pass through. Capped server-side at\n[`OPEN_TOOL_COMMAND_CAP`] chars; `None` for tools without one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool_name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "items": {
+          "$ref": "#/$defs/ActiveInvocationView"
+        },
+        "title": "Array_of_ActiveInvocationView",
+        "type": "array"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `invocation.active`. Empty, and declared\nanyway: the answer is small — it is bounded by how much this daemon\nis running — and this is where a future narrowing would appear.",
+        "title": "ActiveParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "What this daemon is executing right now: one row per running invocation, longest-running first, with its open tool and model calls.",
+      "version": 1
+    }
+  },
+  {
     "view": {
       "description": "Get answers with the roster row plus every invocation the worker owns; List answers with the roster rows alone. Neither derives a heartbeat age — the fold stays wall-clock-free, so a reader that wants an age computes it from `last_heartbeat_ms`.",
       "domain": "worker",

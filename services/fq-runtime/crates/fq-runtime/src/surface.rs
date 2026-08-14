@@ -64,6 +64,12 @@ fn default_invocation_list_limit() -> i64 {
     50
 }
 
+/// The typed parameters of `invocation.active`. Empty, and declared
+/// anyway: the answer is small — it is bounded by how much this daemon
+/// is running — and this is where a future narrowing would appear.
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ActiveParams {}
+
 // ---------------------------------------------------------------------
 // Agent
 // ---------------------------------------------------------------------

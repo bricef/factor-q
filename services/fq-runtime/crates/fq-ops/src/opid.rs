@@ -128,6 +128,33 @@ pub enum CostReport {
     ByAgent,
 }
 
+/// The Invocation domain's reports. Distinct from [`Invocation`],
+/// which is the same domain's *verbs*.
+///
+/// One report, and the reason it is a report rather than a filter on
+/// the Invocation view is the model's own line: a view answers as of
+/// a watermark, and a report is not watermarked and cannot be. What
+/// is running *right now* has no watermark to be answered as of — it
+/// is live machinery state, read at the instant of the call — so the
+/// nature follows from the question, not from any gap in what the
+/// view can select.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    strum::EnumIter,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum InvocationReport {
+    /// `invocation.active` — what this daemon is executing right now.
+    Active,
+}
+
 /// The Control domain's reports. Distinct from [`Control`], which is
 /// the same domain's *verbs*: `control.doctor` asks the machinery how
 /// it is, `control.down` tells it to stop.
@@ -296,6 +323,7 @@ impl JsonSchema for VerbId {
 pub enum ReportId {
     Cost(CostReport),
     Control(ControlReport),
+    Invocation(InvocationReport),
     Unknown { domain: String, name: String },
 }
 
@@ -304,6 +332,7 @@ impl ReportId {
         match self {
             ReportId::Cost(_) => Some(Domain::Cost),
             ReportId::Control(_) => Some(Domain::Control),
+            ReportId::Invocation(_) => Some(Domain::Invocation),
             ReportId::Unknown { .. } => None,
         }
     }
@@ -322,6 +351,7 @@ impl ReportId {
         match self {
             ReportId::Cost(r) => (*r).into(),
             ReportId::Control(r) => (*r).into(),
+            ReportId::Invocation(r) => (*r).into(),
             ReportId::Unknown { name, .. } => name,
         }
     }
@@ -336,6 +366,12 @@ impl From<CostReport> for ReportId {
 impl From<ControlReport> for ReportId {
     fn from(report: ControlReport) -> Self {
         ReportId::Control(report)
+    }
+}
+
+impl From<InvocationReport> for ReportId {
+    fn from(report: InvocationReport) -> Self {
+        ReportId::Invocation(report)
     }
 }
 
@@ -363,6 +399,9 @@ impl From<ReportIdWire> for ReportId {
                 Domain::Control => ControlReport::from_str(&wire.name)
                     .ok()
                     .map(ReportId::Control),
+                Domain::Invocation => InvocationReport::from_str(&wire.name)
+                    .ok()
+                    .map(ReportId::Invocation),
                 _ => None,
             });
         typed.unwrap_or(ReportId::Unknown {
