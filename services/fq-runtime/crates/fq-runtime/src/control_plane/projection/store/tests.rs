@@ -1525,7 +1525,7 @@ fn named_triggered(agent: &str, trigger_id: Uuid, payload: serde_json::Value) ->
     if let EventPayload::Triggered(p) = &mut event.payload {
         p.trigger_id = Some(trigger_id);
         p.trigger_source = TriggerSource::Subject;
-        p.trigger_subject = Some(crate::bus::trigger_subject(agent));
+        p.trigger_subject = Some(crate::events::subjects::trigger(agent));
         p.trigger_payload = payload;
     }
     event
@@ -1674,10 +1674,10 @@ fn requeue_of(original: Uuid, agent: &str, payload: serde_json::Value) -> crate:
         &Trigger::named(
             original,
             TriggerSource::Subject,
-            Some(crate::bus::trigger_subject(agent)),
+            Some(crate::events::subjects::trigger(agent)),
             payload,
         ),
-        crate::bus::trigger_subject(agent),
+        crate::events::subjects::trigger(agent),
     )
 }
 

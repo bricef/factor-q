@@ -169,7 +169,7 @@ async fn requeue(
     // answer it could disagree with.
     let original = Trigger::from_event(&event).ok_or_else(|| unnamed(&event))?;
 
-    let requeued = Trigger::requeue_of(&original, fq_runtime::bus::trigger_subject(agent.as_str()));
+    let requeued = Trigger::requeue_of(&original, fq_runtime::trigger::subject(&agent));
     let claimed = projection
         .reserve_requeue(&requeued, agent.as_str(), &chrono::Utc::now().to_rfc3339())
         .await

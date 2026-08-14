@@ -70,11 +70,12 @@ use serde_json::Value;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::bus::{BusError, EventBus, trigger_subject};
+use crate::agent::AgentId;
+use crate::bus::{BusError, EventBus};
 use crate::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
 };
-use crate::events::{Event, EventPayload, FailureKind, TriggerSource};
+use crate::events::{Event, EventPayload, FailureKind, TriggerSource, subjects};
 use crate::views::{Views, ViewsError};
 
 /// The NATS header a trigger's identity travels in.
@@ -131,6 +132,35 @@ pub const TRIGGER_ID_HEADER: &str = "Fq-Trigger-Id";
 /// cap at all and is the dead-letter atom's own bound to make; this one
 /// bounds what is *accepted*, which is the part that is kept forever.
 pub const MAX_TRIGGER_PAYLOAD_BYTES: usize = 512 * 1024;
+
+/// The subject one agent's triggers travel on.
+///
+/// **Takes an [`AgentId`], not a `&str`, and that is the point.**
+/// `AgentId::new` runs `subjects::validate_token`, so a value of this
+/// type cannot contain a `.`, `*`, `>` or whitespace — the four
+/// characters that would turn one agent's subject into a wildcard over
+/// somebody else's. The subject this builds is therefore well-formed
+/// *by construction* rather than by the caller having remembered.
+///
+/// Before #43 this was `bus::trigger_subject(&str)`: the transport
+/// module owned the trigger domain's names, and owned them in a form
+/// that accepted any string at all. The wire spelling now lives with
+/// the rest of the vocabulary in [`subjects`]; what lives here is the
+/// domain's contract about who may name a trigger.
+pub fn subject(agent: &AgentId) -> String {
+    subjects::trigger(agent.as_str())
+}
+
+/// Every agent's triggers — the trigger stream's capture pattern and
+/// the dispatcher's default consumer filter.
+pub const ALL_SUBJECTS: &str = subjects::ALL_TRIGGERS;
+
+/// Recover the agent id from a trigger subject, or `None` if the
+/// subject is not one. The inverse of [`subject`], for the dispatcher
+/// reading a delivered message back off the wire.
+pub fn agent_id_from_subject(subject: &str) -> Option<&str> {
+    subjects::agent_id_from_trigger(subject)
+}
 
 /// One trigger, named — the request an invocation answers.
 ///
@@ -491,7 +521,7 @@ impl EventBus {
         id: Uuid,
         payload: &Value,
     ) -> Result<PublishedTrigger, BusError> {
-        let subject = trigger_subject(agent_id);
+        let subject = subjects::trigger(agent_id);
         let body = serde_json::to_vec(payload)?;
         check_payload_size(body.len())?;
         let mut headers = async_nats::HeaderMap::new();
@@ -707,7 +737,7 @@ mod tests {
                 .get_stream(crate::bus::TRIGGER_STREAM_NAME)
                 .await
                 .expect("trigger stream")
-                .get_last_raw_message_by_subject(&trigger_subject(&agent))
+                .get_last_raw_message_by_subject(&subjects::trigger(&agent))
                 .await
                 .is_err(),
             "a refused trigger must leave the stream untouched"

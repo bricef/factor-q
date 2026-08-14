@@ -1,5 +1,19 @@
-//! Subject hierarchy for factor-q events — split from
-//! `events.rs` to keep that file inside its size budget.
+//! The `fq.*` wire vocabulary — every subject the runtime publishes to
+//! or filters on, spelled in one place.
+//!
+//! Originally split from `events.rs` to keep that file inside its size
+//! budget, so the module sits under `events`; its scope is wider than
+//! that name suggests and always has been. It already owns the
+//! `fq.system.*` and `fq.worker.*` namespaces alongside `fq.agent.*`,
+//! and it owns `fq.trigger.*` too (#43).
+//!
+//! **One namespace, one home.** The trigger subjects lived in `bus.rs`
+//! until #43 — a second vocabulary, in the transport module, outside
+//! the reach of [`validate_token`] below. That is the shape #453 came
+//! from: a consumer filtering `fq.agent.*.llm_response` against a
+//! constructor emitting `fq.agent.*.llm.response`, so the rolling
+//! summary never fired once. A subject that is spelled in two places
+//! is a subject that can be spelled two ways.
 pub const SYSTEM_STARTUP: &str = "fq.system.startup";
 pub const SYSTEM_SHUTDOWN: &str = "fq.system.shutdown";
 pub const SYSTEM_TASK_FAILED: &str = "fq.system.task_failed";
@@ -153,4 +167,82 @@ pub fn worker_orphaned(worker_id: &str) -> String {
 /// on the envelope.
 pub fn worker_invocation_archive_acked(worker_id: &str) -> String {
     format!("fq.worker.{worker_id}.invocation.archive_acked")
+}
+
+/// The trigger namespace: one subject per agent, `fq.trigger.<agent_id>`.
+///
+/// Triggers ride their own JetStream stream rather than the event
+/// stream — work-queue-ish delivery, 24h retention, no compression —
+/// so `fq.trigger.>` is deliberately disjoint from
+/// [`crate::bus::EVENT_STREAM_SUBJECTS`]. NATS forbids two streams
+/// claiming overlapping subjects, and that disjointness is what keeps
+/// the two streams legal.
+///
+/// The spelling lives here with the rest of the vocabulary; the
+/// domain-typed constructor callers should reach for is
+/// [`crate::trigger::subject`], which takes an
+/// [`crate::agent::AgentId`] and so cannot be handed a token that
+/// would break the subject.
+pub const TRIGGER_PREFIX: &str = "fq.trigger.";
+
+/// Every agent's triggers. Two roles, one string: the subject set the
+/// trigger stream captures, and the dispatcher's default consumer
+/// filter.
+pub const ALL_TRIGGERS: &str = "fq.trigger.>";
+
+/// One agent's trigger subject.
+///
+/// Prefer [`crate::trigger::subject`] — it takes a validated
+/// [`crate::agent::AgentId`] instead of a bare `&str`. This raw form
+/// exists for the transport's own stream wiring and for parsing paths
+/// that only ever hold a `&str`.
+pub fn trigger(agent_id: &str) -> String {
+    format!("{TRIGGER_PREFIX}{agent_id}")
+}
+
+/// Recover the agent id from a trigger subject.
+///
+/// Agent ids are validated to contain no dots (see
+/// [`validate_token`]), so a trigger subject has exactly three
+/// dot-separated tokens and the id is the whole of the third.
+pub fn agent_id_from_trigger(subject: &str) -> Option<&str> {
+    let mut parts = subject.splitn(3, '.');
+    let first = parts.next()?;
+    let second = parts.next()?;
+    let third = parts.next()?;
+    if first != "fq" || second != "trigger" || third.is_empty() {
+        return None;
+    }
+    Some(third)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wildcard and the constructor are two literals, and a
+    /// namespace spelled twice is a namespace that can drift — which
+    /// is the bug in #453, one level up. Assert the relationship
+    /// rather than trusting it.
+    #[test]
+    fn the_trigger_wildcard_and_constructor_share_one_namespace() {
+        assert_eq!(ALL_TRIGGERS, format!("{TRIGGER_PREFIX}>"));
+        assert!(trigger("researcher").starts_with(TRIGGER_PREFIX));
+    }
+
+    #[test]
+    fn a_trigger_subject_round_trips_through_its_agent_id() {
+        assert_eq!(
+            agent_id_from_trigger(&trigger("researcher")),
+            Some("researcher")
+        );
+    }
+
+    #[test]
+    fn only_a_trigger_subject_yields_an_agent_id() {
+        assert_eq!(agent_id_from_trigger("fq.agent.researcher.completed"), None);
+        assert_eq!(agent_id_from_trigger("fq.trigger."), None);
+        assert_eq!(agent_id_from_trigger("fq.trigger"), None);
+        assert_eq!(agent_id_from_trigger(""), None);
+    }
 }

@@ -256,7 +256,7 @@ mod tests {
         )
         .annotate(
             DEAD_LETTER_SUBJECT_KEY,
-            json!(crate::bus::trigger_subject(agent.as_str())),
+            json!(crate::events::subjects::trigger(agent.as_str())),
         )
         .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
         .annotate(DEAD_LETTER_STREAM_SEQ_KEY, json!(seq))

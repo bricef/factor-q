@@ -83,7 +83,7 @@ fn dead_letter(agent: &str, trigger_seq: u64, source: &str, payload: serde_json:
     )
     .annotate(
         DEAD_LETTER_SUBJECT_KEY,
-        json!(fq_runtime::bus::trigger_subject(agent)),
+        json!(fq_runtime::events::subjects::trigger(agent)),
     )
     .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
     .annotate(DEAD_LETTER_STREAM_SEQ_KEY, json!(trigger_seq))

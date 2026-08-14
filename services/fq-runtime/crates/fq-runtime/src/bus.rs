@@ -15,6 +15,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::events::Event;
+use crate::events::subjects::ALL_TRIGGERS;
 
 /// The narrowest seam over event publication (reducer verification
 /// plan, slice 3; widened to the archive sweeper in slice 5). The
@@ -62,8 +63,12 @@ pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60); //
 /// `docs/design/committed/storage-and-scaling.md` for the rationale.
 pub const TRIGGER_STREAM_NAME: &str = "fq-triggers";
 
-/// Subject pattern matching all agent triggers.
-pub const ALL_TRIGGERS_SUBJECT: &str = "fq.trigger.>";
+// The subject set the trigger stream captures is
+// `subjects::ALL_TRIGGERS`, imported at the top of this file. The
+// `fq.trigger.*` vocabulary belongs to the trigger domain and is
+// spelled in `crate::events::subjects` (#43): the transport binds a
+// stream to a subject set, it does not get to name it. A caller after
+// one agent's subject wants `crate::trigger::subject`.
 
 /// The NATS server's default `max_ack_pending` for explicit-ack
 /// consumers. The dispatcher never sizes its ack window *below* this:
@@ -123,26 +128,6 @@ pub const CONTROL_RESUME_SUBJECT: &str = "fq.control.invocation.resume";
 /// operation. A 24h window is a safety net against a runaway
 /// backlog, not a promise that normal triggers live that long.
 pub const DEFAULT_TRIGGER_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60); // 24 hours
-
-/// Build a trigger subject for a given agent id.
-pub fn trigger_subject(agent_id: &str) -> String {
-    format!("fq.trigger.{agent_id}")
-}
-
-/// Extract an agent id from a trigger subject of the form
-/// `fq.trigger.<agent_id>`. Agent ids are validated to contain no
-/// dots (see `AgentId::new`), so the subject has exactly three
-/// dot-separated tokens.
-pub fn agent_id_from_trigger_subject(subject: &str) -> Option<&str> {
-    let mut parts = subject.splitn(3, '.');
-    let first = parts.next()?;
-    let second = parts.next()?;
-    let third = parts.next()?;
-    if first != "fq" || second != "trigger" || third.is_empty() {
-        return None;
-    }
-    Some(third)
-}
 
 /// Errors from the event bus.
 #[derive(Debug, thiserror::Error)]
@@ -355,7 +340,7 @@ impl EventBus {
         self.jetstream
             .get_or_create_stream(stream::Config {
                 name: TRIGGER_STREAM_NAME.to_string(),
-                subjects: vec![ALL_TRIGGERS_SUBJECT.to_string()],
+                subjects: vec![ALL_TRIGGERS.to_string()],
                 retention: stream::RetentionPolicy::Limits,
                 storage: stream::StorageType::File,
                 max_age: DEFAULT_TRIGGER_MAX_AGE,
@@ -452,7 +437,7 @@ impl EventBus {
         name: &str,
         max_ack_pending: i64,
     ) -> Result<consumer::PullConsumer, BusError> {
-        self.trigger_consumer_with_filter(name, ALL_TRIGGERS_SUBJECT, max_ack_pending)
+        self.trigger_consumer_with_filter(name, ALL_TRIGGERS, max_ack_pending)
             .await
     }
 

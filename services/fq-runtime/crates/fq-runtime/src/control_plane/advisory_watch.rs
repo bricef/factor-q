@@ -33,8 +33,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentId;
 use crate::bus::{
-    ADVISORY_STREAM_NAME, BusError, EventBus, STREAM_NAME, TRIGGER_MAX_DELIVER,
-    TRIGGER_STREAM_NAME, agent_id_from_trigger_subject,
+    ADVISORY_STREAM_NAME, BusError, EventBus, STREAM_NAME, TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME,
 };
 use crate::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
@@ -43,7 +42,7 @@ use crate::dead_letter::{
 use crate::events::{
     Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals, subjects,
 };
-use crate::trigger::trigger_id_in;
+use crate::trigger::{agent_id_from_subject, trigger_id_in};
 
 /// Name of the durable JetStream consumer the advisory watch creates.
 pub const CONSUMER_NAME: &str = "fq-advisory-watch";
@@ -188,7 +187,7 @@ impl AdvisoryWatch {
         // inventing one that matches nothing anywhere else.
         let (agent_id, trigger_subject, trigger_payload, trigger_id) = match &trigger {
             Some(raw) => (
-                agent_id_from_trigger_subject(&raw.subject).and_then(|id| AgentId::new(id).ok()),
+                agent_id_from_subject(&raw.subject).and_then(|id| AgentId::new(id).ok()),
                 raw.subject.to_string(),
                 serde_json::from_slice(&raw.payload).unwrap_or(serde_json::Value::Null),
                 trigger_id_in(Some(&raw.headers)),
@@ -327,7 +326,7 @@ mod tests {
         let suffix = Uuid::now_v7().simple().to_string();
         let agent_id_str = format!("advisory-e2e-{suffix}");
         let consumer_name = format!("advisory-e2e-{suffix}");
-        let trigger_subject = crate::bus::trigger_subject(&agent_id_str);
+        let trigger_subject = crate::events::subjects::trigger(&agent_id_str);
 
         let published = bus
             .publish_trigger(&agent_id_str, &json!({"input": "poison"}))
