@@ -98,7 +98,7 @@ pub(crate) struct DoctorWorkers {
 pub(crate) struct DoctorExecutions {
     pub(crate) in_flight: i64,
     /// In-flight invocations with a fresh open dispatch (tool or LLM) —
-    /// actively working, however silent their WAL row (#130).
+    /// actively working, however silent their WAL row.
     pub(crate) working: i64,
     /// Short ids of the working invocations, same convention as
     /// `stuck_ids`.
@@ -110,8 +110,8 @@ pub(crate) struct DoctorExecutions {
     pub(crate) stuck_ids: Vec<String>,
 }
 
-/// Availability of the dead-letter section. Gated on issue #49:
-/// Dead-lettered triggers (#49): transient pre-WAL failures that
+/// Availability of the dead-letter section.
+/// Dead-lettered triggers: transient pre-WAL failures that
 /// exhausted the trigger consumer's delivery bound. The dispatcher
 /// consumes the exhausted trigger and emits a terminal `failed` event
 /// with kind [`DEAD_LETTER_KIND`]; this counts that bucket, so the

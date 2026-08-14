@@ -130,9 +130,9 @@ impl DeadLetter {
 ///
 /// It does not ride in a command receipt's `AtomRef`, which names an
 /// atom by identity — and this domain has no identity to give it, so
-/// no command mints a DeadLetter reference today. That is the gap
-/// #464 tracks; addressing a dead letter positionally is why it is a
-/// gap rather than a design.
+/// no command mints a DeadLetter reference. Addressing a dead letter
+/// positionally is a known gap rather than a design: recreate the
+/// stream and a stored sequence names a different letter.
 ///
 /// `dead_letter.requeue` is the one command over this domain and it
 /// does not close the gap — it steps around it. What a requeue makes is
