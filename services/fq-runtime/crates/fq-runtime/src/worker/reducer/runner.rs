@@ -1344,18 +1344,16 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     });
                 }
                 NextAction::CallModel(request) => {
+                    let mut ctx =
+                        InvocationCtx::new(llm, agent_id, invocation_id, &mut totals, cursor);
                     let outcome = self
                         .run_model_with_llm(
-                            llm,
+                            &mut ctx,
                             agent.budget(),
-                            agent_id,
-                            invocation_id,
                             request,
                             LlmCallOrigin::AgentTurn,
-                            &mut totals,
                             start,
                             &mut context,
-                            cursor,
                         )
                         .await?;
                     match outcome {
@@ -1759,16 +1757,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         result = &mut tool_fut => break result,
                         maybe_req = channel.recv() => match maybe_req {
                             Some((server, request)) => {
+                                let mut ctx = InvocationCtx::new(
+                                    llm, agent_id, invocation_id, totals, cursor,
+                                );
                                 self.handle_server_request(
+                                    &mut ctx,
                                     agent,
                                     &server,
-                                    llm,
-                                    agent_id,
-                                    invocation_id,
                                     request,
-                                    totals,
-                                    start,
-                                    cursor,
                                 )
                                 .await?;
                             }
@@ -2257,50 +2253,91 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     }
 }
 
+/// What every model call needs to know about the invocation it belongs
+/// to: who it is charged to, and the two accumulators it advances.
+///
+/// These five values were threaded individually through every function
+/// below, which is why they all carried
+/// `#[allow(clippy::too_many_arguments)]` (#78). Bundling them is not
+/// cosmetic — it is what lets this group become its own module. Moved
+/// as loose parameters, each of these functions would drag a 9-to-13
+/// argument list across the boundary, which is a worse seam than no
+/// seam.
+///
+/// Built fresh at each of the two places the host loop enters this
+/// group (`run_loop_inner`'s `CallModel` arm and `run_tool`'s
+/// server-request select). It borrows `totals` and `cursor` mutably, so
+/// a short-lived value keeps those borrows from spanning the loop body;
+/// everything inside this group forwards the same `ctx` rather than
+/// rebuilding it.
+pub(super) struct InvocationCtx<'a> {
+    /// The client this invocation's calls go to.
+    pub(super) llm: &'a dyn LlmClient,
+    /// Whose spend and events these are.
+    pub(super) agent_id: &'a AgentId,
+    /// The invocation every emitted event is stamped with.
+    pub(super) invocation_id: Uuid,
+    /// Running cost and token totals, advanced by each call.
+    pub(super) totals: &'a mut InvocationTotals,
+    /// The event-chain cursor: the id of the last event emitted, which
+    /// the next one records as its parent.
+    pub(super) cursor: &'a mut Option<Uuid>,
+}
+
+impl<'a> InvocationCtx<'a> {
+    /// Build the context for one entry into the model-calling group.
+    ///
+    /// A constructor rather than a struct literal at the call sites:
+    /// the literal costs seven lines inside `run_loop_inner` and
+    /// `run_tool`, both of which sit on a function-size budget that
+    /// only ever tightens.
+    pub(super) fn new(
+        llm: &'a dyn LlmClient,
+        agent_id: &'a AgentId,
+        invocation_id: Uuid,
+        totals: &'a mut InvocationTotals,
+        cursor: &'a mut Option<Uuid>,
+    ) -> Self {
+        Self {
+            llm,
+            agent_id,
+            invocation_id,
+            totals,
+            cursor,
+        }
+    }
+}
+
 /// Internal: factor out the LLM dispatch path so the loop body
 /// stays readable.
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// Agent-turn LLM path: dispatch through the shared core, then
     /// apply agent-turn failure semantics — an LLM error fails the
     /// invocation, and exceeding the budget terminates it.
-    #[allow(clippy::too_many_arguments)]
     async fn run_model_with_llm(
         &self,
-        llm: &dyn LlmClient,
+        ctx: &mut InvocationCtx<'_>,
         budget: Option<f64>,
-        agent_id: &AgentId,
-        invocation_id: Uuid,
         request: ModelRequest,
         origin: LlmCallOrigin,
-        totals: &mut InvocationTotals,
         start: Instant,
         context: &mut ContextTracker,
-        cursor: &mut Option<Uuid>,
     ) -> Result<ModelOutcome, ExecutorError> {
         let response = match self
-            .dispatch_llm(
-                llm,
-                agent_id,
-                invocation_id,
-                request,
-                origin,
-                totals,
-                Some(context),
-                cursor,
-            )
+            .dispatch_llm(ctx, request, origin, Some(context))
             .await?
         {
             Ok((response, _cost)) => response,
             Err(err) => {
-                totals.total_duration_ms = start.elapsed().as_millis() as u64;
+                ctx.totals.total_duration_ms = start.elapsed().as_millis() as u64;
                 self.emit_failed(
-                    agent_id,
-                    invocation_id,
+                    ctx.agent_id,
+                    ctx.invocation_id,
                     FailureKind::LlmError,
                     err.to_string(),
                     FailurePhase::LlmRequest,
-                    *totals,
-                    cursor,
+                    *ctx.totals,
+                    ctx.cursor,
                 )
                 .await?;
                 return Err(ExecutorError::Llm(err));
@@ -2308,23 +2345,23 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         };
 
         if let Some(budget) = budget
-            && totals.total_cost > budget
+            && ctx.totals.total_cost > budget
         {
-            totals.total_duration_ms = start.elapsed().as_millis() as u64;
+            ctx.totals.total_duration_ms = start.elapsed().as_millis() as u64;
             self.emit_failed(
-                agent_id,
-                invocation_id,
+                ctx.agent_id,
+                ctx.invocation_id,
                 FailureKind::BudgetExceeded,
                 format!(
                     "cost ${:.6} exceeded budget ${budget:.2}",
-                    totals.total_cost
+                    ctx.totals.total_cost
                 ),
                 FailurePhase::LlmResponse,
-                *totals,
-                cursor,
+                *ctx.totals,
+                ctx.cursor,
             )
             .await?;
-            return Ok(ModelOutcome::BudgetExceeded(totals.total_cost));
+            return Ok(ModelOutcome::BudgetExceeded(ctx.totals.total_cost));
         }
 
         Ok(ModelOutcome::Response(response))
@@ -2334,22 +2371,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// evented / budgeted path every model call flows through — agent
     /// turns and sampling alike. Writes the §5.5 WAL
     /// (intent → dispatched → completed), publishes
-    /// `llm.request` / `llm.dispatched` / `llm.response` + cost (the
+    /// `ctx.llm.request` / `ctx.llm.dispatched` / `ctx.llm.response` + cost (the
     /// cost tagged with `origin` for attribution), and folds cost into
-    /// `totals`. Returns the inner `Err` on an LLM-call failure (the
+    /// `ctx.totals`. Returns the inner `Err` on an LLM-call failure (the
     /// WAL is already closed `is_error`) so each caller applies its
     /// own semantics — an agent turn fails the invocation, a sampling
     /// request merely declines. The outer `Err` is infrastructure
     /// (store / bus).
-    #[allow(clippy::too_many_arguments)]
     async fn dispatch_llm(
         &self,
-        llm: &dyn LlmClient,
-        agent_id: &AgentId,
-        invocation_id: Uuid,
+        ctx: &mut InvocationCtx<'_>,
         request: ModelRequest,
         origin: LlmCallOrigin,
-        totals: &mut InvocationTotals,
         // Agent turns pass their invocation-scoped context tracker so
         // occupancy/history are recorded and the one-shot context-
         // pressure warning can be latched and injected here (issue #76).
@@ -2357,10 +2390,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // are server-initiated and do not drive the agent's own context
         // signal.
         context: Option<&mut ContextTracker>,
-        cursor: &mut Option<Uuid>,
     ) -> Result<Result<(ModelResponse, f64), crate::llm::LlmError>, ExecutorError> {
         let call_id = Uuid::now_v7();
-        let inv_str = invocation_id.to_string();
+        let inv_str = ctx.invocation_id.to_string();
         let req_str = call_id.to_string();
         let chat_request = ChatRequest {
             model: request.model.clone(),
@@ -2402,10 +2434,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .map_err(map_store_err)?;
 
         self.publish_chained(
-            cursor,
+            ctx.cursor,
             Event::new(
-                agent_id.clone(),
-                invocation_id,
+                ctx.agent_id.clone(),
+                ctx.invocation_id,
                 EventPayload::LlmRequest(LlmRequestPayload {
                     call_id,
                     model: chat_request.model.clone(),
@@ -2419,7 +2451,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         .await?;
 
         let call_started = Instant::now();
-        let response = match llm.chat(chat_request).await {
+        let response = match ctx.llm.chat(chat_request).await {
             Ok(r) => r,
             Err(err) => {
                 // The provider errored. Nothing was parsed, so there is
@@ -2428,8 +2460,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // unobservable, and `None` says exactly that.
                 self.fail_llm_call(
                     FailedCall {
-                        agent_id,
-                        invocation_id,
+                        agent_id: ctx.agent_id,
+                        invocation_id: ctx.invocation_id,
                         call_id,
                         model: &request.model,
                         error_kind: (&err).into(),
@@ -2438,8 +2470,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         usage: None,
                         origin: &origin,
                     },
-                    totals,
-                    cursor,
+                    ctx.totals,
+                    ctx.cursor,
                 )
                 .await?;
                 // Hand the LLM error back to the caller; the WAL is
@@ -2454,7 +2486,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 .as_deref()
                 .is_none_or(|content| content.trim().is_empty())
         {
-            // A 200 with nothing in it. Skips `totals.total_llm_calls`
+            // A 200 with nothing in it. Skips `ctx.totals.total_llm_calls`
             // — no outcome to count — but *not* the spend: the provider
             // did the prefill and `response.usage` says what it billed,
             // so it is priced and recorded like any other call.
@@ -2463,8 +2495,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             );
             self.fail_llm_call(
                 FailedCall {
-                    agent_id,
-                    invocation_id,
+                    agent_id: ctx.agent_id,
+                    invocation_id: ctx.invocation_id,
                     call_id,
                     model: &request.model,
                     error_kind: crate::events::LlmErrorKind::EmptyResponse,
@@ -2473,14 +2505,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     usage: Some(response.usage),
                     origin: &origin,
                 },
-                totals,
-                cursor,
+                ctx.totals,
+                ctx.cursor,
             )
             .await?;
             return Ok(Err(err));
         }
 
-        totals.total_llm_calls += 1;
+        ctx.totals.total_llm_calls += 1;
 
         // LLM returned control. Mark dispatched (ambiguous
         // window), publish the dispatched event, then transition
@@ -2491,10 +2523,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .await
             .map_err(map_store_err)?;
         self.publish_chained(
-            cursor,
+            ctx.cursor,
             Event::new(
-                agent_id.clone(),
-                invocation_id,
+                ctx.agent_id.clone(),
+                ctx.invocation_id,
                 EventPayload::LlmDispatched(events::LlmDispatchedPayload {
                     call_id,
                     model: request.model.clone(),
@@ -2519,7 +2551,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let (input_cost, output_cost, total_cost) = pricing
             .map(|p| p.calculate(&response.usage))
             .unwrap_or((0.0, 0.0, 0.0));
-        totals.total_cost += total_cost;
+        ctx.totals.total_cost += total_cost;
 
         let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
         self.config
@@ -2539,7 +2571,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // #76). Only agent turns carry a tracker; sampling/elicitation
         // pass `None`. We record the turn's occupancy and history, and
         // — the first time occupancy crosses the soft threshold — latch
-        // and annotate this `llm.response` event so the warning is
+        // and annotate this `ctx.llm.response` event so the warning is
         // visible in the event trail exactly once (annotations ride on
         // the envelope and are stripped only from downstream consumer
         // prompts, so this does not perturb the canonical trace).
@@ -2557,8 +2589,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             {
                 tracker.warning_emitted = true;
                 warn!(
-                    agent_id = %agent_id,
-                    invocation_id = %invocation_id,
+                    ctx.agent_id = %ctx.agent_id,
+                    ctx.invocation_id = %ctx.invocation_id,
                     tokens_in_use = response.usage.input_tokens,
                     context_window = ?window,
                     "{}",
@@ -2570,9 +2602,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
 
         let mut response_event = super::emit::llm_response_event(
-            self.rounds.next(invocation_id),
-            agent_id,
-            invocation_id,
+            self.rounds.next(ctx.invocation_id),
+            ctx.agent_id,
+            ctx.invocation_id,
             call_id,
             &response,
             origin,
@@ -2580,7 +2612,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             input_cost,
             output_cost,
             total_cost,
-            totals.total_cost,
+            ctx.totals.total_cost,
         );
         if let Some(message) = context_warning {
             response_event = response_event.annotate(
@@ -2588,7 +2620,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 serde_json::json!({ "context_pressure": message }),
             );
         }
-        self.publish_chained(cursor, response_event).await?;
+        self.publish_chained(ctx.cursor, response_event).await?;
 
         Ok(Ok((
             ModelResponse {
@@ -2613,16 +2645,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// `record_cost` attributes each dispatched call's cost to the
     /// caller's sub-budget. The outer `Err` is infrastructure
     /// (store / bus).
+    // 9/7 even with the context bundled: the rest are this primitive's
+    // four injected behaviours (build / parse / validate / attribute),
+    // which are what make it reusable rather than invocation state.
     #[allow(clippy::too_many_arguments)]
     async fn run_structured_completion(
         &self,
-        llm: &dyn LlmClient,
-        agent_id: &AgentId,
-        invocation_id: Uuid,
+        ctx: &mut InvocationCtx<'_>,
         origin: LlmCallOrigin,
         max_retries: u32,
-        totals: &mut InvocationTotals,
-        cursor: &mut Option<Uuid>,
         build_request: impl Fn() -> ModelRequest,
         parse: impl Fn(Option<&str>) -> Option<Value>,
         validate: impl Fn(&Value) -> Result<(), String>,
@@ -2631,20 +2662,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     ) -> Result<Option<Value>, ExecutorError> {
         for _ in 0..max_retries {
             let response = match self
-                .dispatch_llm(
-                    llm,
-                    agent_id,
-                    invocation_id,
-                    build_request(),
-                    origin.clone(),
-                    totals,
-                    None,
-                    cursor,
-                )
+                .dispatch_llm(ctx, build_request(), origin.clone(), None)
                 .await?
             {
                 Ok((response, cost)) => {
-                    record_cost(totals, cost);
+                    record_cost(ctx.totals, cost);
                     response
                 }
                 // A model failure resolves to "no value"; the caller
@@ -2674,50 +2696,21 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// the gate/run/validate logic lives here and replies on the
     /// request's oneshot. A dropped reply (the tool finished and the
     /// bridge went away) is ignored.
-    #[allow(clippy::too_many_arguments)]
     async fn handle_server_request(
         &self,
+        ctx: &mut InvocationCtx<'_>,
         agent: &Agent,
         server: &str,
-        llm: &dyn LlmClient,
-        agent_id: &AgentId,
-        invocation_id: Uuid,
         request: ServerRequest,
-        totals: &mut InvocationTotals,
-        start: Instant,
-        cursor: &mut Option<Uuid>,
     ) -> Result<(), ExecutorError> {
         match request {
             ServerRequest::Sampling { params, reply } => {
-                let result = self
-                    .handle_sampling(
-                        agent,
-                        server,
-                        llm,
-                        agent_id,
-                        invocation_id,
-                        params,
-                        totals,
-                        start,
-                        cursor,
-                    )
-                    .await?;
+                let result = self.handle_sampling(ctx, agent, server, params).await?;
                 let _ = reply.send(result);
                 Ok(())
             }
             ServerRequest::Elicitation { params, reply } => {
-                let result = self
-                    .handle_elicitation(
-                        agent,
-                        server,
-                        llm,
-                        agent_id,
-                        invocation_id,
-                        params,
-                        totals,
-                        cursor,
-                    )
-                    .await?;
+                let result = self.handle_elicitation(ctx, agent, server, params).await?;
                 let _ = reply.send(result);
                 Ok(())
             }
@@ -2733,18 +2726,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// agent invocation untouched — sampling spends the agent's
     /// budget but never fails its turn. The outer `Err` is
     /// infrastructure (store / bus) and does propagate.
-    #[allow(clippy::too_many_arguments)]
     async fn handle_sampling(
         &self,
+        ctx: &mut InvocationCtx<'_>,
         agent: &Agent,
         server: &str,
-        llm: &dyn LlmClient,
-        agent_id: &AgentId,
-        invocation_id: Uuid,
         params: CreateMessageRequestParams,
-        totals: &mut InvocationTotals,
-        _start: Instant,
-        cursor: &mut Option<Uuid>,
     ) -> Result<Result<CreateMessageResult, rmcp::ErrorData>, ExecutorError> {
         // --- gate (no model call on refusal) ---
         let Some(grant) = agent.sampling_grant() else {
@@ -2758,14 +2745,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             ))));
         }
         if let Some(max) = grant.max_cost
-            && totals.sampling_cost >= max
+            && ctx.totals.sampling_cost >= max
         {
             return Ok(Err(sampling_decline(
                 "sampling sub-budget exhausted for this invocation",
             )));
         }
         if let Some(budget) = agent.budget()
-            && totals.total_cost >= budget
+            && ctx.totals.total_cost >= budget
         {
             return Ok(Err(sampling_decline(
                 "invocation budget exhausted; sampling refused",
@@ -2784,16 +2771,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // --- input evaluator gates (may decline before any model call) ---
         if let EvaluatorOutcome::Denied(reason) = self
             .run_evaluators(
+                ctx,
                 &agent.sampling_validation().input_validation,
                 "forwarding a sampling request to the agent's model",
                 &serde_json::to_string(&params).unwrap_or_default(),
                 agent.model(),
-                llm,
-                agent_id,
-                invocation_id,
                 origin.clone(),
-                totals,
-                cursor,
                 |t, c| t.sampling_cost += c,
             )
             .await?
@@ -2805,16 +2788,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         let model_request = sampling_to_model_request(agent.model(), &params);
         let (response, call_cost) = match self
-            .dispatch_llm(
-                llm,
-                agent_id,
-                invocation_id,
-                model_request,
-                origin.clone(),
-                totals,
-                None,
-                cursor,
-            )
+            .dispatch_llm(ctx, model_request, origin.clone(), None)
             .await?
         {
             Ok(pair) => pair,
@@ -2827,7 +2801,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 ))));
             }
         };
-        totals.sampling_cost += call_cost;
+        ctx.totals.sampling_cost += call_cost;
 
         // --- outbound validation seam: the pluggable context chain
         // (empty by default) then the agent's declarative config
@@ -2854,16 +2828,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // --- output evaluator gates (judge the result before reply) ---
         if let EvaluatorOutcome::Denied(reason) = self
             .run_evaluators(
+                ctx,
                 &agent.sampling_validation().output_validation,
                 "returning a sampling result to the requesting MCP server",
                 &sampling_message_text(&result.message.content),
                 agent.model(),
-                llm,
-                agent_id,
-                invocation_id,
                 origin,
-                totals,
-                cursor,
                 |t, c| t.sampling_cost += c,
             )
             .await?
@@ -2885,17 +2855,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// a model failure all resolve to a `decline` *result* (not an
     /// error) so the server continues without the input. The outer
     /// `Err` is infrastructure (store / bus).
-    #[allow(clippy::too_many_arguments)]
     async fn handle_elicitation(
         &self,
+        ctx: &mut InvocationCtx<'_>,
         agent: &Agent,
         server: &str,
-        llm: &dyn LlmClient,
-        agent_id: &AgentId,
-        invocation_id: Uuid,
         params: CreateElicitationRequestParams,
-        totals: &mut InvocationTotals,
-        cursor: &mut Option<Uuid>,
     ) -> Result<Result<CreateElicitationResult, rmcp::ErrorData>, ExecutorError> {
         let decline = || Ok(Ok(elicitation_decline()));
 
@@ -2907,12 +2872,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             return decline();
         }
         if let Some(max) = grant.max_cost
-            && totals.elicitation_cost >= max
+            && ctx.totals.elicitation_cost >= max
         {
             return decline();
         }
         if let Some(budget) = agent.budget()
-            && totals.total_cost >= budget
+            && ctx.totals.total_cost >= budget
         {
             return decline();
         }
@@ -2937,16 +2902,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         };
         if let EvaluatorOutcome::Denied(_) = self
             .run_evaluators(
+                ctx,
                 &agent.elicitation_validation().input_validation,
                 "answering an elicitation request from an MCP server",
                 &serde_json::to_string(&params).unwrap_or_default(),
                 agent.model(),
-                llm,
-                agent_id,
-                invocation_id,
                 origin.clone(),
-                totals,
-                cursor,
                 |t, c| t.elicitation_cost += c,
             )
             .await?
@@ -2971,13 +2932,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let model = agent.model();
         let value = self
             .run_structured_completion(
-                llm,
-                agent_id,
-                invocation_id,
+                ctx,
                 origin.clone(),
                 ELICITATION_MAX_RETRIES,
-                totals,
-                cursor,
                 || elicitation_to_model_request(model, &message, &requested_schema),
                 parse_elicitation_value,
                 |value| validate_against_elicitation_schema(value, &requested_schema),
@@ -3002,16 +2959,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // --- output evaluator gates (judge the elicited value) ---
         if let EvaluatorOutcome::Denied(_) = self
             .run_evaluators(
+                ctx,
                 &agent.elicitation_validation().output_validation,
                 "returning an elicited value to the requesting MCP server",
                 &serde_json::to_string(&value).unwrap_or_default(),
                 agent.model(),
-                llm,
-                agent_id,
-                invocation_id,
                 origin,
-                totals,
-                cursor,
                 |t, c| t.elicitation_cost += c,
             )
             .await?
@@ -3035,19 +2988,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// `{ "approved": bool, "reason": string }` verdict. A judge that
     /// returns no parseable verdict fails closed (denies). Each judge
     /// call's cost is attributed through `record_cost`.
+    // 8/7 with the context bundled: the remainder describe the
+    // evaluation itself (specs, subject, model) rather than the
+    // invocation it runs inside.
     #[allow(clippy::too_many_arguments)]
     async fn run_evaluators(
         &self,
+        ctx: &mut InvocationCtx<'_>,
         evaluators: &[EvaluatorSpec],
         context: &str,
         subject: &str,
         default_model: &str,
-        llm: &dyn LlmClient,
-        agent_id: &AgentId,
-        invocation_id: Uuid,
         origin: LlmCallOrigin,
-        totals: &mut InvocationTotals,
-        cursor: &mut Option<Uuid>,
         mut record_cost: impl FnMut(&mut InvocationTotals, f64),
     ) -> Result<EvaluatorOutcome, ExecutorError> {
         let empty_outbound = ValidatorChain::new();
@@ -3061,13 +3013,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     let model = model.as_deref().unwrap_or(default_model).to_string();
                     let value = self
                         .run_structured_completion(
-                            llm,
-                            agent_id,
-                            invocation_id,
+                            ctx,
                             origin.clone(),
                             EVALUATOR_MAX_RETRIES,
-                            totals,
-                            cursor,
                             || evaluator_to_model_request(&model, context, subject),
                             parse_elicitation_value,
                             validate_evaluator_verdict,

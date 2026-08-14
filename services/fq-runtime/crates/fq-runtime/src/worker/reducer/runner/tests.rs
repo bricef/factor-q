@@ -3136,15 +3136,16 @@ async fn sampling_declined_when_invocation_budget_exhausted() {
     let mut cursor = None;
     let declined = runner
         .handle_sampling(
+            &mut InvocationCtx {
+                llm: &llm,
+                agent_id: agent.id(),
+                invocation_id: Uuid::now_v7(),
+                totals: &mut totals,
+                cursor: &mut cursor,
+            },
             &agent,
             "srv",
-            &llm,
-            agent.id(),
-            Uuid::now_v7(),
             sampling_params(),
-            &mut totals,
-            Instant::now(),
-            &mut cursor,
         )
         .await
         .expect("infrastructure ok")
@@ -3172,15 +3173,16 @@ async fn sampling_declined_when_sub_budget_exhausted() {
     let mut cursor = None;
     let declined = runner
         .handle_sampling(
+            &mut InvocationCtx {
+                llm: &llm,
+                agent_id: agent.id(),
+                invocation_id: Uuid::now_v7(),
+                totals: &mut totals,
+                cursor: &mut cursor,
+            },
             &agent,
             "srv",
-            &llm,
-            agent.id(),
-            Uuid::now_v7(),
             sampling_params(),
-            &mut totals,
-            Instant::now(),
-            &mut cursor,
         )
         .await
         .expect("infrastructure ok")
@@ -3211,15 +3213,16 @@ async fn sampling_spends_into_the_invocation_budget() {
     let invocation_id = Uuid::now_v7();
     let result = runner
         .handle_sampling(
+            &mut InvocationCtx {
+                llm: &llm,
+                agent_id: agent.id(),
+                invocation_id,
+                totals: &mut totals,
+                cursor: &mut cursor,
+            },
             &agent,
             "srv",
-            &llm,
-            agent.id(),
-            invocation_id,
             sampling_params(),
-            &mut totals,
-            Instant::now(),
-            &mut cursor,
         )
         .await
         .expect("infrastructure ok")
