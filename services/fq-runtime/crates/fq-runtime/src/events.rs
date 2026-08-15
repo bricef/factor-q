@@ -5,10 +5,10 @@
 //! - [`Envelope`] — runtime-written system metadata. Closed schema.
 //! - [`EventPayload`] — typed contract between graph nodes. The only
 //!   thing that drives downstream agent behaviour.
-//! - [`Annotations`] — open key/value commentary from the producing
-//!   agent. **Never** read by consuming agents — the runtime will
-//!   strip annotations when building a downstream prompt (the
-//!   barrier lands in step 4 of the envelope-refactor plan).
+//! - [`Annotations`] — open key/value commentary, written by the
+//!   runtime; agents have no way to annotate (see [`annotation_keys`]).
+//!   **Never** read by consuming agents: [`Event::for_consumer_context`]
+//!   is the only sanctioned way into a downstream prompt.
 //!
 //! Each layer has different write permissions, read audiences, and
 //! mutability rules; see
@@ -26,32 +26,34 @@ use crate::agent::AgentId;
 
 pub const SCHEMA_VERSION: u32 = 2;
 
-/// Well-known annotation keys. Kept as documented constants so the
-/// learning loop has a stable vocabulary; unknown keys are still
-/// permitted in the [`Annotations`] map.
+/// Well-known annotation keys — a **reserved vocabulary, not an
+/// agent-facing channel** (#90). Nothing lets an agent annotate; every
+/// writer is host code and four of the five have no writer at all. The
+/// agent path is consumer-driven, waiting on a reader — see
+/// `docs/design/committed/event-schema.md`. Unknown keys still permitted.
 ///
 /// Per §6 of `inter-node-contracts-and-event-layers.md`, every key
 /// here is **advisory** — annotations are never read by consuming
-/// agents. The runtime strips them at the consumer-context
-/// boundary via [`Event::for_consumer_context`]; downstream prompts
-/// see envelope + payload only.
+/// agents. The runtime strips them at the consumer-context boundary
+/// via [`Event::for_consumer_context`]; prompts see envelope +
+/// payload only.
 pub mod annotation_keys {
-    /// Free-form commentary from the producing agent.
+    /// Free-form commentary about the event. Reserved — no writer.
     pub const NOTES: &str = "notes";
-    /// Self-reported confidence. Advisory only — never read by
-    /// consumers. Calibrated confidence comes from a verifier
-    /// node, not from the producer.
+    /// Self-reported confidence; calibrated confidence comes from a
+    /// verifier node, not the producer. Reserved — no writer.
     pub const CONFIDENCE: &str = "confidence";
-    /// Chain-of-thought / working. Never read by consumers — the
-    /// fresh-context discipline depends on the reasoning trace
-    /// never reaching a downstream agent's prompt.
+    /// Chain-of-thought / working. Reserved — no writer, and opening
+    /// one is a retention decision, not plumbing: annotations ride
+    /// every event and the log is kept.
     pub const REASONING: &str = "reasoning";
-    /// Sources looked at but not directly used in the payload.
-    /// Sources actually used belong in a typed `Citation[]` field
-    /// on the payload.
+    /// Sources looked at but not used in the payload; ones actually
+    /// used belong in a typed `Citation[]`. Reserved — no writer.
     pub const SOURCES_CONSIDERED: &str = "sources_considered";
-    /// Markers the producer wants downstream humans (or a meta-
-    /// agent) to see.
+    /// Markers for downstream humans (or a meta-agent). The only key
+    /// with a writer, and it is the runtime: the context-pressure
+    /// warning, which emits an object where the schema says array of
+    /// strings (#90).
     pub const FLAGS: &str = "flags";
 }
 
@@ -80,9 +82,8 @@ pub use llm::{
 /// The three layers are kept as separate fields rather than
 /// flattened so the trust/visibility boundary between them is
 /// expressed in the type system. Producing agents do not touch the
-/// envelope; consuming agents must not read annotations (step 4
-/// adds the runtime-enforced barrier via
-/// [`Event::for_consumer_context`]).
+/// envelope, and consuming agents never see annotations — enforced
+/// by [`Event::for_consumer_context`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub envelope: Envelope,
