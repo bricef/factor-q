@@ -546,7 +546,7 @@ fn register_agent_view(
                     // registry, so it is not found rather than invalid.
                     let loaded = fq_runtime::AgentId::new(&key.agent_id)
                         .ok()
-                        .and_then(|id| registry.get_loaded(&id).map(AgentDetailView::from_loaded));
+                        .and_then(|id| registry.get_loaded(&id).map(AgentDetailView::from));
                     loaded.ok_or_else(|| WireError::NotFound {
                         op: "agent.get".into(),
                         message: format!("no agent `{}` in the daemon's registry", key.agent_id),
@@ -557,7 +557,7 @@ fn register_agent_view(
                 let agents = agent_list.clone();
                 async move {
                     let registry = agents.read().await.clone();
-                    Ok(AgentEntryView::index(&registry))
+                    Ok(fq_runtime::agent_view::agent_index(&registry))
                 }
             },
         )
