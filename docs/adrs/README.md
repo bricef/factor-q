@@ -25,7 +25,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0013](accepted/0013-memory-as-mcp-service.md) | Memory as an MCP service |
 | [0014](accepted/0014-agent-harness-as-reducer.md) | Agent harness as a reducer with a runtime-owned loop |
 | [0015](accepted/0015-rust-runtime-polyglot-tools.md) | Rust runtime, polyglot tools, language boundary at the event bus |
-| [0016](accepted/0016-typed-operations-no-free-form-apis.md) | Typed operations exposed to agents, no free-form storage APIs |
+| [0016](accepted/0016-typed-operations-no-free-form-apis.md) | Typed operations exposed to agents, no free-form storage APIs — the *shape* agent side effects must take; the annotation operations it names (`annotations.add_note`, `annotations.record_confidence`) are not built, and the annotations layer is runtime-written today (#90) |
 | [0017](accepted/0017-mcp-human-in-the-loop.md) | Autonomous resolution of MCP human-in-the-loop primitives (the capability-grant policy) |
 | [0018](accepted/0018-mcp-server-initiated-execution.md) | Execution model for server-initiated MCP calls (sampling/elicitation/roots) |
 | [0019](accepted/0019-skill-format.md) | Skill format and discovery |

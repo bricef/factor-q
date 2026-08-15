@@ -14,7 +14,7 @@ Every event has three structurally distinct layers, each with different write pe
 |---|---|---|---|
 | Envelope | Runtime | Everyone | Immutable, closed schema |
 | Payload | Producing agent | Consuming agents | Validated against producer + consumer schemas |
-| Annotations | Producing agent | Humans, meta-agents, learning loop | **Never read by consuming agents** |
+| Annotations | **Runtime today** (agent write path not built — see below) | Humans, meta-agents, learning loop | **Never read by consuming agents** |
 
 The on-the-wire JSON shape:
 
@@ -75,7 +75,44 @@ All currency amounts are USD.
 
 ## Annotations
 
-Open key/value commentary from the producing agent. `Map<string, JsonValue>` with a registry of well-known keys; unknown keys are permitted.
+Open key/value commentary about an event. `Map<string, JsonValue>` with a registry of well-known keys; unknown keys are permitted.
+
+> **Written by the runtime today. Agents have no way to annotate, and the
+> keys below are a reserved vocabulary rather than an available channel.**
+>
+> The layer is live and load-bearing — the dispatcher and the advisory
+> watch record dead-letter metadata here, and the runner attaches the
+> context-pressure warning — but every writer is host code. No built-in,
+> tool or reducer intent lets an agent attach an annotation to its own
+> event, and nothing in an agent's prompt or tool surface offers one.
+>
+> Read the well-known keys below as the shape the channel will take, not
+> as something an agent can use now. Anything claiming to have "flagged
+> this for review" via annotations is describing a capability that does
+> not exist (#90).
+
+### When the agent write path arrives
+
+**Consumer-driven: the write path lands when something reads it.** The
+readers this layer exists for — the annotation registry and the learning
+loop — are still design, not code
+(`docs/design/aspirational/inter-node-contracts-and-event-layers.md`).
+Building the producer first would give agents somewhere to write that
+nothing consumes, which is the same trap one layer down: annotations are
+stripped at the consumer barrier by design, so no agent ever reads them
+back.
+
+The interface it should take is already decided, in
+[ADR-0016](../../adrs/accepted/0016-typed-operations-no-free-form-apis.md):
+typed operations such as `annotations.add_note(text)` and
+`annotations.record_confidence(score)`, never a free-form
+`annotations.set(key, value)`. That ADR is a point-in-time record and
+describes the intended interface, not a shipped one.
+
+Note that `reasoning` needs an answer before any write path opens: it is
+chain-of-thought, annotations ride every event, and the log is retained —
+so the retention and payload cost of an agent-written trace is a decision
+in its own right, not a detail of the plumbing.
 
 ```json
 {
@@ -91,13 +128,29 @@ The field is omitted entirely when empty.
 
 ### Well-known keys
 
-| Key | Type | Semantics |
-|---|---|---|
-| `notes` | string | Free-form commentary from the producing agent. |
-| `confidence` | number | Self-reported confidence. Advisory only — calibrated confidence comes from a verifier node, not from the producer. |
-| `reasoning` | string | Chain-of-thought / working. The fresh-context discipline depends on this never reaching a downstream agent's prompt. |
-| `sources_considered` | array of `Citation` | Sources looked at but not directly used in the payload. Sources actually used belong in a typed `Citation[]` field on the payload. |
-| `flags` | array of strings | Markers the producer wants downstream humans (or a meta-agent) to see. |
+The reserved vocabulary. Four of the five have **no writer at all** today;
+`flags` is written by the runtime. The "Status" column says which is which,
+so a reader can tell the shipped part from the reserved part.
+
+| Key | Type | Status | Semantics |
+|---|---|---|---|
+| `notes` | string | Reserved — no writer | Free-form commentary from the producing agent. |
+| `confidence` | number | Reserved — no writer | Self-reported confidence. Advisory only — calibrated confidence comes from a verifier node, not from the producer. |
+| `reasoning` | string | Reserved — no writer; see the retention question above | Chain-of-thought / working. The fresh-context discipline depends on this never reaching a downstream agent's prompt. |
+| `sources_considered` | array of `Citation` | Reserved — no writer | Sources looked at but not directly used in the payload. Sources actually used belong in a typed `Citation[]` field on the payload. |
+| `flags` | array of strings | **Runtime writes this** | Markers the producer wants downstream humans (or a meta-agent) to see. |
+
+The host also writes `dead_letter_*` keys (trigger id, payload, stream
+sequence, source) on dead-letter events. Those are runtime bookkeeping
+rather than commentary, and are deliberately not part of the reserved
+vocabulary above.
+
+> **Known divergence:** the runtime's one `flags` writer — the
+> context-pressure warning in `worker/reducer/runner/llm.rs` — emits an
+> object (`{"context_pressure": "…"}`), not the array of strings this
+> table specifies. `Annotations` is `Map<string, JsonValue>`, so nothing
+> catches it. Recorded rather than silently resolved: which shape is right
+> is a decision, and it is tracked on #90.
 
 ### The annotation barrier
 
