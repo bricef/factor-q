@@ -174,6 +174,21 @@ impl AgentEntryView {
     }
 }
 
+/// Census a registry snapshot into the shape `control.status` declares.
+///
+/// A `From` impl rather than a constructor on the type: the shape lives
+/// in the wire crate, which cannot see an `AgentRegistry`, and an
+/// inherent method has to sit with its type. The reading stays here,
+/// beside the registry it reads.
+impl From<&crate::AgentRegistry> for fq_ops::surface::StatusRegistry {
+    fn from(registry: &crate::AgentRegistry) -> Self {
+        fq_ops::surface::StatusRegistry {
+            agents: registry.len() as i64,
+            load_errors: registry.errors().iter().map(|e| e.to_string()).collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,7 +24,7 @@ fn the_registry_census_counts_the_loaded_and_names_the_rejected() {
         ("researcher.md", RESEARCHER),
         ("notes.md", "# Scratch notes\n\nNot an agent definition.\n"),
     ]);
-    let census = StatusRegistry::of(&registry);
+    let census = StatusRegistry::from(&registry);
 
     assert_eq!(census.agents, 1, "one definition parsed: {census:?}");
     assert_eq!(census.load_errors.len(), 1, "got: {census:?}");
@@ -39,7 +39,7 @@ fn the_registry_census_counts_the_loaded_and_names_the_rejected() {
 /// reader must be able to tell it from "not checked".
 #[test]
 fn an_empty_registry_is_a_zero_not_a_gap() {
-    let census = StatusRegistry::of(&fq_runtime::AgentRegistry::new());
+    let census = StatusRegistry::from(&fq_runtime::AgentRegistry::new());
     assert_eq!(census, StatusRegistry::default());
     assert_eq!(census.agents, 0);
     assert!(census.load_errors.is_empty());
