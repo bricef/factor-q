@@ -32,6 +32,7 @@ pub mod health;
 pub mod model;
 pub mod opid;
 pub mod registry;
+pub mod views;
 
 pub use model::{
     Atom, AtomRef, Authority, Command, Domain, Receipt, Report, Stability, Synthetic, Verb, View,

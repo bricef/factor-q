@@ -660,7 +660,7 @@
             "description": "One open tool dispatch on a live invocation: the tool's name, plus\nits command line when the parameters carry one — so the \"doing\"\ncolumn can say WHAT is running, not just which tool has been open\nfor four minutes.\n\nSchema'd because `invocation.active` declares it as part of its\noutput.",
             "properties": {
               "command": {
-                "description": "The dispatch's command, when its parameters have a `command`\nfield: exec-style argv arrays join with spaces, shell-style\nstrings pass through. Capped server-side at\n[`OPEN_TOOL_COMMAND_CAP`] chars; `None` for tools without one.",
+                "description": "The dispatch's command, when its parameters have a `command`\nfield: exec-style argv arrays join with spaces, shell-style\nstrings pass through. Capped server-side at\nthe reader's command cap; `None` for tools without one.",
                 "type": [
                   "string",
                   "null"
@@ -722,7 +722,7 @@
             "type": "string"
           },
           "in_flight_count": {
-            "description": "Invocations this worker currently owns in a non-terminal state\n(`in_flight` or `ambiguous`). Filled by [`Views::workers`] /\n[`Views::worker`]; the bare `From<WorkerRow>` leaves it 0.",
+            "description": "Invocations this worker currently owns in a non-terminal state\n(`in_flight` or `ambiguous`). Counted by the reader that\nassembles the roster; a bare row conversion leaves it 0.",
             "format": "int64",
             "type": "integer"
           },
@@ -831,7 +831,7 @@
                 "type": "string"
               },
               "in_flight_count": {
-                "description": "Invocations this worker currently owns in a non-terminal state\n(`in_flight` or `ambiguous`). Filled by [`Views::workers`] /\n[`Views::worker`]; the bare `From<WorkerRow>` leaves it 0.",
+                "description": "Invocations this worker currently owns in a non-terminal state\n(`in_flight` or `ambiguous`). Counted by the reader that\nassembles the roster; a bare row conversion leaves it 0.",
                 "format": "int64",
                 "type": "integer"
               },
