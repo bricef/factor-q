@@ -31,7 +31,9 @@ pub mod paths;
 pub mod policy;
 pub mod pricing;
 pub mod prompt;
-pub mod surface;
+// The declared contract shapes now live in the wire crate; re-exported
+// so a caller reaches them by the same path as before.
+pub use fq_ops::surface;
 pub mod tools;
 pub mod transcript;
 pub mod trigger;

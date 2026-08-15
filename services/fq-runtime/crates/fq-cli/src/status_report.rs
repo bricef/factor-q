@@ -95,7 +95,7 @@ pub(crate) fn register_status_report(
                 Ok(StatusReport {
                     version: FQ_VERSION.to_string(),
                     streams,
-                    registry: StatusRegistry::of(&snapshot),
+                    registry: StatusRegistry::from(snapshot.as_ref()),
                     projection_rows,
                     recovery,
                 })

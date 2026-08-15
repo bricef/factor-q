@@ -240,16 +240,6 @@ pub struct StatusRegistry {
     pub load_errors: Vec<String>,
 }
 
-impl StatusRegistry {
-    /// Census one registry snapshot.
-    pub fn of(registry: &crate::AgentRegistry) -> Self {
-        StatusRegistry {
-            agents: registry.len() as i64,
-            load_errors: registry.errors().iter().map(|e| e.to_string()).collect(),
-        }
-    }
-}
-
 /// `control.status`'s declared output, and what `fq status --json`
 /// nests under `daemon`.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
