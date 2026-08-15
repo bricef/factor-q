@@ -11,6 +11,22 @@ rather than broken.
 Usage: check-links.py [ROOT]   (default: the repository containing this
 script). Exits non-zero if any link is broken — CI runs this via
 ``just check-links``.
+
+SKIP_PARTS is matched against each file's path *relative to ROOT*, never
+its absolute path, and that distinction is the whole gate. Matching the
+absolute path made the checker silently self-disable inside the repo's
+own standard layout: worktrees live at ``.claude/worktrees/<name>``, so
+every file under one carried a ``.claude`` component, every markdown file
+was skipped, and ``just check-links`` reported "0 relative links checked"
+and exited 0 — a green gate that had checked nothing, in exactly the
+place the repo tells people to work. Relative matching keeps the original
+intent (don't scan agent scratch, build output, or vendored trees *nested
+beneath* the tree being checked, including a worktree's own nested
+``.claude``) without letting ROOT's own address turn the check off.
+
+The empty-scan guard is the belt to that brace: scanning zero markdown
+files is reported as a failure rather than a pass, so any future variant
+of "the filter ate everything" comes back red instead of vacuously green.
 """
 
 import re
@@ -31,10 +47,13 @@ def main() -> int:
     broken: list[str] = []
     external: list[str] = []
     checked = 0
+    scanned = 0
 
     for md in sorted(root.rglob("*.md")):
-        if any(part in SKIP_PARTS for part in md.parts):
+        rel = md.relative_to(root)
+        if any(part in SKIP_PARTS for part in rel.parts):
             continue
+        scanned += 1
         text = md.read_text(encoding="utf-8", errors="replace")
         for m in LINK.finditer(text):
             target = m.group(1)
@@ -45,7 +64,7 @@ def main() -> int:
                 continue
             checked += 1
             resolved = (md.parent / path).resolve()
-            where = f"{md.relative_to(root)}:{text[: m.start()].count(chr(10)) + 1}"
+            where = f"{rel}:{text[: m.start()].count(chr(10)) + 1}"
             if not resolved.is_relative_to(root):
                 external.append(f"{where}: {target}")
             elif not resolved.exists():
@@ -56,9 +75,16 @@ def main() -> int:
     for e in external:
         print(f"SKIPPED  {e}  (outside the repo — not verifiable here)")
     print(
-        f"{checked} relative links checked: "
+        f"{checked} relative links checked in {scanned} files: "
         f"{len(broken)} broken, {len(external)} outside the repo"
     )
+    if not scanned:
+        print(
+            f"ERROR: no markdown scanned under {root} — the check did nothing, "
+            "which is a failure, not a pass",
+            file=sys.stderr,
+        )
+        return 1
     return 1 if broken else 0
 
 

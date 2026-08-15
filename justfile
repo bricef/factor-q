@@ -400,9 +400,22 @@ lint-docs *args:
 
 # Links pointing outside the repo (sibling checkouts) are reported but not
 # failed.
+#
+# The self-test runs as a dependency, so it runs everywhere the check runs
+# (CI, `just ci`, a bare `just check-links`) without a second CI job or a
+# non-stdlib dependency. It guards the checker's skip logic, which is the
+# part that can fail *green*: a skip rule that eats the whole tree reports
+# success having scanned nothing, and running the real gate cannot tell
+# that apart from a clean tree.
 # Check that relative links in all repo markdown resolve.
-check-links:
+check-links: test-check-links
     python3 scripts/check-links.py
+
+# stdlib unittest — no pytest, nothing to install; CI already has python3
+# for the checker itself.
+# Run check-links.py's own tests.
+test-check-links:
+    python3 -m unittest discover -s scripts -p 'test_check_links.py'
 
 # === Code quality ===
 
