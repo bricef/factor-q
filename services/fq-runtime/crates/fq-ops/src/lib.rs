@@ -28,6 +28,7 @@
 //! links it alone — `tests/forbidden_dependency_gate.rs` enforces it).
 
 pub mod fixtures;
+pub mod health;
 pub mod model;
 pub mod opid;
 pub mod registry;

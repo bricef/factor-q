@@ -2254,11 +2254,11 @@
       "output_schema": {
         "$defs": {
           "ConsumerHealth": {
-            "description": "Health of one durable consumer on a stream. Externally tagged, same\nbincode rationale as [`StreamHealth`], and schema'd for the same\nreason.",
+            "description": "Health of one durable consumer on a stream. Externally tagged, for\nthe same encoding reason as [`StreamHealth`].",
             "oneOf": [
               {
                 "additionalProperties": false,
-                "description": "The durable does not exist yet (no `fq run` has initialised it).",
+                "description": "The durable does not exist yet (no daemon has initialised it).",
                 "properties": {
                   "missing": {
                     "properties": {
@@ -2408,7 +2408,7 @@
             "type": "object"
           },
           "StreamHealth": {
-            "description": "Health of one JetStream stream plus its primary durable consumer.\nExternally tagged (serde's default) — internal tagging is JSON-only\nand breaks bincode, the read service's wire format.\n\nSchema'd because `control.status` declares it: the probe is the\ndaemon's now, and a declared report's output type carries its\nschema onto the published surface. The derive adds a schema, never\na serialisation — the bincode wire above is untouched.",
+            "description": "Health of one JetStream stream plus its primary durable consumer.\n\nExternally tagged (serde's default) rather than internally: internal\ntagging is a JSON-only representation, and the edge's session is\nbincode once its JSON preamble is done, so an internally-tagged enum\nwould fail to encode there.",
             "oneOf": [
               {
                 "additionalProperties": false,

@@ -1312,6 +1312,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
+ "fq-ops",
  "fq-test-support",
  "fq-tools",
  "futures",
