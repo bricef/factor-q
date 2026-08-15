@@ -1,87 +1,30 @@
 //! JetStream health probe — the NATS-side half of the operator health
-//! surface, lifted out of the CLI's `fq status` so the CLI, the read
-//! service, and the dashboard all render the same typed data (#105
-//! layer 2). The DB-side half lives in [`crate::views`], which
-//! deliberately performs no NATS access; a health *report* composes the
-//! two at the caller.
+//! surface, so every consumer renders the same typed data (#105 layer
+//! 2). The DB-side half lives in [`crate::views`], which deliberately
+//! performs no NATS access; a health *report* composes the two at the
+//! caller.
+//!
+//! The shapes themselves are [`fq_ops::health`] and are re-exported
+//! here. Only the probing needs a JetStream connection, so a consumer
+//! that renders health rather than measuring it links the leaf crate
+//! and none of this.
 
-use serde::{Deserialize, Serialize};
+pub use fq_ops::health::{ConsumerHealth, StreamHealth};
 
 use crate::bus::{STREAM_NAME, TRIGGER_STREAM_NAME};
 use crate::control_plane::dispatcher::CONSUMER_NAME as DISPATCHER_CONSUMER;
 use crate::control_plane::projection::consumer::CONSUMER_NAME as PROJECTOR_CONSUMER;
 
-/// The runtime's core streams and their primary durable consumers — the
-/// pairs `fq status` reports and the read service probes.
+/// The runtime's core streams and their primary durable consumers —
+/// the pairs `control.status` reports.
 pub const CORE_STREAMS: [(&str, &str); 2] = [
     (STREAM_NAME, PROJECTOR_CONSUMER),
     (TRIGGER_STREAM_NAME, DISPATCHER_CONSUMER),
 ];
 
-/// Health of one JetStream stream plus its primary durable consumer.
-/// Externally tagged (serde's default) — internal tagging is JSON-only
-/// and breaks bincode, the read service's wire format.
-///
-/// Schema'd because `control.status` declares it: the probe is the
-/// daemon's now, and a declared report's output type carries its
-/// schema onto the published surface. The derive adds a schema, never
-/// a serialisation — the bincode wire above is untouched.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum StreamHealth {
-    /// The stream (or its info) could not be fetched; `error` carries
-    /// the reason verbatim.
-    Unavailable { stream: String, error: String },
-    Available {
-        stream: String,
-        messages: u64,
-        bytes: u64,
-        first_seq: u64,
-        last_seq: u64,
-        consumer: ConsumerHealth,
-    },
-}
-
-impl StreamHealth {
-    /// The stream name, whichever state it is in.
-    pub fn stream(&self) -> &str {
-        match self {
-            StreamHealth::Unavailable { stream, .. } => stream,
-            StreamHealth::Available { stream, .. } => stream,
-        }
-    }
-}
-
-/// Health of one durable consumer on a stream. Externally tagged, same
-/// bincode rationale as [`StreamHealth`], and schema'd for the same
-/// reason.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ConsumerHealth {
-    /// The durable does not exist yet (no `fq run` has initialised it).
-    Missing { name: String },
-    /// The durable exists but its info could not be fetched.
-    Error { name: String, error: String },
-    Active {
-        name: String,
-        /// Stream sequence the consumer has been delivered up to.
-        delivered: u64,
-        /// `last_seq - delivered` — how far behind the stream head.
-        lag: u64,
-        ack_pending: u64,
-        num_pending: u64,
-        /// Outstanding redeliveries — messages delivered more than
-        /// once and not yet acked. The retry-pressure signal: a
-        /// non-zero value means work is being NAK'd or timing out and
-        /// walking toward the consumer's delivery bound, past which a
-        /// trigger is dead-lettered rather than retried again.
-        num_redelivered: u64,
-    },
-}
-
 /// Probe one stream and its primary durable consumer. Never errors —
-/// every failure mode is a value, so callers (the CLI, the read
-/// service) render partial health rather than losing the whole report.
+/// every failure mode is a value, so a caller renders partial health
+/// rather than losing the whole report.
 pub async fn probe_stream(
     js: &async_nats::jetstream::Context,
     stream_name: &str,

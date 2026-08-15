@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+fq-ops = { workspace = true }
 fq-tools = { workspace = true }
 async-nats = { workspace = true }
 # Optional: only the `test-support` feature (the mock LLM server for
