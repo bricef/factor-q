@@ -22,16 +22,16 @@ use axum::http::StatusCode;
 use axum::response::Html;
 use fq_edge::EdgeClient;
 use fq_edge::wire::WireError;
-use fq_ops::{ControlReport, CostReport as CostReportId, Domain, InvocationReport, OpId, ReportId};
-use fq_runtime::agent_view::{AgentDetailView, AgentEntryView, AgentsView};
-use fq_runtime::surface::{
+use fq_ops::agent_view::{AgentDetailView, AgentEntryView, AgentsView};
+use fq_ops::surface::{
     AgentListFilter, AgentViewKey, CostByAgentParams, CostSummaryParams, DoctorReport,
     EVENT_LIST_MAX_LIMIT, EventFilter, InvocationListFilter, InvocationViewKey, StatusReport,
 };
-use fq_runtime::views::{
+use fq_ops::views::{
     ActiveInvocationView, AgentCostDetailView, CostReport, EventView, InvocationDetailView,
     InvocationSummaryView,
 };
+use fq_ops::{ControlReport, CostReport as CostReportId, Domain, InvocationReport, OpId, ReportId};
 use serde::de::DeserializeOwned;
 
 use crate::{AppState, render, skew};

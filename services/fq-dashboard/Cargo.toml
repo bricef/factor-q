@@ -16,13 +16,12 @@ path = "src/main.rs"
 # crate `fq` uses, so a deadline or handshake fix lands in both.
 fq-edge = { path = "../fq-runtime/crates/fq-edge" }
 # Operation identities (`OpId`) — the contract half, transport-free.
+# The typed contract: the declared shapes and the view DTOs, from the
+# same crate the daemon declares them in, so a field rename fails this
+# compile instead of drifting silently. This is the whole dependency on
+# the runtime's types — the daemon crate itself, and the SQL and NATS
+# under it, are not linked here. tests/thin_reader_gate.rs holds that.
 fq-ops = { workspace = true }
-# The typed contract: the declared shapes (`fq_runtime::surface`) and
-# the view DTOs come straight from the runtime, so a field rename fails
-# this compile instead of drifting silently (#105 layer 3). Shared
-# transitive deps resolve under the single workspace Cargo.lock (#194),
-# so runtime and dashboard can never disagree on a pin.
-fq-runtime = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 # RFC3339 `since` strings for the costs page's time windows — the same
@@ -46,7 +45,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-async-nats = { workspace = true }
 # The in-crate tests serve a real edge, and a declaration captures its
 # shapes' schemas — so the test's own stand-in key types derive one.
 schemars = { workspace = true }
