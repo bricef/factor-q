@@ -63,7 +63,7 @@ The cost is one ergonomic constraint: the reducer is **synchronous** and writes 
 
 ## Completion semantics
 
-A model ends an invocation only by calling the schema-only `report_outcome` tool with `success`, `failed`, `blocked`, or `partial`. Bare assistant text is recorded, followed by a durable host notice asking the model to continue or report an outcome, and then another model turn. A response containing neither non-whitespace content nor tool calls is rejected by the runner as an `LlmError`; iteration and budget ceilings remain error stops.
+A model ends an invocation only by calling the schema-only `report_outcome` tool with `success`, `failed`, `blocked`, or `partial`. **Every invocation is offered that tool**, whether or not its agent declares one — an agent that could not call it could not finish, and one declaring no tools at all would be handed no way to call anything. Bare assistant text is recorded, followed by a durable host notice asking the model to continue or report an outcome, and then another model turn. A response containing neither non-whitespace content nor tool calls is rejected by the runner as an `LlmError`; iteration and budget ceilings remain error stops.
 
 ## The Rust API
 
