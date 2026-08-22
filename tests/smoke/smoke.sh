@@ -35,8 +35,12 @@ TESTS_FAILED=0
 # Everything this run touches lives under TMP_ROOT, including the three
 # things `fq` would otherwise reach for in the operator's own home:
 #
-#   FQ_CONFIG        carries the edge bind below and nothing else, so
-#                    the rest of the runtime still runs on its defaults
+#   FQ_CONFIG        the edge bind and the model registry, and nothing
+#                    else — the rest of the runtime runs on its
+#                    defaults. The registry has no usable default: an
+#                    empty one declares no models, and the daemon
+#                    refuses to start rather than run an agent whose
+#                    model nothing declared
 #   FQ_STATE_DIR     the edge identity is durable state, and a fresh
 #                    directory is what makes this a *first* run — the
 #                    only time the daemon mints and prints the admin
@@ -58,9 +62,47 @@ export XDG_CONFIG_HOME="${TMP_ROOT}/config"
 # in that gap breaks the run (the race #454 already tracks). The default
 # 9472 is not an option either — on a developer box it is usually held
 # by the daemon or dashboard they are already running.
-printf '[edge]\nbind = "127.0.0.1:0"\n' > "${FQ_CONFIG}"
+# The model every agent below declares. The registry is deliberately
+# closed (ADR-0003/0004): an agent naming a model no provider declares
+# fails to load, and the daemon refuses to start. That is the whole
+# point of it — a typo must not silently spend on an expensive model —
+# so a config this run writes has to declare the model this run uses.
+SMOKE_MODEL="claude-haiku-4-5"
+
+# How long to wait for a triggered invocation to reach a terminal
+# status. A one-turn Haiku call is seconds; a tool loop is longer, and
+# the daemon dispatches one trigger at a time.
+INVOCATION_TIMEOUT_S=180
+
+# One writer for the config, because there are two moments that need it
+# and they must not drift: now, before the daemon binds, and again once
+# port 0 has resolved to a real address. Each writes the file whole, so
+# anything omitted here is omitted from both.
+write_config() {
+    local bind="$1"
+    cat > "${FQ_CONFIG}" <<TOML
+[edge]
+bind = "${bind}"
+
+[providers.anthropic]
+api_key_env = "ANTHROPIC_API_KEY"
+models = ["${SMOKE_MODEL}"]
+TOML
+}
+
+write_config "127.0.0.1:0"
 
 cleanup() {
+    # Every daemon this run started, not just the current one: RUN_PID
+    # holds one pid, and an interrupted run can have stranded earlier
+    # ones. They outlive the script otherwise, and a stray daemon on
+    # the shared broker breaks the *next* run rather than this one.
+    if [[ -n "${STARTED_PIDS:-}" ]]; then
+        local p
+        for p in ${STARTED_PIDS}; do
+            kill -KILL "${p}" 2>/dev/null || true
+        done
+    fi
     # Kill any background fq run we may have left behind.
     if [[ -n "${RUN_PID:-}" ]] && kill -0 "${RUN_PID}" 2>/dev/null; then
         kill -KILL "${RUN_PID}" 2>/dev/null || true
@@ -201,20 +243,68 @@ fq_trigger() {
     local agent="$3"
     local payload="$4"
 
-    start_fq_run "${agents_dir}" "${cache_dir}" >&2 || return 1
+    # Reuse the caller's daemon when it has one. Starting a second
+    # would pair to *its* address and leave that in the shared config —
+    # so once this function stopped it, the caller's next client verb
+    # would dial a dead port while its own daemon was still running.
+    local own_daemon=""
+    if [[ -z "${RUN_PID:-}" ]] || ! kill -0 "${RUN_PID}" 2>/dev/null; then
+        own_daemon=1
+        start_fq_run "${agents_dir}" "${cache_dir}" >&2 || return 1
+    fi
 
     # `|| status=$?` rather than a bare assignment plus `$?`: this
     # script runs under `set -e`, where a failing command substitution
     # exits before the next line can read the status. Putting it in an
     # `||` list makes the failure ours to handle — and the daemon
     # still gets stopped below.
-    local out status=0
-    out="$("${FQ_BIN}" \
+    local status=0
+    "${FQ_BIN}" \
         --agents-dir "${agents_dir}" \
         --cache-dir "${cache_dir}" \
-        trigger "${agent}" "${payload}" 2>&1)" || status=$?
+        trigger "${agent}" "${payload}" >&2 2>&1 || status=$?
 
-    stop_fq_run >&2
+    # `fq trigger` queues and returns — the daemon dispatches it, and
+    # the CLI never had the answer to print (D-1 retired the in-process
+    # execution path). So the result has to be read back from the
+    # invocation the trigger produced, once that invocation is done.
+    local id="" phase="" row=""
+    local deadline=$((SECONDS + INVOCATION_TIMEOUT_S))
+    while (( SECONDS < deadline )); do
+        row="$("${FQ_BIN}" \
+            --agents-dir "${agents_dir}" \
+            --cache-dir "${cache_dir}" \
+            invocation list --json --include-archived 2>/dev/null \
+            | jq -r --arg a "${agent}" \
+                'map(select(.agent_id == $a))
+                 | map(select(.status == "completed" or .status == "failed"))
+                 | first // empty
+                 | "\(.invocation_id) \(.status)"')" || true
+        if [[ -n "${row}" ]]; then
+            id="${row%% *}"
+            phase="${row##* }"
+            break
+        fi
+        sleep 1
+    done
+
+    local out=""
+    if [[ -n "${id}" ]]; then
+        out="$("${FQ_BIN}" \
+            --agents-dir "${agents_dir}" \
+            --cache-dir "${cache_dir}" \
+            invocation transcript "${id}" --full 2>&1)"
+        # The terminal status, in the runtime's own spelling, so a test
+        # asserting on it is asserting on what the system reported.
+        out+=$'\n'"invocation status: ${phase}"
+    else
+        out="no invocation reached a terminal status within ${INVOCATION_TIMEOUT_S}s"
+        status=1
+    fi
+
+    if [[ -n "${own_daemon}" ]]; then
+        stop_fq_run >&2
+    fi
     printf '%s\n' "${out}"
     return "${status}"
 }
@@ -227,9 +317,16 @@ test_trigger_simple_response() {
     local agent_id
     agent_id="$(unique_agent_id simple)"
 
+    # Declares the terminal tool and nothing else. An agent with an
+    # empty tool list is offered no tools at all, so it cannot call
+    # `report_outcome` — and that call is the only clean end to a run.
+    # Such an agent answers correctly and then loops to the iteration
+    # ceiling, which is a failure stop.
     write_agent "${project}" "simple.md" "---
 name: ${agent_id}
 model: claude-haiku-4-5
+tools:
+  - builtin__report_outcome
 budget: 0.10
 ---
 
@@ -240,7 +337,7 @@ You are a concise assistant. Answer in one sentence only."
         "${agent_id}" "Say exactly: Smoke test OK.")"
 
     assert_contains "${output}" "Smoke test OK" "simple trigger response"
-    assert_contains "${output}" "Completed"       "simple trigger completion"
+    assert_contains "${output}" "invocation status: completed"       "simple trigger completion"
 }
 
 test_trigger_with_file_read() {
@@ -259,6 +356,7 @@ name: ${agent_id}
 model: claude-haiku-4-5
 tools:
   - builtin__file_read
+  - builtin__report_outcome
 sandbox:
   fs_read:
     - ${data_dir}
@@ -273,7 +371,7 @@ tool to read it, then answer in one sentence."
         "${agent_id}" "Read ${data_dir}/secret.txt and tell me the secret number.")"
 
     assert_contains "${output}" "47"        "file_read result propagated to LLM"
-    assert_contains "${output}" "Completed" "file_read trigger completion"
+    assert_contains "${output}" "invocation status: completed" "file_read trigger completion"
 }
 
 test_trigger_with_shell_tool() {
@@ -289,7 +387,8 @@ test_trigger_with_shell_tool() {
 name: ${agent_id}
 model: claude-haiku-4-5
 tools:
-  - shell
+  - builtin__exec
+  - builtin__report_outcome
 sandbox:
   exec_cwd:
     - ${work_dir}
@@ -317,7 +416,7 @@ command's output."
         fi
     fi
     pass "shell tool produced kernel name"
-    assert_contains "${output}" "Completed" "shell tool trigger completion"
+    assert_contains "${output}" "invocation status: completed" "shell tool trigger completion"
 }
 
 test_shell_tool_sandbox_denial() {
@@ -336,7 +435,8 @@ test_shell_tool_sandbox_denial() {
 name: ${agent_id}
 model: claude-haiku-4-5
 tools:
-  - shell
+  - builtin__exec
+  - builtin__report_outcome
 sandbox:
   exec_cwd:
     - ${work_dir}
@@ -355,7 +455,7 @@ in one sentence."
     # sandbox error. We don't assert on the LLM's exact wording
     # (model output varies), only that the run itself completed and
     # the forbidden path does not appear as a successful result.
-    assert_contains "${output}" "Completed" "denied shell trigger still completes"
+    assert_contains "${output}" "invocation status: completed" "denied shell trigger still completes"
 }
 
 # Start `fq run` in the background for tests that exercise the
@@ -365,11 +465,20 @@ start_fq_run() {
     local agents_dir="$1"
     local cache_dir="$2"
     RUN_LOG="${TMP_ROOT}/fq-run.log"
+
+    # Back to port 0 before every start. The pairing step below writes
+    # the *resolved* address back so client verbs can dial it, and that
+    # concrete port outlives the daemon that owned it — so the next
+    # daemon would try to bind a port the previous one may not have
+    # released, and fail. Port 0 again means each daemon is handed a
+    # free one.
+    write_config "127.0.0.1:0"
     "${FQ_BIN}" \
         --agents-dir "${agents_dir}" \
         --cache-dir "${cache_dir}" \
         run >"${RUN_LOG}" 2>&1 &
     RUN_PID=$!
+    STARTED_PIDS="${STARTED_PIDS:-} ${RUN_PID}"
 
     # Wait for the runtime to finish starting up. Two lines have to
     # arrive, not one: the projection consumer logs "projection consumer
@@ -389,10 +498,21 @@ start_fq_run() {
     if [[ -z "${ready}" ]]; then
         fail "fq run did not start within 10s"
         head -30 "${RUN_LOG}"
+        stop_fq_run
         return 1
     fi
 
-    pair_with_edge
+    # A daemon that cannot be paired with is useless to the caller, but
+    # it is still running, still holding the shared `fq-dispatcher`
+    # durable, and still consuming triggers meant for whatever starts
+    # next — acking them and finding no such agent in its own directory.
+    # Leaving one behind does not fail one test, it corrupts every test
+    # after it, which is why this stops the daemon rather than letting
+    # the caller's early return strand it.
+    if ! pair_with_edge; then
+        stop_fq_run
+        return 1
+    fi
 }
 
 # Pair this script's `fq` with the daemon it just started.
@@ -434,6 +554,21 @@ pair_with_edge() {
             }
         }
     ' "${RUN_LOG}")"
+    # Printed once, on the first run against a fresh state directory —
+    # and every test here starts its own daemon against the *same*
+    # state directory, so only the first of them sees it. The identity
+    # is durable, so the token the first run printed stays valid for
+    # every daemon after it; what changes is the address, which is why
+    # pairing still has to happen each time.
+    # Cached in a file, not a variable: most callers reach this through
+    # `$(fq_trigger ...)`, and a command substitution is a subshell —
+    # a variable set in there is gone by the time the next test needs
+    # it, which is exactly when the token is no longer being printed.
+    if [[ -n "${token}" ]]; then
+        printf '%s\n' "${token}" > "${TMP_ROOT}/admin-token"
+    elif [[ -r "${TMP_ROOT}/admin-token" ]]; then
+        token="$(cat "${TMP_ROOT}/admin-token")"
+    fi
     if [[ -z "${token}" ]]; then
         fail "could not read the admin token from ${RUN_LOG}"
         head -30 "${RUN_LOG}"
@@ -445,7 +580,7 @@ pair_with_edge() {
     # have to name the same place, and with port 0 that place is not
     # known until now. The daemon read this file once at startup and
     # nothing rereads it, so writing the resolved address back is safe.
-    printf '[edge]\nbind = "%s"\n' "${addr}" > "${FQ_CONFIG}"
+    write_config "${addr}"
 
     if ! "${FQ_BIN}" connect "${addr}" --token "${token}" \
         > "${TMP_ROOT}/connect.log" 2>&1; then
@@ -486,6 +621,8 @@ test_nats_triggered_dispatch() {
     write_agent "${project}" "q.md" "---
 name: ${agent_id}
 model: claude-haiku-4-5
+tools:
+  - builtin__report_outcome
 budget: 0.10
 ---
 
@@ -545,6 +682,8 @@ test_run_projection_query_and_costs() {
     write_agent "${project}" "q.md" "---
 name: ${agent_id}
 model: claude-haiku-4-5
+tools:
+  - builtin__report_outcome
 budget: 0.10
 ---
 
