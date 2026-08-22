@@ -650,13 +650,58 @@ fn canonical_tool_names_rewrites_only_bare_builtins() {
         "builtin__file_read".to_string(),
     ];
     assert_eq!(
-        canonical_tool_names(&names),
+        super::tool_names::canonical_tool_names(&names),
         vec![
             "builtin__exec".to_string(),
             "everything__echo".to_string(),
             "builtin__file_read".to_string(),
         ]
     );
+}
+
+/// The terminal tool is offered whatever the agent declares — including
+/// when it declares nothing. An agent with an empty tool list is handed
+/// no tools at all, so before this it could not call `report_outcome`,
+/// and `report_outcome` is the only clean end to a run: it answered its
+/// first turn correctly and then looped to the iteration ceiling, which
+/// is a failure stop.
+#[test]
+fn the_terminal_tool_is_offered_to_an_agent_that_declares_nothing() {
+    assert_eq!(
+        effective_tool_names(&[]),
+        vec![crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string()]
+    );
+}
+
+/// Appended after what the agent asked for, and canonicalised with it.
+#[test]
+fn the_terminal_tool_joins_the_declared_tools() {
+    let names = vec!["exec".to_string(), "builtin__file_read".to_string()];
+    assert_eq!(
+        effective_tool_names(&names),
+        vec![
+            "builtin__exec".to_string(),
+            "builtin__file_read".to_string(),
+            crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+        ]
+    );
+}
+
+/// Declaring it explicitly is still allowed and must not offer it
+/// twice — a duplicate schema is a malformed request to the provider.
+/// The bare spelling canonicalises first, so both forms collapse.
+#[test]
+fn declaring_the_terminal_tool_does_not_offer_it_twice() {
+    for declared in [
+        vec![crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string()],
+        vec!["report_outcome".to_string()],
+    ] {
+        assert_eq!(
+            effective_tool_names(&declared),
+            vec![crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string()],
+            "declared as {declared:?}"
+        );
+    }
 }
 
 /// #177 migration window: a definition still granting bare built-in
@@ -720,7 +765,9 @@ async fn legacy_bare_builtin_grants_and_calls_still_resolve() {
         .await
         .expect("invocation");
 
-    // The model was offered the canonical name, not the bare grant.
+    // The model was offered the canonical name, not the bare grant —
+    // and the terminal tool alongside it, which every invocation gets
+    // whether or not its agent declared one.
     let offered: Vec<String> = llm
         .requests()
         .first()
@@ -729,7 +776,13 @@ async fn legacy_bare_builtin_grants_and_calls_still_resolve() {
         .iter()
         .map(|t| t.name.clone())
         .collect();
-    assert_eq!(offered, vec!["builtin__self_inspect".to_string()]);
+    assert_eq!(
+        offered,
+        vec![
+            "builtin__self_inspect".to_string(),
+            crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+        ]
+    );
 
     // The event trail records the canonical vocabulary even though
     // the model issued the bare name.

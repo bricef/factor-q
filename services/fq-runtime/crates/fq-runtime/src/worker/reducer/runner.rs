@@ -492,7 +492,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // layered on.
         let tools = invocation_tools.as_ref().unwrap_or(tools);
         warn_on_deprecated_bare_grants(&agent_id, agent.tools());
-        let allowed_tool_names = canonical_tool_names(agent.tools());
+        let allowed_tool_names = effective_tool_names(agent.tools());
         let tool_schemas = tools.build_schemas(&allowed_tool_names);
         // A tool the agent declares but the registry has no
         // implementation for is dropped silently by `build_schemas` —
@@ -875,7 +875,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .ambient_var("FQ_MODEL", agent.model());
         let base_tools = self.context.tools();
         warn_on_deprecated_bare_grants(&agent_id, agent.tools());
-        let allowed_tool_names = canonical_tool_names(agent.tools());
+        let allowed_tool_names = effective_tool_names(agent.tools());
         let tool_schemas = base_tools.build_schemas(&allowed_tool_names);
         let (agent_config, step0_static_context) = self
             .build_invocation_setup(
@@ -1588,7 +1588,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             (Some(ws), Some(tool)) => bind_workspace_params(req, ws, &tool.parameters_schema()),
             _ => req,
         };
-        if !canonical_tool_names(agent.tools())
+        if !effective_tool_names(agent.tools())
             .iter()
             .any(|name| name == &req.tool_name)
         {
@@ -2308,46 +2308,6 @@ impl<'a> InvocationCtx<'a> {
     }
 }
 
-/// Canonical form of a legacy bare built-in name (`exec` →
-/// `builtin__exec`), or `None` when the name is not a bare built-in.
-/// The basename list lives beside the registry so a new built-in cannot
-/// miss this mapping. MCP tools are always explicitly namespaced and
-/// never map.
-fn canonicalize_bare_builtin(name: &str) -> Option<String> {
-    crate::tools::BUILTIN_TOOL_BASENAMES
-        .contains(&name)
-        .then(|| format!("{}{name}", crate::tools::BUILTIN_PREFIX))
-}
-
-/// Map legacy bare built-in grants to their canonical names. Pure and
-/// quiet — it runs on every tool call's allowed-check, so deprecation
-/// warnings are emitted once per invocation setup by
-/// [`warn_on_deprecated_bare_grants`], not here. Accepted for one
-/// release while agent definitions migrate (#177).
-fn canonical_tool_names(names: &[String]) -> Vec<String> {
-    names
-        .iter()
-        .map(|name| canonicalize_bare_builtin(name).unwrap_or_else(|| name.clone()))
-        .collect()
-}
-
-/// Emit the one-per-invocation deprecation warning for legacy bare
-/// built-in grants in an agent definition (#177 migration window).
-fn warn_on_deprecated_bare_grants(agent_id: &AgentId, names: &[String]) {
-    let deprecated: Vec<&str> = names
-        .iter()
-        .filter(|name| canonicalize_bare_builtin(name).is_some())
-        .map(|name| name.as_str())
-        .collect();
-    if !deprecated.is_empty() {
-        warn!(
-            agent_id = %agent_id,
-            tools = ?deprecated,
-            "bare built-in tool grants are deprecated; use the builtin__ prefix"
-        );
-    }
-}
-
 /// Stable runner-authored environment preamble injected as the first context message.
 fn invocation_preamble(
     workspace: Option<&Path>,
@@ -2634,3 +2594,8 @@ pub use config::{ReducerContext, ReducerContextBuilder, RunnerConfig, RunnerConf
 
 #[cfg(test)]
 mod tests;
+mod tool_names;
+
+pub(crate) use tool_names::{
+    canonicalize_bare_builtin, effective_tool_names, warn_on_deprecated_bare_grants,
+};
