@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use fq_runtime::views::{
+use fq_ops::views::{
     AgentCostDetailView, CostReport, CostView, EventView, InvocationCostView, InvocationDetailView,
     InvocationSummaryView, LiveExecutionView, LlmDispatchView, ModelCostView, ToolDispatchView,
 };
@@ -23,31 +23,31 @@ mod health;
 
 pub(crate) use health::{doctor_report, status_report};
 
-pub(crate) fn active_rows() -> Vec<fq_runtime::views::ActiveInvocationView> {
+pub(crate) fn active_rows() -> Vec<fq_ops::views::ActiveInvocationView> {
     vec![
-        fq_runtime::views::ActiveInvocationView {
+        fq_ops::views::ActiveInvocationView {
             invocation_id: "019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string(),
             agent_id: "m0-issue-fix".to_string(),
             phase: "dispatching_tools".to_string(),
             step_index: 165,
             started_at_ms: NOW_MS - 600_000,
             updated_at_ms: NOW_MS - 45_000,
-            liveness: fq_runtime::views::Liveness::Working,
-            open_tools: vec![fq_runtime::views::OpenToolView {
+            liveness: fq_ops::views::Liveness::Working,
+            open_tools: vec![fq_ops::views::OpenToolView {
                 tool_name: "exec".to_string(),
                 command: Some("gh issue view 86 --repo bricef/factor-q".to_string()),
             }],
             open_llms: vec![],
             summary: Some("Fixing #83: SECURITY.md drafted, running just ci".to_string()),
         },
-        fq_runtime::views::ActiveInvocationView {
+        fq_ops::views::ActiveInvocationView {
             invocation_id: "019f5b3f-31fb-7ae0-b130-3d65ccf40375".to_string(),
             agent_id: "m0-loop".to_string(),
             phase: "awaiting_model".to_string(),
             step_index: 44,
             started_at_ms: NOW_MS - 300_000,
             updated_at_ms: NOW_MS - 8_000,
-            liveness: fq_runtime::views::Liveness::Working,
+            liveness: fq_ops::views::Liveness::Working,
             open_tools: vec![],
             open_llms: vec!["claude-opus-4-8".to_string()],
             summary: None,
@@ -161,7 +161,7 @@ fn invocation_detail() -> InvocationDetailView {
         has_transcript: true,
         summary: Some("Fixing #83: SECURITY.md drafted, running just ci".to_string()),
         // Mid-run burn: the cost-so-far row on a live invocation.
-        cost: Some(fq_runtime::views::InvocationCostView {
+        cost: Some(fq_ops::views::InvocationCostView {
             invocation_id: "019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string(),
             started_at_ms: NOW_MS - 600_000,
             event_count: 52,
@@ -177,7 +177,7 @@ fn invocation_detail() -> InvocationDetailView {
         // its WAL row is live (caught by looking at the screenshot).
         archive: None,
         live: Some(LiveExecutionView {
-            liveness: fq_runtime::views::Liveness::Working,
+            liveness: fq_ops::views::Liveness::Working,
             phase: "dispatching_tools".to_string(),
             step_index: 165,
             started_at_ms: NOW_MS - 600_000,
@@ -207,8 +207,8 @@ fn invocation_detail() -> InvocationDetailView {
     }
 }
 
-fn transcript_entries() -> Vec<fq_runtime::transcript::TranscriptEntry> {
-    use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
+fn transcript_entries() -> Vec<fq_ops::transcript::TranscriptEntry> {
+    use fq_ops::transcript::{AssistantToolCall, TranscriptEntry};
     vec![
         TranscriptEntry::Prompt {
             timestamp_ms: NOW_MS - 600_000,
@@ -375,7 +375,7 @@ fn cost_report() -> CostReport {
             ("2026-07-11", 14.81),
         ]
         .into_iter()
-        .map(|(bucket, total_cost)| fq_runtime::views::CostBucketView {
+        .map(|(bucket, total_cost)| fq_ops::views::CostBucketView {
             bucket: bucket.to_string(),
             total_cost,
         })
@@ -523,8 +523,8 @@ fn agent_cost_detail() -> AgentCostDetailView {
 
 /// The agents-list fixture: the dogfood roster plus one broken
 /// definition, so the load-error surface is part of the screenshot.
-fn agents_view() -> fq_runtime::agent_view::AgentsView {
-    use fq_runtime::agent_view::AgentSummaryView;
+fn agents_view() -> fq_ops::agent_view::AgentsView {
+    use fq_ops::agent_view::AgentSummaryView;
     let mk = |id: &str, model: &str, budget: Option<f64>, trigger: Option<&str>, tools, prompt| {
         AgentSummaryView {
             agent_id: id.to_string(),
@@ -536,7 +536,7 @@ fn agents_view() -> fq_runtime::agent_view::AgentsView {
             path: format!("/home/fq/agents/{id}.md"),
         }
     };
-    fq_runtime::agent_view::AgentsView {
+    fq_ops::agent_view::AgentsView {
         agents: vec![
             mk(
                 "doc-drift",
@@ -573,8 +573,8 @@ fn agents_view() -> fq_runtime::agent_view::AgentsView {
 
 /// The agent-detail fixture: the multi-tool dogfood fixer with its
 /// system prompt in the collapsed details block.
-fn agent_detail_view() -> fq_runtime::agent_view::AgentDetailView {
-    fq_runtime::agent_view::AgentDetailView {
+fn agent_detail_view() -> fq_ops::agent_view::AgentDetailView {
+    fq_ops::agent_view::AgentDetailView {
         agent_id: "m0-issue-fix".to_string(),
         model: "claude-opus-4-8".to_string(),
         system_prompt: "You are m0-issue-fix. Fix the referenced issue end-to-end: clone the \
@@ -659,7 +659,7 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
                 &render::transcript(
                     &{
                         let mut entries = transcript_entries();
-                        entries.push(fq_runtime::transcript::TranscriptEntry::Outcome {
+                        entries.push(fq_ops::transcript::TranscriptEntry::Outcome {
                             timestamp_ms: NOW_MS - 30_000,
                             phase: "completed".to_string(),
                         });

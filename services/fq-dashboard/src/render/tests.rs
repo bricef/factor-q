@@ -115,7 +115,7 @@ fn unreachable_shows_last_seen_or_never() {
 /// must render as text, never as HTML.
 #[test]
 fn transcript_escapes_hostile_payloads() {
-    let entries = vec![fq_runtime::transcript::TranscriptEntry::ToolResult {
+    let entries = vec![fq_ops::transcript::TranscriptEntry::ToolResult {
         timestamp_ms: 0,
         tool_call_id: "tc-1".into(),
         tool_name: "exec".into(),
@@ -141,7 +141,7 @@ fn transcript_escapes_hostile_payloads() {
 /// at — and stays pinned to — the latest turn.
 #[test]
 fn transcript_dom_holds_entries_newest_first() {
-    use fq_runtime::transcript::TranscriptEntry;
+    use fq_ops::transcript::TranscriptEntry;
     let entries = vec![
         TranscriptEntry::Prompt {
             timestamp_ms: 0,
@@ -164,7 +164,7 @@ fn transcript_dom_holds_entries_newest_first() {
 
 #[test]
 fn transcript_renders_all_entry_kinds() {
-    use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
+    use fq_ops::transcript::{AssistantToolCall, TranscriptEntry};
     let entries = vec![
         TranscriptEntry::Prompt {
             timestamp_ms: 0,
@@ -197,7 +197,7 @@ fn transcript_renders_all_entry_kinds() {
 /// with a muted em-dash when absent.
 #[test]
 fn summary_column_renders_escaped_with_fallback() {
-    let mut items = vec![fq_runtime::views::InvocationSummaryView {
+    let mut items = vec![fq_ops::views::InvocationSummaryView {
         invocation_id: "inv-s".into(),
         agent_id: Some("m0-issue-fix".into()),
         worker_id: "w".into(),
@@ -217,7 +217,7 @@ fn summary_column_renders_escaped_with_fallback() {
     let html = invocations(&items, InvocationFilters::default(), 1_000);
     assert!(html.contains("—"), "fallback dash: {html}");
 
-    let active_rows = [fq_runtime::views::ActiveInvocationView {
+    let active_rows = [fq_ops::views::ActiveInvocationView {
         invocation_id: "inv-a".into(),
         agent_id: "m0-issue-fix".into(),
         phase: "reducing".into(),
@@ -238,7 +238,7 @@ fn summary_column_renders_escaped_with_fallback() {
 /// line — both escaped, both absent when there is no summary.
 #[test]
 fn summary_renders_on_detail_and_transcript_pages() {
-    let detail = fq_runtime::views::InvocationDetailView {
+    let detail = fq_ops::views::InvocationDetailView {
         invocation_id: "inv-1".into(),
         agent_id: Some("m0-issue-fix".into()),
         owner: None,
@@ -247,7 +247,7 @@ fn summary_renders_on_detail_and_transcript_pages() {
         recent_events: vec![],
         has_transcript: false,
         summary: Some("Fixing #83: <b>ci</b> running".into()),
-        cost: Some(fq_runtime::views::InvocationCostView {
+        cost: Some(fq_ops::views::InvocationCostView {
             invocation_id: "inv-1".into(),
             started_at_ms: 0,
             event_count: 52,
@@ -287,7 +287,7 @@ fn summary_renders_on_detail_and_transcript_pages() {
     // Failures remain useful without a transcript: the reason is inline and
     // the dead transcript link is omitted. Both provider text fields are escaped.
     let mut failed = detail.clone();
-    failed.recent_events = vec![fq_runtime::views::EventView {
+    failed.recent_events = vec![fq_ops::views::EventView {
         event_id: "event-1".into(),
         timestamp: "2026-07-18T00:00:00Z".into(),
         agent_id: "m0-issue-fix".into(),
@@ -319,7 +319,7 @@ fn summary_renders_on_detail_and_transcript_pages() {
 
 #[test]
 fn active_table_omitted_when_nothing_in_flight() {
-    let items = [fq_runtime::views::InvocationSummaryView {
+    let items = [fq_ops::views::InvocationSummaryView {
         invocation_id: "abc".into(),
         agent_id: None,
         worker_id: "w".into(),
@@ -339,7 +339,7 @@ fn active_table_omitted_when_nothing_in_flight() {
 
 #[test]
 fn active_table_shows_live_work_above_the_list() {
-    let active_rows = [fq_runtime::views::ActiveInvocationView {
+    let active_rows = [fq_ops::views::ActiveInvocationView {
         invocation_id: "0123456789abcdef".into(),
         agent_id: "m0-issue-fix".into(),
         phase: "dispatching_tools".into(),
@@ -347,7 +347,7 @@ fn active_table_shows_live_work_above_the_list() {
         started_at_ms: 0,
         updated_at_ms: 540_000,
         liveness: Liveness::Working,
-        open_tools: vec![fq_runtime::views::OpenToolView {
+        open_tools: vec![fq_ops::views::OpenToolView {
             tool_name: "exec".into(),
             command: Some("gh issue view 86 --repo bricef/factor-q".into()),
         }],
@@ -613,7 +613,7 @@ fn costs_link_named_agents_to_their_drilldown() {
 /// and per-invocation rows linking to the invocation detail page.
 #[test]
 fn agent_costs_render_models_and_linked_invocations() {
-    use fq_runtime::views::{InvocationCostView, ModelCostView};
+    use fq_ops::views::{InvocationCostView, ModelCostView};
     let mut totals = cost_view("m0-issue-fix", 1187, 101.38);
     totals.invocation_count = 43;
     let d = AgentCostDetailView {
@@ -735,7 +735,7 @@ fn summary_agent_costs_explain_the_empty_invocation_table() {
 /// load errors loudly.
 #[test]
 fn agents_list_links_definitions_and_surfaces_load_errors() {
-    use fq_runtime::agent_view::{AgentSummaryView, AgentsView};
+    use fq_ops::agent_view::{AgentSummaryView, AgentsView};
     let view = AgentsView {
         agents: vec![
             AgentSummaryView {
@@ -785,7 +785,7 @@ fn agents_list_links_definitions_and_surfaces_load_errors() {
 /// arbitrary text.
 #[test]
 fn agent_detail_collapses_and_escapes_the_prompt() {
-    use fq_runtime::agent_view::AgentDetailView;
+    use fq_ops::agent_view::AgentDetailView;
     let d = AgentDetailView {
         agent_id: "m0-issue-fix".to_string(),
         model: "claude-opus-4-8".to_string(),
@@ -829,7 +829,7 @@ fn agent_detail_collapses_and_escapes_the_prompt() {
 #[test]
 fn invocation_surfaces_link_agent_names() {
     let items = vec![
-        fq_runtime::views::InvocationSummaryView {
+        fq_ops::views::InvocationSummaryView {
             invocation_id: "inv-1".into(),
             agent_id: Some("m0-loop".into()),
             worker_id: "w".into(),
@@ -839,7 +839,7 @@ fn invocation_surfaces_link_agent_names() {
             archived: false,
             summary: None,
         },
-        fq_runtime::views::InvocationSummaryView {
+        fq_ops::views::InvocationSummaryView {
             invocation_id: "inv-2".into(),
             agent_id: None,
             worker_id: "w".into(),
@@ -860,7 +860,7 @@ fn invocation_surfaces_link_agent_names() {
         "got: {html}"
     );
 
-    let active_rows = [fq_runtime::views::ActiveInvocationView {
+    let active_rows = [fq_ops::views::ActiveInvocationView {
         invocation_id: "inv-3".into(),
         agent_id: "m0-issue-fix".into(),
         phase: "reducing".into(),
@@ -885,7 +885,7 @@ fn invocation_surfaces_link_agent_names() {
 /// survives ticks).
 #[test]
 fn invocation_filters_hide_terminal_rows_and_compose_links() {
-    let mk = |id: &str, status: &str| fq_runtime::views::InvocationSummaryView {
+    let mk = |id: &str, status: &str| fq_ops::views::InvocationSummaryView {
         invocation_id: id.into(),
         agent_id: Some("a".into()),
         worker_id: "w".into(),
@@ -1012,7 +1012,7 @@ fn cost_chart_fills_slots_and_labels_the_max() {
 /// detail — same vocabulary everywhere.
 #[test]
 fn liveness_and_status_carry_the_health_palette() {
-    let mk = |liveness| fq_runtime::views::ActiveInvocationView {
+    let mk = |liveness| fq_ops::views::ActiveInvocationView {
         invocation_id: "inv-a".into(),
         agent_id: "a".into(),
         phase: "reducing".into(),
@@ -1053,12 +1053,12 @@ fn liveness_and_status_carry_the_health_palette() {
     assert_eq!(status_span("in_flight"), "in_flight");
 
     // The detail page's live block carries the badge on the phase.
-    let detail = fq_runtime::views::InvocationDetailView {
+    let detail = fq_ops::views::InvocationDetailView {
         invocation_id: "inv-1".into(),
         agent_id: None,
         owner: None,
         archive: None,
-        live: Some(fq_runtime::views::LiveExecutionView {
+        live: Some(fq_ops::views::LiveExecutionView {
             liveness: Liveness::Stuck,
             phase: "reducing".into(),
             step_index: 3,
@@ -1109,7 +1109,7 @@ fn token_cells_compact_with_exact_hover() {
 
 #[test]
 fn invocation_rows_escape_link_and_show_start() {
-    let items = vec![fq_runtime::views::InvocationSummaryView {
+    let items = vec![fq_ops::views::InvocationSummaryView {
         invocation_id: "0123456789abcdef".into(),
         agent_id: Some("<agent>".into()),
         worker_id: "w".into(),

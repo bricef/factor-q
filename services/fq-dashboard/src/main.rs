@@ -351,12 +351,12 @@ mod tests {
     use fq_edge::auth::EdgeIdentity;
     use fq_edge::wire::WireError;
     use fq_ops::Domain;
-    use fq_runtime::agent_view::{AgentDetailView, AgentEntryView, AgentSummaryView};
-    use fq_runtime::surface::{
+    use fq_ops::agent_view::{AgentDetailView, AgentEntryView, AgentSummaryView};
+    use fq_ops::surface::{
         AgentListFilter, AgentViewKey, CostByAgentParams, CostSummaryParams, DoctorReport,
         EventFilter, InvocationListFilter, InvocationViewKey, StatusReport, TurnFilter,
     };
-    use fq_runtime::views::{
+    use fq_ops::views::{
         ActiveInvocationView, AgentCostDetailView, CostReport, EventView, InvocationDetailView,
         InvocationSummaryView,
     };
@@ -427,8 +427,8 @@ mod tests {
     /// and reproducing them here would be a second copy free to drift
     /// from the first.
     fn fixture_registry(version: &str) -> EdgeRegistry {
-        use fq_runtime::surface::{ActiveParams, DoctorParams, StatusParams};
-        use fq_runtime::turn::TurnState;
+        use fq_ops::surface::{ActiveParams, DoctorParams, StatusParams};
+        use fq_ops::turn::TurnState;
 
         let mut registry = EdgeRegistry::new();
         registry

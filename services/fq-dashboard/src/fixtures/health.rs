@@ -11,12 +11,12 @@
 //! `executions` / `failures` belong to `control.doctor`. A screenshot
 //! diff should therefore show nothing but the version line.
 
-use fq_runtime::health::{ConsumerHealth, StreamHealth};
-use fq_runtime::surface::{
+use fq_ops::health::{ConsumerHealth, StreamHealth};
+use fq_ops::surface::{
     DoctorDeadLetters, DoctorExecutions, DoctorFailure, DoctorReport, DoctorWorkers,
     StatusRegistry, StatusReport,
 };
-use fq_runtime::views::RecoveryView;
+use fq_ops::views::RecoveryView;
 
 /// `control.status` — what the daemon is and what its streams are
 /// doing.

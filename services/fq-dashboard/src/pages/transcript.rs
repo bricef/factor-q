@@ -14,9 +14,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Html;
 use fq_edge::EdgeClient;
+use fq_ops::surface::{InvocationViewKey, TurnFilter};
+use fq_ops::views::InvocationDetailView;
 use fq_ops::{Domain, OpId};
-use fq_runtime::surface::{InvocationViewKey, TurnFilter};
-use fq_runtime::views::InvocationDetailView;
 
 use super::{
     CallError, Page, call, edge_or_unreachable, now_ms, unreachable_page, with_skew_banner,
@@ -86,7 +86,7 @@ pub(crate) async fn transcript_stream(
             .get("after")
             .and_then(|v| v.parse().ok())
             .unwrap_or(u64::MAX),
-        truncate: (!full).then_some(fq_runtime::transcript::DEFAULT_TRUNCATE_BYTES),
+        truncate: (!full).then_some(fq_ops::transcript::DEFAULT_TRUNCATE_BYTES),
         queue: std::collections::VecDeque::new(),
         done: false,
     };
@@ -158,10 +158,10 @@ pub(crate) async fn transcript_stream(
             // moved past them — discard them here and this session
             // cannot get them back, only a reload can. So stop at the
             // bad item, render what preceded it, and report after.
-            let mut entries: Vec<fq_runtime::transcript::TranscriptEntry> = Vec::new();
+            let mut entries: Vec<fq_ops::transcript::TranscriptEntry> = Vec::new();
             let mut decode_error = None;
             for item in &batch.items {
-                match serde_json::from_value::<fq_runtime::turn::TurnState>(item.item.clone()) {
+                match serde_json::from_value::<fq_ops::turn::TurnState>(item.item.clone()) {
                     Ok(turn) => entries.push(turn.transcript_entry()),
                     Err(err) => {
                         decode_error = Some(format!("decode: {err}"));
@@ -171,7 +171,7 @@ pub(crate) async fn transcript_stream(
                 }
             }
             if let Some(max) = s.truncate {
-                fq_runtime::transcript::truncate_entries(&mut entries, max);
+                fq_ops::transcript::truncate_entries(&mut entries, max);
             }
             // #turns is a column-reverse panel (newest-first DOM):
             // PREPENDING in chronological order lands each newer entry
@@ -223,7 +223,7 @@ pub(crate) async fn transcript_page(
         Err(err) => return unreachable_page(&state, "transcript", &format!("encode: {err}")),
     };
 
-    let turns: Vec<fq_runtime::turn::TurnState> =
+    let turns: Vec<fq_ops::turn::TurnState> =
         match call(&client, OpId::List(Domain::Turn), filter).await {
             Ok(turns) => turns,
             Err(CallError::NotFound) => Vec::new(),
@@ -252,17 +252,17 @@ pub(crate) async fn transcript_page(
 
     // Log order is chronological and `turn.list` answers in sequence
     // order, so no re-sort is needed to reproduce the timeline.
-    let mut entries: Vec<fq_runtime::transcript::TranscriptEntry> = turns
+    let mut entries: Vec<fq_ops::transcript::TranscriptEntry> = turns
         .iter()
-        .map(fq_runtime::turn::TurnState::transcript_entry)
+        .map(fq_ops::turn::TurnState::transcript_entry)
         .collect();
     // The read service truncated payloads server-side; `turn.list`
     // answers with whole turns, so the same cap is applied here with
     // the same function. The page renders what it always rendered.
     if !full {
-        fq_runtime::transcript::truncate_entries(
+        fq_ops::transcript::truncate_entries(
             &mut entries,
-            fq_runtime::transcript::DEFAULT_TRUNCATE_BYTES,
+            fq_ops::transcript::DEFAULT_TRUNCATE_BYTES,
         );
     }
 

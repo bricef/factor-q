@@ -8,10 +8,10 @@
 // rustdoc resolves its links in its own scope (db59f35).
 mod agents;
 
-use fq_runtime::health::{ConsumerHealth, StreamHealth};
-use fq_runtime::surface::{DoctorReport, StatusReport};
-use fq_runtime::transcript::{AssistantToolCall, TranscriptEntry};
-use fq_runtime::views::{
+use fq_ops::health::{ConsumerHealth, StreamHealth};
+use fq_ops::surface::{DoctorReport, StatusReport};
+use fq_ops::transcript::{AssistantToolCall, TranscriptEntry};
+use fq_ops::views::{
     ActiveInvocationView, AgentCostDetailView, CostBucketView, CostReport, CostView, EventView,
     InvocationDetailView, InvocationSummaryView, Liveness, ModelCostView,
 };

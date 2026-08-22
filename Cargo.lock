@@ -1239,14 +1239,12 @@ name = "fq-dashboard"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
  "axum",
  "chrono",
  "clap",
  "datastar",
  "fq-edge",
  "fq-ops",
- "fq-runtime",
  "futures",
  "http-body-util",
  "schemars 1.2.1",

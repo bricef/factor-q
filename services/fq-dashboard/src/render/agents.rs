@@ -4,10 +4,10 @@
 //! only pages that render what an agent *is* rather than what it did.
 //! They read the daemon's live registry through the read service's
 //! definition DTOs; every other page here renders runtime activity out
-//! of `fq_runtime::views`. The shared cells and shells stay in
+//! of `fq_ops::views`. The shared cells and shells stay in
 //! [`super`], with the rest of their callers.
 
-use fq_runtime::agent_view::{AgentDetailView, AgentsView};
+use fq_ops::agent_view::{AgentDetailView, AgentsView};
 
 use super::{agent_link, esc, fmt_grouped, fold};
 
