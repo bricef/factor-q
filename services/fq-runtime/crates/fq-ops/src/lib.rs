@@ -34,6 +34,7 @@ pub mod model;
 pub mod opid;
 pub mod registry;
 pub mod surface;
+pub mod transcript;
 pub mod views;
 
 pub use model::{
