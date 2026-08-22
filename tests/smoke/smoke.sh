@@ -72,7 +72,7 @@ SMOKE_MODEL="claude-haiku-4-5"
 # How long to wait for a triggered invocation to reach a terminal
 # status. A one-turn Haiku call is seconds; a tool loop is longer, and
 # the daemon dispatches one trigger at a time.
-INVOCATION_TIMEOUT_S=90
+INVOCATION_TIMEOUT_S=180
 
 # One writer for the config, because there are two moments that need it
 # and they must not drift: now, before the daemon binds, and again once
@@ -243,7 +243,15 @@ fq_trigger() {
     local agent="$3"
     local payload="$4"
 
-    start_fq_run "${agents_dir}" "${cache_dir}" >&2 || return 1
+    # Reuse the caller's daemon when it has one. Starting a second
+    # would pair to *its* address and leave that in the shared config —
+    # so once this function stopped it, the caller's next client verb
+    # would dial a dead port while its own daemon was still running.
+    local own_daemon=""
+    if [[ -z "${RUN_PID:-}" ]] || ! kill -0 "${RUN_PID}" 2>/dev/null; then
+        own_daemon=1
+        start_fq_run "${agents_dir}" "${cache_dir}" >&2 || return 1
+    fi
 
     # `|| status=$?` rather than a bare assignment plus `$?`: this
     # script runs under `set -e`, where a failing command substitution
@@ -294,7 +302,9 @@ fq_trigger() {
         status=1
     fi
 
-    stop_fq_run >&2
+    if [[ -n "${own_daemon}" ]]; then
+        stop_fq_run >&2
+    fi
     printf '%s\n' "${out}"
     return "${status}"
 }
@@ -307,9 +317,16 @@ test_trigger_simple_response() {
     local agent_id
     agent_id="$(unique_agent_id simple)"
 
+    # Declares the terminal tool and nothing else. An agent with an
+    # empty tool list is offered no tools at all, so it cannot call
+    # `report_outcome` — and that call is the only clean end to a run.
+    # Such an agent answers correctly and then loops to the iteration
+    # ceiling, which is a failure stop.
     write_agent "${project}" "simple.md" "---
 name: ${agent_id}
 model: claude-haiku-4-5
+tools:
+  - builtin__report_outcome
 budget: 0.10
 ---
 
@@ -339,6 +356,7 @@ name: ${agent_id}
 model: claude-haiku-4-5
 tools:
   - builtin__file_read
+  - builtin__report_outcome
 sandbox:
   fs_read:
     - ${data_dir}
@@ -369,7 +387,8 @@ test_trigger_with_shell_tool() {
 name: ${agent_id}
 model: claude-haiku-4-5
 tools:
-  - shell
+  - builtin__exec
+  - builtin__report_outcome
 sandbox:
   exec_cwd:
     - ${work_dir}
@@ -416,7 +435,8 @@ test_shell_tool_sandbox_denial() {
 name: ${agent_id}
 model: claude-haiku-4-5
 tools:
-  - shell
+  - builtin__exec
+  - builtin__report_outcome
 sandbox:
   exec_cwd:
     - ${work_dir}
@@ -601,6 +621,8 @@ test_nats_triggered_dispatch() {
     write_agent "${project}" "q.md" "---
 name: ${agent_id}
 model: claude-haiku-4-5
+tools:
+  - builtin__report_outcome
 budget: 0.10
 ---
 
@@ -660,6 +682,8 @@ test_run_projection_query_and_costs() {
     write_agent "${project}" "q.md" "---
 name: ${agent_id}
 model: claude-haiku-4-5
+tools:
+  - builtin__report_outcome
 budget: 0.10
 ---
 
