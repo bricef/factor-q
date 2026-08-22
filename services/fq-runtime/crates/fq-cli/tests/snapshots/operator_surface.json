@@ -2625,7 +2625,7 @@
             "description": "What happened: the turn's content, full payload by default.",
             "oneOf": [
               {
-                "description": "The invocation's opening prompt: the system prompt the agent\nwas configured with and the user message its trigger became.\nFolded from the opening `llm.request` — see\n[`TurnFold::apply`]. First in the enum because it is first in\nthe conversation.",
+                "description": "The invocation's opening prompt: the system prompt the agent\nwas configured with and the user message its trigger became.\nIt precedes every Round, and there is exactly one per\ninvocation.",
                 "properties": {
                   "kind": {
                     "const": "prompt",
@@ -2819,7 +2819,7 @@
             "description": "What happened: the turn's content, full payload by default.",
             "oneOf": [
               {
-                "description": "The invocation's opening prompt: the system prompt the agent\nwas configured with and the user message its trigger became.\nFolded from the opening `llm.request` — see\n[`TurnFold::apply`]. First in the enum because it is first in\nthe conversation.",
+                "description": "The invocation's opening prompt: the system prompt the agent\nwas configured with and the user message its trigger became.\nIt precedes every Round, and there is exactly one per\ninvocation.",
                 "properties": {
                   "kind": {
                     "const": "prompt",
