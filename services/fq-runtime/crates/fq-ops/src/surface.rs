@@ -88,6 +88,27 @@ pub struct AgentViewKey {
 pub struct AgentListFilter {}
 
 // ---------------------------------------------------------------------
+// Worker
+// ---------------------------------------------------------------------
+
+/// Get identity for the Worker view.
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkerViewKey {
+    pub worker_id: String,
+}
+
+/// List selection for the Worker view — the typed, schema'd filter
+/// (never a query language). `fq workers list` used to pull the whole
+/// roster and sieve it in the client; the selection now travels with
+/// the request and the view applies it to its index.
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkerListFilter {
+    /// `alive` | `stale` | `shutdown`. Absent lists the whole roster.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+// ---------------------------------------------------------------------
 // Turn
 // ---------------------------------------------------------------------
 

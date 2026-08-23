@@ -41,22 +41,11 @@ pub(crate) fn parse_invocation_status_filter(
     }
 }
 
-/// Get identity for the Worker view.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct WorkerViewKey {
-    pub(crate) worker_id: String,
-}
-
-/// List selection for the Worker view — the typed, schema'd filter
-/// (never a query language). `fq workers list` used to pull the whole
-/// roster and sieve it in the client; the selection now travels with
-/// the request and the view applies it to its index.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct WorkerListFilter {
-    /// `alive` | `stale` | `shutdown`. Absent lists the whole roster.
-    #[serde(default)]
-    pub(crate) status: Option<String>,
-}
+// The Worker shapes are `fq_ops::surface`, like every other declared
+// key and filter. They stayed here through #491 because the handler
+// was their only consumer; the client reads them too once it stops
+// sharing a crate with the handler.
+pub(crate) use fq_ops::surface::{WorkerListFilter, WorkerViewKey};
 
 /// What the operator surface's handlers reach for beyond [`Views`]:
 /// the bus and writer stores commands write through, the runner a
