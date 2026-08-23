@@ -693,7 +693,7 @@ fn flipped_verb_without_a_pairing_says_how_to_pair() {
         &["status"],
     ] {
         let xdg = tempfile::tempdir().expect("xdg dir");
-        let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+        let out = Command::new(fq_client_binary())
             .args(verb)
             .env("FQ_CONFIG", "/nonexistent/fq.toml")
             .env("XDG_CONFIG_HOME", xdg.path())
@@ -1494,7 +1494,7 @@ impl EdgeFixture {
 
         // Pair once: non-interactive TOFU auto-pins with a notice.
         let xdg = tempfile::tempdir().expect("xdg dir");
-        let connect = Command::new(env!("CARGO_BIN_EXE_fq"))
+        let connect = Command::new(fq_client_binary())
             .args(["connect", &addr, "--token", &token])
             .env("FQ_CONFIG", &client_config)
             .env("XDG_CONFIG_HOME", xdg.path())
@@ -1589,7 +1589,7 @@ impl EdgeFixture {
         args: &[&str],
         agents_dir: &std::path::Path,
     ) -> (Option<i32>, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+        let out = Command::new(fq_client_binary())
             .args(args)
             .env("FQ_CONFIG", &self.client_config)
             .env("FQ_CACHE_DIR", self.dir.path())
@@ -2620,4 +2620,12 @@ fn a_limit_keeps_the_newest_rows() {
         !stdout.contains("seq=11"),
         "the older dead letter must not survive the limit; got:\n{stdout}"
     );
+}
+
+/// The client binary. `CARGO_BIN_EXE_*` only names binaries of the
+/// package the test lives in, and `fq` is `fq-cli`'s — but both land in
+/// the same target directory, so the daemon's own path names it.
+#[allow(dead_code)]
+fn fq_client_binary() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_fqd")).with_file_name("fq")
 }

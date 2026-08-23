@@ -58,11 +58,11 @@ async fn operator_surface_matches_the_committed_snapshot() {
         ),
         fq_runtime::Harness::new(),
     ));
-    let registry = fq_cli::operator_registry(
+    let registry = fq_daemon::operator_registry(
         views,
         fq_runtime::watermark::Horizon::new(vec![watermark]),
         Duration::from_millis(1),
-        fq_cli::OperatorDeps {
+        fq_daemon::OperatorDeps {
             bus,
             projection: projection_store,
             control_plane: control_plane_store,
@@ -75,7 +75,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
             // the snapshot describes declarations, and a stop switch
             // nobody touches declares `control.down` just as well as
             // one that would stop a daemon.
-            machinery: fq_cli::MachineryDeps {
+            machinery: fq_daemon::MachineryDeps {
                 agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
                 agents_dir: scratch.path().join("agents"),
                 default_model: None,

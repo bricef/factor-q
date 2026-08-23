@@ -5,35 +5,6 @@ use futures::StreamExt;
 use uuid::Uuid;
 
 #[test]
-fn parse_invocation_status_filter_accepts_known_values() {
-    use fq_runtime::control_plane::store::OwnerStatus;
-    assert!(matches!(
-        parse_invocation_status_filter("in_flight").unwrap(),
-        OwnerStatus::InFlight
-    ));
-    assert!(matches!(
-        parse_invocation_status_filter("ambiguous").unwrap(),
-        OwnerStatus::Ambiguous
-    ));
-    assert!(matches!(
-        parse_invocation_status_filter("completed").unwrap(),
-        OwnerStatus::Completed
-    ));
-    assert!(matches!(
-        parse_invocation_status_filter("failed").unwrap(),
-        OwnerStatus::Failed
-    ));
-}
-
-#[test]
-fn parse_invocation_status_filter_rejects_unknown() {
-    let err = parse_invocation_status_filter("garbage").unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("garbage"));
-    assert!(msg.contains("in_flight"));
-}
-
-#[test]
 fn format_invocation_list_row_human_renders_short_id_and_truncated_fields() {
     let item = fq_ops::views::InvocationSummaryView {
         invocation_id: "019e3b328fd47de1aae0bb91bb24528d".to_string(),

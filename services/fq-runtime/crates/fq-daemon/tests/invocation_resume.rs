@@ -30,7 +30,7 @@ use fq_runtime::test_support::mock_anthropic::{MockAnthropicServer, MockResponse
 use serde_json::json;
 
 fn fq_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_fq")
+    fq_client_binary()
 }
 
 /// The daemon is its own binary; `fq` cannot start one.
@@ -990,4 +990,12 @@ async fn live_drop_requires_opt_in_halts_and_stays_terminal_after_restart() {
 
     restarted.stop();
     mock.shutdown().await;
+}
+
+/// The client binary. `CARGO_BIN_EXE_*` only names binaries of the
+/// package the test lives in, and `fq` is `fq-cli`'s — but both land in
+/// the same target directory, so the daemon's own path names it.
+#[allow(dead_code)]
+fn fq_client_binary() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_fqd")).with_file_name("fq")
 }

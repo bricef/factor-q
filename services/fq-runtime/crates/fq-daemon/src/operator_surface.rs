@@ -732,3 +732,37 @@ pub(crate) fn parse_invocation_status_filter(
         _ => OwnerStatus::Failed,
     })
 }
+
+#[cfg(test)]
+mod status_filter_tests {
+    use super::parse_invocation_status_filter;
+
+    #[test]
+    fn parse_invocation_status_filter_accepts_known_values() {
+        use fq_runtime::control_plane::store::OwnerStatus;
+        assert!(matches!(
+            parse_invocation_status_filter("in_flight").unwrap(),
+            OwnerStatus::InFlight
+        ));
+        assert!(matches!(
+            parse_invocation_status_filter("ambiguous").unwrap(),
+            OwnerStatus::Ambiguous
+        ));
+        assert!(matches!(
+            parse_invocation_status_filter("completed").unwrap(),
+            OwnerStatus::Completed
+        ));
+        assert!(matches!(
+            parse_invocation_status_filter("failed").unwrap(),
+            OwnerStatus::Failed
+        ));
+    }
+
+    #[test]
+    fn parse_invocation_status_filter_rejects_unknown() {
+        let err = parse_invocation_status_filter("garbage").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("garbage"));
+        assert!(msg.contains("in_flight"));
+    }
+}

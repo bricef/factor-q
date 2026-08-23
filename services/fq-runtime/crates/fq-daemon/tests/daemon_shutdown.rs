@@ -32,7 +32,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn fq_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_fq")
+    fq_client_binary()
 }
 
 /// The daemon is its own binary now: `fq` cannot start one, so a test
@@ -475,4 +475,12 @@ fn fq_down_fast_fails_when_no_daemon_running() {
         elapsed < Duration::from_secs(60),
         "`fq down` did not fast-fail with no daemon (took {elapsed:?})"
     );
+}
+
+/// The client binary. `CARGO_BIN_EXE_*` only names binaries of the
+/// package the test lives in, and `fq` is `fq-cli`'s — but both land in
+/// the same target directory, so the daemon's own path names it.
+#[allow(dead_code)]
+fn fq_client_binary() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_fqd")).with_file_name("fq")
 }

@@ -28,7 +28,7 @@ fn unique_scratch() -> std::path::PathBuf {
 /// Run the `fq` binary with stdin piped (non-interactive) and the
 /// scratch dir's isolated XDG config home.
 fn fq(scratch: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_fq"))
+    Command::new(fq_client_binary())
         .args(args)
         .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("XDG_CONFIG_HOME", scratch.join("xdg"))
@@ -263,4 +263,12 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
     let status = daemon.wait().expect("wait for fqd");
     assert!(status.success(), "clean daemon exit, got {status:?}");
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// The client binary. `CARGO_BIN_EXE_*` only names binaries of the
+/// package the test lives in, and `fq` is `fq-cli`'s — but both land in
+/// the same target directory, so the daemon's own path names it.
+#[allow(dead_code)]
+fn fq_client_binary() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_fqd")).with_file_name("fq")
 }

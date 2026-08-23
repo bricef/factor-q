@@ -218,11 +218,11 @@ impl Surface {
             .expect("agent");
 
         let (_watermark_tx, watermark) = fq_runtime::watermark::channel();
-        let registry = fq_cli::operator_registry(
+        let registry = fq_daemon::operator_registry(
             views,
             fq_runtime::watermark::Horizon::new(vec![watermark]),
             Duration::from_millis(1),
-            fq_cli::OperatorDeps {
+            fq_daemon::OperatorDeps {
                 bus: bus.clone(),
                 projection: projection.clone(),
                 control_plane: control_plane.clone(),
@@ -235,7 +235,7 @@ impl Surface {
                 // op, and this probe never issues one — the stop
                 // switch is armed so the surface assembles, and
                 // nothing here throws it.
-                machinery: fq_cli::MachineryDeps {
+                machinery: fq_daemon::MachineryDeps {
                     agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
                     agents_dir: scratch.path().join("agents"),
                     default_model: None,

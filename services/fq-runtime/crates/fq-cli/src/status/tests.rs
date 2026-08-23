@@ -4,18 +4,15 @@ use fq_ops::health::{ConsumerHealth, StreamHealth};
 
 fn config() -> StatusConfig {
     StatusConfig {
-        nats_url: "nats://localhost:4222".to_string(),
-        agents_dir: PathBuf::from("/srv/agents"),
-        cache_dir: PathBuf::from("/var/lib/fq"),
         edge: "127.0.0.1:8787".to_string(),
     }
 }
 
 fn stores(initialised: bool) -> StatusStores {
     StatusStores {
-        worker_path: PathBuf::from("/var/lib/fq/worker.db"),
-        control_plane_path: PathBuf::from("/var/lib/fq/control-plane.db"),
-        projection_path: PathBuf::from("/var/lib/fq/projection.db"),
+        worker_path: "/var/lib/fq/worker.db".to_string(),
+        control_plane_path: "/var/lib/fq/control-plane.db".to_string(),
+        projection_path: "/var/lib/fq/projection.db".to_string(),
         legacy_events_db: None,
         initialised,
     }
@@ -24,6 +21,7 @@ fn stores(initialised: bool) -> StatusStores {
 fn report() -> StatusReport {
     StatusReport {
         version: "0.1.0+deadbee".to_string(),
+        stores: stores(true),
         streams: vec![StreamHealth::Available {
             stream: "fq-events".to_string(),
             messages: 12,
@@ -142,22 +140,6 @@ fn the_store_block_is_the_same_either_way() {
             .to_string()
     };
     assert_eq!(block(&with), block(&without));
-}
-
-/// A store directory the daemon has never initialised keeps its
-/// original remedy line — the one case where `fq status` tells the
-/// operator to start a runtime rather than report on one.
-#[test]
-fn an_uninitialised_store_says_how_to_create_it() {
-    let doc = StatusDocument {
-        stores: stores(false),
-        ..unreachable()
-    };
-    let out = render_status_human(&doc);
-    assert!(
-        out.contains("not initialised (start `fqd` to create)"),
-        "got:\n{out}"
-    );
 }
 
 // ------------------------------------------------------------------

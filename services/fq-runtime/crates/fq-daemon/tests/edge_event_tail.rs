@@ -410,7 +410,7 @@ impl World {
             .expect("client fq.toml");
 
         let xdg = tempfile::tempdir().expect("xdg dir");
-        let connect = Command::new(env!("CARGO_BIN_EXE_fq"))
+        let connect = Command::new(fq_client_binary())
             .args(["connect", &addr, "--token", &token])
             .env("FQ_CONFIG", dir.join("fq.toml"))
             .env("XDG_CONFIG_HOME", xdg.path())
@@ -531,7 +531,7 @@ impl World {
                 .unwrap()
                 .as_nanos()
         ));
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fq"))
+        let mut child = Command::new(fq_client_binary())
             .arg("events")
             .arg("tail")
             .args(args)
@@ -575,7 +575,7 @@ impl World {
     /// test for those is the whole run: what it printed, and what it
     /// exited with.
     fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+        let out = Command::new(fq_client_binary())
             .args(args)
             .env("FQ_CONFIG", self.dir.join("fq.toml"))
             .env("FQ_NATS_URL", self.broker.url())
@@ -2117,4 +2117,12 @@ fn an_idle_tail_survives_its_own_long_poll() {
         3,
         "the tail still renders what is published to it"
     );
+}
+
+/// The client binary. `CARGO_BIN_EXE_*` only names binaries of the
+/// package the test lives in, and `fq` is `fq-cli`'s — but both land in
+/// the same target directory, so the daemon's own path names it.
+#[allow(dead_code)]
+fn fq_client_binary() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_fqd")).with_file_name("fq")
 }

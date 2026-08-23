@@ -271,7 +271,7 @@ impl PairedDaemon {
             .expect("client fq.toml");
 
         let xdg = tempfile::tempdir().expect("xdg dir");
-        let connect = Command::new(env!("CARGO_BIN_EXE_fq"))
+        let connect = Command::new(fq_client_binary())
             .args(["connect", &addr, "--token", &token])
             .env("FQ_CONFIG", &client_config)
             .env("XDG_CONFIG_HOME", xdg.path())
@@ -297,7 +297,7 @@ impl PairedDaemon {
 
     /// Run `fq` as the paired client.
     fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_fq"))
+        let out = Command::new(fq_client_binary())
             .args(args)
             .env("FQ_CONFIG", &self.client_config)
             .env("FQ_AGENTS_DIR", self.scratch.agents())
@@ -468,4 +468,12 @@ fn golden_down() {
 #[test]
 fn golden_down_now() {
     golden_down_case("down_now_human", &["down", "--now"]);
+}
+
+/// The client binary. `CARGO_BIN_EXE_*` only names binaries of the
+/// package the test lives in, and `fq` is `fq-cli`'s — but both land in
+/// the same target directory, so the daemon's own path names it.
+#[allow(dead_code)]
+fn fq_client_binary() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_fqd")).with_file_name("fq")
 }
