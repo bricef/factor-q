@@ -86,7 +86,7 @@ pub async fn fq_main() -> ExitCode {
     // `--now` exits fast enough to win that race every time, while the
     // drain path merely usually lost it.
     #[cfg(unix)]
-    if !matches!(cli.command, Commands::Run | Commands::Down { .. }) {
+    if !matches!(cli.command, Commands::Down { .. }) {
         // SAFETY: changing a process signal disposition before any
         // output has been written; no handler is installed, only the
         // kernel default is restored.
@@ -127,7 +127,6 @@ pub async fn fqd_main() -> ExitCode {
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { force } => init_project(force)?,
-        Commands::Run => run_daemon(&cli.global).await?,
         Commands::Reload => reload_daemon(&cli.global).await?,
         Commands::Down { now } => down_daemon(&cli.global, now).await?,
         Commands::Trigger {

@@ -33,6 +33,11 @@ fn fq_binary() -> &'static str {
     env!("CARGO_BIN_EXE_fq")
 }
 
+/// The daemon is its own binary; `fq` cannot start one.
+fn fqd_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_fqd")
+}
+
 /// Scratch layout for one test: config, agents, cache, and a
 /// workspace dir the agent's sandbox permits. Unique per test run so
 /// parallel tests never collide.
@@ -173,8 +178,7 @@ impl Daemon {
         let log_path = scratch.path(log_name);
         let log = std::fs::File::create(&log_path).expect("create daemon log");
         let log_err = log.try_clone().expect("clone log handle");
-        let child = Command::new(fq_binary())
-            .arg("run")
+        let child = Command::new(fqd_binary())
             .env("FQ_CONFIG", scratch.path("fq.toml"))
             .env("FQ_NATS_URL", nats_url)
             .env("FQ_CACHE_DIR", scratch.path("cache"))

@@ -47,7 +47,7 @@ pub(crate) async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Resul
     // answers the same question at once.
     let client = edge_client_for(global).await.map_err(|err| {
         anyhow::anyhow!(
-            "no running `fq run` daemon reachable at {}: {err:#}\n\
+            "no running `fqd` reachable at {}: {err:#}\n\
              `fq down` is a no-op — is the daemon running? (`fq status`)",
             config.edge.bind
         )

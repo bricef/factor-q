@@ -155,7 +155,7 @@ fn an_uninitialised_store_says_how_to_create_it() {
     };
     let out = render_status_human(&doc);
     assert!(
-        out.contains("not initialised (run `fq run` to create)"),
+        out.contains("not initialised (start `fqd` to create)"),
         "got:\n{out}"
     );
 }

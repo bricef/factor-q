@@ -252,14 +252,14 @@ fn render_stores_human(stores: &StatusStores) -> String {
     ));
     if let Some(legacy) = &stores.legacy_events_db {
         out.push_str(&format!(
-            "  legacy events.db: {} (pending split — run `fq run` to migrate)\n",
+            "  legacy events.db: {} (pending split — start `fqd` to migrate)\n",
             legacy.display()
         ));
     }
     if stores.initialised {
         out.push_str("  state:            initialised — all three store files exist\n");
     } else {
-        out.push_str("  state:            not initialised (run `fq run` to create)\n");
+        out.push_str("  state:            not initialised (start `fqd` to create)\n");
     }
     out
 }
@@ -328,7 +328,7 @@ fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) -> Stri
                 }
                 ConsumerHealth::Missing { name } => {
                     out.push_str(&format!(
-                        "  consumer {name}: not present (no `fq run` has initialised it)\n"
+                        "  consumer {name}: not present (no daemon has initialised it)\n"
                     ));
                 }
             }

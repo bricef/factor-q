@@ -5,21 +5,21 @@ use clap::Parser;
 /// existing human-readable output.
 #[test]
 fn log_format_defaults_to_text() {
-    let cli = Cli::parse_from(["fq", "run"]);
+    let cli = Cli::parse_from(["fq", "status"]);
     assert_eq!(cli.global.log_format, LogFormat::Text);
 }
 
 /// `--log-format json` parses to the JSON renderer.
 #[test]
 fn log_format_json_flag_parses() {
-    let cli = Cli::parse_from(["fq", "--log-format", "json", "run"]);
+    let cli = Cli::parse_from(["fq", "--log-format", "json", "status"]);
     assert_eq!(cli.global.log_format, LogFormat::Json);
 }
 
 /// `--log-format text` parses to the text renderer.
 #[test]
 fn log_format_text_flag_parses() {
-    let cli = Cli::parse_from(["fq", "--log-format", "text", "run"]);
+    let cli = Cli::parse_from(["fq", "--log-format", "text", "status"]);
     assert_eq!(cli.global.log_format, LogFormat::Text);
 }
 
@@ -33,7 +33,7 @@ fn log_format_flag_is_global() {
 /// An unknown value is rejected rather than silently defaulting.
 #[test]
 fn log_format_rejects_unknown_value() {
-    let result = Cli::try_parse_from(["fq", "--log-format", "yaml", "run"]);
+    let result = Cli::try_parse_from(["fq", "--log-format", "yaml", "status"]);
     let err = match result {
         Ok(_) => panic!("unknown log-format value should be rejected"),
         Err(err) => err,

@@ -104,8 +104,6 @@ pub(crate) enum Commands {
         #[arg(long, short = 'f')]
         force: bool,
     },
-    /// Run the runtime in the foreground
-    Run,
     /// Ask a running daemon to hot-reload its agent definitions from
     /// disk, without a restart. The daemon re-reads ITS agents
     /// directory and atomically swaps the registry the dispatcher

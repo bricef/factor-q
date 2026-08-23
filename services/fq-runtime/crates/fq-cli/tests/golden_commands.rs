@@ -222,8 +222,7 @@ impl PairedDaemon {
         let log_path = scratch.cache().join("daemon.log");
         let log = std::fs::File::create(&log_path).expect("create daemon log");
         let log_err = log.try_clone().expect("clone daemon log handle");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fq"))
-            .arg("run")
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fqd"))
             .env("FQ_CONFIG", &daemon_config)
             .env("FQ_NATS_URL", server.url())
             .env("FQ_CACHE_DIR", scratch.cache())

@@ -35,6 +35,12 @@ fn fq_binary() -> &'static str {
     env!("CARGO_BIN_EXE_fq")
 }
 
+/// The daemon is its own binary now: `fq` cannot start one, so a test
+/// that needs a running daemon spawns `fqd` directly.
+fn fqd_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_fqd")
+}
+
 /// A client introduced to one daemon's edge: the pairing store it wrote
 /// to, and the config naming the address it was paired with.
 ///
@@ -111,8 +117,7 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
 
-    let mut child = Command::new(fq_binary())
-        .arg("run")
+    let mut child = Command::new(fqd_binary())
         // The scratch fq.toml plus env overrides — the test never
         // reads a real config.
         .env("FQ_CONFIG", scratch.join("fq.toml"))
@@ -256,8 +261,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
 
-    let mut child = Command::new(fq_binary())
-        .arg("run")
+    let mut child = Command::new(fqd_binary())
         .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -353,8 +357,7 @@ fn daemon_stops_now_on_fq_down_now() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
 
-    let mut child = Command::new(fq_binary())
-        .arg("run")
+    let mut child = Command::new(fqd_binary())
         .env("FQ_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -440,7 +443,7 @@ fn fq_down_fast_fails_when_no_daemon_running() {
     let scratch = unique_scratch();
     let xdg = tempfile::tempdir().expect("xdg dir");
 
-    // No `fq run` daemon is spawned — nothing is listening.
+    // No daemon is spawned — nothing is listening.
     let started = Instant::now();
     let down = Command::new(fq_binary())
         .arg("down")
@@ -463,7 +466,7 @@ fn fq_down_fast_fails_when_no_daemon_running() {
     );
     assert!(out.is_empty(), "fatal error must not pollute stdout: {out}");
     assert!(
-        err.contains("no running `fq run` daemon"),
+        err.contains("no running `fqd`"),
         "expected a 'no daemon' error on stderr, got:\n{err}"
     );
     // Fast-fail: nowhere near the ~130s ceiling the stop wait is bounded

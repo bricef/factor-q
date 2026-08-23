@@ -82,7 +82,6 @@ fn fq_help_lists_expected_subcommands() {
         "status",
         "doctor",
         "init",
-        "run",
         "trigger",
         "agent",
     ] {
