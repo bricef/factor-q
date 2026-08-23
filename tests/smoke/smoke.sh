@@ -317,16 +317,13 @@ test_trigger_simple_response() {
     local agent_id
     agent_id="$(unique_agent_id simple)"
 
-    # Declares the terminal tool and nothing else. An agent with an
-    # empty tool list is offered no tools at all, so it cannot call
-    # `report_outcome` — and that call is the only clean end to a run.
-    # Such an agent answers correctly and then loops to the iteration
-    # ceiling, which is a failure stop.
+    # Declares no tools at all. `report_outcome` is the only clean end
+    # to a run, and the runtime offers it to every invocation whether or
+    # not the agent asked for it (#495) — so this agent must still reach
+    # a completed status rather than looping to the iteration ceiling.
     write_agent "${project}" "simple.md" "---
 name: ${agent_id}
 model: claude-haiku-4-5
-tools:
-  - builtin__report_outcome
 budget: 0.10
 ---
 
@@ -356,7 +353,6 @@ name: ${agent_id}
 model: claude-haiku-4-5
 tools:
   - builtin__file_read
-  - builtin__report_outcome
 sandbox:
   fs_read:
     - ${data_dir}
@@ -388,7 +384,6 @@ name: ${agent_id}
 model: claude-haiku-4-5
 tools:
   - builtin__exec
-  - builtin__report_outcome
 sandbox:
   exec_cwd:
     - ${work_dir}
@@ -436,7 +431,6 @@ name: ${agent_id}
 model: claude-haiku-4-5
 tools:
   - builtin__exec
-  - builtin__report_outcome
 sandbox:
   exec_cwd:
     - ${work_dir}
@@ -621,8 +615,6 @@ test_nats_triggered_dispatch() {
     write_agent "${project}" "q.md" "---
 name: ${agent_id}
 model: claude-haiku-4-5
-tools:
-  - builtin__report_outcome
 budget: 0.10
 ---
 
@@ -682,8 +674,6 @@ test_run_projection_query_and_costs() {
     write_agent "${project}" "q.md" "---
 name: ${agent_id}
 model: claude-haiku-4-5
-tools:
-  - builtin__report_outcome
 budget: 0.10
 ---
 
