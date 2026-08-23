@@ -31,10 +31,6 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn fq_binary() -> &'static str {
-    fq_client_binary()
-}
-
 /// The daemon is its own binary now: `fq` cannot start one, so a test
 /// that needs a running daemon spawns `fqd` directly.
 fn fqd_binary() -> &'static str {
@@ -75,7 +71,7 @@ fn pair_with(scratch: &std::path::Path) -> Pairing {
     let config = scratch.join("client.toml");
     std::fs::write(&config, format!("[edge]\nbind = \"{addr}\"\n")).expect("client config");
     let xdg = tempfile::tempdir().expect("xdg dir");
-    let connect = Command::new(fq_binary())
+    let connect = Command::new(fq_client_binary())
         .args(["connect", &addr, "--token", &token])
         .env("FQ_CONFIG", &config)
         .env("XDG_CONFIG_HOME", xdg.path())
@@ -294,7 +290,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
     // `fq down` should stop the daemon AND confirm the exit itself
     // (exit 0 only once the daemon's edge has stopped answering).
     let pairing = pair_with(&scratch);
-    let down = Command::new(fq_binary())
+    let down = Command::new(fq_client_binary())
         .arg("down")
         .env("FQ_CONFIG", &pairing.config)
         .env("XDG_CONFIG_HOME", pairing.xdg.path())
@@ -387,7 +383,7 @@ fn daemon_stops_now_on_fq_down_now() {
     assert!(ready, "daemon never reached 'Runtime ready' within 30s");
 
     let pairing = pair_with(&scratch);
-    let down = Command::new(fq_binary())
+    let down = Command::new(fq_client_binary())
         .args(["down", "--now"])
         .env("FQ_CONFIG", &pairing.config)
         .env("XDG_CONFIG_HOME", pairing.xdg.path())
@@ -445,7 +441,7 @@ fn fq_down_fast_fails_when_no_daemon_running() {
 
     // No daemon is spawned — nothing is listening.
     let started = Instant::now();
-    let down = Command::new(fq_binary())
+    let down = Command::new(fq_client_binary())
         .arg("down")
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("XDG_CONFIG_HOME", xdg.path())

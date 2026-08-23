@@ -52,9 +52,6 @@ use fq_ops::surface::{DOCTOR_STUCK_THRESHOLD_MS, build_doctor_report};
 use fq_runtime::surface::{DoctorParams, DoctorReport};
 use fq_runtime::views::Views;
 
-/// The projection's failure-kind string for a dead-lettered trigger —
-/// `FailureKind::TriggerExhausted` serialized with the wire vocabulary.
-
 /// Register `control.doctor` on the daemon's edge.
 pub(crate) fn register_doctor_report(
     registry: &mut fq_edge::EdgeRegistry,

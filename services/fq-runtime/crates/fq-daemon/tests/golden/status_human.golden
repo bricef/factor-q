@@ -1,9 +1,7 @@
 factor-q status
 
 Config
-  NATS URL:         <NATS_URL>
-  agents dir:       <CACHE_DIR>/agents
-  cache dir:        <CACHE_DIR>
+  edge:             <EDGE_ADDR>
 
 Daemon
   connection:       ✗ no daemon answered at <EDGE_ADDR>
@@ -11,9 +9,5 @@ Daemon
   -> that is the finding: there is no runtime here to report on.
   -> stream health, the agent registry, projection rows and recovery state
      are the daemon's to answer, so they are absent below rather than stale.
-
-Stores
-  worker db:        <CACHE_DIR>/worker.db
-  control-plane db: <CACHE_DIR>/control-plane.db
-  projection db:    <CACHE_DIR>/projection.db
-  state:            initialised — all three store files exist
+  -> the store paths too: they are the daemon's, and a client that printed
+     its own guess would be describing this machine, not the runtime.

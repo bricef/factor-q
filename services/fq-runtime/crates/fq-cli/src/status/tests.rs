@@ -49,7 +49,6 @@ fn report() -> StatusReport {
 fn answered() -> StatusDocument {
     StatusDocument {
         config: config(),
-        stores: stores(true),
         daemon: Some(report()),
         daemon_error: None,
     }
@@ -58,7 +57,6 @@ fn answered() -> StatusDocument {
 fn unreachable() -> StatusDocument {
     StatusDocument {
         config: config(),
-        stores: stores(true),
         daemon: None,
         daemon_error: Some(
             "could not reach the edge at 127.0.0.1:8787: Connection refused (os error 111)"
@@ -105,41 +103,87 @@ fn the_degraded_answer_names_what_is_absent() {
     assert!(!out.contains("Stream:"), "got:\n{out}");
 }
 
-/// What survives with no daemon: the configuration this client
-/// resolved, and whether the store files that configuration names
-/// exist. Both are local facts, so both are still answered.
+/// What survives with no daemon is the configuration this client
+/// resolved — and only that. The edge address is the one piece of
+/// configuration a client owns, so it is answered whatever happened
+/// on the wire.
 #[test]
 fn what_is_local_still_answers_with_no_daemon() {
     let out = render_status_human(&unreachable());
-    assert!(out.contains("nats://localhost:4222"), "got:\n{out}");
-    assert!(out.contains("/srv/agents"), "got:\n{out}");
-    assert!(out.contains("/var/lib/fq/worker.db"), "got:\n{out}");
-    assert!(out.contains("/var/lib/fq/control-plane.db"), "got:\n{out}");
-    assert!(out.contains("/var/lib/fq/projection.db"), "got:\n{out}");
+    assert!(
+        out.contains("edge:             127.0.0.1:8787"),
+        "got:\n{out}"
+    );
+}
+
+/// The store paths are the *daemon's*, so a client with none
+/// answering says so rather than printing where its own machine
+/// would have kept them.
+///
+/// It used to derive them from its own config, which is right only
+/// while the client and the daemon share a host and silently wrong
+/// the moment they do not — a guess indistinguishable, on screen,
+/// from a measurement. Absence with an explanation is the same
+/// discipline the stream and recovery sections already follow.
+#[test]
+fn no_daemon_means_no_guess_at_the_store_paths() {
+    let out = render_status_human(&unreachable());
+    assert!(!out.contains("\nStores\n"), "got:\n{out}");
+    for guessed in ["worker.db", "control-plane.db", "projection.db"] {
+        assert!(
+            !out.contains(guessed),
+            "the client must not guess `{guessed}`; got:\n{out}"
+        );
+    }
+    assert!(
+        out.contains("the store paths too: they are the daemon's"),
+        "the absence must be explained, not merely left blank; got:\n{out}"
+    );
+}
+
+/// …and when one does answer, the block is what that daemon reported
+/// about its own files.
+#[test]
+fn the_store_block_is_the_answering_daemons() {
+    let out = render_status_human(&answered());
+    assert!(out.contains("\nStores\n"), "got:\n{out}");
+    for path in [
+        "/var/lib/fq/worker.db",
+        "/var/lib/fq/control-plane.db",
+        "/var/lib/fq/projection.db",
+    ] {
+        assert!(out.contains(path), "got:\n{out}");
+    }
     assert!(
         out.contains("initialised — all three store files exist"),
         "got:\n{out}"
     );
 }
 
-/// The store block does not depend on the daemon, so it must not
-/// change when one answers. If these two ever diverge, one of the
-/// renderings has started reporting something it did not measure.
+/// A report whose stores are not all on disk keeps the original
+/// remedy line — the one case where `fq status` tells the operator to
+/// start a runtime rather than report on one.
+///
+/// The finding is the daemon's now, so it arrives on the report
+/// rather than from a client `stat` of its own filesystem. A daemon
+/// that answered has normally opened all three (so it reports
+/// `initialised`), but it re-checks per call rather than caching, and
+/// a store file removed under a running daemon is exactly what that
+/// re-check is for.
 #[test]
-fn the_store_block_is_the_same_either_way() {
-    let with = render_status_human(&answered());
-    let without = render_status_human(&unreachable());
-    let block = |s: &str| {
-        s.split("\nStores\n")
-            .nth(1)
-            .expect("a Stores block")
-            .split("\n\n")
-            .next()
-            .expect("the block")
-            .trim_end()
-            .to_string()
+fn an_uninitialised_store_says_how_to_create_it() {
+    let doc = StatusDocument {
+        daemon: Some(StatusReport {
+            stores: stores(false),
+            ..report()
+        }),
+        ..answered()
     };
-    assert_eq!(block(&with), block(&without));
+    let out = render_status_human(&doc);
+    assert!(
+        out.contains("not initialised (start `fqd` to create)"),
+        "got:\n{out}"
+    );
 }
 
 // ------------------------------------------------------------------

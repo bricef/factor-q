@@ -244,6 +244,12 @@ impl Surface {
                         tokio::sync::oneshot::channel::<bool>().0,
                     ))),
                 },
+                // What `control.status` would report about this
+                // surface's stores. Nothing here calls that report,
+                // but the paths are the real ones the stores above
+                // were opened at rather than placeholders.
+                db_paths: Arc::new(paths.clone()),
+                legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(scratch.path())),
             },
         )
         .expect("assemble the operator registry");

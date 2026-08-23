@@ -420,8 +420,8 @@ async fn event_at(bus: &fq_runtime::EventBus, seq: u64) -> Result<Option<EventSt
 /// most-reached-for read in direct proportion to how much history the
 /// system had accumulated, which is the wrong way round.
 ///
-/// `limit` has already been through `EventFilter::list_limit`, so it is
-/// at most `EVENT_LIST_MAX_LIMIT` and the `Vec` this allocates is
+/// `limit` has already been through [`list_limit`], so it is at most
+/// `EVENT_LIST_MAX_LIMIT` and the `Vec` this allocates is
 /// bounded before the query runs rather than after the rows are in
 /// hand.
 async fn list_events(
@@ -513,28 +513,6 @@ async fn stream_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_filter_describes_itself_in_domain_terms() {
-        let described = |agent: Option<&str>, event_type: Option<&str>| {
-            let filter = EventFilter {
-                agent: agent.map(str::to_string),
-                event_type: event_type.map(str::to_string),
-                ..EventFilter::default()
-            };
-            describe_filter(&filter)
-        };
-        assert_eq!(described(None, None), "all events");
-        assert_eq!(
-            described(Some("researcher"), None),
-            "all events for agent researcher"
-        );
-        assert_eq!(described(None, Some("tool_call")), "all tool_call events");
-        assert_eq!(
-            described(Some("researcher"), Some("tool_call")),
-            "tool_call events for agent researcher"
-        );
-    }
 
     fn filter_with_limit(limit: Option<u32>) -> EventFilter {
         EventFilter {
@@ -636,22 +614,12 @@ mod tests {
             described.contains(&EVENT_LIST_MAX_LIMIT.to_string()),
             "the declared description must name the cap; got {described:?}"
         );
-        // The operator's own copy of the contract. `fq events query
-        // --limit` takes an i64 and cannot be range-checked by clap
-        // against a u32 cap, so the number lives in its help text and
-        // is pinned here rather than left to drift.
-        let help = <crate::cli::Cli as clap::CommandFactory>::command()
-            .find_subcommand("events")
-            .and_then(|events| events.clone().find_subcommand("query").cloned())
-            .expect("`fq events query` exists")
-            .get_arguments()
-            .find(|arg| arg.get_id() == "limit")
-            .and_then(|arg| arg.get_help().map(ToString::to_string))
-            .expect("`--limit` is documented");
-        assert!(
-            help.contains(&EVENT_LIST_MAX_LIMIT.to_string()),
-            "`fq events query --limit`'s help must name the cap; got {help:?}"
-        );
+        // The operator's own copy of the contract is the client's, and
+        // is pinned against this same constant in `fq-cli`'s
+        // `cli::tests`. `fq events query --limit` takes an i64 and
+        // cannot be range-checked by clap against a u32 cap, so the
+        // number lives in its help text and is asserted where that
+        // text is declared.
     }
 
     /// Compile just the `since` narrowing, which is what both stores
@@ -826,7 +794,10 @@ mod tests {
                 ..EventFilter::default()
             },
         ] {
-            let asked = describe_filter(&filter);
+            // The filter as it travels, which is what the daemon
+            // rules on. `fq events tail`'s prose rendering of the
+            // same value is the client's and is asserted there.
+            let asked = serde_json::to_string(&filter).expect("a filter serialises");
             assert!(
                 !selection_for(filter).matches(&heartbeat),
                 "a heartbeat must not be streamed, and `{asked}` did"

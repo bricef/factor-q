@@ -5,7 +5,7 @@
 //! interface file" property without a second source of truth: the
 //! snapshot is generated FROM the declarations, never edited.
 //! Regenerate after an intentional change with
-//! `UPDATE_SNAPSHOT=1 cargo test -p fq-cli --test operator_surface`.
+//! `UPDATE_SNAPSHOT=1 cargo test -p fq-daemon --test operator_surface`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,6 +84,12 @@ async fn operator_surface_matches_the_committed_snapshot() {
                     tokio::sync::oneshot::channel::<bool>().0,
                 ))),
             },
+            // Where `control.status` says this daemon's stores are:
+            // the same three paths the stores above were opened at, so
+            // the surface is assembled over a real layout rather than
+            // an invented one.
+            db_paths: Arc::new(paths.clone()),
+            legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(scratch.path())),
         },
     )
     .expect("assemble the operator registry");
@@ -100,7 +106,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
         panic!(
-            "missing snapshot {path:?} — run `UPDATE_SNAPSHOT=1 cargo test -p fq-cli \
+            "missing snapshot {path:?} — run `UPDATE_SNAPSHOT=1 cargo test -p fq-daemon \
              --test operator_surface` and commit the result"
         )
     });

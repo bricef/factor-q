@@ -18,12 +18,12 @@
 //!   It is reported as one, in the section where the daemon's answers
 //!   would have been, naming what is consequently absent rather than
 //!   leaving the reader to notice.
-//! * **What was never the daemon's stays local.** The resolved
-//!   configuration, the store paths it names and whether the files at
-//!   those paths exist are filesystem facts. Reading them is a `stat`,
-//!   not a store open, so the Phase-4 rule ("`fq-cli` opens no store")
-//!   is kept without giving up the half of the answer that needs
-//!   nothing running.
+//! * **What was never the daemon's stays local.** The edge address
+//!   this client dials is its own configuration, so it is answered
+//!   whatever happened on the wire. The store paths are not: they
+//!   belong to the process that owns those files, which need not be
+//!   on this machine, so they travel on the report and are absent —
+//!   with the reason — when none arrives.
 //! * **The exit code still separates the two.** A degraded answer
 //!   exits non-zero after printing, so `fq status && deploy` fails
 //!   closed while an operator reading the output still gets everything
@@ -190,9 +190,10 @@ fn render_registry_human(registry: &StatusRegistry) -> String {
     out
 }
 
-/// Pure: the store block — paths from configuration, existence from
-/// the filesystem. Rendered identically whether or not a daemon
-/// answered, because it never depended on one.
+/// Pure: the store block, as the daemon that answered reported it —
+/// the paths it is actually running on and whether the files are
+/// there. Rendered only on that branch, because there is nothing
+/// truthful to print about another host's stores.
 fn render_stores_human(stores: &StatusStores) -> String {
     let mut out = String::from("\nStores\n");
     out.push_str(&format!("  worker db:        {}\n", stores.worker_path));

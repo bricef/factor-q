@@ -21,7 +21,7 @@
 //! its own fixture knows. Everything else must be byte-identical.
 //!
 //! To regenerate after an intentional output change:
-//! `UPDATE_GOLDEN=1 cargo test -p fq-cli --test golden` — then review
+//! `UPDATE_GOLDEN=1 cargo test -p fq-daemon --test golden` — then review
 //! the diff like any other code change.
 
 use std::path::{Path, PathBuf};
@@ -620,7 +620,7 @@ fn compare_golden(name: &str, actual: &str) {
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
         panic!(
-            "missing golden {path:?} — run `UPDATE_GOLDEN=1 cargo test -p fq-cli --test golden` \
+            "missing golden {path:?} — run `UPDATE_GOLDEN=1 cargo test -p fq-daemon --test golden` \
              and commit the result"
         )
     });
@@ -634,7 +634,7 @@ fn compare_golden(name: &str, actual: &str) {
             .collect();
         panic!(
             "golden mismatch for {name} ({} vs {} lines){}\n{}\n\nIf the change is intentional: \
-             UPDATE_GOLDEN=1 cargo test -p fq-cli --test golden, then review the diff.",
+             UPDATE_GOLDEN=1 cargo test -p fq-daemon --test golden, then review the diff.",
             expected.lines().count(),
             actual.lines().count(),
             if diff.is_empty() {
@@ -872,10 +872,22 @@ fn status_without_a_daemon_still_answers_and_exits_nonzero() {
         stdout.contains("that is the finding"),
         "an unreachable daemon reads as a diagnosis, not a transport error:\n{stdout}"
     );
-    // The half that never needed a daemon is still there.
+    // The half that never needed a daemon is still there — which is
+    // now the client's own configuration and nothing else. The store
+    // paths used to be here too, derived from that same config; they
+    // are the daemon's now, so the absence is explained rather than
+    // filled in with a guess about this machine.
     assert!(
-        stdout.contains("worker db:") && stdout.contains("state:"),
+        stdout.contains("edge:"),
         "the local half must survive:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("the store paths too: they are the daemon's"),
+        "an absent store block must say whose it was:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("worker db:"),
+        "a client with no daemon must not print a store path it guessed:\n{stdout}"
     );
     assert!(
         stderr.contains("no daemon answered"),

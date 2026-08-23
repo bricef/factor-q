@@ -437,10 +437,13 @@ pub struct DeadLetterFilter {
 }
 
 /// The most dead letters one List page may carry, whatever a caller
-/// asks for — refused rather than quietly applied (see
-/// [`DeadLetterFilter::list_limit`]), and declared on the surface as
-/// this filter's `limit` maximum so a consumer reads it off the schema
-/// instead of discovering it by failing.
+/// asks for — refused rather than quietly applied. This crate
+/// *declares* the bound; the daemon's `dead_letter.list` handler is
+/// what rules on a caller's `limit` against it (`fq-daemon`'s
+/// `dead_letter_atom::list_limit`, which speaks `WireError` and so
+/// cannot live on the shape). It is also declared on the surface as
+/// this filter's `limit` maximum, so a consumer reads it off the
+/// schema instead of discovering it by failing.
 ///
 /// **The number is the edge's frame, worked backwards.** One List
 /// answer is one frame, and both ends of the edge frame with
@@ -479,8 +482,8 @@ pub struct DeadLetterFilter {
 /// page.
 ///
 /// What it replaces had no bound at all. Note that an oversized
-/// `limit` never allocated a page that size up front:
-/// [`list_dead_letters`] scans the subject forward and keeps a sliding
+/// `limit` never allocated a page that size up front: the daemon's
+/// List handler scans the subject forward and keeps a sliding
 /// window of at most `limit`, so the memory was however many dead
 /// letters the log actually held. The scan is the whole subject either
 /// way. What an unbounded `limit` bought was a response that grew with
@@ -516,7 +519,8 @@ pub const DOCTOR_STUCK_THRESHOLD_MS: i64 = DEFAULT_STALE_THRESHOLD_MS;
 /// Pure: assemble a [`DoctorReport`] from the already-fetched read
 /// views, so it can be unit-tested without a database. The stuck
 /// determination (threshold + clock-skew handling) lives in
-/// [`crate::views::Views::executions`]; this builder only
+/// `fq_runtime::views::Views::executions` — the store handle, which
+/// this crate deliberately does not depend on; this builder only
 /// aggregates and shortens ids for triage.
 pub fn build_doctor_report(
     workers: &[crate::views::WorkerView],

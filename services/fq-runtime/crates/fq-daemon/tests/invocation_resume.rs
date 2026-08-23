@@ -29,10 +29,6 @@ use std::time::{Duration, Instant};
 use fq_runtime::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
 use serde_json::json;
 
-fn fq_binary() -> &'static str {
-    fq_client_binary()
-}
-
 /// The daemon is its own binary; `fq` cannot start one.
 fn fqd_binary() -> &'static str {
     env!("CARGO_BIN_EXE_fqd")
@@ -155,7 +151,7 @@ impl Scratch {
 /// the completed output. Never panics on non-zero exit — the error
 /// matrix asserts on failures deliberately.
 fn run_fq(scratch: &Scratch, nats_url: &str, args: &[&str]) -> Output {
-    Command::new(fq_binary())
+    Command::new(fq_client_binary())
         .args(args)
         .env("FQ_CONFIG", scratch.path("fq.toml"))
         .env("FQ_NATS_URL", nats_url)
@@ -233,7 +229,7 @@ impl Daemon {
         // of that file.
         scratch.pin_edge_bind(&addr);
         let token = admin_token_from_log(&log).expect("admin token in first daemon log");
-        let out = Command::new(fq_binary())
+        let out = Command::new(fq_client_binary())
             .args(["connect", &addr, "--token", &token])
             .env("FQ_CONFIG", scratch.path("fq.toml"))
             .env("XDG_CONFIG_HOME", scratch.path("xdg"))

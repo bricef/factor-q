@@ -4,6 +4,7 @@
 //! test here has a sibling there asserting what an operator reads.
 
 use super::*;
+use fq_ops::surface::DoctorDeadLetters;
 use fq_runtime::views::{ExecutionsView, FailureView, WorkerView};
 
 pub(crate) fn worker(id: &str, status: &str, last_heartbeat: i64) -> WorkerView {

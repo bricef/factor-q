@@ -31,7 +31,7 @@
 //! still this file's stdout contract and nothing else.
 //!
 //! To regenerate after an intentional output change:
-//! `UPDATE_GOLDEN=1 cargo test -p fq-cli --test golden_commands` —
+//! `UPDATE_GOLDEN=1 cargo test -p fq-daemon --test golden_commands` —
 //! then review the diff like any other code change.
 
 use std::path::{Path, PathBuf};
@@ -143,7 +143,7 @@ fn assert_golden(name: &str, actual: &str) {
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
         panic!(
-            "missing golden {path:?} — run `UPDATE_GOLDEN=1 cargo test -p fq-cli \
+            "missing golden {path:?} — run `UPDATE_GOLDEN=1 cargo test -p fq-daemon \
              --test golden_commands` and commit the result"
         )
     });
@@ -157,7 +157,7 @@ fn assert_golden(name: &str, actual: &str) {
             .collect();
         panic!(
             "golden mismatch for {name} ({} vs {} lines){}\n{}\n\nIf the change is intentional: \
-             UPDATE_GOLDEN=1 cargo test -p fq-cli --test golden_commands, then review the diff.",
+             UPDATE_GOLDEN=1 cargo test -p fq-daemon --test golden_commands, then review the diff.",
             expected.lines().count(),
             actual.lines().count(),
             if diff.is_empty() {

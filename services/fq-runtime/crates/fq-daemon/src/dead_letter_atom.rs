@@ -234,8 +234,8 @@ async fn dead_letter_at(
 /// verb's business, and `fq dead-letters list` reverses for display
 /// exactly as it always has.
 ///
-/// `limit` has already been through [`DeadLetterFilter::list_limit`],
-/// so it is at most [`DEAD_LETTER_LIST_MAX_LIMIT`] and the window
+/// `limit` has already been through [`list_limit`], so it is at most
+/// [`DEAD_LETTER_LIST_MAX_LIMIT`] and the window
 /// below — and with it the answer's frame — is bounded by a number the
 /// caller was allowed to name. The scan is not: it walks the subject
 /// from sequence 1 to the tip whatever the page size, evicting from
@@ -396,8 +396,7 @@ mod tests {
             // dead letter the log still retains.
             u32::MAX,
         ] {
-            let err = filter_with_limit(Some(asked))
-                .list_limit()
+            let err = list_limit(&filter_with_limit(Some(asked)))
                 .expect_err("a page over the cap must be refused, not served short");
             // The refusal names the cap, so the caller's next request
             // is one edit away rather than a guess — and names the op,
@@ -444,7 +443,7 @@ mod tests {
             DEAD_LETTER_LIST_MAX_LIMIT,
         ] {
             assert_eq!(
-                filter_with_limit(Some(asked)).list_limit().ok(),
+                list_limit(&filter_with_limit(Some(asked))).ok(),
                 Some(asked),
                 "a page within the cap must be exactly the size asked for"
             );
@@ -453,7 +452,7 @@ mod tests {
         // for nothing in particular must not become asking for the
         // largest page the daemon will serve.
         assert_eq!(
-            filter_with_limit(None).list_limit().ok(),
+            list_limit(&filter_with_limit(None)).ok(),
             Some(DEAD_LETTER_LIST_DEFAULT_LIMIT)
         );
     }
@@ -483,25 +482,14 @@ mod tests {
             described.contains(&DEAD_LETTER_LIST_MAX_LIMIT.to_string()),
             "the declared description must name the cap; got {described:?}"
         );
-        // The operator's own copy of the contract. The cap is not
-        // re-declared as a clap range: a client-side range check would
-        // be a second copy of the number in the place least able to
-        // notice the daemon disagreeing — an older `fq` would refuse
-        // pages a newer daemon serves, and quote its own stale cap
-        // doing it. So `--limit` travels and the daemon rules on it,
-        // and the number lives in the help text, pinned here rather
-        // than left to drift.
-        let help = <crate::cli::Cli as clap::CommandFactory>::command()
-            .find_subcommand("dead-letters")
-            .and_then(|dead| dead.clone().find_subcommand("list").cloned())
-            .expect("`fq dead-letters list` exists")
-            .get_arguments()
-            .find(|arg| arg.get_id() == "limit")
-            .and_then(|arg| arg.get_help().map(ToString::to_string))
-            .expect("`--limit` is documented");
-        assert!(
-            help.contains(&DEAD_LETTER_LIST_MAX_LIMIT.to_string()),
-            "`fq dead-letters list --limit`'s help must name the cap; got {help:?}"
-        );
+        // The operator's own copy of the contract is the client's, and
+        // is pinned against this same constant in `fq-cli`'s
+        // `cli::tests`. The cap is not re-declared as a clap range: a
+        // client-side range check would be a second copy of the number
+        // in the place least able to notice the daemon disagreeing —
+        // an older `fq` would refuse pages a newer daemon serves, and
+        // quote its own stale cap doing it. So `--limit` travels and
+        // the daemon rules on it, and the number lives in the help
+        // text, asserted where that text is declared.
     }
 }

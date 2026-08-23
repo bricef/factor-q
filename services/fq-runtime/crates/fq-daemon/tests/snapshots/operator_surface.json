@@ -2407,6 +2407,39 @@
             ],
             "type": "object"
           },
+          "StatusStores": {
+            "description": "Where a daemon keeps its three SQLite stores, and whether they\nexist yet. A daemon that has never run has none of them.",
+            "properties": {
+              "control_plane_path": {
+                "type": "string"
+              },
+              "initialised": {
+                "description": "True once all three stores exist. False on a daemon that has\nnot yet started for the first time.",
+                "type": "boolean"
+              },
+              "legacy_events_db": {
+                "default": null,
+                "description": "A pre-split `events.db` still on disk. Present means the daemon\nhas not yet migrated it; absent is the healthy case.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "projection_path": {
+                "type": "string"
+              },
+              "worker_path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "worker_path",
+              "control_plane_path",
+              "projection_path",
+              "initialised"
+            ],
+            "type": "object"
+          },
           "StreamHealth": {
             "description": "Health of one JetStream stream plus its primary durable consumer.\n\nExternally tagged (serde's default) rather than internally: internal\ntagging is a JSON-only representation, and the edge's session is\nbincode once its JSON preamble is done, so an internally-tagged enum\nwould fail to encode there.",
             "oneOf": [
@@ -2502,6 +2535,10 @@
             "$ref": "#/$defs/StatusRegistry",
             "description": "The live agent registry, censused."
           },
+          "stores": {
+            "$ref": "#/$defs/StatusStores",
+            "description": "Where this daemon's three stores live, and whether it has\ncreated them yet.\n\nReported by the daemon rather than derived by the reader. The\npaths are the daemon's — a reader that computed them from its\nown config would be describing its own machine, which is right\nonly while the two share one, and silently wrong the moment\nthey do not."
+          },
           "streams": {
             "description": "JetStream health for the runtime's core streams and their\nprimary durable consumers — message counts, byte totals and how\nfar each consumer has got. Probed at the daemon, over the\nconnection it already holds.",
             "items": {
@@ -2518,6 +2555,7 @@
           "version",
           "streams",
           "registry",
+          "stores",
           "projection_rows",
           "recovery"
         ],

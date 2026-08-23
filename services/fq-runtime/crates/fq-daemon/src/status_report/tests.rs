@@ -53,6 +53,18 @@ fn an_empty_registry_is_a_zero_not_a_gap() {
 fn the_report_roundtrips_through_its_declared_shape() {
     let report = StatusReport {
         version: "0.1.0+deadbee".to_string(),
+        // A daemon mid-migration: the three split stores plus the
+        // pre-split file still on disk. The unhappy shape on purpose —
+        // `legacy_events_db` is the one optional field here, so a
+        // `None` fixture would roundtrip a report that never exercises
+        // it.
+        stores: fq_ops::surface::StatusStores {
+            worker_path: "/var/lib/factor-q/worker.db".to_string(),
+            control_plane_path: "/var/lib/factor-q/control-plane.db".to_string(),
+            projection_path: "/var/lib/factor-q/projection.db".to_string(),
+            legacy_events_db: Some("/var/lib/factor-q/events.db".to_string()),
+            initialised: true,
+        },
         streams: vec![
             fq_runtime::health::StreamHealth::Unavailable {
                 stream: "fq-events".to_string(),

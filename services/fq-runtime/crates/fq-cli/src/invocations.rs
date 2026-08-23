@@ -55,7 +55,6 @@ pub(crate) async fn invocation_list(
 ) -> anyhow::Result<()> {
     // Validate locally for a fast, friendly error before dialling.
     status
-        .as_deref()
         .map(fq_ops::surface::validate_invocation_status_filter)
         .transpose()
         .map_err(anyhow::Error::msg)?;

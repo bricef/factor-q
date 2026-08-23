@@ -20,10 +20,12 @@
 //! the connection this process already holds; the registry is the
 //! in-memory handle `fq reload` swaps, not the caller's disk; the row
 //! count and the recovery counts are reads of stores the daemon owns.
-//! What is *not* here — configuration paths, and whether the files at
-//! them exist — never needed a daemon and is answered client-side, so
-//! `fq status` keeps saying something when nothing is running
-//! ([`crate::status`]).
+//! The store paths joined them: `fq status` used to derive them from
+//! its own config, which is right only while the client and the
+//! daemon share a host and silently wrong the moment they do not. The
+//! one thing the client still answers alone is the edge address it
+//! dialled — its own configuration, and the reason `fq status` keeps
+//! saying something when nothing is running.
 //!
 //! Two sub-reads (`event_count`, `recovery`) stay internal to the
 //! composite rather than becoming declared reports, for the reason

@@ -476,3 +476,34 @@ pub(crate) fn describe_filter(filter: &EventFilter) -> String {
         (Some(agent), Some(event_type)) => format!("{event_type} events for agent {agent}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tail's preamble, in the domain's terms rather than the
+    /// transport's. It travelled with the daemon's Event atom while
+    /// the filter and the handler shared a crate; the sentence is the
+    /// client's, so it is asserted where it is written.
+    #[test]
+    fn a_filter_describes_itself_in_domain_terms() {
+        let described = |agent: Option<&str>, event_type: Option<&str>| {
+            let filter = EventFilter {
+                agent: agent.map(str::to_string),
+                event_type: event_type.map(str::to_string),
+                ..EventFilter::default()
+            };
+            describe_filter(&filter)
+        };
+        assert_eq!(described(None, None), "all events");
+        assert_eq!(
+            described(Some("researcher"), None),
+            "all events for agent researcher"
+        );
+        assert_eq!(described(None, Some("tool_call")), "all tool_call events");
+        assert_eq!(
+            described(Some("researcher"), Some("tool_call")),
+            "tool_call events for agent researcher"
+        );
+    }
+}
