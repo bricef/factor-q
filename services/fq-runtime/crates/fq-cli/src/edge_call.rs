@@ -19,7 +19,7 @@
 
 use crate::cli::GlobalArgs;
 use crate::connections::{edge_client, stored_connection};
-use fq_runtime::surface::{EventFilter, TurnFilter};
+use fq_ops::surface::{EventFilter, TurnFilter};
 
 /// Dial the configured daemon's edge with the stored pairing. One
 /// handle per verb, not per call: a verb that asks more than one
@@ -72,7 +72,7 @@ const TRANSCRIPT_TURN_LIMIT: u32 = u32::MAX;
 pub(crate) async fn edge_transcript_snapshot(
     client: &fq_edge::EdgeClient,
     invocation_id: &str,
-) -> anyhow::Result<Option<Vec<fq_runtime::transcript::TranscriptEntry>>> {
+) -> anyhow::Result<Option<Vec<fq_ops::transcript::TranscriptEntry>>> {
     use fq_edge::wire::WireError;
 
     let turns = match client
@@ -85,7 +85,7 @@ pub(crate) async fn edge_transcript_snapshot(
         )
         .await?
     {
-        Ok(value) => serde_json::from_value::<Vec<fq_runtime::turn::TurnState>>(value)?,
+        Ok(value) => serde_json::from_value::<Vec<fq_ops::turn::TurnState>>(value)?,
         Err(WireError::NotFound { .. }) => Vec::new(),
         Err(e) => anyhow::bail!("{e}"),
     };
@@ -99,7 +99,7 @@ pub(crate) async fn edge_transcript_snapshot(
     Ok(Some(
         turns
             .iter()
-            .map(fq_runtime::turn::TurnState::transcript_entry)
+            .map(fq_ops::turn::TurnState::transcript_entry)
             .collect(),
     ))
 }

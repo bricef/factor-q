@@ -12,10 +12,9 @@ use fq_runtime::agent::AgentId;
 
 use crate::cli::{GlobalArgs, TranscriptFormat};
 use crate::edge_call::{edge_client_for, edge_invoke, edge_transcript_snapshot, next_turn_batch};
-use fq_runtime::surface::{InvocationListFilter, InvocationViewKey};
+use fq_ops::surface::{InvocationListFilter, InvocationViewKey};
 
-use crate::operator_surface::parse_invocation_status_filter;
-use crate::resume::{InvocationResumeRequest, InvocationResumeResponse};
+use fq_ops::surface::{InvocationResumeRequest, InvocationResumeResponse};
 
 // ============================================================
 // fq invocation subcommand
@@ -23,7 +22,7 @@ use crate::resume::{InvocationResumeRequest, InvocationResumeResponse};
 
 /// One human-readable line for an invocation list row. Pure;
 /// covered by unit tests.
-fn format_invocation_list_row_human(item: &fq_runtime::views::InvocationSummaryView) -> String {
+fn format_invocation_list_row_human(item: &fq_ops::views::InvocationSummaryView) -> String {
     let inv_short: String = item.invocation_id.chars().take(8).collect();
     let agent = item.agent_id.as_deref().unwrap_or("?");
     let agent_trim: String = agent.chars().take(22).collect();
@@ -55,7 +54,11 @@ pub(crate) async fn invocation_list(
     json: bool,
 ) -> anyhow::Result<()> {
     // Validate locally for a fast, friendly error before dialling.
-    status.map(parse_invocation_status_filter).transpose()?;
+    status
+        .as_deref()
+        .map(fq_ops::surface::validate_invocation_status_filter)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
     // The flip (plan Phase 3b): this read speaks the authenticated
     // edge — the daemon serves it from its views. Rendering is
     // untouched; the goldens prove it byte-identical.
@@ -70,7 +73,7 @@ pub(crate) async fn invocation_list(
     )
     .await?
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let items: Vec<fq_runtime::views::InvocationSummaryView> = serde_json::from_value(output)?;
+    let items: Vec<fq_ops::views::InvocationSummaryView> = serde_json::from_value(output)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&items)?);
@@ -104,7 +107,7 @@ pub(crate) async fn invocation_show(
         })?,
     )
     .await?;
-    let detail: fq_runtime::views::InvocationDetailView = match output {
+    let detail: fq_ops::views::InvocationDetailView = match output {
         Ok(value) => serde_json::from_value(value)?,
         Err(fq_edge::wire::WireError::NotFound { .. }) => {
             eprintln!("no invocation found with id={id}");
@@ -265,7 +268,7 @@ pub(crate) async fn invocation_drop(
             "dropped invocation {id} at event sequence {event_seq}, but reading it back failed: {e}"
         )
     })?;
-    let detail: fq_runtime::views::InvocationDetailView = serde_json::from_value(detail)?;
+    let detail: fq_ops::views::InvocationDetailView = serde_json::from_value(detail)?;
     let result = InvocationDropResult {
         invocation_id: id.to_string(),
         // An invocation whose only events are operator-issued has no
@@ -318,7 +321,7 @@ pub(crate) async fn invocation_transcript(
     format: Option<TranscriptFormat>,
     full: bool,
 ) -> anyhow::Result<()> {
-    use fq_runtime::transcript::{DEFAULT_TRUNCATE_BYTES, dedup_key, render_pretty, snapshot_keys};
+    use fq_ops::transcript::{DEFAULT_TRUNCATE_BYTES, dedup_key, render_pretty, snapshot_keys};
 
     let as_json = json || matches!(format, Some(TranscriptFormat::Json));
     if json && matches!(format, Some(TranscriptFormat::Pretty)) {
@@ -399,7 +402,7 @@ pub(crate) async fn invocation_transcript(
             .map_err(|e| anyhow::anyhow!("turn.stream: {e}"))?;
         cursor = batch.next_from_seq;
         for item in batch.items {
-            let turn: fq_runtime::turn::TurnState = serde_json::from_value(item.item)?;
+            let turn: fq_ops::turn::TurnState = serde_json::from_value(item.item)?;
             let entry = turn.transcript_entry();
             if let Some(key) = dedup_key(&entry)
                 && !seen.insert(key)

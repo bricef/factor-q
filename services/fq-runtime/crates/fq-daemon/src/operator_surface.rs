@@ -23,24 +23,6 @@ use fq_runtime::views::Views;
 // until 3e's codegen decision settles their final home.
 // ---------------------------------------------------------------------
 
-/// Parse a `--status` filter into an `OwnerStatus`. Returns
-/// `Err` on unknown values so the CLI exits with a clear
-/// message rather than silently matching no rows.
-pub(crate) fn parse_invocation_status_filter(
-    s: &str,
-) -> anyhow::Result<fq_runtime::control_plane::store::OwnerStatus> {
-    use fq_runtime::control_plane::store::OwnerStatus;
-    match s {
-        "in_flight" => Ok(OwnerStatus::InFlight),
-        "ambiguous" => Ok(OwnerStatus::Ambiguous),
-        "completed" => Ok(OwnerStatus::Completed),
-        "failed" => Ok(OwnerStatus::Failed),
-        other => Err(anyhow::anyhow!(
-            "unknown status filter `{other}` — try in_flight | ambiguous | completed | failed"
-        )),
-    }
-}
-
 // The Worker shapes are `fq_ops::surface`, like every other declared
 // key and filter. They stayed here through #491 because the handler
 // was their only consumer; the client reads them too once it stops
@@ -73,6 +55,11 @@ pub struct OperatorDeps {
     /// these are the only fields a *command over the daemon itself*
     /// needs — everything above serves a resource.
     pub machinery: crate::control_commands::MachineryDeps,
+    /// Where this daemon's stores live — reported by `control.status`
+    /// so a reader never has to derive them from its own config.
+    pub db_paths: std::sync::Arc<fq_runtime::RuntimeDbPaths>,
+    /// A pre-split `events.db`, if one is still on disk.
+    pub legacy_events_db: std::sync::Arc<std::path::PathBuf>,
 }
 
 /// Get identity for a Turn: its event-log sequence.
@@ -281,6 +268,8 @@ pub fn operator_registry(
         status_views,
         status_bus,
         status_registry,
+        deps.db_paths.clone(),
+        deps.legacy_events_db.clone(),
     )?;
 
     let decl = fq_ops::Command::new::<DropCommandInput>(
@@ -725,5 +714,21 @@ async fn stream_turns(
     Ok(fq_edge::wire::StreamBatch {
         items,
         next_from_seq,
+    })
+}
+
+/// Map a validated status filter onto the ownership enum the store
+/// indexes by. The accepted spellings are `fq-ops`'; this is the only
+/// place that knows what they mean to a store.
+pub(crate) fn parse_invocation_status_filter(
+    s: &str,
+) -> anyhow::Result<fq_runtime::control_plane::store::OwnerStatus> {
+    use fq_runtime::control_plane::store::OwnerStatus;
+    fq_ops::surface::validate_invocation_status_filter(s).map_err(anyhow::Error::msg)?;
+    Ok(match s {
+        "in_flight" => OwnerStatus::InFlight,
+        "ambiguous" => OwnerStatus::Ambiguous,
+        "completed" => OwnerStatus::Completed,
+        _ => OwnerStatus::Failed,
     })
 }

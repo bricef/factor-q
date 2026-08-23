@@ -25,9 +25,9 @@ use fq_runtime::events::{Event, EventPayload};
 
 use crate::cli::GlobalArgs;
 use crate::edge_call::{edge_client_for, edge_invoke, next_event_batch};
-use fq_runtime::surface::EventFilter;
+use fq_ops::surface::EventFilter;
 
-use crate::event_atom::EventKey;
+use fq_ops::surface::EventKey;
 
 /// Tail the event stream, formatting each event as a single readable
 /// line.
@@ -73,7 +73,7 @@ pub(crate) async fn tail_events(
     let mut cursor = seek.next_from_seq;
 
     if !json {
-        println!("Tailing {}", crate::event_atom::describe_filter(&filter));
+        println!("Tailing {}", describe_filter(&filter));
         println!("Press Ctrl-C to exit.");
         println!();
     }
@@ -302,14 +302,14 @@ pub(crate) async fn query_events(
                      materialise an unbounded answer. For more than a page, narrow with \
                      --agent/--type/--since, or use `fq events tail`, which is cursored \
                      and selects the same events for the same filter.",
-                    cap = crate::event_atom::EVENT_LIST_MAX_LIMIT
+                    cap = fq_ops::surface::EVENT_LIST_MAX_LIMIT
                 )
             })?),
         })?,
     )
     .await?
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let rows: Vec<fq_runtime::views::EventView> = serde_json::from_value(output)?;
+    let rows: Vec<fq_ops::views::EventView> = serde_json::from_value(output)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -455,4 +455,24 @@ fn unavailable_event(err: &WireError) -> anyhow::Result<(String, &'static str)> 
         ),
         other => anyhow::bail!("{other}"),
     })
+}
+
+/// What an [`EventFilter`] selects, in words — `fq events tail` says it
+/// back in its preamble so an operator can see at a glance that the
+/// narrowing they asked for is the one in force. Domain terms, like
+/// the filter itself: the verb used to echo the raw NATS subject it
+/// had subscribed to, which named a coordinate of the infrastructure
+/// rather than anything the operator selected.
+///
+/// A free function rather than a method because the filter is now a
+/// shared declared shape ([`fq_runtime::surface`]) and this sentence
+/// is the CLI's own — terminal prose has no business travelling with
+/// a wire contract.
+pub(crate) fn describe_filter(filter: &EventFilter) -> String {
+    match (filter.agent.as_deref(), filter.event_type.as_deref()) {
+        (None, None) => "all events".to_string(),
+        (Some(agent), None) => format!("all events for agent {agent}"),
+        (None, Some(event_type)) => format!("all {event_type} events"),
+        (Some(agent), Some(event_type)) => format!("{event_type} events for agent {agent}"),
+    }
 }

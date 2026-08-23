@@ -23,10 +23,10 @@
 //! ([`doctor_client`]).
 
 use crate::cli::GlobalArgs;
-use fq_runtime::surface::DoctorReport;
+use fq_ops::surface::DoctorReport;
 
-use crate::doctor_report::DOCTOR_STUCK_THRESHOLD_MS;
 use crate::edge_call::edge_client_for;
+use fq_ops::surface::DOCTOR_STUCK_THRESHOLD_MS;
 
 /// Pure: render the human-readable `fq doctor` report, mirroring
 /// `render_recovery_guidance` — an overall verdict, then per-failing-

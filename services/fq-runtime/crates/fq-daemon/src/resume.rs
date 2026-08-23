@@ -10,34 +10,24 @@
 
 use std::sync::Arc;
 
+pub(crate) use fq_ops::surface::{InvocationResumeRequest, InvocationResumeResponse};
 use fq_runtime::agent::AgentId;
 use fq_runtime::events::{Event, EventPayload};
 use fq_runtime::llm::LlmClient;
 use fq_runtime::{ControlPlaneStore, EventBus, SharedRegistry};
 use uuid::Uuid;
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-pub(crate) struct InvocationResumeRequest {
-    pub(crate) invocation_id: String,
-    pub(crate) reason: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-pub(crate) struct InvocationResumeResponse {
-    pub(crate) ok: bool,
-    pub(crate) message: String,
-    pub(crate) completed_call_ids: Vec<String>,
-}
-
-impl InvocationResumeResponse {
-    /// Precondition refusal: nothing was injected yet, so there are no
-    /// completed call ids to report.
-    pub(crate) fn rejected(message: impl Into<String>) -> Self {
-        Self {
-            ok: false,
-            message: message.into(),
-            completed_call_ids: Vec::new(),
-        }
+// `InvocationResumeResponse` is `fq_ops::surface`'s now, and an inherent impl has to
+// sit with its type. These are the daemon's use of it, so they
+// become free functions here rather than travelling to a crate
+// that has no reason to know what a page cap or a refusal means.
+/// Precondition refusal: nothing was injected yet, so there are no
+/// completed call ids to report.
+pub(crate) fn rejected(message: impl Into<String>) -> InvocationResumeResponse {
+    InvocationResumeResponse {
+        ok: false,
+        message: message.into(),
+        completed_call_ids: Vec::new(),
     }
 }
 
@@ -83,7 +73,7 @@ pub(crate) async fn handle_resume_request(
                 .await
                 .ok()
                 .flatten();
-            return InvocationResumeResponse::rejected(match owner.map(|o| o.status) {
+            return rejected(match owner.map(|o| o.status) {
                 Some(OwnerStatus::Completed | OwnerStatus::Failed) => {
                     format!("invocation {id} is terminal and cannot be resumed")
                 }
@@ -91,15 +81,11 @@ pub(crate) async fn handle_resume_request(
             });
         }
         Err(err) => {
-            return InvocationResumeResponse::rejected(format!(
-                "failed to inspect invocation: {err}"
-            ));
+            return rejected(format!("failed to inspect invocation: {err}"));
         }
     };
     if state.terminal_at.is_some() {
-        return InvocationResumeResponse::rejected(format!(
-            "invocation {id} is terminal and cannot be resumed"
-        ));
+        return rejected(format!("invocation {id} is terminal and cannot be resumed"));
     }
     // The worker store alone cannot see an operator drop (#374): drop
     // writes coordination only, so the WAL state row still reads
@@ -115,7 +101,7 @@ pub(crate) async fn handle_resume_request(
     if let Some(owner) = &owner
         && matches!(owner.status, OwnerStatus::Completed | OwnerStatus::Failed)
     {
-        return InvocationResumeResponse::rejected(format!(
+        return rejected(format!(
             "invocation {id} is terminal (completed, failed, or operator-dropped) \
              and cannot be resumed"
         ));
@@ -132,7 +118,7 @@ pub(crate) async fn handle_resume_request(
     if let Ok(uuid) = uuid::Uuid::parse_str(id)
         && control.runner.is_active(&uuid)
     {
-        return InvocationResumeResponse::rejected(format!(
+        return rejected(format!(
             "invocation {id} is executing on this daemon right now — resume \
              is for crashed invocations; drain or wait for it instead"
         ));
@@ -147,14 +133,14 @@ pub(crate) async fn handle_resume_request(
         .list_llm_dispatches_for_invocation(id)
         .await;
     let (Ok(tools), Ok(llms)) = (tools, llms) else {
-        return InvocationResumeResponse::rejected("failed to inspect invocation WAL");
+        return rejected("failed to inspect invocation WAL");
     };
 
     // Interrupted-result injection only reconciles tool calls — a stuck
     // LLM dispatch has no tool_dispatch row to complete, so resume cannot
     // help and must say so rather than mislabel the state.
     if llms.iter().any(|l| l.status == DispatchStatus::Dispatched) {
-        return InvocationResumeResponse::rejected(format!(
+        return rejected(format!(
             "invocation {id} is ambiguous in an LLM dispatch; \
              interrupted-result injection applies only to tool calls"
         ));
@@ -169,7 +155,7 @@ pub(crate) async fn handle_resume_request(
             .ok()
             .flatten()
             .is_some_and(|o| o.status == OwnerStatus::InFlight);
-        return InvocationResumeResponse::rejected(if live {
+        return rejected(if live {
             format!("invocation {id} is live; only Ambiguous invocations can be resumed")
         } else {
             format!("invocation {id} is not Ambiguous (it may already have been resumed)")
@@ -179,9 +165,7 @@ pub(crate) async fn handle_resume_request(
     let ids = match control.worker_store.inject_interrupted_results(id).await {
         Ok(ids) => ids,
         Err(err) => {
-            return InvocationResumeResponse::rejected(format!(
-                "failed to inject interrupted result: {err}"
-            ));
+            return rejected(format!("failed to inject interrupted result: {err}"));
         }
     };
 

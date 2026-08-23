@@ -15,8 +15,15 @@
 //! and is near its size budget (#189).
 
 use fq_edge::wire::WireError;
+use fq_ops::surface::{DEAD_LETTER_LIST_MAX_LIMIT, DeadLetterFilter};
 use fq_runtime::dead_letter::{DeadLetter, DeadLetterState};
 use fq_runtime::events::subjects;
+
+/// Cap on one stream batch.
+const DEAD_LETTER_BATCH_CAP: usize = 64;
+
+/// Default List page, matching `fq dead-letters list --limit`'s default.
+const DEAD_LETTER_LIST_DEFAULT_LIMIT: u32 = 50;
 
 /// Get identity for a DeadLetter: its event-log sequence.
 ///
@@ -30,134 +37,51 @@ pub(crate) struct DeadLetterKey {
     pub(crate) seq: u64,
 }
 
-/// List/Stream selection for DeadLetters — the typed, schema'd filter,
-/// never a query language.
+// `DeadLetterFilter` is `fq_ops::surface`'s now, and an inherent impl has to
+// sit with its type. These are the daemon's use of it, so they
+// become free functions here rather than travelling to a crate
+// that has no reason to know what a page cap or a refusal means.
+/// The page size this filter asks List for: the caller's own
+/// number, checked against the cap, or the default when they named
+/// none.
 ///
-/// It carries exactly the narrowing `fq dead-letters list` offers
-/// (`--agent`, `--limit`) and nothing invented alongside: a filter is a
-/// promise the surface has to keep, so it grows when a caller needs it
-/// to (P11), not when a field looks plausible.
-#[derive(Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct DeadLetterFilter {
-    /// One agent's dead letters. Absent reads every agent's.
-    #[serde(default)]
-    pub(crate) agent: Option<String>,
-    /// Cap on one List page — the most recent N matching dead
-    /// letters, and at most 500 of them (this property's `maximum`).
-    /// Absent asks for the default 50.
-    ///
-    /// **A larger N is refused, never quietly shrunk.** So the count
-    /// that comes back is always the one you asked for or the whole
-    /// answer, and it reads unambiguously: fewer rows than you asked
-    /// for means there are no more; exactly as many means there may
-    /// be. For more than a page, narrow with `agent` — the only
-    /// narrowing this filter offers — or read the same dead letters
-    /// from `dead_letter.stream`, which is cursored.
-    ///
-    /// Ignored by Stream, which is cursored rather than paged.
-    #[serde(default)]
-    #[schemars(range(max = DEAD_LETTER_LIST_MAX_LIMIT))]
-    pub(crate) limit: Option<u32>,
-}
-
-impl DeadLetterFilter {
-    /// The page size this filter asks List for: the caller's own
-    /// number, checked against the cap, or the default when they named
-    /// none.
-    ///
-    /// **Over the cap is a refusal, not a shorter page.** Clamping is
-    /// the tempting fix and the wrong one. List answers with a bare
-    /// array of dead letters — no envelope, no cursor, nowhere to say
-    /// "there is more" — so a page the daemon silently shortened is
-    /// indistinguishable from a listing that ended, and an operator
-    /// reads N rows with no way to tell "that is all of them" from
-    /// "that is as many as you may have at once". Refusing keeps
-    /// `limit` the caller's own bound, which is the whole reason the
-    /// row count is readable at all.
-    ///
-    /// And the cap is not a dead end, which is the other half of the
-    /// choice: more than a page is served by narrowing with `agent`,
-    /// or by `dead_letter.stream`, which is cursored and resumes from
-    /// the sequence List ends at — the composition this atom's List
-    /// order exists to make possible (see [`list_dead_letters`]). A
-    /// silent clamp would have been a dead end *and* a lie.
-    fn list_limit(&self) -> Result<u32, WireError> {
-        let Some(limit) = self.limit else {
-            return Ok(DEAD_LETTER_LIST_DEFAULT_LIMIT);
-        };
-        if limit > DEAD_LETTER_LIST_MAX_LIMIT {
-            return Err(WireError::InvalidInput {
-                op: "dead_letter.list".into(),
-                message: format!(
-                    "limit {limit} is over the {DEAD_LETTER_LIST_MAX_LIMIT}-row cap on one \
-                     List page — ask for {DEAD_LETTER_LIST_MAX_LIMIT} or fewer. The cap is \
-                     not applied silently because a shortened page and a complete one are \
-                     the same answer to look at. For more than a page, narrow with `agent` \
-                     — the only narrowing this filter offers — or read \
-                     `dead_letter.stream`, which is cursored and resumes from the sequence \
-                     this listing ends at."
-                ),
-            });
-        }
-        Ok(limit)
+/// **Over the cap is a refusal, not a shorter page.** Clamping is
+/// the tempting fix and the wrong one. List answers with a bare
+/// array of dead letters — no envelope, no cursor, nowhere to say
+/// "there is more" — so a page the daemon silently shortened is
+/// indistinguishable from a listing that ended, and an operator
+/// reads N rows with no way to tell "that is all of them" from
+/// "that is as many as you may have at once". Refusing keeps
+/// `limit` the caller's own bound, which is the whole reason the
+/// row count is readable at all.
+///
+/// And the cap is not a dead end, which is the other half of the
+/// choice: more than a page is served by narrowing with `agent`,
+/// or by `dead_letter.stream`, which is cursored and resumes from
+/// the sequence List ends at — the composition this atom's List
+/// order exists to make possible (see [`list_dead_letters`]). A
+/// silent clamp would have been a dead end *and* a lie.
+fn list_limit(filter: &DeadLetterFilter) -> Result<u32, WireError> {
+    let Some(limit) = filter.limit else {
+        return Ok(DEAD_LETTER_LIST_DEFAULT_LIMIT);
+    };
+    if limit > DEAD_LETTER_LIST_MAX_LIMIT {
+        return Err(WireError::InvalidInput {
+            op: "dead_letter.list".into(),
+            message: format!(
+                "limit {limit} is over the {DEAD_LETTER_LIST_MAX_LIMIT}-row cap on one \
+                 List page — ask for {DEAD_LETTER_LIST_MAX_LIMIT} or fewer. The cap is \
+                 not applied silently because a shortened page and a complete one are \
+                 the same answer to look at. For more than a page, narrow with `agent` \
+                 — the only narrowing this filter offers — or read \
+                 `dead_letter.stream`, which is cursored and resumes from the sequence \
+                 this listing ends at."
+            ),
+        });
     }
+    Ok(limit)
 }
 
-/// Cap on one stream batch.
-const DEAD_LETTER_BATCH_CAP: usize = 64;
-/// Default List page, matching `fq dead-letters list --limit`'s default.
-const DEAD_LETTER_LIST_DEFAULT_LIMIT: u32 = 50;
-/// The most dead letters one List page may carry, whatever a caller
-/// asks for — refused rather than quietly applied (see
-/// [`DeadLetterFilter::list_limit`]), and declared on the surface as
-/// this filter's `limit` maximum so a consumer reads it off the schema
-/// instead of discovering it by failing.
-///
-/// **The number is the edge's frame, worked backwards.** One List
-/// answer is one frame, and both ends of the edge frame with
-/// `LengthDelimitedCodec::new()`, whose default ceiling is 8 MiB
-/// (8,388,608 bytes). A row's fixed part — one UUID, an RFC3339
-/// timestamp, ten keys — is 235 bytes; the golden listing measures 319
-/// and 323; and a production row measures 698: a github-watcher
-/// task payload (`task`/`refs`/`constraints`/`done_criteria`/`github`,
-/// 328 bytes of it) under the inline emitter's message. So 500 rows
-/// leaves 8,388,608 / 500 = 16,777 bytes for each of them — twenty-four
-/// times the production row, or ~16 KB of trigger payload on *every*
-/// row — and a full page of production rows is 0.33 MiB, 4% of the
-/// frame.
-///
-/// **It is smaller than the Event atom's 2,000 because the row is
-/// bigger and the slack has two claimants, not one.** A dead letter
-/// carries the trigger that died with it: `trigger_payload` is opaque
-/// JSON the producer chose, which the wire contract says outright
-/// (`docs/design/committed/trigger-wire-contract.md`: "an **opaque JSON
-/// value**... Any valid JSON value is accepted"), and nothing in the
-/// runtime truncates it — `fq dead-letters list` truncates for
-/// *display* only, and `--json` prints it whole. `error_message` is
-/// unbounded too: the inline emitter interpolates the `ExecutorError`
-/// that lost the last delivery, which can be a provider's error body.
-/// At 698 bytes the row is 2.4x an `EventView`'s 294, so matching that
-/// atom's fourteen-fold headroom would land near 850; 500 is the round
-/// number below it, and the difference is the second unbounded field's
-/// margin.
-///
-/// The only ceiling either field already has is the broker's: a
-/// publish above the server's advertised `max_payload` is refused
-/// (`EventBus::publish`), which is 16 MB on the dogfood broker
-/// (`ops/dogfood/infra/nats.conf`) — *above* the 8 MiB frame, so one
-/// pathological row can outgrow a response all by itself. This cap
-/// does not fix that, and does not pretend to; it bounds the ordinary
-/// page.
-///
-/// What it replaces had no bound at all. Note that an oversized
-/// `limit` never allocated a page that size up front:
-/// [`list_dead_letters`] scans the subject forward and keeps a sliding
-/// window of at most `limit`, so the memory was however many dead
-/// letters the log actually held. The scan is the whole subject either
-/// way. What an unbounded `limit` bought was a response that grew with
-/// retained history until the codec refused it — around 12,000
-/// production-sized rows — after the scan had already been paid for.
-pub(crate) const DEAD_LETTER_LIST_MAX_LIMIT: u32 = 500;
 /// Ceiling on a `next_batch` long poll, whatever the caller asks.
 const DEAD_LETTER_MAX_WAIT_CEILING_MS: u64 = 60_000;
 
@@ -229,7 +153,7 @@ pub(crate) fn register_dead_letter_atom(
                 let bus = list_bus.clone();
                 async move {
                     let subject = selection_subject(&filter, "dead_letter.list")?;
-                    let limit = filter.list_limit()? as usize;
+                    let limit = list_limit(&filter)? as usize;
                     list_dead_letters(&bus, &subject, limit).await
                 }
             },

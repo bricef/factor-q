@@ -1,0 +1,40 @@
+[package]
+name = "fq-daemon"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
+
+# The daemon. It owns the runtime, the three SQLite stores and every
+# word spoken to NATS, and it serves the operation registry over the
+# authenticated edge (ADR-0031). Everything heavy lives here so that
+# `fq` — the client — can link none of it.
+
+[[bin]]
+name = "fqd"
+path = "src/bin/fqd.rs"
+
+[dependencies]
+fq-edge = { path = "../fq-edge" }
+fq-ops = { workspace = true }
+fq-runtime = { workspace = true }
+fq-tools = { workspace = true }
+
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+toml = { workspace = true }
+tarpc = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json"] }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

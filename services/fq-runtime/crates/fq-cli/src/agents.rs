@@ -15,12 +15,12 @@
 
 use std::path::Path;
 
+use fq_ops::agent_view::{AgentEntryView, AgentSummaryView};
 use fq_runtime::agent::definition::parse_agent;
-use fq_runtime::agent_view::{AgentEntryView, AgentSummaryView};
 
 use crate::cli::GlobalArgs;
 use crate::edge_call::edge_invoke;
-use fq_runtime::surface::AgentListFilter;
+use fq_ops::surface::AgentListFilter;
 
 fn format_agent_row_human(agent: &AgentSummaryView) -> String {
     format!(

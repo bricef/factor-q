@@ -1235,6 +1235,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "fq-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "chrono",
+ "clap",
+ "fq-edge",
+ "fq-ops",
+ "fq-runtime",
+ "fq-tools",
+ "futures",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tarpc",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "fq-dashboard"
 version = "0.1.0"
 dependencies = [

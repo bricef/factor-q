@@ -34,19 +34,10 @@
 //! state of "not here", named below.
 
 use fq_edge::wire::WireError;
+pub(crate) use fq_ops::surface::TriggerKey;
 use fq_runtime::trigger::{Trigger, TriggerView};
 use fq_runtime::views::Views;
 use std::sync::Arc;
-
-/// Get identity for a Trigger: the `trigger_id` the runtime minted (or
-/// honoured) when it took responsibility for the trigger — a UUIDv7 in
-/// canonical hyphenated text, and the `triggers` table's primary key.
-///
-/// This is the shape `trigger.publish`'s receipt hands back, verbatim.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct TriggerKey {
-    pub(crate) trigger_id: String,
-}
 
 /// List/Stream selection for Triggers — the typed, schema'd filter,
 /// never a query language.

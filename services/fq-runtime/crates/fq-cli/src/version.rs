@@ -12,6 +12,7 @@ const FQ_TARGET: &str = env!("FQ_TARGET");
 /// daemon reports which build it is — the `system.startup` event and
 /// banner carry the SHA, not just the semver. Lets a deploy check
 /// confirm the live process is on the expected commit.
+#[allow(dead_code)]
 pub(crate) const FQ_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("FQ_GIT_SHA"));
 
 /// Print version + build information: semver, commit, build date, target.

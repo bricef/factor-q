@@ -20,10 +20,10 @@
 use anyhow::Context;
 
 use crate::cli::GlobalArgs;
-use crate::dead_letter_atom::DeadLetterFilter;
 use crate::edge_call::{edge_client_for, edge_invoke};
-use crate::trigger_command::TriggerKey;
 use crate::truncate_json;
+use fq_ops::surface::DeadLetterFilter;
+use fq_ops::surface::TriggerKey;
 
 /// The rendered listing, newest first.
 ///
@@ -61,7 +61,7 @@ pub(crate) async fn list_dead_letters(
                  page, narrow with --agent — the only narrowing this listing offers; the \
                  cursored read of the same dead letters is `dead_letter.stream` on the \
                  operator surface, which no `fq` verb consumes yet.",
-                cap = crate::dead_letter_atom::DEAD_LETTER_LIST_MAX_LIMIT
+                cap = fq_ops::surface::DEAD_LETTER_LIST_MAX_LIMIT
             )
         })?),
     };

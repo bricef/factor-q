@@ -562,13 +562,5 @@ pub(crate) fn init_tracing(format: LogFormat) {
     }
 }
 
-/// `fqd` takes the global connection/config flags and no subcommands.
-#[derive(clap::Parser)]
-#[command(name = "fqd", about = "The factor-q daemon", version)]
-pub(crate) struct FqdArgs {
-    #[command(flatten)]
-    pub(crate) global: GlobalArgs,
-}
-
 #[cfg(test)]
 mod tests;

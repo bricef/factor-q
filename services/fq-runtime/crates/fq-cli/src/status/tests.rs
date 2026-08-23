@@ -1,6 +1,6 @@
 use super::*;
 
-use fq_runtime::health::{ConsumerHealth, StreamHealth};
+use fq_ops::health::{ConsumerHealth, StreamHealth};
 
 fn config() -> StatusConfig {
     StatusConfig {
@@ -44,7 +44,7 @@ fn report() -> StatusReport {
             load_errors: Vec::new(),
         },
         projection_rows: 10,
-        recovery: fq_runtime::views::RecoveryView::default(),
+        recovery: fq_ops::views::RecoveryView::default(),
     }
 }
 

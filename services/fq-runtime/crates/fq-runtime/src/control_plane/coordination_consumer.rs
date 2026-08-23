@@ -70,7 +70,7 @@ pub const FILTER_SUBJECT: &str = "fq.agent.*.invocation.*";
 
 /// Default time after which a worker without a fresh
 /// heartbeat is considered stale (30 seconds).
-pub const DEFAULT_STALE_THRESHOLD_MS: i64 = 30_000;
+pub use fq_ops::surface::DEFAULT_STALE_THRESHOLD_MS;
 
 /// Default cadence for the stale-worker sweep (10 seconds).
 pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 10_000;

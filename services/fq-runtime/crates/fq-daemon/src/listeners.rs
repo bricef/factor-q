@@ -18,9 +18,7 @@ use futures::StreamExt;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::resume::{
-    InvocationResumeRequest, InvocationResumeResponse, ResumeControl, handle_resume_request,
-};
+use crate::resume::{InvocationResumeRequest, ResumeControl, handle_resume_request, rejected};
 
 /// Spawn the operator resume listener (`fq invocation resume`, #373). The
 /// daemon owns the worker store and is the only process allowed to mutate
@@ -63,7 +61,7 @@ pub(crate) fn spawn_resume_listener(
                         let response =
                             match serde_json::from_slice::<InvocationResumeRequest>(&msg.payload) {
                                 Ok(req) => handle_resume_request(&resume_control, req).await,
-                                Err(err) => InvocationResumeResponse::rejected(format!(
+                                Err(err) => rejected(format!(
                                     "invalid resume request: {err}"
                                 )),
                             };

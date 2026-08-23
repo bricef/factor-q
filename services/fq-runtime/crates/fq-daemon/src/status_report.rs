@@ -50,6 +50,10 @@ pub(crate) fn register_status_report(
     views: Arc<Views>,
     bus: fq_runtime::EventBus,
     agents: fq_runtime::SharedRegistry,
+    // Where this daemon's stores are. Taken from the config it was
+    // started with, so the answer describes the process reporting it.
+    db_paths: std::sync::Arc<fq_runtime::RuntimeDbPaths>,
+    legacy_events_db: std::sync::Arc<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     let decl = fq_ops::Report::new::<StatusParams, StatusReport>(
         fq_ops::ControlReport::Status,
@@ -77,6 +81,8 @@ pub(crate) fn register_status_report(
             let views = views.clone();
             let bus = bus.clone();
             let agents = agents.clone();
+            let db_paths = db_paths.clone();
+            let legacy_events_db = legacy_events_db.clone();
             async move {
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
@@ -94,6 +100,18 @@ pub(crate) fn register_status_report(
                 let snapshot = agents.read().await.clone();
                 Ok(StatusReport {
                     version: FQ_VERSION.to_string(),
+                    stores: fq_ops::surface::StatusStores {
+                        worker_path: db_paths.worker.display().to_string(),
+                        control_plane_path: db_paths.control_plane.display().to_string(),
+                        projection_path: db_paths.projection.display().to_string(),
+                        // Checked per call: a migration removes it, and
+                        // a report that cached its absence would keep
+                        // claiming a file the daemon has since dealt with.
+                        legacy_events_db: legacy_events_db
+                            .exists()
+                            .then(|| legacy_events_db.display().to_string()),
+                        initialised: db_paths.all_exist(),
+                    },
                     streams,
                     registry: StatusRegistry::from(snapshot.as_ref()),
                     projection_rows,

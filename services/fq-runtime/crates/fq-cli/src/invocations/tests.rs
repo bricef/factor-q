@@ -35,7 +35,7 @@ fn parse_invocation_status_filter_rejects_unknown() {
 
 #[test]
 fn format_invocation_list_row_human_renders_short_id_and_truncated_fields() {
-    let item = fq_runtime::views::InvocationSummaryView {
+    let item = fq_ops::views::InvocationSummaryView {
         invocation_id: "019e3b328fd47de1aae0bb91bb24528d".to_string(),
         agent_id: Some("a".repeat(40)),
         worker_id: "worker-42".to_string(),
@@ -59,7 +59,7 @@ fn format_invocation_list_row_human_renders_short_id_and_truncated_fields() {
 /// renders an em-dash.
 #[test]
 fn format_invocation_list_row_human_renders_summary_last() {
-    let mut item = fq_runtime::views::InvocationSummaryView {
+    let mut item = fq_ops::views::InvocationSummaryView {
         invocation_id: "019e3b328fd47de1aae0bb91bb24528d".to_string(),
         agent_id: Some("m0-issue-fix".to_string()),
         worker_id: "w".to_string(),
@@ -87,7 +87,7 @@ fn format_invocation_list_row_human_renders_summary_last() {
 
 #[test]
 fn format_invocation_list_row_human_marks_archived() {
-    let item = fq_runtime::views::InvocationSummaryView {
+    let item = fq_ops::views::InvocationSummaryView {
         invocation_id: "inv".to_string(),
         agent_id: Some("a".to_string()),
         worker_id: String::new(),
@@ -275,7 +275,7 @@ async fn drop_invocation_errors_when_nothing_known() {
 /// must not move these fields.
 #[test]
 fn invocation_summary_view_serialises_to_stable_json_shape() {
-    let item = fq_runtime::views::InvocationSummaryView {
+    let item = fq_ops::views::InvocationSummaryView {
         invocation_id: "inv-1".to_string(),
         agent_id: Some("agent-1".to_string()),
         worker_id: "worker-1".to_string(),

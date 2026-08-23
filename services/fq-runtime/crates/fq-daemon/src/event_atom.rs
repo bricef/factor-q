@@ -47,44 +47,11 @@
 use std::sync::Arc;
 
 use fq_edge::wire::WireError;
+use fq_ops::surface::EventKey;
 use fq_runtime::event_tail::EventState;
 use fq_runtime::events::Event;
 use fq_runtime::surface::EventFilter;
 use fq_runtime::views::{EventLocation, EventView, Views};
-
-/// Get identity for an Event: the `event_id` the event stamps on
-/// itself at construction (`Uuid::now_v7`), which is also the
-/// projection index's primary key — stable, transport-independent,
-/// time-ordered, and already indexed.
-///
-/// **Not the log sequence**, which is where this started: see the
-/// module docs for the two ways a stored position comes to address
-/// the wrong event, both of which happen without anybody doing
-/// anything wrong.
-#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct EventKey {
-    pub(crate) event_id: String,
-}
-
-/// What an [`EventFilter`] selects, in words — `fq events tail` says it
-/// back in its preamble so an operator can see at a glance that the
-/// narrowing they asked for is the one in force. Domain terms, like
-/// the filter itself: the verb used to echo the raw NATS subject it
-/// had subscribed to, which named a coordinate of the infrastructure
-/// rather than anything the operator selected.
-///
-/// A free function rather than a method because the filter is now a
-/// shared declared shape ([`fq_runtime::surface`]) and this sentence
-/// is the CLI's own — terminal prose has no business travelling with
-/// a wire contract.
-pub(crate) fn describe_filter(filter: &EventFilter) -> String {
-    match (filter.agent.as_deref(), filter.event_type.as_deref()) {
-        (None, None) => "all events".to_string(),
-        (Some(agent), None) => format!("all events for agent {agent}"),
-        (None, Some(event_type)) => format!("all {event_type} events"),
-        (Some(agent), Some(event_type)) => format!("{event_type} events for agent {agent}"),
-    }
-}
 
 /// The page size a filter asks List for: the caller's own number,
 /// checked against the cap, or the default when they named none.

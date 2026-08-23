@@ -9,6 +9,7 @@ resolver = "2"
 members = [
     "services/fq-dashboard",
     "services/fq-runtime/crates/fq-cli",
+    "services/fq-runtime/crates/fq-daemon",
     "services/fq-runtime/crates/fq-edge",
     "services/fq-runtime/crates/fq-ops",
     "services/fq-runtime/crates/fq-runtime",
@@ -40,6 +41,7 @@ repository = "https://github.com/bricef/factor-q"
 [workspace.dependencies]
 # -- internal --
 fq-ops = { path = "services/fq-runtime/crates/fq-ops" }
+fq-daemon = { path = "services/fq-runtime/crates/fq-daemon" }
 fq-runtime = { path = "services/fq-runtime/crates/fq-runtime" }
 fq-test-support = { path = "services/fq-test-support" }
 fq-tools = { path = "services/fq-runtime/crates/fq-tools" }

@@ -48,99 +48,12 @@
 use std::sync::Arc;
 
 use fq_edge::wire::WireError;
-use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
-use fq_runtime::surface::{
-    DoctorDeadLetters, DoctorExecutions, DoctorFailure, DoctorParams, DoctorReport, DoctorWorkers,
-};
+use fq_ops::surface::{DOCTOR_STUCK_THRESHOLD_MS, build_doctor_report};
+use fq_runtime::surface::{DoctorParams, DoctorReport};
 use fq_runtime::views::Views;
-
-/// Stuck-work threshold: an in-flight invocation whose
-/// `invocation_state.updated_at` is older than this many ms is
-/// flagged "stuck" by `fq doctor`. Reuses the control-plane's
-/// stale-worker value (`DEFAULT_STALE_THRESHOLD_MS = 30_000`,
-/// `coordination_consumer.rs:66`) rather than inventing a third
-/// hard-coded constant — an invocation that has not touched its
-/// WAL row in as long as a worker has not heartbeated is the same
-/// order of "not making progress" signal.
-///
-/// It is the daemon's choice, and the client renders it back in the
-/// ">30s" line. That works because one crate holds both halves today;
-/// when Phase 5 splits them, either the threshold travels in the
-/// report or the client stops naming a number it did not decide.
-pub(crate) const DOCTOR_STUCK_THRESHOLD_MS: i64 = DEFAULT_STALE_THRESHOLD_MS;
 
 /// The projection's failure-kind string for a dead-lettered trigger —
 /// `FailureKind::TriggerExhausted` serialized with the wire vocabulary.
-const DEAD_LETTER_KIND: &str = "trigger_exhausted";
-
-/// Pure: assemble a [`DoctorReport`] from the already-fetched read
-/// views, so it can be unit-tested without a database. The stuck
-/// determination (threshold + clock-skew handling) lives in
-/// [`fq_runtime::views::Views::executions`]; this builder only
-/// aggregates and shortens ids for triage.
-pub(crate) fn build_doctor_report(
-    workers: &[fq_runtime::views::WorkerView],
-    executions: &fq_runtime::views::ExecutionsView,
-    ambiguous: i64,
-    failures: &[fq_runtime::views::FailureView],
-) -> DoctorReport {
-    let mut w = DoctorWorkers::default();
-    for row in workers {
-        match row.status.as_str() {
-            "alive" => w.alive += 1,
-            "stale" => {
-                w.stale += 1;
-                w.stale_ids.push(row.worker_id.clone());
-            }
-            "shutdown" => w.shutdown += 1,
-            // The control-plane only records the three statuses above;
-            // an unknown value would mean a store/view drift — count it
-            // as stale so it surfaces as an issue rather than vanishing.
-            _ => {
-                w.stale += 1;
-                w.stale_ids.push(row.worker_id.clone());
-            }
-        }
-    }
-
-    // Full ids on the wire. They were shortened here to match the human
-    // report, which reads better at 8 characters — but a shortened id is
-    // not an identity: nothing accepts it back. `invocation.get` matches
-    // exactly, so a caller that took one of these and asked about it got
-    // NotFound, and a renderer that linked one produced a dead link.
-    // Shortening is a display choice and belongs to each renderer.
-    let ex = DoctorExecutions {
-        in_flight: executions.in_flight,
-        working: executions.working,
-        working_ids: executions.working_ids.clone(),
-        stuck: executions.stuck,
-        stuck_ids: executions.stuck_ids.clone(),
-    };
-
-    let failures: Vec<DoctorFailure> = failures
-        .iter()
-        .map(|f| DoctorFailure {
-            error_kind: f.error_kind.clone(),
-            count: f.count,
-        })
-        .collect();
-
-    let dead_letters = DoctorDeadLetters {
-        exhausted_triggers: failures
-            .iter()
-            .filter(|f| f.error_kind == DEAD_LETTER_KIND)
-            .map(|f| f.count)
-            .sum(),
-    };
-
-    DoctorReport {
-        workers: w,
-        executions: ex,
-        ambiguous,
-        failures,
-        dead_letters,
-    }
-}
 
 /// Register `control.doctor` on the daemon's edge.
 pub(crate) fn register_doctor_report(
