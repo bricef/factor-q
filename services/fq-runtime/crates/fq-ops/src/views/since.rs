@@ -1,11 +1,11 @@
 //! What a `since` argument means to a read.
 //!
 //! Every operator read that narrows by time — `fq events query
-//! --since`, `fq costs --since`, the Event atom's filter — hands
-//! [`Views`](super::Views) a lower bound on time, and the stores
-//! compare that bound **as text**: the projection writes each timestamp
-//! with `to_rfc3339()` and asks `timestamp >= ?`. Two things follow,
-//! and together they are why the grammar lives here rather than at each
+//! --since`, `fq costs --since`, the Event atom's filter — hands the
+//! runtime's read views a lower bound on time, and the stores compare
+//! that bound **as text**: the projection writes each timestamp with
+//! `to_rfc3339()` and asks `timestamp >= ?`. Two things follow, and
+//! together they are why the grammar lives here rather than at each
 //! caller.
 //!
 //! **One grammar, named once.** `fq events query --since` and `fq costs
@@ -26,6 +26,14 @@
 //! which is why `--since 2026-04-25` has always meant "the 25th
 //! onwards". Parsing it keeps that meaning and adds the offsets the
 //! lexical compare could never have got right.
+//!
+//! **Both ends parse it, which is why it is here and not with the
+//! stores.** `fq` lowers `--since` as clap parses the argument, so a
+//! spelling that names no instant is refused before it travels; the
+//! daemon lowers the same spelling again on the Event atom's filter,
+//! because a client is never the only thing that can send one. Parsing
+//! is pure — a string in, a string out — and the comparison it feeds is
+//! the part that needs a store.
 
 use std::borrow::Cow;
 

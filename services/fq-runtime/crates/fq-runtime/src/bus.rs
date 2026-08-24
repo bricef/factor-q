@@ -78,10 +78,12 @@ pub const TRIGGER_STREAM_NAME: &str = "fq-triggers";
 /// silently ignores on existing deployments.
 pub const NATS_DEFAULT_MAX_ACK_PENDING: i64 = 1000;
 
-/// Maximum times JetStream may deliver a trigger before it is surfaced as
-/// exhausted. This bounds poison-trigger retries while still allowing a few
-/// transient failures to recover.
-pub const TRIGGER_MAX_DELIVER: i64 = 5;
+/// Maximum times JetStream may deliver a trigger before it is surfaced
+/// as exhausted, re-exported from the contract crate where it is
+/// declared. The number is what "exhausted" *means* on the operator
+/// surface, so the client that renders it and the consumer config that
+/// applies it read the same constant; what lives here is the applying.
+pub use fq_ops::surface::TRIGGER_MAX_DELIVER;
 
 /// Escalating redelivery schedule paired with [`TRIGGER_MAX_DELIVER`]:
 /// entry N delays redelivery N+1. Applied twice — as the consumer's

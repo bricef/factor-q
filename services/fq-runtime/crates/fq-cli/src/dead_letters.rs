@@ -72,8 +72,8 @@ pub(crate) async fn list_dead_letters(
     )
     .await?
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let states: Vec<fq_runtime::dead_letter::DeadLetterState> = serde_json::from_value(output)?;
-    let dead: Vec<&fq_runtime::dead_letter::DeadLetter> =
+    let states: Vec<fq_ops::dead_letter::DeadLetterState> = serde_json::from_value(output)?;
+    let dead: Vec<&fq_ops::dead_letter::DeadLetter> =
         states.iter().rev().map(|s| &s.dead_letter).collect();
 
     if json {

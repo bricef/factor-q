@@ -154,7 +154,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         agent: Option<String>,
         /// Filter by time: a date, a UTC date-time, or an RFC3339 instant
-        #[arg(long, value_parser = fq_runtime::views::since::lower_bound)]
+        #[arg(long, value_parser = fq_ops::views::since::lower_bound)]
         since: Option<String>,
         /// Emit JSON instead of human-readable output.
         #[arg(long)]
@@ -481,7 +481,7 @@ pub(crate) enum EventCommands {
         #[arg(long, name = "type")]
         event_type: Option<String>,
         /// Events at or after this time: a date, a UTC date-time, or RFC3339
-        #[arg(long, value_parser = fq_runtime::views::since::lower_bound)]
+        #[arg(long, value_parser = fq_ops::views::since::lower_bound)]
         since: Option<String>,
         /// Maximum rows in one page, at most 2000. A bigger ask is
         /// refused, not shortened — so fewer rows than you asked for

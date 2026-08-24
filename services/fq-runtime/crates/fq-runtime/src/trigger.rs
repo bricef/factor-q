@@ -289,8 +289,8 @@ impl Trigger {
     /// Recognise the trigger one recorded event names, or decline.
     ///
     /// This is the whole of the trigger→projection rule, and it lives
-    /// in one place on purpose ([`crate::dead_letter::DeadLetter::
-    /// from_event`]'s discipline): the same predicate that decides a
+    /// in one place on purpose ([`crate::dead_letter::from_event`]'s
+    /// discipline): the same predicate that decides a
     /// row is written decides what the row *says*, so the index and the
     /// answer cannot come apart.
     ///

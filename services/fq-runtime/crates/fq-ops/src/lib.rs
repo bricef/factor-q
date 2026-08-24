@@ -28,6 +28,7 @@
 //! links it alone — `tests/forbidden_dependency_gate.rs` enforces it).
 
 pub mod agent_view;
+pub mod dead_letter;
 pub mod fixtures;
 pub mod health;
 pub mod model;
