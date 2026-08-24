@@ -628,6 +628,7 @@ check-version tag:
 # Build the release binaries (fq, fq-cas, fq-dashboard) for a target triple.
 build-release target:
     cargo build --release --target {{target}} -p fq-cli --bin fq
+    cargo build --release --target {{target}} -p fq-daemon --bin fqd
     cargo build --release --target {{target}} -p fq-store --features cli --bin fq-cas
     cargo build --release --target {{target}} -p fq-dashboard
 
@@ -635,7 +636,7 @@ build-release target:
 # use `.` as the crate dir; the Go adapters keep per-adapter target dirs.
 # Package the built binaries into a single bundle in dist/ (.tar.gz + .sha256).
 package target:
-    bash scripts/package.sh {{target}} .:fq .:fq-cas
+    bash scripts/package.sh {{target}} .:fq .:fqd .:fq-cas
 
 # Create a draft GitHub release for a tag from the dist/ artifacts.
 publish-release tag:
@@ -669,7 +670,7 @@ build-cron target:
 # verbatim).
 # Package the rolling main-branch deploy bundle into dist/.
 package-main target:
-    bash scripts/package.sh {{target}} .:fq .:fq-dashboard .:fq-cas adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh ops/dogfood/cron.sh
+    bash scripts/package.sh {{target}} .:fq .:fqd .:fq-dashboard .:fq-cas adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh ops/dogfood/cron.sh
 
 # Recreates both the release and its tag so tag, assets, and notes always
 # point at the same commit. The channel keeps no history by design —
