@@ -294,7 +294,21 @@ pub(crate) fn register_resume_command(
                     // terminal, live, already resumed, unknown — because
                     // they are four different things to do next.
                     if !answer.ok {
-                        return Err(WireError::Conflict {
+                        // `InvalidInput`, following `invocation.drop`:
+                        // "refusals are verdicts on this request". Not
+                        // `Conflict`, whose contract is narrower than it
+                        // looks — it means the work is already done and
+                        // *must* name the atom the first call produced.
+                        // Only "already resumed" is that; terminal and
+                        // live are verdicts on current state, and an
+                        // unknown id is a `NotFound`.
+                        //
+                        // Telling those apart needs a typed refusal out
+                        // of `handle_resume_request`, which returns one
+                        // message string across seven sites. Until then
+                        // this is the variant the sibling verb settled
+                        // on, and the message carries which it was.
+                        return Err(WireError::InvalidInput {
                             op: "invocation.resume".into(),
                             message: answer.message,
                         });
