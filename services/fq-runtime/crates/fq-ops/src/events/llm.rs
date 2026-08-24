@@ -157,7 +157,7 @@ pub enum StopReason {
 /// adapter normalises every provider to this shape — Anthropic
 /// reports the three parts separately and they are summed; OpenAI
 /// and Gemini already report totals with cached counts as details.
-/// Pricing depends on this (see [`crate::pricing::ModelPricing`]).
+/// Pricing depends on this (see the runtime's `ModelPricing`).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u32,
@@ -168,15 +168,17 @@ pub struct TokenUsage {
     pub cache_write_tokens: u32,
 }
 
-/// Why an LLM call failed — a serialisable projection of
-/// [`crate::llm::LlmError`], not a new taxonomy.
+/// Why an LLM call failed — a serialisable projection of the
+/// runtime's `LlmError`, not a new taxonomy.
 ///
 /// The error enum already has the right joints, and `is_transient`
 /// already partitions them the way an operator cares about, but it
 /// cannot go on the wire: it is a `thiserror` type carrying the
 /// provider strings that belong in `error_message`. So this mirrors
 /// its variants as `Copy` units and a single [`From`] does the
-/// conversion, which is the only place the two can drift.
+/// conversion, which is the only place the two can drift. That
+/// conversion stays in `fq-runtime` beside the error it reads; only
+/// the wire shape lives here.
 ///
 /// One variant has no `LlmError` counterpart. `EmptyResponse` is the
 /// provider returning 200 with no content and no tool calls; the
@@ -200,19 +202,6 @@ pub enum LlmErrorKind {
     /// A 200 with nothing in it. Synthesised by the runner, never by
     /// a provider, and the only kind that can carry usage.
     EmptyResponse,
-}
-
-impl From<&crate::llm::LlmError> for LlmErrorKind {
-    fn from(err: &crate::llm::LlmError) -> Self {
-        use crate::llm::LlmError;
-        match err {
-            LlmError::Auth(_) => Self::Auth,
-            LlmError::RateLimited => Self::RateLimited,
-            LlmError::InvalidResponse(_) => Self::InvalidResponse,
-            LlmError::RequestFailed(_) => Self::RequestFailed,
-            LlmError::UnpricedModel(_) => Self::UnpricedModel,
-        }
-    }
 }
 
 /// Published when an LLM call ends without a response — the sibling

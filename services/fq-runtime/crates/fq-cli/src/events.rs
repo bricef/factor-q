@@ -20,8 +20,7 @@
 //! reachable by piping `--json` through `jq` and no other way.
 
 use fq_edge::wire::WireError;
-use fq_runtime::event_tail::EventState;
-use fq_runtime::events::{Event, EventPayload};
+use fq_ops::events::{Event, EventPayload, EventState};
 
 use crate::cli::GlobalArgs;
 use crate::edge_call::{edge_client_for, edge_invoke, next_event_batch};
@@ -467,9 +466,9 @@ fn unavailable_event(err: &WireError) -> anyhow::Result<(String, &'static str)> 
 /// rather than anything the operator selected.
 ///
 /// A free function rather than a method because the filter is now a
-/// shared declared shape ([`fq_runtime::surface`]) and this sentence
-/// is the CLI's own — terminal prose has no business travelling with
-/// a wire contract.
+/// shared declared shape ([`fq_ops::surface`]) and this sentence is
+/// the CLI's own — terminal prose has no business travelling with a
+/// wire contract.
 pub(crate) fn describe_filter(filter: &EventFilter) -> String {
     match (filter.agent.as_deref(), filter.event_type.as_deref()) {
         (None, None) => "all events".to_string(),

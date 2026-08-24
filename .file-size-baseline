@@ -16,9 +16,7 @@
 #   services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs -> #78
 #   services/fq-runtime/crates/fq-runtime/src/mcp.rs                   -> #191
 services/fq-dashboard/src/render.rs 1402
-services/fq-runtime/crates/fq-runtime/src/agent.rs 868
 services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1048
-services/fq-runtime/crates/fq-runtime/src/events.rs 1126
 services/fq-runtime/crates/fq-runtime/src/mcp.rs 1850
 services/fq-runtime/crates/fq-runtime/src/views.rs 815
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 2600

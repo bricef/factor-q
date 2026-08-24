@@ -173,16 +173,15 @@ pub fn worker_invocation_archive_acked(worker_id: &str) -> String {
 ///
 /// Triggers ride their own JetStream stream rather than the event
 /// stream — work-queue-ish delivery, 24h retention, no compression —
-/// so `fq.trigger.>` is deliberately disjoint from
-/// [`crate::bus::EVENT_STREAM_SUBJECTS`]. NATS forbids two streams
-/// claiming overlapping subjects, and that disjointness is what keeps
-/// the two streams legal.
+/// so `fq.trigger.>` is deliberately disjoint from the event stream's
+/// subject set (the runtime's `bus::EVENT_STREAM_SUBJECTS`). NATS
+/// forbids two streams claiming overlapping subjects, and that
+/// disjointness is what keeps the two streams legal.
 ///
 /// The spelling lives here with the rest of the vocabulary; the
-/// domain-typed constructor callers should reach for is
-/// [`crate::trigger::subject`], which takes an
-/// [`crate::agent::AgentId`] and so cannot be handed a token that
-/// would break the subject.
+/// domain-typed constructor callers should reach for is the runtime's
+/// `trigger::subject`, which takes an [`AgentId`](crate::agent::AgentId)
+/// and so cannot be handed a token that would break the subject.
 pub const TRIGGER_PREFIX: &str = "fq.trigger.";
 
 /// Every agent's triggers. Two roles, one string: the subject set the
@@ -192,10 +191,10 @@ pub const ALL_TRIGGERS: &str = "fq.trigger.>";
 
 /// One agent's trigger subject.
 ///
-/// Prefer [`crate::trigger::subject`] — it takes a validated
-/// [`crate::agent::AgentId`] instead of a bare `&str`. This raw form
-/// exists for the transport's own stream wiring and for parsing paths
-/// that only ever hold a `&str`.
+/// Prefer the runtime's `trigger::subject` — it takes a validated
+/// [`AgentId`](crate::agent::AgentId) instead of a bare `&str`. This
+/// raw form exists for the transport's own stream wiring and for
+/// parsing paths that only ever hold a `&str`.
 pub fn trigger(agent_id: &str) -> String {
     format!("{TRIGGER_PREFIX}{agent_id}")
 }

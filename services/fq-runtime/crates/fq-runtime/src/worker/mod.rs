@@ -26,7 +26,6 @@ pub mod archive_ack;
 pub mod archive_retry;
 pub mod drain;
 pub mod heartbeat;
-pub mod id;
 pub mod introspection;
 pub mod recovery;
 pub mod reducer;
@@ -37,7 +36,10 @@ pub use archive_ack::{ArchiveAckConsumer, ArchiveAckError};
 pub use archive_retry::{ArchiveRetryError, ArchiveRetrySweeper};
 pub use drain::{DrainReason, DrainRequest, DrainSignal, DrainState};
 pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, HeartbeatProducer};
-pub use id::WorkerId;
+// The identifier rides the wire — four event payloads name a worker,
+// and two subjects are built from one — so it lives in the contract
+// crate and is re-exported here, where the role is.
+pub use fq_ops::worker::WorkerId;
 pub use recovery::{
     CategoryCounts, ClassifiedInvocation, RecoveryCategory, categorise, scan_in_flight,
 };

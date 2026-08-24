@@ -235,7 +235,7 @@ narrowed List by the envelope's `agent_id` and Stream by the consumer
 subject `fq.agent.<id>.>` — the same question only for events that happen
 to be agent-partitioned. Both are settled in one place each now: which
 event types are **transient**, and therefore on neither verb, lives in
-`fq_runtime::events::transient` and every reader derives from it; and a
+`fq_ops::events::transient` and every reader derives from it; and a
 filter field means the *domain's* field on every verb that takes it.
 **Cursors may be transport coordinates; identities may not — and neither
 may selections.**

@@ -1,8 +1,10 @@
 //! Worker identifier.
 //!
-//! A worker is the role that hosts agent invocations (see the
-//! crate-level `worker` module docs). `WorkerId` is the stable,
-//! NATS-subject-safe identifier for a single worker instance.
+//! A worker is the role that hosts agent invocations (the runtime's
+//! own `worker` module documents the role). `WorkerId` is the stable,
+//! NATS-subject-safe identifier for a single worker instance, and it
+//! lives here because it rides the wire: four event payloads name a
+//! worker, and two subjects are built from one.
 //!
 //! The newtype mirrors [`crate::agent::AgentId`] in shape and
 //! discipline: both reuse [`crate::events::subjects::validate_token`]

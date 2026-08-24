@@ -8,7 +8,7 @@
 //! now, and the client no longer knows a NATS url exists.
 
 use anyhow::Context;
-use fq_runtime::agent::AgentId;
+use fq_ops::agent::AgentId;
 
 use crate::cli::{GlobalArgs, TranscriptFormat};
 use crate::edge_call::{edge_client_for, edge_invoke, edge_transcript_snapshot, next_turn_batch};

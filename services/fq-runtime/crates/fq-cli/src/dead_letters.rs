@@ -145,7 +145,7 @@ pub(crate) async fn requeue_dead_letter(
     // Answered offline, in the same breath as `fq agent validate`,
     // rather than costing a round trip. The daemon checks it again —
     // this is a courtesy, never a substitute.
-    fq_runtime::AgentId::new(agent).with_context(|| format!("invalid agent name '{agent}'"))?;
+    fq_ops::agent::AgentId::new(agent).with_context(|| format!("invalid agent name '{agent}'"))?;
 
     let client = edge_client_for(global).await?;
     let receipt = client
