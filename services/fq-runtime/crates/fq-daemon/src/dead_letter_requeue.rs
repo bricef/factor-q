@@ -167,7 +167,7 @@ async fn requeue(
     // event says about a trigger. One read, one source: there is no
     // second place for the payload to come from and therefore no second
     // answer it could disagree with.
-    let original = Trigger::from_event(&event).ok_or_else(|| unnamed(&event))?;
+    let original = fq_runtime::trigger::from_event(&event).ok_or_else(|| unnamed(&event))?;
 
     let requeued = Trigger::requeue_of(&original, fq_runtime::trigger::subject(&agent));
     let claimed = projection

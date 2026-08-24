@@ -175,7 +175,7 @@ pub(crate) async fn requeue_dead_letter(
                 trigger_id.trigger_id
             )
         })?;
-    let trigger: fq_runtime::trigger::Trigger = serde_json::from_value(trigger)?;
+    let trigger: fq_ops::trigger::Trigger = serde_json::from_value(trigger)?;
     let result = RequeueResult {
         agent_id: agent.to_string(),
         trigger_id: trigger.id.to_string(),

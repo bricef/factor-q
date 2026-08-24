@@ -47,6 +47,7 @@ pub mod opid;
 pub mod registry;
 pub mod surface;
 pub mod transcript;
+pub mod trigger;
 pub mod turn;
 pub mod views;
 pub mod worker;
