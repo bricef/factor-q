@@ -7,18 +7,27 @@
 //! on the dashboard are looking at the same computation over the same
 //! `SharedRegistry`, not two renderings of the same idea.
 //!
-//! Its own module rather than a section of `views.rs` because it folds
-//! nothing: every other view is a fold of atoms read out of a store,
-//! whereas an agent definition is configuration the daemon holds in
-//! memory and `fq reload` swaps wholesale. Same shape on the wire,
-//! different provenance — worth a file boundary that says so.
+//! Its own module rather than a section of the runtime's `views.rs`
+//! because it folds nothing: every other view is a fold of atoms read
+//! out of a store, whereas an agent definition is configuration the
+//! daemon holds in memory and `fq reload` swaps wholesale. Same shape
+//! on the wire, different provenance — worth a file boundary that says
+//! so.
+//!
+//! It sits in this crate rather than the runtime because a projection
+//! has to live with the type it reads: `LoadedAgent` is this crate's
+//! and the view shapes are the contract crate's, so anywhere else the
+//! `From` impls below are two foreign types and the orphan rule refuses
+//! them. That is the coherence rule agreeing with the domain — reading
+//! a registry is the registry's business, and it needs nothing the
+//! runtime has. `fq-runtime` re-exports this as `agent_view`.
 
 // The shapes are `fq_ops::agent_view` and are re-exported here, so a
 // caller reaches them by the same path as before. What stays is the
 // projecting: it needs the registry, which is this crate's.
 pub use fq_ops::agent_view::*;
 
-use crate::agent::{AgentRegistry, LoadedAgent};
+use crate::{AgentRegistry, LoadedAgent};
 
 impl From<&LoadedAgent> for AgentSummaryView {
     /// Project one loaded definition into its index row.
@@ -70,11 +79,11 @@ impl From<&LoadedAgent> for AgentDetailView {
             // The definition frontmatter's own lowercase spelling.
             effort: agent.effort().map(|e| {
                 match e {
-                    crate::events::Effort::Minimal => "minimal",
-                    crate::events::Effort::Low => "low",
-                    crate::events::Effort::Medium => "medium",
-                    crate::events::Effort::High => "high",
-                    crate::events::Effort::XHigh => "xhigh",
+                    fq_ops::events::Effort::Minimal => "minimal",
+                    fq_ops::events::Effort::Low => "low",
+                    fq_ops::events::Effort::Medium => "medium",
+                    fq_ops::events::Effort::High => "high",
+                    fq_ops::events::Effort::XHigh => "xhigh",
                 }
                 .to_string()
             }),
@@ -113,8 +122,8 @@ pub fn agent_index(registry: &AgentRegistry) -> Vec<AgentEntryView> {
 /// in the wire crate, which cannot see an `AgentRegistry`, and an
 /// inherent method has to sit with its type. The reading stays here,
 /// beside the registry it reads.
-impl From<&crate::AgentRegistry> for fq_ops::surface::StatusRegistry {
-    fn from(registry: &crate::AgentRegistry) -> Self {
+impl From<&AgentRegistry> for fq_ops::surface::StatusRegistry {
+    fn from(registry: &AgentRegistry) -> Self {
         fq_ops::surface::StatusRegistry {
             agents: registry.len() as i64,
             load_errors: registry.errors().iter().map(|e| e.to_string()).collect(),
@@ -198,7 +207,7 @@ mod tests {
     fn the_detail_carries_the_prompt_and_its_file() {
         let (_dir, registry) = seeded_registry();
         let loaded = registry
-            .get_loaded(&crate::agent::AgentId::new("probe").unwrap())
+            .get_loaded(&crate::AgentId::new("probe").unwrap())
             .expect("probe is loaded");
         let detail = AgentDetailView::from(loaded);
         assert_eq!(detail.agent_id, "probe");

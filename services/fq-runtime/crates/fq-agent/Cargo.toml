@@ -1,0 +1,45 @@
+[package]
+name = "fq-agent"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
+
+# The agent definition domain: the [`Agent`] model, the frontmatter
+# parser, and the directory registry. It is its own crate because
+# reading a definition is something BOTH ends do — the daemon loads a
+# whole directory at startup and must reject what will not run, and
+# `fq agent validate` checks one file before it is ever deployed. Same
+# model, same parser, two callers; the alternative was the operator
+# client linking the whole runtime (and sqlx, and NATS) to parse a
+# Markdown file.
+#
+# Kept deliberately light for that reason — fq-cli's
+# tests/thin_client_gate.rs is what says so as a build fact.
+
+[dependencies]
+# The identifier and the grants ride the wire, so they live in the
+# contract crate; the snapshot shapes a definition folds into
+# (ConfigSnapshot / SandboxSnapshot) do too.
+fq-ops = { workspace = true }
+# A declared sandbox materialises into a ToolSandbox the tools check
+# against. fq-tools is a leaf battery — no store, no broker, no HTTP —
+# so carrying it costs the client nothing it does not already link.
+fq-tools = { workspace = true }
+serde = { workspace = true }
+serde_yaml = "0.9"
+thiserror = { workspace = true }
+# The registry walks a directory of definitions, and says so out loud
+# when one declares a boundary nothing enforces (#35).
+tracing = { workspace = true }
+walkdir = "2"
+
+[dev-dependencies]
+# The view projections are wire shapes; their tests assert the tagged
+# encoding a reader deserialises.
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

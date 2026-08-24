@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::events::Effort;
+use fq_ops::events::Effort;
 
-use super::{
+use crate::{
     Agent, BuildError, CapabilityValidation, ElicitationGrant, McpServerDeclaration, RootsGrant,
     SamplingGrant, Sandbox, StaticResourcePin,
 };

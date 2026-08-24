@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use super::{Agent, AgentId, definition::ParseError, definition::parse_agent_with_default};
+use crate::{Agent, AgentId, definition::ParseError, definition::parse_agent_with_default};
 
 /// Result of scanning a directory for agent definitions.
 #[derive(Debug, Default)]
@@ -333,10 +333,10 @@ You are an agent.
     /// examples must be updated alongside the change.
     #[test]
     fn real_example_agents_parse_and_load() {
-        // Walk up from CARGO_MANIFEST_DIR (crates/fq-runtime) to the
+        // Walk up from CARGO_MANIFEST_DIR (crates/fq-agent) to the
         // repo root, then into agents/examples.
         //
-        // services/fq-runtime/crates/fq-runtime → ../../../.. = repo root
+        // services/fq-runtime/crates/fq-agent → ../../../.. = repo root
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let examples_dir = manifest
             .join("..")

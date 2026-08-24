@@ -35,7 +35,12 @@ use uuid::Uuid;
 
 /// The token agents write in sandbox paths and tool parameters; the
 /// runtime substitutes the invocation's workspace path for it.
-pub const WORKSPACE_TOKEN: &str = "${workspace}";
+///
+/// Defined with the definition vocabulary it belongs to (`fq-agent`) —
+/// it is what an author types — and re-exported here, where the
+/// substitution happens, so the provisioning call sites read as they
+/// always did.
+pub use fq_agent::WORKSPACE_TOKEN;
 
 /// Errors from workspace provisioning. All permanent: provisioning is
 /// pure filesystem work, so a failure means the host is genuinely

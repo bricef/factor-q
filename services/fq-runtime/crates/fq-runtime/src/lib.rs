@@ -16,8 +16,19 @@
 //! framing and `docs/plans/closed/2026-04-28-data-architecture-v1.md`
 //! for the implementation plan.
 
-pub mod agent;
-pub mod agent_view;
+// The agent definition domain — the model, the frontmatter parser, the
+// directory registry — lives in its own crate, because reading a
+// definition is something both ends do: the daemon loads a directory of
+// them at startup, and `fq agent validate` lints one file before it is
+// deployed. The client can now do that without linking a store or a
+// broker. Re-exported here so every `crate::agent::…` call site (and
+// `fq_runtime::agent::…` for the daemon and the tests) is unchanged.
+pub use fq_agent as agent;
+// The registry's projection into the declared view shapes went with the
+// registry: a `From<&LoadedAgent>` for a `fq-ops` shape is two foreign
+// types anywhere else, and coherence and the domain agree about where
+// it belongs. Same path from here as before.
+pub use fq_agent::view as agent_view;
 pub mod bus;
 pub mod config;
 pub mod db;

@@ -11,12 +11,17 @@
 //!
 //! `fq agent validate` sits here too and deliberately stays local:
 //! linting a file someone is about to add is an offline operation, and
-//! it is why removing the listing's local read costs nothing.
+//! it is why removing the listing's local read costs nothing. It reads
+//! the definition through `fq-agent`, the crate the daemon's own
+//! registry loads through — one parser, so the verdict here is the
+//! verdict the daemon would reach — and that crate carries no store, no
+//! broker and no HTTP client, which is what let this client stop
+//! linking `fq-runtime` altogether (#264).
 
 use std::path::Path;
 
+use fq_agent::definition::parse_agent;
 use fq_ops::agent_view::{AgentEntryView, AgentSummaryView};
-use fq_runtime::agent::definition::parse_agent;
 
 use crate::cli::GlobalArgs;
 use crate::edge_call::edge_invoke;

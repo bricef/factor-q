@@ -28,8 +28,12 @@ bin-dir = "fq"
 # ADR-0031); whether the listener starts is `[edge]` in fq.toml. The
 # client half (`fq connect` / `fq ops` / `fq token`) speaks it too.
 fq-edge = { path = "../fq-edge" }
+# `fq agent validate` lints a definition offline, through the same
+# parser the daemon's registry loads with. The definition domain is its
+# own crate precisely so this costs the client no store and no broker
+# (#264); tests/thin_client_gate.rs holds that line.
+fq-agent = { workspace = true }
 fq-ops = { workspace = true }
-fq-runtime = { workspace = true }
 fq-tools = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }

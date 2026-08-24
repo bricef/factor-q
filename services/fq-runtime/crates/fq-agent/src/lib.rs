@@ -1,16 +1,26 @@
-//! Agent type and fluent builder.
+//! The agent definition domain: the [`Agent`] model, the frontmatter
+//! parser, and the directory registry.
 //!
-//! An [`Agent`] is the validated, runtime representation of an agent that
-//! the executor consumes. Agents are constructed via [`AgentBuilder`] with
-//! a fluent API. Validation runs at [`AgentBuilder::build`] time and
-//! returns a [`BuildError`] if required fields are missing or invalid.
+//! Both ends of the system read a definition. The daemon loads a whole
+//! directory of them at startup, rejects the ones that will not run,
+//! and hot-swaps the registry on `fq reload`; the operator wants to
+//! check one file before it is ever deployed (`fq agent validate`).
+//! Same model, same parser, two callers — which is why this is a crate
+//! rather than a module of the runtime, and why it carries no store,
+//! no broker and no HTTP client. `fq-runtime` re-exports it under
+//! `agent`, so the daemon's call sites read exactly as they did.
 //!
-//! The Markdown frontmatter parser in the `definition` submodule produces
-//! `Agent` values by calling the builder internally. Programmatic
-//! construction is equally supported:
+//! An [`Agent`] is the validated representation the executor consumes.
+//! Agents are constructed via [`AgentBuilder`] with a fluent API.
+//! Validation runs at [`AgentBuilder::build`] time and returns a
+//! [`BuildError`] if required fields are missing or invalid.
+//!
+//! The Markdown frontmatter parser in the [`definition`] submodule
+//! produces `Agent` values by calling the builder internally.
+//! Programmatic construction is equally supported:
 //!
 //! ```
-//! use fq_runtime::agent::{Agent, Sandbox};
+//! use fq_agent::{Agent, Sandbox};
 //!
 //! let agent = Agent::builder()
 //!     .id("researcher")
@@ -27,6 +37,7 @@
 
 pub mod definition;
 pub mod registry;
+pub mod view;
 
 pub use registry::{AgentRegistry, LoadError, LoadedAgent, RegistryError};
 
@@ -40,8 +51,17 @@ pub use fq_ops::agent::{
     AgentId, CapabilityValidation, ElicitationGrant, EvaluatorSpec, RootsGrant, SamplingGrant,
 };
 
-use crate::events::subjects::SubjectTokenError;
-use crate::events::{ConfigSnapshot, Effort, SandboxSnapshot};
+use fq_ops::events::subjects::SubjectTokenError;
+use fq_ops::events::{ConfigSnapshot, Effort, SandboxSnapshot};
+
+/// The token agents write in sandbox paths and tool parameters; the
+/// runtime substitutes the invocation's workspace path for it.
+///
+/// It lives here because it is part of the definition vocabulary — the
+/// thing an author types into `sandbox.exec_cwd` — rather than part of
+/// the provisioning that later binds it. The runtime's workspace module
+/// re-exports it for the substitution sites.
+pub const WORKSPACE_TOKEN: &str = "${workspace}";
 
 /// An MCP server declared in an agent definition.
 #[derive(Debug, Clone)]
@@ -150,7 +170,7 @@ impl Agent {
 
     /// The agent's per-invocation `max_iterations` override, if the
     /// definition sets one. `None` means "use the daemon config
-    /// default" (see [`crate::config::Config::max_iterations`]).
+    /// default" — `max_iterations` in the runtime's `Config`.
     pub fn max_iterations(&self) -> Option<u32> {
         self.max_iterations
     }
@@ -380,7 +400,6 @@ fn bind_workspace_path(
     raw: &str,
     workspace: Option<&std::path::Path>,
 ) -> Result<std::path::PathBuf, UnboundWorkspace> {
-    use crate::worker::workspace::WORKSPACE_TOKEN;
     if !raw.contains(WORKSPACE_TOKEN) {
         return Ok(std::path::PathBuf::from(raw));
     }
