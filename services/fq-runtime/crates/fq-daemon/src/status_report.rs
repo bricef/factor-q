@@ -56,6 +56,7 @@ pub(crate) fn register_status_report(
     // started with, so the answer describes the process reporting it.
     db_paths: std::sync::Arc<fq_runtime::RuntimeDbPaths>,
     legacy_events_db: std::sync::Arc<std::path::PathBuf>,
+    drain_deadline_ms_value: u64,
 ) -> anyhow::Result<()> {
     let decl = fq_ops::Report::new::<StatusParams, StatusReport>(
         fq_ops::ControlReport::Status,
@@ -102,6 +103,7 @@ pub(crate) fn register_status_report(
                 let snapshot = agents.read().await.clone();
                 Ok(StatusReport {
                     version: FQ_VERSION.to_string(),
+                    drain_deadline_ms: drain_deadline_ms_value,
                     stores: fq_ops::surface::StatusStores {
                         worker_path: db_paths.worker.display().to_string(),
                         control_plane_path: db_paths.control_plane.display().to_string(),

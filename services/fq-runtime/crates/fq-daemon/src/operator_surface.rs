@@ -34,6 +34,19 @@ pub(crate) use fq_ops::surface::{WorkerListFilter, WorkerViewKey};
 /// command asks about liveness, and the live agent registry the Agent
 /// view reads. Everything a *fold* can answer still comes from
 /// `Views`; the split keeps that read path visibly read-only.
+/// The daemon's own facts, as `control.status` answers them.
+///
+/// Grouped because they are one concept — where this process keeps its
+/// state and how long it will take to stop — and because a reader must
+/// get all three from the daemon rather than deriving any of them from
+/// a config it may not share.
+pub struct DaemonFacts {
+    pub db_paths: std::sync::Arc<fq_runtime::RuntimeDbPaths>,
+    /// A pre-split `events.db`, if one is still on disk.
+    pub legacy_events_db: std::sync::Arc<std::path::PathBuf>,
+    pub drain_deadline_ms: u64,
+}
+
 pub struct OperatorDeps {
     pub bus: fq_runtime::EventBus,
     pub projection: Arc<fq_runtime::control_plane::projection::ProjectionStore>,
@@ -59,11 +72,8 @@ pub struct OperatorDeps {
     /// NATS request/reply on its own subject, which is why the client
     /// still linked a broker; it is a command like any other now.
     pub resume: std::sync::Arc<crate::resume::ResumeControl>,
-    /// Where this daemon's stores live — reported by `control.status`
-    /// so a reader never has to derive them from its own config.
-    pub db_paths: std::sync::Arc<fq_runtime::RuntimeDbPaths>,
-    /// A pre-split `events.db`, if one is still on disk.
-    pub legacy_events_db: std::sync::Arc<std::path::PathBuf>,
+    /// What `control.status` reports about this daemon itself.
+    pub facts: DaemonFacts,
 }
 
 /// Get identity for a Turn: its event-log sequence.
@@ -272,8 +282,9 @@ pub fn operator_registry(
         status_views,
         status_bus,
         status_registry,
-        deps.db_paths.clone(),
-        deps.legacy_events_db.clone(),
+        deps.facts.db_paths.clone(),
+        deps.facts.legacy_events_db.clone(),
+        deps.facts.drain_deadline_ms,
     )?;
 
     crate::resume::register_resume_command(&mut registry, deps.resume.clone())?;

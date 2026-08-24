@@ -57,10 +57,12 @@ pub(crate) async fn tail_events(
         event_type,
         ..EventFilter::default()
     };
-    let config = global.resolve_config()?;
 
     if !json {
-        println!("Connecting to the edge at {}...", config.edge.bind);
+        println!(
+            "Connecting to the edge at {}...",
+            crate::edge_call::daemon_addr(global)?
+        );
     }
     let client = edge_client_for(global).await?;
 

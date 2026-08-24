@@ -93,6 +93,11 @@ async fn operator_surface_matches_the_committed_snapshot() {
         fq_runtime::watermark::Horizon::new(vec![watermark]),
         Duration::from_millis(1),
         fq_daemon::OperatorDeps {
+            facts: fq_daemon::DaemonFacts {
+                db_paths: Arc::new(paths.clone()),
+                legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(scratch.path())),
+                drain_deadline_ms: 180_000,
+            },
             bus,
             projection: projection_store,
             control_plane: control_plane_store,
@@ -115,12 +120,6 @@ async fn operator_surface_matches_the_committed_snapshot() {
                     tokio::sync::oneshot::channel::<bool>().0,
                 ))),
             },
-            // Where `control.status` says this daemon's stores are:
-            // the same three paths the stores above were opened at, so
-            // the surface is assembled over a real layout rather than
-            // an invented one.
-            db_paths: Arc::new(paths.clone()),
-            legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(scratch.path())),
         },
     )
     .expect("assemble the operator registry");

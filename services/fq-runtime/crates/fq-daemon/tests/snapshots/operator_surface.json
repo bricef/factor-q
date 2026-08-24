@@ -2522,6 +2522,12 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`control.status`'s declared output, and what `fq status --json`\nnests under `daemon`.",
         "properties": {
+          "drain_deadline_ms": {
+            "description": "How long this daemon will drain for before giving up, in\nmilliseconds.\n\nReported because a client that waits for a stop has to wait at\nleast this long, and it is the daemon's setting. A reader that\nguessed would call a successful drain a hang, or hang past a\nreal failure — and against a remote daemon it has no config to\nguess from at all.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "projection_rows": {
             "description": "Rows in the daemon's projection index — how much of the event\nlog has been folded into readable state.",
             "format": "int64",
@@ -2555,6 +2561,7 @@
           "version",
           "streams",
           "registry",
+          "drain_deadline_ms",
           "stores",
           "projection_rows",
           "recovery"

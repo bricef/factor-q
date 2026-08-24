@@ -240,6 +240,11 @@ impl Surface {
             fq_runtime::watermark::Horizon::new(vec![watermark]),
             Duration::from_millis(1),
             fq_daemon::OperatorDeps {
+                facts: fq_daemon::DaemonFacts {
+                    db_paths: Arc::new(paths.clone()),
+                    legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(scratch.path())),
+                    drain_deadline_ms: 180_000,
+                },
                 bus: bus.clone(),
                 projection: projection.clone(),
                 control_plane: control_plane.clone(),
@@ -259,12 +264,6 @@ impl Surface {
                         tokio::sync::oneshot::channel::<bool>().0,
                     ))),
                 },
-                // What `control.status` would report about this
-                // surface's stores. Nothing here calls that report,
-                // but the paths are the real ones the stores above
-                // were opened at rather than placeholders.
-                db_paths: Arc::new(paths.clone()),
-                legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(scratch.path())),
             },
         )
         .expect("assemble the operator registry");

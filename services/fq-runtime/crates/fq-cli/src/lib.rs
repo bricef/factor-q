@@ -208,6 +208,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 // declaration it rides, each belong in their own file.
 mod agents;
 mod cli;
+mod config;
 mod connections;
 mod control;
 mod costs;

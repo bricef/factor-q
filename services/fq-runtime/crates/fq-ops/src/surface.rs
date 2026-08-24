@@ -292,6 +292,15 @@ pub struct StatusReport {
     pub streams: Vec<StreamHealth>,
     /// The live agent registry, censused.
     pub registry: StatusRegistry,
+    /// How long this daemon will drain for before giving up, in
+    /// milliseconds.
+    ///
+    /// Reported because a client that waits for a stop has to wait at
+    /// least this long, and it is the daemon's setting. A reader that
+    /// guessed would call a successful drain a hang, or hang past a
+    /// real failure — and against a remote daemon it has no config to
+    /// guess from at all.
+    pub drain_deadline_ms: u64,
     /// Where this daemon's three stores live, and whether it has
     /// created them yet.
     ///

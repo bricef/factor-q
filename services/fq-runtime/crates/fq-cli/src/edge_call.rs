@@ -27,9 +27,41 @@ use fq_ops::surface::{EventFilter, TurnFilter};
 /// tail, reads the snapshot, then long-polls) pays for the TLS
 /// handshake and the token exchange once, and every answer comes from
 /// the same daemon incarnation.
+/// Which daemon this invocation talks to.
+///
+/// In order: `--addr`, then `fq.toml`'s default, then the sole pairing
+/// if there is exactly one. The last is why `fq.toml` can be absent —
+/// an operator with one daemon has nothing to disambiguate, and asking
+/// them to write a file naming their only choice is ceremony.
+///
+/// With several pairings and no answer, the error names them. A client
+/// that guessed would sooner or later drop a command on the wrong
+/// daemon, and the operator would have no way to tell from the output
+/// which one answered.
+pub(crate) fn daemon_addr(global: &GlobalArgs) -> anyhow::Result<String> {
+    if let Some(addr) = global.addr() {
+        return Ok(addr.to_string());
+    }
+    if let Some(addr) = global.client_config()?.daemon.addr {
+        return Ok(addr);
+    }
+    let mut paired = crate::connections::paired_addresses()?;
+    match paired.len() {
+        1 => Ok(paired.remove(0)),
+        0 => anyhow::bail!(
+            "no daemon paired — run `fq connect <addr> --token <token>` first \
+             (the daemon prints the token once, on its first run)"
+        ),
+        _ => anyhow::bail!(
+            "several daemons paired and no default — pass `--addr <one of: {}>`, \
+             or set `[daemon] addr` in fq.toml",
+            paired.join(", ")
+        ),
+    }
+}
+
 pub(crate) async fn edge_client_for(global: &GlobalArgs) -> anyhow::Result<fq_edge::EdgeClient> {
-    let config = global.resolve_config()?;
-    let addr = config.edge.bind.clone();
+    let addr = daemon_addr(global)?;
     let entry = stored_connection(&addr)?;
     edge_client(
         &addr,

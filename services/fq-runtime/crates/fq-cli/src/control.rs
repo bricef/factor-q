@@ -38,7 +38,6 @@ const DOWN_TEARDOWN_HEADROOM: Duration = Duration::from_secs(10);
 /// answering. A timeout is a loud, actionable error, never a false
 /// "stopped".
 pub(crate) async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
     // The liveness gate, and it fails closed: with no daemon listening
     // there is nothing to dial, so `fq down` reports that instead of
     // waiting out a deadline for a confirmation nobody will send. The
@@ -49,7 +48,7 @@ pub(crate) async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Resul
         anyhow::anyhow!(
             "no running `fqd` reachable at {}: {err:#}\n\
              `fq down` is a no-op — is the daemon running? (`fq status`)",
-            config.edge.bind
+            crate::edge_call::daemon_addr(global).unwrap_or_else(|_| "the daemon".into())
         )
     })?;
 
@@ -84,7 +83,14 @@ pub(crate) async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Resul
     // Bound the confirmation wait by the drain deadline plus headroom in
     // drain mode; `--now` should be near-instant but gets the same
     // generous ceiling so a busy daemon is not misreported as hung.
-    let wait = Duration::from_millis(config.drain_deadline_ms) + DOWN_TEARDOWN_HEADROOM;
+    // The deadline is the daemon's, so ask it rather than guess. A
+    // client that guessed would call a successful drain a hang, and
+    // against a remote daemon it has no config to guess from at all.
+    // Falls back to the headroom alone if the report cannot be read —
+    // the stop was already requested, and refusing to wait at all
+    // would be worse than waiting a short time.
+    let deadline_ms = daemon_drain_deadline_ms(global).await.unwrap_or(0);
+    let wait = Duration::from_millis(deadline_ms) + DOWN_TEARDOWN_HEADROOM;
     eprintln!(
         "Waiting up to {}s for the daemon to stop...",
         wait.as_secs()
@@ -135,4 +141,17 @@ pub(crate) async fn reload_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     );
     println!("`fq agent list` shows what the daemon now holds.");
     Ok(())
+}
+
+/// Ask the daemon how long it will drain for.
+async fn daemon_drain_deadline_ms(global: &GlobalArgs) -> anyhow::Result<u64> {
+    let report = crate::edge_call::edge_invoke(
+        global,
+        fq_ops::OpId::Report(fq_ops::ReportId::Control(fq_ops::ControlReport::Status)),
+        serde_json::json!({}),
+    )
+    .await?
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let report: fq_ops::surface::StatusReport = serde_json::from_value(report)?;
+    Ok(report.drain_deadline_ms)
 }

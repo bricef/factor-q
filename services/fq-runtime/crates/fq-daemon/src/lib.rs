@@ -28,7 +28,7 @@ mod trigger_command;
 mod version;
 
 pub use crate::control_commands::{DownSignal, MachineryDeps};
-pub use crate::operator_surface::{OperatorDeps, operator_registry};
+pub use crate::operator_surface::{DaemonFacts, OperatorDeps, operator_registry};
 /// The resume path's handle, out here because `OperatorDeps` carries
 /// one: a caller that assembles the operator surface — this daemon, or
 /// an integration test standing one up — has to be able to name it.

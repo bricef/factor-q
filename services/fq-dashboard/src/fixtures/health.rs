@@ -23,6 +23,7 @@ use fq_ops::views::RecoveryView;
 pub(crate) fn status_report() -> StatusReport {
     StatusReport {
         version: "0.1.0+abc123def456".to_string(),
+        drain_deadline_ms: 180_000,
         // The daemon reports where its stores are; a fixture stands
         // in for a daemon, so it answers too.
         stores: fq_ops::surface::StatusStores {

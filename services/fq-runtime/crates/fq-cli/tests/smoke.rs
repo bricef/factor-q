@@ -224,12 +224,12 @@ fn fq_workers_help_lists_subcommands() {
 }
 
 #[test]
-fn fq_status_against_bogus_nats_fails_gracefully() {
-    // Use a NATS URL that's guaranteed not to be listening
-    // so the binary's connection-failure path is exercised.
-    // 127.0.0.1:1 is reliably refused on most systems.
+fn fq_status_against_an_unreachable_daemon_fails_gracefully() {
+    // The client's only dependency is the daemon's edge — it speaks to
+    // no broker and opens no store — so this points at a port that is
+    // reliably refused and exercises the connection-failure path.
     let mut child = Command::new(fq_binary())
-        .args(["--nats-url", "nats://127.0.0.1:1", "status"])
+        .args(["--addr", "127.0.0.1:1", "status"])
         .env("FQ_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_AGENTS_DIR", "/nonexistent/agents")
         .env("FQ_CACHE_DIR", "/nonexistent/cache")

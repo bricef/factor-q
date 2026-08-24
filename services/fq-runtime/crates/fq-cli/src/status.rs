@@ -75,7 +75,7 @@ struct StatusConfig {
 }
 
 pub(crate) async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
+    let edge = crate::edge_call::daemon_addr(global)?;
 
     let (daemon, daemon_error) = match daemon_status(global).await {
         Ok(report) => (Some(report), None),
@@ -85,9 +85,7 @@ pub(crate) async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Resu
     };
 
     let document = StatusDocument {
-        config: StatusConfig {
-            edge: config.edge.bind.clone(),
-        },
+        config: StatusConfig { edge: edge.clone() },
         daemon,
         daemon_error,
     };

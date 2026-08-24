@@ -52,6 +52,7 @@ fn an_empty_registry_is_a_zero_not_a_gap() {
 #[test]
 fn the_report_roundtrips_through_its_declared_shape() {
     let report = StatusReport {
+        drain_deadline_ms: 180_000,
         version: "0.1.0+deadbee".to_string(),
         // A daemon mid-migration: the three split stores plus the
         // pre-split file still on disk. The unhappy shape on purpose —
