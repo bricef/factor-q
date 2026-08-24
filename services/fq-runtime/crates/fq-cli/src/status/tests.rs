@@ -314,7 +314,7 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
     assert!(out.contains("num pending:    1"), "got:\n{out}");
     assert!(out.contains("redelivered:    3"), "got:\n{out}");
     assert!(
-        out.contains(&format!("bound {}", fq_runtime::bus::TRIGGER_MAX_DELIVER)),
+        out.contains(&format!("bound {}", fq_ops::surface::TRIGGER_MAX_DELIVER)),
         "got:\n{out}"
     );
 }

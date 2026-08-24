@@ -197,7 +197,7 @@ pub async fn list_dead_letters(
         // One definition of "is a dead letter", shared with the atom
         // the operator surface serves — so the two readings of the
         // same log cannot drift.
-        if let Some(dead) = DeadLetter::from_event(&event) {
+        if let Some(dead) = crate::dead_letter::from_event(&event) {
             out.push(dead);
         }
     }

@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use fq_edge::wire::WireError;
 use fq_runtime::control_plane::projection::ProjectionStore;
-use fq_runtime::dead_letter::DeadLetter;
+use fq_runtime::dead_letter::from_event as dead_letter_from_event;
 use fq_runtime::events::{Event, subjects};
 use fq_runtime::trigger::Trigger;
 
@@ -241,7 +241,7 @@ async fn select_dead_letter(
             // The atom's own predicate decides what is a dead letter, so
             // this scan and the listing cannot come to disagree about
             // which events the operator is choosing between.
-            if let Some(dead) = DeadLetter::from_event(&event)
+            if let Some(dead) = dead_letter_from_event(&event)
                 && trigger_seq.is_none_or(|want| dead.trigger_stream_seq == Some(want))
             {
                 // Later replaces earlier: the stream runs oldest-first

@@ -9,7 +9,7 @@
 //! daemon restart. That made an unbounded table an operator's job to
 //! remember, and *the system should not depend on operator remediations
 //! to work normally*, so the reclamation became a daemon retention
-//! sweep ([`fq_runtime::control_plane::retention`]) and the verb was
+//! sweep (the runtime's control-plane retention sweep) and the verb was
 //! retired rather than transplanted onto the edge.
 //!
 //! Split out of `lib.rs` (#189) rather than grown in place: the
@@ -17,11 +17,9 @@
 //! past its budget, and a subcommand's rendering is exactly the kind
 //! of thing that belongs in its own module.
 
-use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
-
 use crate::cli::GlobalArgs;
 use crate::edge_call::edge_invoke;
-use fq_ops::surface::{WorkerListFilter, WorkerViewKey};
+use fq_ops::surface::{DEFAULT_STALE_THRESHOLD_MS, WorkerListFilter, WorkerViewKey};
 
 /// Human-readable heartbeat age. Stays in step with the
 /// stale-worker sweep threshold so the operator can eyeball

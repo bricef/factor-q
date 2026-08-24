@@ -7,6 +7,12 @@
 //! that renders a view rather than assembling one links this crate and
 //! none of the storage behind it.
 
+// The `since` argument every time-narrowed read takes, and the one
+// grammar its callers share. Parsing a spelling into a bound is pure,
+// so it sits with the shapes; comparing that bound against a column is
+// the store's, and stays with the store.
+pub mod since;
+
 use serde::{Deserialize, Serialize};
 
 // ============================================================

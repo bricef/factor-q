@@ -500,6 +500,20 @@ pub struct DeadLetterFilter {
 /// production-sized rows — after the scan had already been paid for.
 pub const DEAD_LETTER_LIST_MAX_LIMIT: u32 = 500;
 
+/// Maximum times JetStream may deliver a trigger before it is surfaced
+/// as exhausted. This bounds poison-trigger retries while still
+/// allowing a few transient failures to recover.
+///
+/// **A contract value, not a broker setting.** It is what "exhausted"
+/// means: the dispatcher and the advisory watch both decide a trigger
+/// has run out against this number, the consumer config is reconciled
+/// to it, and `fq status` prints it to an operator as the bound their
+/// redeliveries are counting towards. The transport applies it — the
+/// runtime's `bus` re-exports it for exactly that — but a client
+/// naming the same number is not reaching into the broker, it is
+/// quoting the promise.
+pub const TRIGGER_MAX_DELIVER: i64 = 5;
+
 /// Stuck-work threshold: an in-flight invocation whose
 /// `invocation_state.updated_at` is older than this many ms is
 /// flagged "stuck" by `fq doctor`. Reuses the control-plane's

@@ -38,6 +38,7 @@
 
 pub mod agent;
 pub mod agent_view;
+pub mod dead_letter;
 pub mod events;
 pub mod fixtures;
 pub mod health;

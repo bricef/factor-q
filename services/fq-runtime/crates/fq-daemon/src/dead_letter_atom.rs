@@ -5,10 +5,10 @@
 //! Unlike the Invocation or Worker resources this is not a projection
 //! fold — there is no dead-letter table anywhere. The atom is a lens
 //! over the event log's `fq.agent.*.failed` subjects
-//! ([`fq_runtime::dead_letter::DeadLetter::from_event`] is the whole
-//! of the predicate), which is why `fq dead-letters list` needed NATS
-//! when `fq events query` did not: the projection stores no
-//! annotations, and the annotations are where the trigger lives.
+//! ([`fq_runtime::dead_letter::from_event`] is the whole of the
+//! predicate), which is why `fq dead-letters list` needed NATS when
+//! `fq events query` did not: the projection stores no annotations,
+//! and the annotations are where the trigger lives.
 //!
 //! Its own module rather than more of `operator_surface.rs` (the
 //! Event atom's precedent): that file is the daemon's assembly point
@@ -16,7 +16,7 @@
 
 use fq_edge::wire::WireError;
 use fq_ops::surface::{DEAD_LETTER_LIST_MAX_LIMIT, DeadLetterFilter};
-use fq_runtime::dead_letter::{DeadLetter, DeadLetterState};
+use fq_runtime::dead_letter::{DeadLetterState, from_event};
 use fq_runtime::events::subjects;
 
 /// Cap on one stream batch.
@@ -216,7 +216,7 @@ async fn dead_letter_at(
     if got_seq != seq {
         return Err(not_found());
     }
-    DeadLetter::from_event(&event)
+    from_event(&event)
         .map(|dead_letter| DeadLetterState {
             seq: got_seq,
             dead_letter,
@@ -263,7 +263,7 @@ async fn list_dead_letters(
     let mut window: std::collections::VecDeque<DeadLetterState> = std::collections::VecDeque::new();
     while let Some(next) = events.next().await {
         let (seq, event) = next.map_err(internal)?;
-        if let Some(dead_letter) = DeadLetter::from_event(&event) {
+        if let Some(dead_letter) = from_event(&event) {
             if window.len() == limit {
                 window.pop_front();
             }
@@ -313,7 +313,7 @@ async fn stream_dead_letters(
         };
         let (seq, event) = next;
         next_from_seq = seq + 1;
-        if let Some(dead_letter) = DeadLetter::from_event(&event) {
+        if let Some(dead_letter) = from_event(&event) {
             let item = serde_json::to_value(DeadLetterState { seq, dead_letter }).map_err(|e| {
                 WireError::Internal {
                     message: e.to_string(),

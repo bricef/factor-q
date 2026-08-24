@@ -269,7 +269,7 @@ fn render_stream_health_human(health: &fq_ops::health::StreamHealth) -> String {
                     if *num_redelivered > 0 {
                         out.push_str(&format!(
                             "    redelivered:    {num_redelivered} (retrying; bound {})\n",
-                            fq_runtime::bus::TRIGGER_MAX_DELIVER
+                            fq_ops::surface::TRIGGER_MAX_DELIVER
                         ));
                     }
                 }
