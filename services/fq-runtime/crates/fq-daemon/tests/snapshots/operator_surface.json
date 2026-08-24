@@ -2579,6 +2579,39 @@
         "scope": "invocation",
         "verb": "write"
       },
+      "description": "Only an invocation that crashed mid-tool-call can be resumed. A refusal is an error, not a receipt: it names which precondition failed — terminal, live, already resumed, or unknown — because those are four different things for an operator to do next. Success is a receipt; the re-drive runs detached, so the invocation is still working when this returns.",
+      "domain": "invocation",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "invocation_id"
+        ],
+        "title": "InvocationResumeRequest",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Resume a crashed invocation: reconcile its stuck tool calls with an interrupted result, then re-drive it through the recovery path.",
+      "verb": "resume",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "invocation",
+        "verb": "write"
+      },
       "description": "Returns a receipt naming the drop event's sequence — feed it to a gated read for read-your-writes. Refused on an invocation this daemon is actively driving unless `live` is set, which halts it at its next step boundary (in-flight tools finish) before the drop.",
       "domain": "invocation",
       "input_schema": {

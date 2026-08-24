@@ -586,13 +586,13 @@ pub fn build_doctor_report(
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema, Debug)]
 pub struct InvocationResumeRequest {
     pub invocation_id: String,
     pub reason: Option<String>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema, Debug)]
 pub struct InvocationResumeResponse {
     pub ok: bool,
     pub message: String,

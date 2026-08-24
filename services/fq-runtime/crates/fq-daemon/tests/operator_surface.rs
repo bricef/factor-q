@@ -10,6 +10,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+/// A model that is declared but never asked. `invocation.resume`'s
+/// handle carries the LLM it would re-drive a crashed invocation with,
+/// and this test only reads the shape of the surface that handle is
+/// registered on — so the honest stub is one that panics if the
+/// snapshot ever starts running an invocation.
+struct UnusedLlm;
+
+#[async_trait::async_trait]
+impl fq_runtime::llm::LlmClient for UnusedLlm {
+    async fn chat(
+        &self,
+        _request: fq_runtime::llm::ChatRequest,
+    ) -> Result<fq_runtime::llm::ChatResponse, fq_runtime::llm::LlmError> {
+        panic!("the surface snapshot describes declarations; it never calls a model")
+    }
+}
+
 #[tokio::test]
 async fn operator_surface_matches_the_committed_snapshot() {
     let server = fq_test_support::NatsServer::start();
@@ -52,11 +69,24 @@ async fn operator_surface_matches_the_committed_snapshot() {
             fq_runtime::RunnerConfig::builder()
                 .bus(bus.clone())
                 .pricing(Arc::new(fq_runtime::PricingTable::empty()))
-                .store(worker_store)
+                .store(worker_store.clone())
                 .worker_id(fq_runtime::worker::WorkerId::new("snapshot-worker").unwrap())
                 .build(),
         ),
         fq_runtime::Harness::new(),
+    ));
+    // The agent registry the daemon shares between the Agent view and
+    // the resume path — one handle, as `fq run` wires it.
+    let agents = fq_runtime::shared_registry(fq_runtime::AgentRegistry::new());
+    // `invocation.resume` is a command on the edge now, so its handle
+    // is assembled here rather than handed to a NATS listener.
+    let resume = Arc::new(fq_daemon::ResumeControl::new(
+        bus.clone(),
+        worker_store,
+        control_plane_store.clone(),
+        runner.clone(),
+        agents.clone(),
+        Arc::new(UnusedLlm),
     ));
     let registry = fq_daemon::operator_registry(
         views,
@@ -67,10 +97,11 @@ async fn operator_surface_matches_the_committed_snapshot() {
             projection: projection_store,
             control_plane: control_plane_store,
             runner: runner.clone(),
+            resume,
             // The Agent view's source. Empty here: the snapshot
             // describes the surface's shape, and a registry's contents
             // are data, not declaration.
-            agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
+            agents,
             // What the machinery verbs command. Wired, never thrown:
             // the snapshot describes declarations, and a stop switch
             // nobody touches declares `control.down` just as well as

@@ -19,7 +19,6 @@ mod dead_letter_requeue;
 mod doctor_report;
 mod edge_identity;
 mod event_atom;
-mod listeners;
 mod operator_surface;
 mod pricing;
 mod recovery;
@@ -30,6 +29,10 @@ mod version;
 
 pub use crate::control_commands::{DownSignal, MachineryDeps};
 pub use crate::operator_surface::{OperatorDeps, operator_registry};
+/// The resume path's handle, out here because `OperatorDeps` carries
+/// one: a caller that assembles the operator surface — this daemon, or
+/// an integration test standing one up — has to be able to name it.
+pub use crate::resume::ResumeControl;
 
 use crate::cli::{FqdArgs, init_tracing};
 

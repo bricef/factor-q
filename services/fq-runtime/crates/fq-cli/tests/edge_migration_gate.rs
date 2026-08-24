@@ -60,6 +60,15 @@ use std::path::{Path, PathBuf};
 /// source lines.
 const LEGACY: &[&str] = &[
     "open_views(",
+    // Added when `fq invocation resume` moved to the edge, because this
+    // gate read ZERO while the client still opened its own NATS
+    // connection and did request/reply on a bespoke subject. The list
+    // above catches store opens and subscriptions; a client that dials
+    // the broker to *ask a question* matched none of them, so the
+    // number said the phase was done while a second, unauthenticated
+    // path to the daemon was still in use. Same failure the `Views::open`
+    // entry was added for, in a shape the patterns did not cover.
+    "EventBus::connect(",
     // Added when `open_views` was deleted, because deleting the helper
     // did not delete the habit: `fq status` opens the same stores by
     // calling `Views::open` directly. Counting only the helper would
@@ -150,12 +159,21 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// path was a bare `EventBus::connect` plus a publish, which none of
 /// the four patterns match. That is the cohort-4.1 lesson repeating
 /// (check a verb's legacy path is *counted* before trusting a flip to
-/// move the number) and it is deliberately not fixed by widening the
-/// patterns here: a client connecting to the broker is what
+/// move the number). It was left unfixed at the time, on the argument
+/// that a client connecting to the broker is what
 /// `store_open_gate.rs`'s sibling discipline and the Phase-4 acceptance
-/// criterion ("`fq-cli` … publishes nothing to NATS") cover, and both
-/// are checked by reading the diff at the merge gate rather than by
-/// this count.
+/// criterion ("`fq-cli` … publishes nothing to NATS") cover, and that
+/// both are checked by reading the diff at the merge gate rather than
+/// by this count.
+///
+/// **That argument did not hold.** This gate read zero for the whole of
+/// Phase 4 while `fq invocation resume` still dialled the broker and
+/// did request/reply on `fq.control.invocation.resume` — a second,
+/// unauthenticated path to the daemon, in the one crate whose number
+/// was supposed to say there were none. "Checked by reading the diff"
+/// is not a check; nobody read it. `EventBus::connect(` is a pattern
+/// now, the resume flip removed the last site, and the zero below is
+/// finally the zero it always claimed to be.
 ///
 /// It went 4 -> 3 with verb 8, the last non-report call point, and the
 /// design question cohort 4.3 deferred is what closed it. Requeue was
@@ -214,6 +232,12 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// them, adding a store open to the client half is loud either way.
 /// Phase 5 splits the binary, at which point most of this becomes a
 /// fact about which crate a symbol is in rather than a convention.
+///
+/// As of the resume flip the claim is the whole one: no client-side
+/// code in this crate opens a store, calls runtime internals, loads
+/// the agents directory, holds a bus subscription, **or connects to
+/// the broker**. `fq-cli` no longer depends on `async-nats` at all,
+/// which is the fact the count was standing in for.
 const REMAINING: usize = 0;
 
 /// True when `path` is the test half of a module split — `foo/tests.rs`

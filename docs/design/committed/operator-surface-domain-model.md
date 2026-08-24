@@ -541,9 +541,11 @@ settles the next case rather than the last one:
 
 - **Control flows one way in: client → edge → daemon → bus.** The
   daemon publishes because it owns the log; a client never does.
-  `fq.control.*` is therefore not an entry point. The subjects that
-  remain (`reload`, `down`, `invocation.resume`) are legacy, and
-  retire with their verbs' flips.
+  `fq.control.*` is therefore not an entry point — and as of
+  `invocation.resume`'s flip, not a namespace either: `reload` and
+  `down` retired with cohort 4.3, resume was the last one, and no
+  `fq.control.*` subject exists in the bus any more. The property
+  above is now the whole story rather than the direction of travel.
 - **A control subject is not a cheaper edge.** It skips authority
   (D7's verb × scope is enforced at the edge and nowhere else), skips
   the receipt/watermark contract (a subject can carry a reply, but not

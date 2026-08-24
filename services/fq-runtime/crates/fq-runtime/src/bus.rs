@@ -114,15 +114,6 @@ pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(120),
 ];
 
-/// Request/reply control subject for operator recovery of ambiguous invocations.
-///
-/// The last of the `fq.control.*` subjects: reload and down retired with
-/// cohort 4.3, which made the machinery verbs declared commands on the
-/// edge. NATS is the internal event log and coordination substrate, not
-/// an external control surface (domain-model amendment, 2026-08-05), and
-/// resume follows in its own flip.
-pub const CONTROL_RESUME_SUBJECT: &str = "fq.control.invocation.resume";
-
 /// Default retention for the trigger stream. Triggers are short-lived
 /// — the dispatcher consumes them within seconds under normal
 /// operation. A 24h window is a safety net against a runaway
@@ -788,34 +779,6 @@ impl EventBus {
             })
         });
         Ok(Box::pin(stream))
-    }
-
-    /// Ask the running daemon to inject interrupted results and resume an invocation.
-    pub async fn request_control_resume(&self, body: Vec<u8>) -> Result<Vec<u8>, BusError> {
-        let response = tokio::time::timeout(
-            Duration::from_secs(5),
-            self.client
-                .request(CONTROL_RESUME_SUBJECT, Bytes::from(body)),
-        )
-        .await
-        .map_err(|_| BusError::Publish("resume request timed out; start the daemon first".into()))?
-        .map_err(|err| BusError::Publish(err.to_string()))?;
-        Ok(response.payload.to_vec())
-    }
-
-    /// Subscribe to the daemon control-resume subject. Unlike reload and
-    /// down, this is request/reply: each message carries a JSON resume
-    /// request and a reply inbox the daemon answers on.
-    pub async fn subscribe_control_resume(&self) -> Result<async_nats::Subscriber, BusError> {
-        Ok(self.client.subscribe(CONTROL_RESUME_SUBJECT).await?)
-    }
-
-    /// Reply to a daemon control request.
-    pub async fn reply_control(&self, reply: String, body: Vec<u8>) -> Result<(), BusError> {
-        self.client
-            .publish(reply, Bytes::from(body))
-            .await
-            .map_err(|err| BusError::Publish(err.to_string()))
     }
 }
 

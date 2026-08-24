@@ -1,20 +1,18 @@
 //! The `fq invocation` verbs (list, show, drop, resume, transcript): the
 //! operator's triage surface over one invocation's life.
 //!
-//! Split out of `lib.rs` (#189) on the `workers.rs` precedent. Every read here
+//! Split out of `lib.rs` (#189) on the `workers.rs` precedent. Every verb here
 //! rides the authenticated edge — the daemon answers from its views — so this
-//! module is rendering plus the one round trip each verb needs. The daemon
-//! half of `resume` is `resume.rs`, which owns the request both sides speak.
+//! module is rendering plus the one round trip each verb needs. `resume` was
+//! the last exception, reaching the broker directly; it is a declared command
+//! now, and the client no longer knows a NATS url exists.
 
 use anyhow::Context;
-use fq_runtime::EventBus;
 use fq_runtime::agent::AgentId;
 
 use crate::cli::{GlobalArgs, TranscriptFormat};
 use crate::edge_call::{edge_client_for, edge_invoke, edge_transcript_snapshot, next_turn_batch};
 use fq_ops::surface::{InvocationListFilter, InvocationViewKey};
-
-use fq_ops::surface::{InvocationResumeRequest, InvocationResumeResponse};
 
 // ============================================================
 // fq invocation subcommand
@@ -168,32 +166,25 @@ pub(crate) async fn invocation_resume(
     reason: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let bus = EventBus::connect(&config.nats.url).await.with_context(|| {
-        format!(
-            "failed to connect to NATS at {}; start the daemon first",
-            config.nats.url
+    let client = edge_client_for(global).await?;
+    // A refusal arrives as an error with the daemon's own message —
+    // terminal, live, already resumed, or unknown — so the four stay
+    // distinguishable without a flag the caller could ignore.
+    let receipt = client
+        .invoke(
+            fq_ops::OpId::Verb(fq_ops::VerbId::Invocation(fq_ops::Invocation::Resume)),
+            serde_json::json!({
+                "invocation_id": id,
+                "reason": reason,
+            }),
         )
-    })?;
-    let request = InvocationResumeRequest {
-        invocation_id: id.to_string(),
-        reason: reason.map(str::to_string),
-    };
-    let bytes = bus
-        .request_control_resume(serde_json::to_vec(&request)?)
-        .await
-        .context("resume request failed; start the daemon first")?;
-    let response: InvocationResumeResponse = serde_json::from_slice(&bytes)?;
-    if !response.ok {
-        anyhow::bail!(response.message);
-    }
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let receipt: fq_ops::Receipt = serde_json::from_value(receipt)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
     } else {
-        println!(
-            "Resumed invocation {id}; injected interrupted results for: {}.",
-            response.completed_call_ids.join(", ")
-        );
+        println!("Resumed invocation {id}.");
         println!("Follow with `fq invocation show {id}` or `fq invocation transcript {id}`.");
     }
     Ok(())

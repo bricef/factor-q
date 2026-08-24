@@ -196,7 +196,7 @@ impl Surface {
                 fq_runtime::RunnerConfig::builder()
                     .bus(bus.clone())
                     .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
-                    .store(worker_store)
+                    .store(worker_store.clone())
                     .worker_id(
                         fq_runtime::worker::WorkerId::new(format!(
                             "drop-liveness-{}",
@@ -218,6 +218,23 @@ impl Surface {
             .expect("agent");
 
         let (_watermark_tx, watermark) = fq_runtime::watermark::channel();
+        // Nothing here drops an agent definition; the Agent view is
+        // registered either way, so it gets an empty registry rather
+        // than a mock — and `invocation.resume`'s handle reads the same
+        // one, as the daemon wires it.
+        let agents = fq_runtime::shared_registry(fq_runtime::AgentRegistry::new());
+        // `invocation.resume` is a command on the edge, so the surface
+        // cannot assemble without its handle. This probe only issues
+        // `invocation.drop`, so the model here is never asked — a
+        // parked one would simply never be entered.
+        let resume = Arc::new(fq_daemon::ResumeControl::new(
+            bus.clone(),
+            worker_store,
+            control_plane.clone(),
+            runner.clone(),
+            agents.clone(),
+            ParkedLlm::new(),
+        ));
         let registry = fq_daemon::operator_registry(
             views,
             fq_runtime::watermark::Horizon::new(vec![watermark]),
@@ -227,10 +244,8 @@ impl Surface {
                 projection: projection.clone(),
                 control_plane: control_plane.clone(),
                 runner: runner.clone(),
-                // Nothing here drops an agent definition; the Agent
-                // view is registered either way, so it gets an empty
-                // registry rather than a mock.
-                agents: fq_runtime::shared_registry(fq_runtime::AgentRegistry::new()),
+                resume,
+                agents,
                 // The machinery verbs are registered like every other
                 // op, and this probe never issues one — the stop
                 // switch is armed so the surface assembles, and

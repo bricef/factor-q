@@ -55,6 +55,10 @@ pub struct OperatorDeps {
     /// these are the only fields a *command over the daemon itself*
     /// needs — everything above serves a resource.
     pub machinery: crate::control_commands::MachineryDeps,
+    /// The resume path's handle. `invocation.resume` used to arrive as a
+    /// NATS request/reply on its own subject, which is why the client
+    /// still linked a broker; it is a command like any other now.
+    pub resume: std::sync::Arc<crate::resume::ResumeControl>,
     /// Where this daemon's stores live — reported by `control.status`
     /// so a reader never has to derive them from its own config.
     pub db_paths: std::sync::Arc<fq_runtime::RuntimeDbPaths>,
@@ -271,6 +275,8 @@ pub fn operator_registry(
         deps.db_paths.clone(),
         deps.legacy_events_db.clone(),
     )?;
+
+    crate::resume::register_resume_command(&mut registry, deps.resume.clone())?;
 
     let decl = fq_ops::Command::new::<DropCommandInput>(
         fq_ops::Invocation::Drop,

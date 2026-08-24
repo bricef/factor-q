@@ -23,14 +23,18 @@
 # crate, not written here. Splitting one 929-line function across the
 # assemble/run seam gives two functions, not two short ones: every value
 # the assembly produces flows forward into the running half, so both
-# candidate cut points measured ~26 fields wide. The 9-line increase is
-# the struct that carries them across.
+# candidate cut points measured ~26 fields wide. The struct that carries
+# them across is why the two halves together exceed the original.
 #
 # Decomposing this properly means designing the daemon's boot sequence,
 # which is #78's work and wants its own review. Admitted by hand, per
 # the rule above, so that choice is visible rather than blessed.
+#
+# `just sizes-bless` rewrites this file from the measurements and keeps
+# only the header, so re-add this note after any bless — the numbers
+# below survive it, the reason they are here does not.
 services/fq-runtime/crates/fq-daemon/src/daemon.rs::run_daemon 346
-services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 592
+services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 585
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::resume 354
-services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 378
-services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_tool 316
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 376
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_tool 314

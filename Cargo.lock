@@ -1211,14 +1211,11 @@ name = "fq-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
- "async-trait",
  "chrono",
  "clap",
  "fq-edge",
  "fq-ops",
  "fq-runtime",
- "fq-test-support",
  "fq-tools",
  "futures",
  "libc",

@@ -2,14 +2,18 @@
 //! serialise, and the daemon-side handler that services one.
 //!
 //! Split out of `lib.rs` (#189). The daemon owns the worker store and is the
-//! only process allowed to mutate the WAL, and request/reply lets the CLI
-//! distinguish a stopped daemon from a rejected precondition — so the wire
-//! types cannot live with either half alone. All decision-making is here; the
-//! listener that carries it (`listeners.rs`) is transport only, and the client
-//! that asks (`invocations.rs`) only renders the answer.
+//! only process allowed to mutate the WAL, so every decision below has to be
+//! made here.
+//!
+//! It used to be reached by a bespoke NATS request/reply — the last thing a
+//! client spoke to the broker for, and the reason `fq` linked one at all. It
+//! is a declared command on the authenticated edge now, registered by
+//! [`register_resume_command`]; the transport is the edge's, and a refusal is
+//! a wire error rather than a flag inside a successful answer.
 
 use std::sync::Arc;
 
+use fq_edge::wire::WireError;
 pub(crate) use fq_ops::surface::{InvocationResumeRequest, InvocationResumeResponse};
 use fq_runtime::agent::AgentId;
 use fq_runtime::events::{Event, EventPayload};
@@ -32,16 +36,42 @@ pub(crate) fn rejected(message: impl Into<String>) -> InvocationResumeResponse {
 }
 
 /// Daemon-side dependencies for servicing `fq invocation resume`
-/// requests (#373), grouped so the control listener hands one handle to
-/// `handle_resume_request` instead of threading six parameters through
-/// the spawn.
-pub(crate) struct ResumeControl {
+/// requests (#373), grouped so the registered command holds one handle
+/// rather than closing over six.
+pub struct ResumeControl {
     pub(crate) bus: EventBus,
     pub(crate) worker_store: Arc<fq_runtime::WorkerStore>,
     pub(crate) cp_store: Arc<ControlPlaneStore>,
     pub(crate) runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
     pub(crate) registry: SharedRegistry,
     pub(crate) llm: Arc<dyn LlmClient>,
+}
+
+impl ResumeControl {
+    /// Assemble the handle `invocation.resume` runs against.
+    ///
+    /// Public because the fields are not: an integration test builds
+    /// one to register the surface, and widening six fields to let it
+    /// would make every one of them part of the crate's API rather
+    /// than just the act of constructing the whole.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        bus: EventBus,
+        worker_store: Arc<fq_runtime::WorkerStore>,
+        cp_store: Arc<ControlPlaneStore>,
+        runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
+        registry: SharedRegistry,
+        llm: Arc<dyn LlmClient>,
+    ) -> Self {
+        ResumeControl {
+            bus,
+            worker_store,
+            cp_store,
+            runner,
+            registry,
+            llm,
+        }
+    }
 }
 
 /// Service one `fq invocation resume` request on the daemon side: enforce
@@ -217,4 +247,65 @@ pub(crate) async fn handle_resume_request(
         message: "resume accepted".into(),
         completed_call_ids: ids,
     }
+}
+
+/// Declare `invocation.resume` on the edge.
+///
+/// Its own function for the same reason the reports have theirs: the
+/// registry assembles the surface, and one op's declaration plus its
+/// handler is a unit that reads better beside the logic it calls than
+/// inside a list of every other op.
+pub(crate) fn register_resume_command(
+    registry: &mut fq_edge::EdgeRegistry,
+    resume_control: std::sync::Arc<ResumeControl>,
+) -> anyhow::Result<()> {
+    let decl = fq_ops::Command::new::<fq_ops::surface::InvocationResumeRequest>(
+        fq_ops::Invocation::Resume,
+        fq_ops::Authority {
+            verb: fq_ops::Verb::Write,
+            scope: fq_ops::Domain::Invocation,
+        },
+        "Resume a crashed invocation: reconcile its stuck tool calls with an \
+         interrupted result, then re-drive it through the recovery path.",
+        fq_ops::Stability::Experimental,
+    )
+    .description(
+        "Only an invocation that crashed mid-tool-call can be resumed. A \
+         refusal is an error, not a receipt: it names which precondition \
+         failed — terminal, live, already resumed, or unknown — because \
+         those are four different things for an operator to do next. \
+         Success is a receipt; the re-drive runs detached, so the invocation \
+         is still working when this returns.",
+    );
+    registry
+        .command::<fq_ops::surface::InvocationResumeRequest, _, _>(
+            decl,
+            move |input: fq_ops::surface::InvocationResumeRequest| {
+                let control = resume_control.clone();
+                async move {
+                    let id = input.invocation_id.clone();
+                    let answer = crate::resume::handle_resume_request(&control, input).await;
+                    // A refusal is an error here, not a successful
+                    // response carrying `ok: false`. That flag was the
+                    // request/reply shape, where the only channel was
+                    // the payload; on the edge a caller that ignores it
+                    // would read a refusal as a resume. The four
+                    // preconditions keep their distinct messages —
+                    // terminal, live, already resumed, unknown — because
+                    // they are four different things to do next.
+                    if !answer.ok {
+                        return Err(WireError::Conflict {
+                            op: "invocation.resume".into(),
+                            message: answer.message,
+                        });
+                    }
+                    Ok(fq_ops::Receipt::naming(
+                        fq_ops::Domain::Invocation,
+                        serde_json::json!({ "invocation_id": id }),
+                    ))
+                }
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
+    Ok(())
 }

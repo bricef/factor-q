@@ -230,19 +230,18 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let down_signal: crate::control_commands::DownSignal =
         Arc::new(tokio::sync::Mutex::new(Some(down_requested_tx)));
 
-    // Operator resume listener (`fq invocation resume`, #373). Best-effort
-    // core-NATS like reload/down: non-fatal, resubscribes on loss, and its
-    // handle is not watched in the main select.
-    let resume_control = ResumeControl {
+    // What `invocation.resume` (#373) runs against. It used to be a
+    // NATS listener on a bespoke subject; the verb is a declared
+    // command on the edge now, so this is built here and the registry
+    // below holds it — there is no listener left to hand it to.
+    let resume_control = Arc::new(ResumeControl {
         bus: bus.clone(),
         worker_store: worker_store.clone(),
         cp_store: cp_store.clone(),
         runner: resume_runner.clone(),
         registry: shared_registry.clone(),
         llm: llm.clone(),
-    };
-    let (resume_listener_handle, resume_listener_shutdown_tx) =
-        crate::listeners::spawn_resume_listener(resume_control);
+    });
 
     // Spawn the trigger dispatcher. Its concurrency bound (#70) is
     // config, default 1 (serial) until the Phase-2 concurrency gate.
@@ -292,6 +291,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
                 // drive invocations with — `invocation.drop` asks it
                 // whether the target is live, and arms its halt.
                 runner: resume_runner.clone(),
+                resume: resume_control.clone(),
                 // The same hot-swapped handle `fq reload` updates and
                 // the dispatcher reads, so `fq agent list` answers
                 // with the definitions this daemon would run.
@@ -502,7 +502,6 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let _ = archive_retry_shutdown_tx.send(());
     let _ = retention_shutdown_tx.send(());
     let _ = disp_shutdown_tx.send(());
-    let _ = resume_listener_shutdown_tx.send(());
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection_handle).await {
         Ok(Ok(Ok(()))) => println!("  projection consumer stopped cleanly."),
@@ -606,12 +605,6 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         } else if suspended > 0 {
             println!("  drained {suspended} in-flight invocation(s) cleanly.");
         }
-    }
-
-    match tokio::time::timeout(std::time::Duration::from_secs(5), resume_listener_handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => tracing::error!(error = %err, "control-resume listener task panicked"),
-        Err(_) => tracing::warn!("control-resume listener did not shut down within 5s"),
     }
 
     // Shut down MCP server processes.
