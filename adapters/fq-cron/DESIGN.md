@@ -97,7 +97,7 @@ implementation, swappable later without touching the scheduling core.
 ### D3 — Configuration: one TOML file, watched; connection via flags/env
 
 Job definitions live in a single **TOML** file — TOML matches the
-daemon's `fq.toml` convention, and a declarative jobs file is design
+daemon's `fqd.toml` convention, and a declarative jobs file is design
 principle 8 in miniature: every schedule, subject, payload, and policy is
 an edit-and-reload, never a rebuild.
 
@@ -336,8 +336,8 @@ separates ([ops/dogfood](../../ops/dogfood/README.md)):
   versioned with each release and rolls back with the same `current`
   symlink flip.
 - The **jobs file** is host-side state at `~/fq-dogfood/fq-cron.toml` —
-  the same tier as `fq.toml` and `agents/`, which deploys never touch.
-  Unlike `fq.toml` it needs no explicit reload command: editing the
+  the same tier as `fqd.toml` and `agents/`, which deploys never touch.
+  Unlike `fqd.toml` it needs no explicit reload command: editing the
   file *is* the deploy.
 
 ## Testing

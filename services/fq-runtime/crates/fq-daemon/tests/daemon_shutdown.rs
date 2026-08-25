@@ -124,14 +124,14 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn()
-        .expect("spawn fq run");
+        .expect("spawn fqd");
 
     // Wait for the daemon to reach its steady state (the point past which
     // the shutdown select is armed). Fail loudly if it dies during startup.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut ready = false;
     while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().expect("poll fq run") {
+        if let Some(status) = child.try_wait().expect("poll fqd") {
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
         }
@@ -266,13 +266,13 @@ fn daemon_stops_and_confirms_on_fq_down() {
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn()
-        .expect("spawn fq run");
+        .expect("spawn fqd");
 
     // Wait for the daemon to reach steady state.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut ready = false;
     while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().expect("poll fq run") {
+        if let Some(status) = child.try_wait().expect("poll fqd") {
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
         }
@@ -362,12 +362,12 @@ fn daemon_stops_now_on_fq_down_now() {
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn()
-        .expect("spawn fq run");
+        .expect("spawn fqd");
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut ready = false;
     while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().expect("poll fq run") {
+        if let Some(status) = child.try_wait().expect("poll fqd") {
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
         }

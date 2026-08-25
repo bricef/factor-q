@@ -68,7 +68,7 @@ just fq -- agent list
 
 ```
 fq init [-f|--force]                        # create a new project (config, agents/, sample)
-fq run                                      # start the daemon (projection + dispatcher)
+fqd                                      # start the daemon (projection + dispatcher)
 fq trigger <agent> [payload]                # ask the daemon to dispatch a trigger to an agent
                                             # (--via-nats is accepted and ignored: the
                                             #  in-process runner is retired)
@@ -108,7 +108,7 @@ Test tiers, each with different prerequisites:
 
 The unit-and-integration tier includes the in-process acceptance
 harness (`test_support::runtime::TestRuntime`) that boots the full
-`fq run` runtime against live NATS and the mock Anthropic server,
+`fqd` runtime against live NATS and the mock Anthropic server,
 plus four end-to-end scenarios (drop-ambiguous, stale-worker,
 retry-sweeper-recovers-from-CP-outage, drop-vs-late-archived race).
 New acceptance tests for future plans should reach for the harness

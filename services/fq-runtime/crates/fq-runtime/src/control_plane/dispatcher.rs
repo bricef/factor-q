@@ -2,7 +2,7 @@
 //!
 //! Sits on the `fq.trigger.>` JetStream stream and dispatches each
 //! incoming message to the appropriate agent via the executor.
-//! Runs as a long-lived tokio task inside `fq run`, alongside the
+//! Runs as a long-lived tokio task inside `fqd`, alongside the
 //! projection consumer.
 //!
 //! # Delivery semantics

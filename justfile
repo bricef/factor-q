@@ -697,7 +697,7 @@ down: infra-down
 # Start the runtime in the foreground (brings up infra, builds, runs)
 [no-cd]
 run: infra-up build-runtime
-    cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fq -- run
+    cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fqd --
 
 # Deliberately spares .tools/ (pinned tooling, not a build product — see
 # .gitignore; `just install-nats` reprovisions it anyway) and .ci-timings

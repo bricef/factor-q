@@ -197,7 +197,7 @@ Concrete subjects:
 | `fq.worker.{worker_id}.invocation.archive_acked` | Control-plane → worker: archive row written; safe to delete local `invocation_state` |
 | `fq.system.startup` | Runtime lifecycle — startup |
 | `fq.system.shutdown` | Runtime lifecycle — shutdown |
-| `fq.system.task_failed` | A hosted task inside `fq run` exited with an error |
+| `fq.system.task_failed` | A hosted task inside `fqd` exited with an error |
 | `fq.system.recovery` | Daemon-startup snapshot of in-flight invocation categorisation |
 
 ### Rationale
@@ -562,7 +562,7 @@ System events share a sentinel `agent_id` of `"system"`; their envelope's `invoc
 
 ### `system.task_failed`
 
-A hosted task inside `fq run` (the projection consumer, the trigger dispatcher, the coordination consumer, etc.) exited with an error before a graceful shutdown was requested. The daemon then shuts itself down so operators don't unknowingly rely on a half-broken daemon.
+A hosted task inside `fqd` (the projection consumer, the trigger dispatcher, the coordination consumer, etc.) exited with an error before a graceful shutdown was requested. The daemon then shuts itself down so operators don't unknowingly rely on a half-broken daemon.
 
 ```json
 {

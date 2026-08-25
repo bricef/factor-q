@@ -122,7 +122,7 @@ impl RuntimeDbPaths {
         }
     }
 
-    /// All three files exist — the layout a completed `fq run`
+    /// All three files exist — the layout a completed `fqd`
     /// bootstrap leaves behind.
     pub fn all_exist(&self) -> bool {
         self.as_array().iter().all(|p| p.exists())
@@ -223,7 +223,7 @@ fn io_err(path: &Path, source: std::io::Error) -> SplitError {
 /// layout, if one is present. Idempotent and crash-safe; see the
 /// module docs for the exact contract. Callers that open any store
 /// for writing run this first; read-only surfaces do not (they
-/// surface a "run `fq run` to migrate" hint instead), so exactly the
+/// surface a "start `fqd` to migrate" hint instead), so exactly the
 /// writable paths — which already assume exclusive-enough access to
 /// the state directory — can trigger it.
 pub async fn split_legacy_events_db(dir: &Path) -> Result<SplitOutcome, SplitError> {

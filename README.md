@@ -98,7 +98,7 @@ This starts NATS+JetStream in Docker and builds the `fq` CLI. Use it through `ju
 
 ```sh
 mkdir my-project && cd my-project
-just fq init                            # writes fq.toml, agents/, sample agent
+just fq init                            # writes fqd.toml, fq.toml, agents/, sample agent
 export ANTHROPIC_API_KEY='sk-ant-...'
 just fq trigger sample-agent "Hello."   # run the agent
 just fq events tail                     # (another terminal) watch events
@@ -113,7 +113,7 @@ See [QUICKSTART.md](QUICKSTART.md) for the full step-by-step path from a fresh c
 ```sh
 just up                                 # NATS + build
 mkdir my-project && cd my-project
-just fq init                            # writes fq.toml, agents/, sample
+just fq init                            # writes fqd.toml, fq.toml, agents/, sample
 export ANTHROPIC_API_KEY='sk-ant-...'
 just fq trigger sample-agent "Hello."   # run the agent
 just fq events tail                     # (another terminal) watch events

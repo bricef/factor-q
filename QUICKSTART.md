@@ -38,7 +38,7 @@ just fq status
 
 ## 2. Initialise a project
 
-factor-q runs out of a directory containing a config file (`fq.toml`), an agents directory (`agents/`), a cache (`./cache/` or `$XDG_CACHE_HOME/factor-q`), and a state directory (`./state/` or `$XDG_STATE_HOME/factor-q`) for data that must survive a wipe of the cache — today the edge identity. `fq init` writes those for you.
+factor-q runs out of a directory containing a config file (`fqd.toml`), an agents directory (`agents/`), a cache (`./cache/` or `$XDG_CACHE_HOME/factor-q`), and a state directory (`./state/` or `$XDG_STATE_HOME/factor-q`) for data that must survive a wipe of the cache — today the edge identity. `fq init` writes those for you.
 
 ```sh
 mkdir my-fq-project && cd my-fq-project
@@ -49,7 +49,8 @@ This produces:
 
 | File | What it does |
 |---|---|
-| `fq.toml` | Runtime configuration — NATS URL, agents directory, provider env vars. |
+| `fqd.toml` | Runtime configuration — NATS URL, agents directory, provider env vars. |
+| `fq.toml` | The *client's* config, and a different file — optional, and holding at most which daemon to talk to. |
 | `agents/sample-agent.md` | A starter agent with `builtin__file_read` and `builtin__exec` tools and a `$0.10` budget. |
 | `README.md` | A pointer back to factor-q docs. |
 
@@ -61,7 +62,7 @@ Open `agents/sample-agent.md` to see the format: YAML frontmatter declaring mode
 export ANTHROPIC_API_KEY='sk-ant-...'
 ```
 
-The runtime reads provider keys from environment variables (named in `fq.toml` under `[providers.*]`). They're never written back to disk.
+The runtime reads provider keys from environment variables (named in `fqd.toml` under `[providers.*]`). They're never written back to disk.
 
 ## 4. Start the daemon and pair with it
 
@@ -99,7 +100,7 @@ Then run `just fq trigger sample-agent ...` again. You'll see each event scroll 
 
 ## 7. Query history and costs
 
-The runtime also materialises every event into a SQLite projection so you can query historical runs without replaying NATS. `fq events query` and `fq costs` ask the running daemon for that history over the edge, so keep `fq run` up; the rows it renders carry no payloads. The last column is each event's identity, printed in full — pass one to `fq events get` and you get that event back whole, payload included, for as long as the log still holds it.
+The runtime also materialises every event into a SQLite projection so you can query historical runs without replaying NATS. `fq events query` and `fq costs` ask the running daemon for that history over the edge, so keep `fqd` up; the rows it renders carry no payloads. The last column is each event's identity, printed in full — pass one to `fq events get` and you get that event back whole, payload included, for as long as the log still holds it.
 
 ```sh
 # Last 20 events, all agents
@@ -170,10 +171,10 @@ redeploy (suspend in-flight work for the next binary to resume), use
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `fq status` says no daemon answered. | The daemon isn't running, or this client was never paired with it. | Start it (`fq run`), then `fq connect <edge-addr> --token <token>`. |
+| `fq status` says no daemon answered. | The daemon isn't running, or this client was never paired with it. | Start it (`fqd`), then `fq connect <edge-addr> --token <token>`. |
 | `fq status` shows a stream as unavailable. | NATS isn't running, or the daemon never provisioned it. | `just infra-up`; check `just infra-status`. |
 | `fq trigger` says "LLM authentication failed". | `ANTHROPIC_API_KEY` is unset or invalid. | Re-export the variable in the same shell that runs `fq`. |
-| `fq trigger` exits with "agent not found". | You're not in the project directory, or the agents directory in `fq.toml` is wrong. | `cd` into the project, or pass `--agents-dir`. |
+| `fq trigger` exits with "agent not found". | The **daemon's** agents directory does not hold that definition — the client no longer looks at agent files at all, it asks the daemon. | Fix `[agents] directory` in `fqd.toml` and `fq reload`, or start the daemon from the project directory. |
 | Tools fail with "path not in sandbox". | The agent's `sandbox.fs_read` / `fs_write` / `exec_cwd` doesn't include the path the model tried to use. | Edit the agent definition's sandbox section; nothing is granted by default. |
 | `just up` complains about a port. | Something else is using port 4222 (NATS) or 8222. | Stop the conflicting service or edit `infrastructure/docker-compose.yml`. |
 

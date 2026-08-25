@@ -4,7 +4,7 @@
 //! - **integration**: in-memory or tempdir SQLite. Fast,
 //!   no env vars required.
 //!
-//! Live `fq run` acceptance — the daemon coming up cleanly
+//! Live `fqd` acceptance — the daemon coming up cleanly
 //! against an empty cache dir — is exercised by the existing
 //! NATS-gated startup tests once the daemon construction in
 //! `fq-cli/src/main.rs` is updated to call `WorkerStore::open`

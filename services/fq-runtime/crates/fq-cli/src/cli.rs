@@ -219,7 +219,8 @@ pub(crate) enum Commands {
     /// fingerprint (trust-on-first-use, with confirmation) and store
     /// the capability token
     Connect {
-        /// Edge address; defaults to `[edge] bind` from config
+        /// Edge address. Defaults to `[daemon] addr` in the client's
+        /// config, or to the sole paired daemon when there is only one
         addr: Option<String>,
         /// Capability token to present and store (the daemon printed
         /// the admin token at first run); defaults to the token
@@ -254,7 +255,8 @@ pub(crate) enum OpsCommands {
     /// List the operations the daemon's registry serves — the surface
     /// describing itself, over the authenticated edge.
     List {
-        /// Edge address; defaults to `[edge] bind` from config
+        /// Edge address. Defaults to `[daemon] addr` in the client's
+        /// config, or to the sole paired daemon when there is only one
         #[arg(long)]
         addr: Option<String>,
         /// Emit the raw describe payload as JSON.
@@ -277,7 +279,8 @@ pub(crate) enum TokenCommands {
         #[arg(long)]
         token: Option<String>,
         /// Which stored connection's token to attenuate; defaults to
-        /// `[edge] bind` from config.
+        /// `[daemon] addr` in the client's config, or the
+        /// sole paired daemon.
         #[arg(long)]
         addr: Option<String>,
     },

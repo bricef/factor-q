@@ -85,7 +85,7 @@ safe-retry. Not required, not load-bearing for v1.
 ## 3. The role boundary: control-plane and worker
 
 factor-q's runtime separates into two roles. v1 collapses them
-into a single `fq run` process for deployment simplicity; the
+into a single `fqd` process for deployment simplicity; the
 internal interface is real and the v2 split is a deployment
 change rather than a redesign.
 
@@ -146,7 +146,7 @@ Five reasons it pays its weight:
 
 5. **Composes with v1.** In v1 the two roles share a process,
    but the boundary is real. v2 lifts the worker out as a
-   separate `fq run --role=worker` deployment without
+   separate `fqd --role=worker` deployment without
    redesigning contracts.
 
 ### 3.3 Invocation locality (not project pinning)
@@ -198,7 +198,7 @@ maintains the live worker membership view. Trigger routing
 picks among healthy workers; ownership of an invocation is
 recorded in coordination state.
 
-In v1, a single `fq run` process plays both roles; the worker
+In v1, a single `fqd` process plays both roles; the worker
 membership view contains exactly one entry; trigger routing is
 trivial. The contracts are exercised — they just don't do
 much.
@@ -377,7 +377,7 @@ Concrete:
   hand-off-confirmation window (default 60 seconds).
 - Background sweep on the control-plane deletes archive rows
   where `terminal_at < now() - retention_days`.
-- Operator override: `fq.toml` key `state.retention_days`
+- Operator override: `fqd.toml` key `state.retention_days`
   (default 7).
 - Operator-driven force: `fq invocation drop <id>`.
 
@@ -510,7 +510,7 @@ identifying which role and which schema is mismatched.
 Concrete behaviour on a worker:
 
 ```
-$ fq run --role=worker
+$ fqd --role=worker
 ERROR: 2 invocations have incompatible state schema (v0.3 -> v0.4):
   inv_abc123: tool_dispatch table format changed
   inv_def456: same
@@ -529,7 +529,7 @@ not supported in v1/v2.**
 This is the load-bearing decision the requirements doc deferred.
 The shape:
 
-- Worker registration: each `fq run --role=worker` registers
+- Worker registration: each `fqd --role=worker` registers
   with the control-plane on startup (NATS subject; heartbeat).
 - Invocation claim: when a trigger fires, the control-plane
   picks a healthy worker, records the assignment in
@@ -580,7 +580,7 @@ the role and store.
 | **Tool dispatch WAL** | worker | Per-worker SQLite | Three-state record per dispatch. Co-located with state for transactional consistency. |
 | **LLM dispatch WAL** | worker | Per-worker SQLite | Same shape as tool WAL. |
 | **Per-invocation workspaces** | worker | Worker filesystem | Critical state. Local to the worker that runs the invocation. Lifecycle bound to invocation. |
-| Static configuration | operator | Filesystem (`fq.toml`) | Operator-managed. Unchanged. |
+| Static configuration | operator | Filesystem (`fqd.toml`) | Operator-managed. Unchanged. |
 | Agent definitions | operator | Filesystem (`agents/`) | Operator-managed. Unchanged. |
 | Pricing cache | both roles | Filesystem (`<cache_dir>/pricing.json`) | Rebuildable from network. Both roles may cache. |
 | Cost/budget windows | derived | (control-plane projection) | Rebuildable from audit log via the projection. |
@@ -648,10 +648,10 @@ downstream consumers.
 
 ### 7.4 Operator workflow
 
-Single-node (v1), `fq run --role=both`:
+Single-node (v1), `fqd --role=both`:
 
 ```
-$ fq run
+$ fqd
 [fq] role: both (control-plane + worker)
 [fq] opening control-plane store          ✓
 [fq] opening worker store                  ✓
@@ -668,7 +668,7 @@ $ fq run
 Multi-node (v2):
 
 ```
-$ fq run --role=control-plane
+$ fqd --role=control-plane
 [fq] role: control-plane
 [fq] opening control-plane store          ✓
 [fq] connecting to NATS                    ✓
@@ -682,7 +682,7 @@ $ fq run --role=control-plane
 ```
 
 ```
-$ fq run --role=worker --worker-id=w-001
+$ fqd --role=worker --worker-id=w-001
 [fq] role: worker, id: w-001
 [fq] opening worker store                  ✓
 [fq] connecting to NATS                    ✓
@@ -710,7 +710,7 @@ Per role.
 | `<cache_dir>/projection.db` | control-plane | No | Derived event read model, rebuildable by replaying the NATS stream. Deliberately its own file (#262) so its delete-and-replay lifecycle never touches a backup unit. |
 | `<cache_dir>/worker.db` (`worker-<id>.db` when workers split out) | per worker | **Yes** | One file per worker. Contains in-flight state and WAL. Backed up while the worker is running via SQLite online backup, or while stopped via copy. |
 | `<workspaces_dir>/` (per worker) | per worker | **Yes** | Critical: workspaces are core agent state. Backed up *together* with the worker SQLite (same point-in-time) so resume sees consistent state. |
-| `fq.toml`, `agents/` | operator | n/a | Operator-managed (typically git). |
+| `fqd.toml`, `agents/` | operator | n/a | Operator-managed (typically git). |
 
 ### 8.2 What this means in practice
 
@@ -922,7 +922,7 @@ state.
 | `fq workers list` | control-plane | List registered workers and status. |
 | `fq workers stale` | control-plane | List workers whose heartbeat has lapsed. |
 
-`fq run` startup gains the in-flight summary block from §7.4,
+`fqd` startup gains the in-flight summary block from §7.4,
 keyed off the role.
 
 ## 10. Implementation order
@@ -980,8 +980,8 @@ What changes when an operator splits the deployment.
 
 ### 11.2 What changes
 
-- **Process boundary.** v1's `fq run` becomes
-  `fq run --role=control-plane` or `fq run --role=worker`
+- **Process boundary.** v1's `fqd` becomes
+  `fqd --role=control-plane` or `fqd --role=worker`
   (or `--role=both` for compatibility).
 - **SQLite split — done (#262), one file per store.** Landed
   ahead of v2 as `worker.db`, `control-plane.db` and

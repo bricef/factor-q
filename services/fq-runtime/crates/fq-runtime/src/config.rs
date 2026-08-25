@@ -676,11 +676,10 @@ impl Config {
     /// and gives the full dotted path rather than just the leaf.
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
         let mut ignored = Vec::new();
-        let config: Self =
-            serde_ignored::deserialize(toml::Deserializer::new(s), |path| {
-                ignored.push(path.to_string());
-            })
-            .map_err(|err| ConfigError::InvalidToml(err.to_string()))?;
+        let config: Self = serde_ignored::deserialize(toml::Deserializer::new(s), |path| {
+            ignored.push(path.to_string());
+        })
+        .map_err(|err| ConfigError::InvalidToml(err.to_string()))?;
         if !ignored.is_empty() {
             return Err(ConfigError::UnknownKeys(ignored));
         }

@@ -1,17 +1,16 @@
-//! The `fq`/`fqd` binaries' library half: the composition root.
+//! The `fq` binary's library half: the composition root.
 //!
-//! What lives here is the wiring nothing else can own — the two entry points,
+//! What lives here is the wiring nothing else can own — the entry point,
 //! the dispatch from a parsed `cli::Commands` to the verb that serves it,
-//! the handful of primitives every verb shares (store paths, the read views),
-//! and the daemon itself. Every verb group is a module: `status`, `doctor`,
-//! `invocations`, `trigger`, `workers`, `events`, and so on (#189).
+//! and the handful of primitives every verb shares. Every verb group is a
+//! module: `status`, `doctor`, `invocations`, `trigger`, `workers`,
+//! `events`, and so on (#189).
 //!
-//! `run_daemon` is the one large inhabitant that stays. Its startup recovery
-//! and its control listeners are modules of their own (`recovery`,
-//! `listeners`); what remains is the ordered wiring of the supervised task
-//! set, the select that watches it, and the teardown that unwinds it — three
-//! things that share a dozen live bindings and cannot be separated without
-//! changing behaviour. Splitting those is the rest of #189.
+//! The daemon is **not** here. It is `fq-daemon`, a separate crate
+//! producing a separate binary, and this crate is gated against linking
+//! it (`tests/thin_client_gate.rs`) — a client that could reach a store
+//! or a broker directly would stop being a client. Every verb here asks
+//! the daemon over the edge instead.
 
 use std::process::ExitCode;
 
@@ -37,8 +36,8 @@ use crate::trigger::publish_trigger;
 use crate::version::print_version;
 use crate::workers::{workers_list, workers_show};
 
-/// The `fq` entry point: the operator CLI (and, until the Phase-5
-/// split completes, the daemon via `fq run`).
+/// The `fq` entry point: the operator CLI. The daemon is `fqd`, from
+/// the `fq-daemon` crate.
 #[tokio::main]
 pub async fn fq_main() -> ExitCode {
     let cli = Cli::parse();

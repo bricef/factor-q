@@ -390,7 +390,7 @@ impl Sandbox {
 #[derive(Debug, thiserror::Error)]
 #[error(
     "sandbox path {path:?} uses ${{workspace}} but no workspace is bound \
-     (set [workspace] repo in fq.toml)"
+     (set [workspace] path in fqd.toml)"
 )]
 pub struct UnboundWorkspace {
     pub path: String,

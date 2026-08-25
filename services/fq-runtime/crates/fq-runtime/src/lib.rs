@@ -7,7 +7,7 @@
 //! - [`worker`] — execution: invocation host loop, in-flight
 //!   state, tool dispatch, LLM calls.
 //!
-//! In v1 both roles are hosted in the same `fq run` process,
+//! In v1 both roles are hosted in the same `fqd` process,
 //! but the boundary between them is enforced at compile time
 //! through the [`worker::Worker`] trait. v2 splits the
 //! deployment without changing the contract.

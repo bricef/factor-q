@@ -81,7 +81,7 @@ on the next poll.
 ## Requirements
 
 - A GitHub token in `GH_TOKEN` (preferred) or `GITHUB_TOKEN` — GitHub access uses the API directly; `gh` is not required.
-- A running `fq run` daemon, which owns the `fq-triggers` JetStream stream
+- A running `fqd` daemon, which owns the `fq-triggers` JetStream stream
   the adapter publishes to and emits the lifecycle events it observes.
 
 ## Run

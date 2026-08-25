@@ -1,7 +1,7 @@
 //! `fqd` is the daemon and nothing else — but it must be the *same*
-//! daemon `fq run` starts: shared code, shared behaviour. This smoke
+//! daemon `fqd` starts: shared code, shared behaviour. This smoke
 //! proves the new binary reaches steady state and drains cleanly on
-//! SIGTERM, exactly like `daemon_shutdown.rs` proves for `fq run`.
+//! SIGTERM, exactly like `daemon_shutdown.rs` proves for `fqd`.
 
 #![cfg(unix)]
 
