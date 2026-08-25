@@ -1,180 +1,23 @@
-# factor-q configuration
+# factor-q client configuration — read by `fq`, and by nothing else.
 #
-# All fields have sensible defaults — delete any section below if you
-# want to accept the default. Secrets are never stored in this file;
-# instead, each provider names an environment variable that holds its
-# key.
+# The daemon, `fqd`, reads the file beside this one: `fqd.toml`. That
+# is where the broker URL, the agents directory, the model registry and
+# every other runtime knob live. Nothing there is read by `fq`, and
+# nothing here is read by `fqd`.
+#
+# There is exactly one setting, and a fresh project needs none of it.
+# `fq connect` writes the pairing store — every daemon this client can
+# reach, and the token to authenticate to each — so the only question
+# left for this file is *which* of them to talk to, and with a single
+# pairing even that is answered. Credentials stay in the pairing store:
+# a token rotates on the daemon's schedule, not an operator's, and
+# merging the two would either make this file secret or stop the
+# secrets being private.
 #
 # Full documentation: https://github.com/bricef/factor-q
 
-# Daemon default cap on LLM turns per invocation — a backstop against a
-# wedged agent, well below the host step budget. An agent definition may
-# override this with its own `max_iterations:` in frontmatter, applied on
-# `fq reload` with no restart. When neither is set, a built-in default
-# (100) applies. Raise it for workloads that legitimately need more
-# turns; lower it to fail runaway agents sooner.
-# max_iterations = 100
-
-[nats]
-# URL of the NATS server. JetStream must be enabled on the server.
-# The token in the userinfo must match the broker's (see
-# docker-compose.yml's --auth flag). Change both together for any
-# deployment that leaves this machine.
-url = "nats://fq-dev-token@localhost:4222"
-
-[agents]
-# Directory containing agent definition files (.md with YAML frontmatter).
-# Relative paths are resolved against this config file's directory.
-directory = "agents"
-#
-# Fallback model for definitions that omit `model:` in their frontmatter.
-# When set, an agent with no explicit model inherits this; when unset,
-# every agent must name its own model. Must itself be a declared, priced
-# model (see the pricing guarantee under [providers.anthropic]).
-# default_model = "claude-haiku-4-5"
-
-# [workspace]
-# Per-invocation workspace binding. Agents reference their working
-# directory as `${workspace}` (in sandbox.exec_cwd/fs_read/fs_write and
-# in tool parameters); this section says what the token binds to. When
-# the section is omitted the token is unbound, and any agent that uses
-# it fails loudly at invocation start.
-#
-# The runtime only provisions *directories* — what goes into a
-# workspace (cloning an upstream repo, branching, pushing) is the
-# agent's job through its granted tools.
-#
-# The workspace path. With `per_invocation = false` this directory
-# itself is the binding, shared by every invocation; with
-# `per_invocation = true` it is the root under which each invocation
-# gets a fresh empty directory named by its invocation id.
-# path = "/path/to/workspace"
-#
-# Provision a fresh empty directory per invocation (#14/#70). Default
-# off. A suspended invocation keeps its directory across restarts;
-# terminal invocations are reclaimed, and orphans are swept at daemon
-# startup.
-# per_invocation = false
-
-[cache]
-# Directory for runtime cache files (LiteLLM pricing JSON, etc).
-# If omitted, defaults to $XDG_CACHE_HOME/factor-q, then
-# $HOME/.cache/factor-q, then the system temp directory.
-# directory = "./cache"
-
-[state]
-# Directory for data factor-q must never regenerate — today the edge
-# identity: the daemon's self-signed certificate and its biscuit token
-# root. Losing it orphans every client pinned to the old fingerprint
-# and invalidates every token already issued, so this is deliberately
-# NOT the cache directory, which the XDG spec and FHS 5.5 both license
-# a cleaner to empty at any time.
-#
-# If omitted, defaults to $XDG_STATE_HOME/factor-q, then
-# $HOME/.local/state/factor-q, then /var/lib/factor-q.
-#
-# An upgrade from a build that kept the identity under [cache] adopts
-# it on first start (and says so) rather than minting a new one.
-# directory = "./state"
-
-[providers.anthropic]
-# Environment variable holding the Anthropic API key. The runtime reads
-# the variable at call time; nothing is written back to this file.
-api_key_env = "ANTHROPIC_API_KEY"
-#
-# The model registry (ADR-0003/0004): list every model an agent may use.
-# An agent whose `model:` names an id not declared under some provider
-# fails to load, and the daemon refuses to start unless every declared
-# model is priced (below). This makes the models the fleet can spend on
-# explicit in one place — a config typo can't silently run an expensive
-# model, and an unpriced model can't silently defeat budget enforcement.
-models = ["claude-haiku-4-5"]
-#
-# Optional override for the Anthropic API base URL. When unset, the
-# runtime uses Anthropic's public endpoint. Use cases: pointing at a
-# local mock during integration tests, an internal LLM proxy, or a
-# Bedrock-compatible endpoint.
-# base_url = "http://127.0.0.1:8080"
-
-# --- Additional providers (optional) --------------------------------------
-# Any OpenAI-compatible provider (OpenRouter, Groq, Together, a local
-# vLLM, …) is available by configuration alone — no code. Declare its
-# shape, endpoint, key env var, and the model ids it serves. Agents then
-# select one of its models via their `model:` frontmatter.
-#
-# [providers.openrouter]
-# api_shape   = "openai-compatible"   # anthropic | openai | gemini | ollama | openai-compatible
-# base_url    = "https://openrouter.ai/api/v1"
-# api_key_env = "OPENROUTER_API_KEY"
-# models      = ["openai/gpt-4o-mini"]
-#
-# Per-model price override, USD per MILLION tokens. Required for any model
-# the LiteLLM pricing table doesn't list (e.g. OpenRouter-namespaced ids)
-# — without it the daemon refuses to start, since an unpriced model would
-# track its cost as $0 and silently escape budget enforcement (ADR-0004).
-# [providers.openrouter.pricing."openai/gpt-4o-mini"]
-# input_per_mtok  = 0.15
-# output_per_mtok = 0.60
-# # optional: cache_read_per_mtok, cache_write_per_mtok (default: input rate)
-
-[worker]
-# How many invocations one daemon runs concurrently (#70). Default 1
-# (serial). Raise only once ALL of the following hold:
-#   - per-invocation workspaces are enabled ([workspace]
-#     per_invocation = true) so concurrent invocations cannot clobber
-#     each other's files — the daemon refuses to start otherwise;
-#   - the parallel-workers Phase-2 verification gate is green
-#     (concurrent recovery/drain/shutdown, and the shared base-MCP
-#     connection proven safe under concurrent reads — see
-#     docs/plans/active/2026-07-10-parallel-workers-worktree.md);
-#   - you accept the spend profile: each in-flight invocation spends
-#     budget in parallel, and this bound only gates dispatcher-run
-#     invocations (startup recovery resumes all recoverable invocations
-#     concurrently regardless); a fleet-level cost cap is #42.
-# max_concurrent_invocations = 1
-#
-# Worker-side knobs for the archive hand-off retry sweeper. The
-# sweeper republishes `invocation.archived` for any terminal row
-# whose control-plane ack hasn't arrived yet.
-#
-# How often the sweeper republishes pending rows, in ms. Lower
-# values shorten time-to-recovery after a control-plane restart
-# at the cost of more NATS traffic during sustained outages.
-# archive_retry_interval_ms = 10000
-#
-# How long after `terminal_at` (in ms) the sweeper logs one
-# warning per held row. The sweeper *keeps republishing* past
-# this point — the warn is the operator-visible signal that the
-# control-plane isn't acknowledging in a reasonable time. The
-# local row is never deleted automatically (correctness over
-# cleanup); operator action is required for held rows.
-# archive_warn_after_ms = 60000
-
-[state]
-# Control-plane state-retention knobs (step 10 of
-# data-architecture-v1). Drives a periodic sweep that deletes
-# rows from `invocation_archive` older than `retention_days`.
-#
-# How long to keep `invocation_archive` rows, in days. Default
-# 30. Set to `-1` to disable the sweep entirely (the archive
-# then grows without bound; useful for an operator who wants
-# to manage retention with an external job).
-# retention_days = 30
-#
-# How often the retention sweep runs, in seconds. Default 1
-# hour. Production doesn't need faster; the deletes are
-# proportional to the number of rows past the cutoff each tick,
-# so a shorter interval just means smaller per-tick batches.
-# sweep_interval_seconds = 3600
-
-[tools.exec]
-# Timeouts for the built-in `exec` tool. Raise these for agents that run
-# long builds/test suites (e.g. a full `just ci`); a call that exceeds
-# the timeout is killed and returned as an error with partial output.
-#
-# Timeout applied when a call doesn't set its own `timeout_secs`. Default 120.
-# default_timeout_secs = 120
-#
-# Hard ceiling on any single call. A caller-supplied `timeout_secs` above
-# this is clamped down (not rejected). Default 600.
-# max_timeout_secs = 600
+# [daemon]
+# Edge address `fq` talks to when `--addr` is absent and more than one
+# daemon is paired. Names a pairing rather than carrying credentials,
+# so rotating a token never touches this file.
+# addr = "127.0.0.1:9472"

@@ -2,10 +2,18 @@
 
 This directory was initialised with `fq init`. It contains:
 
-- `fq.toml` — factor-q runtime configuration
+- `fqd.toml` — the daemon's configuration: broker, agents directory,
+  model registry, retention
+- `fq.toml` — the client's configuration: which daemon `fq` talks to
 - `docker-compose.yml` — NATS (with JetStream) for local development
 - `agents/` — agent definitions (Markdown with YAML frontmatter)
 - `agents/sample-agent.md` — a minimal working agent to test the pipeline
+
+Two binaries, so two config files, each named for the one that reads
+it. `fqd` is the daemon: it owns the broker connection, the stores and
+every invocation. `fq` is the client: it asks a daemon questions over
+an authenticated connection, and works just as well against a daemon on
+another machine — which is why it has no use for `fqd.toml`.
 
 ## Prerequisites
 
@@ -26,26 +34,49 @@ See the [deployment guide][deployment] for full setup details.
 # Start NATS (JetStream) in the background
 docker compose up -d
 
-# List the agents this project defines
-fq agent list
-
-# Validate a specific agent definition
+# Validate the sample agent definition. This one needs no daemon —
+# linting a file before it is deployed is an offline operation.
 fq agent validate agents/sample-agent.md
+
+# Start the daemon from this directory, so it reads fqd.toml. On its
+# first run it prints a certificate fingerprint and an admin token,
+# once — keep the token.
+fqd
+```
+
+Then, in another shell, pair the client with it. The edge listens on
+`127.0.0.1:9472` unless `fqd.toml`'s `[edge] bind` says otherwise, and
+the first connection asks you to confirm the fingerprint the daemon
+printed:
+
+```sh
+fq connect 127.0.0.1:9472 --token <token>
+
+# List the agents the daemon loaded
+fq agent list
 
 # Trigger the sample agent with a message
 fq trigger sample-agent "Say hello in one sentence."
 
-# In another terminal, tail the event stream
+# Watch the run
 fq events tail
 ```
+
+The pairing is stored once, so later `fq` commands need neither the
+address nor the token. Set `[daemon] addr` in `fq.toml` only when you
+have paired with more than one daemon and want a default.
 
 ## Next steps
 
 - Edit `agents/sample-agent.md` or add new agent files under `agents/`.
-- Override any configuration field from `fq.toml` using CLI flags
-  (`--agents-dir`, `--nats-url`, `--cache-dir`, `--state-dir`) or
+  `fq reload` makes the daemon re-read them without a restart.
+- Override any of the daemon's configuration when starting `fqd`, with
+  flags (`--agents-dir`, `--nats-url`, `--cache-dir`, `--state-dir`) or
   environment variables (`FQ_AGENTS_DIR`, `FQ_NATS_URL`,
-  `FQ_CACHE_DIR`, `FQ_STATE_DIR`).
+  `FQ_CACHE_DIR`, `FQ_STATE_DIR`). These configure the runtime, so they
+  belong to the daemon; `fq` does not accept them.
+- Point `fq` at a particular daemon with `--addr` (or `FQ_ADDR`), and
+  at a different client config with `--config` (or `FQ_CONFIG`).
 
 ## Documentation
 

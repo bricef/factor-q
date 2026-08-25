@@ -48,6 +48,10 @@ fq-runtime = { workspace = true, features = ["test-support"] }
 # tests (#233).
 fq-test-support = { workspace = true }
 libc = { workspace = true }
+# The `fq init` template gate asks which keys `Config` ignored, which
+# is the difference between a template that parses and one the daemon
+# actually reads.
+serde_ignored = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
