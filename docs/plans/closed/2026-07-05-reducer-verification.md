@@ -20,7 +20,7 @@ backlog § Reducer boundary invariants (backlog since retired).
 
 The **"what"** and **"why"** live elsewhere — the reducer model in
 [ADR-0014](../../adrs/accepted/0014-agent-harness-as-reducer.md) and
-[wasm-boundary-design](../../design/committed/wasm-boundary-design.md), the
+[wasm-boundary-design](../../design/aspirational/wasm-boundary-design.md), the
 WAL/recovery/archive protocols in
 [data-architecture](../../design/committed/data-architecture.md) (§3, §7,
 §9.1), and the user-facing contract in the
@@ -347,7 +347,7 @@ slices 1–2 are immediately valuable even if later slices pause for M3.
 - Backlog § Reducer boundary invariants (retired) — thread 2 absorbed
   here; threads 1 and 3 unchanged
 - [ADR-0014 — agent harness as reducer](../../adrs/accepted/0014-agent-harness-as-reducer.md)
-  · [wasm-boundary-design](../../design/committed/wasm-boundary-design.md)
+  · [wasm-boundary-design](../../design/aspirational/wasm-boundary-design.md)
 - [data-architecture](../../design/committed/data-architecture.md) §3
   (worker store), §7 (recovery), §9.1 (three-state WAL)
 - [Reducer harness guide](../../guide/reducer-harness.md) — the contract

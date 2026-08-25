@@ -1057,5 +1057,5 @@ What changes when an operator splits the deployment.
 - Event bus accepted decision: [`ADR-0011`](../../adrs/accepted/0011-event-bus-and-persistence.md)
 - Memory-as-MCP-services scope boundary: [`ADR-0013`](../../adrs/accepted/0013-memory-as-mcp-service.md)
 - Reducer harness (load-bearing consumer of state persistence): [`reducer-harness.md`](../../guide/reducer-harness.md)
-- Boundary design (why the reducer is a clean fit for this WAL): [`wasm-boundary-design.md`](./wasm-boundary-design.md)
+- Boundary design (why the reducer is a clean fit for this WAL): [`wasm-boundary-design.md`](../aspirational/wasm-boundary-design.md)
 - Vision and Q200 north star: [`VISION.md`](../../../VISION.md)

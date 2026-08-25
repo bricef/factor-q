@@ -2,10 +2,35 @@
 
 ## Status
 
-Draft. Consolidates the architectural shift that emerges from
-the reducer-model harness design: isolation moves from
-agent-scoped to tool-scoped, and workspace state is introduced
-as a first-class concern.
+**Aspirational — target design, not a description of what runs.**
+Moved here from `committed/` on 2026-08-25, because a reader was
+taking its present-tense prose as an account of the system.
+[ADR-0028](../../adrs/accepted/0028-tool-scoped-isolation-and-workspace.md)
+ratifies the *direction* below; almost none of the mechanism is built.
+
+What actually ships today:
+
+- **Tools run in-process**, dispatched uniformly over `Arc<dyn Tool>`.
+  There is no isolation-tier field, no dispatch switch, and no
+  container, WASM or microVM implementation anywhere in the tree. The
+  tier table below is the target model.
+- **`exec` is a plain subprocess**, constrained by path and env
+  allow-lists. It runs one program directly and interprets no shell —
+  which is why it is `exec` and not `shell`, as this document still
+  calls it in places.
+- **There is no network proxy.** `sandbox.network` parses and is
+  deliberately not plumbed through; the agent registry warns at load
+  that a declaring agent still has ambient network access (#35). Read
+  the proxy section as a design, not a control you have.
+- **Workspaces are per-invocation or shared, never per-agent**, and the
+  runtime provisions directories only — no overlay, no base layer, no
+  snapshot. ADR-0028 §3 replaced the overlay direction with a
+  CAS-backed VFS.
+
+The consolidation this section originally described — isolation moving
+from agent-scoped to tool-scoped, workspace state as a first-class
+concern — is the decision that was accepted. The implementation is not
+started.
 
 ## Context
 
@@ -406,8 +431,12 @@ What changes:
   encapsulation rather than security
 - The tier table is now about tool-level concerns
 
-Action: amend ADR-0010 with an addendum, or write ADR-0011
-to supersede the parts that have shifted. Not urgent —
+Action: **done, as
+[ADR-0028](../../adrs/accepted/0028-tool-scoped-isolation-and-workspace.md)**,
+which supersedes ADR-0010 and ratifies this framing. (The
+original text proposed writing "ADR-0011"; that number was
+already taken by an unrelated accepted decision on the event
+bus, so following it literally would have overwritten one.) Not urgent —
 both documents can coexist during the transition, and the
 phase-1 sandbox keeps working in the meantime.
 
@@ -490,8 +519,8 @@ Decide as workspace strategy solidifies.
    include isolation-tier declarations (default: subprocess
    for current tools).
 3. Build the network proxy as a first-class component.
-4. Amend ADR-0010 or write ADR-0011 to reflect the
-   per-tool-isolation framing.
+4. ~~Amend ADR-0010 or write a new ADR to reflect the
+   per-tool-isolation framing.~~ Done as ADR-0028.
 5. Add an agent tool catalogue design to the backlog (it can
    now reference the isolation schema).
 

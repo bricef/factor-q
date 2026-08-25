@@ -170,7 +170,7 @@ cumulative cost against the agent's declared budget ceiling.
 
 See the [reducer harness guide](docs/guide/reducer-harness.md)
 for the full surface, the
-[boundary design](docs/design/committed/wasm-boundary-design.md) for the
+[boundary design](docs/design/aspirational/wasm-boundary-design.md) for the
 rationale, and the
 [legacy-executor deprecation plan](docs/plans/closed/2026-05-27-deprecate-legacy-executor.md)
 for the consolidation that landed in 2026-05.

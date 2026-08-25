@@ -6,8 +6,11 @@ Accepted 2026-07-09 by Brice.
 
 Supersedes the agent-scoped framing of
 [ADR-0010](../accepted/0010-agent-execution-isolation.md); ratifies the
-committed [tool-isolation model](../../design/committed/tool-isolation-model.md)
-and extends it with a harness-owned virtual filesystem. It is a single
+[tool-isolation model](../../design/aspirational/tool-isolation-model.md)
+and extends it with a harness-owned virtual filesystem. That model moved to
+`design/aspirational/` on 2026-08-26: this ADR ratifies its *direction*, and
+the mechanism — isolation tiers, the network proxy, workspace overlays — is
+not built. It is a single
 application of [design principle 3 — safe by construction, not by
 restriction](../../design/committed/design-principles.md).
 
@@ -23,7 +26,7 @@ Two shifts changed the picture:
 - [ADR-0014](../accepted/0014-agent-harness-as-reducer.md): the harness is a
   pure function that returns a `NextAction`. It cannot execute anything, so it
   is not an attack surface, and the host has total control over what runs.
-- The [tool-isolation model](../../design/committed/tool-isolation-model.md)
+- The [tool-isolation model](../../design/aspirational/tool-isolation-model.md)
   drew the consequence: the security boundary belongs around each *tool*, not
   the agent as a whole. Each tool has its own threat profile and its own
   isolation need; wrapping the whole agent is both overkill for pure tools and
@@ -188,7 +191,7 @@ or aggregate resource limits, but no longer as the primary security boundary.
   builds on [ADR-0014](../accepted/0014-agent-harness-as-reducer.md),
   [ADR-0016](../accepted/0016-typed-operations-no-free-form-apis.md),
   [ADR-0005](../accepted/0005-agent-definition-format.md).
-- Design: [tool-isolation-model](../../design/committed/tool-isolation-model.md),
+- Design: [tool-isolation-model](../../design/aspirational/tool-isolation-model.md),
   [wasm-posix-sandbox](../../design/aspirational/wasm-posix-sandbox.md).
 - Substrate: fq-store (CAS); `sect` (`sect-core` + its DESIGN.md); the
   `virtual-filesystem` crate (trait + `ScopedFS`/`RocFS`/`MountableFS`).

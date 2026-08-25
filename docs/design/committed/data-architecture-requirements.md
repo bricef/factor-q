@@ -78,7 +78,7 @@ Mapping the open problems on factor-q's roadmap to the shapes above. The point i
 | Approval gates | [`ARCHITECTURE.md` cross-cutting concerns](../../../ARCHITECTURE.md#security-and-access-control) | Pending approvals / waits | Same shape as suspension plus metadata about what's needed. |
 | Scheduled refresh of pricing data | [#344](https://github.com/bricef/factor-q/issues/344) | Schedules / wakeups | Tiny, low-frequency, but durable — pricing should refresh even if the operator restarts. |
 | Scheduled agent triggers | `adapters/fq-cron` (shipped) | Schedules / wakeups | Same shape; user-facing rather than runtime-internal. |
-| Workspace snapshotting | [`tool-isolation-model.md`](./tool-isolation-model.md) backlog | Per-invocation workspaces | Likely needs its own store; large blobs. |
+| Workspace snapshotting | [`tool-isolation-model.md`](../aspirational/tool-isolation-model.md) backlog | Per-invocation workspaces | Likely needs its own store; large blobs. |
 | Hot-reload of agent definitions | shipped (`fq reload`); config half [#114](https://github.com/bricef/factor-q/issues/114) | Static configuration (read-side) | Doesn't introduce new persistence; introduces a watcher. |
 | Long-lived agent waits (e.g. webhook receivers) | [`agent-os-architecture.md`](../aspirational/agent-os-architecture.md) | Latest state + a wakeup trigger | Composite — needs both the suspension shape and the wakeup shape. |
 | Crash recovery | discussed during reducer prototype | Latest state + a "what was in-flight" index | Composite — uses suspension state plus a way to enumerate it on startup. |

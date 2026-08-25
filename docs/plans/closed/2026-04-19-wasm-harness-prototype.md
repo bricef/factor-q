@@ -4,7 +4,7 @@
 **Status**: Deferred 2026-05-22. The premise of this plan —
 that the security win comes from packaging the *harness* as
 a WASM component — was overtaken by
-[`docs/design/committed/tool-isolation-model.md`](../../design/committed/tool-isolation-model.md),
+[`docs/design/aspirational/tool-isolation-model.md`](../../design/aspirational/tool-isolation-model.md),
 which reframes isolation as a per-tool concern: the harness
 is a pure trusted function, and WASM is one of five
 isolation tiers (in-process / subprocess / container / WASM
@@ -29,7 +29,7 @@ native Rust. The WIT-and-component-model packaging exercise
 remains valuable as a research project but isn't on the
 critical path.
 
-**Design reference**: [`docs/design/committed/wasm-boundary-design.md`](../../design/committed/wasm-boundary-design.md), [`docs/design/committed/tool-isolation-model.md`](../../design/committed/tool-isolation-model.md)
+**Design reference**: [`docs/design/aspirational/wasm-boundary-design.md`](../../design/aspirational/wasm-boundary-design.md), [`docs/design/aspirational/tool-isolation-model.md`](../../design/aspirational/tool-isolation-model.md)
 
 ## Goal
 
