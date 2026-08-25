@@ -1,19 +1,22 @@
 //! Runtime configuration.
 //!
-//! Configuration is loaded from a TOML file (typically `fq.toml` at the
-//! project root), with sensible defaults for unspecified fields. Secrets
-//! are never stored in the config file — the config names the environment
-//! variable that holds each secret, and the runtime reads the variable at
-//! use time.
+//! Configuration is loaded from a TOML file (`fqd.toml` at the project
+//! root, by the daemon's default), with sensible defaults for
+//! unspecified fields. Secrets are never stored in the config file —
+//! the config names the environment variable that holds each secret,
+//! and the runtime reads the variable at use time.
+//!
+//! The file's *name* is not this module's to know. [`Config`] parses
+//! whatever path it is handed, and the binary that reads it names it —
+//! `fq-daemon`'s `DEFAULT_CONFIG_PATH`. A second constant here said
+//! `fq.toml` long after that became the client's own, differently
+//! shaped config; nothing read it, so nothing caught it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-
-/// Default name of the config file at the project root.
-pub const DEFAULT_CONFIG_FILENAME: &str = "fq.toml";
 
 /// Runtime configuration for the factor-q daemon.
 #[derive(Debug, Clone, Deserialize)]
