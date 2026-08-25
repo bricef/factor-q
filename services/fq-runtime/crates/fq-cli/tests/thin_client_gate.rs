@@ -36,7 +36,21 @@ use std::path::PathBuf;
 /// What the client must not link. `fq-runtime` heads the list because
 /// it transitively carries every other entry — which is how the
 /// dependency would return, as one line that looks harmless.
-const FORBIDDEN: &[&str] = &["fq-runtime", "sqlx", "async-nats", "reqwest", "rmcp"];
+///
+/// `fq-daemon` is on the list for the same reason and was missing from
+/// it until 2026-08-25: this file is titled for keeping the daemon out
+/// of the client, and the crate that *is* the daemon was the one name
+/// it did not check. One line adding it re-links `fq-runtime` and
+/// everything under it, with this gate still green — the precise
+/// regression the binary split exists to prevent.
+const FORBIDDEN: &[&str] = &[
+    "fq-runtime",
+    "fq-daemon",
+    "sqlx",
+    "async-nats",
+    "reqwest",
+    "rmcp",
+];
 
 /// Every dependency table, `[dev-dependencies]` included. A test-only
 /// edge still compiles the crate in, and a fixture built by spawning a
@@ -54,9 +68,16 @@ fn the_client_links_no_daemon() {
         // Comments explain the boundary; they must be free to name it.
         .filter(|(_, line)| !line.trim_start().starts_with('#'))
         .filter(|(_, line)| {
-            FORBIDDEN
-                .iter()
-                .any(|dep| line.trim_start().starts_with(dep))
+            let line = line.trim_start();
+            FORBIDDEN.iter().any(|dep| {
+                // `fq-daemon = { workspace = true }` — the ordinary form.
+                line.starts_with(dep)
+                    // `[dependencies.fq-daemon]` — the same edge written
+                    // as a table header, which does not begin with the
+                    // crate's name and so slips past the check above.
+                    || (line.starts_with('[')
+                        && line.contains(&format!("dependencies.{dep}")))
+            })
         })
         .map(|(i, line)| (i + 1, line.trim()))
         .collect();

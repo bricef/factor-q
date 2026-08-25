@@ -31,7 +31,20 @@ use std::path::PathBuf;
 /// What a reader must not link. `fq-runtime` heads the list because it
 /// transitively carries every other entry — which is how the dependency
 /// would return, as one line that looks harmless.
-const FORBIDDEN: &[&str] = &["fq-runtime", "sqlx", "async-nats", "reqwest", "rmcp"];
+///
+/// `fq-daemon` is on the list for the same reason and was missing from
+/// it until 2026-08-25. This crate's manifest claims "the daemon crate
+/// itself … are not linked here, `tests/thin_reader_gate.rs` holds
+/// that" — which was not true of the daemon crate specifically, the one
+/// name the list omitted.
+const FORBIDDEN: &[&str] = &[
+    "fq-runtime",
+    "fq-daemon",
+    "sqlx",
+    "async-nats",
+    "reqwest",
+    "rmcp",
+];
 
 /// Every dependency table, `[dev-dependencies]` included. A test-only
 /// edge still compiles the crate in, and a fixture built from a store
@@ -48,9 +61,16 @@ fn the_dashboard_links_no_path_to_a_store() {
         // Comments explain the boundary; they must be free to name it.
         .filter(|(_, line)| !line.trim_start().starts_with('#'))
         .filter(|(_, line)| {
-            FORBIDDEN
-                .iter()
-                .any(|dep| line.trim_start().starts_with(dep))
+            let line = line.trim_start();
+            FORBIDDEN.iter().any(|dep| {
+                // `fq-daemon = { workspace = true }` — the ordinary form.
+                line.starts_with(dep)
+                    // `[dependencies.fq-daemon]` — the same edge written
+                    // as a table header, which does not begin with the
+                    // crate's name and so slips past the check above.
+                    || (line.starts_with('[')
+                        && line.contains(&format!("dependencies.{dep}")))
+            })
         })
         .map(|(i, line)| (i + 1, line.trim()))
         .collect();
