@@ -126,7 +126,16 @@ pair_with_daemon() {
     local log="$1" addr token
     wait_for 30 "edge listening" grep -q "edge is listening on" "${log}"
     addr="$(sed -n 's/.*edge is listening on \([0-9.]*:[0-9]*\).*/\1/p' "${log}" | tail -1)"
+    # The token is printed once ever — when the identity is *minted*.
+    # Every restart after the first adopts the identity from the state
+    # dir and prints nothing, so cache it. The address is not cacheable:
+    # the bind is port 0, so it is new on every start.
     token="$(awk '/edge: admin token/ { seen = 1; next } seen && NF { print $1; exit }' "${log}")"
+    if [[ -n "${token}" ]]; then
+        printf '%s\n' "${token}" > "${TMP_ROOT}/admin-token"
+    elif [[ -r "${TMP_ROOT}/admin-token" ]]; then
+        token="$(cat "${TMP_ROOT}/admin-token")"
+    fi
     [[ -n "${addr}" && -n "${token}" ]] || {
         printf '%s could not read the edge address or admin token from %s\n' "$(red 'x')" "${log}"
         exit 1
@@ -135,11 +144,19 @@ pair_with_daemon() {
         printf '%s fq connect failed\n' "$(red 'x')"
         exit 1
     }
+    printf '%s\n' "${addr}" > "${TMP_ROOT}/edge-addr"
+}
+
+# Every client verb dials the daemon this drill just started. Each
+# restart binds a fresh port and adds a pairing, so without an explicit
+# address the client would have several stored and refuse to guess.
+fq_client() {
+    "${FQ_BIN}" --addr "$(cat "${TMP_ROOT}/edge-addr")" "$@"
 }
 
 trigger_n() {
     for i in $(seq 1 "${N}"); do
-        "${FQ_BIN}" trigger "${AGENT_ID}" "{\"drill\":${i}}" --via-nats >/dev/null
+        fq_client trigger "${AGENT_ID}" "{\"drill\":${i}}" --via-nats >/dev/null
     done
 }
 
@@ -220,11 +237,27 @@ trigger_n
 check "all ${N} invocations in flight (one workspace dir each)" \
     wait_for 60 "${N} workspace dirs" dirs_are "${N}"
 
-"${FQ_BIN}" down >/dev/null
+fq_client down >/dev/null
 check "daemon exits after the drain joins in-flight work" \
     wait_for 90 "daemon exit" daemon_exited
-check "dispatcher logged the drain" \
-    grep -q "no longer consuming new triggers" "${TMP_ROOT}/daemon-1.log"
+# The dispatcher stops consuming by one of two paths, and which one it
+# takes is a race this drill does not control. `draining()` logs "no
+# longer consuming new triggers", but it is only reached at two loop
+# checkpoints — the top, and after a capacity wait. With every worker
+# slot already full and no further trigger arriving during the drain
+# window, the dispatcher is instead parked awaiting the next message
+# and leaves through its shutdown arm, logging "received shutdown
+# signal". Verified against a live drill: with N=3 and max_concurrent=3
+# it takes the shutdown path every time.
+#
+# Asserting the first spelling alone was asserting which branch won a
+# race. What the drain actually guarantees is that the dispatcher
+# stopped deliberately rather than died — so accept either line, and
+# leave the drain's real guarantees to the checks around this one,
+# which cover suspend, resume and exactly-once.
+check "dispatcher stopped consuming deliberately" \
+    grep -qE "no longer consuming new triggers|trigger dispatcher received shutdown signal" \
+    "${TMP_ROOT}/daemon-1.log"
 check "all ${N} suspended workspaces survive the shutdown" dirs_are "${N}"
 
 # --- phase 2: next-binary recovery resumes each exactly once ------------
