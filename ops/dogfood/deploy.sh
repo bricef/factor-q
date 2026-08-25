@@ -79,6 +79,18 @@ pids_under() {
 pids_installed() { pids_under "$1" "$DOGFOOD/releases/"; }
 # Verification: the exact release we just flipped `current` to.
 pids_release()   { pids_under "$1" "$DOGFOOD/$REL/"; }
+# A daemon from before the fq/fqd split is the `fq` binary running its
+# `run` subcommand. Bring-down has to find it, or the deploy sails past
+# a daemon it never stopped and the new one dies on "address in use"
+# (seen 2026-08-25, on the split deploy itself). The client shares that
+# binary name, so match the subcommand too rather than adopting a
+# passing `fq status` as the bring-down target.
+pids_presplit_daemon() {
+    local p
+    for p in $(pids_installed fq); do
+        case " $(tr '\0' ' ' < "/proc/$p/cmdline")" in *" run "*) printf '%s\n' "$p" ;; esac
+    done
+}
 
 FORCE=0
 WANT="latest"
@@ -115,7 +127,7 @@ if [ "$WANT" = "latest" ]; then
 
     mkdir "$tmp/x"
     tar -xzf "$tmp"/*.tar.gz -C "$tmp/x"
-    chmod +x "$tmp/x/fq" "$tmp/x/fq-cas" "$tmp/x/fq-dashboard" "$tmp/x/github-watcher" "$tmp/x/fq-cron" "$tmp/x"/*.sh
+    chmod +x "$tmp/x/fq" "$tmp/x/fqd" "$tmp/x/fq-cas" "$tmp/x/fq-dashboard" "$tmp/x/github-watcher" "$tmp/x/fq-cron" "$tmp/x"/*.sh
 
     SHA="$(fq_sha "$tmp/x/fq")"
     [ -n "$SHA" ] || die "could not read the embedded SHA from the downloaded fq"
@@ -157,6 +169,7 @@ fi
 # --- 2. early exit when the target is already live -----------------------
 ACTIVE="$(readlink current 2>/dev/null || true)"
 DAEMON_PID="$(pids_installed fqd | head -1 || true)"
+[ -n "$DAEMON_PID" ] || DAEMON_PID="$(pids_presplit_daemon | head -1 || true)"
 CRON_OK=1
 if [ -f fq-cron.toml ]; then
     CRON_PID="$(pids_installed fq-cron | head -1 || true)"
@@ -185,8 +198,14 @@ for cpid in $(pids_installed fq-cron); do
 done
 
 if [ -n "$DAEMON_PID" ]; then
-    DRAIN_CLI="$REL/fq"
-    [ ! -x ./current/fq ] || DRAIN_CLI=./current/fq
+    # The client that matches the daemon being stopped — taken from that
+    # daemon's own release directory. `current` is the wrong source: a
+    # previous failed deploy may already have flipped it, which would
+    # aim a new client at an old daemon. The incoming build is the
+    # last-resort fallback, for a daemon whose release was deleted.
+    DAEMON_EXE="$(readlink "/proc/$DAEMON_PID/exe" 2>/dev/null || true)"
+    DRAIN_CLI="$(dirname "${DAEMON_EXE% (deleted)}")/fq"
+    [ -x "$DRAIN_CLI" ] || DRAIN_CLI="$REL/fq"
     # Where to dial. `fq` is a client now: its own --config is `fq.toml`,
     # which is not this file, and it reads no daemon config at all — so
     # the address comes from the daemon's own `[edge] bind`, read here.
