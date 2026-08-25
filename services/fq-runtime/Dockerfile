@@ -91,7 +91,7 @@ COPY --from=builder /build/target/release/fq /usr/local/bin/fq
 # Defaults for container deployments. Operators should override paths to
 # point at mounted volumes for persistence; the defaults fall through to
 # /tmp so a fresh container runs without any explicit configuration.
-ENV FQ_CONFIG=/etc/factor-q/fq.toml \
+ENV FQ_DAEMON_CONFIG=/etc/factor-q/fqd.toml \
     FQ_AGENTS_DIR=/var/lib/factor-q/agents \
     FQ_CACHE_DIR=/var/cache/factor-q \
     FQ_NATS_URL=nats://nats:4222 \

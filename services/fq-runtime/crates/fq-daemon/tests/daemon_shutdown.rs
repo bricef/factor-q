@@ -73,7 +73,7 @@ fn pair_with(scratch: &std::path::Path) -> Pairing {
     let xdg = tempfile::tempdir().expect("xdg dir");
     let connect = Command::new(fq_client_binary())
         .args(["connect", &addr, "--token", &token])
-        .env("FQ_CONFIG", &config)
+        .env("FQ_CLI_CONFIG", &config)
         .env("XDG_CONFIG_HOME", xdg.path())
         .env("RUST_LOG", "off")
         .stdin(Stdio::piped())
@@ -116,7 +116,7 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
     let mut child = Command::new(fqd_binary())
         // The scratch fq.toml plus env overrides — the test never
         // reads a real config.
-        .env("FQ_CONFIG", scratch.join("fq.toml"))
+        .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))
@@ -258,7 +258,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
     let log_err = log.try_clone().expect("clone daemon log handle");
 
     let mut child = Command::new(fqd_binary())
-        .env("FQ_CONFIG", scratch.join("fq.toml"))
+        .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))
@@ -292,7 +292,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
     let pairing = pair_with(&scratch);
     let down = Command::new(fq_client_binary())
         .arg("down")
-        .env("FQ_CONFIG", &pairing.config)
+        .env("FQ_CLI_CONFIG", &pairing.config)
         .env("XDG_CONFIG_HOME", pairing.xdg.path())
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -354,7 +354,7 @@ fn daemon_stops_now_on_fq_down_now() {
     let log_err = log.try_clone().expect("clone daemon log handle");
 
     let mut child = Command::new(fqd_binary())
-        .env("FQ_CONFIG", scratch.join("fq.toml"))
+        .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))
@@ -385,7 +385,7 @@ fn daemon_stops_now_on_fq_down_now() {
     let pairing = pair_with(&scratch);
     let down = Command::new(fq_client_binary())
         .args(["down", "--now"])
-        .env("FQ_CONFIG", &pairing.config)
+        .env("FQ_CLI_CONFIG", &pairing.config)
         .env("XDG_CONFIG_HOME", pairing.xdg.path())
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -443,7 +443,7 @@ fn fq_down_fast_fails_when_no_daemon_running() {
     let started = Instant::now();
     let down = Command::new(fq_client_binary())
         .arg("down")
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_CLI_CONFIG", "/nonexistent/fq.toml")
         .env("XDG_CONFIG_HOME", xdg.path())
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))

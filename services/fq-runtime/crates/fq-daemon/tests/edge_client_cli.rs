@@ -30,7 +30,7 @@ fn unique_scratch() -> std::path::PathBuf {
 fn fq(scratch: &std::path::Path, args: &[&str]) -> Output {
     Command::new(fq_client_binary())
         .args(args)
-        .env("FQ_CONFIG", scratch.join("fq.toml"))
+        .env("FQ_CLI_CONFIG", scratch.join("fq.toml"))
         .env("XDG_CONFIG_HOME", scratch.join("xdg"))
         .stdin(Stdio::piped())
         .output()
@@ -79,7 +79,7 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone log handle");
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
-        .env("FQ_CONFIG", scratch.join("fq.toml"))
+        .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))

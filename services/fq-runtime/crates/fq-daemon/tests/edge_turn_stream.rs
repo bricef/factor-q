@@ -93,7 +93,7 @@ async fn the_turn_atom_lives_end_to_end() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone log handle");
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
-        .env("FQ_CONFIG", scratch.join("fq.toml"))
+        .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))

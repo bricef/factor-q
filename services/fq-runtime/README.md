@@ -170,7 +170,7 @@ through to safe locations.
 
 | Variable          | CLI flag          | Default (container)          | Notes                                     |
 |-------------------|-------------------|------------------------------|-------------------------------------------|
-| `FQ_CONFIG`       | `--config`        | `/etc/factor-q/fq.toml`       | Optional — defaults apply if unset        |
+| `FQ_DAEMON_CONFIG`| `--config`        | `/etc/factor-q/fqd.toml`       | Optional — defaults apply if unset        |
 | `FQ_AGENTS_DIR`   | `--agents-dir`    | `/var/lib/factor-q/agents`    | Mount a volume with your agent definitions |
 | `FQ_CACHE_DIR`    | `--cache-dir`     | `/var/cache/factor-q`         | Pricing snapshot and the SQLite stores    |
 | `FQ_STATE_DIR`    | `--state-dir`     | (unset — resolves as below)   | Durable state: the edge identity          |

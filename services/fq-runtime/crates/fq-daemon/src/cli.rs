@@ -63,8 +63,14 @@ pub(crate) fn init_tracing(format: LogFormat) {
 /// Precedence: CLI flag > env var > config file > default.
 #[derive(Args, Clone)]
 pub(crate) struct GlobalArgs {
-    /// Path to the factor-q config file
-    #[arg(long, env = "FQ_CONFIG", default_value = DEFAULT_CONFIG_PATH, global = true)]
+    /// Path to the daemon's config file.
+    ///
+    /// The variable names the binary, because the two binaries' configs
+    /// are different files with different shapes. A shared `FQ_CONFIG`
+    /// pointed both at one file, and since neither config rejects
+    /// unknown fields, each silently ignored the other's tables rather
+    /// than saying so.
+    #[arg(long, env = "FQ_DAEMON_CONFIG", default_value = DEFAULT_CONFIG_PATH, global = true)]
     config: PathBuf,
 
     /// Override the agents directory from config

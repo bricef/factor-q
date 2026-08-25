@@ -53,7 +53,7 @@ fn spawn_daemon_with_state(
     let file = std::fs::File::create(log).expect("create daemon log");
     let file_err = file.try_clone().expect("clone log handle");
     Command::new(env!("CARGO_BIN_EXE_fqd"))
-        .env("FQ_CONFIG", scratch.join("fq.toml"))
+        .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", state_dir)
