@@ -1,13 +1,37 @@
 //! Running: the tasks the daemon hosts, and how it stops them.
 //!
 //! Split from `daemon.rs`, which is now assembly only. The seam is
-//! where it is because the seventeen task handles never cross it: they
-//! are created here, awaited here, and stopped here, so the boundary
-//! carries what was *assembled* and nothing about what is running.
+//! where it is because almost every task handle is created here,
+//! awaited here, and stopped here, so the boundary carries what was
+//! *assembled* rather than what is running. `resume_handles` is the
+//! one exception — startup recovery spawns before this module is
+//! reached, so those handles ride across in `Assembled` and are joined
+//! with the rest at the end.
 //!
-//! That is also why spawn and shutdown are one module rather than two.
-//! Separating them would have meant handing seventeen handles across a
-//! function boundary, which is a worse shape than the length it fixes.
+//! That is also why spawn and shutdown are one module rather than two:
+//! separating them would mean handing eleven handles and their
+//! shutdown senders across a function boundary, which is a worse shape
+//! than the length it fixes.
+//!
+//! `run_hosted` has two phases and they must stay in this order:
+//! everything fallible first, then everything spawned. A marker in the
+//! body says where the line is.
+//!
+//! The order matters because a `?` after the first spawn returns
+//! straight out of the function and skips the teardown at the end of
+//! this file: the worker is never deregistered, no `system.shutdown`
+//! is published, and the MCP children take the abrupt drop-guard kill
+//! instead of a graceful stop. The tasks themselves do stop — but only
+//! as a side effect of their shutdown senders being dropped as the
+//! locals unwind, which is not the same thing, and it leaves a worker
+//! row ageing into `stale`.
+//!
+//! That is not hypothetical. An `edge: failed to bind` on a port a
+//! previous daemon still held did exactly this in production on
+//! 2026-08-25, and the orphaned worker it left behind is how it was
+//! noticed. The edge now binds before the first spawn for that reason:
+//! it was the last fallible step and the only one that routinely
+//! fails.
 
 use std::sync::Arc;
 
@@ -94,10 +118,84 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         .await
         .context("failed to publish system.startup event")?;
 
-    // Spawn the projection consumer, advancing the watermark as it
-    // applies events — the fold-as-of-W coordinate reads gate on for
-    // read-your-writes (plan Phase 3a).
+    // Everything the edge's registry is built from, constructed
+    // before it and before any task is spawned. These are plain
+    // values — channels, an Arc, a one-shot — so hoisting them costs
+    // nothing and buys the ordering the edge bind below depends on.
     let (watermark_tx, projection_watermark) = fq_runtime::watermark::channel();
+    let (coord_watermark_tx, coordination_watermark) = fq_runtime::watermark::channel();
+    let shared_registry: SharedRegistry = Arc::new(tokio::sync::RwLock::new(registry));
+    let (down_requested_tx, mut down_requested_rx) = tokio::sync::oneshot::channel::<bool>();
+    let down_signal: crate::control_commands::DownSignal =
+        Arc::new(tokio::sync::Mutex::new(Some(down_requested_tx)));
+    let resume_control = Arc::new(ResumeControl {
+        bus: bus.clone(),
+        worker_store: worker_store.clone(),
+        cp_store: cp_store.clone(),
+        runner: resume_runner.clone(),
+        registry: shared_registry.clone(),
+        llm: llm.clone(),
+    });
+
+    // The authenticated operator edge (ADR-0006 + ADR-0031, plan
+    // Phase 2): TLS + capability tokens over tarpc
+    // `invoke`/`next_batch`. Identity (certificate + token root)
+    // persists under the state dir; the first run mints it and prints
+    // the admin token exactly once — see `edge_identity`. Same
+    // supervision posture as the read service: outside the supervised
+    // set — an operator surface dying must not take the runtime down.
+    let edge_bound = if config.edge.enabled {
+        let (identity, _identity_dir) = crate::edge_identity::resolve(&config)?;
+        // The operator surface: real declarations over the daemon's
+        // read views, gated at the projection watermark (Phase 3).
+        let edge_views = Arc::new(
+            fq_runtime::views::Views::open(&db_paths) // allow-runtime-internals: allow-direct-store-open: daemon's own
+                .await
+                .context("edge: failed to open the read views")?,
+        );
+        let edge_registry = Arc::new(operator_registry(
+            edge_views,
+            fq_runtime::watermark::Horizon::new(vec![
+                projection_watermark.clone(),
+                coordination_watermark.clone(),
+            ]),
+            std::time::Duration::from_millis(config.edge.min_seq_wait_ms),
+            OperatorDeps {
+                bus: bus.clone(),
+                projection: store.clone(),
+                control_plane: cp_store.clone(),
+                facts: daemon_facts(&config),
+                // The same runner the dispatcher and startup recovery
+                // drive invocations with — `invocation.drop` asks it
+                // whether the target is live, and arms its halt.
+                runner: resume_runner.clone(),
+                resume: resume_control.clone(),
+                // The same hot-swapped handle `fq reload` updates and
+                // the dispatcher reads, so `fq agent list` answers
+                // with the definitions this daemon would run.
+                agents: shared_registry.clone(),
+                machinery: crate::control_commands::MachineryDeps {
+                    agents: shared_registry.clone(),
+                    agents_dir: config.agents.directory.clone(),
+                    default_model: config.agents.default_model.clone(),
+                    // The same runner `fq down`'s drain suspends and the
+                    // teardown below waits on.
+                    worker: resume_runner.clone(),
+                    down: down_signal,
+                },
+            },
+        )?);
+        let (edge_addr, edge_serving) = fq_edge::bind(&config.edge.bind, &identity, edge_registry)
+            .await
+            .context("edge: failed to bind (check [edge] in fqd.toml)")?;
+        Some((edge_addr, edge_serving))
+    } else {
+        None
+    };
+
+    // ---- Nothing above has spawned a task; nothing below may fail.
+    // New fallible work goes above this line — see the module doc for
+    // what a `?` down here costs. ----
     let (proj_shutdown_tx, proj_shutdown_rx) = tokio::sync::oneshot::channel();
     let projection_consumer =
         ProjectionConsumer::new(bus.clone(), store.clone()).with_watermark(watermark_tx);
@@ -109,7 +207,6 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // coordination_invocation_owner / coordination_worker
     // state. Stale-worker sweep runs on a timer.
     let (coord_shutdown_tx, coord_shutdown_rx) = tokio::sync::oneshot::channel();
-    let (coord_watermark_tx, coordination_watermark) = fq_runtime::watermark::channel();
     let coord_consumer = fq_runtime::CoordinationConsumer::new(bus.clone(), cp_store.clone())
         .with_runtime_id(runtime_id)
         .with_worker_store(worker_store.clone())
@@ -184,7 +281,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // Spawn the archive retry sweeper. Periodically lists
     // pending hand-offs and republishes invocation.archived
     // until the control-plane acks. Cadence + warn threshold
-    // come from `[worker]` in fq.toml.
+    // come from `[worker]` in fqd.toml.
     let (archive_retry_shutdown_tx, archive_retry_shutdown_rx) = tokio::sync::oneshot::channel();
     let archive_retry_sweeper =
         fq_runtime::ArchiveRetrySweeper::new(bus.clone(), worker_id.clone(), worker_store.clone())
@@ -215,7 +312,6 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // trigger pick it up. In-flight invocations snapshot their config
     // at trigger time and are undisturbed by a swap (ADR-0020
     // refresh-between-invocations precedent).
-    let shared_registry: SharedRegistry = Arc::new(tokio::sync::RwLock::new(registry));
 
     let drain_probe: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
 
@@ -226,22 +322,11 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // them on the transport it already serves rather than on a
     // best-effort core-NATS channel whose loss it had to survive. What
     // is left is the one-shot the select below still waits on.
-    let (down_requested_tx, mut down_requested_rx) = tokio::sync::oneshot::channel::<bool>();
-    let down_signal: crate::control_commands::DownSignal =
-        Arc::new(tokio::sync::Mutex::new(Some(down_requested_tx)));
 
     // What `invocation.resume` (#373) runs against. It used to be a
     // NATS listener on a bespoke subject; the verb is a declared
     // command on the edge now, so this is built here and the registry
     // below holds it — there is no listener left to hand it to.
-    let resume_control = Arc::new(ResumeControl {
-        bus: bus.clone(),
-        worker_store: worker_store.clone(),
-        cp_store: cp_store.clone(),
-        runner: resume_runner.clone(),
-        registry: shared_registry.clone(),
-        llm: llm.clone(),
-    });
 
     // Spawn the trigger dispatcher. Its concurrency bound (#70) is
     // config, default 1 (serial) until the Phase-2 concurrency gate.
@@ -255,65 +340,19 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     );
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
 
-    // The authenticated operator edge (ADR-0006 + ADR-0031, plan
-    // Phase 2): TLS + capability tokens over tarpc
-    // `invoke`/`next_batch`. Identity (certificate + token root)
-    // persists under the state dir; the first run mints it and prints
-    // the admin token exactly once — see `edge_identity`. Same
-    // supervision posture as the read service: outside the supervised
-    // set — an operator surface dying must not take the runtime down.
-    let edge_addr = if config.edge.enabled {
-        let (identity, _identity_dir) = crate::edge_identity::resolve(&config)?;
-        // The operator surface: real declarations over the daemon's
-        // read views, gated at the projection watermark (Phase 3).
-        let edge_views = Arc::new(
-            fq_runtime::views::Views::open(&db_paths) // allow-runtime-internals: allow-direct-store-open: daemon's own
-                .await
-                .context("edge: failed to open the read views")?,
-        );
-        let edge_registry = Arc::new(operator_registry(
-            edge_views,
-            fq_runtime::watermark::Horizon::new(vec![
-                projection_watermark.clone(),
-                coordination_watermark.clone(),
-            ]),
-            std::time::Duration::from_millis(config.edge.min_seq_wait_ms),
-            OperatorDeps {
-                bus: bus.clone(),
-                projection: store.clone(),
-                control_plane: cp_store.clone(),
-                facts: daemon_facts(&config),
-                // The same runner the dispatcher and startup recovery
-                // drive invocations with — `invocation.drop` asks it
-                // whether the target is live, and arms its halt.
-                runner: resume_runner.clone(),
-                resume: resume_control.clone(),
-                // The same hot-swapped handle `fq reload` updates and
-                // the dispatcher reads, so `fq agent list` answers
-                // with the definitions this daemon would run.
-                agents: shared_registry.clone(),
-                machinery: crate::control_commands::MachineryDeps {
-                    agents: shared_registry.clone(),
-                    agents_dir: config.agents.directory.clone(),
-                    default_model: config.agents.default_model.clone(),
-                    // The same runner `fq down`'s drain suspends and the
-                    // teardown below waits on.
-                    worker: resume_runner.clone(),
-                    down: down_signal,
-                },
-            },
-        )?);
-        let (edge_addr, edge_serving) = fq_edge::bind(&config.edge.bind, &identity, edge_registry)
-            .await
-            .context("edge: failed to bind (check [edge] in fq.toml)")?;
+    // The edge begins serving only once everything it reports on is
+    // running. Binding happened before the first spawn, so a bind
+    // failure — a port already held, most often by a daemon that has
+    // not finished exiting — returns while nothing is running yet,
+    // instead of stranding ten supervised tasks and a registered
+    // worker on a path that never reaches the teardown below.
+    let edge_addr = edge_bound.map(|(edge_addr, edge_serving)| {
         tokio::spawn(async move {
             edge_serving.await;
             tracing::warn!("edge exited; the operator edge is down until the daemon restarts");
         });
-        Some(edge_addr)
-    } else {
-        None
-    };
+        edge_addr
+    });
 
     println!();
     println!("Runtime ready. Press Ctrl-C to stop.");

@@ -33,8 +33,18 @@
 # `just sizes-bless` rewrites this file from the measurements and keeps
 # only the header, so re-add this note after any bless — the numbers
 # below survive it, the reason they are here does not.
+#
+# run_hosted 581 -> 596 (2026-08-25): the edge now binds before the
+# first spawn, so no fallible step remains after one, and an early
+# error can no longer skip the teardown. That costs 15 lines because
+# binding and serving are now two places instead of one — the bind up
+# with the other fallible work, the `tokio::spawn` down where the edge
+# should start answering. Raised by hand rather than blessed, because a
+# correctness fix paying for itself in length is exactly the trade a
+# human should see. It strengthens the case for #78 rather than
+# weakening it.
 services/fq-runtime/crates/fq-daemon/src/daemon.rs::run_daemon 346
-services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 581
+services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 596
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::resume 354
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 376
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_tool 314
