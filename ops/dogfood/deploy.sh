@@ -194,8 +194,18 @@ if [ -n "$DAEMON_PID" ]; then
     # one this fails and the escalation below stops the daemon instead.
     EDGE_ADDR="$(sed -n 's/^ *bind *= *"\([^"]*\)".*/\1/p' "$DOGFOOD/fqd.toml" | head -1)"
     [ -n "$EDGE_ADDR" ] || EDGE_ADDR=127.0.0.1:9470
+    # DRAIN_CLI is deliberately the *installed* client, version-matched to
+    # the daemon it is being asked to stop — so on a deploy that crosses
+    # the fq/fqd split it is the older surface, which has no `--addr` and
+    # finds the daemon through the daemon's config instead. Ask the binary
+    # rather than assuming: the same probe covers a rollback.
+    if "$DRAIN_CLI" down --help 2>/dev/null | grep -q -- '--addr'; then
+        DIAL=(--addr "$EDGE_ADDR")
+    else
+        DIAL=(--config "$DOGFOOD/fqd.toml")
+    fi
     log "Stopping daemon (PID $DAEMON_PID) via confirmed fq down using $DRAIN_CLI"
-    "$DRAIN_CLI" --addr "$EDGE_ADDR" down \
+    "$DRAIN_CLI" "${DIAL[@]}" down \
         || printf '    (confirmed drain failed; escalating)\n'
     if kill -0 "$DAEMON_PID" 2>/dev/null; then
         # Escalation 1: `--now` skips the already-attempted drain;
@@ -204,7 +214,7 @@ if [ -n "$DAEMON_PID" ]; then
         # `fq down` exits zero only after observing the daemon's own
         # system.shutdown event. If wedged, fall through to the signal.
         printf '    graceful stop failed — requesting immediate stop (fq down --now)\n'
-        if "$DRAIN_CLI" --addr "$EDGE_ADDR" down --now; then
+        if "$DRAIN_CLI" "${DIAL[@]}" down --now; then
             printf '    confirmed stop\n'
         else
             # Escalation 2, last resort: SIGINT is crash-equivalent —
