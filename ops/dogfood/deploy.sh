@@ -79,6 +79,18 @@ pids_under() {
 pids_installed() { pids_under "$1" "$DOGFOOD/releases/"; }
 # Verification: the exact release we just flipped `current` to.
 pids_release()   { pids_under "$1" "$DOGFOOD/$REL/"; }
+# A daemon from before the fq/fqd split is the `fq` binary running its
+# `run` subcommand. Bring-down has to find it, or the deploy sails past
+# a daemon it never stopped and the new one dies on "address in use"
+# (seen 2026-08-25, on the split deploy itself). The client shares that
+# binary name, so match the subcommand too rather than adopting a
+# passing `fq status` as the bring-down target.
+pids_presplit_daemon() {
+    local p
+    for p in $(pids_installed fq); do
+        case " $(tr '\0' ' ' < "/proc/$p/cmdline")" in *" run "*) printf '%s\n' "$p" ;; esac
+    done
+}
 
 FORCE=0
 WANT="latest"
@@ -92,7 +104,8 @@ done
 
 cd "$DOGFOOD" 2>/dev/null || die "dogfood dir not found: $DOGFOOD (set FQ_DOGFOOD)"
 mkdir -p releases logs
-[ -f fq.toml ] || die "no fq.toml in $DOGFOOD — the instance config stays host-side"
+[ -f fqd.toml ] || die "no fqd.toml in $DOGFOOD — the instance config stays host-side\
+   (the daemon's config was fq.toml before the fq/fqd split; rename it)"
 [ -f .secrets/env ] || die "no .secrets/env in $DOGFOOD — start from ops/dogfood/env.example"
 
 # The embedded-SHA readers. fq prints "fq <semver> (<sha> <target>)";
@@ -114,7 +127,7 @@ if [ "$WANT" = "latest" ]; then
 
     mkdir "$tmp/x"
     tar -xzf "$tmp"/*.tar.gz -C "$tmp/x"
-    chmod +x "$tmp/x/fq" "$tmp/x/fq-cas" "$tmp/x/fq-dashboard" "$tmp/x/github-watcher" "$tmp/x/fq-cron" "$tmp/x"/*.sh
+    chmod +x "$tmp/x/fq" "$tmp/x/fqd" "$tmp/x/fq-cas" "$tmp/x/fq-dashboard" "$tmp/x/github-watcher" "$tmp/x/fq-cron" "$tmp/x"/*.sh
 
     SHA="$(fq_sha "$tmp/x/fq")"
     [ -n "$SHA" ] || die "could not read the embedded SHA from the downloaded fq"
@@ -156,6 +169,7 @@ fi
 # --- 2. early exit when the target is already live -----------------------
 ACTIVE="$(readlink current 2>/dev/null || true)"
 DAEMON_PID="$(pids_installed fqd | head -1 || true)"
+[ -n "$DAEMON_PID" ] || DAEMON_PID="$(pids_presplit_daemon | head -1 || true)"
 CRON_OK=1
 if [ -f fq-cron.toml ]; then
     CRON_PID="$(pids_installed fq-cron | head -1 || true)"
@@ -184,10 +198,33 @@ for cpid in $(pids_installed fq-cron); do
 done
 
 if [ -n "$DAEMON_PID" ]; then
-    DRAIN_CLI="$REL/fq"
-    [ ! -x ./current/fq ] || DRAIN_CLI=./current/fq
+    # The client that matches the daemon being stopped — taken from that
+    # daemon's own release directory. `current` is the wrong source: a
+    # previous failed deploy may already have flipped it, which would
+    # aim a new client at an old daemon. The incoming build is the
+    # last-resort fallback, for a daemon whose release was deleted.
+    DAEMON_EXE="$(readlink "/proc/$DAEMON_PID/exe" 2>/dev/null || true)"
+    DRAIN_CLI="$(dirname "${DAEMON_EXE% (deleted)}")/fq"
+    [ -x "$DRAIN_CLI" ] || DRAIN_CLI="$REL/fq"
+    # Where to dial. `fq` is a client now: its own --config is `fq.toml`,
+    # which is not this file, and it reads no daemon config at all — so
+    # the address comes from the daemon's own `[edge] bind`, read here.
+    # The token still has to come from a pairing (`fq connect`); without
+    # one this fails and the escalation below stops the daemon instead.
+    EDGE_ADDR="$(sed -n 's/^ *bind *= *"\([^"]*\)".*/\1/p' "$DOGFOOD/fqd.toml" | head -1)"
+    [ -n "$EDGE_ADDR" ] || EDGE_ADDR=127.0.0.1:9470
+    # DRAIN_CLI is deliberately the *installed* client, version-matched to
+    # the daemon it is being asked to stop — so on a deploy that crosses
+    # the fq/fqd split it is the older surface, which has no `--addr` and
+    # finds the daemon through the daemon's config instead. Ask the binary
+    # rather than assuming: the same probe covers a rollback.
+    if "$DRAIN_CLI" down --help 2>/dev/null | grep -q -- '--addr'; then
+        DIAL=(--addr "$EDGE_ADDR")
+    else
+        DIAL=(--config "$DOGFOOD/fqd.toml")
+    fi
     log "Stopping daemon (PID $DAEMON_PID) via confirmed fq down using $DRAIN_CLI"
-    "$DRAIN_CLI" --config "$DOGFOOD/fq.toml" down \
+    "$DRAIN_CLI" "${DIAL[@]}" down \
         || printf '    (confirmed drain failed; escalating)\n'
     if kill -0 "$DAEMON_PID" 2>/dev/null; then
         # Escalation 1: `--now` skips the already-attempted drain;
@@ -196,7 +233,7 @@ if [ -n "$DAEMON_PID" ]; then
         # `fq down` exits zero only after observing the daemon's own
         # system.shutdown event. If wedged, fall through to the signal.
         printf '    graceful stop failed — requesting immediate stop (fq down --now)\n'
-        if "$DRAIN_CLI" --config "$DOGFOOD/fq.toml" down --now; then
+        if "$DRAIN_CLI" "${DIAL[@]}" down --now; then
             printf '    confirmed stop\n'
         else
             # Escalation 2, last resort: SIGINT is crash-equivalent —
