@@ -38,11 +38,23 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FQ_BIN="${REPO_ROOT}/target/debug/fq"
+FQD_BIN="${REPO_ROOT}/target/debug/fqd"
 TMP_ROOT="$(mktemp -d -t fq-drill-XXXXXX)"
 N=3
 SLEEP_SECS=15
 AGENT_ID="drill-sleeper-$$"
-export FQ_DAEMON_CONFIG="${TMP_ROOT}/fq.toml"
+export FQ_DAEMON_CONFIG="${TMP_ROOT}/fqd.toml"
+# The pairing store is user-side, under XDG_CONFIG_HOME. Without
+# this, `fq down` below resolves through the developer's own
+# pairings and — with exactly one paired daemon, the normal case —
+# stops THAT daemon instead of the drill's.
+export XDG_CONFIG_HOME="${TMP_ROOT}/config"
+# The edge identity lives in the state dir, and the default is
+# shared with any real daemon on this box. Sharing it means the
+# identity is *adopted* rather than minted, so no admin token is
+# printed — and the drill has no way to pair. Its own dir, its own
+# identity, its own token.
+export FQ_STATE_DIR="${TMP_ROOT}/state"
 
 CHECKS_RUN=0
 CHECKS_FAILED=0
@@ -101,9 +113,28 @@ daemon_exited() { ! kill -0 "${RUN_PID}" 2>/dev/null; }
 
 start_daemon() {
     local log="$1"
-    "${FQ_BIN}" run >"${log}" 2>&1 &
+    "${FQD_BIN}" >"${log}" 2>&1 &
     RUN_PID=$!
     wait_for 30 "daemon ready" grep -q "Runtime ready" "${log}"
+    pair_with_daemon "${log}"
+}
+
+# `fq down` is an edge command: it needs an address to dial and a token
+# to present. Both are printed once, at startup — the address because
+# the bind is port 0, the token because this is a fresh state dir.
+pair_with_daemon() {
+    local log="$1" addr token
+    wait_for 30 "edge listening" grep -q "edge is listening on" "${log}"
+    addr="$(sed -n 's/.*edge is listening on \([0-9.]*:[0-9]*\).*/\1/p' "${log}" | tail -1)"
+    token="$(awk '/edge: admin token/ { seen = 1; next } seen && NF { print $1; exit }' "${log}")"
+    [[ -n "${addr}" && -n "${token}" ]] || {
+        printf '%s could not read the edge address or admin token from %s\n' "$(red 'x')" "${log}"
+        exit 1
+    }
+    "${FQ_BIN}" connect "${addr}" --token "${token}" >/dev/null 2>&1 || {
+        printf '%s fq connect failed\n' "$(red 'x')"
+        exit 1
+    }
 }
 
 trigger_n() {
@@ -116,11 +147,12 @@ trigger_n() {
 
 section "scratch project"
 [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { printf '%s ANTHROPIC_API_KEY is not set\n' "$(red 'x')"; exit 1; }
-[[ -x "${FQ_BIN}" ]] || { printf '%s fq binary missing — run `just build`\n' "$(red 'x')"; exit 1; }
+[[ -x "${FQ_BIN}" ]]  || { printf '%s fq binary missing — run `just build`\n' "$(red 'x')"; exit 1; }
+[[ -x "${FQD_BIN}" ]] || { printf '%s fqd binary missing — run `just build`\n' "$(red 'x')"; exit 1; }
 
 mkdir -p "${TMP_ROOT}/agents" "${TMP_ROOT}/workspace" "${TMP_ROOT}/cache"
 
-cat > "${TMP_ROOT}/fq.toml" <<EOF
+cat > "${TMP_ROOT}/fqd.toml" <<EOF
 [nats]
 url = "${FQ_NATS_URL:-nats://fq-dev-token@127.0.0.1:4222}"
 
@@ -133,6 +165,12 @@ per_invocation = true
 
 [worker]
 max_concurrent_invocations = ${N}
+
+[edge]
+# Port 0 — the kernel picks. A fixed port collides with any
+# daemon already running on this box, including the one whose
+# pairing we just isolated ourselves from.
+bind = "127.0.0.1:0"
 
 [cache]
 directory = "${TMP_ROOT}/cache"
@@ -165,14 +203,14 @@ info "scratch project at ${TMP_ROOT} (agent ${AGENT_ID}, N=${N})"
 # --- phase 0: the startup guard fails loud -----------------------------
 
 section "phase 0 — startup guard"
-sed -i 's/per_invocation = true/per_invocation = false/' "${TMP_ROOT}/fq.toml"
-if "${FQ_BIN}" run >"${TMP_ROOT}/guard.log" 2>&1; then
+sed -i 's/per_invocation = true/per_invocation = false/' "${TMP_ROOT}/fqd.toml"
+if "${FQD_BIN}" >"${TMP_ROOT}/guard.log" 2>&1; then
     check "daemon refuses max_concurrent > 1 without per-invocation workspaces" false
 else
     check "daemon refuses max_concurrent > 1 without per-invocation workspaces" \
         grep -q "requires per-invocation" "${TMP_ROOT}/guard.log"
 fi
-sed -i 's/per_invocation = false/per_invocation = true/' "${TMP_ROOT}/fq.toml"
+sed -i 's/per_invocation = false/per_invocation = true/' "${TMP_ROOT}/fqd.toml"
 
 # --- phase 1: drain with N in flight ------------------------------------
 
