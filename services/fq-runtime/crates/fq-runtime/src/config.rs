@@ -461,7 +461,16 @@ pub enum ApiShape {
 /// A configurable LLM provider: an API shape, an optional endpoint
 /// override, an auth env var, and the model ids routed to it.
 /// `[providers.<name>]` in `fqd.toml`.
+// `deny_unknown_fields` rather than the `serde_ignored` pass `Config`
+// uses, because this struct is reached through `ProvidersConfig`'s
+// `#[serde(flatten)]`: flattening buffers the table's contents, and an
+// unknown key inside a buffer is invisible from outside. It is legal
+// here only because this struct itself flattens nothing.
+//
+// Without it, `api = "openai"` — for `api_shape` — was accepted in
+// silence, which is the exact edit an operator is most likely to make.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     #[serde(default)]
     pub api_shape: ApiShape,
@@ -1158,16 +1167,41 @@ max_iterations = 250
 
     #[test]
     fn a_provider_of_any_name_is_still_accepted() {
-        // `ProvidersConfig` flattens, which is why `deny_unknown_fields`
-        // is unavailable — the strictness must not cost us this.
+        // `ProvidersConfig` flattens, so the strictness must not cost us
+        // the ability to name a provider anything.
         let config = Config::from_toml_str(
-            "[providers.openrouter]\napi = \"openai\"\n\
+            "[providers.openrouter]\napi_shape = \"openai-compatible\"\n\
              api_key_env = \"OPENROUTER_API_KEY\"\n\
              base_url = \"https://openrouter.ai/api/v1\"\n\
              models = [\"z-ai/glm-5.2\"]\n",
         )
         .expect("a named provider is configuration, not a typo");
         assert!(config.providers.extra.contains_key("openrouter"));
+    }
+
+    #[test]
+    fn a_typo_inside_a_named_provider_is_rejected() {
+        // The regression this pairs with: `api` for `api_shape` was
+        // accepted in silence, because a flattened map buffers its
+        // values and an unknown key inside a buffer is invisible to the
+        // `serde_ignored` pass. `ProviderConfig` denies its own unknown
+        // fields for exactly this reason.
+        //
+        // The earlier version of the test above used `api` in its own
+        // fixture and passed, which is how the hole stayed open: the
+        // test proved a provider could be named, and quietly proved the
+        // typo was tolerated too.
+        let err = Config::from_toml_str(
+            "[providers.openrouter]\napi = \"openai\"\n\
+             api_key_env = \"OPENROUTER_API_KEY\"\n\
+             models = [\"z-ai/glm-5.2\"]\n",
+        )
+        .expect_err("`api` is not a field — `api_shape` is");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("api_shape"),
+            "the error should name the field meant, got: {msg}"
+        );
     }
 
     #[test]
