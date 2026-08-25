@@ -43,6 +43,17 @@ TMP_ROOT="$(mktemp -d -t fq-drill-XXXXXX)"
 N=3
 SLEEP_SECS=15
 AGENT_ID="drill-sleeper-$$"
+# Same reasoning as smoke.sh: this drill asserts that drain, recovery and
+# crash-restart move invocations correctly, not that the model is clever.
+# Twelve invocations per run, nightly — so the cheapest model that can
+# call one tool is the right one. Overridable for a local run against
+# whichever key you have.
+DRILL_PROVIDER="${DRILL_PROVIDER:-openrouter}"
+DRILL_MODEL="${DRILL_MODEL:-openai/gpt-5-nano}"
+DRILL_API_KEY_ENV="${DRILL_API_KEY_ENV:-OPENROUTER_API_KEY}"
+DRILL_BASE_URL="${DRILL_BASE_URL:-https://openrouter.ai/api/v1}"
+DRILL_INPUT_PER_MTOK="${DRILL_INPUT_PER_MTOK:-0.05}"
+DRILL_OUTPUT_PER_MTOK="${DRILL_OUTPUT_PER_MTOK:-0.40}"
 export FQ_DAEMON_CONFIG="${TMP_ROOT}/fqd.toml"
 # The pairing store is user-side, under XDG_CONFIG_HOME. Without
 # this, `fq down` below resolves through the developer's own
@@ -163,7 +174,7 @@ trigger_n() {
 # --- scratch project ---------------------------------------------------
 
 section "scratch project"
-[[ -n "${ANTHROPIC_API_KEY:-}" ]] || { printf '%s ANTHROPIC_API_KEY is not set\n' "$(red 'x')"; exit 1; }
+[[ -n "${!DRILL_API_KEY_ENV:-}" ]] || { printf '%s %s is not set (the key for provider %s)\n' "$(red 'x')" "${DRILL_API_KEY_ENV}" "${DRILL_PROVIDER}"; exit 1; }
 [[ -x "${FQ_BIN}" ]]  || { printf '%s fq binary missing — run `just build`\n' "$(red 'x')"; exit 1; }
 [[ -x "${FQD_BIN}" ]] || { printf '%s fqd binary missing — run `just build`\n' "$(red 'x')"; exit 1; }
 
@@ -192,15 +203,37 @@ bind = "127.0.0.1:0"
 [cache]
 directory = "${TMP_ROOT}/cache"
 
-[providers.anthropic]
-api_key_env = "ANTHROPIC_API_KEY"
-models = ["claude-haiku-4-5"]
 EOF
+
+if [[ "${DRILL_PROVIDER}" == "anthropic" ]]; then
+    cat >> "${TMP_ROOT}/fqd.toml" <<EOF
+
+[providers.anthropic]
+api_key_env = "${DRILL_API_KEY_ENV}"
+models = ["${DRILL_MODEL}"]
+EOF
+else
+    # A declared model with no price fails startup (#62), and an
+    # OpenRouter id is not an exact-match LiteLLM key — so the price
+    # has to be stated here.
+    cat >> "${TMP_ROOT}/fqd.toml" <<EOF
+
+[providers.${DRILL_PROVIDER}]
+api_shape = "openai-compatible"
+base_url = "${DRILL_BASE_URL}"
+api_key_env = "${DRILL_API_KEY_ENV}"
+models = ["${DRILL_MODEL}"]
+
+[providers.${DRILL_PROVIDER}.pricing."${DRILL_MODEL}"]
+input_per_mtok = ${DRILL_INPUT_PER_MTOK}
+output_per_mtok = ${DRILL_OUTPUT_PER_MTOK}
+EOF
+fi
 
 cat > "${TMP_ROOT}/agents/${AGENT_ID}.md" <<EOF
 ---
 name: ${AGENT_ID}
-model: claude-haiku-4-5
+model: ${DRILL_MODEL}
 budget: 0.25
 max_iterations: 4
 tools:

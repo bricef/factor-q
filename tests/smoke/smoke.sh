@@ -9,7 +9,7 @@
 # projection back.
 #
 # Prerequisites:
-#   - ANTHROPIC_API_KEY must be set in the environment
+#   - the provider key must be set (SMOKE_API_KEY_ENV, default OPENROUTER_API_KEY)
 #   - NATS with JetStream must be running (e.g. `just infra-up`)
 #   - The fq binary must be built (run via the `just smoke` recipe
 #     which builds first, or run `just build` manually)
@@ -68,7 +68,30 @@ export XDG_CONFIG_HOME="${TMP_ROOT}/config"
 # fails to load, and the daemon refuses to start. That is the whole
 # point of it — a typo must not silently spend on an expensive model —
 # so a config this run writes has to declare the model this run uses.
-SMOKE_MODEL="claude-haiku-4-5"
+# The model these tests run against. They assert that the *plumbing*
+# completes — a trigger reaches the daemon, a tool result reaches the
+# model, an invocation reaches a terminal status — not that the model is
+# clever, so the cheapest model that can hold a tool-calling loop is the
+# right one. Every run costs real money, and this suite is meant to be
+# run often.
+#
+# Overridable end to end, so a local run can point at whatever key you
+# have and CI can pick on price:
+#   SMOKE_PROVIDER      provider table name; `anthropic` is special-cased
+#   SMOKE_MODEL         model id as the provider spells it
+#   SMOKE_API_KEY_ENV   env var the daemon reads the key from
+#   SMOKE_BASE_URL      OpenAI-compatible endpoint (ignored for anthropic)
+#   SMOKE_{INPUT,OUTPUT}_PER_MTOK  price, USD per million tokens
+#
+# The price is not decoration: a declared model with no price fails
+# startup (#62), and an OpenRouter id is not an exact-match LiteLLM key,
+# so nothing else can supply it.
+SMOKE_PROVIDER="${SMOKE_PROVIDER:-openrouter}"
+SMOKE_MODEL="${SMOKE_MODEL:-openai/gpt-5-nano}"
+SMOKE_API_KEY_ENV="${SMOKE_API_KEY_ENV:-OPENROUTER_API_KEY}"
+SMOKE_BASE_URL="${SMOKE_BASE_URL:-https://openrouter.ai/api/v1}"
+SMOKE_INPUT_PER_MTOK="${SMOKE_INPUT_PER_MTOK:-0.05}"
+SMOKE_OUTPUT_PER_MTOK="${SMOKE_OUTPUT_PER_MTOK:-0.40}"
 
 # How long to wait for a triggered invocation to reach a terminal
 # status. A one-turn Haiku call is seconds; a tool loop is longer, and
@@ -85,10 +108,31 @@ write_config() {
 [edge]
 bind = "${bind}"
 
+TOML
+    if [[ "${SMOKE_PROVIDER}" == "anthropic" ]]; then
+        cat >> "${FQ_DAEMON_CONFIG}" <<TOML
+
 [providers.anthropic]
-api_key_env = "ANTHROPIC_API_KEY"
+api_key_env = "${SMOKE_API_KEY_ENV}"
 models = ["${SMOKE_MODEL}"]
 TOML
+    else
+        # A named provider needs its price declared: the id is not an
+        # exact-match LiteLLM key, and an unpriced declared model is a
+        # startup refusal rather than a surprise bill (#62).
+        cat >> "${FQ_DAEMON_CONFIG}" <<TOML
+
+[providers.${SMOKE_PROVIDER}]
+api_shape = "openai-compatible"
+base_url = "${SMOKE_BASE_URL}"
+api_key_env = "${SMOKE_API_KEY_ENV}"
+models = ["${SMOKE_MODEL}"]
+
+[providers.${SMOKE_PROVIDER}.pricing."${SMOKE_MODEL}"]
+input_per_mtok = ${SMOKE_INPUT_PER_MTOK}
+output_per_mtok = ${SMOKE_OUTPUT_PER_MTOK}
+TOML
+    fi
 }
 
 write_config "127.0.0.1:0"
@@ -184,12 +228,12 @@ check_prereqs() {
     fi
     pass "fq binary present"
 
-    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-        fail "ANTHROPIC_API_KEY is not set"
+    if [[ -z "${!SMOKE_API_KEY_ENV:-}" ]]; then
+        fail "${SMOKE_API_KEY_ENV} is not set (the key for provider ${SMOKE_PROVIDER})"
         info "export it (or let direnv load it) before running smoke tests"
         exit 2
     fi
-    pass "ANTHROPIC_API_KEY is set"
+    pass "${SMOKE_API_KEY_ENV} is set"
 
     # Probe NATS on the default port. We don't rely on curl being
     # present; use /dev/tcp.
@@ -322,7 +366,7 @@ test_trigger_simple_response() {
     # a completed status rather than looping to the iteration ceiling.
     write_agent "${project}" "simple.md" "---
 name: ${agent_id}
-model: claude-haiku-4-5
+model: ${SMOKE_MODEL}
 budget: 0.10
 ---
 
@@ -349,7 +393,7 @@ test_trigger_with_file_read() {
 
     write_agent "${project}" "reader.md" "---
 name: ${agent_id}
-model: claude-haiku-4-5
+model: ${SMOKE_MODEL}
 tools:
   - builtin__file_read
 sandbox:
@@ -380,7 +424,7 @@ test_trigger_with_shell_tool() {
 
     write_agent "${project}" "runner.md" "---
 name: ${agent_id}
-model: claude-haiku-4-5
+model: ${SMOKE_MODEL}
 tools:
   - builtin__exec
 sandbox:
@@ -427,7 +471,7 @@ test_shell_tool_sandbox_denial() {
 
     write_agent "${project}" "runner.md" "---
 name: ${agent_id}
-model: claude-haiku-4-5
+model: ${SMOKE_MODEL}
 tools:
   - builtin__exec
 sandbox:
@@ -627,7 +671,7 @@ test_nats_triggered_dispatch() {
 
     write_agent "${project}" "q.md" "---
 name: ${agent_id}
-model: claude-haiku-4-5
+model: ${SMOKE_MODEL}
 budget: 0.10
 ---
 
@@ -684,7 +728,7 @@ test_run_projection_query_and_costs() {
 
     write_agent "${project}" "q.md" "---
 name: ${agent_id}
-model: claude-haiku-4-5
+model: ${SMOKE_MODEL}
 budget: 0.10
 ---
 
@@ -736,6 +780,21 @@ You are a concise assistant. Answer in one sentence."
         printf '  %s\n' "${costs}"
         return 1
     fi
+
+    # Say what it cost. This suite bills a real provider on every run,
+    # and it is meant to run nightly and unattended — a spend it never
+    # shows is a spend nobody reviews. It is one invocation's worth, not
+    # the whole run, but it is the number that moves when the model
+    # changes, which is the decision this line informs.
+    # The filtered total, not the last dollar sign in the output: the
+    # report ends with a "framework" line (engine spend, charged to no
+    # invocation) which is $0.000000 here, and grepping the last match
+    # reported that instead — a cost line that always says zero is worse
+    # than none.
+    info "one-invocation cost on ${SMOKE_MODEL}: $(
+        printf '%s' "${costs}" \
+            | sed -n 's/^Total across all agents: \(\$[0-9.]*\).*/\1/p'
+    )"
 }
 
 # --- main --------------------------------------------------------------
