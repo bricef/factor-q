@@ -52,17 +52,22 @@ jobs:
       # message. A live suite without a key is not a skip: it is this
       # workflow silently going back to being the thing that does not
       # run, which is what it exists to fix.
+      #
+      # OpenRouter because that is what the suites default to
+      # (`SMOKE_API_KEY_ENV` / `DRILL_API_KEY_ENV`). If that default
+      # ever moves back to Anthropic, this name moves with it — the
+      # workflow supplies a key, the suites decide which provider.
       - name: Check the API key is configured
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          if [ -z "${ANTHROPIC_API_KEY}" ]; then
-            echo "::error::ANTHROPIC_API_KEY is not set for this repository. \
+          if [ -z "${OPENROUTER_API_KEY}" ]; then
+            echo "::error::OPENROUTER_API_KEY is not set for this repository. \
           Add it under Settings -> Secrets and variables -> Actions. \
-          Both suites call the real Anthropic API and cannot run without it."
+          Both suites call a real model API and cannot run without it."
             exit 1
           fi
-          echo "key present (${#ANTHROPIC_API_KEY} chars)"
+          echo "key present (${#OPENROUTER_API_KEY} chars)"
 
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
@@ -77,7 +82,7 @@ jobs:
 
       - name: Smoke suite
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: just smoke
 
       # Runs even if smoke failed: they cover different things, and one
@@ -87,7 +92,7 @@ jobs:
       - name: Drain drill
         if: always()
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: just drill
 
       # A daemon that outlives its suite holds the durable consumer and
