@@ -87,11 +87,11 @@ export XDG_CONFIG_HOME="${TMP_ROOT}/config"
 # startup (#62), and an OpenRouter id is not an exact-match LiteLLM key,
 # so nothing else can supply it.
 SMOKE_PROVIDER="${SMOKE_PROVIDER:-openrouter}"
-SMOKE_MODEL="${SMOKE_MODEL:-openai/gpt-5-nano}"
+SMOKE_MODEL="${SMOKE_MODEL:-openai/gpt-4o-mini}"
 SMOKE_API_KEY_ENV="${SMOKE_API_KEY_ENV:-OPENROUTER_API_KEY}"
 SMOKE_BASE_URL="${SMOKE_BASE_URL:-https://openrouter.ai/api/v1}"
-SMOKE_INPUT_PER_MTOK="${SMOKE_INPUT_PER_MTOK:-0.05}"
-SMOKE_OUTPUT_PER_MTOK="${SMOKE_OUTPUT_PER_MTOK:-0.40}"
+SMOKE_INPUT_PER_MTOK="${SMOKE_INPUT_PER_MTOK:-0.15}"
+SMOKE_OUTPUT_PER_MTOK="${SMOKE_OUTPUT_PER_MTOK:-0.60}"
 
 # How long to wait for a triggered invocation to reach a terminal
 # status. A one-turn Haiku call is seconds; a tool loop is longer, and
@@ -696,10 +696,15 @@ You are a concise assistant. Answer in one sentence."
         return 1
     }
 
-    # Give the daemon up to 15s to pick up the trigger, run the
-    # agent, and project the events.
+    # Wait as long as the other trigger tests do. This budget used to be
+    # a hardcoded 15s, which had to cover dispatch, an LLM call, a tool
+    # loop, completion AND projection — so it was really asserting
+    # round-trip latency while claiming to assert NATS dispatch. It held
+    # only for a fast, directly-reached model: measured over five runs,
+    # a model behind an extra proxy hop failed it three times, with every
+    # other test in the suite green including both tool loops.
     local agent_filter="${agent_id}"
-    local deadline=$((SECONDS + 15))
+    local deadline=$((SECONDS + INVOCATION_TIMEOUT_S))
     local rows=""
     while (( SECONDS < deadline )); do
         rows="$(fq_client \

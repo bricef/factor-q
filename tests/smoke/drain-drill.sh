@@ -49,11 +49,11 @@ AGENT_ID="drill-sleeper-$$"
 # call one tool is the right one. Overridable for a local run against
 # whichever key you have.
 DRILL_PROVIDER="${DRILL_PROVIDER:-openrouter}"
-DRILL_MODEL="${DRILL_MODEL:-openai/gpt-5-nano}"
+DRILL_MODEL="${DRILL_MODEL:-openai/gpt-4o-mini}"
 DRILL_API_KEY_ENV="${DRILL_API_KEY_ENV:-OPENROUTER_API_KEY}"
 DRILL_BASE_URL="${DRILL_BASE_URL:-https://openrouter.ai/api/v1}"
-DRILL_INPUT_PER_MTOK="${DRILL_INPUT_PER_MTOK:-0.05}"
-DRILL_OUTPUT_PER_MTOK="${DRILL_OUTPUT_PER_MTOK:-0.40}"
+DRILL_INPUT_PER_MTOK="${DRILL_INPUT_PER_MTOK:-0.15}"
+DRILL_OUTPUT_PER_MTOK="${DRILL_OUTPUT_PER_MTOK:-0.60}"
 export FQ_DAEMON_CONFIG="${TMP_ROOT}/fqd.toml"
 # The pairing store is user-side, under XDG_CONFIG_HOME. Without
 # this, `fq down` below resolves through the developer's own
