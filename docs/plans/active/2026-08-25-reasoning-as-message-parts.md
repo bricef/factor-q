@@ -30,6 +30,25 @@ describes the tree.
   decomposition** — and **the upstream genai contribution is a required
   outcome of this work**, not separable follow-on. §5 scopes it.
 
+**Design settled by the co-design session of 2026-08-25**, recorded as
+[ADR-0034](../../adrs/draft/0034-reasoning-as-a-content-part.md). The session
+answered three of this plan's original open questions and added one invariant:
+
+- **Parts are an internal concern and stop at the operator boundary.**
+  `Message`, `ChatResponse`, `ModelResponse` and `LlmResponsePayload` are
+  parts-shaped; `TurnAction` and `TranscriptEntry` are not. Provider vocabulary
+  never crosses into the operator domain (ADR-0034 D3).
+- **The response chain carries parts anyway**, despite a response being
+  converted-into rather than replayed — pragmatic, and it avoids a conversion
+  seam that would need undoing when a second part kind arrives.
+- **Reasoning renders behind a flag**, in the CLI *and* the dashboard. Because
+  the transcript is composed over turns and never the reverse, this pulls the
+  **operator surface and the dashboard into scope** — a flag can only reveal
+  what the layer beneath already carries.
+- **The data model distinguishes absence from opacity** (I7 below). New, and
+  the strongest constraint the session produced.
+- **`TurnFilter::abbreviate` is deferred** — the system is correct without it.
+
 ## The one-line principle
 
 **Reasoning is the model's own working, handed back to itself.** The boundary
@@ -201,19 +220,32 @@ understand is preserved or refused, never dropped on the floor. The failure
 mode this whole issue documents is a *silent* one; the fix must not introduce
 another.
 
+**I7 — Absence and opacity are different facts.** Reasoning the system carries
+but cannot interpret is reported as *present-and-opaque*, never as absent and
+never flattened into "no reasoning". Presentation may collapse the distinction
+(`opaque — click to see raw`); the data model may not. This is the sharper
+sibling of I5: I5 says do not lose it, I7 says do not misreport it. It matters
+because the failure this whole change exists to fix is a *silent* one, and
+rendering opaque reasoning as absence would reproduce that class of error one
+layer up — an operator reading a transcript would conclude the model did no
+thinking when it demonstrably did.
+
 **I6 — Ordering is a provider concern.** Provider order is preserved on the
 way in. Each adapter emits in whatever order its own API requires (Anthropic
 demands thinking blocks first in an assistant turn; OpenAI-compatible carries
 reasoning as a sibling field where position is meaningless). We promise the
 vector is ordered; we do not promise a canonical cross-provider order.
 
-## 4. Design — input to the modelling session, not a settled spec
+## 4. Design — settled by ADR-0034
 
 Per CONTRIBUTING's co-design practice and lesson 1 of the
 [fq-ops design review](../../reviews/2026-07-21-fq-ops-design-review-learnings.md)
-(*"when review comments correct ontology, stop coding and model"*), Phase 0 is
-a modelling session. What follows is a **proposal to be worked through**, with
-the open questions named in §8 rather than assumed away.
+(*"when review comments correct ontology, stop coding and model"*), Phase 0 was
+a modelling session. **It has now run** (2026-08-25), and its output is
+[ADR-0034](../../adrs/draft/0034-reasoning-as-a-content-part.md) — which is the
+authority for what follows. This section is the working summary; where the two
+disagree, the ADR wins. What remains genuinely open is in §8, reduced from five
+questions to two.
 
 ### 4.1 What a reasoning part is
 
@@ -273,11 +305,45 @@ Event log **and** transcript. Consequences to build:
 
 - `LlmResponsePayload` carries reasoning parts; `SCHEMA_VERSION` 2 → 3 with a
   changelog entry in `event-schema.md`.
-- `TranscriptEntry::Assistant` gains a reasoning field. Rendering default is
-  open question Q2 (§8) — the retention decision is settled, the *default
-  visibility* of a possibly-large block in `fq invocation transcript` is not.
+- `TranscriptEntry::Assistant` gains a reasoning field, **rendered behind a
+  flag** — settled 2026-08-25. Default-off, because reasoning is the least
+  useful part of a transcript read for *what happened* and can be large.
 - Retention follows the existing event-log rules. Per the cost-retention
   principle this is additive: nothing that exists today is windowed or lost.
+
+### 4.6 The operator boundary — where parts stop
+
+The transcript is *"a rendering composed over turns, never the reverse"*
+(`fq-ops/src/turn.rs`). So a transcript flag can only reveal what `TurnState`
+already carries, and reasoning must reach the operator atom for §4.3 to have
+anything to render. That is what pulls `turn.*` and the dashboard into scope.
+
+But the atom gets a **reasoning concept, not a parts concept** (ADR-0034 D3).
+`TurnAction` carries `cost_usd`, `is_error`, `round`, `initiating_turn` — an
+operator vocabulary with no wire concepts in it, and importing a provider part
+taxonomy would be the vocabulary leak of lesson 7. So the internal three-way
+`Reasoning` enum reduces at this boundary to:
+
+```rust
+pub struct TurnReasoning {
+    /// Readable working, when the provider exposed any.
+    pub text: Option<String>,
+    /// Carried but not interpretable here. `None` means there genuinely
+    /// was none — never that it was dropped.
+    pub opaque: Option<Value>,
+}
+```
+
+Which is I7 made concrete: it distinguishes all four honest states — no
+reasoning (`reasoning: None` on the turn), Plain, Signed (both fields), and
+Opaque (`opaque` alone). Signatures never cross this boundary as signatures;
+nothing above the adapter can do anything with one.
+
+**Two consumers, one type.** `fq invocation transcript` and the dashboard both
+render `fq_ops::transcript::TranscriptEntry` (`render.rs:484`), so the flag and
+the opaque affordance are built once. The dashboard is where
+`opaque — click to see raw` lives; the CLI's `--json` stays honest by
+construction, since it emits the structure above verbatim.
 
 ### 4.4 The consumer barrier, extended to parts
 
@@ -351,13 +417,14 @@ through a hand-rolled probe.
 
 | Phase | Deliverable | Gates |
 |---|---|---|
-| **0** | **Modelling session.** Part taxonomy, `Message` shape, signature attachment, ordering, barrier semantics, strip site. Output is the ADR draft, per CONTRIBUTING (*"the session's output is the design document itself"*). | §8 questions answered |
-| **1** | **ADR + doc amendments.** New ADR. Amend `inter-node-contracts-and-event-layers.md` §6/§7 (I3), `event-schema.md` (`llm.response` shape + v2→v3 changelog), `SCHEMA_VERSION` 2 → 3. No code. | ADR accepted |
+| **0** ✅ | **Modelling session** — ran 2026-08-25. Output: [ADR-0034](../../adrs/draft/0034-reasoning-as-a-content-part.md). | done |
+| **1** | **ADR accepted + doc amendments.** Move ADR-0034 `draft/` → `accepted/`, add its README row. Amend `inter-node-contracts-and-event-layers.md` §6/§7 (I3), `event-schema.md` (`llm.response` shape + v2→v3 changelog), `SCHEMA_VERSION` 2 → 3. No code. | ADR accepted |
 | **1b** | **Upstream genai PR opened** (§5, G1–G4). Runs in parallel from here. | PR open, shape argued |
 | **2** | **Oracle first, then the type.** Build the judge before the thing it judges (lesson 10: *"thirteen reworks with zero behavioural regressions"*). Then `Message`/`ChatResponse`/`ModelResponse`/`LlmResponsePayload` become parts-shaped, with a no-op encoder. Behaviour unchanged; the diff is shape only. | golden net green, `just quality` + `just runtime-ci` |
 | **3** | **OpenAI-compatible read + write.** `from_provider_response` reads `ChatResponse.reasoning_content`; `convert_message` emits `ContentPart::ReasoningContent`; `harness.rs:329` carries it into the replayed conversation. The cross-model strip (I2) lands here with its assertion. | I1, I2, I5 |
-| **4** | **Cost decomposition.** `reasoning_tokens` into `TokenUsage` from `completion_tokens_details`; `convert_usage` reads it; `total_cost` provably unchanged. | I4 |
-| **5** | **Anthropic encoder** behind the resolved genai dependency (upstream or fork). Re-run the round-trip experiment's `echo` arm through factor-q. | I1 on Anthropic |
+| **4** | **The operator surface and the transcript.** `TurnAction::Assistant` gains `TurnReasoning` (§4.6) — the reduction that keeps parts internal. `TranscriptEntry` follows, then the flag in both consumers: `fq invocation transcript` and the dashboard, including its `opaque — click to see raw` affordance. Golden files move here. | I7, golden updated |
+| **5** | **Cost decomposition.** `reasoning_tokens` into `TokenUsage` from `completion_tokens_details`; `convert_usage` reads it; `total_cost` provably unchanged. | I4 |
+| **6** | **Anthropic encoder** behind the resolved genai dependency (upstream or fork). Re-run the round-trip experiment's `echo` arm through factor-q. | I1 on Anthropic |
 
 Phase 2 is the one to hold the line on: a pure shape change with an unchanged
 golden net is the cheapest possible place to discover the model is wrong.
@@ -392,24 +459,29 @@ shape and never on output quality.
   the crash DST unchanged — that is the strongest available evidence the shape
   change is behaviour-preserving.
 
-## 8. Open questions for the modelling session
+## 8. Open questions
 
-- **Q1 — Does the tool result become a part?** §4.2 argues the
+The 2026-08-25 session closed three of the original five. What it settled is in
+the decisions block and ADR-0034; what remains:
+
+- **Q1 — Does the tool result become a part?** *(open)* §4.2 argues the
   `MessageRole::Tool` + `tool_call_id` pairing is an invalid-states-
   representable smell with a live runtime error to prove it. Folding it in is
-  the better model and is scope beyond the gate. Fold now, or note and defer?
-- **Q2 — Transcript rendering default.** Retention is settled (§4.3); does
-  `fq invocation transcript` show reasoning by default, or behind a flag
-  alongside `--full`? Reasoning blocks can be large and are the least useful
-  part of a transcript read for *what happened*.
-- **Q3 — Do `ChatResponse` / `ModelResponse` / `LlmResponsePayload` all become
-  parts-shaped, or only `Message`?** Only `Message` carries the #414 gate. The
-  other three are responses, and a response is not replayed — it is *converted
-  into* a message. Uniformity argues one way; lesson 8 (*"defer shapes to
-  their consumer"*) argues the other.
-- **Q4 — Is `Opaque` reachable at all in this work?** Anthropic's
-  `redacted_thinking` is rare and the Gemini path is not in scope. Naming the
-  variant with no encoder is either honest room-to-grow or exactly the
-  speculative structure lesson 2 says to delete.
-- **Q5 — Restate or withdraw the #424 gate?** §2.2 shows the stated reason is
-  stale. Maintainer call, not ours.
+  the better model and is scope beyond the gate. **Decide before Phase 2** —
+  it changes that phase's diff, and doing it later means touching every
+  construction site twice.
+- **Q5 — Restate or withdraw the #424 gate?** *(open)* §2.2 shows the stated
+  reason is stale. Maintainer call, not ours. Does not block any phase here.
+
+**Closed by the session:**
+
+- **Q2 — Transcript rendering default** → behind a flag (§4.3), in the CLI and
+  the dashboard alike.
+- **Q3 — How far parts propagate** → through the response chain, stopping at
+  the operator boundary (§4.6, ADR-0034 D3). Neither of the two candidate
+  extremes: not `Message`-only, and not all the way up.
+- **Q4 — Is `Opaque` reachable?** → yes, and it is *required* to be
+  representable. I7 makes naming it the point rather than speculative
+  structure: a system that cannot say "opaque" can only say "absent", which is
+  a lie. Note this inverts the lesson-2 reading in the original question —
+  the variant earns its place on honesty grounds, not on room-to-grow grounds.

@@ -84,6 +84,7 @@ A design doc's *folder* answers the same question for prose:
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
 | [0032](draft/0032-exactly-once-trigger-dispatch.md) | Trigger dispatch is exactly-once by durable claim (trigger inbox in NATS KV, CAS-arbitrated), not by ack timing; broker responsibility ends at the post-claim ack — unstarted, while the incident it fixes (#327) is still open |
+| [0034](draft/0034-reasoning-as-a-content-part.md) | Reasoning is a content part on a parts-shaped `Message`, replayed within an invocation and stripped across one; parts stay internal and stop at the operator boundary, which receives a reasoning concept that distinguishes absence from opacity |
 
 ## Related guides
 
