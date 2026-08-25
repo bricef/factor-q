@@ -50,7 +50,13 @@ pub(crate) enum LogFormat {
 pub(crate) struct GlobalArgs {
     /// Path to the client's config file. Optional: with one paired
     /// daemon there is nothing to configure.
-    #[arg(long, env = "FQ_CONFIG", default_value = DEFAULT_CONFIG_PATH, global = true)]
+    ///
+    /// The variable names the binary, because the two binaries' configs
+    /// are different files with different shapes. A shared `FQ_CONFIG`
+    /// pointed both at one file, and since neither config rejects
+    /// unknown fields, each silently ignored the other's tables rather
+    /// than saying so.
+    #[arg(long, env = "FQ_CLI_CONFIG", default_value = DEFAULT_CONFIG_PATH, global = true)]
     config: PathBuf,
 
     /// The daemon's edge address. Overrides the config's default and

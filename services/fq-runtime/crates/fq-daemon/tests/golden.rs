@@ -695,7 +695,7 @@ fn flipped_verb_without_a_pairing_says_how_to_pair() {
         let xdg = tempfile::tempdir().expect("xdg dir");
         let out = Command::new(fq_client_binary())
             .args(verb)
-            .env("FQ_CONFIG", "/nonexistent/fq.toml")
+            .env("FQ_CLI_CONFIG", "/nonexistent/fq.toml")
             .env("XDG_CONFIG_HOME", xdg.path())
             .env("RUST_LOG", "off")
             .output()
@@ -1284,7 +1284,7 @@ impl EdgeFixture {
         let log = std::fs::File::create(&log_path).expect("daemon log");
         let log_err = log.try_clone().expect("log handle");
         let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
-            .env("FQ_CONFIG", &daemon_config)
+            .env("FQ_DAEMON_CONFIG", &daemon_config)
             .env("FQ_NATS_URL", broker.url())
             .env("FQ_CACHE_DIR", dir.path())
             .env("FQ_STATE_DIR", dir.path().join("state"))
@@ -1508,7 +1508,7 @@ impl EdgeFixture {
         let xdg = tempfile::tempdir().expect("xdg dir");
         let connect = Command::new(fq_client_binary())
             .args(["connect", &addr, "--token", &token])
-            .env("FQ_CONFIG", &client_config)
+            .env("FQ_CLI_CONFIG", &client_config)
             .env("XDG_CONFIG_HOME", xdg.path())
             .env("RUST_LOG", "off")
             .stdin(std::process::Stdio::piped())
@@ -1603,7 +1603,7 @@ impl EdgeFixture {
     ) -> (Option<i32>, String, String) {
         let out = Command::new(fq_client_binary())
             .args(args)
-            .env("FQ_CONFIG", &self.client_config)
+            .env("FQ_CLI_CONFIG", &self.client_config)
             .env("FQ_CACHE_DIR", self.dir.path())
             .env("FQ_STATE_DIR", self.dir.path().join("state"))
             .env("FQ_AGENTS_DIR", agents_dir)

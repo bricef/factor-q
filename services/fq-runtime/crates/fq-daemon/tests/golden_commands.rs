@@ -223,7 +223,7 @@ impl PairedDaemon {
         let log = std::fs::File::create(&log_path).expect("create daemon log");
         let log_err = log.try_clone().expect("clone daemon log handle");
         let mut child = Command::new(env!("CARGO_BIN_EXE_fqd"))
-            .env("FQ_CONFIG", &daemon_config)
+            .env("FQ_DAEMON_CONFIG", &daemon_config)
             .env("FQ_NATS_URL", server.url())
             .env("FQ_CACHE_DIR", scratch.cache())
             .env("FQ_STATE_DIR", scratch.state())
@@ -273,7 +273,7 @@ impl PairedDaemon {
         let xdg = tempfile::tempdir().expect("xdg dir");
         let connect = Command::new(fq_client_binary())
             .args(["connect", &addr, "--token", &token])
-            .env("FQ_CONFIG", &client_config)
+            .env("FQ_CLI_CONFIG", &client_config)
             .env("XDG_CONFIG_HOME", xdg.path())
             .env("RUST_LOG", "off")
             .stdin(Stdio::piped())
@@ -299,7 +299,7 @@ impl PairedDaemon {
     fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
         let out = Command::new(fq_client_binary())
             .args(args)
-            .env("FQ_CONFIG", &self.client_config)
+            .env("FQ_CLI_CONFIG", &self.client_config)
             .env("FQ_AGENTS_DIR", self.scratch.agents())
             .env("FQ_CACHE_DIR", self.scratch.cache())
             .env("FQ_STATE_DIR", self.scratch.state())

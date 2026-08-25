@@ -54,7 +54,7 @@ fn fqd_reaches_steady_state_and_drains_on_sigterm() {
     let log_err = log.try_clone().expect("clone daemon log handle");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_fqd"))
-        .env("FQ_CONFIG", scratch.join("fq.toml"))
+        .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))

@@ -26,7 +26,7 @@ fn run_fq(args: &[&str], timeout: Duration) -> (Option<i32>, String, String) {
         .args(args)
         // Force-resolve to non-existent paths so tests don't
         // pick up the developer's real config / cache.
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_CLI_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_AGENTS_DIR", "/nonexistent/agents")
         .env("FQ_CACHE_DIR", "/nonexistent/cache")
         .env("FQ_STATE_DIR", "/nonexistent/state")
@@ -230,7 +230,7 @@ fn fq_status_against_an_unreachable_daemon_fails_gracefully() {
     // reliably refused and exercises the connection-failure path.
     let mut child = Command::new(fq_binary())
         .args(["--addr", "127.0.0.1:1", "status"])
-        .env("FQ_CONFIG", "/nonexistent/fq.toml")
+        .env("FQ_CLI_CONFIG", "/nonexistent/fq.toml")
         .env("FQ_AGENTS_DIR", "/nonexistent/agents")
         .env("FQ_CACHE_DIR", "/nonexistent/cache")
         .env("FQ_STATE_DIR", "/nonexistent/state")

@@ -153,7 +153,7 @@ impl Scratch {
 fn run_fq(scratch: &Scratch, nats_url: &str, args: &[&str]) -> Output {
     Command::new(fq_client_binary())
         .args(args)
-        .env("FQ_CONFIG", scratch.path("fq.toml"))
+        .env("FQ_CLI_CONFIG", scratch.path("fq.toml"))
         .env("FQ_NATS_URL", nats_url)
         .env("FQ_CACHE_DIR", scratch.path("cache"))
         .env("FQ_STATE_DIR", scratch.path("state"))
@@ -175,7 +175,7 @@ impl Daemon {
         let log = std::fs::File::create(&log_path).expect("create daemon log");
         let log_err = log.try_clone().expect("clone log handle");
         let child = Command::new(fqd_binary())
-            .env("FQ_CONFIG", scratch.path("fq.toml"))
+            .env("FQ_DAEMON_CONFIG", scratch.path("fq.toml"))
             .env("FQ_NATS_URL", nats_url)
             .env("FQ_CACHE_DIR", scratch.path("cache"))
             .env("FQ_STATE_DIR", scratch.path("state"))
@@ -231,7 +231,7 @@ impl Daemon {
         let token = admin_token_from_log(&log).expect("admin token in first daemon log");
         let out = Command::new(fq_client_binary())
             .args(["connect", &addr, "--token", &token])
-            .env("FQ_CONFIG", scratch.path("fq.toml"))
+            .env("FQ_CLI_CONFIG", scratch.path("fq.toml"))
             .env("XDG_CONFIG_HOME", scratch.path("xdg"))
             .stdin(std::process::Stdio::piped())
             .output()

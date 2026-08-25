@@ -35,7 +35,7 @@ TESTS_FAILED=0
 # Everything this run touches lives under TMP_ROOT, including the three
 # things `fq` would otherwise reach for in the operator's own home:
 #
-#   FQ_CONFIG        the edge bind and the model registry, and nothing
+#   FQ_DAEMON_CONFIG        the edge bind and the model registry, and nothing
 #                    else — the rest of the runtime runs on its
 #                    defaults. The registry has no usable default: an
 #                    empty one declares no models, and the daemon
@@ -52,7 +52,7 @@ TESTS_FAILED=0
 #
 # Exported rather than passed as flags so that the daemon and every
 # client call agree without threading the same arguments through each.
-export FQ_CONFIG="${TMP_ROOT}/fq.toml"
+export FQ_DAEMON_CONFIG="${TMP_ROOT}/fq.toml"
 export FQ_STATE_DIR="${TMP_ROOT}/state"
 export XDG_CONFIG_HOME="${TMP_ROOT}/config"
 
@@ -80,7 +80,7 @@ INVOCATION_TIMEOUT_S=180
 # anything omitted here is omitted from both.
 write_config() {
     local bind="$1"
-    cat > "${FQ_CONFIG}" <<TOML
+    cat > "${FQ_DAEMON_CONFIG}" <<TOML
 [edge]
 bind = "${bind}"
 

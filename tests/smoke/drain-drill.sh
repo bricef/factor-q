@@ -42,7 +42,7 @@ TMP_ROOT="$(mktemp -d -t fq-drill-XXXXXX)"
 N=3
 SLEEP_SECS=15
 AGENT_ID="drill-sleeper-$$"
-export FQ_CONFIG="${TMP_ROOT}/fq.toml"
+export FQ_DAEMON_CONFIG="${TMP_ROOT}/fq.toml"
 
 CHECKS_RUN=0
 CHECKS_FAILED=0

@@ -363,7 +363,7 @@ impl World {
         let log = std::fs::File::create(&log_path).expect("daemon log");
         let log_err = log.try_clone().expect("log handle");
         let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
-            .env("FQ_CONFIG", dir.join("fqd.toml"))
+            .env("FQ_DAEMON_CONFIG", dir.join("fqd.toml"))
             .env("FQ_NATS_URL", broker.url())
             .env("FQ_CACHE_DIR", dir.join("cache"))
             .env("FQ_STATE_DIR", dir.join("state"))
@@ -412,7 +412,7 @@ impl World {
         let xdg = tempfile::tempdir().expect("xdg dir");
         let connect = Command::new(fq_client_binary())
             .args(["connect", &addr, "--token", &token])
-            .env("FQ_CONFIG", dir.join("fq.toml"))
+            .env("FQ_CLI_CONFIG", dir.join("fq.toml"))
             .env("XDG_CONFIG_HOME", xdg.path())
             .env("RUST_LOG", "off")
             .stdin(Stdio::piped())
@@ -535,7 +535,7 @@ impl World {
             .arg("events")
             .arg("tail")
             .args(args)
-            .env("FQ_CONFIG", self.dir.join("fq.toml"))
+            .env("FQ_CLI_CONFIG", self.dir.join("fq.toml"))
             .env("FQ_NATS_URL", self.broker.url())
             .env("FQ_CACHE_DIR", self.dir.join("cache"))
             .env("FQ_STATE_DIR", self.dir.join("state"))
@@ -577,7 +577,7 @@ impl World {
     fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
         let out = Command::new(fq_client_binary())
             .args(args)
-            .env("FQ_CONFIG", self.dir.join("fq.toml"))
+            .env("FQ_CLI_CONFIG", self.dir.join("fq.toml"))
             .env("FQ_NATS_URL", self.broker.url())
             .env("FQ_CACHE_DIR", self.dir.join("cache"))
             .env("FQ_STATE_DIR", self.dir.join("state"))
