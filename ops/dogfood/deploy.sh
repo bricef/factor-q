@@ -92,7 +92,8 @@ done
 
 cd "$DOGFOOD" 2>/dev/null || die "dogfood dir not found: $DOGFOOD (set FQ_DOGFOOD)"
 mkdir -p releases logs
-[ -f fq.toml ] || die "no fq.toml in $DOGFOOD — the instance config stays host-side"
+[ -f fqd.toml ] || die "no fqd.toml in $DOGFOOD — the instance config stays host-side\
+   (the daemon's config was fq.toml before the fq/fqd split; rename it)"
 [ -f .secrets/env ] || die "no .secrets/env in $DOGFOOD — start from ops/dogfood/env.example"
 
 # The embedded-SHA readers. fq prints "fq <semver> (<sha> <target>)";
@@ -186,8 +187,15 @@ done
 if [ -n "$DAEMON_PID" ]; then
     DRAIN_CLI="$REL/fq"
     [ ! -x ./current/fq ] || DRAIN_CLI=./current/fq
+    # Where to dial. `fq` is a client now: its own --config is `fq.toml`,
+    # which is not this file, and it reads no daemon config at all — so
+    # the address comes from the daemon's own `[edge] bind`, read here.
+    # The token still has to come from a pairing (`fq connect`); without
+    # one this fails and the escalation below stops the daemon instead.
+    EDGE_ADDR="$(sed -n 's/^ *bind *= *"\([^"]*\)".*/\1/p' "$DOGFOOD/fqd.toml" | head -1)"
+    [ -n "$EDGE_ADDR" ] || EDGE_ADDR=127.0.0.1:9470
     log "Stopping daemon (PID $DAEMON_PID) via confirmed fq down using $DRAIN_CLI"
-    "$DRAIN_CLI" --config "$DOGFOOD/fq.toml" down \
+    "$DRAIN_CLI" --addr "$EDGE_ADDR" down \
         || printf '    (confirmed drain failed; escalating)\n'
     if kill -0 "$DAEMON_PID" 2>/dev/null; then
         # Escalation 1: `--now` skips the already-attempted drain;
@@ -196,7 +204,7 @@ if [ -n "$DAEMON_PID" ]; then
         # `fq down` exits zero only after observing the daemon's own
         # system.shutdown event. If wedged, fall through to the signal.
         printf '    graceful stop failed — requesting immediate stop (fq down --now)\n'
-        if "$DRAIN_CLI" --config "$DOGFOOD/fq.toml" down --now; then
+        if "$DRAIN_CLI" --addr "$EDGE_ADDR" down --now; then
             printf '    confirmed stop\n'
         else
             # Escalation 2, last resort: SIGINT is crash-equivalent —

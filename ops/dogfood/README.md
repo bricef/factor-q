@@ -29,8 +29,8 @@ Deploy tooling for the dogfood instance (issue #102). The contract:
 ```text
 fq-dogfood/
 ├── current -> releases/<sha>/   # the active build (symlink)
-├── releases/<sha>/              # fq, fq-cas, fq-dashboard, github-watcher, fq-cron + launchers
-├── fq.toml                      # instance config — host-side, `fq reload` to apply
+├── releases/<sha>/              # fq, fqd, fq-cas, fq-dashboard, github-watcher, fq-cron + launchers
+├── fqd.toml                     # daemon config — host-side, `fq reload` to apply
 ├── fq-cron.toml                 # scheduled jobs — host-side; editing deploys/reloads them
 ├── agents/                      # agent definitions — host-side; canonical copies of
 │                                #   repo-tracked ones live in ops/dogfood/agents/ —
@@ -53,7 +53,8 @@ bootstrap, and can't live inside the thing it swaps.
 mkdir -p ~/fq-dogfood/{releases,logs,agents,.secrets} && chmod 700 ~/fq-dogfood/.secrets
 cp -r ops/dogfood/infra ~/fq-dogfood/
 install -m 600 ops/dogfood/env.example ~/fq-dogfood/.secrets/env  # then edit
-# fq.toml: copy an existing instance config, or generate with `fq init`
+# fqd.toml: copy an existing instance config (`fq init` writes a
+#           client-side fq.toml, which is a different file)
 # fq-cron.toml: install the host job schedule before starting cron.sh
 ops/dogfood/deploy.sh
 setsid ~/fq-dogfood/current/cron.sh </dev/null &  # cron.sh appends to logs/cron.log
@@ -62,13 +63,13 @@ setsid ~/fq-dogfood/current/cron.sh </dev/null &  # cron.sh appends to logs/cron
 Migrating an existing in-place instance (pre-#102: host-built binary,
 untracked `run.sh`/`watcher.sh`/`cron.sh`/`redeploy.sh`): fold any local secrets
 into `.secrets/env`, delete the legacy scripts, `bin/`, and `fq.rollback`,
-then run `deploy.sh`. State (`fq.toml`, `fq-cron.toml`, `agents/`, `cache/`, `workspace/`,
+then run `deploy.sh`. State (`fqd.toml`, `fq-cron.toml`, `agents/`, `cache/`, `workspace/`,
 the NATS volume) is untouched by deploys.
 
 Note (#362): the daemon's edge identity — self-signed certificate plus
 biscuit token root, whose loss orphans every pinned client and issued
 token — lives in the **state** directory, not `cache/`. With no
-`[state] directory` in the instance `fq.toml` and no `FQ_STATE_DIR` in
+`[state] directory` in the instance `fqd.toml` and no `FQ_STATE_DIR` in
 `.secrets/env`, that resolves to `$HOME/.local/state/factor-q`, i.e.
 *outside* the dogfood tree. Set `[state] directory = "./state"` to keep
 it project-local like `cache/`. Either way a daemon whose state
@@ -90,7 +91,7 @@ key is the exception — add it to `.secrets/env` and `deploy.sh --force`,
 since only launch reads the env file.
 
 One-line invocation summaries (#216): set `[summary] model = "<cheap-model>"`
-in `fq.toml` (and `fq reload`-or-restart) and the daemon keeps a one-line,
+in `fqd.toml` (and `fq reload`-or-restart) and the daemon keeps a one-line,
 cheap-model status per invocation on the dashboard's invocation surfaces —
 what work was expected, what it is doing now, how it ended. The model must
 be priced (the ADR-0004 startup guarantee applies, so deploy config-first);
@@ -112,7 +113,7 @@ commands):
 1. **Move the edge off port 9472.** `[edge] bind` defaults to
    `127.0.0.1:9472`, which is the port the dashboard itself serves on
    and the one Caddy proxies to. Set `bind = "127.0.0.1:9470"` under
-   `[edge]` in `fq.toml`, restart the daemon, and set `FQ_EDGE` to
+   `[edge]` in `fqd.toml`, restart the daemon, and set `FQ_EDGE` to
    match. `dashboard.sh` refuses to launch without `FQ_EDGE` rather
    than defaulting into the collision.
 2. **Pin the daemon.** `FQ_EDGE_FINGERPRINT` is the SHA-256 the daemon
