@@ -101,7 +101,7 @@ fn default_edge_bind() -> String {
     "127.0.0.1:9472".to_string()
 }
 
-/// Built-in tool configuration — `[tools]` in `fq.toml`. Today only the
+/// Built-in tool configuration — `[tools]` in `fqd.toml`. Today only the
 /// `exec` tool exposes knobs; future built-ins add their own subsections
 /// here.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -110,7 +110,7 @@ pub struct ToolsConfig {
     pub exec: ExecToolConfig,
 }
 
-/// Timeouts for the built-in `exec` tool — `[tools.exec]` in `fq.toml`.
+/// Timeouts for the built-in `exec` tool — `[tools.exec]` in `fqd.toml`.
 ///
 /// The `fq-tools` crate keeps its own conservative defaults (30s default
 /// / 300s max) so the primitive is safe in isolation; the runtime raises
@@ -264,7 +264,7 @@ pub struct WorkerConfig {
     /// Retry policy for transient LLM API errors (rate limits, transport
     /// failures). Retrying is safe — a model call is idempotent — and does
     /// not consume a reducer iteration. Tuning knobs, so configuration
-    /// (design principle 8), overridable in `fq.toml`.
+    /// (design principle 8), overridable in `fqd.toml`.
     #[serde(default)]
     pub llm_retry: crate::llm::RetryConfig,
     /// How many invocations one daemon runs concurrently (#70, the
@@ -460,7 +460,7 @@ pub enum ApiShape {
 
 /// A configurable LLM provider: an API shape, an optional endpoint
 /// override, an auth env var, and the model ids routed to it.
-/// `[providers.<name>]` in `fq.toml`.
+/// `[providers.<name>]` in `fqd.toml`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
     #[serde(default)]
@@ -660,8 +660,31 @@ impl Default for Config {
 
 impl Config {
     /// Parse configuration from a TOML string.
+    ///
+    /// A key this struct does not know is an error, not a shrug. An
+    /// operator who writes `max_iters` for `max_iterations`, or puts a
+    /// `[worker]` setting under `[workspace]`, has made an edit that
+    /// does not take effect — and silence there is indistinguishable
+    /// from the setting working. The daemon reads its config once, at
+    /// startup, so the alternative to failing here is running for weeks
+    /// on a value nobody set.
+    ///
+    /// `#[serde(deny_unknown_fields)]` cannot express this: serde
+    /// rejects it alongside the `#[serde(flatten)]` that
+    /// `ProvidersConfig` needs to accept `[providers.<name>]` for any
+    /// name. `serde_ignored` reports the same thing from the outside,
+    /// and gives the full dotted path rather than just the leaf.
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
-        toml::from_str(s).map_err(|err| ConfigError::InvalidToml(err.to_string()))
+        let mut ignored = Vec::new();
+        let config: Self =
+            serde_ignored::deserialize(toml::Deserializer::new(s), |path| {
+                ignored.push(path.to_string());
+            })
+            .map_err(|err| ConfigError::InvalidToml(err.to_string()))?;
+        if !ignored.is_empty() {
+            return Err(ConfigError::UnknownKeys(ignored));
+        }
+        Ok(config)
     }
 
     /// Load configuration from a file, returning an error if the file is
@@ -747,6 +770,12 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+
+    /// Keys the config does not know. Named in full, because the
+    /// point of the error is telling the operator which line of theirs
+    /// did nothing.
+    #[error("unknown setting(s) in config: {} — check the spelling and the table they are under", .0.join(", "))]
+    UnknownKeys(Vec<String>),
 
     #[error("invalid TOML in config file: {0}")]
     InvalidToml(String),
@@ -1109,8 +1138,42 @@ max_iterations = 250
     }
 
     #[test]
+    fn an_unknown_top_level_key_is_rejected() {
+        let err = Config::from_toml_str("max_iters = 5\n").unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::UnknownKeys(keys) if keys == &["max_iters"]),
+            "expected the misspelling to be named, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_inside_a_table_is_named_by_its_full_path() {
+        // The leaf alone would be ambiguous: several tables have a
+        // `directory`, and knowing which one did nothing is the point.
+        let err = Config::from_toml_str("[workspace]\nper_invokation = true\n").unwrap_err();
+        let ConfigError::UnknownKeys(keys) = &err else {
+            panic!("expected UnknownKeys, got: {err}");
+        };
+        assert_eq!(keys, &["workspace.per_invokation"]);
+    }
+
+    #[test]
+    fn a_provider_of_any_name_is_still_accepted() {
+        // `ProvidersConfig` flattens, which is why `deny_unknown_fields`
+        // is unavailable — the strictness must not cost us this.
+        let config = Config::from_toml_str(
+            "[providers.openrouter]\napi = \"openai\"\n\
+             api_key_env = \"OPENROUTER_API_KEY\"\n\
+             base_url = \"https://openrouter.ai/api/v1\"\n\
+             models = [\"z-ai/glm-5.2\"]\n",
+        )
+        .expect("a named provider is configuration, not a typo");
+        assert!(config.providers.extra.contains_key("openrouter"));
+    }
+
+    #[test]
     fn load_or_default_returns_default_when_missing() {
-        let path = PathBuf::from("/tmp/definitely-does-not-exist-fq.toml");
+        let path = PathBuf::from("/tmp/definitely-does-not-exist-fqd.toml");
         let config = Config::load_or_default(&path).unwrap();
         assert_eq!(config.nats.url, "nats://localhost:4222");
     }
@@ -1140,7 +1203,7 @@ api_key_env = "{env_var}"
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let config_path = dir.path().join("fq.toml");
+        let config_path = dir.path().join("fqd.toml");
         std::fs::write(
             &config_path,
             r#"
@@ -1162,7 +1225,7 @@ directory = "my-agents"
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let config_path = dir.path().join("fq.toml");
+        let config_path = dir.path().join("fqd.toml");
         std::fs::write(
             &config_path,
             r#"
@@ -1184,7 +1247,7 @@ retention_days = 7
         assert_eq!(config.state.retention_days, 7);
     }
 
-    /// An `fq.toml` with no `[state] directory` — every deployment
+    /// An `fqd.toml` with no `[state] directory` — every deployment
     /// that predates #362 — must not fall back to the cache directory
     /// or to anything temp-dir shaped.
     #[test]
@@ -1199,7 +1262,7 @@ retention_days = 7
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let config_path = dir.path().join("fq.toml");
+        let config_path = dir.path().join("fqd.toml");
         std::fs::write(
             &config_path,
             r#"
@@ -1218,7 +1281,7 @@ directory = "sub/agents"
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let config_path = dir.path().join("fq.toml");
+        let config_path = dir.path().join("fqd.toml");
         std::fs::write(
             &config_path,
             r#"
