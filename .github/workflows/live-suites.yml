@@ -1,0 +1,104 @@
+name: Live suites
+
+# The two suites that drive a real daemon against a real model: `just
+# smoke` (six end-to-end trigger/tool/projection cases) and `just drill`
+# (fifteen durability checks over drain, recovery, SIGTERM and SIGKILL).
+#
+# They existed for months with nothing running them, and both were broken
+# by the fq/fqd binary split for weeks before anyone found out — the
+# daemon was renamed and they still invoked `fq run`. That is the gap
+# this workflow closes: not "are they written", but "does anyone run
+# them".
+#
+# NOT on pull_request, deliberately. Every run spends real money on the
+# Anthropic API — roughly $0.01 for smoke, plus the drill's twelve short
+# invocations — and it is per run, not per repository. Putting that on
+# every push would bill for typo fixes and would invite the usual
+# response to a slow paid check, which is to stop reading it. Nightly
+# catches a break within a day of the merge that caused it, and
+# `workflow_dispatch` is there for the change you already suspect.
+#
+# Both suites in ONE job, in sequence. They share the dev broker on
+# 4222, and a daemon holds the `fq-dispatcher` durable consumer: two
+# runs at once would ack each other's triggers, find no such agent, and
+# discard them. The failure looks exactly like a product bug.
+
+on:
+  schedule:
+    # 03:17 UTC. Off the hour on purpose — the top of the hour is the
+    # busiest slot on shared runners.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+# Queue, never cancel. A cancelled run leaves a daemon holding the
+# shared durable consumer, which breaks the *next* run rather than this
+# one — the hardest kind of failure to attribute.
+concurrency:
+  group: live-suites
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: Smoke and drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail here rather than fifteen minutes in, with the fix in the
+      # message. A live suite without a key is not a skip: it is this
+      # workflow silently going back to being the thing that does not
+      # run, which is what it exists to fix.
+      - name: Check the API key is configured
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is not set for this repository. \
+          Add it under Settings -> Secrets and variables -> Actions. \
+          Both suites call the real Anthropic API and cannot run without it."
+            exit 1
+          fi
+          echo "key present (${#ANTHROPIC_API_KEY} chars)"
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v3
+
+      # The dev broker on 4222, which both suites dial through the
+      # justfile's FQ_NATS_URL default. This is the shared instance from
+      # infrastructure/docker-compose.yml, not the per-test private
+      # broker the unit suites spawn.
+      - name: Start NATS
+        run: just infra-up
+
+      - name: Smoke suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: just smoke
+
+      # Runs even if smoke failed: they cover different things, and one
+      # red should not hide the other's result. `always()` rather than
+      # `success()` for the same reason the Rust suites are separate
+      # jobs — a red in one must never mask another.
+      - name: Drain drill
+        if: always()
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: just drill
+
+      # A daemon that outlives its suite holds the durable consumer and
+      # breaks the next run. The runner is ephemeral so this is belt and
+      # braces, but the same reap is the local habit and the failure it
+      # prevents is a silent one.
+      - name: Reap stray daemons
+        if: always()
+        run: |
+          for pid in $(pgrep -x fqd || true); do
+            echo "stray daemon $pid — stopping"
+            kill -INT "$pid" || true
+          done
+          just infra-down || true

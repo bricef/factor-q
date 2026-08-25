@@ -51,6 +51,7 @@ jobs:
       go: ${{ steps.filter.outputs.go }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       coupling: ${{ steps.filter.outputs.coupling }}
+      docker: ${{ steps.filter.outputs.docker }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -109,6 +110,21 @@ jobs:
               - 'services/fq-dashboard/**'
               - 'scripts/dashboard-screenshots.sh'
               - 'scripts/dashboard-pr-comment.sh'
+              - '.github/workflows/ci.yml'
+            # Deliberately narrow. The image build is the slowest job here,
+            # and only two kinds of change can break it: the Dockerfile
+            # itself, and the workspace's membership or dependency graph.
+            # The failure this exists to catch is a new crate that never
+            # reached the Dockerfile's member-manifest COPY list — cargo
+            # refuses to load a workspace with a member manifest missing,
+            # so the build dies on its first cargo line. That is a
+            # `Cargo.toml` change every time.
+            docker:
+              - 'services/fq-runtime/Dockerfile'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'justfile'
+              - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
 
   docs-lint:
@@ -409,3 +425,51 @@ jobs:
         uses: extractions/setup-just@v3
       - if: needs.changes.outputs.go == 'true'
         run: just go-ci
+
+  # The container image, which had been unbuildable for weeks before this
+  # job existed: `fq-agent` and `fq-daemon` were added to the workspace and
+  # never reached the Dockerfile's member-manifest COPY list, so `cargo
+  # build` failed on its first line inside the image. Nothing noticed,
+  # because `just docker-build` ran in no workflow — the image was the one
+  # deliverable with no gate at all.
+  #
+  # It builds the real image rather than linting the Dockerfile: the failure
+  # mode is a manifest cargo cannot resolve, which only a build finds. The
+  # smoke check afterwards is cheap and catches the other half — an image
+  # that builds but cannot start, which is what `CMD ["run"]` left behind
+  # when the split deleted that subcommand.
+  #
+  # Path-filtered narrowly (see the `docker` filter): this is the slowest
+  # job in the file, and a docs-only or single-crate PR cannot break it.
+  docker:
+    name: Container image
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.changes.outputs.docker != 'true'
+        run: echo "No Docker-relevant changes — skipping the image build."
+      - if: needs.changes.outputs.docker == 'true'
+        uses: actions/checkout@v4
+      - if: needs.changes.outputs.docker == 'true'
+        uses: extractions/setup-just@v3
+      # No layer cache: this is a cold build every time, and it compiles
+      # the workspace from scratch inside the image. That is affordable
+      # precisely because the filter above is narrow — and a cold build
+      # is also the honest test, since the failure being guarded against
+      # is a manifest cargo cannot resolve, which a warm cache could
+      # step straight over.
+      - if: needs.changes.outputs.docker == 'true'
+        run: just docker-build
+      # An image that builds but cannot run is still broken, and that is
+      # not hypothetical: the entrypoint invoked a deleted subcommand and
+      # the build was perfectly happy. `fqd --version` proves the
+      # entrypoint resolves and the binary executes in the runtime stage,
+      # which is distroless and has no shell to check it any other way.
+      - if: needs.changes.outputs.docker == 'true'
+        run: |
+          set -euo pipefail
+          echo "entrypoint (the daemon):"
+          docker run --rm factor-q/fq-runtime:latest --version
+          echo "the client, which ships alongside it:"
+          docker run --rm --entrypoint /usr/local/bin/fq \
+            factor-q/fq-runtime:latest --version
