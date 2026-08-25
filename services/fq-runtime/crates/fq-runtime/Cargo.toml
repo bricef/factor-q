@@ -24,6 +24,10 @@ url = "2"
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
 schemars = { workspace = true }
 serde = { workspace = true }
+# Reports the keys a parse silently dropped, which `deny_unknown_fields`
+# cannot: `ProvidersConfig` uses `#[serde(flatten)]`, and serde rejects
+# the two together.
+serde_ignored = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 tracing = { workspace = true }
