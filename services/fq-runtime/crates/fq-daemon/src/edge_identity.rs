@@ -29,7 +29,7 @@ pub(crate) fn resolve(config: &Config) -> anyhow::Result<(EdgeIdentity, PathBuf)
     let dir = identity_dir(&config.state.directory);
     let legacy = identity_dir(&config.cache.directory);
     let (identity, origin) = EdgeIdentity::load_or_adopt(&dir, &legacy)
-        .context("edge: failed to load or provision identity (check [state] in fq.toml)")?;
+        .context("edge: failed to load or provision identity (check [state] in fqd.toml)")?;
     match origin {
         IdentityOrigin::Loaded => {}
         IdentityOrigin::Adopted => {
