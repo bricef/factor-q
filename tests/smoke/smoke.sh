@@ -28,6 +28,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FQ_BIN="${REPO_ROOT}/target/debug/fq"
+FQD_BIN="${REPO_ROOT}/target/debug/fqd"
 TMP_ROOT="$(mktemp -d -t fq-smoke-XXXXXX)"
 TESTS_RUN=0
 TESTS_FAILED=0
@@ -52,7 +53,7 @@ TESTS_FAILED=0
 #
 # Exported rather than passed as flags so that the daemon and every
 # client call agree without threading the same arguments through each.
-export FQ_DAEMON_CONFIG="${TMP_ROOT}/fq.toml"
+export FQ_DAEMON_CONFIG="${TMP_ROOT}/fqd.toml"
 export FQ_STATE_DIR="${TMP_ROOT}/state"
 export XDG_CONFIG_HOME="${TMP_ROOT}/config"
 
@@ -103,7 +104,7 @@ cleanup() {
             kill -KILL "${p}" 2>/dev/null || true
         done
     fi
-    # Kill any background fq run we may have left behind.
+    # Kill any background daemon we may have left behind.
     if [[ -n "${RUN_PID:-}" ]] && kill -0 "${RUN_PID}" 2>/dev/null; then
         kill -KILL "${RUN_PID}" 2>/dev/null || true
     fi
@@ -172,6 +173,10 @@ run_test() {
 check_prereqs() {
     section "prerequisites"
 
+    if [[ ! -x "${FQD_BIN}" ]]; then
+        fail "fqd binary not found at ${FQD_BIN}"
+        return 1
+    fi
     if [[ ! -x "${FQ_BIN}" ]]; then
         fail "fq binary not found at ${FQ_BIN}"
         info "build it with: just build"
@@ -259,9 +264,7 @@ fq_trigger() {
     # `||` list makes the failure ours to handle — and the daemon
     # still gets stopped below.
     local status=0
-    "${FQ_BIN}" \
-        --agents-dir "${agents_dir}" \
-        --cache-dir "${cache_dir}" \
+    fq_client \
         trigger "${agent}" "${payload}" >&2 2>&1 || status=$?
 
     # `fq trigger` queues and returns — the daemon dispatches it, and
@@ -271,9 +274,7 @@ fq_trigger() {
     local id="" phase="" row=""
     local deadline=$((SECONDS + INVOCATION_TIMEOUT_S))
     while (( SECONDS < deadline )); do
-        row="$("${FQ_BIN}" \
-            --agents-dir "${agents_dir}" \
-            --cache-dir "${cache_dir}" \
+        row="$(fq_client \
             invocation list --json --include-archived 2>/dev/null \
             | jq -r --arg a "${agent}" \
                 'map(select(.agent_id == $a))
@@ -290,9 +291,7 @@ fq_trigger() {
 
     local out=""
     if [[ -n "${id}" ]]; then
-        out="$("${FQ_BIN}" \
-            --agents-dir "${agents_dir}" \
-            --cache-dir "${cache_dir}" \
+        out="$(fq_client \
             invocation transcript "${id}" --full 2>&1)"
         # The terminal status, in the runtime's own spelling, so a test
         # asserting on it is asserting on what the system reported.
@@ -303,7 +302,7 @@ fq_trigger() {
     fi
 
     if [[ -n "${own_daemon}" ]]; then
-        stop_fq_run >&2
+        stop_daemon >&2
     fi
     printf '%s\n' "${out}"
     return "${status}"
@@ -452,7 +451,7 @@ in one sentence."
     assert_contains "${output}" "invocation status: completed" "denied shell trigger still completes"
 }
 
-# Start `fq run` in the background for tests that exercise the
+# Start `fqd` in the background for tests that exercise the
 # projection. Writes its PID to RUN_PID and its log to RUN_LOG so
 # callers can inspect on failure.
 start_fq_run() {
@@ -467,10 +466,10 @@ start_fq_run() {
     # released, and fail. Port 0 again means each daemon is handed a
     # free one.
     write_config "127.0.0.1:0"
-    "${FQ_BIN}" \
+    "${FQD_BIN}" \
         --agents-dir "${agents_dir}" \
         --cache-dir "${cache_dir}" \
-        run >"${RUN_LOG}" 2>&1 &
+        >"${RUN_LOG}" 2>&1 &
     RUN_PID=$!
     STARTED_PIDS="${STARTED_PIDS:-} ${RUN_PID}"
 
@@ -490,9 +489,9 @@ start_fq_run() {
         sleep 0.1
     done
     if [[ -z "${ready}" ]]; then
-        fail "fq run did not start within 10s"
+        fail "fqd did not start within 10s"
         head -30 "${RUN_LOG}"
-        stop_fq_run
+        stop_daemon
         return 1
     fi
 
@@ -504,7 +503,7 @@ start_fq_run() {
     # after it, which is why this stops the daemon rather than letting
     # the caller's early return strand it.
     if ! pair_with_edge; then
-        stop_fq_run
+        stop_daemon
         return 1
     fi
 }
@@ -582,10 +581,24 @@ pair_with_edge() {
         head -20 "${TMP_ROOT}/connect.log"
         return 1
     fi
+    # Which daemon the client verbs talk to. `fq connect` accumulates
+    # pairings — one per daemon this suite starts — and with more than
+    # one stored the client rightly refuses to guess. Before the split
+    # it found the address in the daemon's config; now the address is
+    # ours to pass. Written to a file for the same reason the token is:
+    # most callers reach this through a command substitution, and a
+    # variable set in a subshell is gone by the next test.
+    printf '%s\n' "${addr}" > "${TMP_ROOT}/edge-addr"
     pass "paired with the daemon's edge at ${addr}"
 }
 
-stop_fq_run() {
+# Every client verb goes through here, so none of them can forget the
+# address and fall back to whichever pairing happens to be stored.
+fq_client() {
+    "${FQ_BIN}" --addr "$(cat "${TMP_ROOT}/edge-addr")" "$@"
+}
+
+stop_daemon() {
     if [[ -n "${RUN_PID:-}" ]] && kill -0 "${RUN_PID}" 2>/dev/null; then
         kill -INT "${RUN_PID}" 2>/dev/null || true
         local deadline=$((SECONDS + 5))
@@ -601,7 +614,7 @@ stop_fq_run() {
     RUN_PID=""
 }
 
-# Verify NATS-triggered execution: start fq run (which spawns
+# Verify NATS-triggered execution: start fqd (which spawns
 # both the projection consumer and the trigger dispatcher),
 # publish a trigger via `fq trigger --via-nats` (which does NOT
 # run the executor in-process), and verify that the daemon picks
@@ -625,19 +638,17 @@ You are a concise assistant. Answer in one sentence."
     # Publish via NATS — this should return immediately without
     # running the executor in-process.
     local publish_out
-    publish_out="$("${FQ_BIN}" \
-        --agents-dir "${project}/agents" \
-        --cache-dir "${project}/cache" \
+    publish_out="$(fq_client \
         trigger --via-nats "${agent_id}" \
         "Say exactly: nats dispatch OK." 2>&1)" || {
-        stop_fq_run
+        stop_daemon
         fail "fq trigger --via-nats failed"
         printf '  %s\n' "${publish_out}"
         return 1
     }
 
     assert_contains "${publish_out}" "Published trigger" "publish confirmation" || {
-        stop_fq_run
+        stop_daemon
         return 1
     }
 
@@ -647,7 +658,7 @@ You are a concise assistant. Answer in one sentence."
     local deadline=$((SECONDS + 15))
     local rows=""
     while (( SECONDS < deadline )); do
-        rows="$("${FQ_BIN}" --cache-dir "${project}/cache" \
+        rows="$(fq_client \
             events query --agent "${agent_filter}" --limit 20 2>&1 || true)"
         if [[ "${rows}" == *"completed"* ]]; then
             break
@@ -655,14 +666,14 @@ You are a concise assistant. Answer in one sentence."
         sleep 0.5
     done
 
-    stop_fq_run
+    stop_daemon
 
     assert_contains "${rows}" "triggered"    "nats-dispatched event: triggered"  || return 1
     assert_contains "${rows}" "completed"    "nats-dispatched event: completed"  || return 1
     assert_contains "${rows}" "${agent_id}"  "nats-dispatched event: agent id"   || return 1
 }
 
-# Test the full runtime cycle: start fq run (which spawns the
+# Test the full runtime cycle: start fqd (which spawns the
 # projection consumer), fire a trigger to produce events, wait for
 # them to land in SQLite, then query them back via the CLI.
 test_run_projection_query_and_costs() {
@@ -683,7 +694,7 @@ You are a concise assistant. Answer in one sentence."
 
     # Push an invocation through. fq trigger runs the executor
     # directly and publishes events to NATS; the consumer spawned
-    # by fq run picks them up.
+    # by the daemon picks them up.
     fq_trigger "${project}/agents" "${project}/cache" \
         "${agent_id}" "Say exactly: projection OK." >/dev/null
 
@@ -691,24 +702,24 @@ You are a concise assistant. Answer in one sentence."
     sleep 2
 
     local rows
-    rows="$("${FQ_BIN}" --cache-dir "${project}/cache" \
+    rows="$(fq_client \
         events query --agent "${agent_id}" --limit 20 2>&1)" || {
-        stop_fq_run
+        stop_daemon
         fail "events query failed"
         printf '  %s\n' "${rows}"
         return 1
     }
 
     local costs
-    costs="$("${FQ_BIN}" --cache-dir "${project}/cache" \
+    costs="$(fq_client \
         costs --agent "${agent_id}" 2>&1)" || {
-        stop_fq_run
+        stop_daemon
         fail "costs query failed"
         printf '  %s\n' "${costs}"
         return 1
     }
 
-    stop_fq_run
+    stop_daemon
 
     assert_contains "${rows}" "triggered"    "events query shows triggered" || return 1
     assert_contains "${rows}" "completed"    "events query shows completed" || return 1
