@@ -322,7 +322,7 @@ all userspace.
 This means:
 
 - **Distribution is trivial.** `docker run factorq` (or just
-  `./fq run`) and you have a running agent OS with full
+  `./fqd`) and you have a running agent OS with full
   isolation. No special privileges, no nested containers, no
   runtime class configuration. It runs anywhere — CI systems,
   cheap VPS providers, PaaS platforms that don't support nested

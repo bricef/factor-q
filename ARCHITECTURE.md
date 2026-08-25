@@ -253,12 +253,12 @@ providers.
 ### System lifecycle events
 
 Three system event types on `fq.system.*`:
-- `system_startup` — emitted when `fq run` connects and is ready
+- `system_startup` — emitted when `fqd` connects and is ready
 - `system_shutdown` — emitted on clean Ctrl-C or task-failure exit
 - `system_task_failed` — emitted when the projection consumer or
   trigger dispatcher exits unexpectedly
 
-`fq run` watches both hosted tasks via `tokio::select!`. If
+`fqd` watches both hosted tasks via `tokio::select!`. If
 either dies before a Ctrl-C, the daemon publishes
 `system.task_failed`, shuts down the other task, and exits
 non-zero.
@@ -268,13 +268,14 @@ non-zero.
 One module per verb group — `status.rs`, `doctor.rs`, `invocations.rs`,
 `trigger.rs`, `workers.rs`, `events.rs`, and so on (#189). `cli.rs` holds
 the clap declarations every module shares; `lib.rs` is the composition
-root: the two entry points, the dispatch from a parsed command to the verb
-that serves it, and `run_daemon`. `bin/fq.rs` and `bin/fqd.rs` are shims.
+root: the entry point and the dispatch from a parsed command to the verb
+that serves it. `bin/fq.rs` is a shim. The daemon is not here — it is the
+`fq-daemon` crate, and `tests/thin_client_gate.rs` keeps it that way.
 
 | Command | What it does |
 |---|---|
 | `fq init` | Scaffold a project from embedded templates |
-| `fq run` | Long-running daemon (projection + dispatcher) |
+| `fqd` | Long-running daemon (projection + dispatcher) |
 | `fq trigger` | `trigger.publish` over the edge — the daemon queues the work on `fq-triggers` and its dispatcher runs it. In-process execution is retired (D-1) |
 | `fq agent list/validate` | Registry inspection |
 | `fq events tail` | Live event stream |

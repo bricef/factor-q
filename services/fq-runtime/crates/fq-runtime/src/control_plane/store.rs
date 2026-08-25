@@ -22,9 +22,9 @@
 //!
 //! ## What this module does NOT do yet
 //!
-//! - Wiring into `fq run` startup beyond opening the file.
+//! - Wiring into `fqd` startup beyond opening the file.
 //!   Self-registration (the local worker registers with the
-//!   local control-plane on `fq run` start) is wired in
+//!   local control-plane on `fqd` start) is wired in
 //!   `fq-cli/src/main.rs` as part of step 3.
 //! - Subscribing to `invocation.ambiguous` /
 //!   `invocation.archived` events on NATS — that's step 7.

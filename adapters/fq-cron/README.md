@@ -10,7 +10,7 @@ NATS.
 
 - A NATS server with JetStream enabled.
 - For durable trigger subjects, a stream that captures the subject (normally
-  the stream owned by `fq run`).
+  the stream owned by `fqd`).
 
 ## Configuration
 

@@ -211,7 +211,7 @@ let s2 = new_harness.step(StepInput {
 // `s2` continues exactly where the previous run left off.
 ```
 
-In production, `fq run` automates the host side of this: the `WorkerStore` writes an `invocation_state` row at every step boundary, and the daemon's recovery scan auto-resumes safe-to-replay invocations on the next startup. See [`ReducerRunner::resume`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs) for the wire-up.
+In production, `fqd` automates the host side of this: the `WorkerStore` writes an `invocation_state` row at every step boundary, and the daemon's recovery scan auto-resumes safe-to-replay invocations on the next startup. See [`ReducerRunner::resume`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs) for the wire-up.
 
 For a working unit test of the reducer-only round-trip pattern, see `state_round_trips_across_drop_and_resume` in [`harness.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/harness.rs).
 

@@ -388,11 +388,11 @@ pub struct InvocationTotals {
     pub elicitation_cost: f64,
 }
 
-/// Published when the `fq run` daemon starts up.
+/// Published when the `fqd` daemon starts up.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStartupPayload {
     /// Unique id for this daemon run. All system events from a
-    /// single `fq run` invocation share this id.
+    /// single `fqd` invocation share this id.
     pub runtime_id: Uuid,
     /// Version of the fq binary (the value of `CARGO_PKG_VERSION`
     /// at build time).
@@ -406,7 +406,7 @@ pub struct SystemStartupPayload {
     pub pricing_entries: u32,
 }
 
-/// Published when the `fq run` daemon shuts down.
+/// Published when the `fqd` daemon shuts down.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemShutdownPayload {
     pub runtime_id: Uuid,
@@ -419,7 +419,7 @@ pub struct SystemShutdownPayload {
     pub clean: bool,
 }
 
-/// Published when one of the hosted tasks inside `fq run` (the
+/// Published when one of the hosted tasks inside `fqd` (the
 /// projection consumer, the trigger dispatcher, etc.) exits with
 /// an error before a graceful shutdown was requested.
 ///
@@ -437,7 +437,7 @@ pub struct SystemTaskFailedPayload {
 }
 
 /// Counts of in-flight invocations classified by recovery
-/// category at daemon startup. Emitted once per `fq run`
+/// category at daemon startup. Emitted once per `fqd`
 /// after the worker recovery scan completes.
 ///
 /// The same counts are surfaced live via `fq status`; this

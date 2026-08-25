@@ -196,6 +196,6 @@ pub(crate) async fn requeue_dead_letter(
     }
     println!("  payload: {}", truncate_json(&result.trigger_payload, 120));
     println!("Requeueing the same dead letter again is refused, and names this trigger.");
-    println!("A running `fq run` daemon will pick this up with a fresh delivery budget.");
+    println!("A running `fqd` daemon will pick this up with a fresh delivery budget.");
     Ok(())
 }

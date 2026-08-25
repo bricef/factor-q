@@ -53,7 +53,7 @@ that mapping a deliberate choice rather than an accident.
 | **Pending approvals / waits** | An invocation is paused waiting for an external signal (human sign-off, scheduled time, webhook). | One write at suspension; one update on resolution. | When the signal arrives, or operator inspection. | Small (~KB) plus a pointer to the invocation state shape above. | Until the wait resolves or is cancelled. May be days. |
 | **Schedules / wakeups** | Future-firing entries: "at time T, trigger agent X" or "at time T, refresh pricing." | Low. Cron-shaped or one-shot. | A scheduler reads upcoming entries continuously; fires entries when due. | Small per row; row count grows with cron entries. | Until fired or cancelled. |
 | **Per-invocation workspaces** | Filesystem an agent's tools work against during an invocation. May be empty, may be a pre-loaded base layer plus deltas. | Tool-frequency: many small writes. | Tools read what they wrote and what was pre-loaded. | Highly variable. Small for "no-fs" agents; could reach hundreds of MB for code-handling agents with checked-out repos. | Lifetime of the invocation, plus optional snapshotting for replay/audit. |
-| **Static configuration** | `fq.toml` — runtime configuration. | Operator edits, runtime never writes. | Read at startup, occasionally re-read on hot-reload. | KB. | Operator-managed. |
+| **Static configuration** | `fqd.toml` — runtime configuration. | Operator edits, runtime never writes. | Read at startup, occasionally re-read on hot-reload. | KB. | Operator-managed. |
 | **Agent definitions** | Markdown files declaring agents. | Operator edits today. Hot-reload (backlog) doesn't change ownership. | Read at startup; potentially re-read on file changes. | KB per agent. | Operator-managed. Future: agents authoring agents would change this. |
 | **Caches** | Fetched data with a backing source of truth elsewhere — pricing JSON from LiteLLM, possibly model schemas, possibly future model-specific quirks. | Periodic refresh. | Hot path during invocation. | KB to low MB. | Rebuildable from network on miss; durability is "convenience-only". |
 | **Secrets at rest** | Anything sensitive that ends up persisted: a tool returned a credential, an agent received PII, a user typed an API key. Currently *also* the contents of conversation history insofar as it overlaps with this. | Inherited from whatever shape produced it. | Inherited. | Inherited. | A retention/deletion policy concern more than a storage concern. |
@@ -370,10 +370,10 @@ are constraints, not choices.
 | SQLite holds the queryable projection over the audit log. | [`event-schema.md`](./event-schema.md), implementation in `fq-runtime/src/projection/`. |
 | The projection is **rebuildable from events**. | implementation invariant; the projection consumer is idempotent on `event_id`. |
 | Memory (long-term, collective) is delivered as MCP services, not built into the runtime's persistence. | [`ADR-0013`](../../adrs/accepted/0013-memory-as-mcp-service.md) |
-| Static configuration (`fq.toml`), agent definitions, and skills are filesystem files. | [`ADR-0005`](../../adrs/accepted/0005-agent-definition-format.md), implementation. |
+| Static configuration (`fqd.toml`), agent definitions, and skills are filesystem files. | [`ADR-0005`](../../adrs/accepted/0005-agent-definition-format.md), implementation. |
 | Pricing data is fetched from a remote source and cached locally; the cache is rebuildable. | implementation. |
 | Audit-log retention is operator-set; events default to 30 days, triggers to 24 hours. | [`bus.rs`](../../../services/fq-runtime/crates/fq-runtime/src/bus.rs) defaults. |
-| Secrets (API keys) are read from environment variables; factor-q itself does not write them anywhere. | [`fq.toml`](../../../services/fq-runtime/crates/fq-cli/src/templates/fq.toml) provider section. |
+| Secrets (API keys) are read from environment variables; factor-q itself does not write them anywhere. | [`fqd.toml`](../../../services/fq-runtime/crates/fq-cli/src/templates/fqd.toml) provider section. |
 
 ---
 

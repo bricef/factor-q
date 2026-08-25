@@ -1,6 +1,6 @@
-# Operating the `fq run` daemon
+# Operating the `fqd` daemon
 
-Practical guide to the lifecycle of a long-lived `fq run` daemon: how to
+Practical guide to the lifecycle of a long-lived `fqd` daemon: how to
 **stop** it, how to **redeploy** it, and how to **hot-reload** agent
 definitions — without reaching for a raw signal.
 
@@ -60,7 +60,7 @@ new one — stop cleanly, deploy, then relaunch:
 ```sh
 fq down     # drain to a step boundary, confirm shutdown, and exit
 # ... deploy the new binary ...
-fq run      # recovery resumes suspended invocations without lost/re-run work
+fqd      # recovery resumes suspended invocations without lost/re-run work
 ```
 
 The default mode is the suspend-for-handoff mechanism specified by ADR-0027.
@@ -94,7 +94,7 @@ the roster would grow by a row per restart if reclaiming it were
 something you had to remember. The daemon collects stale registrations
 itself, on the same scheduled sweep that bounds the invocation archive.
 
-Two knobs, both under `[state]` in `fq.toml`:
+Two knobs, both under `[state]` in `fqd.toml`:
 
 | Key | Default | Meaning |
 | --- | --- | --- |

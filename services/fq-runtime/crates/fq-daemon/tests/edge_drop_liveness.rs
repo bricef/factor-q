@@ -129,7 +129,7 @@ impl LlmClient for ParkedLlm {
 // ---------------------------------------------------------------------
 
 /// The daemon's operator surface over live stores and a real runner —
-/// assembled by the same `operator_registry` call `fq run` makes, so
+/// assembled by the same `operator_registry` call `fqd` makes, so
 /// what these tests exercise is the shipped handler, not a re-creation.
 ///
 /// The one deliberate omission is the projection consumer: nothing

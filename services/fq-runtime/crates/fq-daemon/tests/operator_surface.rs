@@ -76,7 +76,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
         fq_runtime::Harness::new(),
     ));
     // The agent registry the daemon shares between the Agent view and
-    // the resume path — one handle, as `fq run` wires it.
+    // the resume path — one handle, as `fqd` wires it.
     let agents = fq_runtime::shared_registry(fq_runtime::AgentRegistry::new());
     // `invocation.resume` is a command on the edge now, so its handle
     // is assembled here rather than handed to a NATS listener.

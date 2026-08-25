@@ -402,7 +402,7 @@ pub enum StoreError {
     #[error("failed to create database directory: {0}")]
     CreateDir(std::io::Error),
 
-    #[error("projection database not initialised at {0} (has `fq run` been started?)")]
+    #[error("projection database not initialised at {0} (has `fqd` been started?)")]
     NotInitialised(PathBuf),
 
     /// A database written by an older build, opened by a handle that
@@ -411,7 +411,7 @@ pub enum StoreError {
     /// and not something to deduce from missing SQL.
     #[error(
         "projection database at {path} was written by an older build and is missing \
-         {missing}. A read-only handle cannot migrate it — run `fq run` once against \
+         {missing}. A read-only handle cannot migrate it — start `fqd` once against \
          this state directory and it will bring the schema forward."
     )]
     SchemaOutdated { path: PathBuf, missing: String },

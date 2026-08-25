@@ -36,17 +36,15 @@ pub use crate::resume::ResumeControl;
 
 use crate::cli::{FqdArgs, init_tracing};
 
-/// The `fqd` entry point: the daemon and nothing else. `fq run`
-/// remains a compatibility alias until the Phase-5 split completes;
-/// both drive the same `run_daemon` path, so the edge and every other
-/// daemon behaviour land once, in shared code.
+/// The `fqd` entry point: the daemon and nothing else.
 #[tokio::main]
 pub async fn fqd_main() -> ExitCode {
     let args = FqdArgs::parse();
     init_tracing(args.global.log_format);
     // The daemon keeps SIGPIPE ignored (Rust's startup default): a
-    // long-running process must not be killable by a closed stdout —
-    // the same disposition `fq run` runs under.
+    // long-running process must not be killable by a closed stdout.
+    // The client sets the opposite disposition, for the opposite
+    // reason: `fq events tail | head` should end quietly.
     match run_daemon(&args.global).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -56,11 +54,6 @@ pub async fn fqd_main() -> ExitCode {
     }
 }
 
-/// Long-running foreground runtime. Connects to NATS, opens the
-/// projection store, spawns two tokio tasks — the projection
-/// consumer and the NATS trigger dispatcher — and waits for
-/// either Ctrl-C or a premature task failure.
-///
 mod boot;
 mod daemon;
 mod hosted;

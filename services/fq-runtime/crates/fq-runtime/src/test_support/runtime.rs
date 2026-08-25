@@ -1,4 +1,4 @@
-//! In-process test harness that boots the full `fq run`
+//! In-process test harness that boots the full `fqd`
 //! runtime against live NATS and [`MockAnthropicServer`].
 //!
 //! Use it to write acceptance scenarios without re-building

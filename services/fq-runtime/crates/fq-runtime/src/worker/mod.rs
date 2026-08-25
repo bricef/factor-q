@@ -6,7 +6,7 @@
 //! in-flight state, executes tool calls, and publishes lifecycle
 //! events to NATS.
 //!
-//! In v1 the control-plane and worker share a single `fq run`
+//! In v1 the control-plane and worker share a single `fqd`
 //! process; this module enforces the role boundary at compile
 //! time so v2 (separate deployment) is a process split rather
 //! than a redesign.

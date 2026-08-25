@@ -187,7 +187,7 @@ impl Daemon {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
             .spawn()
-            .expect("spawn fq run");
+            .expect("spawn fqd");
         Self { child, log_path }
     }
 

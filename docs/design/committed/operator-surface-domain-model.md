@@ -610,7 +610,7 @@ finding about the verb — not a reason to reach for the bus.
 
 ## Out of scope
 
-Process lifecycle (`fq init`, `fq run`/`fqd`) and local pure functions
+Process lifecycle (`fq init`, `fqd`) and local pure functions
 (`fq agent validate`) are not surface promises. The ADR-0016 agent-facing
 built-ins converge on this model later (plan Phase 7); the graph
 executor's signature work should check itself against the Resource/Report

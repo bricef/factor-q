@@ -180,7 +180,7 @@ fn assert_golden(name: &str, actual: &str) {
 // The sweep's own coverage is in `fq_runtime::control_plane::retention`.
 
 // ------------------------------------------------------------------
-// The paired-daemon harness: a live `fq run`, a client paired with its
+// The paired-daemon harness: a live `fqd`, a client paired with its
 // edge, and the scratch both share.
 //
 // Every verb below this line speaks the authenticated edge, so a broker
@@ -231,13 +231,13 @@ impl PairedDaemon {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
             .spawn()
-            .expect("spawn fq run");
+            .expect("spawn fqd");
 
         // Wait for steady state; fail loudly if the daemon dies on
         // startup.
         let deadline = Instant::now() + Duration::from_secs(30);
         let text = loop {
-            if let Some(status) = child.try_wait().expect("poll fq run") {
+            if let Some(status) = child.try_wait().expect("poll fqd") {
                 let log = std::fs::read_to_string(&log_path).unwrap_or_default();
                 panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
             }
@@ -330,7 +330,7 @@ impl PairedDaemon {
         let child = self.child.as_mut()?;
         let deadline = Instant::now() + timeout;
         loop {
-            match child.try_wait().expect("poll fq run") {
+            match child.try_wait().expect("poll fqd") {
                 Some(status) => {
                     self.child = None;
                     return Some(status);

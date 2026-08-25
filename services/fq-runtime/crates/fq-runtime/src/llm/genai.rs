@@ -9,7 +9,7 @@
 //! Auth is handled by `genai` itself via environment variables
 //! (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc). We don't override the
 //! resolver in this adapter; operators configure which env var to use
-//! per provider in `fq.toml` and ensure it's set in the runtime
+//! per provider in `fqd.toml` and ensure it's set in the runtime
 //! environment.
 
 use async_trait::async_trait;

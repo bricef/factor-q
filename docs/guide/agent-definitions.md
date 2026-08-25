@@ -46,7 +46,7 @@ configuration alone.
   deployment's `agents.default_model`. A definition with neither an
   explicit `model:` nor a configured default fails to load.
 - **A model must be declared to be usable.** Every model an agent names
-  must appear in some provider's `models = [...]` list in `fq.toml`. An
+  must appear in some provider's `models = [...]` list in `fqd.toml`. An
   agent that names an undeclared model fails to load — a typo can't
   silently reach the wire.
 - **Every declared model must be priced.** The daemon refuses to start
@@ -55,7 +55,7 @@ configuration alone.
   (ADR-0004) can't be defeated by an unpriced model tracking as $0.
 
 Declaring providers, the default model, and price overrides is a
-deployment (`fq.toml`) concern — see the generated config's `[providers]`
+deployment (`fqd.toml`) concern — see the generated config's `[providers]`
 and `[agents]` sections (`fq init`).
 
 ## Adding tools
@@ -259,7 +259,7 @@ operator (a shell is needed for the expansion):
 
 Instead of hardcoding an absolute workspace path, an agent can reference
 its working directory as `${workspace}`. The runtime binds the token per
-invocation, driven by `[workspace]` in `fq.toml`:
+invocation, driven by `[workspace]` in `fqd.toml`:
 
 ```yaml
 sandbox:
