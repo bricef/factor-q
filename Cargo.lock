@@ -1207,7 +1207,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "fq-agent"
+version = "0.1.0"
+dependencies = [
+ "fq-ops",
+ "fq-tools",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
 name = "fq-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "fq-agent",
+ "fq-edge",
+ "fq-ops",
+ "fq-tools",
+ "futures",
+ "libc",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tarpc",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "fq-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1294,11 +1334,13 @@ dependencies = [
 name = "fq-ops"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "strum 0.27.2",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -1310,6 +1352,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
+ "fq-agent",
  "fq-ops",
  "fq-test-support",
  "fq-tools",
@@ -1323,7 +1366,6 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
- "serde_yaml",
  "sqlx",
  "strum 0.27.2",
  "tempfile",
@@ -1333,7 +1375,6 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "walkdir",
 ]
 
 [[package]]

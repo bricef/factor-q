@@ -40,6 +40,7 @@ use crate::model::Domain;
 #[strum(serialize_all = "snake_case")]
 pub enum Invocation {
     Drop,
+    Resume,
 }
 
 #[derive(

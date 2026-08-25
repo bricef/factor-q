@@ -36,7 +36,9 @@ just fq --help
 factor-q/
 ├── Cargo.toml                  the single Cargo workspace (#194) — one Cargo.lock
 ├── services/fq-runtime/        runtime crates
-│   ├── crates/fq-cli/           fq + fqd binaries
+│   ├── crates/fq-agent/         agent definitions: model, parser, registry
+│   ├── crates/fq-cli/           the fq operator client
+│   ├── crates/fq-daemon/        the fqd daemon binary
 │   ├── crates/fq-edge/          authenticated generic edge
 │   ├── crates/fq-ops/           operation-registry contract crate
 │   ├── crates/fq-runtime/       core library

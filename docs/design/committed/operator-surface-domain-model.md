@@ -235,7 +235,7 @@ narrowed List by the envelope's `agent_id` and Stream by the consumer
 subject `fq.agent.<id>.>` — the same question only for events that happen
 to be agent-partitioned. Both are settled in one place each now: which
 event types are **transient**, and therefore on neither verb, lives in
-`fq_runtime::events::transient` and every reader derives from it; and a
+`fq_ops::events::transient` and every reader derives from it; and a
 filter field means the *domain's* field on every verb that takes it.
 **Cursors may be transport coordinates; identities may not — and neither
 may selections.**
@@ -541,9 +541,11 @@ settles the next case rather than the last one:
 
 - **Control flows one way in: client → edge → daemon → bus.** The
   daemon publishes because it owns the log; a client never does.
-  `fq.control.*` is therefore not an entry point. The subjects that
-  remain (`reload`, `down`, `invocation.resume`) are legacy, and
-  retire with their verbs' flips.
+  `fq.control.*` is therefore not an entry point — and as of
+  `invocation.resume`'s flip, not a namespace either: `reload` and
+  `down` retired with cohort 4.3, resume was the last one, and no
+  `fq.control.*` subject exists in the bus any more. The property
+  above is now the whole story rather than the direction of travel.
 - **A control subject is not a cheaper edge.** It skips authority
   (D7's verb × scope is enforced at the edge and nowhere else), skips
   the receipt/watermark contract (a subject can carry a reply, but not

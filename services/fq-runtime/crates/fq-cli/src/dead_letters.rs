@@ -20,10 +20,10 @@
 use anyhow::Context;
 
 use crate::cli::GlobalArgs;
-use crate::dead_letter_atom::DeadLetterFilter;
 use crate::edge_call::{edge_client_for, edge_invoke};
-use crate::trigger_command::TriggerKey;
 use crate::truncate_json;
+use fq_ops::surface::DeadLetterFilter;
+use fq_ops::surface::TriggerKey;
 
 /// The rendered listing, newest first.
 ///
@@ -61,7 +61,7 @@ pub(crate) async fn list_dead_letters(
                  page, narrow with --agent — the only narrowing this listing offers; the \
                  cursored read of the same dead letters is `dead_letter.stream` on the \
                  operator surface, which no `fq` verb consumes yet.",
-                cap = crate::dead_letter_atom::DEAD_LETTER_LIST_MAX_LIMIT
+                cap = fq_ops::surface::DEAD_LETTER_LIST_MAX_LIMIT
             )
         })?),
     };
@@ -72,8 +72,8 @@ pub(crate) async fn list_dead_letters(
     )
     .await?
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let states: Vec<fq_runtime::dead_letter::DeadLetterState> = serde_json::from_value(output)?;
-    let dead: Vec<&fq_runtime::dead_letter::DeadLetter> =
+    let states: Vec<fq_ops::dead_letter::DeadLetterState> = serde_json::from_value(output)?;
+    let dead: Vec<&fq_ops::dead_letter::DeadLetter> =
         states.iter().rev().map(|s| &s.dead_letter).collect();
 
     if json {
@@ -145,7 +145,7 @@ pub(crate) async fn requeue_dead_letter(
     // Answered offline, in the same breath as `fq agent validate`,
     // rather than costing a round trip. The daemon checks it again —
     // this is a courtesy, never a substitute.
-    fq_runtime::AgentId::new(agent).with_context(|| format!("invalid agent name '{agent}'"))?;
+    fq_ops::agent::AgentId::new(agent).with_context(|| format!("invalid agent name '{agent}'"))?;
 
     let client = edge_client_for(global).await?;
     let receipt = client
@@ -175,7 +175,7 @@ pub(crate) async fn requeue_dead_letter(
                 trigger_id.trigger_id
             )
         })?;
-    let trigger: fq_runtime::trigger::Trigger = serde_json::from_value(trigger)?;
+    let trigger: fq_ops::trigger::Trigger = serde_json::from_value(trigger)?;
     let result = RequeueResult {
         agent_id: agent.to_string(),
         trigger_id: trigger.id.to_string(),

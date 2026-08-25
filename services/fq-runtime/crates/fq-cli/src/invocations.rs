@@ -1,21 +1,18 @@
 //! The `fq invocation` verbs (list, show, drop, resume, transcript): the
 //! operator's triage surface over one invocation's life.
 //!
-//! Split out of `lib.rs` (#189) on the `workers.rs` precedent. Every read here
+//! Split out of `lib.rs` (#189) on the `workers.rs` precedent. Every verb here
 //! rides the authenticated edge — the daemon answers from its views — so this
-//! module is rendering plus the one round trip each verb needs. The daemon
-//! half of `resume` is `resume.rs`, which owns the request both sides speak.
+//! module is rendering plus the one round trip each verb needs. `resume` was
+//! the last exception, reaching the broker directly; it is a declared command
+//! now, and the client no longer knows a NATS url exists.
 
 use anyhow::Context;
-use fq_runtime::EventBus;
-use fq_runtime::agent::AgentId;
+use fq_ops::agent::AgentId;
 
 use crate::cli::{GlobalArgs, TranscriptFormat};
 use crate::edge_call::{edge_client_for, edge_invoke, edge_transcript_snapshot, next_turn_batch};
-use fq_runtime::surface::{InvocationListFilter, InvocationViewKey};
-
-use crate::operator_surface::parse_invocation_status_filter;
-use crate::resume::{InvocationResumeRequest, InvocationResumeResponse};
+use fq_ops::surface::{InvocationListFilter, InvocationViewKey};
 
 // ============================================================
 // fq invocation subcommand
@@ -23,7 +20,7 @@ use crate::resume::{InvocationResumeRequest, InvocationResumeResponse};
 
 /// One human-readable line for an invocation list row. Pure;
 /// covered by unit tests.
-fn format_invocation_list_row_human(item: &fq_runtime::views::InvocationSummaryView) -> String {
+fn format_invocation_list_row_human(item: &fq_ops::views::InvocationSummaryView) -> String {
     let inv_short: String = item.invocation_id.chars().take(8).collect();
     let agent = item.agent_id.as_deref().unwrap_or("?");
     let agent_trim: String = agent.chars().take(22).collect();
@@ -55,7 +52,10 @@ pub(crate) async fn invocation_list(
     json: bool,
 ) -> anyhow::Result<()> {
     // Validate locally for a fast, friendly error before dialling.
-    status.map(parse_invocation_status_filter).transpose()?;
+    status
+        .map(fq_ops::surface::validate_invocation_status_filter)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
     // The flip (plan Phase 3b): this read speaks the authenticated
     // edge — the daemon serves it from its views. Rendering is
     // untouched; the goldens prove it byte-identical.
@@ -70,7 +70,7 @@ pub(crate) async fn invocation_list(
     )
     .await?
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let items: Vec<fq_runtime::views::InvocationSummaryView> = serde_json::from_value(output)?;
+    let items: Vec<fq_ops::views::InvocationSummaryView> = serde_json::from_value(output)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&items)?);
@@ -104,7 +104,7 @@ pub(crate) async fn invocation_show(
         })?,
     )
     .await?;
-    let detail: fq_runtime::views::InvocationDetailView = match output {
+    let detail: fq_ops::views::InvocationDetailView = match output {
         Ok(value) => serde_json::from_value(value)?,
         Err(fq_edge::wire::WireError::NotFound { .. }) => {
             eprintln!("no invocation found with id={id}");
@@ -166,32 +166,25 @@ pub(crate) async fn invocation_resume(
     reason: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let bus = EventBus::connect(&config.nats.url).await.with_context(|| {
-        format!(
-            "failed to connect to NATS at {}; start the daemon first",
-            config.nats.url
+    let client = edge_client_for(global).await?;
+    // A refusal arrives as an error with the daemon's own message —
+    // terminal, live, already resumed, or unknown — so the four stay
+    // distinguishable without a flag the caller could ignore.
+    let receipt = client
+        .invoke(
+            fq_ops::OpId::Verb(fq_ops::VerbId::Invocation(fq_ops::Invocation::Resume)),
+            serde_json::json!({
+                "invocation_id": id,
+                "reason": reason,
+            }),
         )
-    })?;
-    let request = InvocationResumeRequest {
-        invocation_id: id.to_string(),
-        reason: reason.map(str::to_string),
-    };
-    let bytes = bus
-        .request_control_resume(serde_json::to_vec(&request)?)
-        .await
-        .context("resume request failed; start the daemon first")?;
-    let response: InvocationResumeResponse = serde_json::from_slice(&bytes)?;
-    if !response.ok {
-        anyhow::bail!(response.message);
-    }
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let receipt: fq_ops::Receipt = serde_json::from_value(receipt)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
     } else {
-        println!(
-            "Resumed invocation {id}; injected interrupted results for: {}.",
-            response.completed_call_ids.join(", ")
-        );
+        println!("Resumed invocation {id}.");
         println!("Follow with `fq invocation show {id}` or `fq invocation transcript {id}`.");
     }
     Ok(())
@@ -265,7 +258,7 @@ pub(crate) async fn invocation_drop(
             "dropped invocation {id} at event sequence {event_seq}, but reading it back failed: {e}"
         )
     })?;
-    let detail: fq_runtime::views::InvocationDetailView = serde_json::from_value(detail)?;
+    let detail: fq_ops::views::InvocationDetailView = serde_json::from_value(detail)?;
     let result = InvocationDropResult {
         invocation_id: id.to_string(),
         // An invocation whose only events are operator-issued has no
@@ -318,7 +311,7 @@ pub(crate) async fn invocation_transcript(
     format: Option<TranscriptFormat>,
     full: bool,
 ) -> anyhow::Result<()> {
-    use fq_runtime::transcript::{DEFAULT_TRUNCATE_BYTES, dedup_key, render_pretty, snapshot_keys};
+    use fq_ops::transcript::{DEFAULT_TRUNCATE_BYTES, dedup_key, render_pretty, snapshot_keys};
 
     let as_json = json || matches!(format, Some(TranscriptFormat::Json));
     if json && matches!(format, Some(TranscriptFormat::Pretty)) {
@@ -399,7 +392,7 @@ pub(crate) async fn invocation_transcript(
             .map_err(|e| anyhow::anyhow!("turn.stream: {e}"))?;
         cursor = batch.next_from_seq;
         for item in batch.items {
-            let turn: fq_runtime::turn::TurnState = serde_json::from_value(item.item)?;
+            let turn: fq_ops::turn::TurnState = serde_json::from_value(item.item)?;
             let entry = turn.transcript_entry();
             if let Some(key) = dedup_key(&entry)
                 && !seen.insert(key)

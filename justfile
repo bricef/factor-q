@@ -9,9 +9,12 @@ set positional-arguments
 
 # All Rust crates live in the single workspace at this justfile's directory
 # (#194); recipes scope their suite with `-p` filters instead of cd'ing into
-# per-service workspaces. The runtime suite is these five crates — a new
+# per-service workspaces. The runtime suite is these seven crates — a new
 # services/fq-runtime crate joins this list and the root Cargo.toml members.
-runtime_pkgs := "-p fq-cli -p fq-edge -p fq-ops -p fq-runtime -p fq-tools"
+# `fq-daemon` is here because every gate below is a `-p` filter: a crate
+# absent from this line is not linted, not doc-checked and not tested, and
+# the gates go green having never compiled it.
+runtime_pkgs := "-p fq-agent -p fq-cli -p fq-daemon -p fq-edge -p fq-ops -p fq-runtime -p fq-tools"
 infra_dir := "infrastructure"
 
 # Show available recipes
@@ -625,6 +628,7 @@ check-version tag:
 # Build the release binaries (fq, fq-cas, fq-dashboard) for a target triple.
 build-release target:
     cargo build --release --target {{target}} -p fq-cli --bin fq
+    cargo build --release --target {{target}} -p fq-daemon --bin fqd
     cargo build --release --target {{target}} -p fq-store --features cli --bin fq-cas
     cargo build --release --target {{target}} -p fq-dashboard
 
@@ -632,7 +636,7 @@ build-release target:
 # use `.` as the crate dir; the Go adapters keep per-adapter target dirs.
 # Package the built binaries into a single bundle in dist/ (.tar.gz + .sha256).
 package target:
-    bash scripts/package.sh {{target}} .:fq .:fq-cas
+    bash scripts/package.sh {{target}} .:fq .:fqd .:fq-cas
 
 # Create a draft GitHub release for a tag from the dist/ artifacts.
 publish-release tag:
@@ -666,7 +670,7 @@ build-cron target:
 # verbatim).
 # Package the rolling main-branch deploy bundle into dist/.
 package-main target:
-    bash scripts/package.sh {{target}} .:fq .:fq-dashboard .:fq-cas adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh ops/dogfood/cron.sh
+    bash scripts/package.sh {{target}} .:fq .:fqd .:fq-dashboard .:fq-cas adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh ops/dogfood/cron.sh
 
 # Recreates both the release and its tag so tag, assets, and notes always
 # point at the same commit. The channel keeps no history by design —

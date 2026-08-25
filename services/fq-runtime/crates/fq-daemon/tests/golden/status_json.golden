@@ -1,0 +1,7 @@
+{
+  "config": {
+    "edge": "<EDGE_ADDR>"
+  },
+  "daemon": null,
+  "daemon_error": "could not reach the edge at <EDGE_ADDR>: Connection refused (os error #)"
+}

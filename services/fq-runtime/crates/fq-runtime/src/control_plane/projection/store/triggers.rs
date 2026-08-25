@@ -130,7 +130,7 @@ impl ProjectionStore {
         event: &Event,
         seq: Option<u64>,
     ) -> Result<(), StoreError> {
-        let Some(trigger) = Trigger::from_event(event) else {
+        let Some(trigger) = crate::trigger::from_event(event) else {
             return Ok(());
         };
         let payload = serde_json::to_string(&trigger.payload)

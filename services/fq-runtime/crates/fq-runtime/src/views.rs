@@ -26,14 +26,14 @@ mod costs;
 // reads here that are not header folds.
 mod transcript;
 
-// The `since` argument every time-narrowed read here takes, and the one
-// grammar its callers share.
-pub mod since;
-
 // The view types themselves are `fq_ops::views` and are re-exported
 // here, so a caller reaches them by the same path as before. What is
 // left in this module is the reading: the store handles, and the
 // `From<Row>` conversions that sit beside the rows they convert.
+//
+// `since` went with them and for the same reason: parsing a spelling
+// into a bound is pure, and `fq` does it at the argument. Comparing
+// that bound against a column is what stayed.
 pub use fq_ops::views::*;
 
 use crate::agent::AgentId;

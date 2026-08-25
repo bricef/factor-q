@@ -11,9 +11,10 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use fq_runtime::Config;
 use tracing_subscriber::{EnvFilter, fmt};
 
+/// The client's config file. The daemon reads `fqd.toml` — one file
+/// per binary, named for it, so neither has to know the other's shape.
 const DEFAULT_CONFIG_PATH: &str = "fq.toml";
 
 #[derive(Parser)]
@@ -47,27 +48,15 @@ pub(crate) enum LogFormat {
 /// Precedence: CLI flag > env var > config file > default.
 #[derive(Args, Clone)]
 pub(crate) struct GlobalArgs {
-    /// Path to the factor-q config file
+    /// Path to the client's config file. Optional: with one paired
+    /// daemon there is nothing to configure.
     #[arg(long, env = "FQ_CONFIG", default_value = DEFAULT_CONFIG_PATH, global = true)]
     config: PathBuf,
 
-    /// Override the agents directory from config
-    #[arg(long, env = "FQ_AGENTS_DIR", global = true)]
-    agents_dir: Option<PathBuf>,
-
-    /// Override the NATS URL from config
-    #[arg(long, env = "FQ_NATS_URL", global = true)]
-    nats_url: Option<String>,
-
-    /// Override the cache directory from config
-    #[arg(long, env = "FQ_CACHE_DIR", global = true)]
-    cache_dir: Option<PathBuf>,
-
-    /// Override the state directory from config — durable data that
-    /// must survive a restart (the edge identity), as opposed to the
-    /// regenerable cache directory
-    #[arg(long, env = "FQ_STATE_DIR", global = true)]
-    state_dir: Option<PathBuf>,
+    /// The daemon's edge address. Overrides the config's default and
+    /// disambiguates when several daemons are paired.
+    #[arg(long, env = "FQ_ADDR", global = true)]
+    addr: Option<String>,
 
     /// Log output format for the tracing subscriber. `text` (the
     /// default) is human-readable ANSI; `json` emits one JSON object
@@ -77,22 +66,14 @@ pub(crate) struct GlobalArgs {
 }
 
 impl GlobalArgs {
-    /// Load the config file (or defaults) and apply CLI/env overrides on top.
-    pub(crate) fn resolve_config(&self) -> anyhow::Result<Config> {
-        let mut config = Config::load_or_default(&self.config)?;
-        if let Some(dir) = &self.agents_dir {
-            config.agents.directory = dir.clone();
-        }
-        if let Some(url) = &self.nats_url {
-            config.nats.url = url.clone();
-        }
-        if let Some(dir) = &self.cache_dir {
-            config.cache.directory = dir.clone();
-        }
-        if let Some(dir) = &self.state_dir {
-            config.state.directory = dir.clone();
-        }
-        Ok(config)
+    /// The daemon address named on the command line, if any.
+    pub(crate) fn addr(&self) -> Option<&str> {
+        self.addr.as_deref()
+    }
+
+    /// The client's own config. A missing file is the healthy case.
+    pub(crate) fn client_config(&self) -> anyhow::Result<crate::config::ClientConfig> {
+        crate::config::ClientConfig::load(&self.config)
     }
 }
 
@@ -104,8 +85,6 @@ pub(crate) enum Commands {
         #[arg(long, short = 'f')]
         force: bool,
     },
-    /// Run the runtime in the foreground
-    Run,
     /// Ask a running daemon to hot-reload its agent definitions from
     /// disk, without a restart. The daemon re-reads ITS agents
     /// directory and atomically swaps the registry the dispatcher
@@ -175,7 +154,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         agent: Option<String>,
         /// Filter by time: a date, a UTC date-time, or an RFC3339 instant
-        #[arg(long, value_parser = fq_runtime::views::since::lower_bound)]
+        #[arg(long, value_parser = fq_ops::views::since::lower_bound)]
         since: Option<String>,
         /// Emit JSON instead of human-readable output.
         #[arg(long)]
@@ -502,7 +481,7 @@ pub(crate) enum EventCommands {
         #[arg(long, name = "type")]
         event_type: Option<String>,
         /// Events at or after this time: a date, a UTC date-time, or RFC3339
-        #[arg(long, value_parser = fq_runtime::views::since::lower_bound)]
+        #[arg(long, value_parser = fq_ops::views::since::lower_bound)]
         since: Option<String>,
         /// Maximum rows in one page, at most 2000. A bigger ask is
         /// refused, not shortened — so fewer rows than you asked for
@@ -562,14 +541,6 @@ pub(crate) fn init_tracing(format: LogFormat) {
             .json()
             .init(),
     }
-}
-
-/// `fqd` takes the global connection/config flags and no subcommands.
-#[derive(clap::Parser)]
-#[command(name = "fqd", about = "The factor-q daemon", version)]
-pub(crate) struct FqdArgs {
-    #[command(flatten)]
-    pub(crate) global: GlobalArgs,
 }
 
 #[cfg(test)]

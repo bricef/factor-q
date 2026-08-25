@@ -8,7 +8,7 @@
 #
 # The host never compiles. Artifacts come from the rolling `main-latest`
 # pre-release (.github/workflows/main-artifacts.yml): one checksummed
-# tarball holding fq, fq-cas, fq-dashboard, github-watcher and their
+# tarball holding fq, fqd, fq-cas, fq-dashboard, github-watcher and their
 # launchers, all stamped with the commit SHA they were built from. Every
 # deployed build is kept under releases/<sha>/ and `current` symlinks
 # the active one, so rollback is `deploy.sh <previous-sha>` — local, no
@@ -55,7 +55,7 @@ die() { printf '\n\033[1;31m✗ ERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # --- process selection: match /proc/<pid>/exe, never the name alone -------
 # A dev build left running from .claude/worktrees/<x>/target/debug/fq is
-# also called `fq`, and `pgrep -x fq | head -1` returns the LOWEST pid — so
+# also called `fqd`, and `pgrep -x fqd | head -1` returns the LOWEST pid — so
 # a stray that outlives a daemon restart silently shadows the real process.
 # Seen 2026-07-27: 17 orphaned worktree daemons (oldest 11 days) made the
 # post-launch check report "daemon PID N runs …/target/debug/fq (deleted)"
@@ -155,7 +155,7 @@ fi
 
 # --- 2. early exit when the target is already live -----------------------
 ACTIVE="$(readlink current 2>/dev/null || true)"
-DAEMON_PID="$(pids_installed fq | head -1 || true)"
+DAEMON_PID="$(pids_installed fqd | head -1 || true)"
 CRON_OK=1
 if [ -f fq-cron.toml ]; then
     CRON_PID="$(pids_installed fq-cron | head -1 || true)"
@@ -164,7 +164,7 @@ if [ -f fq-cron.toml ]; then
 fi
 if [ "$FORCE" != 1 ] && [ "$ACTIVE" = "$REL" ] && [ -n "$DAEMON_PID" ]; then
     exe="$(readlink "/proc/$DAEMON_PID/exe" 2>/dev/null || true)"
-    if [ "$exe" = "$DOGFOOD/$REL/fq" ] && [ -n "$(pids_release github-watcher)" ] \
+    if [ "$exe" = "$DOGFOOD/$REL/fqd" ] && [ -n "$(pids_release github-watcher)" ] \
         && [ -n "$(pids_release fq-dashboard)" ] && [ "$CRON_OK" = 1 ]; then
         ok "already running $SHA — nothing to do (--force to restart anyway)"
         exit 0
@@ -266,11 +266,11 @@ for _ in $(seq 1 "$READY_WAIT"); do
 done
 [ "$ready" = 1 ] || die "daemon did not reach 'Runtime ready' within ${READY_WAIT}s (see logs/fq-run.log)"
 
-NEW_DAEMON="$(pids_release fq | head -1 || true)"
-[ -n "$NEW_DAEMON" ] || die "no fq process from $REL after relaunch (see logs/fq-run.log)"
+NEW_DAEMON="$(pids_release fqd | head -1 || true)"
+[ -n "$NEW_DAEMON" ] || die "no fqd process from $REL after relaunch (see logs/fq-run.log)"
 exe="$(readlink "/proc/$NEW_DAEMON/exe" 2>/dev/null || true)"
-[ "$exe" = "$DOGFOOD/$REL/fq" ] \
-    || die "daemon PID $NEW_DAEMON runs $exe, not $DOGFOOD/$REL/fq"
+[ "$exe" = "$DOGFOOD/$REL/fqd" ] \
+    || die "daemon PID $NEW_DAEMON runs $exe, not $DOGFOOD/$REL/fqd"
 ok "daemon up (PID $NEW_DAEMON) from $REL, Runtime ready"
 
 log "Verifying watcher startup"

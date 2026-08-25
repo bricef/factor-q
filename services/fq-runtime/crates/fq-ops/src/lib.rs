@@ -18,6 +18,15 @@
 //! - **Machinery reads**: `Get` on the synthetic `Control` resource —
 //!   no category of their own.
 //!
+//! Alongside those four categories it holds the vocabularies the
+//! surface answers *in*: the view shapes ([`views`]), the transcript
+//! ([`transcript`]) and turn ([`turn`]) renderings, and the event
+//! schema ([`events`]) with the identifiers and grants an event
+//! carries ([`agent`], [`worker`]). Producing any of them — folding a
+//! store row, probing JetStream, publishing an event — stays in
+//! `fq-runtime`, which re-exports these so its own call sites are
+//! unchanged.
+//!
 //! This crate holds the *type foundation only* — the model's value
 //! types, the wire identity, and the self-describing [`Registry`].
 //! Handlers, transports, auth middleware, and the generic
@@ -27,7 +36,10 @@
 //! must stay a leaf (no sqlx, no NATS, no tokio; the thin `fq` client
 //! links it alone — `tests/forbidden_dependency_gate.rs` enforces it).
 
+pub mod agent;
 pub mod agent_view;
+pub mod dead_letter;
+pub mod events;
 pub mod fixtures;
 pub mod health;
 pub mod model;
@@ -35,8 +47,10 @@ pub mod opid;
 pub mod registry;
 pub mod surface;
 pub mod transcript;
+pub mod trigger;
 pub mod turn;
 pub mod views;
+pub mod worker;
 
 pub use model::{
     Atom, AtomRef, Authority, Command, Domain, Receipt, Report, Stability, Synthetic, Verb, View,

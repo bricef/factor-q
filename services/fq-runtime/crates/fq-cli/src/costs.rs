@@ -14,8 +14,8 @@
 //! daemon that owns them.
 
 use crate::cli::GlobalArgs;
-use crate::cost_report::CostSummaryParams;
 use crate::edge_call::edge_invoke;
+use fq_ops::surface::CostSummaryParams;
 
 /// Show per-agent cost totals.
 pub(crate) async fn show_costs(
@@ -35,7 +35,7 @@ pub(crate) async fn show_costs(
     )
     .await?
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let report: fq_runtime::views::CostReport = serde_json::from_value(output)?;
+    let report: fq_ops::views::CostReport = serde_json::from_value(output)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

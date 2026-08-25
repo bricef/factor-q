@@ -33,7 +33,7 @@ pub(crate) async fn publish_trigger(
     // question and is deliberately not asked here — a trigger for an
     // unknown agent is a dead letter, which is a durable record an
     // operator can find, not a client-side refusal that leaves none.
-    fq_runtime::AgentId::new(agent_name)
+    fq_ops::agent::AgentId::new(agent_name)
         .with_context(|| format!("invalid agent name '{agent_name}'"))?;
 
     // A payload that is not JSON is the string itself — the shorthand

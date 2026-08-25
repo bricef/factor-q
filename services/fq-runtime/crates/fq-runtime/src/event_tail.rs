@@ -2,47 +2,17 @@
 //! Turn stream's substrate (Phase 3d). Split from `bus.rs` to keep
 //! that file inside its size budget; same `EventBus`, read-only
 //! surface.
+//!
+//! The tailing is here; what a tail *yields* is not. [`EventState`]
+//! is a wire shape — one event and the position it was read at — so
+//! it lives in `fq-ops` with the rest of the event vocabulary, and is
+//! re-exported here so `crate::event_tail::EventState` still names it.
 
 use crate::bus::{BusError, EventBus, STREAM_NAME};
 use crate::events::Event;
 use async_nats::jetstream::consumer;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
-/// One recorded event, with the log position it was read at.
-///
-/// The Event atom's state is the event itself, unabridged. It is the
-/// substrate every other resource folds from, so an atom that dropped
-/// the payload would not be the fact; the projection's `events` table
-/// is an *index* over these, not the atom. The event's **identity**
-/// is `event.envelope.event_id`, which is what `event.get` takes.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct EventState {
-    /// Where in the log this event sits — the universal cursor (P5):
-    /// the same number that cursors `event.stream`, feeds `min_seq`
-    /// gates, and appears in a command receipt's `watermarks`.
-    ///
-    /// It does *not* appear in the receipt's `AtomRef`, which names
-    /// the event by `event_id`. A receipt separates the two on
-    /// purpose: what was written is addressed by identity, how far the
-    /// log got is addressed by position.
-    ///
-    /// A cursor, never an identity. It says where the read landed,
-    /// and it is only meaningful against the log that produced it:
-    /// recreate the stream and the number means something else. Ask
-    /// for an event by `event_id`; use this to resume.
-    pub seq: u64,
-    /// The event exactly as published.
-    ///
-    /// Declared to the surface as an opaque object rather than a
-    /// reflected schema: an event already names its own payload
-    /// contract in `envelope.schema_id` (`factor-q/llm_response@1`),
-    /// which is the versioned reference a reader resolves, and
-    /// reflecting the whole payload tree here would need schemars'
-    /// chrono and uuid integrations — a wider change than this atom.
-    #[schemars(with = "serde_json::Value")]
-    pub event: Event,
-}
+pub use fq_ops::events::EventState;
 
 impl EventBus {
     /// An ephemeral, ordered, ack-less consumer over the event stream

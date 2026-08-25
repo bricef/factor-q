@@ -15,11 +15,18 @@
 //! serves, not an operator *action* — and because a client naming
 //! `control_plane::operator::` is exactly what the Phase-4 migration
 //! gate counts.
-
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+//!
+//! The two shapes themselves are now `fq_ops::dead_letter` and are
+//! re-exported here, so a caller reaches them by the same path as
+//! before. What is left in this module is the *recognition*: the
+//! annotation keys the emitters write, and [`from_event`], the lens
+//! that reads one back. Both need an `Event`, which is runtime
+//! machinery — the data can be deserialised by a client that has never
+//! seen the log, and producing it cannot.
 
 use crate::events::{Event, EventPayload, FailureKind};
+
+pub use fq_ops::dead_letter::{DeadLetter, DeadLetterState};
 
 /// Annotation keys shared by the two dead-letter emitters (#49/#169):
 /// the dispatcher's inline path and the advisory watch. `trigger_*`
@@ -52,106 +59,50 @@ pub const DEAD_LETTER_SOURCE_KEY: &str = "dead_letter_source";
 /// requeue to be refused on.
 pub const DEAD_LETTER_TRIGGER_ID_KEY: &str = "trigger_id";
 
-/// One dead-lettered trigger, as its terminal event records it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct DeadLetter {
-    pub event_id: String,
-    /// When the exhaustion was recorded, RFC3339.
-    ///
-    /// Declared to the surface as a string rather than a reflected
-    /// schema: that is exactly what it serialises as, and reflecting
-    /// `chrono::DateTime` would need schemars' chrono integration —
-    /// a wider change than this atom (the Event atom made the same
-    /// call for its payload tree).
-    #[schemars(with = "String")]
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub agent_id: String,
-    pub trigger_subject: String,
-    /// The original trigger's sequence on the **trigger** stream — the
-    /// key that reconciles the inline and advisory emitters, and the
-    /// selector `dead_letter.requeue` takes.
-    ///
-    /// Absent when the advisory arrived after the trigger had aged
-    /// out, which is why it is not this atom's identity: an identity
-    /// that can be missing is not one. The atom is addressed by its
-    /// **event-log** sequence — see [`DeadLetterState`].
-    pub trigger_stream_seq: Option<u64>,
-    /// Which emitter surfaced it: `"inline"` | `"advisory"`.
-    pub source: String,
-    pub trigger_payload: serde_json::Value,
-    pub error_message: String,
-}
-
-impl DeadLetter {
-    /// Recognise a dead letter in one recorded event, or decline.
-    ///
-    /// This is the whole of the atom's definition: a `Failed` event
-    /// whose `error_kind` is `TriggerExhausted`, with the emitters'
-    /// annotations lifted into domain fields. Every read — Get, List
-    /// and Stream alike — is this predicate applied to a different
-    /// span of the log, so there is one place the shape can drift.
-    ///
-    /// A missing annotation is rendered as an empty value rather than
-    /// refused: the annotations are how the emitters describe the
-    /// trigger, and an exhaustion the log records with less detail is
-    /// still an exhaustion the operator needs to see.
-    pub fn from_event(event: &Event) -> Option<Self> {
-        let EventPayload::Failed(failed) = &event.payload else {
-            return None;
-        };
-        if !matches!(failed.error_kind, FailureKind::TriggerExhausted) {
-            return None;
-        }
-        let annotation = |key: &str| event.annotations.0.get(key);
-        let string = |key: &str| {
-            annotation(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string()
-        };
-        Some(DeadLetter {
-            event_id: event.envelope.event_id.to_string(),
-            timestamp: event.envelope.timestamp,
-            agent_id: event.envelope.agent_id.as_str().to_string(),
-            trigger_subject: string(DEAD_LETTER_SUBJECT_KEY),
-            trigger_stream_seq: annotation(DEAD_LETTER_STREAM_SEQ_KEY).and_then(|v| v.as_u64()),
-            source: string(DEAD_LETTER_SOURCE_KEY),
-            trigger_payload: annotation(DEAD_LETTER_PAYLOAD_KEY)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-            error_message: failed.error_message.clone(),
-        })
+/// Recognise a dead letter in one recorded event, or decline.
+///
+/// This is the whole of the atom's definition: a `Failed` event whose
+/// `error_kind` is `TriggerExhausted`, with the emitters' annotations
+/// lifted into domain fields. Every read — Get, List and Stream alike —
+/// is this predicate applied to a different span of the log, so there
+/// is one place the shape can drift.
+///
+/// A missing annotation is rendered as an empty value rather than
+/// refused: the annotations are how the emitters describe the trigger,
+/// and an exhaustion the log records with less detail is still an
+/// exhaustion the operator needs to see.
+///
+/// A free function rather than `DeadLetter::from_event`, because an
+/// inherent impl cannot follow a type across a crate boundary and the
+/// type is a shape the client shares. The keys it reads stay here with
+/// it: they are how the emitters write a dead letter, and nothing that
+/// only *reads* one needs to know them.
+pub fn from_event(event: &Event) -> Option<DeadLetter> {
+    let EventPayload::Failed(failed) = &event.payload else {
+        return None;
+    };
+    if !matches!(failed.error_kind, FailureKind::TriggerExhausted) {
+        return None;
     }
-}
-
-/// A dead letter addressed by its event-log sequence — the universal
-/// cursor (P5): the same number that cursors `dead_letter.stream` and
-/// feeds `min_seq` gates.
-///
-/// It does not ride in a command receipt's `AtomRef`, which names an
-/// atom by identity — and this domain has no identity to give it, so
-/// no command mints a DeadLetter reference. Addressing a dead letter
-/// positionally is a known gap rather than a design: recreate the
-/// stream and a stored sequence names a different letter.
-///
-/// `dead_letter.requeue` is the one command over this domain and it
-/// does not close the gap — it steps around it. What a requeue makes is
-/// a *trigger*, so its receipt names one, in a different domain from
-/// the verb's own. A DeadLetter reference is still not a thing that
-/// exists.
-///
-/// The identity is the log sequence and not the trigger sequence for
-/// three reasons, in ascending order of force: the trigger sequence is
-/// a coordinate on a *different* stream, it is not unique across
-/// agents, and it can be absent altogether. The Event and Turn atoms
-/// are keyed the same way, so a sequence read out of any of the three
-/// streams means the same thing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct DeadLetterState {
-    pub seq: u64,
-    /// The fact itself. Nested rather than flattened so the identity
-    /// is visibly the atom's and not one of the trigger's own fields.
-    pub dead_letter: DeadLetter,
+    let annotation = |key: &str| event.annotations.0.get(key);
+    let string = |key: &str| {
+        annotation(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    Some(DeadLetter {
+        event_id: event.envelope.event_id.to_string(),
+        timestamp: event.envelope.timestamp,
+        agent_id: event.envelope.agent_id.as_str().to_string(),
+        trigger_subject: string(DEAD_LETTER_SUBJECT_KEY),
+        trigger_stream_seq: annotation(DEAD_LETTER_STREAM_SEQ_KEY).and_then(|v| v.as_u64()),
+        source: string(DEAD_LETTER_SOURCE_KEY),
+        trigger_payload: annotation(DEAD_LETTER_PAYLOAD_KEY)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        error_message: failed.error_message.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -176,11 +127,11 @@ mod tests {
     #[test]
     fn only_trigger_exhaustion_is_a_dead_letter() {
         assert!(
-            DeadLetter::from_event(&failed(FailureKind::TriggerExhausted)).is_some(),
+            from_event(&failed(FailureKind::TriggerExhausted)).is_some(),
             "an exhausted trigger is the atom"
         );
         assert!(
-            DeadLetter::from_event(&failed(FailureKind::RuntimeError)).is_none(),
+            from_event(&failed(FailureKind::RuntimeError)).is_none(),
             "an ordinary failure shares the subject and is not the atom"
         );
         let completed = Event::new(
@@ -195,7 +146,7 @@ mod tests {
                 total_duration_ms: 0,
             }),
         );
-        assert!(DeadLetter::from_event(&completed).is_none());
+        assert!(from_event(&completed).is_none());
     }
 
     #[test]
@@ -208,7 +159,7 @@ mod tests {
             .annotate(DEAD_LETTER_PAYLOAD_KEY, serde_json::json!({"n": 1}))
             .annotate(DEAD_LETTER_STREAM_SEQ_KEY, serde_json::json!(11))
             .annotate(DEAD_LETTER_SOURCE_KEY, serde_json::json!("inline"));
-        let dead = DeadLetter::from_event(&event).expect("a dead letter");
+        let dead = from_event(&event).expect("a dead letter");
         assert_eq!(dead.trigger_subject, "fq.trigger.researcher");
         assert_eq!(dead.trigger_stream_seq, Some(11));
         assert_eq!(dead.source, "inline");
@@ -223,8 +174,7 @@ mod tests {
     /// the failures that took longest to surface.
     #[test]
     fn a_dead_letter_with_no_annotations_is_still_a_dead_letter() {
-        let dead =
-            DeadLetter::from_event(&failed(FailureKind::TriggerExhausted)).expect("a dead letter");
+        let dead = from_event(&failed(FailureKind::TriggerExhausted)).expect("a dead letter");
         assert_eq!(dead.trigger_subject, "");
         assert_eq!(dead.trigger_stream_seq, None);
         assert_eq!(dead.source, "");

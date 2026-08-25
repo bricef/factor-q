@@ -23,4 +23,4 @@ set -a
 . ./.secrets/env
 set +a
 
-exec ./current/fq run
+exec ./current/fqd

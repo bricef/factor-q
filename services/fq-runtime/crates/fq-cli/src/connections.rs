@@ -147,8 +147,10 @@ pub(crate) async fn connect(
 ) -> anyhow::Result<()> {
     use std::io::IsTerminal;
 
-    let config = global.resolve_config()?;
-    let addr = addr.unwrap_or_else(|| config.edge.bind.clone());
+    let addr = match addr {
+        Some(a) => a,
+        None => crate::edge_call::daemon_addr(global)?,
+    };
     let path = connections_path()?;
     let existing = load_connections(&path)?.connections.get(&addr).cloned();
 
@@ -239,6 +241,16 @@ pub(crate) async fn edge_client(
 }
 
 /// Load the stored pairing for `addr`, with guidance when absent.
+/// Every address this client has a pairing for, in stored order.
+///
+/// The client needs this to answer "which daemon" without being told:
+/// one pairing is not ambiguous, and several are — the caller turns
+/// that into a default or an error naming the choices.
+pub(crate) fn paired_addresses() -> anyhow::Result<Vec<String>> {
+    let path = connections_path()?;
+    Ok(load_connections(&path)?.connections.into_keys().collect())
+}
+
 pub(crate) fn stored_connection(addr: &str) -> anyhow::Result<ConnectionEntry> {
     let path = connections_path()?;
     load_connections(&path)?
@@ -259,8 +271,10 @@ pub(crate) async fn ops_list(
     addr: Option<String>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let addr = addr.unwrap_or_else(|| config.edge.bind.clone());
+    let addr = match addr {
+        Some(a) => a,
+        None => crate::edge_call::daemon_addr(global)?,
+    };
     let entry = stored_connection(&addr)?;
     let client = edge_client(
         &addr,
@@ -332,8 +346,10 @@ pub(crate) fn token_attenuate(
     let token = match token {
         Some(token) => token,
         None => {
-            let config = global.resolve_config()?;
-            let addr = addr.unwrap_or_else(|| config.edge.bind.clone());
+            let addr = match addr {
+                Some(a) => a,
+                None => crate::edge_call::daemon_addr(global)?,
+            };
             stored_connection(&addr)?.token
         }
     };

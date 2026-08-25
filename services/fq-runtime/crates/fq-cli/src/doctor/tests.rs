@@ -5,8 +5,8 @@
 //! be pinned here either.
 
 use super::*;
-use crate::doctor_report::build_doctor_report;
-use fq_runtime::views::{ExecutionsView, FailureView, WorkerView};
+use fq_ops::surface::build_doctor_report;
+use fq_ops::views::{ExecutionsView, FailureView, WorkerView};
 
 fn worker(id: &str, status: &str) -> WorkerView {
     WorkerView {

@@ -53,7 +53,6 @@ use crate::agent::{AgentId, AgentRegistry};
 use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER};
 use crate::events::{Event, EventPayload, FailureKind, FailurePhase, InvocationTotals};
 use crate::llm::LlmClient;
-use crate::trigger::Trigger;
 use crate::trigger::agent_id_from_subject;
 use crate::worker::{DrainState, DurableStart, ExecutorError, Worker};
 
@@ -428,7 +427,7 @@ impl TriggerDispatcher {
         // system takes responsibility for it. Everything downstream —
         // the `triggered` event, the dead letter — reads the name off
         // this value rather than deciding again.
-        let trigger = Trigger::delivered(msg, payload);
+        let trigger = crate::trigger::delivered(msg, payload);
         let trigger_id = trigger.id;
 
         // Kept for the dead-letter path: an exhausted trigger's event
@@ -714,6 +713,7 @@ mod tests {
     use crate::llm::fixture::FixtureClient;
     use crate::pricing::{ModelPricing, PricingTable};
     use crate::tools::ToolRegistry;
+    use crate::trigger::Trigger;
     use crate::worker::{
         Harness, ReducerContext, ReducerRunner, RunnerConfig, WorkerId, WorkerStore,
     };

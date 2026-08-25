@@ -52,7 +52,9 @@ factor-q/
 │                              crate below shares one Cargo.lock and target/
 ├── services/fq-runtime/       Runtime crates
 │   └── crates/
-│       ├── fq-cli/              fq + fqd binaries (CLI commands, daemon host)
+│       ├── fq-agent/            agent definitions (model, parser, registry)
+│       ├── fq-cli/              the fq operator client (CLI commands)
+│       ├── fq-daemon/           the fqd daemon binary (boot, host, control)
 │       ├── fq-edge/             authenticated generic edge (wire transport)
 │       ├── fq-ops/              operation-registry contract crate
 │       ├── fq-runtime/          core library (bus, executor, projection, dispatcher)

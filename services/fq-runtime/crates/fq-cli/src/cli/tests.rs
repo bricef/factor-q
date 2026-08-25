@@ -5,21 +5,21 @@ use clap::Parser;
 /// existing human-readable output.
 #[test]
 fn log_format_defaults_to_text() {
-    let cli = Cli::parse_from(["fq", "run"]);
+    let cli = Cli::parse_from(["fq", "status"]);
     assert_eq!(cli.global.log_format, LogFormat::Text);
 }
 
 /// `--log-format json` parses to the JSON renderer.
 #[test]
 fn log_format_json_flag_parses() {
-    let cli = Cli::parse_from(["fq", "--log-format", "json", "run"]);
+    let cli = Cli::parse_from(["fq", "--log-format", "json", "status"]);
     assert_eq!(cli.global.log_format, LogFormat::Json);
 }
 
 /// `--log-format text` parses to the text renderer.
 #[test]
 fn log_format_text_flag_parses() {
-    let cli = Cli::parse_from(["fq", "--log-format", "text", "run"]);
+    let cli = Cli::parse_from(["fq", "--log-format", "text", "status"]);
     assert_eq!(cli.global.log_format, LogFormat::Text);
 }
 
@@ -33,7 +33,7 @@ fn log_format_flag_is_global() {
 /// An unknown value is rejected rather than silently defaulting.
 #[test]
 fn log_format_rejects_unknown_value() {
-    let result = Cli::try_parse_from(["fq", "--log-format", "yaml", "run"]);
+    let result = Cli::try_parse_from(["fq", "--log-format", "yaml", "status"]);
     let err = match result {
         Ok(_) => panic!("unknown log-format value should be rejected"),
         Err(err) => err,
@@ -97,4 +97,62 @@ fn json_layer_emits_parseable_json_with_fields() {
     assert_eq!(parsed["fields"]["message"], "structured event");
     assert_eq!(parsed["fields"]["invocation_id"], "inv-42");
     assert_eq!(parsed["fields"]["worker_id"], "w-1");
+}
+
+// ------------------------------------------------------------------
+// The caps the daemon enforces, as this client documents them.
+//
+// Both listings are capped daemon-side (`dead_letter.list`,
+// `event.list`), and neither cap is re-declared here as a clap range:
+// a client-side range check would be a second copy of the number in
+// the place least able to notice the daemon disagreeing — an older
+// `fq` would refuse pages a newer daemon serves, and quote its own
+// stale cap doing it. So `--limit` travels as typed and the daemon
+// rules on it, and the client's only copy of the number is the help
+// text an operator reads. That copy is hand-written, so it is the one
+// that can drift; these pin it to the constant both sides share.
+//
+// The other half of each contract — the cap as the filter schema's
+// `maximum` and in its declared description — is asserted daemon-side,
+// in `fq-daemon`'s `dead_letter_atom` and `event_atom` tests.
+// ------------------------------------------------------------------
+
+/// The help clap would print for one flag of one `fq` subcommand
+/// path, e.g. `["dead-letters", "list"]` and `"limit"`.
+fn arg_help(path: &[&str], arg: &str) -> String {
+    use clap::CommandFactory;
+
+    let mut command = Cli::command();
+    for name in path {
+        let next = command
+            .find_subcommand(name)
+            .unwrap_or_else(|| panic!("`fq {}` exists", path.join(" ")))
+            .clone();
+        command = next;
+    }
+    command
+        .get_arguments()
+        .find(|candidate| candidate.get_id() == arg)
+        .and_then(|candidate| candidate.get_help().map(ToString::to_string))
+        .unwrap_or_else(|| panic!("`fq {} --{arg}` is documented", path.join(" ")))
+}
+
+#[test]
+fn dead_letter_limit_help_names_the_cap_the_daemon_enforces() {
+    let help = arg_help(&["dead-letters", "list"], "limit");
+    let cap = fq_ops::surface::DEAD_LETTER_LIST_MAX_LIMIT;
+    assert!(
+        help.contains(&cap.to_string()),
+        "`fq dead-letters list --limit`'s help must name the {cap}-row cap; got {help:?}"
+    );
+}
+
+#[test]
+fn event_query_limit_help_names_the_cap_the_daemon_enforces() {
+    let help = arg_help(&["events", "query"], "limit");
+    let cap = fq_ops::surface::EVENT_LIST_MAX_LIMIT;
+    assert!(
+        help.contains(&cap.to_string()),
+        "`fq events query --limit`'s help must name the {cap}-row cap; got {help:?}"
+    );
 }

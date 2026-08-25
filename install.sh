@@ -1,6 +1,6 @@
 #!/bin/sh
 # factor-q installer. Detects your platform, downloads the matching release
-# bundle from GitHub (a single archive with the fq and fq-cas binaries),
+# bundle from GitHub (a single archive with the fq, fqd and fq-cas binaries),
 # verifies its checksum, and installs them.
 #
 #   curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/install.sh | sh
@@ -83,7 +83,7 @@ fi
 tar -xzf "$tmp/bundle.tar.gz" -C "$tmp"
 
 mkdir -p "$INSTALL_DIR"
-for bin in fq fq-cas; do
+for bin in fq fqd fq-cas; do
     [ -f "$tmp/${bin}" ] || err "archive did not contain the ${bin} binary"
     if ! install -m 0755 "$tmp/${bin}" "$INSTALL_DIR/${bin}" 2>/dev/null; then
         cp "$tmp/${bin}" "$INSTALL_DIR/${bin}"
@@ -100,4 +100,5 @@ case ":$PATH:" in
         ;;
 esac
 echo "Run 'fq version' to verify, then 'fq init' to start a project."
+echo "('fqd' is the daemon — 'fq' is a client and cannot start one.)"
 echo "(fq-cas is the content-addressed storage CLI: 'fq-cas --help'.)"

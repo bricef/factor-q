@@ -18,12 +18,12 @@
 //!   It is reported as one, in the section where the daemon's answers
 //!   would have been, naming what is consequently absent rather than
 //!   leaving the reader to notice.
-//! * **What was never the daemon's stays local.** The resolved
-//!   configuration, the store paths it names and whether the files at
-//!   those paths exist are filesystem facts. Reading them is a `stat`,
-//!   not a store open, so the Phase-4 rule ("`fq-cli` opens no store")
-//!   is kept without giving up the half of the answer that needs
-//!   nothing running.
+//! * **What was never the daemon's stays local.** The edge address
+//!   this client dials is its own configuration, so it is answered
+//!   whatever happened on the wire. The store paths are not: they
+//!   belong to the process that owns those files, which need not be
+//!   on this machine, so they travel on the report and are absent —
+//!   with the reason — when none arrives.
 //! * **The exit code still separates the two.** A degraded answer
 //!   exits non-zero after printing, so `fq status && deploy` fails
 //!   closed while an operator reading the output still gets everything
@@ -36,12 +36,9 @@
 //! that answer is the one this verb now gives, which is that there is
 //! no runtime to describe.
 
-use std::path::PathBuf;
-
 use crate::cli::GlobalArgs;
 use crate::edge_call::edge_invoke;
-use crate::runtime_db_paths;
-use fq_runtime::surface::{StatusParams, StatusRegistry, StatusReport};
+use fq_ops::surface::{StatusParams, StatusRegistry, StatusReport, StatusStores};
 
 /// The `fq status --json` document: the local blocks, then either the
 /// daemon's report or the reason there is not one.
@@ -55,7 +52,6 @@ use fq_runtime::surface::{StatusParams, StatusRegistry, StatusReport};
 #[derive(serde::Serialize)]
 struct StatusDocument {
     config: StatusConfig,
-    stores: StatusStores,
     /// The daemon's own report, when one answered.
     daemon: Option<StatusReport>,
     /// Why none answered, when none did. Exactly one of this and
@@ -71,37 +67,15 @@ struct StatusDocument {
 /// is what makes it visible.
 #[derive(serde::Serialize)]
 struct StatusConfig {
-    nats_url: String,
-    agents_dir: PathBuf,
-    cache_dir: PathBuf,
-    /// The edge address this client dials.
+    /// The edge address this client dials — the only piece of
+    /// configuration it owns. The broker URL, the agents directory and
+    /// the cache directory are the *daemon's*, and a client that
+    /// printed its own copy would be describing its own machine.
     edge: String,
 }
 
-/// The per-store files the configured cache directory names, and
-/// whether they are there.
-///
-/// Existence only, deliberately: `initialised` is three `stat` calls,
-/// never an open. What is *in* those files is the daemon's to report
-/// (`daemon.projection_rows`, `daemon.recovery`), and asking the
-/// filesystem whether they exist is the part that still works when no
-/// daemon does.
-#[derive(serde::Serialize)]
-struct StatusStores {
-    worker_path: PathBuf,
-    control_plane_path: PathBuf,
-    projection_path: PathBuf,
-    /// A v1 single-file `events.db` still awaiting the split
-    /// migration (the daemon performs it at startup).
-    legacy_events_db: Option<PathBuf>,
-    /// All three per-store files exist.
-    initialised: bool,
-}
-
 pub(crate) async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Result<()> {
-    let config = global.resolve_config()?;
-    let db_paths = runtime_db_paths(&config);
-    let legacy = fq_runtime::db::legacy_db_path(&config.cache.directory);
+    let edge = crate::edge_call::daemon_addr(global)?;
 
     let (daemon, daemon_error) = match daemon_status(global).await {
         Ok(report) => (Some(report), None),
@@ -111,19 +85,7 @@ pub(crate) async fn show_status(global: &GlobalArgs, json: bool) -> anyhow::Resu
     };
 
     let document = StatusDocument {
-        config: StatusConfig {
-            nats_url: config.nats.url.clone(),
-            agents_dir: config.agents.directory.clone(),
-            cache_dir: config.cache.directory.clone(),
-            edge: config.edge.bind.clone(),
-        },
-        stores: StatusStores {
-            worker_path: db_paths.worker.clone(),
-            control_plane_path: db_paths.control_plane.clone(),
-            projection_path: db_paths.projection.clone(),
-            legacy_events_db: legacy.exists().then_some(legacy),
-            initialised: db_paths.all_exist(),
-        },
+        config: StatusConfig { edge: edge.clone() },
         daemon,
         daemon_error,
     };
@@ -163,15 +125,7 @@ async fn daemon_status(global: &GlobalArgs) -> anyhow::Result<StatusReport> {
 fn render_status_human(doc: &StatusDocument) -> String {
     let mut out = String::from("factor-q status\n\n");
     out.push_str("Config\n");
-    out.push_str(&format!("  NATS URL:         {}\n", doc.config.nats_url));
-    out.push_str(&format!(
-        "  agents dir:       {}\n",
-        doc.config.agents_dir.display()
-    ));
-    out.push_str(&format!(
-        "  cache dir:        {}\n",
-        doc.config.cache_dir.display()
-    ));
+    out.push_str(&format!("  edge:             {}\n", doc.config.edge));
 
     out.push_str("\nDaemon\n");
     let Some(report) = &doc.daemon else {
@@ -184,9 +138,10 @@ fn render_status_human(doc: &StatusDocument) -> String {
         out.push_str(
             "  -> that is the finding: there is no runtime here to report on.\n\
              \x20 -> stream health, the agent registry, projection rows and recovery state\n\
-             \x20    are the daemon's to answer, so they are absent below rather than stale.\n",
+             \x20    are the daemon's to answer, so they are absent below rather than stale.\n\
+             \x20 -> the store paths too: they are the daemon's, and a client that printed\n\
+             \x20    its own guess would be describing this machine, not the runtime.\n",
         );
-        out.push_str(&render_stores_human(&doc.stores));
         return out;
     };
 
@@ -201,7 +156,7 @@ fn render_status_human(doc: &StatusDocument) -> String {
     for stream in &report.streams {
         out.push_str(&render_stream_health_human(stream));
     }
-    out.push_str(&render_stores_human(&doc.stores));
+    out.push_str(&render_stores_human(&report.stores));
 
     // Recovery state: points the operator at the commands they'd need
     // if anything is off; renders "All clear." otherwise.
@@ -233,43 +188,38 @@ fn render_registry_human(registry: &StatusRegistry) -> String {
     out
 }
 
-/// Pure: the store block — paths from configuration, existence from
-/// the filesystem. Rendered identically whether or not a daemon
-/// answered, because it never depended on one.
+/// Pure: the store block, as the daemon that answered reported it —
+/// the paths it is actually running on and whether the files are
+/// there. Rendered only on that branch, because there is nothing
+/// truthful to print about another host's stores.
 fn render_stores_human(stores: &StatusStores) -> String {
     let mut out = String::from("\nStores\n");
-    out.push_str(&format!(
-        "  worker db:        {}\n",
-        stores.worker_path.display()
-    ));
+    out.push_str(&format!("  worker db:        {}\n", stores.worker_path));
     out.push_str(&format!(
         "  control-plane db: {}\n",
-        stores.control_plane_path.display()
+        stores.control_plane_path
     ));
-    out.push_str(&format!(
-        "  projection db:    {}\n",
-        stores.projection_path.display()
-    ));
+    out.push_str(&format!("  projection db:    {}\n", stores.projection_path));
     if let Some(legacy) = &stores.legacy_events_db {
         out.push_str(&format!(
-            "  legacy events.db: {} (pending split — run `fq run` to migrate)\n",
-            legacy.display()
+            "  legacy events.db: {} (pending split — start `fqd` to migrate)\n",
+            legacy
         ));
     }
     if stores.initialised {
         out.push_str("  state:            initialised — all three store files exist\n");
     } else {
-        out.push_str("  state:            not initialised (run `fq run` to create)\n");
+        out.push_str("  state:            not initialised (start `fqd` to create)\n");
     }
     out
 }
 
 /// Pure: render one probed stream exactly as `fq status` always has.
 /// The probe is the daemon's now (it owns the broker connection) but
-/// the data is the same typed [`fq_runtime::health::StreamHealth`] and
+/// the data is the same typed [`fq_ops::health::StreamHealth`] and
 /// the rendering is unchanged.
-fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) -> String {
-    use fq_runtime::health::{ConsumerHealth, StreamHealth};
+fn render_stream_health_human(health: &fq_ops::health::StreamHealth) -> String {
+    use fq_ops::health::{ConsumerHealth, StreamHealth};
 
     let mut out = format!("\nStream: {}\n", health.stream());
     match health {
@@ -319,7 +269,7 @@ fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) -> Stri
                     if *num_redelivered > 0 {
                         out.push_str(&format!(
                             "    redelivered:    {num_redelivered} (retrying; bound {})\n",
-                            fq_runtime::bus::TRIGGER_MAX_DELIVER
+                            fq_ops::surface::TRIGGER_MAX_DELIVER
                         ));
                     }
                 }
@@ -328,7 +278,7 @@ fn render_stream_health_human(health: &fq_runtime::health::StreamHealth) -> Stri
                 }
                 ConsumerHealth::Missing { name } => {
                     out.push_str(&format!(
-                        "  consumer {name}: not present (no `fq run` has initialised it)\n"
+                        "  consumer {name}: not present (no daemon has initialised it)\n"
                     ));
                 }
             }

@@ -1,0 +1,3058 @@
+[
+  {
+    "view": {
+      "description": "",
+      "domain": "invocation",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List selection for the Invocation view — the typed, schema'd\nfilter (never a query language).",
+        "properties": {
+          "include_archived": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 50,
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "InvocationListFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One row in the invocation list: a coordination-ownership row, or (in\nthe merged index) an archive-only row flagged `archived`.",
+        "properties": {
+          "agent_id": {
+            "description": "From the projection; `None` when no event for the id has landed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "archived": {
+            "description": "True when the row came from `invocation_archive` (no live\nownership row remains).",
+            "type": "boolean"
+          },
+          "assigned_at_ms": {
+            "description": "`assigned_at` for ownership rows; `archived_at` for archive-only\nrows.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "started_at_ms": {
+            "description": "When the invocation began: `assigned_at` (dispatch time — the\nclosest thing to a start the coordination store records) for\nownership rows, the archive's true `started_at` for archive-only\nrows. Unlike `assigned_at_ms`, this means the same thing on both\nrow kinds — the list surface's \"started\" column.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "description": "`in_flight` / `completed` / `failed` / `ambiguous`, or the\narchive's `final_phase` for archive-only rows.",
+            "type": "string"
+          },
+          "summary": {
+            "default": null,
+            "description": "One-line operator summary; see\n[`ActiveInvocationView::summary`].",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "worker_id": {
+            "description": "Empty for archive-only rows (the archive keeps no worker).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invocation_id",
+          "worker_id",
+          "status",
+          "assigned_at_ms",
+          "started_at_ms",
+          "archived"
+        ],
+        "title": "InvocationSummaryView",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for the Invocation view.",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "invocation_id"
+        ],
+        "title": "InvocationViewKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "ArchiveView": {
+            "description": "A finalised invocation's archive record.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "archived_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "final_phase": {
+                "type": "string"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "terminal_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "agent_id",
+              "final_phase",
+              "started_at_ms",
+              "terminal_at_ms",
+              "archived_at_ms"
+            ],
+            "type": "object"
+          },
+          "EventView": {
+            "description": "One event row from the projection — the Event atom's **index**\nrow (`event.list`). Extracted fields, never the payload;\n`event_id` is the identity that reads the whole event back\nthrough `event.get`, whenever the payload is still retained.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "duration_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "error_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error_message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "event_id": {
+                "type": "string"
+              },
+              "event_type": {
+                "type": "string"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timestamp": {
+                "type": "string"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "event_id",
+              "timestamp",
+              "agent_id",
+              "invocation_id",
+              "event_type"
+            ],
+            "type": "object"
+          },
+          "InvocationCostView": {
+            "description": "One invocation's share of an agent's spend.",
+            "properties": {
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "description": "Epoch ms of the invocation's first cost event (its effective\nstart as the projection sees it); 0 when the stored timestamp\nfails to parse.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cost": {
+                "description": "This invocation's own spend. Does not include summary costs —\nthose are carried by the agent's `framework_cost`.",
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "started_at_ms",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens"
+            ],
+            "type": "object"
+          },
+          "InvocationSummaryView": {
+            "description": "One row in the invocation list: a coordination-ownership row, or (in\nthe merged index) an archive-only row flagged `archived`.",
+            "properties": {
+              "agent_id": {
+                "description": "From the projection; `None` when no event for the id has landed.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "archived": {
+                "description": "True when the row came from `invocation_archive` (no live\nownership row remains).",
+                "type": "boolean"
+              },
+              "assigned_at_ms": {
+                "description": "`assigned_at` for ownership rows; `archived_at` for archive-only\nrows.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "description": "When the invocation began: `assigned_at` (dispatch time — the\nclosest thing to a start the coordination store records) for\nownership rows, the archive's true `started_at` for archive-only\nrows. Unlike `assigned_at_ms`, this means the same thing on both\nrow kinds — the list surface's \"started\" column.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "status": {
+                "description": "`in_flight` / `completed` / `failed` / `ambiguous`, or the\narchive's `final_phase` for archive-only rows.",
+                "type": "string"
+              },
+              "summary": {
+                "default": null,
+                "description": "One-line operator summary; see\n[`ActiveInvocationView::summary`].",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "worker_id": {
+                "description": "Empty for archive-only rows (the archive keeps no worker).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "worker_id",
+              "status",
+              "assigned_at_ms",
+              "started_at_ms",
+              "archived"
+            ],
+            "type": "object"
+          },
+          "LiveExecutionView": {
+            "description": "Live execution state of an in-flight invocation, from the worker WAL —\nthe \"what is it doing right now\" view. Present only while the invocation\nhas a WAL row (deleted on archive hand-off).",
+            "properties": {
+              "liveness": {
+                "$ref": "#/$defs/Liveness",
+                "description": "The health page's verdict for this run (see [`Liveness`])."
+              },
+              "llms": {
+                "items": {
+                  "$ref": "#/$defs/LlmDispatchView"
+                },
+                "type": "array"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "step_index": {
+                "description": "Reducer *step* counter (every model and tool step) — not the\nmodel-turn count that `max_iterations` gates.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "terminal_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tools": {
+                "items": {
+                  "$ref": "#/$defs/ToolDispatchView"
+                },
+                "type": "array"
+              },
+              "updated_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "liveness",
+              "phase",
+              "step_index",
+              "started_at_ms",
+              "updated_at_ms",
+              "tools",
+              "llms"
+            ],
+            "type": "object"
+          },
+          "Liveness": {
+            "description": "The per-invocation liveness verdict the health page counts —\nshared by every surface that shows an in-flight row, so the health\ntile, the active table, and the detail page cannot drift apart.",
+            "oneOf": [
+              {
+                "const": "working",
+                "description": "A fresh open dispatch (tool or LLM) — long runs are fine as\nlong as the dispatch itself is younger than the long-dispatch\nthreshold.",
+                "type": "string"
+              },
+              {
+                "const": "advancing",
+                "description": "Nothing open, but the WAL row advanced recently: the reducer is\nbetween steps. The quiet, healthy in-between.",
+                "type": "string"
+              },
+              {
+                "const": "stuck",
+                "description": "No fresh dispatch AND the WAL row has not advanced within the\nstuck threshold — the row the operator needs to look at.",
+                "type": "string"
+              }
+            ]
+          },
+          "LlmDispatchView": {
+            "description": "One in-flight LLM dispatch (worker WAL).",
+            "properties": {
+              "completed_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "cost_usd": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "dispatched_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "intent_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "is_error": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              },
+              "status": {
+                "description": "`intent` / `dispatched` / `completed`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "request_id",
+              "model",
+              "status",
+              "intent_at_ms"
+            ],
+            "type": "object"
+          },
+          "ToolDispatchView": {
+            "description": "One in-flight tool dispatch (worker WAL).",
+            "properties": {
+              "completed_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "dispatched_at_ms": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "intent_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "is_error": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "status": {
+                "description": "`intent` / `dispatched` / `completed`.",
+                "type": "string"
+              },
+              "tool_call_id": {
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool_call_id",
+              "tool_name",
+              "status",
+              "intent_at_ms"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Everything known about one invocation, composed across the three stores.",
+        "properties": {
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "archive": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ArchiveView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Archive record, if the invocation has finalised."
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InvocationCostView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The invocation's cost so far — llm calls, tokens, and spend\nsummed from the projection's cost-bearing events. Grows while\nthe run is live; `None` before the first priced call lands."
+          },
+          "has_transcript": {
+            "default": false,
+            "description": "Whether the worker WAL contains dispatch rows for a transcript.",
+            "type": "boolean"
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "live": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveExecutionView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Live WAL execution state, if the invocation is still in flight."
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InvocationSummaryView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Coordination ownership row, if any."
+          },
+          "recent_events": {
+            "description": "Most recent events for this invocation (newest first).",
+            "items": {
+              "$ref": "#/$defs/EventView"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "default": null,
+            "description": "One-line operator summary; see\n[`ActiveInvocationView::summary`].",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "invocation_id",
+          "recent_events"
+        ],
+        "title": "InvocationDetailView",
+        "type": "object"
+      },
+      "summary": "An agent invocation: the fold of its lifecycle events.",
+      "version": 1
+    }
+  },
+  {
+    "report": {
+      "description": "Live execution state, read at the instant of the call. Answers `what is running right now` — the phase and step each invocation has reached, how long since its last advance, and which tool or model calls are open on it. This is not the same question as listing invocations whose status is in-flight, and a caller should know which they want. A listing is a fold of the event log: it answers as of a position in that log, it can be gated on one, and it reports what has been recorded. This reports what is happening, which has no such position — the work advances while the answer is being assembled, so two calls a second apart legitimately differ and neither is stale. Ask the listing for history and for anything you need read-your-writes on; ask this for a live picture. It describes one daemon — the one answering — and not a fleet. An invocation another worker is driving is not here.",
+      "domain": "invocation",
+      "name": "active",
+      "output_schema": {
+        "$defs": {
+          "ActiveInvocationView": {
+            "description": "One invocation this daemon is executing right now: how far it has\ngot, when it last advanced, and which tool or model calls it\ncurrently has open. The row form of [`ExecutionsView`]'s counts.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "liveness": {
+                "$ref": "#/$defs/Liveness",
+                "description": "The health page's verdict for this row, colour-coded on the\ndashboard (see [`Liveness`])."
+              },
+              "open_llms": {
+                "description": "Models with an open (non-completed) LLM dispatch right now.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "open_tools": {
+                "description": "Open (non-completed) tool dispatches right now — name plus\nthe command line when the tool is command-shaped.",
+                "items": {
+                  "$ref": "#/$defs/OpenToolView"
+                },
+                "type": "array"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "step_index": {
+                "description": "Reducer *step* counter — see [`LiveExecutionView::step_index`].",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "summary": {
+                "default": null,
+                "description": "One-line operator summary, when the summariser has\nproduced one. `None` with the summariser disabled or before\nthe first line lands.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "updated_at_ms": {
+                "description": "Last WAL advance; long tool runs legitimately leave this old.",
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "agent_id",
+              "phase",
+              "step_index",
+              "started_at_ms",
+              "updated_at_ms",
+              "liveness",
+              "open_tools",
+              "open_llms"
+            ],
+            "type": "object"
+          },
+          "Liveness": {
+            "description": "The per-invocation liveness verdict the health page counts —\nshared by every surface that shows an in-flight row, so the health\ntile, the active table, and the detail page cannot drift apart.",
+            "oneOf": [
+              {
+                "const": "working",
+                "description": "A fresh open dispatch (tool or LLM) — long runs are fine as\nlong as the dispatch itself is younger than the long-dispatch\nthreshold.",
+                "type": "string"
+              },
+              {
+                "const": "advancing",
+                "description": "Nothing open, but the WAL row advanced recently: the reducer is\nbetween steps. The quiet, healthy in-between.",
+                "type": "string"
+              },
+              {
+                "const": "stuck",
+                "description": "No fresh dispatch AND the WAL row has not advanced within the\nstuck threshold — the row the operator needs to look at.",
+                "type": "string"
+              }
+            ]
+          },
+          "OpenToolView": {
+            "description": "One open tool dispatch on a live invocation: the tool's name, plus\nits command line when the parameters carry one — so the \"doing\"\ncolumn can say WHAT is running, not just which tool has been open\nfor four minutes.\n\nSchema'd because `invocation.active` declares it as part of its\noutput.",
+            "properties": {
+              "command": {
+                "description": "The dispatch's command, when its parameters have a `command`\nfield: exec-style argv arrays join with spaces, shell-style\nstrings pass through. Capped server-side at\nthe reader's command cap; `None` for tools without one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool_name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "items": {
+          "$ref": "#/$defs/ActiveInvocationView"
+        },
+        "title": "Array_of_ActiveInvocationView",
+        "type": "array"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `invocation.active`. Empty, and declared\nanyway: the answer is small — it is bounded by how much this daemon\nis running — and this is where a future narrowing would appear.",
+        "title": "ActiveParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "What this daemon is executing right now: one row per running invocation, longest-running first, with its open tool and model calls.",
+      "version": 1
+    }
+  },
+  {
+    "view": {
+      "description": "Get answers with the roster row plus every invocation the worker owns; List answers with the roster rows alone. Neither derives a heartbeat age — the fold stays wall-clock-free, so a reader that wants an age computes it from `last_heartbeat_ms`.",
+      "domain": "worker",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List selection for the Worker view — the typed, schema'd filter\n(never a query language). `fq workers list` used to pull the whole\nroster and sieve it in the client; the selection now travels with\nthe request and the view applies it to its index.",
+        "properties": {
+          "status": {
+            "default": null,
+            "description": "`alive` | `stale` | `shutdown`. Absent lists the whole roster.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WorkerListFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One worker in the roster: the Worker view's **index** row (`worker.list`).",
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "in_flight_count": {
+            "description": "Invocations this worker currently owns in a non-terminal state\n(`in_flight` or `ambiguous`). Counted by the reader that\nassembles the roster; a bare row conversion leaves it 0.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_heartbeat_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "registered_at_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "description": "`alive` / `stale` / `shutdown`, as recorded by the control-plane.",
+            "type": "string"
+          },
+          "worker_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_id",
+          "host",
+          "registered_at_ms",
+          "last_heartbeat_ms",
+          "status",
+          "in_flight_count"
+        ],
+        "title": "WorkerView",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for the Worker view.",
+        "properties": {
+          "worker_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_id"
+        ],
+        "title": "WorkerViewKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "InvocationSummaryView": {
+            "description": "One row in the invocation list: a coordination-ownership row, or (in\nthe merged index) an archive-only row flagged `archived`.",
+            "properties": {
+              "agent_id": {
+                "description": "From the projection; `None` when no event for the id has landed.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "archived": {
+                "description": "True when the row came from `invocation_archive` (no live\nownership row remains).",
+                "type": "boolean"
+              },
+              "assigned_at_ms": {
+                "description": "`assigned_at` for ownership rows; `archived_at` for archive-only\nrows.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "description": "When the invocation began: `assigned_at` (dispatch time — the\nclosest thing to a start the coordination store records) for\nownership rows, the archive's true `started_at` for archive-only\nrows. Unlike `assigned_at_ms`, this means the same thing on both\nrow kinds — the list surface's \"started\" column.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "status": {
+                "description": "`in_flight` / `completed` / `failed` / `ambiguous`, or the\narchive's `final_phase` for archive-only rows.",
+                "type": "string"
+              },
+              "summary": {
+                "default": null,
+                "description": "One-line operator summary; see\n[`ActiveInvocationView::summary`].",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "worker_id": {
+                "description": "Empty for archive-only rows (the archive keeps no worker).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "worker_id",
+              "status",
+              "assigned_at_ms",
+              "started_at_ms",
+              "archived"
+            ],
+            "type": "object"
+          },
+          "WorkerView": {
+            "description": "One worker in the roster: the Worker view's **index** row (`worker.list`).",
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "in_flight_count": {
+                "description": "Invocations this worker currently owns in a non-terminal state\n(`in_flight` or `ambiguous`). Counted by the reader that\nassembles the roster; a bare row conversion leaves it 0.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "last_heartbeat_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "registered_at_ms": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "status": {
+                "description": "`alive` / `stale` / `shutdown`, as recorded by the control-plane.",
+                "type": "string"
+              },
+              "worker_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "worker_id",
+              "host",
+              "registered_at_ms",
+              "last_heartbeat_ms",
+              "status",
+              "in_flight_count"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One worker plus the invocations it currently owns: the Worker\nview's **state**, what `worker.get` answers with. `worker` is\nnested rather than serde-flattened, and stays that way — the\nnesting is `fq workers show --json`'s committed shape.",
+        "properties": {
+          "owned": {
+            "description": "Every ownership row for this worker (any status), newest first.",
+            "items": {
+              "$ref": "#/$defs/InvocationSummaryView"
+            },
+            "type": "array"
+          },
+          "worker": {
+            "$ref": "#/$defs/WorkerView"
+          }
+        },
+        "required": [
+          "worker",
+          "owned"
+        ],
+        "title": "WorkerDetailView",
+        "type": "object"
+      },
+      "summary": "A worker: the fold of its registration, heartbeats and ownership.",
+      "version": 1
+    }
+  },
+  {
+    "view": {
+      "description": "The answer is what this daemon would run right now — the registry `fq reload` swaps, not the definitions on the caller's disk. Get answers with one definition in full, including its system prompt. List answers with one row per definition file the registry knows: the agents it loaded, in id order, then the files it rejected, because a definition that failed to parse is the row an operator most needs to see and has no agent id to be listed under.",
+      "domain": "agent",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List selection for the Agent view. Empty, and declared anyway: a\nregistry is a directory of definitions the daemon holds entirely in\nmemory, so there is no narrowing worth a wire contract yet, and the\ndeclaration is where a future one would appear.",
+        "title": "AgentListFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$defs": {
+          "AgentSummaryView": {
+            "description": "One agent definition in the daemon's live registry — the summary\nrow behind the dashboard's agents list and the Agent view's loaded\nindex row.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "budget": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              },
+              "path": {
+                "description": "The definition file this agent was loaded from. On the summary\nas well as the detail because \"which file is this?\" is the\nquestion a listing gets asked next, and answering it from the\nindex costs one string per row instead of one Get per agent.",
+                "type": "string"
+              },
+              "prompt_bytes": {
+                "description": "Size of the system prompt, so the list hints at definition\nweight without shipping every prompt on every refresh.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "tool_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "trigger": {
+                "description": "The NATS trigger suffix the agent listens on, if any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "agent_id",
+              "model",
+              "tool_count",
+              "prompt_bytes",
+              "path"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One row of the Agent view's index (`agent.list`): a definition file\nthe daemon read, and what became of it.\n\nA registry snapshot is not only its agents. A file that failed to\nparse is usually the most operationally interesting thing in the\ndirectory — the agent someone expects to be running and is not —\nand it has no agent id to be listed under, so it rides the index as\nits own kind of row. Dropping it would make the listing lie by\nomission, and there is nowhere else on today's surface to put it.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/AgentSummaryView",
+            "description": "A definition the registry loaded.",
+            "properties": {
+              "entry": {
+                "const": "agent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A definition the registry rejected, rendered exactly as the\ndaemon reports it — the message names the file.",
+            "properties": {
+              "entry": {
+                "const": "load_error",
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "AgentEntryView"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for the Agent view.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "AgentViewKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One agent definition in full — the Agent view's state (`agent.get`)\nand the dashboard's agent detail page. Sourced from the daemon's\nregistry handle, so `fq reload` is reflected without a restart.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "budget": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_iterations": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mcp_servers": {
+            "description": "Declared MCP server names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "path": {
+            "description": "The definition file the agent was loaded from.",
+            "type": "string"
+          },
+          "system_prompt": {
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "trigger": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agent_id",
+          "model",
+          "system_prompt",
+          "tools",
+          "mcp_servers",
+          "path"
+        ],
+        "title": "AgentDetailView",
+        "type": "object"
+      },
+      "summary": "An agent definition, as the daemon's live registry holds it.",
+      "version": 1
+    }
+  },
+  {
+    "atom": {
+      "description": "`event_id` is an Event's identity — the UUIDv7 the event stamps on itself when it is constructed, and the projection index's primary key. It is NOT the log sequence: a sequence is a transport coordinate, and recreating the event stream restarts it at 1 while the index survives. Get resolves an identity in two O(1) hops (the index for the log position, then the log) and VERIFIES that the event it read carries the identity asked for, so a rewound or recreated log fails loudly instead of answering with a neighbour. Get and Stream answer from the log with the whole event, payload included. LIST DOES NOT RETURN PAYLOADS: it answers from the projection's index, one row of extracted fields (identity, timestamp, agent, invocation, event type, model, cost, error, duration) per event, most recent `limit` first. Every row carries the identity that reads the whole event back through `event.get` WHEN THE PAYLOAD IS STILL RETAINED, so a listing is a step away from the fact — with the two unavailable cases named rather than collapsed into `not found`: `Unlocatable` (the row is indexed but its log position was never recorded, so we know the event and not where its payload is) and `Gone` (the position is known and the log has aged past it, or was replaced). Read payloads in bulk by streaming, not by listing. LIST AND STREAM SELECT THE SAME EVENTS FOR THE SAME FILTER. `agent` means the envelope's `agent_id` on both — the domain's answer to whose event this is, never the bus subject the message was routed on, which disagrees for every event that is not agent-partitioned (an `invocation_archive_acked` rides `fq.worker.*` under its agent's envelope; `system_startup` rides `fq.system.*` under agent `system`). And NEITHER VERB SERVES A TRANSIENT EVENT TYPE (worker_heartbeat): a heartbeat is operational signal rather than part of this interface, and the fact it carries is on `worker.list` as `last_heartbeat_ms` — tap the transport directly to watch the raw ones. WHAT THE TWO STILL DIFFER ON IS THE WINDOW, not which events are in it. List sees the projection, which sweeps non-cost rows older than `state.retention_days` (30 by default) and keeps COST-BEARING ROWS INDEFINITELY; Stream sees the log, which keeps 30 days of everything and exempts nothing. So old spend lists after it can no longer be streamed or Got — `Gone` is the normal answer there, not a fault — and the two are two windows over one substrate rather than one set. List is a projection read and honours `min_seq`; Stream long-polls via next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail without consuming anything. Resuming at a cursor loses nothing: the log is durable and the consumer is positional — a cursor may be a transport coordinate, an identity may not.",
+      "domain": "event",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List/Stream selection for Events — the typed, schema'd filter.\n\nNever a query language, and deliberately never a bus subject: a\nsubject pattern is a coordinate of the infrastructure the edge maps\n(D8), so the selection travels in domain terms and the daemon\ndecides which subjects answer it. It carries exactly the narrowing\n`fq events query` offers, which is the same narrowing a tail wants.",
+        "properties": {
+          "agent": {
+            "default": null,
+            "description": "One agent's events — the events whose **envelope** names that\nagent, which is the domain's answer to whose event this is.\nNot the events on `fq.agent.<id>.>`: an agent's archive ack is\npublished on a worker subject, and agent `system` has no\n`fq.agent.*` subject at all. Absent reads every agent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_type": {
+            "default": null,
+            "description": "One event type, as the payload names itself (`llm_response`,\n`tool_call`, `system_startup`, …). An unrecognised value\nmatches nothing rather than failing: event types are values,\nand a newer daemon has types this binary has never heard of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Cap on one List page — the most recent N matching rows, and at\nmost 2000 of them (this property's `maximum`). Absent asks for\nthe default 50.\n\n**A larger N is refused, never quietly shrunk.** So the count\nthat comes back is always the one you asked for or the whole\nanswer, and it reads unambiguously: fewer rows than you asked\nfor means there are no more; exactly as many means there may\nbe. For more than a page, narrow (`agent`, `event_type`,\n`since`) or read the same population from `event.stream`,\nwhich is cursored.\n\nIgnored by Stream, which is cursored rather than paged.",
+            "format": "uint32",
+            "maximum": 2000,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "since": {
+            "default": null,
+            "description": "Only events at or after this RFC3339 instant.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "EventFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One event row from the projection — the Event atom's **index**\nrow (`event.list`). Extracted fields, never the payload;\n`event_id` is the identity that reads the whole event back\nthrough `event.get`, whenever the payload is still retained.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "total_cost": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "event_id",
+          "timestamp",
+          "agent_id",
+          "invocation_id",
+          "event_type"
+        ],
+        "title": "EventView",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for an Event: the `event_id` the event stamps on\nitself at construction (`Uuid::now_v7`), which is also the\nprojection index's primary key — stable, transport-independent,\ntime-ordered, and already indexed.\n\n**Not the log sequence**, which is where this started: see the\nmodule docs for the two ways a stored position comes to address\nthe wrong event, both of which happen without anybody doing\nanything wrong.",
+        "properties": {
+          "event_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id"
+        ],
+        "title": "EventKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One recorded event, with the log position it was read at.\n\nThe Event atom's state is the event itself, unabridged. It is the\nsubstrate every other resource folds from, so an atom that dropped\nthe payload would not be the fact; the projection's `events` table\nis an *index* over these, not the atom. The event's **identity**\nis `event.envelope.event_id`, which is what `event.get` takes.",
+        "properties": {
+          "event": {
+            "description": "The event exactly as published.\n\nDeclared to the surface as an opaque object rather than a\nreflected schema: an event already names its own payload\ncontract in `envelope.schema_id` (`factor-q/llm_response@1`),\nwhich is the versioned reference a reader resolves, and\nreflecting the whole payload tree here would need schemars'\nchrono and uuid integrations — a wider change than this atom."
+          },
+          "seq": {
+            "description": "Where in the log this event sits — the universal cursor (P5):\nthe same number that cursors `event.stream`, feeds `min_seq`\ngates, and appears in a command receipt's `watermarks`.\n\nIt does *not* appear in the receipt's `AtomRef`, which names\nthe event by `event_id`. A receipt separates the two on\npurpose: what was written is addressed by identity, how far the\nlog got is addressed by position.\n\nA cursor, never an identity. It says where the read landed,\nand it is only meaningful against the log that produced it:\nrecreate the stream and the number means something else. Ask\nfor an event by `event_id`; use this to resume.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "event"
+        ],
+        "title": "EventState",
+        "type": "object"
+      },
+      "summary": "One recorded event: the substrate every other resource folds from.",
+      "version": 1
+    }
+  },
+  {
+    "atom": {
+      "description": "Event-log-backed, not a stored table: `seq` is the stream sequence of the `failed` event that recorded the exhaustion — the same cursor receipts, `min_seq` gates and the Event and Turn atoms speak. `trigger_stream_seq` is a different number entirely (the original trigger's, on the trigger stream) and may be absent. List answers with the most recent `limit` matching dead letters in sequence order, bounded by the tip observed at entry; Stream long-polls via next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail. Visibility is bounded by event-stream retention (30 days by default). A row carries the trigger's payload, which is what `dead_letter.requeue` re-publishes — it reads this record and never the trigger stream, so a dead letter is requeueable for as long as it is listable.",
+      "domain": "dead_letter",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List/Stream selection for DeadLetters — the typed, schema'd filter,\nnever a query language.\n\nIt carries exactly the narrowing `fq dead-letters list` offers\n(`--agent`, `--limit`) and nothing invented alongside: a filter is a\npromise the surface has to keep, so it grows when a caller needs it\nto (P11), not when a field looks plausible.",
+        "properties": {
+          "agent": {
+            "default": null,
+            "description": "One agent's dead letters. Absent reads every agent's.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Cap on one List page — the most recent N matching dead\nletters, and at most 500 of them (this property's `maximum`).\nAbsent asks for the default 50.\n\n**A larger N is refused, never quietly shrunk.** So the count\nthat comes back is always the one you asked for or the whole\nanswer, and it reads unambiguously: fewer rows than you asked\nfor means there are no more; exactly as many means there may\nbe. For more than a page, narrow with `agent` — the only\nnarrowing this filter offers — or read the same dead letters\nfrom `dead_letter.stream`, which is cursored.\n\nIgnored by Stream, which is cursored rather than paged.",
+            "format": "uint32",
+            "maximum": 500,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "title": "DeadLetterFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$defs": {
+          "DeadLetter": {
+            "description": "One dead-lettered trigger, as its terminal event records it.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "error_message": {
+                "type": "string"
+              },
+              "event_id": {
+                "type": "string"
+              },
+              "source": {
+                "description": "Which emitter surfaced it: `\"inline\"` | `\"advisory\"`.",
+                "type": "string"
+              },
+              "timestamp": {
+                "description": "When the exhaustion was recorded, RFC3339.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`chrono::DateTime` would need schemars' chrono integration —\na wider change than this atom (the Event atom made the same\ncall for its payload tree).",
+                "type": "string"
+              },
+              "trigger_payload": true,
+              "trigger_stream_seq": {
+                "description": "The original trigger's sequence on the **trigger** stream — the\nkey that reconciles the inline and advisory emitters, and the\nselector `dead_letter.requeue` takes.\n\nAbsent when the advisory arrived after the trigger had aged\nout, which is why it is not this atom's identity: an identity\nthat can be missing is not one. The atom is addressed by its\n**event-log** sequence — see [`DeadLetterState`].",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "trigger_subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "event_id",
+              "timestamp",
+              "agent_id",
+              "trigger_subject",
+              "source",
+              "trigger_payload",
+              "error_message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "A dead letter addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `dead_letter.stream` and\nfeeds `min_seq` gates.\n\nIt does not ride in a command receipt's `AtomRef`, which names an\natom by identity — and this domain has no identity to give it, so\nno command mints a DeadLetter reference. Addressing a dead letter\npositionally is a known gap rather than a design: recreate the\nstream and a stored sequence names a different letter.\n\n`dead_letter.requeue` is the one command over this domain and it\ndoes not close the gap — it steps around it. What a requeue makes is\na *trigger*, so its receipt names one, in a different domain from\nthe verb's own. A DeadLetter reference is still not a thing that\nexists.\n\nThe identity is the log sequence and not the trigger sequence for\nthree reasons, in ascending order of force: the trigger sequence is\na coordinate on a *different* stream, it is not unique across\nagents, and it can be absent altogether. The Event and Turn atoms\nare keyed the same way, so a sequence read out of any of the three\nstreams means the same thing.",
+        "properties": {
+          "dead_letter": {
+            "$ref": "#/$defs/DeadLetter",
+            "description": "The fact itself. Nested rather than flattened so the identity\nis visibly the atom's and not one of the trigger's own fields."
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "dead_letter"
+        ],
+        "title": "DeadLetterState",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for a DeadLetter: its event-log sequence.\n\n**Not** the trigger sequence the human listing prints and\n`dead_letter.requeue` selects by — that is a coordinate on the\ntrigger stream, is not unique across agents, and is absent whenever\nthe trigger aged out before the advisory landed. See\n[`DeadLetterState`] for the full reasoning.",
+        "properties": {
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq"
+        ],
+        "title": "DeadLetterKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "DeadLetter": {
+            "description": "One dead-lettered trigger, as its terminal event records it.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "error_message": {
+                "type": "string"
+              },
+              "event_id": {
+                "type": "string"
+              },
+              "source": {
+                "description": "Which emitter surfaced it: `\"inline\"` | `\"advisory\"`.",
+                "type": "string"
+              },
+              "timestamp": {
+                "description": "When the exhaustion was recorded, RFC3339.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`chrono::DateTime` would need schemars' chrono integration —\na wider change than this atom (the Event atom made the same\ncall for its payload tree).",
+                "type": "string"
+              },
+              "trigger_payload": true,
+              "trigger_stream_seq": {
+                "description": "The original trigger's sequence on the **trigger** stream — the\nkey that reconciles the inline and advisory emitters, and the\nselector `dead_letter.requeue` takes.\n\nAbsent when the advisory arrived after the trigger had aged\nout, which is why it is not this atom's identity: an identity\nthat can be missing is not one. The atom is addressed by its\n**event-log** sequence — see [`DeadLetterState`].",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "trigger_subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "event_id",
+              "timestamp",
+              "agent_id",
+              "trigger_subject",
+              "source",
+              "trigger_payload",
+              "error_message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "A dead letter addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `dead_letter.stream` and\nfeeds `min_seq` gates.\n\nIt does not ride in a command receipt's `AtomRef`, which names an\natom by identity — and this domain has no identity to give it, so\nno command mints a DeadLetter reference. Addressing a dead letter\npositionally is a known gap rather than a design: recreate the\nstream and a stored sequence names a different letter.\n\n`dead_letter.requeue` is the one command over this domain and it\ndoes not close the gap — it steps around it. What a requeue makes is\na *trigger*, so its receipt names one, in a different domain from\nthe verb's own. A DeadLetter reference is still not a thing that\nexists.\n\nThe identity is the log sequence and not the trigger sequence for\nthree reasons, in ascending order of force: the trigger sequence is\na coordinate on a *different* stream, it is not unique across\nagents, and it can be absent altogether. The Event and Turn atoms\nare keyed the same way, so a sequence read out of any of the three\nstreams means the same thing.",
+        "properties": {
+          "dead_letter": {
+            "$ref": "#/$defs/DeadLetter",
+            "description": "The fact itself. Nested rather than flattened so the identity\nis visibly the atom's and not one of the trigger's own fields."
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "dead_letter"
+        ],
+        "title": "DeadLetterState",
+        "type": "object"
+      },
+      "summary": "A trigger that exhausted its delivery budget, as its terminal event records it.",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "trigger",
+        "verb": "write"
+      },
+      "description": "IDEMPOTENT ON THE ORIGINAL TRIGGER. A dead letter can be requeued once; asking again is refused with a `Conflict` that NAMES THE TRIGGER the first call produced, so the second attempt is a redirection rather than a dead end — hand that id to `trigger.get`. The key is the original trigger's identity, which the dead letter carries, and the record is the `requeued_from` field on the requeued trigger, uniquely indexed. THE RECEIPT NAMES A TRIGGER, not a dead letter: its `AtomRef` carries `{\"trigger_id\": \"…\"}` for the trigger this call made, which is exactly the key `trigger.get` takes. It is a NEW identity — a requeue is a later trigger and sorts as one — and the requeued trigger's `requeued_from` names the one it re-ran. The original is untouched. Unlike `trigger.publish`, the record exists before this answers, so the key resolves with no wait and there is no watermark to gate on. A DEAD LETTER WITH NO `trigger_id` IS REFUSED, `Unlocatable`, and nothing is published. Two kinds have none: anything dead-lettered before triggers were named, and one the advisory path recorded after the original had aged off the trigger stream — it reads the identity and never invents one. Such a dead letter can only be re-run as new work, with `trigger.publish`, and that is deliberately your call to make rather than this command's: requeueing it would hand back the guarantee's name without the guarantee. The payload is the dead letter's own record of the trigger, verbatim. `trigger_seq` selects which dead letter by the original's trigger-stream position (what `dead_letter.list` prints); absent takes the agent's most recent.",
+      "domain": "dead_letter",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `dead_letter.requeue` on the wire.",
+        "properties": {
+          "agent_id": {
+            "description": "The agent whose dead letter to requeue.",
+            "type": "string"
+          },
+          "trigger_seq": {
+            "default": null,
+            "description": "Select by the original trigger's sequence on the trigger stream\n— the number `dead_letter.list` prints. Absent selects the\nagent's most recent dead letter.\n\nA position, not an identity: it is a coordinate on a different\nstream, it is not unique across agents, and it can be absent\naltogether, which is why it selects rather than keys.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "RequeueCommandInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Re-run a dead-lettered trigger: publish it again, once, with a fresh delivery budget.",
+      "verb": "requeue",
+      "version": 1
+    }
+  },
+  {
+    "atom": {
+      "description": "`trigger_id` is a Trigger's identity — the UUIDv7 the runtime minted when it published the trigger, or the one an inbound `Fq-Trigger-Id` header supplied. It is what `trigger.publish` hands back in its receipt, and handing that key here unchanged is the whole walk. TRIGGERS ARE KEPT INDEFINITELY, PAYLOADS INCLUDED: the record lives in the projection and the retention sweep never reaches it, so a trigger outlives both the trigger stream (24h) and the event log (30 days). All three verbs answer from that one record, so there is no window in which a trigger lists and then cannot be fetched. LIST DOES NOT RETURN PAYLOADS. It answers with index rows — identity, agent, when the trigger was recorded, and how the runtime came by it — most recently recorded first, and every row carries the identity that reads the whole trigger back through `trigger.get`. Get and Stream answer with the whole Trigger, payload included. The split is not cosmetic: an accepted payload may be up to 512 KiB and one answer is one 8 MiB frame, so a page of whole triggers is a page that can fail to encode. LIST AND STREAM SELECT THE SAME TRIGGERS FOR THE SAME FILTER, from the same store — they differ in shape and in order, not in population. List is newest-first and paged; Stream is sequence-ordered and cursored, long-polling via next_batch, with `from_seq = u64::MAX` seeking the tail of the recorded triggers (not of the event log, which runs ahead of what has been recorded). A trigger whose record arrived without a log position lists and gets but never streams: a cursor is the one thing it has no honest value for. A trigger with NO DURABLE RECORD answers `Unlocatable`, never `not found` — a queued trigger nothing has dispatched yet is real and will resolve, and saying `no such trigger` about the name a receipt just issued would be a lie. The same answer covers a record written before triggers were kept (forward-only, so it can never be found by id) and an id that names nothing; the message names all three, because a primary-key lookup cannot tell them apart.",
+      "domain": "trigger",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List/Stream selection for Triggers — the typed, schema'd filter,\nnever a query language.\n\n**Two axes, and they are the two the record actually has.** A\ntrigger's permanent row carries its identity, its agent, when it was\nrecorded, its source, its subject and its payload. Of those, agent\nand time are what an operator narrows by and what the table is\nindexed on (`idx_triggers_agent_time`, `idx_triggers_time`). Source\nis a closed three-valued set that nobody has asked to filter by, and\npayload is opaque JSON the runtime must not interpret — narrowing by\nit would be the query language this is deliberately not. A filter is\na promise the surface has to keep, so it grows when a caller needs\nit (P11), not when a column looks plausible.",
+        "properties": {
+          "agent": {
+            "default": null,
+            "description": "One agent's triggers. Absent reads every agent's.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Cap on one List page — the most recently recorded N matching\ntriggers, and at most 500 of them (this property's `maximum`).\nAbsent asks for the default 50.\n\n**A larger N is refused, never quietly shrunk.** So the count\nthat comes back is always the one you asked for or the whole\nanswer: fewer rows than you asked for means there are no more;\nexactly as many means there may be. For more than a page,\nnarrow (`agent`, `since`) or read `trigger.stream`, which is\ncursored and selects the same triggers for the same filter.\n\nIgnored by Stream, which is cursored rather than paged.",
+            "format": "uint32",
+            "maximum": 500,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "since": {
+            "default": null,
+            "description": "Only triggers recorded at or after this RFC3339 instant.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "TriggerFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$defs": {
+          "TriggerSource": {
+            "enum": [
+              "manual",
+              "subject",
+              "schedule"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One trigger as `trigger.list` hands it back: the Trigger atom's\n**index** row.\n\n**It carries no payload, deliberately.** A payload is opaque JSON a\nproducer chose, bounded only by [`MAX_TRIGGER_PAYLOAD_BYTES`], and\none List answer is one 8 MiB frame — so a page of whole triggers is\na page that can fail to encode. The split is what\n`fq_ops::Atom::with_index` exists for, and the rule that makes it\nsafe is kept here: **the row carries the identity Get takes**, so\nany row walks to the whole trigger through `trigger.get`.\n\nEverything on it is bounded: two ids, an instant, and a source drawn\nfrom a closed set.",
+        "properties": {
+          "agent_id": {
+            "description": "The agent the trigger was for.",
+            "type": "string"
+          },
+          "recorded_at": {
+            "description": "When the record that named this trigger was written, RFC3339.\nNot when it was published: publishing appends nothing durable,\nso the first moment a trigger is a recorded fact is the moment\nsomething acted on it.",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/TriggerSource",
+            "description": "How the runtime came by it: `manual` | `subject` | `schedule`."
+          },
+          "trigger_id": {
+            "description": "The identity — hand this to `trigger.get` unchanged.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger_id",
+          "agent_id",
+          "recorded_at",
+          "source"
+        ],
+        "title": "TriggerView",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for a Trigger: the `trigger_id` the runtime minted (or\nhonoured) when it took responsibility for the trigger — a UUIDv7 in\ncanonical hyphenated text, and the `triggers` table's primary key.\n\nThis is the shape `trigger.publish`'s receipt hands back, verbatim.",
+        "properties": {
+          "trigger_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger_id"
+        ],
+        "title": "TriggerKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "TriggerSource": {
+            "enum": [
+              "manual",
+              "subject",
+              "schedule"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One trigger, named — the request an invocation answers.\n\nThis is the value the control-plane hands a worker; the worker\nrecords [`Trigger::id`] on the invocation's `triggered` event, which\nis what finally lets a reader say *this invocation came from that\ntrigger* rather than inferring it from matching content.\n\nIt is also the Trigger atom's **state** — what `trigger.get` and\n`trigger.stream` answer with, whole. Not a wrapper around it with a\nlog position bolted on, as [`crate::dead_letter::DeadLetterState`]\nand `EventState` are: those atoms are addressed by position and this\none is addressed by name, which is the entire point of the identity\nlanding first.",
+        "properties": {
+          "id": {
+            "description": "The trigger's identity: a UUIDv7, like every other identity the\nruntime mints (`event_id`, `invocation_id`). Time-sortable, so\nids order the way the triggers did.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`Uuid` would need schemars' uuid integration — a wider change\nthan this atom ([`crate::dead_letter::DeadLetter`] made the same\ncall for its chrono timestamp).",
+            "type": "string"
+          },
+          "payload": {
+            "description": "The trigger body, verbatim — an opaque JSON value the target\nagent interprets (wire contract §The payload)."
+          },
+          "requeued_from": {
+            "default": null,
+            "description": "The trigger this one was requeued from, when it was one —\n`dead_letter.requeue`'s record of what it re-ran.\n\n**Absent on every trigger the runtime learns about from the\nwire**, and that is structural rather than an omission: lineage\nrides no header and the body is contractually opaque, so there\nis nowhere on the wire it could come from. [`Trigger::\nrequeue_of`] is the only constructor that sets it, which makes\n\"this trigger is a requeue\" a claim only the requeue path can\nmake.\n\nIt is also the idempotency key `dead_letter.requeue` turns on:\nthe column behind this field is uniquely indexed, so a dead\nletter can be requeued at most once and the second attempt is\nanswered with the trigger the first one made.\n\n`serde(default)` because trigger rows written before requeues\nwere recorded read NULL, and a required field would break them.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/$defs/TriggerSource",
+            "description": "How the runtime came by this trigger."
+          },
+          "subject": {
+            "description": "The subject it arrived on, when it arrived on one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "payload"
+        ],
+        "title": "Trigger",
+        "type": "object"
+      },
+      "summary": "One request to run an agent, as the runtime recorded it.",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "trigger",
+        "verb": "write"
+      },
+      "description": "At-least-once delivery with a bounded budget: the trigger is durable when this answers, and a delivery that keeps failing is dead-lettered (`fq dead-letters list`) rather than retried forever. The answer means accepted, not run — an agent this daemon does not have is a dead letter, not a refusal here. THE RECEIPT NAMES THE TRIGGER: its `AtomRef` carries `{\"trigger_id\": \"…\"}`, which is exactly the key `trigger.get` takes, so a publish walks to the thing it published. The receipt's watermark is the trigger's sequence on the TRIGGER stream, which is a different log from the event stream every other watermark on this surface speaks: it is what `fq dead-letters` reconciles on, and it is NOT a `min_seq` for reading the trigger back. Publishing appends no durable record — the record appears when a worker consumes the trigger — so there is no position a read-your-writes gate could wait for, and `trigger.get` answers `Unlocatable` until then. THE PAYLOAD IS BOUNDED AT 512 KiB (524288 bytes of JSON body), and a larger one is REFUSED, never truncated — a truncated payload is a different task, and an agent handed one would do the wrong work while every record said it did the right work. The bound exists because a trigger is kept indefinitely: 512 KiB is roughly sixteen hundred times a real task payload, sixteen times under the edge's 8 MiB frame so `trigger.get` can always answer with the whole thing, and half a stock broker's default max_payload so an accepted trigger is never one the transport then refuses.",
+      "domain": "trigger",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `trigger.publish` on the wire.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "payload": {
+            "default": null,
+            "description": "The trigger body, verbatim. Any JSON: agents receive it as the\nuser message their run opens with. Bounded at\n[`fq_runtime::trigger::MAX_TRIGGER_PAYLOAD_BYTES`] — see the\ncommand's description."
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "PublishCommandInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Dispatch a trigger to an agent via the durable trigger stream.",
+      "verb": "publish",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "control",
+        "verb": "write"
+      },
+      "description": "Affects the NEXT trigger only: in-flight invocations keep the config they snapshotted at trigger time. Answers when the swap has happened, so a reload that could not read the directory is an error rather than a silence — and in that case the definitions already loaded are kept. Appends no atom: the registry is live machinery, not a fold.",
+      "domain": "control",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `control.reload` on the wire. Empty, and declared\nanyway: the daemon reloads from the directory *it* was started with,\nnever one the caller names — that choice is the whole point of the\nverb, and this is where a future option (a `fq.toml` refresh)\nwould appear.",
+        "title": "ReloadCommandInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Re-read the agent definitions from disk and swap the live registry.",
+      "verb": "reload",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "control",
+        "verb": "write"
+      },
+      "description": "Returns as soon as the stop is under way, not when it has finished — the daemon cannot answer a call once it has exited, so confirmation is the caller watching this edge stop answering. `now` skips the drain: clean teardown, worker deregistered, immediate exit, with in-flight invocations left for the next start's recovery. Idempotent: a second call on a daemon already stopping changes nothing. Appends no atom — the `system.shutdown` event is written after this has answered.",
+      "domain": "control",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `control.down` on the wire.",
+        "properties": {
+          "now": {
+            "default": false,
+            "description": "Skip the drain: clean teardown, worker deregistered, immediate\nexit. Defaults false, which is also what a peer that predates\nthe field sends.",
+            "type": "boolean"
+          }
+        },
+        "title": "DownCommandInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Stop this daemon, draining in-flight work to a step boundary.",
+      "verb": "down",
+      "version": 1
+    }
+  },
+  {
+    "report": {
+      "description": "Answers over the whole recorded history unless `since` narrows it: cost-bearing rows are exempt from the retention sweep and kept indefinitely, so this report never silently windows. The time series ignores `agent` deliberately — the chart answers what the fleet is burning, the tables answer who burned it. Totals include summary costs; `framework_cost` says how much of the total they are.",
+      "domain": "cost",
+      "name": "summary",
+      "output_schema": {
+        "$defs": {
+          "CostBucketView": {
+            "description": "One time bucket's cost sum — a day or an hour, keyed by its\nfixed-width UTC timestamp prefix (`YYYY-MM-DD` / `YYYY-MM-DDTHH`).",
+            "properties": {
+              "bucket": {
+                "type": "string"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "bucket",
+              "total_cost"
+            ],
+            "type": "object"
+          },
+          "CostView": {
+            "description": "Per-agent cost/token aggregate.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "framework_cost": {
+                "default": 0.0,
+                "description": "Summary costs: engine spend on this agent's behalf that belongs\nto no one invocation. Included in `total_cost` and excluded\nfrom every per-invocation figure, so\n`total_cost - framework_cost` is what those account for.\n\nZero for an ordinary agent. For the reserved `summary` agent it\nis the whole row, which is why that drill-down shows spend with\nno invocations under it.",
+                "format": "double",
+                "type": "number"
+              },
+              "invocation_count": {
+                "description": "Distinct invocations behind the aggregate.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "agent_id",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens",
+              "invocation_count"
+            ],
+            "type": "object"
+          },
+          "ModelCostView": {
+            "description": "One model's share of an agent's spend.",
+            "properties": {
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "model": {
+                "type": "string"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "model",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Per-agent costs plus the per-model split and the grand totals, so a\ncaller renders all three without re-summing.",
+        "properties": {
+          "agents": {
+            "items": {
+              "$ref": "#/$defs/CostView"
+            },
+            "type": "array"
+          },
+          "buckets": {
+            "default": [],
+            "description": "Spend over time within the window — daily buckets, or hourly\nwhen the caller asked for them. Sparse: quiet buckets are\nabsent (display layers fill gaps). Oldest first.",
+            "items": {
+              "$ref": "#/$defs/CostBucketView"
+            },
+            "type": "array"
+          },
+          "framework_cost": {
+            "default": 0.0,
+            "description": "Summary costs across every agent. Included in `total_cost`, and\nnamed here so `total = invocations + framework` reads off the\npage rather than looking like a discrepancy.",
+            "format": "double",
+            "type": "number"
+          },
+          "models": {
+            "description": "The same cost rows grouped by model, biggest spender first —\nspend by capability tier rather than by consumer.",
+            "items": {
+              "$ref": "#/$defs/ModelCostView"
+            },
+            "type": "array"
+          },
+          "total_cache_read_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_cache_write_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_cost": {
+            "format": "double",
+            "type": "number"
+          },
+          "total_input_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_output_tokens": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agents",
+          "models",
+          "total_cost",
+          "total_input_tokens",
+          "total_output_tokens",
+          "total_cache_read_tokens",
+          "total_cache_write_tokens"
+        ],
+        "title": "CostReport",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `cost.summary`.",
+        "properties": {
+          "agent": {
+            "default": null,
+            "description": "Narrow the per-agent rows to one agent. Absent reports the\nwhole fleet.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hourly_buckets": {
+            "default": false,
+            "description": "Bucket the time series hourly instead of daily.",
+            "type": "boolean"
+          },
+          "since": {
+            "default": null,
+            "description": "Lower bound on time, in the `views::since` grammar. Absent\nreports the whole recorded history — cost-bearing rows are\nexempt from the retention sweep, so that is a real answer here\nrather than whatever happened to survive it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "CostSummaryParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Fleet spend: per-agent rows, the per-model split, the time series, and the totals.",
+      "version": 1
+    }
+  },
+  {
+    "report": {
+      "description": "The drill-down behind one row of `cost.summary`. `invocations` is newest first and capped by `invocation_limit`; `totals.invocation_count` carries the uncapped count, so a truncated list is visible as one. An agent with no cost events in the window is not found rather than an empty breakdown — there is no row of the summary to drill into. Totals include summary costs; the per-invocation rows do not.",
+      "domain": "cost",
+      "name": "by_agent",
+      "output_schema": {
+        "$defs": {
+          "CostView": {
+            "description": "Per-agent cost/token aggregate.",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "framework_cost": {
+                "default": 0.0,
+                "description": "Summary costs: engine spend on this agent's behalf that belongs\nto no one invocation. Included in `total_cost` and excluded\nfrom every per-invocation figure, so\n`total_cost - framework_cost` is what those account for.\n\nZero for an ordinary agent. For the reserved `summary` agent it\nis the whole row, which is why that drill-down shows spend with\nno invocations under it.",
+                "format": "double",
+                "type": "number"
+              },
+              "invocation_count": {
+                "description": "Distinct invocations behind the aggregate.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "agent_id",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens",
+              "invocation_count"
+            ],
+            "type": "object"
+          },
+          "InvocationCostView": {
+            "description": "One invocation's share of an agent's spend.",
+            "properties": {
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "invocation_id": {
+                "type": "string"
+              },
+              "started_at_ms": {
+                "description": "Epoch ms of the invocation's first cost event (its effective\nstart as the projection sees it); 0 when the stored timestamp\nfails to parse.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cost": {
+                "description": "This invocation's own spend. Does not include summary costs —\nthose are carried by the agent's `framework_cost`.",
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "started_at_ms",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens"
+            ],
+            "type": "object"
+          },
+          "ModelCostView": {
+            "description": "One model's share of an agent's spend.",
+            "properties": {
+              "event_count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "model": {
+                "type": "string"
+              },
+              "total_cost": {
+                "format": "double",
+                "type": "number"
+              },
+              "total_input_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_output_tokens": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "model",
+              "event_count",
+              "total_cost",
+              "total_input_tokens",
+              "total_output_tokens"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One agent's cost drill-down: its own totals plus per-model and\nper-invocation breakdowns — the dashboard's `/costs/<agent>` page\nand any future `fq costs show <agent>`.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "invocations": {
+            "description": "Newest first, capped by the caller's limit;\n`totals.invocation_count` carries the uncapped count. Summary\ncosts are not here — uncapped, these sum to\n`totals.total_cost - totals.framework_cost`.",
+            "items": {
+              "$ref": "#/$defs/InvocationCostView"
+            },
+            "type": "array"
+          },
+          "models": {
+            "description": "Biggest spender first.",
+            "items": {
+              "$ref": "#/$defs/ModelCostView"
+            },
+            "type": "array"
+          },
+          "totals": {
+            "$ref": "#/$defs/CostView"
+          }
+        },
+        "required": [
+          "agent_id",
+          "totals",
+          "models",
+          "invocations"
+        ],
+        "title": "AgentCostDetailView",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `cost.by_agent`.",
+        "properties": {
+          "agent": {
+            "description": "The agent to break down. Required — this report is one agent's\ndrill-down where `cost.summary` is the fleet's.",
+            "type": "string"
+          },
+          "invocation_limit": {
+            "default": 50,
+            "description": "Cap on the per-invocation rows, newest first.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "since": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agent"
+        ],
+        "title": "CostByAgentParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "One agent's spend, broken down by model and by invocation.",
+      "version": 1
+    }
+  },
+  {
+    "report": {
+      "description": "A composite: the four checks are read together, at one instant, by the daemon that owns the work being reported on — which is also the cost of asking. This report cannot describe a daemon that is not running, and the absence of an answer is itself the finding rather than a transport failure to retry. The checks that count as *issues* are stale workers, stuck in-flight work, ambiguous invocations and permanent failures; in-flight work that is merely running is healthy, and the dead-letter line is informational. `stuck` means an in-flight invocation whose WAL row has not advanced within the same threshold that makes a worker stale — not hearing from either for that long is the same order of signal. The threshold is the daemon's and is not a parameter: a health report an operator can narrow is one they can narrow past the problem.",
+      "domain": "control",
+      "name": "doctor",
+      "output_schema": {
+        "$defs": {
+          "DoctorDeadLetters": {
+            "description": "Dead-lettered triggers: transient pre-WAL failures that\nexhausted the trigger consumer's delivery bound. The dispatcher\nconsumes the exhausted trigger and emits a terminal `failed` event\nwith the dead-letter kind; this counts that bucket, so the\nreport needs no extra query. The event's annotations carry the\ntrigger subject and payload for requeue/diagnosis.",
+            "properties": {
+              "exhausted_triggers": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "exhausted_triggers"
+            ],
+            "type": "object"
+          },
+          "DoctorExecutions": {
+            "description": "In-flight / current-execution view, read from the worker-local\n`invocation_state` table (the reliable live view — the CP owner\ntable's `in_flight` status is not populated by trigger dispatch\nyet; see issue #50).",
+            "properties": {
+              "in_flight": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "stuck": {
+                "description": "In-flight invocations whose `updated_at` is older than the\nreport's stuck threshold.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "stuck_ids": {
+                "description": "Ids of the stuck invocations, in full, for triage — same\nconvention as `working_ids`.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "working": {
+                "description": "In-flight invocations with a fresh open dispatch (tool or LLM) —\nactively working, however silent their WAL row.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "working_ids": {
+                "description": "Ids of the working invocations, in full — ask about one with\n`invocation.get`. Shorten them for display if you like; the\nshortened form is not an identity and nothing takes it back.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "in_flight",
+              "working",
+              "working_ids",
+              "stuck",
+              "stuck_ids"
+            ],
+            "type": "object"
+          },
+          "DoctorFailure": {
+            "description": "One failure-kind bucket in the report. Mirrors\n[`crate::views::FailureView`] but owns its data so the report is a\nself-contained serialisable value.",
+            "properties": {
+              "count": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "error_kind": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "error_kind",
+              "count"
+            ],
+            "type": "object"
+          },
+          "DoctorWorkers": {
+            "description": "Worker liveness counts plus the ids of any stale workers so\nthe operator can act without a second `fq workers list` call.",
+            "properties": {
+              "alive": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "shutdown": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "stale": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "stale_ids": {
+                "description": "Worker ids currently past the stale threshold.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "alive",
+              "stale",
+              "shutdown",
+              "stale_ids"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The full doctor report — `control.doctor`'s declared output, and\nwhat `fq doctor --json` prints verbatim.",
+        "properties": {
+          "ambiguous": {
+            "description": "Ambiguous invocations needing operator triage (CP owner\ntable, `status='ambiguous'`).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "dead_letters": {
+            "$ref": "#/$defs/DoctorDeadLetters"
+          },
+          "executions": {
+            "$ref": "#/$defs/DoctorExecutions"
+          },
+          "failures": {
+            "description": "Terminal failures grouped by `FailureKind` (from the\nprojection `events` table, `event_type='failed'`).",
+            "items": {
+              "$ref": "#/$defs/DoctorFailure"
+            },
+            "type": "array"
+          },
+          "workers": {
+            "$ref": "#/$defs/DoctorWorkers"
+          }
+        },
+        "required": [
+          "workers",
+          "executions",
+          "ambiguous",
+          "failures",
+          "dead_letters"
+        ],
+        "title": "DoctorReport",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `control.doctor`. Empty, and declared\nanyway: every check runs, because a health report an operator can\nnarrow is one they can narrow past the problem. This is where a\nfuture option — an override for the stuck threshold — would appear.",
+        "title": "DoctorParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Durable-execution health in one report: workers, current work, ambiguity, failures, dead letters.",
+      "version": 1
+    }
+  },
+  {
+    "report": {
+      "description": "What is running and what it is running on. Answers `which build is this`, `are the streams and their consumers keeping up`, `which agent definitions did this daemon load and which did it reject`, `how far has the projection folded` and `is anything waiting on operator recovery`. It does not judge: stale workers and ambiguous invocations are reported as counts, and deciding whether they amount to a problem is `control.doctor`'s job. The registry census is the daemon's in-memory handle — what it would run right now, not what is on any caller's disk — so it reflects a reload without a restart. Stream figures are a probe at the instant of the call, not a fold, so two calls a second apart legitimately differ. This report cannot describe a daemon that is not running, and a caller that cannot reach one has learned the single most important thing about the machinery rather than failed to learn anything: absence is the finding.",
+      "domain": "control",
+      "name": "status",
+      "output_schema": {
+        "$defs": {
+          "ConsumerHealth": {
+            "description": "Health of one durable consumer on a stream. Externally tagged, for\nthe same encoding reason as [`StreamHealth`].",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The durable does not exist yet (no daemon has initialised it).",
+                "properties": {
+                  "missing": {
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "missing"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The durable exists but its info could not be fetched.",
+                "properties": {
+                  "error": {
+                    "properties": {
+                      "error": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "error"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "error"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "active": {
+                    "properties": {
+                      "ack_pending": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "delivered": {
+                        "description": "Stream sequence the consumer has been delivered up to.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "lag": {
+                        "description": "`last_seq - delivered` — how far behind the stream head.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "num_pending": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "num_redelivered": {
+                        "description": "Outstanding redeliveries — messages delivered more than\nonce and not yet acked. The retry-pressure signal: a\nnon-zero value means work is being NAK'd or timing out and\nwalking toward the consumer's delivery bound, past which a\ntrigger is dead-lettered rather than retried again.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "delivered",
+                      "lag",
+                      "ack_pending",
+                      "num_pending",
+                      "num_redelivered"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "active"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RecoveryView": {
+            "description": "Recovery-state counts — the data behind `fq status`'s recovery block and\nthe dashboard's health tile. Computed against a caller-supplied `now_ms`\nand threshold so the view stays pure (no wall-clock inside).\n\nSchema'd because `control.status` declares it as part of its output.",
+            "properties": {
+              "ambiguous": {
+                "description": "Ambiguous invocations awaiting operator triage.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "stale_worker_ids": {
+                "description": "Ids of those stale workers, so a caller can act without a second query.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "stale_workers": {
+                "description": "Workers past the stale threshold (and not shut down).",
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "ambiguous",
+              "stale_workers",
+              "stale_worker_ids"
+            ],
+            "type": "object"
+          },
+          "StatusRegistry": {
+            "description": "The daemon's live agent registry, censused: what it would run right\nnow, and what it could not load.",
+            "properties": {
+              "agents": {
+                "description": "Definitions the registry holds — the agents this daemon would\nrun if triggered right now.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "load_errors": {
+                "description": "One entry per definition file the registry rejected, phrased as\nthe daemon phrased it; each message names the file. A daemon\nwith load errors is running fewer agents than its directory\ndescribes, which is rarely what the operator intended.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "agents",
+              "load_errors"
+            ],
+            "type": "object"
+          },
+          "StatusStores": {
+            "description": "Where a daemon keeps its three SQLite stores, and whether they\nexist yet. A daemon that has never run has none of them.",
+            "properties": {
+              "control_plane_path": {
+                "type": "string"
+              },
+              "initialised": {
+                "description": "True once all three stores exist. False on a daemon that has\nnot yet started for the first time.",
+                "type": "boolean"
+              },
+              "legacy_events_db": {
+                "default": null,
+                "description": "A pre-split `events.db` still on disk. Present means the daemon\nhas not yet migrated it; absent is the healthy case.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "projection_path": {
+                "type": "string"
+              },
+              "worker_path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "worker_path",
+              "control_plane_path",
+              "projection_path",
+              "initialised"
+            ],
+            "type": "object"
+          },
+          "StreamHealth": {
+            "description": "Health of one JetStream stream plus its primary durable consumer.\n\nExternally tagged (serde's default) rather than internally: internal\ntagging is a JSON-only representation, and the edge's session is\nbincode once its JSON preamble is done, so an internally-tagged enum\nwould fail to encode there.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The stream (or its info) could not be fetched; `error` carries\nthe reason verbatim.",
+                "properties": {
+                  "unavailable": {
+                    "properties": {
+                      "error": {
+                        "type": "string"
+                      },
+                      "stream": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "stream",
+                      "error"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "unavailable"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "available": {
+                    "properties": {
+                      "bytes": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "consumer": {
+                        "$ref": "#/$defs/ConsumerHealth"
+                      },
+                      "first_seq": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "last_seq": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "messages": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "stream": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "stream",
+                      "messages",
+                      "bytes",
+                      "first_seq",
+                      "last_seq",
+                      "consumer"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "available"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`control.status`'s declared output, and what `fq status --json`\nnests under `daemon`.",
+        "properties": {
+          "drain_deadline_ms": {
+            "description": "How long this daemon will drain for before giving up, in\nmilliseconds.\n\nReported because a client that waits for a stop has to wait at\nleast this long, and it is the daemon's setting. A reader that\nguessed would call a successful drain a hang, or hang past a\nreal failure — and against a remote daemon it has no config to\nguess from at all.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "projection_rows": {
+            "description": "Rows in the daemon's projection index — how much of the event\nlog has been folded into readable state.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "recovery": {
+            "$ref": "#/$defs/RecoveryView",
+            "description": "Ambiguous invocations awaiting triage and workers past the\nstale threshold, with their ids."
+          },
+          "registry": {
+            "$ref": "#/$defs/StatusRegistry",
+            "description": "The live agent registry, censused."
+          },
+          "stores": {
+            "$ref": "#/$defs/StatusStores",
+            "description": "Where this daemon's three stores live, and whether it has\ncreated them yet.\n\nReported by the daemon rather than derived by the reader. The\npaths are the daemon's — a reader that computed them from its\nown config would be describing its own machine, which is right\nonly while the two share one, and silently wrong the moment\nthey do not."
+          },
+          "streams": {
+            "description": "JetStream health for the runtime's core streams and their\nprimary durable consumers — message counts, byte totals and how\nfar each consumer has got. Probed at the daemon, over the\nconnection it already holds.",
+            "items": {
+              "$ref": "#/$defs/StreamHealth"
+            },
+            "type": "array"
+          },
+          "version": {
+            "description": "The build this daemon is running: semver plus the commit it was\nbuilt from, so a deploy check can confirm the live process is on\nthe expected revision.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "streams",
+          "registry",
+          "drain_deadline_ms",
+          "stores",
+          "projection_rows",
+          "recovery"
+        ],
+        "title": "StatusReport",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `control.status`. Empty, and declared\nanyway: the report is small enough that every part of it is worth\nhaving, and this is where a future narrowing would appear.",
+        "title": "StatusParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Machinery state: the daemon's build, its stream health, its live registry, its projection position and its recovery counts.",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "invocation",
+        "verb": "write"
+      },
+      "description": "Only an invocation that crashed mid-tool-call can be resumed. A refusal is an error, not a receipt: it names which precondition failed — terminal, live, already resumed, or unknown — because those are four different things for an operator to do next. Success is a receipt; the re-drive runs detached, so the invocation is still working when this returns.",
+      "domain": "invocation",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "invocation_id"
+        ],
+        "title": "InvocationResumeRequest",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Resume a crashed invocation: reconcile its stuck tool calls with an interrupted result, then re-drive it through the recovery path.",
+      "verb": "resume",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "invocation",
+        "verb": "write"
+      },
+      "description": "Returns a receipt naming the drop event's sequence — feed it to a gated read for read-your-writes. Refused on an invocation this daemon is actively driving unless `live` is set, which halts it at its next step boundary (in-flight tools finish) before the drop.",
+      "domain": "invocation",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `invocation.drop` on the wire.",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          },
+          "live": {
+            "default": false,
+            "description": "Halt the invocation first if this daemon is actively driving\nit. Without it, live work is refused outright — the kill\nswitch is opt-in, never implied. Defaults false, which\nis also what every peer that predates the field sends.",
+            "type": "boolean"
+          },
+          "reason": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "invocation_id"
+        ],
+        "title": "DropCommandInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Drop an invocation: archive it as failed and release its owner.",
+      "verb": "drop",
+      "version": 1
+    }
+  },
+  {
+    "atom": {
+      "description": "Event-log-backed: `seq` is the stream sequence — the same cursor receipts and min_seq gates speak. Stream long-polls via next_batch; from_seq = u64::MAX seeks the tail.",
+      "domain": "turn",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List/Stream selection for Turns — full payloads by default; an\n`abbreviate` option waits for a consumer that wants it (P11).",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          },
+          "limit": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "invocation_id"
+        ],
+        "title": "TurnFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$defs": {
+          "AssistantToolCall": {
+            "properties": {
+              "parameters": true,
+              "tool_call_id": {
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool_call_id",
+              "tool_name",
+              "parameters"
+            ],
+            "type": "object"
+          },
+          "TurnAction": {
+            "description": "What happened: the turn's content, full payload by default.",
+            "oneOf": [
+              {
+                "description": "The invocation's opening prompt: the system prompt the agent\nwas configured with and the user message its trigger became.\nIt precedes every Round, and there is exactly one per\ninvocation.",
+                "properties": {
+                  "kind": {
+                    "const": "prompt",
+                    "type": "string"
+                  },
+                  "system": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "user": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "content": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "cost_usd": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "is_error": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "assistant",
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "tool_calls": {
+                    "items": {
+                      "$ref": "#/$defs/AssistantToolCall"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "model",
+                  "tool_calls"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "is_error": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "tool_result",
+                    "type": "string"
+                  },
+                  "output": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "parameters": {
+                    "description": "Joined from the initiating call when it is in the fold's\nwindow; `null` for a lone turn fetched by key."
+                  },
+                  "tool_call_id": {
+                    "type": "string"
+                  },
+                  "tool_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tool_call_id",
+                  "tool_name",
+                  "parameters"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One turn, addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `turn.stream`, feeds\n`min_seq` gates, and appears in command receipts.",
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/TurnAction",
+            "description": "The action itself — the fact this atom records."
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "initiating_turn": {
+            "description": "For a tool-result turn: the sequence of the assistant turn\nwhose call it answers — tracing in log coordinates. Absent\nwhen the initiating turn predates the stream window, and on\nturns no other turn initiated (assistant turns, the prompt).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "round": {
+            "description": "The Round grouping key: one Round is an assistant action plus\nthe tool results it initiated (the model-turn count\n`max_iterations` gates). 0 on the opening prompt, which\nprecedes every Round, and on turns derived from events\npredating the field.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timestamp_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "invocation_id",
+          "agent_id",
+          "round",
+          "timestamp_ms",
+          "action"
+        ],
+        "title": "TurnState",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for a Turn: its event-log sequence.",
+        "properties": {
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq"
+        ],
+        "title": "TurnKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "AssistantToolCall": {
+            "properties": {
+              "parameters": true,
+              "tool_call_id": {
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool_call_id",
+              "tool_name",
+              "parameters"
+            ],
+            "type": "object"
+          },
+          "TurnAction": {
+            "description": "What happened: the turn's content, full payload by default.",
+            "oneOf": [
+              {
+                "description": "The invocation's opening prompt: the system prompt the agent\nwas configured with and the user message its trigger became.\nIt precedes every Round, and there is exactly one per\ninvocation.",
+                "properties": {
+                  "kind": {
+                    "const": "prompt",
+                    "type": "string"
+                  },
+                  "system": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "user": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "content": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "cost_usd": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "is_error": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "assistant",
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "tool_calls": {
+                    "items": {
+                      "$ref": "#/$defs/AssistantToolCall"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "model",
+                  "tool_calls"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "is_error": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "tool_result",
+                    "type": "string"
+                  },
+                  "output": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "parameters": {
+                    "description": "Joined from the initiating call when it is in the fold's\nwindow; `null` for a lone turn fetched by key."
+                  },
+                  "tool_call_id": {
+                    "type": "string"
+                  },
+                  "tool_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tool_call_id",
+                  "tool_name",
+                  "parameters"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One turn, addressed by its event-log sequence — the universal\ncursor (P5): the same number that cursors `turn.stream`, feeds\n`min_seq` gates, and appears in command receipts.",
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/TurnAction",
+            "description": "The action itself — the fact this atom records."
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "initiating_turn": {
+            "description": "For a tool-result turn: the sequence of the assistant turn\nwhose call it answers — tracing in log coordinates. Absent\nwhen the initiating turn predates the stream window, and on\nturns no other turn initiated (assistant turns, the prompt).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "round": {
+            "description": "The Round grouping key: one Round is an assistant action plus\nthe tool results it initiated (the model-turn count\n`max_iterations` gates). 0 on the opening prompt, which\nprecedes every Round, and on turns derived from events\npredating the field.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timestamp_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "invocation_id",
+          "agent_id",
+          "round",
+          "timestamp_ms",
+          "action"
+        ],
+        "title": "TurnState",
+        "type": "object"
+      },
+      "summary": "One action within a Round: an assistant output or a tool result.",
+      "version": 1
+    }
+  }
+]

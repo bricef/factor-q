@@ -23,6 +23,16 @@ use fq_ops::views::RecoveryView;
 pub(crate) fn status_report() -> StatusReport {
     StatusReport {
         version: "0.1.0+abc123def456".to_string(),
+        drain_deadline_ms: 180_000,
+        // The daemon reports where its stores are; a fixture stands
+        // in for a daemon, so it answers too.
+        stores: fq_ops::surface::StatusStores {
+            worker_path: "/var/lib/factor-q/worker.db".to_string(),
+            control_plane_path: "/var/lib/factor-q/control-plane.db".to_string(),
+            projection_path: "/var/lib/factor-q/projection.db".to_string(),
+            legacy_events_db: None,
+            initialised: true,
+        },
         streams: vec![
             StreamHealth::Available {
                 stream: "fq-events".to_string(),
