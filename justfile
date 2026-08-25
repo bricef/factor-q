@@ -294,10 +294,18 @@ go-ci: gate-adapters
 # brings a broker up nor tears one down. The pinned binary provisions itself:
 # the Rust gates depend on `install-nats` (idempotent, a no-op once installed).
 #
-# smoke is intentionally NOT part of `ci`: it needs ANTHROPIC_API_KEY and makes
+# smoke is intentionally NOT part of `ci`: it needs a provider key and makes
 # a real, paid LLM call. Run it on its own with `just smoke`.
 #
-# The full local gate — every target CI runs, timed, fail-fast.
+# `docker-build` is not part of `ci` either: a cold image build compiles the
+# whole workspace again inside the container, which is minutes for a check
+# that only a Dockerfile or workspace-membership change can break. CI runs it
+# in its own path-filtered job. So the promise below has one carve-out —
+# after changing the Dockerfile, `Cargo.toml`'s members, or the lockfile, run
+# `just docker-build` by hand, because a green `just ci` does not cover it.
+#
+# The full local gate — every target CI runs bar the two carve-outs above,
+# timed, fail-fast.
 ci:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -341,7 +349,7 @@ test-shell-sandbox:
 # commands read them back.
 #
 # Requires:
-#   - ANTHROPIC_API_KEY in the environment
+#   - the provider key named by SMOKE_API_KEY_ENV (default OPENROUTER_API_KEY)
 #   - NATS running (see `just infra-up`)
 #   - fq binary built (this recipe builds it first)
 #
@@ -351,7 +359,8 @@ smoke: build-runtime
 
 # N concurrent invocations through drain / clean-shutdown / crash-recovery
 # on a scratch daemon (plan §3, the Phase-2 gate's live leg). Needs
-# ANTHROPIC_API_KEY and a running broker (`just infra-up`) with no other fq
+# the key named by DRILL_API_KEY_ENV (default OPENROUTER_API_KEY) and a running
+# broker (`just infra-up`) with no other fq
 # daemon on it.
 # Run the parallel-workers live drill.
 drill: build-runtime
@@ -380,7 +389,8 @@ soak iters="1000":
 # Uses "$@" (enabled by `set positional-arguments`) so quoted arguments
 # are forwarded to fq intact.
 #
-# Run the fq CLI (e.g. `just fq --agents-dir ./agents agent list`).
+# Run the fq client (e.g. `just fq --addr 127.0.0.1:9472 agent list`).
+# Note `--agents-dir` is the daemon's flag, not the client's.
 [no-cd]
 fq *args:
     cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fq -- "$@"

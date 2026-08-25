@@ -78,7 +78,7 @@ just test-runtime
 just test
 
 # Filter — one workspace, so plain cargo filters work from the root
-cargo test -p fq-runtime --lib agent::definition
+cargo test -p fq-agent --lib definition
 ```
 
 Run `just install-nats` once before the Rust suites so tests can provision
@@ -240,7 +240,7 @@ has a detailed inventory of what shipped and what was deferred.
 1. Create `services/fq-runtime/crates/fq-tools/src/builtin/<name>.rs`
 2. Implement `Tool` for your struct (see `file_read.rs` for a
    minimal example, `exec.rs` for a complex one)
-3. Register it in `ToolRegistry::with_builtins()` in
+3. Register it in `ToolRegistry::with_builtins_exec()` in
    `services/fq-runtime/crates/fq-runtime/src/tools.rs`
 4. Add sandbox tests proving the tool respects sandbox boundaries
 5. If the tool spawns processes, add tests to the containerised
