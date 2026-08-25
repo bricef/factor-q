@@ -1,0 +1,415 @@
+# Reasoning as a first-class message part — execution plan
+
+**Status:** active (2026-08-25). Tracking issue:
+[#437](https://github.com/bricef/factor-q/issues/437). Contract precondition
+for [#414](https://github.com/bricef/factor-q/issues/414) (multi-node MVP,
+confirmed exit criterion) and currently drawn as a blocker for
+[#424](https://github.com/bricef/factor-q/issues/424) (module coupling epic) —
+though §2.2 below re-measures that second claim and finds it no longer
+describes the tree.
+
+**Decisions carried in from the issue (maintainer, 2026-07-28):**
+
+- **Parts vector, not a narrow scalar.** `Message` carries an ordered part
+  list. The narrow `reasoning: Option<String>` option is explicitly *not* a
+  stepping stone — do not implement it. Governing principle: *if the upstream
+  APIs return a part vector, we should too.*
+- **Schema bumps are not a constraint.** Pre-alpha; model the domain
+  correctly and bump `SCHEMA_VERSION` as needed.
+- **genai is a dependency, not a ceiling.** Resolution ladder, in order:
+  fix upstream → fork → migrate. We do not design factor-q's message contract
+  around a client library's limitation.
+- **Dedicated design work is in scope**, with an ADR as the vehicle.
+
+**Decisions taken 2026-08-25 (maintainer):**
+
+- **Reasoning reaches the event log and the transcript**, not the reducer
+  state blob alone. This settles open question 2 of the issue, and makes the
+  consumer-barrier extension (§4.4) load-bearing rather than theoretical.
+- **Scope is the shape, the OpenAI-compatible provider path, and the cost
+  decomposition** — and **the upstream genai contribution is a required
+  outcome of this work**, not separable follow-on. §5 scopes it.
+
+## The one-line principle
+
+**Reasoning is the model's own working, handed back to itself.** The boundary
+that matters is the **invocation**, not the turn: *within* one, reasoning is
+continuity and must round-trip; *across* one, reasoning is coupling and must
+be stripped. Every decision below follows from which side of that line a given
+piece of code sits on.
+
+That sentence is also the resolution of the issue's open question 1. The
+codebase currently reads as *"reasoning is deliberately excluded"* because of
+`annotation_keys::REASONING` and the `for_consumer_context()` strip. That
+discipline is about a **consumer** never seeing a **producer's** reasoning,
+because that is what makes fresh-context verification path-independent.
+Replaying a model's own reasoning inside its own single conversation is not
+that: one agent, one context, one invocation, and the reasoning is the
+model's own working being returned to it exactly as the provider's contract
+assumes. §4.4 writes the rule down so a future contributor cannot read this
+change as breaking §6 of `inter-node-contracts-and-event-layers.md`.
+
+## 1. What is dropped, and where
+
+Every line number in the issue body is stale — `events.rs` was extracted into
+the `fq-ops` contract crate (ADR-0031 Phase 1) after the issue was written.
+The map as it stands on `main` (`9477254`):
+
+| Layer | Location today | State |
+|---|---|---|
+| Provider → internal | `fq-runtime/src/llm/genai.rs:378` `from_provider_response` | Builds from `first_text()` only. `ChatResponse.reasoning_content` is never read. |
+| Internal → provider | `fq-runtime/src/llm/genai.rs:284` `convert_message` | Emits `Text` + `ToolCall` parts only. No reasoning part is ever constructed. |
+| Internal response | `fq-runtime/src/llm.rs:34` `ChatResponse` | `{content, tool_calls, stop_reason, usage}` — no field. |
+| Reducer boundary | `fq-runtime/src/worker/reducer/types.rs:170` `ModelResponse` | Same four fields. The reducer structurally cannot see reasoning. |
+| Event log | `fq-ops/src/events/llm.rs:127` `LlmResponsePayload` | Same four fields plus `round` / `origin`. |
+| Request path | `fq-ops/src/events/llm.rs:62` `Message` | `content: Option<String>` — no parts list, so there is nowhere to put reasoning on the way back in. |
+
+**The drop the issue does not name, and the one that matters most:**
+
+> `fq-runtime/src/worker/reducer/harness.rs:329`
+
+```rust
+state.messages.push(Message {
+    role: MessageRole::Assistant,
+    content: response.content.clone(),
+    tool_calls: response.tool_calls.clone(),
+    tool_call_id: None,
+});
+```
+
+This is the replay path. `HarnessState.messages` is the conversation the
+reducer rebuilds and re-sends on **every** turn; it round-trips through the
+opaque `state` blob (`invocation_state.state_blob`, JSON) between steps.
+Everything else in the table above is plumbing whose only purpose is to get
+reasoning *to* and *from* this line. A change that lands the parts vector
+everywhere but leaves line 329 dropping reasoning has achieved nothing.
+
+The drop is at least clean rather than corrupting: `first_text()` filters to
+`is_text()` parts, so reasoning is never silently concatenated into `content`.
+
+## 2. What has changed since the issue was written
+
+Four corrections, each of which moves work off or onto the critical path.
+
+### 2.1 The vocabulary moved to `fq-ops`
+
+`Message`, `LlmResponsePayload` and `SCHEMA_VERSION` now live in the `fq-ops`
+contract crate. In `fq-runtime`, `events.rs` is a 34-line re-export facade
+whose only local content is the `LlmError → LlmErrorKind` conversion. The
+import path (`crate::events::…`) is unchanged, so this is a file boundary
+move, not an API one — but it relocates the whole change surface into a
+different crate.
+
+### 2.2 #424's blocking rationale no longer describes the tree
+
+The gate on #424 reads: *"`events` has fan-in 10, so this change ripples
+through the same ten modules that epic restructures. One disruption, not
+two."* Re-measured on `main` with `just lint-coupling`:
+
+| | #424's table (2026-07-27) | `main` today |
+|---|---|---|
+| `fq-runtime::events` prod lines | 1,329 | **33** |
+| `fq-runtime::events` fan-out | 2 (`agent`, `worker`) | **1** (`llm`) |
+| `fq-runtime::events` fan-in | 10 | 12 |
+| fq-runtime cycle group | 11 modules | **15 modules** |
+
+The fan-in is a **re-export** fan-in. Re-exports do not churn when the
+re-exported struct gains a field; only sites that *construct or destructure*
+`Message` need touching, and those are countable (§3.3). The vocabulary that
+genuinely changes now lives in `fq-ops::events` (1,744 prod lines, fan-out 2,
+fan-in 3), inside `fq-ops`'s own small 3-module cycle (`agent` ↔ `events` ↔
+`worker`) — which is **not** the 15-module fq-runtime cycle that #424
+restructures.
+
+**Action:** this does not unilaterally lift the #424 gate, but the stated
+reason for it is stale and should be restated or withdrawn on that issue
+rather than carried forward unexamined. Flag for the maintainer; do not
+assume.
+
+### 2.3 Upstream genai is in better shape than recorded
+
+Verified against the pinned source (`genai = "0.6"` → `0.6.5` in
+`Cargo.lock`), not against the issue's summary:
+
+- **OpenAI-compatible round-trip is confirmed complete.** Response side:
+  `openai/adapter_impl.rs::to_chat_response` reads `/message/reasoning` then
+  `/message/reasoning_content` into `ChatResponse.reasoning_content`
+  **unconditionally** — `capture_reasoning_content` gates only the *streaming*
+  path, so factor-q needs no option flag. Request side:
+  `openai/adapter_shared.rs:375` collects `ContentPart::ReasoningContent`
+  parts from the assistant turn and hoists them into the sibling
+  `reasoning_content` field, under a comment naming the case directly:
+  `// Echo reasoning_content back for providers that require it (Kimi, DeepSeek)`.
+  Note the **asymmetry**: we read a sibling field and write a content part.
+- **`ContentPart` has gained `ThoughtSignature(String)`** since the issue was
+  written, and `ToolCall` carries a `thought_signatures` field — the Gemini
+  path the issue lists as blocked on us.
+- **The Anthropic path is far less blocked than assumed.** genai's Anthropic
+  parser routes every *unrecognised* block type into
+  `ContentPart::Custom(CustomPart { model_iden, data })` — raw provider JSON
+  preserved verbatim, tagged with the producing model.
+  **`redacted_thinking` already survives this way today.** Only `thinking` is
+  special-cased, into the lossy `reasoning_content: Option<String>` that drops
+  `signature`. See §5.
+
+  Two consequences. First, the upstream fix needs **no new part type** — the
+  library already has a lossless, model-tagged carrier. Second,
+  `CustomPart.model_iden` is *literally* the producing-model tie that #414's
+  cross-model strip invariant requires; upstream independently reached the
+  same modelling conclusion.
+
+### 2.4 Two of #414's proposed exit criteria are already met
+
+#78 (`runner.rs` split) is **closed** — `worker/reducer/runner/` now exists
+with `llm.rs`, `replay.rs`, `server_request.rs`, `failure.rs`, `config.rs`.
+#189 is open but `fq-cli/src/lib.rs` is **233 lines** across 18 modules; the
+6.3k-line headline is resolved even if the listener/shutdown-join extraction
+is not. Only #191 (`mcp.rs`, 1,851 lines) and the two security PoCs (#399,
+#400) remain outstanding of the five *proposed* criteria.
+
+**Consequence for sequencing:** STATUS.md's deliberately-open ordering
+question — *"whether #437 lands before or after #78/#189/#191, since both
+touch `runner.rs`"* — is largely moot. `runner.rs` is already split. This work
+should not wait on #191.
+
+## 3. Target invariants
+
+What must be true when this is done.
+
+**I1 — Round-trip fidelity.** For an OpenAI-compatible provider that returns
+`reasoning_content`, the assistant message factor-q sends on turn N+1 carries
+that provider's reasoning back on the wire, byte-identical to what was
+received.
+
+**I2 — Model-tie.** Every reasoning part names the model that produced it.
+Replaying a reasoning part to a *different* model is impossible without an
+explicit strip — reasoning blocks are model-tied by provider contract, and
+ADR-0003 guarantees per-agent model selection, so cross-model edges exist by
+construction. Enforced at a single choke point, not by convention.
+
+**I3 — Invocation boundary.** Reasoning replays freely within the invocation
+that produced it and never crosses an invocation boundary into a consuming
+agent's context — whether it arrives via annotations *or* via a payload part.
+This extends §6 of `inter-node-contracts-and-event-layers.md` to parts.
+
+**I4 — Cost is a decomposition, never a new charge.** Capturing
+`reasoning_tokens` splits `output_tokens` into thought-vs-spoken for
+visibility. `total_cost` is unchanged, before and after, to the cent.
+
+**I5 — Nothing is silently lost.** A provider part factor-q does not
+understand is preserved or refused, never dropped on the floor. The failure
+mode this whole issue documents is a *silent* one; the fix must not introduce
+another.
+
+**I6 — Ordering is a provider concern.** Provider order is preserved on the
+way in. Each adapter emits in whatever order its own API requires (Anthropic
+demands thinking blocks first in an assistant turn; OpenAI-compatible carries
+reasoning as a sibling field where position is meaningless). We promise the
+vector is ordered; we do not promise a canonical cross-provider order.
+
+## 4. Design — input to the modelling session, not a settled spec
+
+Per CONTRIBUTING's co-design practice and lesson 1 of the
+[fq-ops design review](../../reviews/2026-07-21-fq-ops-design-review-learnings.md)
+(*"when review comments correct ontology, stop coding and model"*), Phase 0 is
+a modelling session. What follows is a **proposal to be worked through**, with
+the open questions named in §8 rather than assumed away.
+
+### 4.1 What a reasoning part is
+
+Three shapes exist across providers, and code branches on the difference:
+
+| Shape | Provider | Readable text | Continuity token |
+|---|---|---|---|
+| Plain | Kimi, DeepSeek (`reasoning_content`) | yes | none |
+| Signed | Anthropic (`thinking` + `signature`) | yes | yes — and it **encrypts the full reasoning**, so the visible text is not the payload |
+| Opaque | Anthropic (`redacted_thinking`), Gemini (`thought_signature`) | none | yes — the token *is* the content |
+
+Applying lesson 2's test (*"does any code branch on this distinction?"*): yes,
+in three places — the transcript renders plain and signed text but must render
+opaque as `[redacted]`; each adapter encodes the three differently on the
+wire; and the strip rule's *consequence* differs (dropping plain text costs
+continuity, dropping a signed block within a tool-use turn is a protocol
+violation). So the distinction is real structure, not speculative machinery.
+Proposed:
+
+```rust
+pub enum Reasoning {
+    /// Readable working, no continuity token. Kimi, DeepSeek.
+    Plain(String),
+    /// Readable working plus a token that must be echoed verbatim.
+    Signed { text: String, token: OpaqueToken },
+    /// No readable content — the token is the content.
+    Opaque(OpaqueToken),
+}
+```
+
+All three carry the producing model (I2). Only `Plain` gets a live
+encoder/decoder in this work; the other two are named because they are
+documented provider realities, and their adapters land with §5.
+
+### 4.2 What `Message` becomes
+
+```rust
+pub struct Message {
+    pub role: MessageRole,
+    pub parts: Vec<ContentPart>,
+}
+```
+
+Worth noting what this **deletes**: `tool_call_id: Option<ToolCallId>` paired
+with `MessageRole::Tool` is exactly the "invalid states representable" smell
+from lesson 3, and it has a live runtime error to prove it —
+`genai.rs:296`, *"tool role message is missing tool_call_id"*. Folding the
+tool result into a part makes that error structurally impossible. That is
+positive evidence the parts model is the right one, and it is the kind of
+deletion lesson 5 asks for.
+
+It is also scope beyond the gate. Raised as open question Q1 (§8).
+
+### 4.3 Where reasoning lives (settled 2026-08-25)
+
+Event log **and** transcript. Consequences to build:
+
+- `LlmResponsePayload` carries reasoning parts; `SCHEMA_VERSION` 2 → 3 with a
+  changelog entry in `event-schema.md`.
+- `TranscriptEntry::Assistant` gains a reasoning field. Rendering default is
+  open question Q2 (§8) — the retention decision is settled, the *default
+  visibility* of a possibly-large block in `fq invocation transcript` is not.
+- Retention follows the existing event-log rules. Per the cost-retention
+  principle this is additive: nothing that exists today is windowed or lost.
+
+### 4.4 The consumer barrier, extended to parts
+
+**This is the sharp edge, and the issue does not name it.**
+`for_consumer_context()` strips **annotations**. Reasoning as a first-class
+part lands in `LlmResponsePayload` — the **payload** layer, which the barrier
+does **not** strip. So "make reasoning first-class" silently moves reasoning
+from the *excluded* side of the barrier to the *permissive* side.
+
+`for_consumer_context()` has **no production caller today** (only tests),
+because multi-node does not exist yet — which is precisely why writing the
+rule now is free and writing it after #414 ships is not. §7 of
+`inter-node-contracts-and-event-layers.md` currently reads flatly
+*"Reasoning traces / chain-of-thought → annotations, with strict barrier
+enforcement"*, which becomes wrong-as-written the moment reasoning is a
+payload part. Both that line and §6 need amending to state I3.
+
+### 4.5 Where the strip is enforced
+
+Single choke point in the genai adapter's `convert_message` — the last gate
+before the wire, and the only place that knows both the target model and the
+provider encoding. Asserted by the oracle, not left to convention (design
+principle 3: safe by construction, not by restriction).
+
+## 5. The upstream genai contribution — a required outcome
+
+Scoped against `genai 0.6.5`. Four changes, all small, all in
+`jeremychone/rust-genai`. Per §2.3 the library already has a lossless,
+model-tagged carrier (`ContentPart::Custom`), so **no new part type is
+required** — which is what makes this tractable rather than a rewrite.
+
+| # | Site | Today | Change |
+|---|---|---|---|
+| G1 | `anthropic/adapter_shared.rs:527` | `"thinking" => reasoning_content.push(item.x_take("thinking")?)` — text kept, `signature` discarded | Preserve the block losslessly. `redacted_thinking` already takes the `Custom` path at the `other_typ` arm; route `thinking` the same way, or add a signature field to the reasoning representation. |
+| G2 | `anthropic/streamer.rs:152-155` | Captures `thinking` text; discards `signature_delta` | Same fix on the streaming path, so both parsers agree. |
+| G3 | `anthropic/adapter_shared.rs:227` and `:271` | `ContentPart::Custom(_) => {}` (and `ReasoningContent`, `ThoughtSignature`) — empty arms in **both** the user- and assistant-content branches | Echo `Custom` parts verbatim when `model_iden.adapter_kind == Anthropic`. This is the actual round-trip. |
+| G4 | `bedrock/converse.rs` | Same drop | Same fix. Anthropic signatures are cross-platform (Claude API / Bedrock / Vertex), so one modelling decision covers all three. |
+
+**Two candidate shapes for G1, to be offered in the PR discussion rather than
+picked unilaterally:**
+
+- **(i) Route `thinking` to `ContentPart::Custom`.** Purely additive, no
+  breaking change to a public enum, and reuses the path `redacted_thinking`
+  already takes. Weakness: `Custom` semantically means *"we don't know what
+  this is"*, which is a small lie for a block the parser demonstrably
+  recognises.
+- **(ii) Give the reasoning part a signature field.** Semantically honest.
+  Weakness: `ContentPart::ReasoningContent(String)` is a public tuple variant,
+  so this is a breaking change for downstream users.
+
+Upstream will likely prefer (i); (ii) is the better model. Lead with (ii),
+offer (i) as the compatible fallback.
+
+**Sequencing so an external review cycle never blocks us.** G1–G4 are
+independent of factor-q's own phases, so the PR opens at the *end of Phase 1*
+— as soon as the ADR fixes the shape we are arguing for — and runs in
+parallel with Phases 2–4. The maintainer's resolution ladder is the
+contingency: if upstream stalls or rejects on design grounds, we fork and
+point Cargo at it; migration is the third rung and not contemplated here.
+**We are never blocked on the merge**, only on the shape decision, which is
+ours.
+
+**Anthropic-side verification of the round-trip is what
+[`experiments/reasoning-round-trip/`](../../../experiments/reasoning-round-trip/)
+already exists to measure**, and its `echo` arm is exactly the correct
+protocol this contribution enables. Re-run it against a build carrying the
+fork to confirm the `echo` arm is reachable through factor-q rather than only
+through a hand-rolled probe.
+
+## 6. Execution plan (PR-sized)
+
+| Phase | Deliverable | Gates |
+|---|---|---|
+| **0** | **Modelling session.** Part taxonomy, `Message` shape, signature attachment, ordering, barrier semantics, strip site. Output is the ADR draft, per CONTRIBUTING (*"the session's output is the design document itself"*). | §8 questions answered |
+| **1** | **ADR + doc amendments.** New ADR. Amend `inter-node-contracts-and-event-layers.md` §6/§7 (I3), `event-schema.md` (`llm.response` shape + v2→v3 changelog), `SCHEMA_VERSION` 2 → 3. No code. | ADR accepted |
+| **1b** | **Upstream genai PR opened** (§5, G1–G4). Runs in parallel from here. | PR open, shape argued |
+| **2** | **Oracle first, then the type.** Build the judge before the thing it judges (lesson 10: *"thirteen reworks with zero behavioural regressions"*). Then `Message`/`ChatResponse`/`ModelResponse`/`LlmResponsePayload` become parts-shaped, with a no-op encoder. Behaviour unchanged; the diff is shape only. | golden net green, `just quality` + `just runtime-ci` |
+| **3** | **OpenAI-compatible read + write.** `from_provider_response` reads `ChatResponse.reasoning_content`; `convert_message` emits `ContentPart::ReasoningContent`; `harness.rs:329` carries it into the replayed conversation. The cross-model strip (I2) lands here with its assertion. | I1, I2, I5 |
+| **4** | **Cost decomposition.** `reasoning_tokens` into `TokenUsage` from `completion_tokens_details`; `convert_usage` reads it; `total_cost` provably unchanged. | I4 |
+| **5** | **Anthropic encoder** behind the resolved genai dependency (upstream or fork). Re-run the round-trip experiment's `echo` arm through factor-q. | I1 on Anthropic |
+
+Phase 2 is the one to hold the line on: a pure shape change with an unchanged
+golden net is the cheapest possible place to discover the model is wrong.
+
+## 7. Test plan
+
+Per the issue, the gap is **silent**, so tests assert on the outbound wire
+shape and never on output quality.
+
+- **Wire-shape round-trip (I1).** Fixture-backed two-turn test over an
+  OpenAI-compatible provider: turn 1 returns `reasoning_content` and a tool
+  call; assert the assistant message factor-q sends on turn 2 carries that
+  `reasoning_content` back, byte-identical. This is *the* test the issue asks
+  for. `test_support/mock_anthropic.rs` is the existing pattern; an
+  OpenAI-shaped sibling is needed.
+- **Cross-model strip (I2).** Property test: for any conversation carrying
+  reasoning from model A, a request built for model B contains no reasoning
+  part. Model-tie is a shape invariant, so it is property-checkable rather
+  than example-checkable.
+- **Invocation boundary (I3).** Assert `ConsumerView` exposes no reasoning
+  part, for every payload variant that can carry one. Cheap now, and the only
+  moment it *can* be written before #414 gives it a caller.
+- **Cost decomposition (I4).** Assert `reasoning_tokens` is captured **and**
+  that `total_cost` is bit-identical with and without the split. The second
+  half is the one that matters.
+- **State-blob compatibility.** `validate_state_blob` and the resume path
+  (`invocation_resume.rs`) must reject a v2 blob cleanly rather than
+  mis-parse it. Per STATUS.md pre-alpha, breaking in-flight resumes is
+  acceptable; breaking them *silently* is not (I5).
+- **Oracle + DST.** The reducer verification net (claims R1–R7) covers the
+  replay path. A parts-shaped conversation must pass resume-equivalence and
+  the crash DST unchanged — that is the strongest available evidence the shape
+  change is behaviour-preserving.
+
+## 8. Open questions for the modelling session
+
+- **Q1 — Does the tool result become a part?** §4.2 argues the
+  `MessageRole::Tool` + `tool_call_id` pairing is an invalid-states-
+  representable smell with a live runtime error to prove it. Folding it in is
+  the better model and is scope beyond the gate. Fold now, or note and defer?
+- **Q2 — Transcript rendering default.** Retention is settled (§4.3); does
+  `fq invocation transcript` show reasoning by default, or behind a flag
+  alongside `--full`? Reasoning blocks can be large and are the least useful
+  part of a transcript read for *what happened*.
+- **Q3 — Do `ChatResponse` / `ModelResponse` / `LlmResponsePayload` all become
+  parts-shaped, or only `Message`?** Only `Message` carries the #414 gate. The
+  other three are responses, and a response is not replayed — it is *converted
+  into* a message. Uniformity argues one way; lesson 8 (*"defer shapes to
+  their consumer"*) argues the other.
+- **Q4 — Is `Opaque` reachable at all in this work?** Anthropic's
+  `redacted_thinking` is rare and the Gemini path is not in scope. Naming the
+  variant with no encoder is either honest room-to-grow or exactly the
+  speculative structure lesson 2 says to delete.
+- **Q5 — Restate or withdraw the #424 gate?** §2.2 shows the stated reason is
+  stale. Maintainer call, not ours.
