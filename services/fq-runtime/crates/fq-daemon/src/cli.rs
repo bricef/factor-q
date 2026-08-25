@@ -119,8 +119,20 @@ impl GlobalArgs {
 }
 
 /// `fqd` takes the global connection/config flags and no subcommands.
+///
+/// `long_version` carries the commit, matching `fq`. A bare `version`
+/// printed `fqd 0.1.0` and nothing else, so the one binary whose
+/// deployed build actually matters could only be identified over a live
+/// authenticated edge or by reading its startup banner — and the
+/// deploy's bundle-coherence check, which compares the SHAs the other
+/// binaries report, had to skip the daemon.
 #[derive(clap::Parser)]
-#[command(name = "fqd", about = "The factor-q daemon", version)]
+#[command(
+    name = "fqd",
+    about = "The factor-q daemon",
+    version,
+    long_version = env!("FQ_VERSION_LONG")
+)]
 pub(crate) struct FqdArgs {
     #[command(flatten)]
     pub(crate) global: GlobalArgs,

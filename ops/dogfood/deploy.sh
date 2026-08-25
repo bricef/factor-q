@@ -134,15 +134,22 @@ if [ "$WANT" = "latest" ]; then
     case "$SHA" in *-dirty*) die "channel artifact is dirty-stamped ($SHA) — refusing" ;; esac
     WSHA="$(watcher_sha "$tmp/x/github-watcher")"
     [ "$WSHA" = "$SHA" ] || die "bundle mismatch: fq is $SHA but github-watcher is $WSHA"
+    # The daemon, which is the binary this whole deploy is about, and
+    # which until 2026-08-25 could not be checked at all: `fqd
+    # --version` printed no commit, so the coherence check covered
+    # every binary except the one that matters most.
+    FQDSHA="$(fq_sha "$tmp/x/fqd")"
+    [ -n "$FQDSHA" ] || die "cannot read the embedded SHA from the bundled fqd"
+    [ "$FQDSHA" = "$SHA" ] || die "bundle mismatch: fq is $SHA but fqd is $FQDSHA"
     # The dashboard gained --version with #168 (prints "fq-dashboard
     # <sha>"); include it in the coherence check. Tolerate a bundle
     # predating the flag (empty DSHA) rather than dying on it.
     DSHA="$("$tmp/x/fq-dashboard" --version 2>/dev/null | awk '{print $2}')"
     if [ -n "$DSHA" ]; then
         [ "$DSHA" = "$SHA" ] || die "bundle mismatch: fq is $SHA but fq-dashboard is $DSHA"
-        ok "bundle is main @ $SHA (fq, watcher and dashboard agree)"
+        ok "bundle is main @ $SHA (fq, fqd, watcher and dashboard agree)"
     else
-        ok "bundle is main @ $SHA (fq and watcher agree; dashboard predates --version)"
+        ok "bundle is main @ $SHA (fq, fqd and watcher agree; dashboard predates --version)"
     fi
 
     REL="releases/$SHA"

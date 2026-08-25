@@ -146,20 +146,29 @@ guide.
 
 ### Container image
 
-A multi-stage `Dockerfile` lives alongside this README. It builds a
-release binary with the official Rust image and copies it into a
+A multi-stage `Dockerfile` lives alongside this README. It builds with
+the official Rust image and copies the binaries into a
 [distroless](https://github.com/GoogleContainerTools/distroless) runtime
 stage (`gcr.io/distroless/cc-debian12:nonroot`) for minimal surface
 area and a non-root user by default.
 
+It ships **both** binaries. `fqd` is the entrypoint and takes no
+subcommand — it is the daemon. `fq` rides along because a distroless
+image has no shell, so `docker exec`-ing the client is the only way to
+ask a daemon in a container anything.
+
 ```sh
-# From this directory
-docker build -t factor-q/fq-runtime .
+# From the repository root — the build context is the workspace, not
+# this directory, because cargo needs every member manifest.
+just docker-build
 ```
 
-The image is aspirational for now — the runtime doesn't yet have enough
-functionality to warrant a real deploy — but it establishes the shape
-the runtime is authored against.
+The image is not exercised by CI. Nothing builds it on a push, so it
+drifts silently: before 2026-08-25 its member-manifest list had been
+missing two crates since they were added, which made `cargo build` fail
+on the first line it reached, and its `CMD` still named a subcommand
+that no longer existed. If you change the workspace's membership,
+build this by hand.
 
 ### Environment variables
 
