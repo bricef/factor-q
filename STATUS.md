@@ -4,9 +4,41 @@ One screen: what runs today, where we are, what's next. Updated at
 milestone boundaries — **last: 2026-07-20** (M0 "close the loop" met).
 If this contradicts `git log`, trust the log and fix this file.
 
+## Maturity: pre-alpha
+
+**There are no external users, no published release, and no compatibility
+promise of any kind.** Everything below is built on that assumption, and
+so is every review of it.
+
+Concretely, and deliberately:
+
+- **Backward compatibility is not a goal.** Wire formats, event payloads,
+  config file names and shapes, CLI surfaces, and on-disk layouts change
+  without deprecation windows, version negotiation, or migration code. A
+  client and a daemon from different builds are not expected to
+  interoperate, and a skew failure is a deploy ordering problem, not a bug.
+- **Rollback to an earlier build is not supported.** Deploy tooling may
+  assume it only ever moves forward. A rollback that fails is a known
+  limitation, not a defect to file.
+- **Manual intervention on upgrade is acceptable.** Renaming a config,
+  re-pairing a client, clearing state, or hand-fixing a host is a fine
+  answer. Prefer a clear failure that names the manual step over
+  automation that guesses.
+- **Delete transition scaffolding once the transition is done.** Code that
+  exists only to straddle two versions is a liability here, not an asset —
+  it is untested against the version it claims to support and it hides the
+  simple path.
+
+The corollary for reviews: **a finding whose only impact is on
+compatibility, migration, or rollback is out of scope** — note it and move
+on. Findings about the *current* build's correctness are always in scope.
+
+Revisit this section when the first external consumer appears; until then
+it is the licence to keep changing shape quickly.
+
 ## What runs today
 
-- **Runtime (`fq`)** — a persistent daemon (`fq run`: event projection +
+- **Runtime (`fqd`)** — a persistent daemon (event projection +
   trigger dispatcher over NATS/JetStream). Agents are Markdown definitions
   executed through the suspend/resume [reducer harness](docs/guide/reducer-harness.md);
   per-agent model selection, budget enforcement after every LLM call,
