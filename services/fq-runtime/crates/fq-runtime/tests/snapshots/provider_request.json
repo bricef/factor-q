@@ -1,0 +1,157 @@
+{
+  "chat_options": {
+    "cache_control": null,
+    "capture_content": null,
+    "capture_raw_body": null,
+    "capture_reasoning_content": null,
+    "capture_tool_calls": null,
+    "capture_usage": null,
+    "extra_body": null,
+    "extra_headers": null,
+    "max_tokens": 4096,
+    "normalize_reasoning_content": null,
+    "prompt_cache_key": null,
+    "reasoning_effort": "High",
+    "response_format": null,
+    "seed": null,
+    "service_tier": null,
+    "stop_sequences": [],
+    "temperature": 0.2,
+    "tool_choice": null,
+    "top_p": null,
+    "verbosity": null
+  },
+  "chat_request": {
+    "messages": [
+      {
+        "content": [
+          {
+            "Text": "You are a careful assistant."
+          }
+        ],
+        "options": {
+          "cache_control": "Ephemeral"
+        },
+        "role": "System"
+      },
+      {
+        "content": [
+          {
+            "Text": "Pinned resource: the deploy runbook."
+          }
+        ],
+        "options": null,
+        "role": "User"
+      },
+      {
+        "content": [
+          {
+            "Text": "Investigate the failing deploy."
+          }
+        ],
+        "options": null,
+        "role": "User"
+      },
+      {
+        "content": [
+          {
+            "Text": "Let me look at the logs."
+          }
+        ],
+        "options": null,
+        "role": "Assistant"
+      },
+      {
+        "content": [
+          {
+            "Text": "No tool calls were made and the run is not over."
+          }
+        ],
+        "options": null,
+        "role": "User"
+      },
+      {
+        "content": [
+          {
+            "Text": "Reading both logs."
+          },
+          {
+            "ToolCall": {
+              "call_id": "call_a",
+              "fn_arguments": {
+                "path": "/var/log/deploy.log"
+              },
+              "fn_name": "file_read"
+            }
+          },
+          {
+            "ToolCall": {
+              "call_id": "call_b",
+              "fn_arguments": {
+                "path": "/var/log/agent.log"
+              },
+              "fn_name": "file_read"
+            }
+          }
+        ],
+        "options": null,
+        "role": "Assistant"
+      },
+      {
+        "content": [
+          {
+            "ToolResponse": {
+              "call_id": "call_a",
+              "content": "deploy failed at step 3"
+            }
+          }
+        ],
+        "options": null,
+        "role": "Tool"
+      },
+      {
+        "content": [
+          {
+            "ToolResponse": {
+              "call_id": "call_b",
+              "content": "agent restarted"
+            }
+          }
+        ],
+        "options": null,
+        "role": "Tool"
+      },
+      {
+        "content": [
+          {
+            "Text": "Budget is 80% spent."
+          }
+        ],
+        "options": {
+          "cache_control": "Ephemeral"
+        },
+        "role": "User"
+      }
+    ],
+    "system": null,
+    "tools": [
+      {
+        "config": null,
+        "description": "Read a file from the workspace.",
+        "name": "file_read",
+        "schema": {
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "model": "claude-sonnet-4-6"
+}
