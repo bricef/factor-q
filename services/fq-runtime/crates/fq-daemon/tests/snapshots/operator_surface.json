@@ -947,7 +947,7 @@
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "One row of the Agent view's index (`agent.list`): a definition file\nthe daemon read, and what became of it.\n\nA registry snapshot is not only its agents. A file that failed to\nparse is usually the most operationally interesting thing in the\ndirectory — the agent someone expects to be running and is not —\nand it has no agent id to be listed under, so it rides the index as\nits own kind of row. Dropping it would make the listing lie by\nomission, and there is nowhere else on today's surface to put it.",
+        "description": "One row of the Agent view's index (`agent.list`): a definition file\nthe daemon read, and what became of it.\n\nA registry snapshot is not only its agents. A file that failed to\nparse is usually the most operationally interesting thing in the\ndirectory — the agent someone expects to be running and is not —\nand it has no agent id to be listed under, so it rides the index as\nits own kind of row. Dropping it would make the listing lie by\nomission.\n\nThat last clause used to end \"and there is nowhere else on today's\nsurface to put it\", which stopped being true when `control.status`\ngrew `registry.load_errors`. The 2026-08-05 amendment to the\noperator-surface model decided this index should become homogeneous\nonce load errors had another home; the `control.status` half shipped\nand this half did not, so the union is what the surface still\npromises. Narrowing it is a wire break and wants doing deliberately,\nnot incidentally.",
         "oneOf": [
           {
             "$ref": "#/$defs/AgentSummaryView",
