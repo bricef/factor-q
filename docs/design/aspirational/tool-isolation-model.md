@@ -20,7 +20,10 @@ What actually ships today:
   calls it in places.
 - **There is no network proxy.** `sandbox.network` parses and is
   deliberately not plumbed through; the agent registry warns at load
-  that a declaring agent still has ambient network access (#35). Read
+  that a declaring agent still has ambient network access. Enforcement is
+  tracked by #208 (forward proxy) and #209 (containerised isolation); #35,
+  which first identified this, was closed by a change that added the warning
+  rather than the enforcement. Read
   the proxy section as a design, not a control you have.
 - **Workspaces are per-invocation or shared, never per-agent**, and the
   runtime provisions directories only — no overlay, no base layer, no
