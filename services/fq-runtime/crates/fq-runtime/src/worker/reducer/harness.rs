@@ -28,7 +28,7 @@ use crate::events::{Message, MessageRole, RequestParams, TaskStatus};
 /// 8): the effective cap is a per-agent definition override, else the
 /// daemon config default ([`crate::config::Config::max_iterations`]),
 /// else this constant — which is what the config default falls back to
-/// when `fq.toml` says nothing. It stays here so a runner built with no
+/// when `fqd.toml` says nothing. It stays here so a runner built with no
 /// explicit default (most tests) still gets a sane bound, itself
 /// bounded in the large by the dollar budget and the host step budget.
 pub const DEFAULT_MAX_ITERATIONS: u32 = 100;

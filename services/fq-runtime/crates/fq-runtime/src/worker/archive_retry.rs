@@ -83,7 +83,7 @@ impl ArchiveRetrySweeper {
     }
 
     /// Override the retry cadence. Production callers set this
-    /// from the `[worker]` section of `fq.toml`; tests call it
+    /// from the `[worker]` section of `fqd.toml`; tests call it
     /// to shorten the loop.
     pub fn with_retry_interval_ms(mut self, ms: u64) -> Self {
         self.retry_interval_ms = ms;
