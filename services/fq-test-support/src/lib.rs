@@ -308,3 +308,71 @@ mod tests {
         }
     }
 }
+
+/// Re-serialise a JSON value with object keys in a stable, self-defined
+/// order — pretty-printed, newline-terminated, ready to be a snapshot.
+///
+/// **Why this exists.** `serde_json::Map` is a `BTreeMap` (sorted keys) or
+/// an `IndexMap` (insertion order) depending on whether anything in the
+/// build graph enables `serde_json/preserve_order`. Cargo features are
+/// additive across the whole graph, so that is not a decision any crate
+/// here makes — it is a decision a *dependency* makes, and because it
+/// applies per build, the same code emits different bytes depending on
+/// **which packages you compile together**. `cargo test -p fq-ops` and
+/// `just runtime-ci` genuinely disagreed about a snapshot for exactly this
+/// reason (#437, genai 0.7 turned the feature on).
+///
+/// A snapshot oracle that compares serialised bytes is otherwise asserting
+/// on a third party's internal representation. Sorting here makes the
+/// question moot: the bytes depend on the data and nothing else.
+///
+/// Sorting is a bijection on the data, so real drift still shows — and the
+/// output is additionally immune to struct field reordering, which
+/// insertion-order serialisation is not.
+pub fn canonical_json(value: &serde_json::Value) -> String {
+    fn sorted(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                let mut out = serde_json::Map::with_capacity(keys.len());
+                for key in keys {
+                    out.insert(key.clone(), sorted(&map[key]));
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(sorted).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string_pretty(&sorted(value)).expect("a Value always serialises") + "\n"
+}
+
+#[cfg(test)]
+mod canonical_json_tests {
+    use super::canonical_json;
+
+    /// The property that matters: key order in the input cannot change the
+    /// output. Under `preserve_order` these two build different maps.
+    #[test]
+    fn key_insertion_order_does_not_change_the_bytes() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"b":1,"a":{"z":2,"y":3}}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"{"a":{"y":3,"z":2},"b":1}"#).unwrap();
+        assert_eq!(canonical_json(&a), canonical_json(&b));
+    }
+
+    /// And it must still be a faithful encoding, not a lossy one.
+    #[test]
+    fn content_survives_and_drift_still_shows() {
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"b":[1,{"d":4,"c":3}],"a":null}"#).unwrap();
+        let round: serde_json::Value = serde_json::from_str(&canonical_json(&v)).unwrap();
+        assert_eq!(round, v, "canonicalisation must preserve the data");
+
+        let changed: serde_json::Value =
+            serde_json::from_str(r#"{"b":[1,{"d":5,"c":3}],"a":null}"#).unwrap();
+        assert_ne!(canonical_json(&v), canonical_json(&changed));
+    }
+}
