@@ -270,7 +270,7 @@ The sketch below was the shape at proposal time. **It is not the numbering
 that ran**, and the rest of this ADR — Appendix B's "Phase 3e", "the
 Phase-4 inventory" — uses the executed plan's numbering instead, as does
 the code. The authoritative sequence is
-[the registry + split execution plan](../../plans/active/2026-07-20-registry-and-split-execution.md):
+[the registry + split execution plan](../../plans/closed/2026-07-20-registry-and-split-execution.md):
 Phase 3 = exemplars, Phase 4 = fleet migration, Phase 5 = split the binary,
 Phase 6 = MCP operator face. Read phase numbers anywhere else in this
 document as the plan's, not this list's.
