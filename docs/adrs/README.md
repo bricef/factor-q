@@ -8,6 +8,40 @@ supersede earlier ones; guides track the current state).
 Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 `NNNN-slug.md`.
 
+## Status and Implementation are different questions
+
+Every ADR carries two lines near the top, and they answer different things:
+
+```text
+Status: Accepted
+Implementation: partial — the edge and the typed registry ship (#489, #498);
+                the MCP server face is not built (#84)
+```
+
+- **`Status:`** — what we decided, and whether a later ADR has replaced it.
+  `Proposed` / `Accepted` / `Superseded by ADR-NNNN`. This is the historical
+  record and does not change because code did or did not get written.
+- **`Implementation:`** — whether the thing exists, as one of **`pending`**,
+  **`partial`** or **`complete`**, followed by a short note naming the PRs
+  and issues involved. Partial is the interesting case: say which half
+  shipped and which did not.
+
+**Why both.** Until 2026-08-26 an ADR said only `Status: Accepted`, and a
+reader had no way to tell a decision that shipped from one nobody had
+started. A review that year found five accepted ADRs describing systems that
+were never built and saying nothing about it, and two that shipped the
+current architecture and were equally silent. Neither is a documentation
+error in the ordinary sense — the decisions really were accepted. The
+missing information was construction state, and the fix is to state it
+rather than leave it to inference.
+
+Keep the note short and pointed at evidence. `Implementation: complete
+(#498)` is worth more than a paragraph, because the PR carries the detail
+and does not go stale.
+
+A design doc's *folder* answers the same question for prose:
+[`design/committed/` vs `design/aspirational/`](../design/README.md).
+
 ## Accepted
 
 | ADR | Decision |
