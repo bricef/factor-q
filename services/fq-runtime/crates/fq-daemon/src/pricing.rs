@@ -1,9 +1,9 @@
 //! The ADR-0004 pricing-coverage guarantee, enforced before anything runs.
 //!
-//! Split out of `lib.rs` (#189). Both entry points that drive an agent — the
-//! daemon and the in-process `fq trigger` — merge config overrides over the
-//! cached LiteLLM table through here, so the fail-fast lives in one place
-//! rather than twice.
+//! Split out of `lib.rs` (#189). The daemon is the only thing that drives
+//! an agent — D-1 retired the in-process `fq trigger` path — so this is
+//! where config overrides are merged over the cached LiteLLM table, and
+//! the fail-fast has one place to live rather than two.
 
 use fq_runtime::agent::AgentRegistry;
 use fq_runtime::{Config, PricingTable};

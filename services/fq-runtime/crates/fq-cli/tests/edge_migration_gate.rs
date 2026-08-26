@@ -9,13 +9,18 @@
 //! re-derive from the diff. A flip that leaves the old path in place
 //! as a fallback passes its goldens — it does not pass this.
 //!
-//! Five legacy paths are counted:
+//! Six legacy paths are counted:
 //!
 //! * `open_views(` — the CLI opening projection stores for itself.
 //!   Its definition counted too, so the terminal state was a clean
 //!   zero: the last caller's departure took the helper with it, in
 //!   cohort 4.4. The pattern stays because what it guards against is a
 //!   helper like it reappearing.
+//! * `EventBus::connect(` — a client verb dialling the broker to ask a
+//!   question, rather than to subscribe. Added when `fq invocation
+//!   resume` moved to the edge: none of the other patterns matched a
+//!   bespoke request/reply subject, so the count read zero while a
+//!   second, unauthenticated path to the daemon was still in use.
 //! * `Views::open(` — the same act one level down, which is how it
 //!   survived the helper's deletion: `fq status` opened the stores by
 //!   calling the constructor `open_views` had wrapped. Added in cohort
@@ -31,19 +36,23 @@
 //!   verb 9).
 //! * `.subscribe` — a client verb holding its own bus subscription
 //!   (`EventBus::subscribe`, `subscribe_control_*`). Neither a store
-//!   open nor a runtime-internals call, so the first three patterns
-//!   were blind to it, and it is the worst of the four: core NATS
+//!   open nor a runtime-internals call, so the store-open patterns
+//!   were blind to it, and it is the worst of the six: core NATS
 //!   drops messages silently when a consumer falls behind and cannot
 //!   be resumed, so a verb built on one answers with *some* of the
 //!   truth and says nothing about the rest (plan Phase 4, verbs 11
 //!   and 4).
 //!
-//! **Marked uses are exempt.** fq-cli is still both the thin client
-//! and the daemon host (the binary split is Phase 5), so the same
-//! crate legitimately contains daemon-side code — the edge's own
-//! command handlers call runtime internals *by design*, and that is
-//! the architecture, not debt. Those carry `allow-runtime-internals:`
-//! with a reason. Only unmarked sites are the migration backlog.
+//! **Marked uses are exempt**, and today nothing is marked. The
+//! exemption existed because fq-cli was once both the thin client and
+//! the daemon host, so the same crate legitimately contained
+//! daemon-side code — the edge's own command handlers call runtime
+//! internals *by design*. Phase 5 moved that half to `fq-daemon`, and
+//! this crate now carries zero `allow-runtime-internals:` markers. The
+//! mechanism stays as the escape hatch: a marker reappearing here is a
+//! reviewable act in the diff, and the reviewer's question is which
+//! crate the code belongs in. Only unmarked sites are the migration
+//! backlog.
 //!
 //! The scanner deliberately mirrors `store_open_gate.rs`: walk `src/`
 //! at runtime so a module split joins the gate automatically rather
@@ -230,8 +239,10 @@ const ALLOW: &str = "allow-runtime-internals:";
 /// the sibling gate (`store_open_gate.rs`) counts *markers* as well as
 /// violations, and why `Views::open` is now on both lists — between
 /// them, adding a store open to the client half is loud either way.
-/// Phase 5 splits the binary, at which point most of this becomes a
-/// fact about which crate a symbol is in rather than a convention.
+/// Phase 5 has since split the binary, so most of this is now a fact
+/// about which crate a symbol is in rather than a convention: the
+/// daemon half lives in `fq-daemon`, and `fq-cli` does not link
+/// `fq-runtime` at all (`fq-edge/tests/thin_client_gate.rs`).
 ///
 /// As of the resume flip the claim is the whole one: no client-side
 /// code in this crate opens a store, calls runtime internals, loads

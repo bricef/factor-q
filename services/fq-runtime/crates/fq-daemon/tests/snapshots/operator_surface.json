@@ -1636,7 +1636,7 @@
       "domain": "control",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "The typed input of `control.reload` on the wire. Empty, and declared\nanyway: the daemon reloads from the directory *it* was started with,\nnever one the caller names — that choice is the whole point of the\nverb, and this is where a future option (a `fq.toml` refresh)\nwould appear.",
+        "description": "The typed input of `control.reload` on the wire. Empty, and declared\nanyway: the daemon reloads from the directory *it* was started with,\nnever one the caller names — that choice is the whole point of the\nverb, and this is where a future option (an `fqd.toml` refresh)\nwould appear.",
         "title": "ReloadCommandInput",
         "type": "object"
       },
@@ -2441,7 +2441,7 @@
             "type": "object"
           },
           "StreamHealth": {
-            "description": "Health of one JetStream stream plus its primary durable consumer.\n\nExternally tagged (serde's default) rather than internally: internal\ntagging is a JSON-only representation, and the edge's session is\nbincode once its JSON preamble is done, so an internally-tagged enum\nwould fail to encode there.",
+            "description": "Health of one JetStream stream plus its primary durable consumer.\n\nExternally tagged (serde's default). The edge does not force the\nchoice: its token preamble is raw length-prefixed bytes and the\ntarpc session that follows is length-delimited JSON end to end\n(`fq_edge::server`, `fq_edge::client`), so an internally-tagged\nenum would encode there too. What pins the representation is that\nit is *declared* — the schema `describe` publishes for this type\nspells the tagging out, so changing it is a wire break, not a\nstylistic edit.",
             "oneOf": [
               {
                 "additionalProperties": false,

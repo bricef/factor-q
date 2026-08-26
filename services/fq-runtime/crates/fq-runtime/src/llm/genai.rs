@@ -54,7 +54,7 @@ impl GenAiClient {
     /// Construct a client that redirects every request to `base_url`
     /// instead of the provider-default endpoint. Used by tests (the
     /// `MockAnthropicServer`) and for operator overrides via the
-    /// `[providers.anthropic]` `base_url` setting in `fq.toml`.
+    /// `[providers.anthropic]` `base_url` setting in `fqd.toml`.
     ///
     /// Auth and model resolution are unchanged — the closure replaces
     /// only the endpoint on whichever `ServiceTarget` genai resolves

@@ -3,7 +3,7 @@
 //!
 //! The client half of `cost.summary` (plan Phase 4, verb 13): one call,
 //! then rendering. The report — what it computes, and the allocation
-//! rule it carries — is [`crate::cost_report`], daemon-side.
+//! rule it carries — is `fq_daemon::cost_report`, in the other binary.
 //!
 //! It used to open the projection itself, which meant spend was
 //! readable with the daemon stopped. It is not any more, and unlike

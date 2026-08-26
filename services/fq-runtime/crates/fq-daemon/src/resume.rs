@@ -305,7 +305,7 @@ pub(crate) fn register_resume_command(
                         //
                         // Telling those apart needs a typed refusal out
                         // of `handle_resume_request`, which returns one
-                        // message string across seven sites. Until then
+                        // message string across nine sites. Until then
                         // this is the variant the sibling verb settled
                         // on, and the message carries which it was.
                         return Err(WireError::InvalidInput {

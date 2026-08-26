@@ -21,12 +21,6 @@ use crate::cli::GlobalArgs;
 use crate::connections::{edge_client, stored_connection};
 use fq_ops::surface::{EventFilter, TurnFilter};
 
-/// Dial the configured daemon's edge with the stored pairing. One
-/// handle per verb, not per call: a verb that asks more than one
-/// question (`invocation transcript --follow` seeks the turn stream's
-/// tail, reads the snapshot, then long-polls) pays for the TLS
-/// handshake and the token exchange once, and every answer comes from
-/// the same daemon incarnation.
 /// Which daemon this invocation talks to.
 ///
 /// In order: `--addr`, then `fq.toml`'s default, then the sole pairing
@@ -60,6 +54,12 @@ pub(crate) fn daemon_addr(global: &GlobalArgs) -> anyhow::Result<String> {
     }
 }
 
+/// Dial the configured daemon's edge with the stored pairing. One
+/// handle per verb, not per call: a verb that asks more than one
+/// question (`invocation transcript --follow` seeks the turn stream's
+/// tail, reads the snapshot, then long-polls) pays for the TLS
+/// handshake and the token exchange once, and every answer comes from
+/// the same daemon incarnation.
 pub(crate) async fn edge_client_for(global: &GlobalArgs) -> anyhow::Result<fq_edge::EdgeClient> {
     let addr = daemon_addr(global)?;
     let entry = stored_connection(&addr)?;
