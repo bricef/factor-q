@@ -93,6 +93,11 @@ pub enum TriggerSource {
 ///
 /// Captured on `triggered` so that replay is meaningful even if the agent
 /// definition is later modified.
+///
+/// **A subset, not the definition.** `Agent` carries five fields this
+/// does not — `max_iterations`, `effort`, `trigger`, `mcp_servers`,
+/// `static_resources` — each of which changes what actually ran. See
+/// `Agent::to_snapshot` and #512.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfigSnapshot {
     pub name: String,
