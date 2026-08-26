@@ -4,9 +4,12 @@
 
 **Prerequisites:**
 - Rust toolchain (edition 2024 — install via [rustup](https://rustup.rs/))
+- A Go toolchain, for the trigger adapters in `adapters/` (`just ci`
+  gates them)
 - Docker and Docker Compose (for NATS)
 - [just](https://github.com/casey/just) (task runner)
-- An Anthropic API key for smoke tests (optional for unit tests)
+- A provider API key for smoke tests — `OPENROUTER_API_KEY` by
+  default; not needed for unit tests or the Go gate
 
 **First-time setup:**
 
@@ -46,6 +49,8 @@ factor-q/
 ├── services/fq-store/          content-addressed storage (fq-cas)
 ├── services/fq-dashboard/      operator dashboard
 ├── services/fq-test-support/   shared test-only helpers
+├── adapters/fq-cron/           durable cron scheduler (Go)
+├── adapters/github-watcher/    GitHub issue trigger adapter (Go)
 ├── tools/fq-lint/              source-policy linter — the size ratchets
 ├── infrastructure/             docker-compose + NATS config
 ├── agents/examples/            sample agent definitions
@@ -61,7 +66,7 @@ factor-q/
 
 ## Running tests
 
-factor-q has three test tiers, each with different prerequisites
+factor-q has four test tiers, each with different prerequisites
 and coverage:
 
 ### Tier 1: Unit tests
@@ -85,21 +90,45 @@ Run `just install-nats` once before the Rust suites so tests can provision
 their isolated brokers. The shared broker from `just infra-up` is required by
 smoke tests, not by these Rust suites.
 
-### Tier 2: Smoke tests
+### Tier 2: Go adapter gate
 
-End-to-end against a real LLM (Anthropic). Exercises the full
-stack: agent loading, executor, tool-call loops, event bus,
-projection, and the NATS-triggered dispatch path. Each test
-creates its own temp directory and uses a unique agent id.
+The trigger adapters (`adapters/fq-cron`, `adapters/github-watcher`)
+are standalone Go binaries that reach factor-q only through the
+trigger wire contract, never through `fq-runtime` code — so they have
+their own gate, and `just ci` runs it as its `go-ci` phase. Skipping
+it locally is the usual way a red CI arrives after a green `just
+quality`.
 
 ```sh
-# Requires ANTHROPIC_API_KEY and a running NATS
+just go-ci        # gofmt -l, go vet, go test, go build — every adapter
+```
+
+Needs a Go toolchain and the pinned `nats-server` from `just
+install-nats` (the adapters' integration tests spawn their own
+broker). No API key, no Docker.
+
+### Tier 3: Smoke tests
+
+End-to-end against a real LLM. Exercises the full stack: agent
+loading, executor, tool-call loops, event bus, projection, and the
+NATS-triggered dispatch path. Each test creates its own temp
+directory and uses a unique agent id.
+
+```sh
+# Requires a running NATS and the provider key named by
+# SMOKE_API_KEY_ENV — which defaults to OPENROUTER_API_KEY, not
+# ANTHROPIC_API_KEY. Override SMOKE_API_KEY_ENV to use another.
 just smoke
 ```
 
 Costs roughly $0.005-0.01 per run. Tests are in `tests/smoke/smoke.sh`.
+`just drill` is the sibling live drill (drain / clean shutdown / crash
+recovery) and takes its key from `DRILL_API_KEY_ENV`, same default.
 
-### Tier 3: Containerised sandbox tests
+Smoke is deliberately *not* part of `just ci`: it needs a provider key
+and makes a real, paid call.
+
+### Tier 4: Containerised sandbox tests
 
 The exec tool spawns child processes. Even though the test
 battery uses only safe commands (`echo`, `true`, `sleep`, etc.),
@@ -122,10 +151,18 @@ subsequent runs.
 ```sh
 just install-nats                              # once per fresh clone
 just test                                      # every Rust suite
+just go-ci                                     # the Go adapter gate
 just infra-up                                  # shared broker for smoke tests
-just smoke                                       # end-to-end (needs API key)
-just test-shell-sandbox                          # containerised sandbox
+just smoke                                     # end-to-end (needs a provider key)
+just test-shell-sandbox                        # containerised sandbox
 ```
+
+Or `just ci` for the full local gate in one shot — `lint-docs`,
+`check-links`, `quality`, the four Rust suites, and `go-ci`, timed
+per phase and fail-fast. It covers everything CI runs bar two
+carve-outs it names: `smoke` (paid) and `docker-build` (minutes; run
+it by hand after changing the Dockerfile, the workspace members, or
+the lockfile).
 
 ## Code conventions
 
@@ -139,12 +176,15 @@ just test-shell-sandbox                          # containerised sandbox
   ```sh
   just quality          # all of the below, fail-fast, timed
   just lint-sources     # the include! ban (see AGENTS.md)
+  just test-fq-lint     # unit tests for the linter itself
   just lint-sizes       # file + function size ratchets
   just lint-fmt         # cargo fmt --check, workspace-wide
   just lint-clippy      # clippy per crate, with each crate's features
   just lint-creep       # functions approaching the 250-line cap (advisory)
-  just test-fq-lint     # unit tests for the linter itself
+  just lint-coupling    # module fan-in/fan-out and cycles (advisory)
   ```
+
+  Listed in the order `quality` runs them.
 
 - **Size budgets are ratcheted, not advisory.** No file may exceed
   800 production lines and no function may exceed 250 lines;
