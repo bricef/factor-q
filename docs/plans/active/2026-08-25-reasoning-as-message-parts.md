@@ -147,10 +147,19 @@ fan-in 3), inside `fq-ops`'s own small 3-module cycle (`agent` ↔ `events` ↔
 `worker`) — which is **not** the 15-module fq-runtime cycle that #424
 restructures.
 
-**Action:** this does not unilaterally lift the #424 gate, but the stated
-reason for it is stale and should be restated or withdrawn on that issue
-rather than carried forward unexamined. Flag for the maintainer; do not
-assume.
+**Action: none here — parked 2026-08-26.** The evidence is captured on
+[#424](https://github.com/bricef/factor-q/issues/424) and
+[#415](https://github.com/bricef/factor-q/issues/415), and the block stands
+until someone chooses otherwise. It is recorded in this plan only because
+re-measuring the graph was a by-product of scoping the change, not because
+anything here waits on it. See §8.
+
+Two findings went to those issues rather than living here, since they are
+cleanup work and not reasoning work: the cycle is now carried by
+`worker → trigger → views → worker` rather than by anything touching the
+event vocabulary, and `fq-runtime::events` is one ~12-line `From` impl away
+from being a pure sink (fan-in 12, fan-out 0) — its only remaining outbound
+reference.
 
 ### 2.3 Upstream genai is in better shape than recorded
 
@@ -506,11 +515,20 @@ shape and never on output quality.
 
 ## 8. Open questions
 
-The 2026-08-25 session closed three of the original five. What it settled is in
-the decisions block and ADR-0034; what remains:
+**All five are now resolved, and nothing blocks execution.** Three were settled
+by the 2026-08-25 session, Q1 by the 2026-08-26 one, and Q5 is parked as work
+that belongs to a different effort. What they settled is in the decisions block
+and in ADR-0034.
 
-- **Q5 — Restate or withdraw the #424 gate?** *(open)* §2.2 shows the stated
-  reason is stale. Maintainer call, not ours. Does not block any phase here.
+- ~~**Q5 — Restate or withdraw the #424 gate?**~~ **Parked 2026-08-26.** The
+  evidence in §2.2 is captured on
+  [#424](https://github.com/bricef/factor-q/issues/424) and
+  [#415](https://github.com/bricef/factor-q/issues/415); the block stands
+  until someone chooses otherwise. **Nothing in this plan depends on it** —
+  it governs when a separate cleanup epic may start, not what this work does.
+  The cheap resolution is to read the `Coupling metrics` CI comment on Phase
+  2's PR: that phase is a pure shape change, so a zero-delta coupling diff
+  retires the gate's premise as a measured fact rather than an argued one.
 
 **Split out rather than answered:**
 

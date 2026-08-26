@@ -328,10 +328,13 @@ out of the log is a hole in that claim.
   system is correct without it. Revisit when `turn.list` actually strains the
   8 MiB frame ceiling — reasoning is a second unbounded field on that path, and
   the first that is routinely rather than exceptionally large.
-- **Q4 — Restate or withdraw #424's gate on this work.** Its stated rationale
-  (*"`events` has fan-in 10"*) re-measures on `main` to a 33-line re-export
-  facade with fan-out 1, and the vocabulary that changes now lives outside
-  fq-runtime's cycle group. Maintainer call.
+- ~~**Q4 — Restate or withdraw #424's gate on this work.**~~ **Parked
+  2026-08-26.** Its stated rationale (*"`events` has fan-in 10"*) re-measures
+  on `main` to a 33-line re-export facade with fan-out 1. Evidence captured on
+  [#424](https://github.com/bricef/factor-q/issues/424) and
+  [#415](https://github.com/bricef/factor-q/issues/415); the block stands until
+  someone chooses otherwise. Nothing in this ADR or its plan depends on the
+  outcome — the gate governs when a separate cleanup epic may begin.
 - **Q5 — Does the parallel-tool-result batching get fixed here?** No. D1b makes
   the batched shape *expressible*; changing what the harness emits is a
   separate behavioural fix with its own test coverage gap
