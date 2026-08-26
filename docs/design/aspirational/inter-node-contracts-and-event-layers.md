@@ -62,6 +62,12 @@ This rule cannot be enforced by guidance or convention. Without runtime enforcem
 
 The reasoning-trace case matters specifically: fresh-context verification only works if the verifier does not see the producer's reasoning. If reasoning leaks via annotations into a downstream agent's input, the path-independence that justifies multi-invocation in the first place is lost.
 
+**Amended 2026-08-26 by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md), which is the authority for the two paragraphs below.** This section is the one part of this aspirational document now backed by an accepted decision; the rest remains design-ahead.
+
+**The barrier is between invocations, not between turns.** The rule above governs what a *consuming* agent sees of a *producing* agent's work. It says nothing about a model seeing its own reasoning inside its own conversation — there the reasoning is the model's own working handed back to itself, one agent and one context, exactly as every provider's contract assumes. Replay *within* an invocation is continuity; exposure *across* one is coupling. Reading this section as a prohibition on the first is the misreading ADR-0034 exists partly to prevent, and it was a live one: factor-q discarded reasoning end to end, and the code read as though that were deliberate.
+
+**The barrier follows the data, not the layer that carries it.** This section was written when reasoning could only arrive as an annotation, so "strip annotations" and "strip reasoning" were the same instruction. Since ADR-0034 reasoning is a first-class content part on the message, which puts it in the **payload** — the layer the barrier does *not* strip. The rule is therefore stated on the content rather than on its container: **a consuming agent sees no upstream reasoning, whether it arrives as an annotation or as a payload part.** Stripping annotations alone no longer discharges this section.
+
 ### 7. Where data goes — the placement test
 
 For any new field, the test is:
@@ -75,7 +81,7 @@ For any new field, the test is:
 Specific calls following this test:
 
 - *Self-reported confidence* → annotations. LLM confidence is poorly calibrated and should not gate downstream behaviour. Calibrated confidence should come from a separate verifier node producing a typed `Verdict`.
-- *Reasoning traces / chain-of-thought* → annotations, with strict barrier enforcement.
+- *Reasoning traces / chain-of-thought* → **payload**, as a typed content part on the message, and stripped at the invocation boundary by §6. **Amended 2026-08-26 ([ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md)); this entry previously read "annotations, with strict barrier enforcement".** That was right while reasoning was advisory commentary and wrong once it became load-bearing: a model's own prior reasoning changes what its next turn produces, so by this section's own test — *"if this field disappeared, would graph correctness change?"* — it is payload. The `reasoning` annotation key keeps its original and different meaning, an agent's *self-reported* working, and still has no writer.
 - *Tool call summaries* → envelope (system-level, queryable).
 - *Provenance / sources used* → payload, as a typed `Citation[]` field, when downstream nodes need them. Sources merely *considered* but not used belong in annotations.
 - *"Why I made this choice"* → annotations. Always. The moment a consumer reads "why" to decide what to do, two agents are coupled through prose.

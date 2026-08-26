@@ -2,11 +2,11 @@
 
 ## Status
 
-Draft (2026-08-25). Output of the co-design session of 2026-08-25, per
-[CONTRIBUTING § Design sessions](../../../CONTRIBUTING.md) — *"the session's
-output is the design document itself"*. Records the maintainer decisions taken
-on [#437](https://github.com/bricef/factor-q/issues/437) on 2026-07-28 and
-2026-08-25. Execution is sequenced by
+Accepted (2026-08-26). Output of the co-design sessions of 2026-08-25 and
+2026-08-26, per [CONTRIBUTING § Design sessions](../../../CONTRIBUTING.md) —
+*"the session's output is the design document itself"*. Records the maintainer
+decisions taken on [#437](https://github.com/bricef/factor-q/issues/437) on
+2026-07-28, 2026-08-25 and 2026-08-26. Execution is sequenced by
 [the plan](../../plans/active/2026-08-25-reasoning-as-message-parts.md).
 
 Contract precondition for [#414](https://github.com/bricef/factor-q/issues/414)
