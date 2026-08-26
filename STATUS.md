@@ -1,7 +1,9 @@
 # Status
 
 One screen: what runs today, where we are, what's next. Updated at
-milestone boundaries — **last: 2026-07-20** (M0 "close the loop" met).
+milestone boundaries — **last: 2026-08-26** (ADR-0006 + ADR-0031 done:
+the edge migration gate reached zero on 2026-08-14 and the `fq`/`fqd`
+binary split shipped on 2026-08-23).
 If this contradicts `git log`, trust the log and fix this file.
 
 ## Maturity: pre-alpha
@@ -38,22 +40,29 @@ it is the licence to keep changing shape quickly.
 
 ## What runs today
 
-- **Runtime (`fqd`)** — a persistent daemon (event projection +
-  trigger dispatcher over NATS/JetStream). Agents are Markdown definitions
-  executed through the suspend/resume [reducer harness](docs/guide/reducer-harness.md);
+- **Runtime (`fqd`) and client (`fq`)** — two binaries since the
+  ADR-0031 split landed on 2026-08-23: a persistent daemon (event
+  projection + trigger dispatcher over NATS/JetStream), and a thin
+  client that reaches it only over the authenticated edge. Agents are
+  Markdown definitions executed through the suspend/resume
+  [reducer harness](docs/guide/reducer-harness.md);
   per-agent model selection, budget enforcement after every LLM call,
-  sandboxed built-in tools (`file_read`, `file_write`, `exec`,
-  `self_inspect`). Full [MCP client](docs/guide/mcp.md) (spec 2025-11-25):
+  seven sandboxed built-in tools (`file_read`, `file_list`,
+  `file_search`, `file_write`, `exec`, `self_inspect`, and
+  `report_outcome` — the one that ends an invocation with a declared
+  status). Full [MCP client](docs/guide/mcp.md) (spec 2025-11-25):
   stdio + Streamable HTTP transports; tools, resources, prompts, and the
   server-initiated capabilities (sampling, elicitation, roots). Operator
-  surface: `fq init / run / trigger / reload / down / agent / invocation`
+  surface: `fq init / trigger / reload / down / agent / invocation`
   (including `transcript`) `/ events / costs / status / workers /
   dead-letters / doctor` (read commands take `--json`), plus the
   authenticated-edge client verbs `fq connect` (TOFU cert pinning +
   token), `fq ops list`, and `fq token attenuate` (offline token
   narrowing), plus a read-only
-  web dashboard (`fq-dashboard` over the daemon's localhost tarpc read
-  service — the
+  web dashboard (`fq-dashboard`, which reads over the **authenticated
+  edge as a second principal**: its own capability token, attenuated
+  offline to six read grants, so a compromised dashboard can read
+  exactly what it renders and command nothing — the
   [operator-dashboard plan](docs/plans/closed/2026-07-10-operator-dashboard.md)).
 - **Store (`fq-cas`)** — [content-addressed storage](services/fq-store/README.md)
   (BLAKE3, FastCDC dedup) + named objects with version history + verified
@@ -113,28 +122,27 @@ path: trace oracle, state validation, sim world, resume equivalence,
 crash DST, budget properties, soak — seven real bugs found and fixed
 by it; `just soak` scales the lifecycle driver for deep local runs).
 The registry-first API + daemon/CLI split (ADR-0006 + ADR-0031) is
-**underway** per the
-[registry-and-split-execution plan](docs/plans/active/2026-07-20-registry-and-split-execution.md):
-Phase 0 (golden net), Phase 1 (`fq-ops` contract crate), and Phase 2
-(the authenticated generic edge — `fq-edge`, TLS + capability tokens —
-wired into the daemon and enabled by default) have landed. Phase 3, the
-exemplar slices proving one declaration per category through the edge,
-is **complete** as of 2026-07-28: watermark plumbing (3a) and typed op
-identifiers are in, the `Invocation` view (3b) has flipped its CLI verbs
-behind golden, `invocation.drop` (3c) composes read-your-writes through
-the public surface alone, and the `Turn` atom (3d) added
-`turn.get`/`turn.list`/`turn.stream` with `--follow` riding the stream.
-Phase 3e closed decision D-3 with **no codegen**: shared data
-definitions in one workspace are the interface, so ADR-0006's held
-per-method-generation fallback is formally not taken. Phase 4, the fleet
-migration, is **underway**: cohort 4.0 (the pure flips over ops that
-already existed) landed 2026-07-28 — `fq invocation drop` (verb 18) and
-`fq invocation transcript` (verb 20) now speak only the edge — leaving
-**15 verb flips**, surveyed call point by call point in the
-[Phase-4 call-point inventory](docs/plans/active/2026-07-28-phase-4-call-point-inventory.md).
-A migration gate counts the operator surface's remaining legacy call
-points (10 at Phase-4 start, 8 now, zero at the end) so a flip cannot
-leave the old path behind as a fallback.
+**complete**, per the now-closed
+[registry-and-split-execution plan](docs/plans/closed/2026-07-20-registry-and-split-execution.md).
+Phases 0–2 built the golden net, the `fq-ops` contract crate, and the
+authenticated generic edge (`fq-edge`, TLS + capability tokens) wired
+into the daemon and enabled by default. Phase 3 proved one declaration
+per category through the edge — the `Invocation` view, `invocation.drop`
+composing read-your-writes through the public surface alone, and the
+`Turn` atom's `turn.get`/`turn.list`/`turn.stream` with `--follow`
+riding the stream — and Phase 3e closed decision D-3 with **no
+codegen**: shared data definitions in one workspace are the interface,
+so ADR-0006's held per-method-generation fallback is formally not
+taken. Phase 4, the fleet migration, finished on **2026-08-14**: the
+migration gate (`fq-cli/tests/edge_migration_gate.rs`) counts the
+operator surface's remaining legacy call points and now asserts
+`REMAINING = 0`, so no verb keeps the old path as a fallback. The route
+was surveyed call point by call point in the
+[Phase-4 call-point inventory](docs/plans/closed/2026-07-28-phase-4-call-point-inventory.md).
+Phase 5, the binary split, shipped on **2026-08-23**: the daemon left
+the CLI crate for `fq-daemon` and its `fqd` binary, and `fq` is now a
+thin client that cannot link the runtime at all —
+`fq-cli/tests/thin_client_gate.rs` holds that.
 The dogfood loop **lands PRs**: the daily `doc-drift` agent
 (fq-cron-scheduled) now opens its own docs-only PRs for drift it can
 verify and fix, and files issues for the rest; alongside it the
@@ -144,15 +152,25 @@ an `m0-issue-fix` agent on `ready`-labelled issues (agent definitions in
 sandboxed working copy, validates with `just ci`, and opens a PR behind
 the human merge gate — the loop that met M0 (see the closed
 [M0 plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md)). Next on
-that track: exactly-once trigger dispatch
-([plan](docs/plans/active/2026-07-18-exactly-once-trigger-dispatch.md))
-to close the duplicate-PR redelivery storm, and the M0 plan's proxy
+that track: finishing exactly-once trigger dispatch
+([plan](docs/plans/active/2026-07-18-exactly-once-trigger-dispatch.md)),
+which is **partly landed** — the dispatcher now acks after durable
+start rather than on dispatch, which was the duplicate-PR redelivery
+storm's direct cause — with the deduplication and adjudication items
+still open; and the M0 plan's proxy
 instrumentation (read relative to an expert+frontier baseline) to make
 **M1 (Q1)** decidable. Open strategic questions
 (security sequencing) are in the
 [2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
 
-## How the work is sequenced
+## How the work is sequenced — a July 2026 snapshot
+
+*Deliberately not refreshed.* This section is a record of what was
+believed to gate what as of late July 2026, kept because its whole
+purpose is showing that a hold was reasoned rather than neglected, and
+because the maintainer-confirmation dates in it are themselves the
+record. Read it as history, not as today's state — for that, see
+"Where we are" above.
 
 A coarse map of what gates what. It exists because a hold is
 indistinguishable from neglect unless the reason is written down: the
