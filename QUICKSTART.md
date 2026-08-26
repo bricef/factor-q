@@ -21,20 +21,21 @@ That's the whole list. No global Rust libraries, no language runtimes besides Ru
 git clone https://github.com/bricef/factor-q.git
 cd factor-q
 
-# Starts NATS+JetStream in Docker and builds the fq binary.
+# Starts NATS+JetStream in Docker and builds the fq and fqd binaries.
 just up
 ```
 
-`just up` is two things: `just infra-up` (Docker compose for NATS) and `just build-runtime` (cargo build of the runtime crates — all `just fq` needs; `just build` builds every Rust service in the single workspace). When it finishes you have a NATS server on `nats://localhost:4222` — bound to loopback, token-authenticated (the token lives in `infrastructure/nats/nats.conf` and rides in the default `FQ_NATS_URL` as URL userinfo) — and a usable `fq` CLI behind `just fq`.
+`just up` is two things: `just infra-up` (Docker compose for NATS) and `just build-runtime` (cargo build of the runtime crates — all `just fq` needs; `just build` builds every Rust service in the single workspace). When it finishes you have a NATS server on `nats://localhost:4222` — bound to loopback, token-authenticated (the token lives in `infrastructure/nats/nats.conf` and rides in the default `FQ_NATS_URL` as URL userinfo) — and both binaries: the `fq` client behind `just fq`, and the `fqd` daemon behind `just run`.
 
 Verify it:
 
 ```sh
 just fq --help
-just fq status
 ```
 
-`fq status` reports what this client is configured to reach, and — from the daemon, once one is running — its streams, its consumers and its projection. Nothing is running yet, so it will say so: that answer is the point of the command, and it still prints the configuration and store paths it resolved. It exits non-zero until a daemon answers.
+`fq --help` lists the operator surface. Don't run `fq status` yet: every `fq` verb answers over a daemon's authenticated edge, and until you have paired with one (step 4) `fq status` fails with "no daemon paired" and tells you to run `fq connect` first. That is the whole output — it exits non-zero without printing a report, because there is no daemon to report on.
+
+Once you *are* paired, `fq status` reports the edge address this client dials, and then — from the daemon — its build, its streams and consumers, its agent registry, its projection position, and its recovery state. If the daemon is not answering it says so and exits non-zero, and it deliberately omits the store paths in that case: those belong to the daemon, and a client printing its own guess would be describing your machine rather than the runtime.
 
 ## 2. Initialise a project
 
@@ -52,6 +53,7 @@ This produces:
 | `fqd.toml` | Runtime configuration — NATS URL, agents directory, provider env vars. |
 | `fq.toml` | The *client's* config, and a different file — optional, and holding at most which daemon to talk to. |
 | `agents/sample-agent.md` | A starter agent with `builtin__file_read` and `builtin__exec` tools and a `$0.10` budget. |
+| `docker-compose.yml` | A NATS+JetStream broker for this project (loopback-bound, token-authenticated, JetStream persisted in a volume) — `docker compose up -d` here instead of `just infra-up` if you would rather this project had its own. |
 | `README.md` | A pointer back to factor-q docs. |
 
 Open `agents/sample-agent.md` to see the format: YAML frontmatter declaring model, tools, sandbox, and budget; Markdown body containing the system prompt. Full reference in the [agent authoring guide](docs/guide/agent-definitions.md).
@@ -94,9 +96,11 @@ The daemon queues the work and its dispatcher runs it, so this returns as soon a
 just fq events tail
 ```
 
-Then run `just fq trigger sample-agent ...` again. You'll see each event scroll past as it happens: `triggered`, `llm.request`, `llm.response`, `tool.call`, `tool.result`, `cost`, `completed`. Every decision the agent made is on the bus.
+Then run `just fq trigger sample-agent ...` again. You'll see each event scroll past as it happens: `triggered`, `llm_request`, `llm_response`, `tool_call`, `tool_result`, `completed`. Every decision the agent made is on the bus.
 
-`fq events tail --agent sample-agent` narrows to one agent. `fq events tail --event-type tool_call` narrows to all tool calls across all agents. The two compose, and they are the same narrowing `fq events query` takes; see [`docs/design/committed/event-schema.md`](docs/design/committed/event-schema.md) for every event type.
+There is no separate `cost` event: spend rides on the envelope of the event that incurred it (`envelope.cost`), which is why `fq costs` can total a run without replaying a second stream.
+
+`fq events tail --agent sample-agent` narrows to one agent. `fq events tail --event-type tool_call` narrows to all tool calls across all agents; the flag takes one of `triggered`, `llm_request`, `llm_response`, `llm_failure`, `tool_call`, `tool_result`, `completed`, `failed`. The two compose, and they are the same narrowing `fq events query` takes; see [`docs/design/committed/event-schema.md`](docs/design/committed/event-schema.md) for every event type.
 
 ## 7. Query history and costs
 
@@ -126,10 +130,10 @@ The projection is rebuildable from NATS at any time — NATS is the source of tr
 
 The `builtin__self_inspect` built-in lets an agent ask the runtime about its own invocation state — budget remaining, iterations used, the configured model — instead of guessing. Try it via the bundled `self-aware` example:
 
-The daemon runs what its own registry holds, so add the example to your project's agents directory and have the daemon re-read it:
+The daemon runs what its own registry holds, so add the example to your project's agents directory and have the daemon re-read it. The example lives in the factor-q checkout, and you are in `my-fq-project`, so copy it across:
 
 ```sh
-cp agents/examples/self-aware.md agents/
+cp /path/to/factor-q/agents/examples/self-aware.md agents/
 just fq reload
 
 just fq trigger self-aware \
