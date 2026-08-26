@@ -14,6 +14,32 @@ not built. It is a single
 application of [design principle 3 — safe by construction, not by
 restriction](../../design/committed/design-principles.md).
 
+Implementation: pending — none of the seven Decision clauses is built, and
+the gap is wide enough to be worth enumerating, because this ADR is cited as
+the reason [ADR-0010](0010-agent-execution-isolation.md) is superseded.
+
+- **D2, isolation per tool by tier** — there is no tier dispatch. Every tool
+  runs in-process and `exec` is a plain subprocess. No wasmtime.
+- **D3/D4, harness-owned VFS over fq-store's CAS, WASI and FUSE mounts** —
+  no `FileSystem` trait and no VFS. The `virtual-filesystem` crate named in
+  References is not a workspace member, and no FUSE dependency exists in any
+  manifest — which also means [ADR-0029](0029-fuse-binding-crate.md)'s crate
+  choice has not been acted on.
+- **D6, narrow typed tools replacing the shell** — the built-in set is still
+  discovery, exec, file_read, file_write, report_outcome, self_inspect.
+  There is no `sect-core`, no `Git` tool, no `WebFetch`, and the general
+  `exec` shell is still there.
+- **D7, the network proxy as the single egress choke-point** — no proxy.
+  `sandbox.network` is parsed and carried and deliberately not enforced;
+  the code says so in four places, and #35 was closed with a load-time
+  warning (#214) rather than enforcement. The interim proxy is #208.
+
+What runs is the phase-1 process sandbox this ADR's own Context describes as
+the starting point: `ToolSandbox` path canonicalisation plus `exec_cwd`, with
+workspaces per-invocation or shared and no overlay. So between this ADR and
+ADR-0010 the repo holds two isolation models, one superseded and one
+unbuilt — and the shipped reality is the older one's phase 1.
+
 ## Context
 
 Phase 1 shipped a process-level sandbox: path canonicalisation for the file

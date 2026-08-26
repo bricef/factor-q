@@ -11,6 +11,15 @@ protocol (issue #173). Builds on the **block** reclaim protocol
 model check are in
 [storage-gc-objects-verification](../../design/committed/storage-gc-objects-verification.md).
 
+Implementation: complete — the decision is in the code and faithfully so.
+`services/fq-store/src/index.rs` carries a v5 migration that names this ADR
+and adds `objects.available`, alongside `reserve_object`, `claim_object` and
+`claimable_objects` (#234, closing #173), and the forbidden state has a
+red-without-the-fix regression test in `tests/gc_interleaving.rs`. Every
+cross-reference resolves, and the generation model really is retained in the
+tree as the checked alternative. One clause did not land: the CI job the
+last Consequence asks for — see the note there.
+
 ## Context
 
 The online collector reclaims two kinds of thing: **blocks** (content chunks)
@@ -87,7 +96,12 @@ this decision (`storage_gc_objects_backoff.tla`, `storage_gc_objects_gen.tla`).
   as the precise statement of what wait-freedom would have cost, should manifest
   contention ever change the calculus.
 - Verification declares a JRE + `tla2tools.jar` as a toolchain dependency (a CI
-  job should re-run both models on any change to the object reclaim protocol);
+  job should re-run both models on any change to the object reclaim protocol —
+  **no such job exists**. `.github/workflows/ci.yml` has no model-checking
+  phase, and the `justfile`'s only TLC mention is a recipe that cleans its
+  scratch, so the models are run by hand. This is the one ADR whose
+  correctness argument *is* the model check, so the proof is currently a
+  one-time artefact with no ratchet, in a repo that otherwise gates heavily);
   implementation is verified as a refinement of the back-off model, with the
   deterministic simulation witnessing writer-retry termination and the
   un-fsynced durability refinement (a manifest durable before the row that names

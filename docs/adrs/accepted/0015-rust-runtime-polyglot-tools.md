@@ -4,6 +4,14 @@
 
 Accepted
 
+Implementation: partial — the core decision holds and is built. The runtime
+is Rust, MCP is first-class and low-friction, and the Go adapters
+(`adapters/fq-cron`, `adapters/github-watcher`) are a live instance of the
+title's language boundary at the event bus. Two mechanisms this ADR names
+were never built: the documented, versioned tool process protocol (MCP
+became the single external tool path), and cross-process distributed
+tracing. Both are annotated in § Implications.
+
 ## Context
 
 Factor-q is implemented in Rust. The AI ecosystem — model SDKs, MCP server implementations, prompt optimizers (DSPy, GEPA), retrieval and embedding libraries — is predominantly Python, with a 12-18 month lag for equivalent Rust crates that has not been shrinking.
@@ -38,7 +46,7 @@ Specifically:
 
 ### Negative
 
-- Cross-language debugging is harder. A failure that involves the runtime, an MCP server, and an offline-compiled artifact spans three execution contexts with different debuggers and logging conventions. Investment in cross-process tracing (OpenTelemetry-style) is needed.
+- Cross-language debugging is harder. A failure that involves the runtime, an MCP server, and an offline-compiled artifact spans three execution contexts with different debuggers and logging conventions. Investment in cross-process tracing (OpenTelemetry-style) is needed. (Never made — see § Implications.)
 - Per-tool startup overhead exists. Subprocess-launched tools pay process-startup cost per invocation; MCP servers amortise this with long-lived processes but require connection management. For very high-frequency tools, this matters.
 - Deployment is slightly more complex than pure single-binary: factor-q ships its Rust binary plus expects MCP servers and tool processes to be available. The deployment story is "Rust binary + a documented runtime environment for tools," not "Rust binary alone."
 - The runtime cannot directly leverage Python-native capabilities that don't fit a process-boundary model. Anything that requires shared in-memory state with the runtime (e.g., a deeply integrated LangGraph state machine) is inaccessible.
@@ -64,8 +72,25 @@ This was a serious option and deserves explicit acknowledgement: the pivot is *p
 ## Implications
 
 - MCP is a first-tier integration target. The runtime should make adding new MCP servers low-friction; this is the primary mechanism by which factor-q's capabilities grow.
-- Cross-process observability needs early investment. Distributed tracing across the Rust runtime and external tool processes is operational baseline, not an enhancement.
-- The Rust runtime should ship with a documented, versioned tool process protocol. Tool authors should be able to write a tool against a stable contract without needing to read runtime source.
+- Cross-process observability needs early investment. Distributed tracing
+  across the Rust runtime and external tool processes is operational
+  baseline, not an enhancement. **The investment was never made**, and this
+  sentence has implied a baseline the system does not have. There is no
+  OpenTelemetry dependency in any manifest; the only observability dependency
+  is `tracing-subscriber` — local structured logging in the daemon, CLI,
+  dashboard and store. What carries cross-context correlation instead is the
+  event log's own `trace_id` / `parent_event_id` on the event envelope.
+  Metrics and OTLP export are tracked by #342
+- The Rust runtime should ship with a documented, versioned tool process
+  protocol. Tool authors should be able to write a tool against a stable
+  contract without needing to read runtime source. **Not built, and
+  overtaken**: MCP became the single external tool path. A tool is either an
+  in-process Rust `Tool` impl or an MCP server; the built-in set is fixed and
+  small (discovery, exec, file_read, file_write, report_outcome,
+  self_inspect), and `exec` is a sandboxed shell tool, not a tool-authoring
+  contract. This is also the live answer to
+  [ADR-0008](../draft/0008-extension-model.md)'s still-open extension
+  question
 - DSPy integration is offline by design. The compilation pipeline (when it runs, where artifacts are stored, how they are loaded) is a Phase 3 concern, but the boundary is clear: signatures and verifier-data go in, compiled artifacts come out, the runtime consumes artifacts at execution time.
 
 ## References

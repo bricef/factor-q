@@ -4,6 +4,12 @@
 
 Accepted
 
+Implementation: partial — factor-q owns its own work engine (invocations,
+triggers, the control-plane dispatcher, scheduled triggers via `fq-cron`),
+and no external task manager is integrated. The dependency/fan-out/fan-in
+half of the task model is not built: it belongs to the graph executor, whose
+plan is held (#414, ADR-0007).
+
 ## Context
 
 factor-q needs task tracking with dependency management, fan-out/fan-in, and scheduling. An existing project (Taskflow) already provides task management, raising the question of whether to integrate with it or build task management into factor-q.

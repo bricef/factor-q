@@ -4,6 +4,22 @@
 
 Accepted 2026-07-20 by Brice — proposed 2026-07-17.
 
+Implementation: complete — the split shipped. `fq-daemon` is a workspace
+member producing `bin/fqd` (#356, then #498 "split fq and fqd, and fq links
+no daemon"); the client is thin and gated (`thin_client_gate.rs`, and
+`edge_migration_gate.rs`'s `REMAINING = 0`); the daemon reads `fqd.toml` and
+the client an optional `fq.toml`; `install.sh` and the deploy ship both
+(#499, #513). Appendix A's biscuit capability tokens are live — `fq token
+list` / `fq token attenuate` are shipped verbs and every connection presents
+a token — and the client pins the server fingerprint, which closes the
+"Server-cert trust" open question.
+
+Two clauses below name things that were never built and by decision never
+will be: the *generated* client wrappers and the `ControlService` trait.
+Both are annotated in place. Still true, and worth stating because it is a
+security posture: `fqd↔NATS` and `worker↔NATS` remain unauthenticated on
+loopback, exactly as the Consequences say.
+
 ## Context
 
 Today `fq` is one binary that is both the **daemon** (`fq run`) and the
@@ -37,8 +53,13 @@ Split into two binaries:
 
 The interface is the **derived tarpc binding of the operation registry**
 (ADR-0006): a generic `invoke`/`next_batch` pair carrying
-schema-versioned, registry-defined operations, fronted by generated typed
-client wrappers in the shared wire crate. The command surface (`reload`,
+schema-versioned, registry-defined operations, fronted by typed
+client wrappers in the shared wire crate. (As accepted this read
+"**generated** typed client wrappers".
+[ADR-0006](0006-registry-first-api.md) Appendix B supersedes that word by
+name: the wrappers are hand-written glue over `invoke`/`next_batch` — about
+15 lines each — the codegen fallback was closed unexercised, and typing is
+*shared*, not generated.) The command surface (`reload`,
 `down`, `trigger`, `invocation drop`, `workers prune`, dead-letter
 `requeue`) and the read surface are registry entries, not trait methods.
 Streaming reads (`events tail`, `invocation transcript --follow`) are
@@ -90,9 +111,17 @@ local-store fallback (that would re-link `sqlx` into `fq`).
   an explicit fingerprint) to avoid MITM; `fqd` auto-provisions the cert and the
   secret on first run, so there is no operator crypto toil.
 - A new sqlx-free **wire-types + client crate** is introduced; the `*View`
-  types, `TranscriptEntry`, the `ControlService` trait, and the client live
-  there. `fqd` depends on it and on `fq-runtime`; `fq` depends on it alone.
-- Two-binary distribution touches the ADR-0022 release matrix and `install.sh`.
+  types, `TranscriptEntry`, and the client live there. `fqd` depends on it
+  and on `fq-runtime`; `fq` depends on it alone. (As accepted this list also
+  named a `ControlService` trait. It was never written and by decision never
+  will be — [ADR-0006](0006-registry-first-api.md) rejected the
+  hand-enumerated `ControlService` explicitly, and the transport contract is
+  `fq-edge`'s generic `invoke`/`next_batch`. Appendix A rewrote this
+  consequence's crate topology into `fq-ops` + `fq-edge` but left the trait
+  in the list.)
+- Two-binary distribution touches the ADR-0022 release matrix and
+  `install.sh` — which came true, and is now a *three*-binary distribution
+  (`fq`, `fqd`, `fq-cas`); see [ADR-0022](0022-binary-distribution-and-licensing.md) §3.
 
 ## Alternatives considered
 
