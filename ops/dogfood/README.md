@@ -4,25 +4,48 @@ Deploy tooling for the dogfood instance (issue #102). The contract:
 
 - **CI builds, the host fetches.** Every merge to main,
   [main-artifacts.yml](../../.github/workflows/main-artifacts.yml) builds
-  static musl binaries (`fq`, `fq-cas`, `github-watcher`, `fq-cron`) plus the
-  launchers in this directory, packages them with a sha256
+  static musl binaries (`fq`, `fqd`, `fq-dashboard`, `fq-cas`,
+  `github-watcher`, `fq-cron`) plus the launchers in this directory,
+  packages them with a sha256
   ([package.sh](../../scripts/package.sh)), and publishes the bundle to
   the rolling `main-latest` pre-release. The dogfood host never compiles.
 - **Every deployed build is kept; `current` picks the active one.**
   [deploy.sh](deploy.sh) verifies the checksum and the embedded commit
-  SHA, installs into `releases/<sha>/`, drains the daemon (ADR-0027 —
-  escalating past the drain deadline to a confirmed `fq down --now`,
-  and only then SIGINT, #63), atomically flips the `current` symlink,
-  relaunches, and confirms both processes run from the new release dir
+  SHA (`fq`, `fqd`, `fq-dashboard` and `github-watcher` must all report
+  the same one), installs into `releases/<sha>/`, drains the daemon
+  (ADR-0027 — `fq down`, escalating to a confirmed `fq down --now` and
+  then SIGINT, #63), atomically flips the `current` symlink, relaunches,
+  and confirms every process runs from the new release dir
   (`/proc/<pid>/exe`, not log grepping). Exit 0 means you are on the
   target SHA.
+
+  **Known defect: a clean drain is reported as a failure.** `fq down`
+  exits 0 as soon as the daemon's edge stops answering — which happens
+  while the daemon is still tearing down (closing stores, deregistering
+  its worker, publishing `fq.system.shutdown`), a moment before the
+  process actually exits. `deploy.sh`'s next `kill -0` runs with no
+  grace period at all, so it usually still sees a live pid and prints
+  `graceful stop failed — requesting immediate stop (fq down --now)` on
+  a drain that in fact succeeded. That `--now` then fails against an
+  edge socket that is already closed, and the script fires SIGINT at a
+  pid that is already gone. Read those two lines as noise, not as a
+  daemon that resisted: the escalation is unconditional, not
+  deadline-governed, and there is no wait between the drain and the
+  check for one to govern. The tell that the drain worked is the
+  worker's terminal state — `shutdown`, not `stale` — and that is what
+  the 2026-08-25 deploy recorded. The deadline that *is* real is the
+  daemon's own `drain_deadline_ms` (default 120s), which bounds how long
+  `fq down` waits before reporting a timeout; `deploy.sh` does not
+  consult it. Fixing this means giving the `kill -0` a grace window,
+  which is a change to the script and wants its own PR.
 - **Rollback is local and instant**: `deploy.sh <previous-sha>` — no
   network, no rebuild, just a symlink flip through the same
   drain/verify path. `deploy.sh` keeps the newest `KEEP_RELEASES`
   (default 5) dirs and prunes the rest.
-- **The environment is declared, not ambient.** Both launchers source
-  exactly one file, `.secrets/env` ([template](env.example)) — nothing
-  else reaches the processes' environment.
+- **The environment is declared, not ambient.** All four launchers
+  (`run.sh`, `watcher.sh`, `dashboard.sh`, `cron.sh`) source exactly one
+  file, `.secrets/env` ([template](env.example)) — nothing else reaches
+  the processes' environment.
 
 ## Host layout (`~/fq-dogfood`, override with `FQ_DOGFOOD`)
 
@@ -34,18 +57,38 @@ fq-dogfood/
 ├── fq-cron.toml                 # scheduled jobs — host-side; editing deploys/reloads them
 ├── agents/                      # agent definitions — host-side; canonical copies of
 │                                #   repo-tracked ones live in ops/dogfood/agents/ —
-│                                #   install with scp, e.g. backlog-groomer.md (weekly
-│                                #   groom: cron `fq trigger backlog-groomer` until #257)
+│                                #   install with scp (declare the model first, below)
 ├── .secrets/env                 # the single declared environment (chmod 600)
 ├── infra/                       # NATS compose + config (copied from ./infra)
-├── logs/                        # fq-run.log, watcher.log, cron.log
-└── workspace/ cache/ reports/   # runtime state
+├── logs/                        # fq-run.log, watcher.log, dashboard.log, cron.log
+└── workspace/ cache/            # runtime state
 ```
 
-The launchers (`run.sh`, `watcher.sh`, `cron.sh`) ship *inside* the artifact bundle
-so they are versioned with the binaries they launch and roll back with
-them. `deploy.sh` itself runs from a repo checkout — it is the
-bootstrap, and can't live inside the thing it swaps.
+**Installing a repo-tracked agent is two steps, and the order matters.**
+An agent definition names a model, and the daemon refuses to start when
+any loaded agent names a model no `[providers.<name>] models = [...]`
+entry in `fqd.toml` declares (the ADR-0004 pricing guarantee —
+`deploy.sh` greps for `registry validation failed` and aborts). The
+registry is read at **startup only**: `fq reload` re-reads the agents
+directory, not the config. So:
+
+1. add the model to the right provider's `models` list in `fqd.toml`,
+   and restart the daemon (`deploy.sh --force`) so the new registry
+   takes;
+2. then `scp` the definition into `agents/` and `fq reload`.
+
+Doing it the other way round leaves an agent the running daemon rejects
+and a `fqd.toml` whose next restart is a crash. `ops/dogfood/agents/`
+currently holds `backlog-groomer.md` (weekly groom: cron
+`fq trigger backlog-groomer` until #257), which declares
+`model: claude-fable-5` — **not** in the live instance's registry, so it
+needs step 1 before it can be installed at all.
+
+The launchers (`run.sh`, `watcher.sh`, `dashboard.sh`, `cron.sh`) ship
+*inside* the artifact bundle so they are versioned with the binaries
+they launch and roll back with them. `deploy.sh` itself runs from a repo
+checkout — it is the bootstrap, and can't live inside the thing it
+swaps.
 
 ## Bootstrap (one-time per host)
 
@@ -53,12 +96,26 @@ bootstrap, and can't live inside the thing it swaps.
 mkdir -p ~/fq-dogfood/{releases,logs,agents,.secrets} && chmod 700 ~/fq-dogfood/.secrets
 cp -r ops/dogfood/infra ~/fq-dogfood/
 install -m 600 ops/dogfood/env.example ~/fq-dogfood/.secrets/env  # then edit
-# fqd.toml: copy an existing instance config (`fq init` writes a
-#           client-side fq.toml, which is a different file)
-# fq-cron.toml: install the host job schedule before starting cron.sh
+# fqd.toml: copy an existing instance config. `fq init` does write one,
+#           but it is a fresh-project starter — one provider, one model,
+#           the dev broker's URL, and no [edge] bind — so a daemon
+#           started on it would not load this instance's agents.
+#           (`fq init` writes fq.toml too; that is the *client's* config,
+#           a different file whose only setting is `[daemon] addr`.)
+# fq-cron.toml: install the host job schedule BEFORE the first deploy —
+#           deploy.sh launches cron.sh iff this file exists, and skips it
+#           silently otherwise.
 ops/dogfood/deploy.sh
-setsid ~/fq-dogfood/current/cron.sh </dev/null &  # cron.sh appends to logs/cron.log
 ```
+
+`deploy.sh` starts all four processes itself, cron included. Do **not**
+also launch `cron.sh` by hand afterwards: that leaves two `fq-cron`
+processes on the same schedule, each publishing every job. A subsequent
+real deploy does clean them up — bring-down loops over every matching
+pid — but a no-op `deploy.sh` on the build already running will not: its
+early-exit check looks at one cron pid, sees the right release, and
+reports "already running". If you added `fq-cron.toml` after a deploy,
+`deploy.sh --force` is the way to pick it up.
 
 Migrating an existing in-place instance (pre-#102: host-built binary,
 untracked `run.sh`/`watcher.sh`/`cron.sh`/`redeploy.sh`): fold any local secrets
@@ -104,10 +161,12 @@ must run the same build as the daemon: the two share the contract types
 they exchange, so a field removed or renamed on one side is a decode
 failure on the other.
 
-**One-time setup, and it is new.** The dashboard reads over the
-daemon's authenticated edge, which means it needs an identity — it is
-the first process other than the operator's own CLI to need one. Three
-variables in `.secrets/env` (see `env.example`, which carries the
+**One-time setup.** The dashboard reads over the daemon's authenticated
+edge, which means it needs an identity — it is the first process other
+than the operator's own CLI to need one. Its own
+[README](../../services/fq-dashboard/README.md) documents the binary,
+its flags and every page; what follows is the dogfood-specific form,
+three variables in `.secrets/env` (see `env.example`, which carries the
 commands):
 
 1. **Move the edge off port 9472.** `[edge] bind` defaults to
