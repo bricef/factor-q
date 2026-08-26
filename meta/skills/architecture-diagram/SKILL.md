@@ -32,7 +32,8 @@ Do not trust the existing dot or ARCHITECTURE.md. Anchors:
 
 | Claim in the diagram | Source of truth |
 |---|---|
-| Stream names, subjects, retention, max_deliver | `services/fq-runtime/crates/fq-runtime/src/bus.rs` (`STREAM_NAME`, `TRIGGER_STREAM_NAME`, `ADVISORY_STREAM_NAME`, `CONTROL_*_SUBJECT`) |
+| Stream names, subjects, retention, max_deliver | `services/fq-runtime/crates/fq-runtime/src/bus.rs` (`STREAM_NAME`, `EVENT_STREAM_SUBJECTS`, `TRIGGER_STREAM_NAME`, `ADVISORY_STREAM_NAME`, `DEFAULT_MAX_AGE`, `DEFAULT_TRIGGER_MAX_AGE`) |
+| Control-plane commands (`fq down`, `fq reload`) | Declared edge operations, not NATS subjects — `fq-ops`' `Control` verbs, served in `fq-daemon/src/control_commands.rs`. The `fq.control.*` subjects are gone; do not draw a bus edge for them |
 | Event subject shapes (`fq.agent.<id>.*`, `fq.worker.*`) | `services/fq-runtime/crates/fq-runtime/src/events.rs` |
 | Daemon composition (which tasks `fqd` hosts) | `run_hosted` in `services/fq-runtime/crates/fq-daemon/src/hosted.rs` |
 | CLI verbs (all of which reach the daemon over the edge) | `enum Commands` in `fq-cli/src/cli.rs` + the verb modules beside it |
