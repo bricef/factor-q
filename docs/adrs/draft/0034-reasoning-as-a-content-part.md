@@ -56,10 +56,47 @@ assumption is baked into all of them:
 
 ## Decision
 
-**D1 — Reasoning is a content part.** `Message` carries an ordered
-`Vec<ContentPart>`, of which reasoning is one variant. The narrow
-`reasoning: Option<String>` alternative is rejected outright and is **not** to
-be implemented as a stepping stone (maintainer, 2026-07-28).
+**D1 — Reasoning is a content part, and `Message` is an enum over turn
+kinds.** The narrow `reasoning: Option<String>` alternative is rejected
+outright and is **not** to be implemented as a stepping stone (maintainer,
+2026-07-28).
+
+```rust
+pub enum Message {
+    System(String),
+    User(String),                  // Vec<UserPart> when binary lands
+    Assistant(Vec<AssistantPart>),
+    ToolResults(Vec<ToolResult>),  // one turn, N results
+}
+
+pub enum AssistantPart {
+    Text(String),
+    Reasoning(Reasoning),
+    ToolCall(MessageToolCall),
+}
+```
+
+**The turn kind is the variant, so the role is carried by the type rather than
+by a `role` field a part vector can disagree with.** This deletes four invalid
+states that `{role, parts}` would leave representable: a `Tool` message with no
+correlation id, a reasoning part in a user turn, a tool call in a user turn,
+and a tool result in an assistant turn. It also makes *N tool results in one
+turn* expressible for the first time — see D1b.
+
+Parts are admissible by construction, not by convention: each variant carries
+the parts that turn kind can hold. A single flat `ContentPart` reused across
+variants would smuggle the invalid states back in, and upstream shows what that
+costs — genai carries the comment *"ToolCall is not valid in user content for
+Anthropic; skip gracefully"*, i.e. an invalid combination handled by silently
+dropping it.
+
+**D1b — One turn's tool results are one message.** A corollary of D1:
+`ToolResults(Vec<ToolResult>)` carries every result answering a single
+assistant turn. This matches the Anthropic wire shape (`tool_result` blocks
+batched in one user turn) and genai's own model, whose adapter already loops
+over a tool message's parts. It makes the correct shape *expressible*; it does
+**not** by itself change what the harness emits — that is
+[#511](https://github.com/bricef/factor-q/issues/511).
 
 **D2 — A reasoning part has three shapes**, because code branches on the
 difference:
@@ -73,8 +110,11 @@ difference:
 Every reasoning part names the model that produced it.
 
 **D3 — Parts are an internal concern and stop at the operator boundary.**
-`Message`, `ChatResponse`, `ModelResponse` and `LlmResponsePayload` are
-parts-shaped. `TurnAction` and `TranscriptEntry` are **not**. The operator
+`Message` is the enum above; `ChatResponse`, `ModelResponse` and
+`LlmResponsePayload` carry `Vec<AssistantPart>` — **a response is an assistant
+turn**, so it takes that turn kind's part type rather than a flat one, and a
+response structurally cannot contain a tool result. `TurnAction` and
+`TranscriptEntry` are **not** parts-shaped. The operator
 surface receives a *reasoning* concept, never a *parts* concept, and provider
 vocabulary — part taxonomies, signatures, thought tokens — never crosses into
 it.
@@ -180,10 +220,21 @@ the system must say which one it is holding.
   needs: the cross-model strip becomes a graph invariant that can be expressed
   and enforced, rather than a convention that degrades into a bug billing input
   tokens on every cross-model edge.
-- `Message { role, parts }` **deletes** the `MessageRole::Tool` +
-  `tool_call_id: Option<_>` pairing, an invalid-states-representable smell with
-  a live runtime error to prove it (`genai.rs:296`, *"tool role message is
-  missing tool_call_id"*). See open question Q1.
+- The enum **deletes** four invalid states rather than moving them, including
+  the `MessageRole::Tool` + `tool_call_id: Option<_>` pairing that has a live
+  runtime error to prove it (`genai.rs:296`, *"tool role message is missing
+  tool_call_id"*). `ToolResult` carries its own id, so the error's precondition
+  ceases to exist and the check is deleted, not relocated.
+
+  This is worth stating precisely because the intermediate option —
+  `Message { role, parts: Vec<ContentPart> }` — **would** have moved them:
+  it trades "Tool role missing its id" for "ToolResult part in a non-Tool
+  role", both runtime-checked in the same adapter. Only making the turn kind
+  the variant removes the question from the type. An earlier draft of this ADR
+  credited the intermediate option with the deletion; that was wrong.
+- Consumers that switched on `role` gain exhaustiveness checking. `turn.rs`'s
+  `is_opening_request` — *"the message list carries no assistant and no tool
+  message"* — becomes a match the compiler completes.
 - The thought-vs-spoken cost split becomes visible, which for reasoning-first
   models is most of the bill.
 
@@ -220,6 +271,31 @@ second scalar beside `content` that does not generalise — no signature, no
 ordering, and nothing to build on when images, documents, or Anthropic thinking
 blocks need a home. Explicitly not to be used as a stepping stone.
 
+**`Message { role, parts: Vec<ContentPart> }` — a role field beside a flat part
+vector.** The shape every provider uses on the wire, and the obvious middle
+option. Rejected: it leaves four invalid combinations representable and
+runtime-checked, and a flat part enum forces the silent-skip behaviour genai
+already exhibits. The wire-fidelity argument for it does not apply here —
+`Message` is the *replay* type, built by the reducer and converted at the
+adapter; nothing ever deserialises a provider response into it. Wire fidelity
+is the response chain's job, and D3 keeps it there.
+
+**Richer type machinery over parts** — a role type parameter, phantom role
+markers, or a trait declaring which roles admit which parts. Rejected on
+lesson 2's second test: *is any consumer generic over this abstraction?* No —
+every consumer handles one turn kind at a time, and nothing iterates parts
+polymorphically across roles. A trait declaring admissibility is also exactly
+the trait/descriptor duality lesson 4 warns about; the enum is the value that
+duality dissolves into.
+
+**Hoisting reasoning out of the ordered vector** —
+`Assistant { reasoning: Vec<Reasoning>, body: Vec<BodyPart> }`, which would make
+Anthropic's "thinking blocks first" structural rather than conventional.
+Tempting, and rejected by I6: it asserts reasoning never interleaves with text
+or tool calls, which is not established across providers. Order stays a
+provider concern, expressed as one ordered vector the adapter emits in its own
+required order.
+
 **Parts all the way to the operator surface.** Uniform, and one fewer
 conversion. Rejected as a vocabulary leak (D3 rationale): the operator surface
 would acquire provider concepts it can do nothing with, and would be coupled to
@@ -240,9 +316,9 @@ out of the log is a hole in that claim.
 
 ## Open questions (deferred by decision)
 
-- **Q1 — Does the tool result become a part?** D1 makes it possible and the
-  Consequences note the deletion it enables. Folding it in is the better model
-  and is scope beyond what #414 gates. **Unresolved**; decide before Phase 2.
+- ~~**Q1 — Does the tool result become a part?**~~ **Closed 2026-08-26:** yes,
+  and further than the question assumed — the turn kind became the enum
+  variant (D1), which deletes the invalid states rather than relocating them.
 - **Q2 — Which upstream genai shape to argue.** Giving the reasoning part a
   signature field is semantically honest but breaks a public enum variant;
   routing to `ContentPart::Custom` is purely additive but means *"we don't know
@@ -256,6 +332,13 @@ out of the log is a hole in that claim.
   (*"`events` has fan-in 10"*) re-measures on `main` to a 33-line re-export
   facade with fan-out 1, and the vocabulary that changes now lives outside
   fq-runtime's cycle group. Maintainer call.
+- **Q5 — Does the parallel-tool-result batching get fixed here?** No. D1b makes
+  the batched shape *expressible*; changing what the harness emits is a
+  separate behavioural fix with its own test coverage gap
+  (`mock_anthropic.rs` builds responses carrying one `tool_use` block, so the
+  parallel path has no hermetic coverage today). Tracked as
+  [#511](https://github.com/bricef/factor-q/issues/511) so the shape change and
+  the behaviour change stay reviewable apart.
 
 ## References
 

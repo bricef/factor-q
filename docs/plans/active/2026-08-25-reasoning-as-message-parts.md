@@ -35,9 +35,10 @@ describes the tree.
 answered three of this plan's original open questions and added one invariant:
 
 - **Parts are an internal concern and stop at the operator boundary.**
-  `Message`, `ChatResponse`, `ModelResponse` and `LlmResponsePayload` are
-  parts-shaped; `TurnAction` and `TranscriptEntry` are not. Provider vocabulary
-  never crosses into the operator domain (ADR-0034 D3).
+  `Message` is parts-carrying and `ChatResponse` / `ModelResponse` /
+  `LlmResponsePayload` take `Vec<AssistantPart>`; `TurnAction` and
+  `TranscriptEntry` are not parts-shaped. Provider vocabulary never crosses
+  into the operator domain (ADR-0034 D3).
 - **The response chain carries parts anyway**, despite a response being
   converted-into rather than replayed — pragmatic, and it avoids a conversion
   seam that would need undoing when a second part kind arrives.
@@ -48,6 +49,12 @@ answered three of this plan's original open questions and added one invariant:
 - **The data model distinguishes absence from opacity** (I7 below). New, and
   the strongest constraint the session produced.
 - **`TurnFilter::abbreviate` is deferred** — the system is correct without it.
+
+**Decided 2026-08-26 (maintainer), closing this plan's Q1:** `Message` becomes
+an **enum over turn kinds**, not a `{role, parts}` struct. The turn kind is the
+variant, so the role is carried by the type. See §4.2 — this is a stronger
+form of the change than the original question posed, and it deletes invalid
+states that both options considered would only have relocated.
 
 ## The one-line principle
 
@@ -283,21 +290,59 @@ documented provider realities, and their adapters land with §5.
 ### 4.2 What `Message` becomes
 
 ```rust
-pub struct Message {
-    pub role: MessageRole,
-    pub parts: Vec<ContentPart>,
+pub enum Message {
+    System(String),
+    User(String),                  // Vec<UserPart> when binary lands
+    Assistant(Vec<AssistantPart>),
+    ToolResults(Vec<ToolResult>),  // one turn, N results
+}
+
+pub enum AssistantPart {
+    Text(String),
+    Reasoning(Reasoning),
+    ToolCall(MessageToolCall),
 }
 ```
 
-Worth noting what this **deletes**: `tool_call_id: Option<ToolCallId>` paired
-with `MessageRole::Tool` is exactly the "invalid states representable" smell
-from lesson 3, and it has a live runtime error to prove it —
-`genai.rs:296`, *"tool role message is missing tool_call_id"*. Folding the
-tool result into a part makes that error structurally impossible. That is
-positive evidence the parts model is the right one, and it is the kind of
-deletion lesson 5 asks for.
+**The turn kind is the variant, so the role is carried by the type.** Four
+invalid states stop being representable: a `Tool` message with no correlation
+id, a reasoning part in a user turn, a tool call in a user turn, a tool result
+in an assistant turn. `genai.rs:296`'s *"tool role message is missing
+tool_call_id"* is **deleted, not relocated** — `ToolResult` carries its own id,
+so the error's precondition ceases to exist.
 
-It is also scope beyond the gate. Raised as open question Q1 (§8).
+That distinction is the whole reason this shape won over `{role, parts}`. A
+role field beside a flat part vector would have traded one runtime-checked
+invariant for another (*"ToolResult in a non-Tool role"*), both caught in the
+same adapter. Only the enum removes the question from the type. The full
+comparison, including the two richer ontologies considered and rejected, is in
+[ADR-0034](../../adrs/draft/0034-reasoning-as-a-content-part.md) § Alternatives.
+
+Each variant carries the parts its turn kind can hold, rather than sharing one
+flat `ContentPart`. Upstream shows the cost of not doing this: genai carries
+the comment *"ToolCall is not valid in user content for Anthropic; skip
+gracefully"* — an invalid combination handled by silently dropping it, which is
+the failure mode I5 exists to prevent.
+
+**A response is an assistant turn**, so `ChatResponse`, `ModelResponse` and
+`LlmResponsePayload` carry `Vec<AssistantPart>` rather than a flat part type. A
+response structurally cannot contain a tool result.
+
+**`ToolResults` makes the batched shape expressible for the first time** — and
+that is all it does here. Today `tool_results_step` pushes one `Message` per
+result, and genai maps each `ChatRole::Tool` message to its own Anthropic user
+message, so N parallel results become N consecutive user messages where
+Anthropic's documented shape is one user message with N `tool_result` blocks.
+**This plan does not change that behaviour.** The path also has no hermetic
+coverage — `mock_anthropic.rs` builds responses carrying one `tool_use` block —
+so the fix needs test infrastructure that does not exist yet. Tracked
+separately (§8) so the shape change and the behavioural fix stay reviewable
+apart.
+
+`User(String)` is a deliberate minimum: every user message factor-q constructs
+is plain text, and MCP sampling already flattens multimodal content upstream of
+this type via `sampling_message_text`. It becomes `Vec<UserPart>` when binary
+content arrives — cheap, pre-alpha, and not worth a one-variant enum today.
 
 ### 4.3 Where reasoning lives (settled 2026-08-25)
 
@@ -420,7 +465,7 @@ through a hand-rolled probe.
 | **0** ✅ | **Modelling session** — ran 2026-08-25. Output: [ADR-0034](../../adrs/draft/0034-reasoning-as-a-content-part.md). | done |
 | **1** | **ADR accepted + doc amendments.** Move ADR-0034 `draft/` → `accepted/`, add its README row. Amend `inter-node-contracts-and-event-layers.md` §6/§7 (I3), `event-schema.md` (`llm.response` shape + v2→v3 changelog), `SCHEMA_VERSION` 2 → 3. No code. | ADR accepted |
 | **1b** | **Upstream genai PR opened** (§5, G1–G4). Runs in parallel from here. | PR open, shape argued |
-| **2** | **Oracle first, then the type.** Build the judge before the thing it judges (lesson 10: *"thirteen reworks with zero behavioural regressions"*). Then `Message`/`ChatResponse`/`ModelResponse`/`LlmResponsePayload` become parts-shaped, with a no-op encoder. Behaviour unchanged; the diff is shape only. | golden net green, `just quality` + `just runtime-ci` |
+| **2** | **Oracle first, then the type.** Build the judge before the thing it judges (lesson 10: *"thirteen reworks with zero behavioural regressions"*). Then `Message` becomes the turn-kind enum (§4.2) and the response chain takes `Vec<AssistantPart>`, with a no-op encoder. ~30 construction sites, of which 3 are tool-role; `Message.tool_call_id` has exactly one consumer. Behaviour unchanged; the diff is shape only. | golden net green, `just quality` + `just runtime-ci` |
 | **3** | **OpenAI-compatible read + write.** `from_provider_response` reads `ChatResponse.reasoning_content`; `convert_message` emits `ContentPart::ReasoningContent`; `harness.rs:329` carries it into the replayed conversation. The cross-model strip (I2) lands here with its assertion. | I1, I2, I5 |
 | **4** | **The operator surface and the transcript.** `TurnAction::Assistant` gains `TurnReasoning` (§4.6) — the reduction that keeps parts internal. `TranscriptEntry` follows, then the flag in both consumers: `fq invocation transcript` and the dashboard, including its `opaque — click to see raw` affordance. Golden files move here. | I7, golden updated |
 | **5** | **Cost decomposition.** `reasoning_tokens` into `TokenUsage` from `completion_tokens_details`; `convert_usage` reads it; `total_cost` provably unchanged. | I4 |
@@ -464,14 +509,17 @@ shape and never on output quality.
 The 2026-08-25 session closed three of the original five. What it settled is in
 the decisions block and ADR-0034; what remains:
 
-- **Q1 — Does the tool result become a part?** *(open)* §4.2 argues the
-  `MessageRole::Tool` + `tool_call_id` pairing is an invalid-states-
-  representable smell with a live runtime error to prove it. Folding it in is
-  the better model and is scope beyond the gate. **Decide before Phase 2** —
-  it changes that phase's diff, and doing it later means touching every
-  construction site twice.
 - **Q5 — Restate or withdraw the #424 gate?** *(open)* §2.2 shows the stated
   reason is stale. Maintainer call, not ours. Does not block any phase here.
+
+**Split out rather than answered:**
+
+- **Parallel tool results are not batched.** N results become N consecutive
+  Anthropic user messages where the documented shape is one message with N
+  `tool_result` blocks (§4.2). Pre-existing, independent of reasoning, and
+  needs mock coverage for multi-`tool_use` responses before it can be fixed
+  under test. §4.2's `ToolResults` variant makes the correct shape expressible;
+  the behavioural fix is tracked as [#511](https://github.com/bricef/factor-q/issues/511).
 
 **Closed by the session:**
 
