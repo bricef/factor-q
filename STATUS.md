@@ -147,17 +147,19 @@ The dogfood loop **lands PRs**: the daily `doc-drift` agent
 (fq-cron-scheduled) now opens its own docs-only PRs for drift it can
 verify and fix, and files issues for the rest; alongside it the
 `github-watcher` adapter triggers
-an `m0-issue-fix` agent on `ready`-labelled issues (agent definitions in
+an `m0-issue-fix` agent on `status:ready`-labelled issues (agent definitions in
 `~/fq-dogfood`, outside the repo); the agent makes the change in a
 sandboxed working copy, validates with `just ci`, and opens a PR behind
 the human merge gate — the loop that met M0 (see the closed
 [M0 plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md)). Next on
-that track: finishing exactly-once trigger dispatch
+that track: exactly-once trigger dispatch
 ([plan](docs/plans/active/2026-07-18-exactly-once-trigger-dispatch.md)),
-which is **partly landed** — the dispatcher now acks after durable
-start rather than on dispatch, which was the duplicate-PR redelivery
-storm's direct cause — with the deduplication and adjudication items
-still open; and the M0 plan's proxy
+whose core is **not yet built** — the ADR-0032 claim registry that
+would make dispatch exactly-once by construction has not started, so a
+trigger redelivered before its invocation's first WAL write can still
+start a second run. The dispatcher's ack-after-durable-start (#41)
+bounds the older failure — a long invocation outliving the ack
+deadline and being re-run — but not this one; and the M0 plan's proxy
 instrumentation (read relative to an expert+frontier baseline) to make
 **M1 (Q1)** decidable. Open strategic questions
 (security sequencing) are in the
