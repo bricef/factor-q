@@ -67,11 +67,16 @@ When present (on `llm.response` events, and on the `llm.failure` events that bil
   "output_cost": 0.000710,
   "total_cost": 0.001018,
   "cumulative_invocation_cost": 0.004523,
-  "cumulative_agent_cost": 0.127890
+  "cumulative_agent_cost": 0.127890,
+  "origin": { "kind": "agent_turn" }
 }
 ```
 
-All currency amounts are USD.
+All currency amounts are USD. `origin` mirrors the payload field of the
+same name (`agent_turn`, or `sampling` / `elicitation` naming the MCP
+server that asked): sampling spend is attributable to its server and
+still counts toward the invocation total, which needs both facts on the
+one record.
 
 ## Annotations
 
@@ -230,15 +235,20 @@ Published when an agent invocation begins. Carries a snapshot of the agent's con
     "tools": ["read", "web_search"],
     "sandbox": {
       "fs_read": ["/project/docs"],
-      "network": ["*.api.internal"]
+      "fs_write": ["/project/output"],
+      "network": ["*.api.internal"],
+      "env": ["RESEARCH_API_KEY"],
+      "exec_cwd": ["/project"]
     },
-    "budget": 0.50
+    "budget": 0.50,
+    "sampling": { "...": "MCP capability grants, omitted when nothing is granted" },
+    "sampling_validation": { "...": "redaction + evaluator gates, omitted when empty" }
   }
 }
 ```
 
 **Design notes:**
-- **`config_snapshot` is a full capture.** This is what makes replay meaningful — if the agent definition is later changed, the trace still shows exactly what was running.
+- **`config_snapshot` is a partial capture, and the gap matters.** The intent is that the trace shows exactly what was running even after the definition changes. `ConfigSnapshot` carries eleven of `Agent`'s sixteen fields; **`max_iterations`, `effort`, `trigger`, `mcp_servers` and `static_resources` are not captured**, and every one of them changes what actually ran. Two invocations of the same agent across an `fq reload` that altered any of them produce identical snapshots. Treat the snapshot as the configuration that shaped the *conversation*, not as the full definition — closing the gap is a code change, tracked as one.
 - **`trigger_id` names the trigger this invocation came from.** UUIDv7, minted or honoured per the [trigger wire contract](trigger-wire-contract.md#trigger-identity-fq-trigger-id), where it travels as the `Fq-Trigger-Id` header. Before it existed, an invocation was linked to its trigger only by *content* — matching subject and payload — which cannot distinguish two identical triggers and cannot be keyed on. This is that link, by identity.
 - **`trigger_id` is optional on read, always written.** Every `triggered` event published since 2026-08-10 carries one; events already on the log do not, and the field deserialises as absent for them. It is optional for exactly that reason and no other — a required field would fail replay of the existing log and refuse events from older peers (invariant 11).
 - **`trigger_source` indicates who initiated.** `manual`, `subject`, or `schedule`.
@@ -264,7 +274,8 @@ Published immediately before an LLM call is made.
   "request_params": {
     "temperature": 0.7,
     "max_tokens": 4096
-  }
+  },
+  "origin": { "kind": "agent_turn" }
 }
 ```
 
@@ -295,6 +306,7 @@ Published when an LLM call returns and the response is durably written. The enve
 
 ```json
 {
+  "round": 3,
   "call_id": "0198f2a1-4c3b-7d21-9e88-5a0b1c2d3e4f",
   "content": "I will research the topic by first...",
   "tool_calls": [
@@ -310,7 +322,8 @@ Published when an LLM call returns and the response is durably written. The enve
     "output_tokens": 567,
     "cache_read_tokens": 0,
     "cache_write_tokens": 0
-  }
+  },
+  "origin": { "kind": "agent_turn" }
 }
 ```
 
@@ -587,7 +600,7 @@ Published by the daemon's summary consumer (#216) — never by an agent — unde
 
 ```json
 {
-  "runtime_id": "01HXJ...",
+  "runtime_id": "01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f",
   "version": "0.1.0",
   "nats_url": "nats://localhost:4222",
   "agents_loaded": 3,
@@ -601,7 +614,7 @@ System events share a sentinel `agent_id` of `"system"`; their envelope's `invoc
 
 ```json
 {
-  "runtime_id": "01HXJ...",
+  "runtime_id": "01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f",
   "reason": "ctrl_c | task_failed | error",
   "clean": true
 }
@@ -613,7 +626,7 @@ A hosted task inside `fqd` (the projection consumer, the trigger dispatcher, the
 
 ```json
 {
-  "runtime_id": "01HXJ...",
+  "runtime_id": "01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f",
   "task_name": "coordination_consumer",
   "error_message": "..."
 }
@@ -625,7 +638,7 @@ Emitted once per daemon startup with the counts of in-flight invocations classif
 
 ```json
 {
-  "runtime_id": "01HXJ...",
+  "runtime_id": "01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f",
   "worker_id": "worker-001",
   "safe_resume": 2,
   "safe_replay": 0,
