@@ -81,8 +81,9 @@ fq-cas --server 127.0.0.1:9000 metrics
 
 ## Library
 
-`fq-store` is also a library. The core is the `ContentStore` trait
-(`put` / `get` / `get_range` / `has` / `size` / `stats`), with a
+`fq-store` is also a library. The core is the `ContentStore` trait —
+seven required methods (`put` / `get` / `get_range` / `has` / `size` /
+`stats` / `remove`) plus provided ones a backend may override — with a
 BLAKE3 + FastCDC filesystem backend (`fs::FilesystemStore`) and a `tarpc`
 network client (`service::RemoteStore`, behind the `service` feature).
 

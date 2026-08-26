@@ -29,9 +29,12 @@ default:
 nats_version := trim(read(".nats-version"))
 nats_bin := justfile_directory() / ".tools" / "nats-server"
 
-# The bus/integration tests need a NATS endpoint. Default to the local
-# dev instance (`just infra-up`); override by exporting FQ_NATS_URL in
-# the environment before invoking just.
+# The address of the shared dev broker (`just infra-up`), for the things
+# that use one: `just run`, `just smoke`, `just drill`, and a daemon
+# started by hand. NOT the test suite — every NATS-backed test spawns its
+# own private broker (#233) and points the code under test at that, so
+# `just test` ignores this. Override by exporting FQ_NATS_URL before
+# invoking just.
 # The dev broker requires token auth (infrastructure/nats/nats.conf);
 # the credential rides in the URL userinfo (see bus.rs url_credentials).
 export FQ_NATS_URL := env_var_or_default("FQ_NATS_URL", "nats://fq-dev-token@127.0.0.1:4222")
@@ -633,9 +636,12 @@ check-version tag:
     fi
     echo "release tag {{tag}} matches Cargo version v${cargo_version}"
 
-# Tagged releases still package only fq + fq-cas (`just package`); the
-# main-branch deploy bundle takes all of them (`just package-main`).
-# Build the release binaries (fq, fq-cas, fq-dashboard) for a target triple.
+# This builds all four; the two packaging recipes then differ in what
+# they ship. `just package` (tagged releases) takes fq, fqd and fq-cas —
+# the daemon has to be in a versioned install, and has been since the
+# fq/fqd split. `just package-main` (the deploy bundle) adds fq-dashboard
+# and the Go adapters.
+# Build the release binaries (fq, fqd, fq-cas, fq-dashboard) for a target triple.
 build-release target:
     cargo build --release --target {{target}} -p fq-cli --bin fq
     cargo build --release --target {{target}} -p fq-daemon --bin fqd
