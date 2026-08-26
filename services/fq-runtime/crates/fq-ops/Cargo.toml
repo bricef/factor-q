@@ -28,3 +28,9 @@ uuid = { workspace = true, features = ["serde"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# Only for `canonical_json` in the snapshot oracle. This crate depends on
+# serde_json and tokio alone, so it cannot pull `genai` — and therefore
+# `serde_json/preserve_order` — into fq-ops' own test build.
+fq-test-support = { workspace = true }

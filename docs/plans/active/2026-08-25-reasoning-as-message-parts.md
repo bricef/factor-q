@@ -481,14 +481,27 @@ proposed:
   runtime-ci` builds seven packages, genai among them, and emits
   insertion-ordered keys. Same source, same test, two outputs.
 
-  Two snapshots were regenerated for the CI form
-  (`fq-daemon/tests/snapshots/operator_surface.json`,
-  `fq-ops/tests/snapshots/exemplar_registry.json`). The lasting cost is that
-  `cargo test -p fq-ops --test registry` **run in isolation now fails on key
-  order** while being semantically correct; a snapshot can only be right for
-  one context. That is documented on the test itself rather than left as a
-  trap — it cost an hour and three gate runs to diagnose here, because the
-  test passes 25/25 standalone and fails every time under the gate.
+  **Fixed rather than documented.** The first pass regenerated both snapshots
+  for the CI form and wrote the hazard down on the test. That left a real
+  trap: `cargo test -p fq-ops --test registry` in isolation would fail on key
+  order while being semantically correct, and `UPDATE_SNAPSHOT=1` in that
+  context would "fix" it into the shape that then fails CI.
+
+  The defect was never the feature — it was that these oracles compared **the
+  exact bytes `serde_json` happens to emit**, which is an assertion about a
+  third party's internal representation. Both now serialise through
+  `fq_test_support::canonical_json`, which sorts object keys recursively, so
+  a snapshot is a function of its data and nothing else. Three properties
+  follow: the package-set inconsistency disappears (both contexts produce
+  identical bytes), real drift still shows (sorting is a bijection), and the
+  snapshots become immune to **struct field reordering**, which raw
+  insertion-order serialisation is not.
+
+  `fq-test-support` is the right home because it depends on `serde_json` and
+  `tokio` alone — it cannot pull `genai`, and therefore cannot pull
+  `preserve_order`, into fq-ops' own test build. A shared helper that did
+  would have "fixed" the inconsistency by adding the very coupling being
+  removed.
 - **0.7 adds a first-class Kimi adapter** (`KIMI_API_KEY`, the moonshot.ai
   endpoint, reached by a `kimi::` namespace or model prefix). That is exactly
   the model class this work exists for, and it means the eventual wiring may be

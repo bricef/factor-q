@@ -123,9 +123,12 @@ async fn operator_surface_matches_the_committed_snapshot() {
         },
     )
     .expect("assemble the operator registry");
-    let actual = serde_json::to_string_pretty(&registry.describe_value().expect("describe"))
-        .expect("serialise")
-        + "\n";
+    // Canonical rather than `to_string_pretty`: `serde_json::Map` is a
+    // `BTreeMap` or an `IndexMap` depending on whether something in the
+    // build graph enables `preserve_order`, so raw serialisation makes the
+    // expected bytes depend on which packages are compiled together
+    // (#437). Sorting keys here makes the snapshot a function of the data.
+    let actual = fq_test_support::canonical_json(&registry.describe_value().expect("describe"));
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/snapshots/operator_surface.json");

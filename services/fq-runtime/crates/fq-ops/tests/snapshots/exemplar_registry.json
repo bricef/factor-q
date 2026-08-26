@@ -1,127 +1,163 @@
 [
   {
     "atom": {
-      "domain": "turn",
-      "version": 1,
-      "summary": "exemplar resource",
       "description": "",
-      "stability": "experimental",
-      "key_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "EntryKey",
-        "type": "object",
-        "properties": {
-          "seq": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          }
-        },
-        "required": [
-          "seq"
-        ]
-      },
-      "state_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "EntryState",
-        "type": "object",
-        "properties": {
-          "seq": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "invocation_id": {
-            "type": "string"
-          },
-          "round": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "role": {
-            "type": "string"
-          },
-          "content": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "seq",
-          "invocation_id",
-          "round",
-          "role",
-          "content"
-        ]
-      },
-      "index_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "EntryState",
-        "type": "object",
-        "properties": {
-          "seq": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "invocation_id": {
-            "type": "string"
-          },
-          "round": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "role": {
-            "type": "string"
-          },
-          "content": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "seq",
-          "invocation_id",
-          "round",
-          "role",
-          "content"
-        ]
-      },
+      "domain": "turn",
       "filter_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "EntryFilter",
-        "type": "object",
         "properties": {
           "invocation_id": {
             "type": "string"
           },
           "limit": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
             "type": [
               "integer",
               "null"
-            ],
-            "format": "uint32",
-            "minimum": 0,
-            "default": null
+            ]
           }
         },
         "required": [
           "invocation_id"
-        ]
-      }
+        ],
+        "title": "EntryFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "round": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "invocation_id",
+          "round",
+          "role",
+          "content"
+        ],
+        "title": "EntryState",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq"
+        ],
+        "title": "EntryKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "invocation_id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "round": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "invocation_id",
+          "round",
+          "role",
+          "content"
+        ],
+        "title": "EntryState",
+        "type": "object"
+      },
+      "summary": "exemplar resource",
+      "version": 1
     }
   },
   {
     "view": {
-      "domain": "invocation",
-      "version": 1,
-      "summary": "exemplar resource",
       "description": "",
-      "stability": "experimental",
+      "domain": "invocation",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "InvocationFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One row of the Invocation view's index — what List returns. The\nexemplar keeps it visibly narrower than the fold to demonstrate\nthe distinction (state answers Get; index rows answer List).",
+        "properties": {
+          "invocation_id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "invocation_id",
+          "phase"
+        ],
+        "title": "InvocationIndexRow",
+        "type": "object"
+      },
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "InvocationKey",
-        "type": "object",
         "properties": {
           "invocation_id": {
             "type": "string"
@@ -129,17 +165,18 @@
         },
         "required": [
           "invocation_id"
-        ]
+        ],
+        "title": "InvocationKey",
+        "type": "object"
       },
+      "stability": "experimental",
       "state_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "InvocationState",
-        "type": "object",
         "properties": {
-          "invocation_id": {
+          "agent_id": {
             "type": "string"
           },
-          "agent_id": {
+          "invocation_id": {
             "type": "string"
           },
           "phase": {
@@ -150,177 +187,134 @@
           "invocation_id",
           "agent_id",
           "phase"
-        ]
+        ],
+        "title": "InvocationState",
+        "type": "object"
       },
-      "index_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "InvocationIndexRow",
-        "description": "One row of the Invocation view's index — what List returns. The\nexemplar keeps it visibly narrower than the fold to demonstrate\nthe distinction (state answers Get; index rows answer List).",
-        "type": "object",
-        "properties": {
-          "invocation_id": {
-            "type": "string"
-          },
-          "phase": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "invocation_id",
-          "phase"
-        ]
-      },
-      "filter_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "InvocationFilter",
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "default": null
-          },
-          "limit": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "uint32",
-            "minimum": 0,
-            "default": null
-          }
-        }
-      }
+      "summary": "exemplar resource",
+      "version": 1
     }
   },
   {
     "atom": {
-      "domain": "trigger",
-      "version": 1,
-      "summary": "exemplar resource",
       "description": "",
-      "stability": "experimental",
+      "domain": "trigger",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "agent_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "TriggerFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "payload": true,
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "agent_id",
+          "payload"
+        ],
+        "title": "TriggerState",
+        "type": "object"
+      },
       "key_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "TriggerKey",
-        "type": "object",
         "properties": {
           "seq": {
-            "type": "integer",
             "format": "uint64",
-            "minimum": 0
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "seq"
-        ]
+        ],
+        "title": "TriggerKey",
+        "type": "object"
       },
+      "stability": "experimental",
       "state_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "TriggerState",
-        "type": "object",
         "properties": {
-          "seq": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
           "agent_id": {
             "type": "string"
           },
-          "payload": true
-        },
-        "required": [
-          "seq",
-          "agent_id",
-          "payload"
-        ]
-      },
-      "index_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "TriggerState",
-        "type": "object",
-        "properties": {
+          "payload": true,
           "seq": {
-            "type": "integer",
             "format": "uint64",
-            "minimum": 0
-          },
-          "agent_id": {
-            "type": "string"
-          },
-          "payload": true
-        },
-        "required": [
-          "seq",
-          "agent_id",
-          "payload"
-        ]
-      },
-      "filter_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "TriggerFilter",
-        "type": "object",
-        "properties": {
-          "agent_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "default": null
+            "minimum": 0,
+            "type": "integer"
           }
-        }
-      }
+        },
+        "required": [
+          "seq",
+          "agent_id",
+          "payload"
+        ],
+        "title": "TriggerState",
+        "type": "object"
+      },
+      "summary": "exemplar resource",
+      "version": 1
     }
   },
   {
     "synthetic": {
-      "domain": "control",
-      "version": 1,
-      "summary": "exemplar resource",
       "description": "",
+      "domain": "control",
       "stability": "experimental",
       "state_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "ControlState",
-        "type": "object",
         "properties": {
-          "version": {
-            "type": "string"
-          },
           "nats_connected": {
             "type": "boolean"
           },
           "stream_ok": {
             "type": "boolean"
+          },
+          "version": {
+            "type": "string"
           }
         },
         "required": [
           "version",
           "nats_connected",
           "stream_ok"
-        ]
-      }
+        ],
+        "title": "ControlState",
+        "type": "object"
+      },
+      "summary": "exemplar resource",
+      "version": 1
     }
   },
   {
     "command": {
-      "domain": "invocation",
-      "verb": "drop",
-      "version": 1,
       "authority": {
-        "verb": "write",
-        "scope": "invocation"
+        "scope": "invocation",
+        "verb": "write"
       },
-      "summary": "Drop an in-flight invocation, archiving it as failed.",
       "description": "Kill-switch semantics: workers observe the drop at their next step boundary.",
-      "stability": "experimental",
+      "domain": "invocation",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "DropInput",
-        "type": "object",
         "properties": {
           "invocation_id": {
             "type": "string"
@@ -334,51 +328,51 @@
         },
         "required": [
           "invocation_id"
-        ]
-      }
+        ],
+        "title": "DropInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Drop an in-flight invocation, archiving it as failed.",
+      "verb": "drop",
+      "version": 1
     }
   },
   {
     "command": {
-      "domain": "control",
-      "verb": "down",
-      "version": 1,
       "authority": {
-        "verb": "write",
-        "scope": "control"
+        "scope": "control",
+        "verb": "write"
       },
-      "summary": "Stop the daemon, draining in-flight work to a step boundary.",
       "description": "Confirmation is the shutdown event, not the ack.",
-      "stability": "experimental",
+      "domain": "control",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "DownInput",
-        "type": "object",
         "properties": {
           "now": {
-            "type": "boolean",
-            "default": false
+            "default": false,
+            "type": "boolean"
           }
-        }
-      }
+        },
+        "title": "DownInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Stop the daemon, draining in-flight work to a step boundary.",
+      "verb": "down",
+      "version": 1
     }
   },
   {
     "command": {
-      "domain": "trigger",
-      "verb": "publish",
-      "version": 1,
       "authority": {
-        "verb": "write",
-        "scope": "trigger"
+        "scope": "trigger",
+        "verb": "write"
       },
-      "summary": "Dispatch a trigger to an agent via the durable trigger stream.",
       "description": "At-least-once delivery with a bounded budget; the receipt references the appended trigger atom.",
-      "stability": "experimental",
+      "domain": "trigger",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "PublishInput",
-        "type": "object",
         "properties": {
           "agent_id": {
             "type": "string"
@@ -388,52 +382,58 @@
         "required": [
           "agent_id",
           "payload"
-        ]
-      }
+        ],
+        "title": "PublishInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Dispatch a trigger to an agent via the durable trigger stream.",
+      "verb": "publish",
+      "version": 1
     }
   },
   {
     "report": {
+      "description": "Cost figures are retained indefinitely; totals never window.",
       "domain": "cost",
       "name": "summary",
-      "version": 1,
-      "summary": "Aggregate cost across all agents.",
-      "description": "Cost figures are retained indefinitely; totals never window.",
-      "stability": "experimental",
-      "params_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "CostParams",
-        "type": "object",
-        "properties": {
-          "since": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "default": null
-          }
-        }
-      },
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "CostOutput",
-        "type": "object",
         "properties": {
           "total_cost": {
-            "type": "number",
-            "format": "double"
+            "format": "double",
+            "type": "number"
           },
           "total_llm_calls": {
-            "type": "integer",
             "format": "uint64",
-            "minimum": 0
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "total_cost",
           "total_llm_calls"
-        ]
-      }
+        ],
+        "title": "CostOutput",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "since": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "CostParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Aggregate cost across all agents.",
+      "version": 1
     }
   }
 ]
