@@ -4,7 +4,9 @@ This document specifies the event schema emitted by the factor-q runtime. It cov
 
 Events are the primary observability and audit surface of factor-q. Every meaningful action in the system is an event, published to NATS JetStream, and later projected into SQLite for querying.
 
-**Schema version: 2.** See the [v1 → v2 changelog](#changelog-v1--v2) at the bottom for the breaking changes.
+**Schema version: 3** — see the [v2 → v3 changelog](#changelog-v2--v3), and [v1 → v2](#changelog-v1--v2) below it.
+
+> **This document leads the code, deliberately and temporarily.** v3 was decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md) and is specified here; the runtime still emits **v2** until the shape change lands (phase 2 of the [execution plan](../../plans/active/2026-08-25-reasoning-as-message-parts.md)), at which point `SCHEMA_VERSION` flips with the payloads it describes. Flagged rather than left to be discovered: a committed doc contradicting the code normally means one of them is wrong, and this is the exception that proves it — it is a design-first sequence with a named end. Delete this note when phase 2 lands.
 
 ## The three-layer model
 
@@ -34,7 +36,7 @@ Closed schema — if a new field is needed, the runtime grows. Producing agents 
 
 | Field | Type | Purpose |
 |---|---|---|
-| `schema_version` | `u32` | Always `2`. Monotonic version of the envelope shape. |
+| `schema_version` | `u32` | Always `3` once the v3 shape lands; `2` on the wire until then (see the note at the top). Monotonic version of the envelope shape. |
 | `event_id` | `string` (UUID v7) | Globally unique event identifier. UUID v7 gives time-ordered IDs. |
 | `parent_event_id` | `string` (UUID v7), optional | The previous event in this invocation, if any. Omitted on the `triggered` event, on system events, and on the first event of a recovery re-emit. |
 | `trace_id` | `string` (UUID v7) | Trace correlation id. Equal to `invocation_id` for now; reserved as a separate field so multi-invocation traces (graph workflows spanning multiple invocations) can be stitched together later without a wire-format change. |
@@ -141,7 +143,7 @@ so a reader can tell the shipped part from the reserved part.
 |---|---|---|---|
 | `notes` | string | Reserved — no writer | Free-form commentary from the producing agent. |
 | `confidence` | number | Reserved — no writer | Self-reported confidence. Advisory only — calibrated confidence comes from a verifier node, not from the producer. |
-| `reasoning` | string | Reserved — no writer; see the retention question above | Chain-of-thought / working. The fresh-context discipline depends on this never reaching a downstream agent's prompt. |
+| `reasoning` | string | Reserved — no writer; see the retention question above | An agent's **self-reported** working, in prose it chose to write. The fresh-context discipline depends on this never reaching a downstream agent's prompt. **Not** the model's actual reasoning: since [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md) that is a typed content part on the message (`llm.response` `parts`), in the payload layer. Two different things that share a name — this key is commentary, the part is the provider's own record of the turn. |
 | `sources_considered` | array of `Citation` | Reserved — no writer | Sources looked at but not directly used in the payload. Sources actually used belong in a typed `Citation[]` field on the payload. |
 | `flags` | array of strings | **Runtime writes this** | Markers the producer wants downstream humans (or a meta-agent) to see. |
 
@@ -162,6 +164,10 @@ vocabulary above.
 The single rule that makes the three-layer model work: **the executor strips annotations from the input context when building the prompt for a consuming agent.** A consuming agent sees the payload and selected envelope fields, never the annotations from upstream events.
 
 This is enforced by [`Event::for_consumer_context`](#consumer-view) in the runtime, not by convention.
+
+**Reasoning is barred too, and it does not live in this layer.** Since [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md) a model's reasoning is a typed content part on the message, which puts it in the **payload** — the layer `for_consumer_context` deliberately does *not* strip. The barrier is therefore stated on the content rather than on the container: **a consuming agent sees no upstream reasoning, whether it arrives as an annotation or as a payload part.** Stripping annotations alone no longer discharges the rule.
+
+**The boundary is the invocation, not the turn.** Replaying a model's own reasoning back to it within its own conversation is not a barrier violation — it is one agent, one context, and the reasoning is its own working, which is what every provider's contract assumes. The barrier governs what a *consuming* agent sees of a *producing* agent's work. ADR-0034 § D6 is the authority.
 
 ### Consumer view
 
@@ -264,10 +270,22 @@ Published immediately before an LLM call is made.
   "call_id": "0198f2a1-4c3b-7d21-9e88-5a0b1c2d3e4f",
   "model": "claude-haiku",
   "messages": [
-    { "role": "system", "content": "..." },
-    { "role": "user", "content": "..." },
-    { "role": "assistant", "content": "...", "tool_calls": [...] },
-    { "role": "tool", "tool_call_id": "...", "content": "..." }
+    { "kind": "system", "text": "..." },
+    { "kind": "user", "text": "..." },
+    {
+      "kind": "assistant",
+      "parts": [
+        { "kind": "reasoning", "model": "claude-haiku", "reasoning": { "kind": "signed", "text": "...", "token": "..." } },
+        { "kind": "text", "text": "..." },
+        { "kind": "tool_call", "tool_call_id": "...", "tool_name": "read", "parameters": {} }
+      ]
+    },
+    {
+      "kind": "tool_results",
+      "results": [
+        { "tool_call_id": "...", "output": "...", "is_error": false }
+      ]
+    }
   ],
   "tools_available": [
     { "name": "read", "description": "...", "parameters_schema": {...} }
@@ -283,6 +301,8 @@ Published immediately before an LLM call is made.
 **Design notes:**
 
 - **Full message history is sent every time.** Reconstructing context from earlier events would be fragile.
+- **This is where the reasoning round-trip is observable.** An assistant turn's `reasoning` parts are replayed here on every subsequent call, which is the whole point of [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md): a provider that returns reasoning gets it back. **A cross-model edge strips them** — reasoning is tied to the model that produced it, so a request built for a different model carries none.
+- **One `tool_results` message answers one assistant turn**, carrying every result rather than one message per result.
 - **`tools_available` is a snapshot per call.** Tool schemas can change between calls.
 - **`call_id` correlates with the response.** It is a UUID the runtime mints for the call, not a provider identifier — unlike `tool_call_id`, which comes from the provider and is carried through verbatim in whatever shape it arrives.
 - **`origin` says what prompted the call.** `agent_turn` for a reducer-driven reasoning turn, or `sampling` / `elicitation` with the requesting MCP server's name (ADR-0018), so the request/response trace is self-describing about whose spend it is. Absent on events written before the field existed, which read as `agent_turn`.
@@ -311,9 +331,15 @@ Published when an LLM call returns and the response is durably written. The enve
 {
   "round": 3,
   "call_id": "0198f2a1-4c3b-7d21-9e88-5a0b1c2d3e4f",
-  "content": "I will research the topic by first...",
-  "tool_calls": [
+  "parts": [
     {
+      "kind": "reasoning",
+      "model": "kimi-k2-instruct",
+      "reasoning": { "kind": "plain", "text": "The docs overview is the cheapest place to..." }
+    },
+    { "kind": "text", "text": "I will research the topic by first..." },
+    {
+      "kind": "tool_call",
       "tool_call_id": "tool-01HXJ...",
       "tool_name": "read",
       "parameters": { "path": "/project/docs/overview.md" }
@@ -323,6 +349,7 @@ Published when an LLM call returns and the response is durably written. The enve
   "usage": {
     "input_tokens": 1234,
     "output_tokens": 567,
+    "reasoning_tokens": 402,
     "cache_read_tokens": 0,
     "cache_write_tokens": 0
   },
@@ -335,6 +362,11 @@ Published when an LLM call returns and the response is durably written. The enve
 - **Cost rides on the envelope.** See [Cost metadata](#cost-metadata) above. Consumers query `WHERE event_type IN ('llm_response', 'llm_failure') AND total_cost IS NOT NULL` for cost-bearing per-call events.
 - **`tool_call_id` is assigned by the LLM.**
 - **`usage` carries raw token counts**, mirrored in `envelope.cost` along with the computed dollar values.
+- **`parts` is an ordered list, and a response is an assistant turn** — so it carries assistant parts only (`text`, `reasoning`, `tool_call`) and structurally cannot contain a tool result. This replaced the flat `content` + `tool_calls` pair in v3; see [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md).
+- **Provider order is preserved; no canonical order is promised.** Anthropic requires thinking blocks first in an assistant turn, OpenAI-compatible providers carry reasoning as a sibling field where position is meaningless. The list is ordered as the provider returned it, and each adapter re-emits in whatever order its own API requires.
+- **A `reasoning` part names the model that produced it.** Reasoning is model-tied: replaying it to a different model is at best wasted input tokens and at worst a protocol violation, so the strip on a cross-model edge keys on this field.
+- **`reasoning.kind` is one of `plain` / `signed` / `opaque`.** `plain` carries readable working only (Kimi, DeepSeek); `signed` carries readable working plus a continuity token that must be echoed verbatim (Anthropic `thinking` — note the token *encrypts the full reasoning*, so the visible text is not the payload); `opaque` carries a token and no readable text at all (Anthropic `redacted_thinking`, Gemini thought signatures). **An `opaque` part is not an empty one** — omitting it, or recording it as an absent reasoning part, misstates what the turn contained.
+- **`reasoning_tokens` is a decomposition of `output_tokens`, not an addition to it.** Providers already fold reasoning into the completion count, so `total_cost` is unchanged by its presence. It exists because for reasoning-first models the thought-vs-spoken split is most of the bill and was previously invisible.
 
 ### `llm.failure`
 
@@ -754,6 +786,23 @@ Three consumer consequences follow. First, **cost figures are exempt from the sw
 - **Binary payloads.** Large tool outputs inflate event sizes. Options: compression, reference-by-hash to an object store, truncation with a pointer. Deferred until it's a problem.
 - **Schema evolution past v2.** When a breaking change is needed, the version field and per-payload `schema_id` give us the substrate; the migration story (rolling upgrades, multi-version consumers) is a separate design.
 - **Cross-agent graph events.** When multi-agent graph orchestration arrives, events like "edge fired" or "node spawned" need their own types. The `trace_id` field is reserved for that.
+
+## Changelog: v2 → v3
+
+Breaking, with no wire-format compatibility shim, on the same grounds as v1 → v2: factor-q is pre-alpha with no external consumers, and STATUS.md puts compatibility, migration and rollback explicitly out of scope. v2 events do not parse against v3 deserialisers or vice versa. Persisted reducer state breaks with them, so in-flight invocations do not survive the upgrade — that is accepted, but it must **fail loudly** rather than mis-parse.
+
+Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); motivation and the provider analysis are on [#437](https://github.com/bricef/factor-q/issues/437).
+
+| Change | Reason |
+|---|---|
+| `schema_version` bumped 2 → 3 | Marks the wire-format break. |
+| `Message` becomes an enum over turn kinds — `system` / `user` / `assistant` / `tool_results` — replacing `{role, content, tool_calls, tool_call_id}` | The turn kind is the variant, so the role is carried by the type. Deletes four states the old shape left representable, including a tool message with no correlation id. |
+| `llm.response` replaces `content` + `tool_calls` with an ordered `parts` list | Every provider returns an ordered part list for an assistant turn; a single `Option<String>` beside a call array cannot represent one, and had nowhere to put reasoning. |
+| Assistant parts are `text` / `reasoning` / `tool_call` | The parts an assistant turn can hold. A response is an assistant turn, so it takes this part type and cannot contain a tool result. |
+| A `reasoning` part carries its producing `model` | Reasoning is model-tied; the cross-model strip keys on it. |
+| A `reasoning` part is `plain` / `signed` / `opaque` | The three shapes providers actually return. `opaque` exists so a part we cannot render is still recorded as *present*: absence and opacity are different facts. |
+| One turn's tool results are one `tool_results` message | Matches the Anthropic wire shape, where `tool_result` blocks are batched in a single turn. Makes the correct shape expressible; changing what the harness emits is [#511](https://github.com/bricef/factor-q/issues/511). |
+| `usage` gains `reasoning_tokens` (additive, defaults to 0) | Splits `output_tokens` into thought-vs-spoken. A decomposition, not a new charge — `total_cost` is unchanged. |
 
 ## Changelog: v1 → v2
 

@@ -31,7 +31,7 @@ describes the tree.
   outcome of this work**, not separable follow-on. §5 scopes it.
 
 **Design settled by the co-design session of 2026-08-25**, recorded as
-[ADR-0034](../../adrs/draft/0034-reasoning-as-a-content-part.md). The session
+[ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md). The session
 answered three of this plan's original open questions and added one invariant:
 
 - **Parts are an internal concern and stop at the operator boundary.**
@@ -258,7 +258,7 @@ Per CONTRIBUTING's co-design practice and lesson 1 of the
 [fq-ops design review](../../reviews/2026-07-21-fq-ops-design-review-learnings.md)
 (*"when review comments correct ontology, stop coding and model"*), Phase 0 was
 a modelling session. **It has now run** (2026-08-25), and its output is
-[ADR-0034](../../adrs/draft/0034-reasoning-as-a-content-part.md) — which is the
+[ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md) — which is the
 authority for what follows. This section is the working summary; where the two
 disagree, the ADR wins. What remains genuinely open is in §8, reduced from five
 questions to two.
@@ -325,7 +325,7 @@ role field beside a flat part vector would have traded one runtime-checked
 invariant for another (*"ToolResult in a non-Tool role"*), both caught in the
 same adapter. Only the enum removes the question from the type. The full
 comparison, including the two richer ontologies considered and rejected, is in
-[ADR-0034](../../adrs/draft/0034-reasoning-as-a-content-part.md) § Alternatives.
+[ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md) § Alternatives.
 
 Each variant carries the parts its turn kind can hold, rather than sharing one
 flat `ContentPart`. Upstream shows the cost of not doing this: genai carries
@@ -471,10 +471,10 @@ through a hand-rolled probe.
 
 | Phase | Deliverable | Gates |
 |---|---|---|
-| **0** ✅ | **Modelling session** — ran 2026-08-25. Output: [ADR-0034](../../adrs/draft/0034-reasoning-as-a-content-part.md). | done |
-| **1** | **ADR accepted + doc amendments.** Move ADR-0034 `draft/` → `accepted/`, add its README row. Amend `inter-node-contracts-and-event-layers.md` §6/§7 (I3), `event-schema.md` (`llm.response` shape + v2→v3 changelog), `SCHEMA_VERSION` 2 → 3. No code. | ADR accepted |
+| **0** ✅ | **Modelling session** — ran 2026-08-25. Output: [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md). | done |
+| **1** ✅ | **ADR accepted + doc amendments.** Move ADR-0034 `draft/` → `accepted/`, add its README row. Amend `inter-node-contracts-and-event-layers.md` §6/§7 (I3), and `event-schema.md` (`llm.response` shape, the annotation-barrier section, the `reasoning` key's row, and a v2→v3 changelog). **Documentation only — no code.** | ADR accepted, `check-links` green |
 | **1b** | **Upstream genai PR opened** (§5, G1–G4). Runs in parallel from here. | PR open, shape argued |
-| **2** | **Oracle first, then the type.** Build the judge before the thing it judges (lesson 10: *"thirteen reworks with zero behavioural regressions"*). Then `Message` becomes the turn-kind enum (§4.2) and the response chain takes `Vec<AssistantPart>`, with a no-op encoder. ~30 construction sites, of which 3 are tool-role; `Message.tool_call_id` has exactly one consumer. Behaviour unchanged; the diff is shape only. | golden net green, `just quality` + `just runtime-ci` |
+| **2** | **Oracle first, then the type.** Build the judge before the thing it judges (lesson 10: *"thirteen reworks with zero behavioural regressions"*). Then `Message` becomes the turn-kind enum (§4.2) and the response chain takes `Vec<AssistantPart>`, with a no-op encoder. ~30 construction sites, of which 3 are tool-role; `Message.tool_call_id` has exactly one consumer. **`SCHEMA_VERSION` 2 → 3 lands here, with the shape it describes** — bumping it in Phase 1 would have events claiming v3 while still carrying v2 payloads. Behaviour unchanged; the diff is shape only. | golden net green, `just quality` + `just runtime-ci` |
 | **3** | **OpenAI-compatible read + write.** `from_provider_response` reads `ChatResponse.reasoning_content`; `convert_message` emits `ContentPart::ReasoningContent`; `harness.rs:329` carries it into the replayed conversation. The cross-model strip (I2) lands here with its assertion. | I1, I2, I5 |
 | **4** | **The operator surface and the transcript.** `TurnAction::Assistant` gains `TurnReasoning` (§4.6) — the reduction that keeps parts internal. `TranscriptEntry` follows, then the flag in both consumers: `fq invocation transcript` and the dashboard, including its `opaque — click to see raw` affordance. Golden files move here. | I7, golden updated |
 | **5** | **Cost decomposition.** `reasoning_tokens` into `TokenUsage` from `completion_tokens_details`; `convert_usage` reads it; `total_cost` provably unchanged. | I4 |

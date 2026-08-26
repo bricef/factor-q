@@ -76,6 +76,7 @@ A design doc's *folder* answers the same question for prose:
 | [0030](accepted/0030-object-manifest-gc-back-off.md) | Object/manifest GC uses back-off (no generations) — objects get the block protocol's claim CAS + reserve-before-rely, but a writer meeting a claimed object retries rather than minting a generation; TLC-checked, refines ADR-0023 (F2) |
 | [0031](accepted/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; capability-token-over-TLS auth (Appendix A, superseding the original shared secret) as swappable middleware; built |
 | [0033](accepted/0033-bsl-reaffirmation.md) | BSL 1.1 stands after the 2026-07-25 cleanroom review's finding 1.4 — reaffirms [ADR-0022](accepted/0022-binary-distribution-and-licensing.md) §7 unamended; costs carried knowingly, the named-scenario gap left open, revisit triggers proposed |
+| [0034](accepted/0034-reasoning-as-a-content-part.md) | Reasoning is a content part and `Message` is an enum over turn kinds; reasoning replays within an invocation and is stripped across one; parts stay internal and stop at the operator boundary, which receives a reasoning concept that distinguishes absence from opacity |
 
 ## Draft
 
@@ -84,7 +85,6 @@ A design doc's *folder* answers the same question for prose:
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
 | [0032](draft/0032-exactly-once-trigger-dispatch.md) | Trigger dispatch is exactly-once by durable claim (trigger inbox in NATS KV, CAS-arbitrated), not by ack timing; broker responsibility ends at the post-claim ack — unstarted, while the incident it fixes (#327) is still open |
-| [0034](draft/0034-reasoning-as-a-content-part.md) | Reasoning is a content part on a parts-shaped `Message`, replayed within an invocation and stripped across one; parts stay internal and stop at the operator boundary, which receives a reasoning concept that distinguishes absence from opacity |
 
 ## Related guides
 
