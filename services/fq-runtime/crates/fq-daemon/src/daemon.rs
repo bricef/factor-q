@@ -22,10 +22,13 @@ use crate::version::FQ_VERSION;
 
 /// Lifecycle events are published on `fq.system.*` so operators
 /// can see from the event stream when the daemon started, why it
-/// stopped, and which hosted task (if any) failed. A task that
-/// dies unexpectedly triggers an immediate shutdown of the other
-/// task and a non-zero process exit, rather than silently
-/// limping along with a broken dispatcher or projector.
+/// stopped, and which hosted task (if any) failed. Nine tasks are
+/// supervised together in `hosted.rs` — the projection, coordination,
+/// heartbeat and archive-ack consumers, the advisory watch, the
+/// heartbeat producer, the archive-retry and retention sweepers, and
+/// the trigger dispatcher. Any one dying unexpectedly triggers an
+/// immediate shutdown of the rest and a non-zero process exit, rather
+/// than silently limping along with a broken dispatcher or projector.
 pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     let runtime_id = Uuid::now_v7();
     // Includes the commit (FQ_VERSION = semver+sha), so the running
@@ -38,7 +41,7 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // concurrent invocations sharing one workspace directory clobber
     // each other's files silently. The precondition must hold in
     // config, not live only as a template comment existing deployments
-    // never see (principle 7 — an unenforced declared boundary is a
+    // never see (principle 3 — an unenforced declared boundary is a
     // silent success with wider-than-intended reach).
     if config.worker.max_concurrent_invocations > 1
         && !(config.workspace.per_invocation && config.workspace.path.is_some())

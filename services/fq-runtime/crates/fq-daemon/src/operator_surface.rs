@@ -29,11 +29,6 @@ use fq_runtime::views::Views;
 // sharing a crate with the handler.
 pub(crate) use fq_ops::surface::{WorkerListFilter, WorkerViewKey};
 
-/// What the operator surface's handlers reach for beyond [`Views`]:
-/// the bus and writer stores commands write through, the runner a
-/// command asks about liveness, and the live agent registry the Agent
-/// view reads. Everything a *fold* can answer still comes from
-/// `Views`; the split keeps that read path visibly read-only.
 /// The daemon's own facts, as `control.status` answers them.
 ///
 /// Grouped because they are one concept — where this process keeps its
@@ -47,6 +42,11 @@ pub struct DaemonFacts {
     pub drain_deadline_ms: u64,
 }
 
+/// What the operator surface's handlers reach for beyond [`Views`]:
+/// the bus and writer stores commands write through, the runner a
+/// command asks about liveness, and the live agent registry the Agent
+/// view reads. Everything a *fold* can answer still comes from
+/// `Views`; the split keeps that read path visibly read-only.
 pub struct OperatorDeps {
     pub bus: fq_runtime::EventBus,
     pub projection: Arc<fq_runtime::control_plane::projection::ProjectionStore>,
@@ -156,9 +156,11 @@ fn arm_drop_halt(
 /// registry, reads gated at the read horizon (every consumer feeding a
 /// view's fold), the Turn, Event and DeadLetter atoms served from the
 /// log, the Trigger atom served from its permanent projection record,
-/// the commands — `invocation.drop`, `trigger.publish`,
-/// `dead_letter.requeue`, and the two machinery verbs — each returning
-/// a receipt, and the reports: the two Cost aggregates and the two
+/// the six commands — `invocation.drop`, `invocation.resume`,
+/// `trigger.publish`, `dead_letter.requeue`, and the two machinery
+/// verbs (`control.reload`, `control.down`) — each returning a
+/// receipt, and the five reports: the two Cost aggregates
+/// (`cost.summary`, `cost.by_agent`), `invocation.active`, and the two
 /// Control machinery reports (`control.doctor`, `control.status`).
 /// Public for the operator-surface snapshot test.
 pub fn operator_registry(
@@ -561,8 +563,15 @@ fn register_agent_view(
     Ok(())
 }
 
-/// Cap on one stream batch and one list page.
+/// Hard cap on one stream batch, applied whatever the caller asks.
 const TURN_BATCH_CAP: usize = 64;
+/// The page size `turn.list` uses when the caller names none — a
+/// **default, not a cap**. Unlike `event_atom`, `dead_letter_atom` and
+/// `trigger_command`, which reject an over-limit request with
+/// `InvalidInput`, `TurnFilter` carries no maximum and the handler
+/// applies this via `unwrap_or`, so `limit: u32::MAX` is an unbounded
+/// log walk over the edge. Tracked in #512 as a code defect; the
+/// number here is only the default until it is fixed.
 const TURN_LIST_DEFAULT_LIMIT: u32 = 200;
 /// Ceiling on a `next_batch` long poll, whatever the caller asks.
 const TURN_MAX_WAIT_CEILING_MS: u64 = 60_000;

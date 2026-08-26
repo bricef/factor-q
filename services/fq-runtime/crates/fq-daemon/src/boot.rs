@@ -1,5 +1,5 @@
 //! What the daemon works out before it runs anything: where its stores
-//! are, whether they need migrating, and the two labels it registers
+//! are, whether they need migrating, and the host label it registers
 //! itself under.
 //!
 //! Split out of `daemon.rs` — each of these is a function of the config

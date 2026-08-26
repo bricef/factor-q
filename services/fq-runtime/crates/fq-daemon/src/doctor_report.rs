@@ -39,11 +39,12 @@
 //!   reduce to three integers.
 //!
 //! The client half — the verb, its exit code, and the human rendering
-//! — is [`crate::doctor`]. That seam is the one Phase 5 splits the
-//! binary along, and the report's declared shapes sit on the shared
-//! side of it in [`fq_runtime::surface`]: the dashboard's health page
-//! composes this report with `control.status`, so both ends name the
-//! same types.
+//! — is `fq_cli::doctor`, in the other binary. That seam is the one
+//! Phase 5 split the binary along, and the report's declared shapes
+//! sit on the shared side of it in [`fq_runtime::surface`] (re-exported
+//! from `fq_ops::surface`, the leaf both binaries link): the
+//! dashboard's health page composes this report with `control.status`,
+//! so both ends name the same types.
 
 use std::sync::Arc;
 
