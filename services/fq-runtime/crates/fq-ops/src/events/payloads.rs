@@ -279,7 +279,6 @@ pub enum ToolErrorKind {
     PermissionDenied,
 }
 
-/// Published when an invocation finishes successfully.
 /// Agent-declared task outcome (#125). The serde spellings are the
 /// wire contract and must stay in lockstep with fq-tools'
 /// `TASK_STATUS_VALUES` (the `report_outcome` schema enum) — the
@@ -308,6 +307,7 @@ impl TaskStatus {
     }
 }
 
+/// Published when an invocation finishes successfully.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletedPayload {
     /// The agent's own declaration of how the *task* went (#125) —
