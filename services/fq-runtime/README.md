@@ -58,11 +58,16 @@ just test-runtime
 # Type-check the whole workspace without building
 just check
 
-# Format and lint
+# Format; then every non-test quality gate (source policy, sizes, fmt,
+# clippy, creep, coupling)
 just fmt
-just lint
+just quality
 
-# The full local gate — every target CI runs, timed, fail-fast
+# This suite's doc/build/test gate; `just rust-ci` for all of them
+just runtime-ci
+
+# The full local gate — every target CI runs bar `docker-build` and
+# `smoke`, timed, fail-fast
 just ci
 
 # Run the client (note: no `--` separator; `just fq -- agent list`

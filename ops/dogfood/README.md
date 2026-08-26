@@ -53,7 +53,8 @@ Deploy tooling for the dogfood instance (issue #102). The contract:
 fq-dogfood/
 ├── current -> releases/<sha>/   # the active build (symlink)
 ├── releases/<sha>/              # fq, fqd, fq-cas, fq-dashboard, github-watcher, fq-cron + launchers
-├── fqd.toml                     # daemon config — host-side, `fq reload` to apply
+├── fqd.toml                     # daemon config — host-side; read at STARTUP, so a change
+│                                #   needs `deploy.sh --force`, not `fq reload`
 ├── fq-cron.toml                 # scheduled jobs — host-side; editing deploys/reloads them
 ├── agents/                      # agent definitions — host-side; canonical copies of
 │                                #   repo-tracked ones live in ops/dogfood/agents/ —
@@ -142,13 +143,17 @@ ops/dogfood/deploy.sh 1a2b3c4      # roll back / pin (sha prefix ok)
 ls ~/fq-dogfood/releases           # deploy history on this host
 ```
 
-Config and agent-definition changes don't need a deploy at all:
-`fq reload` hot-swaps the registry (Design Principle 8). A new provider
-key is the exception — add it to `.secrets/env` and `deploy.sh --force`,
-since only launch reads the env file.
+**Agent-definition** changes don't need a deploy: `fq reload` re-reads
+the agents directory and hot-swaps the registry (Design Principle 8),
+affecting the next trigger. **Config** changes do need one. `fq reload`
+reads the agents directory and nothing else — `fqd.toml` is read once, at
+startup — so a `[providers]`, `[edge]`, `[summary]`, `[worker]` or
+retention edit takes effect on `deploy.sh --force`, not on a reload. A
+new provider key is the same story for a different reason: only launch
+reads `.secrets/env`.
 
 One-line invocation summaries (#216): set `[summary] model = "<cheap-model>"`
-in `fqd.toml` (and `fq reload`-or-restart) and the daemon keeps a one-line,
+in `fqd.toml` and restart (`deploy.sh --force`) and the daemon keeps a one-line,
 cheap-model status per invocation on the dashboard's invocation surfaces —
 what work was expected, what it is doing now, how it ended. The model must
 be priced (the ADR-0004 startup guarantee applies, so deploy config-first);
