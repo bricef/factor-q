@@ -7,6 +7,18 @@ incident (#327: one trigger for issue #189 → three invocations → three PRs,
 numbers 322/323/324). Execution plan:
 [exactly-once trigger dispatch](../../plans/active/2026-07-18-exactly-once-trigger-dispatch.md).
 
+Implementation: pending — nothing is built. There is no trigger claim
+registry: `TriggerClaim`, `trigger_claim` and `fq-trigger-claims` return
+nothing under `services/`, and the machinery Decision 8 says is "removed" is
+fully intact — `DurableStart` is still constructed and threaded through the
+dispatcher.
+
+What a reader cannot otherwise tell from a `Draft` label is where the
+decision *stands*, so: the originating incident **#327 is still open**, and
+the execution plan above still calls this the "highest-priority correctness
+fix". The draft has sat five weeks. It is unstarted rather than withdrawn,
+and promoting it is a decision nobody has taken either way.
+
 ## Context
 
 JetStream is an **at-least-once transport**. Today the runtime's defence
