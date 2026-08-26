@@ -351,6 +351,29 @@ fn wire_encoding_is_native_not_rendered() {
 // The schema snapshot oracle
 // ------------------------------------------------------------------
 
+/// **This snapshot is only correct for a workspace-wide build.** `genai`
+/// declares `serde_json` with `preserve_order`, which turns
+/// `serde_json::Map` from a `BTreeMap` into an `IndexMap` — so JSON object
+/// keys serialise in insertion order rather than alphabetically. Cargo
+/// features are additive across the whole build graph, so whether that
+/// feature is on depends on **which packages you compile together**:
+///
+/// - `cargo test -p fq-ops` alone — this crate has no `genai` in its graph,
+///   the feature is off, and schemars emits **alphabetical** keys.
+/// - `just test-runtime` / `just runtime-ci` — `fq-runtime` pulls `genai`
+///   in, the feature is on, and the same code emits **insertion-ordered**
+///   keys.
+///
+/// The committed snapshot holds the second form, because that is what CI
+/// builds. Running this test on its own will therefore fail on key order
+/// while being semantically identical — compare with `json.load`, not with
+/// `diff`, before believing the surface drifted. Regenerate with the same
+/// package set CI uses, or `UPDATE_SNAPSHOT=1` will "fix" it into the shape
+/// that then fails CI:
+///
+/// ```text
+/// UPDATE_SNAPSHOT=1 just test-runtime
+/// ```
 #[test]
 fn describe_matches_the_committed_snapshot() {
     let registry = exemplar_registry();

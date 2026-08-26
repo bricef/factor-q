@@ -429,12 +429,72 @@ Scoped against `genai 0.6.5`. Four changes, all small, all in
 model-tagged carrier (`ContentPart::Custom`), so **no new part type is
 required** — which is what makes this tractable rather than a rewrite.
 
-| # | Site | Today | Change |
-|---|---|---|---|
-| G1 | `anthropic/adapter_shared.rs:527` | `"thinking" => reasoning_content.push(item.x_take("thinking")?)` — text kept, `signature` discarded | Preserve the block losslessly. `redacted_thinking` already takes the `Custom` path at the `other_typ` arm; route `thinking` the same way, or add a signature field to the reasoning representation. |
-| G2 | `anthropic/streamer.rs:152-155` | Captures `thinking` text; discards `signature_delta` | Same fix on the streaming path, so both parsers agree. |
-| G3 | `anthropic/adapter_shared.rs:227` and `:271` | `ContentPart::Custom(_) => {}` (and `ReasoningContent`, `ThoughtSignature`) — empty arms in **both** the user- and assistant-content branches | Echo `Custom` parts verbatim when `model_iden.adapter_kind == Anthropic`. This is the actual round-trip. |
-| G4 | `bedrock/converse.rs` | Same drop | Same fix. Anthropic signatures are cross-platform (Claude API / Bedrock / Vertex), so one modelling decision covers all three. |
+**Re-scoped 2026-08-26 against `0.7.0-beta.19`, and it shrank to one line.** The
+original G1–G4 were scoped against `0.6`, which is what factor-q pinned. On the
+0.7 line upstream has already done most of it:
+
+| # | Site | Status on `0.7.0-beta.19` |
+|---|---|---|
+| **G1** | `anthropic/adapter_shared.rs:559` | **Still needed — the whole remaining gap.** `"thinking" => reasoning_content.push(item.x_take("thinking")?)` keeps the text and drops `signature`. Every *other* block type falls through to `other_typ` → `ContentPart::Custom`, which preserves the raw JSON verbatim, signature included. |
+| G2 | `anthropic/streamer.rs` | **Done upstream** — the streamer now reads `/delta/signature` and emits `InterStreamEvent::ThoughtSignatureChunk`. Not on factor-q's path regardless: we call `exec_chat`, not the streaming API. |
+| G3 | `anthropic/adapter_shared.rs` ×3 | **Done upstream.** `ContentPart::Custom(custom_part) => values.push(custom_part.data)` at all three arms, where `0.6` had `ContentPart::Custom(_) => {}`. This was the actual round-trip, and it means `redacted_thinking` already survives on 0.7. |
+| G4 | `bedrock/converse.rs` | Re-check against 0.7 before assuming it still applies; the Anthropic fix landing upstream makes it likely this did too. |
+
+**So the contribution is: stop special-casing `thinking` away from the `Custom`
+path, while still populating `reasoning_content` so display consumers are
+unaffected.** One arm, additive, no public type changes — which retires the
+"(i) vs (ii)" shape argument below: option (ii) (a signature-carrying reasoning
+part) is no longer needed to make the round-trip work, so the additive route is
+both the smaller change *and* the sufficient one.
+
+### What the 0.7 migration verified
+
+Three things worth recording, since each was a live risk when the upgrade was
+proposed:
+
+- **Zero source changes.** The changelog's three breaking items —`Tool` gaining
+  a required `custom_format` field, `ReasoningEffort::None` → `Zero`, and
+  `Error::HttpError` gaining `headers` — all miss factor-q. `convert_tool_schema`
+  uses `Tool::new()` plus builders rather than a struct literal, `convert_params`
+  never maps `None`, and `map_error` does not destructure `HttpError`.
+- **Prompt-cache behaviour is unchanged, contrary to the initial concern.** The
+  changelog's *"request-level `ChatOptions::with_cache_control` … which was
+  previously ignored"* refers to **request-level** control. factor-q sets
+  **message-level** control (`message.options`), which 0.6 honoured and
+  beta.19 still honours — beta.19 explicitly *"track[s] explicit message-level
+  breakpoints so request-level cache_control can defer to them"*. The
+  two-breakpoint design in `into_provider_request` was working as documented and
+  continues to.
+- **It turns on `serde_json/preserve_order` workspace-wide, and that is the
+  one consequence with teeth.** genai 0.7's manifest declares
+  `serde_json = { features = ["preserve_order"] }`; 0.6.5 did not. Cargo
+  features are additive across the build graph, so `serde_json::Map` becomes
+  an `IndexMap` for **every** crate compiled alongside it, and JSON object keys
+  serialise in insertion order rather than alphabetically.
+
+  The data is unaffected — both regenerated snapshots parse **identically** to
+  their predecessors, and it is inert on the wire, in the reducer state blob,
+  and for content addressing (`Cid::of` hashes blob content in `fq-store`,
+  never our event JSON). What it changes is the *build*: **the serialised form
+  now depends on which packages you compile together.** `cargo test -p fq-ops`
+  alone has no genai in its graph and emits alphabetical keys; `just
+  runtime-ci` builds seven packages, genai among them, and emits
+  insertion-ordered keys. Same source, same test, two outputs.
+
+  Two snapshots were regenerated for the CI form
+  (`fq-daemon/tests/snapshots/operator_surface.json`,
+  `fq-ops/tests/snapshots/exemplar_registry.json`). The lasting cost is that
+  `cargo test -p fq-ops --test registry` **run in isolation now fails on key
+  order** while being semantically correct; a snapshot can only be right for
+  one context. That is documented on the test itself rather than left as a
+  trap — it cost an hour and three gate runs to diagnose here, because the
+  test passes 25/25 standalone and fails every time under the gate.
+- **0.7 adds a first-class Kimi adapter** (`KIMI_API_KEY`, the moonshot.ai
+  endpoint, reached by a `kimi::` namespace or model prefix). That is exactly
+  the model class this work exists for, and it means the eventual wiring may be
+  a named provider rather than `api_shape = "openai-compatible"` plus a
+  `base_url` override. Not acted on here — noted for phase 3, where the
+  fixture-backed test needs to choose a provider shape to assert against.
 
 **Two candidate shapes for G1, to be offered in the PR discussion rather than
 picked unilaterally:**
@@ -473,7 +533,8 @@ through a hand-rolled probe.
 |---|---|---|
 | **0** ✅ | **Modelling session** — ran 2026-08-25. Output: [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md). | done |
 | **1** ✅ | **ADR accepted + doc amendments.** Move ADR-0034 `draft/` → `accepted/`, add its README row. Amend `inter-node-contracts-and-event-layers.md` §6/§7 (I3), and `event-schema.md` (`llm.response` shape, the annotation-barrier section, the `reasoning` key's row, and a v2→v3 changelog). **Documentation only — no code.** | ADR accepted, `check-links` green |
-| **1b** | **Upstream genai PR opened** (§5, G1–G4). Runs in parallel from here. | PR open, shape argued |
+| **1b** ✅ | **Migrate genai `0.6` → `=0.7.0-beta.19`.** Decided 2026-08-26: take the 0.7 line now rather than at phase 6, because upstream has already landed most of the Anthropic round-trip there (§5) and pinning a fork of 0.6 would mean redoing the work at the next upgrade. **Zero source changes** — all three of the changelog's breaking changes miss factor-q's usage. Pinned exactly (`=`), because a beta's API can move between betas. | `runtime-ci` green |
+| **1c** | **Upstream genai PR opened** (§5, now a one-line change). Runs in parallel from here. The fork exists at [bricef/rust-genai](https://github.com/bricef/rust-genai), branch `fix/anthropic-thinking-signature-roundtrip`. | PR open |
 | **2** | **Oracle first, then the type.** Build the judge before the thing it judges (lesson 10: *"thirteen reworks with zero behavioural regressions"*). Then `Message` becomes the turn-kind enum (§4.2) and the response chain takes `Vec<AssistantPart>`, with a no-op encoder. ~30 construction sites, of which 3 are tool-role; `Message.tool_call_id` has exactly one consumer. **`SCHEMA_VERSION` 2 → 3 lands here, with the shape it describes** — bumping it in Phase 1 would have events claiming v3 while still carrying v2 payloads. Behaviour unchanged; the diff is shape only. | golden net green, `just quality` + `just runtime-ci` |
 | **3** | **OpenAI-compatible read + write.** `from_provider_response` reads `ChatResponse.reasoning_content`; `convert_message` emits `ContentPart::ReasoningContent`; `harness.rs:329` carries it into the replayed conversation. The cross-model strip (I2) lands here with its assertion. | I1, I2, I5 |
 | **4** | **The operator surface and the transcript.** `TurnAction::Assistant` gains `TurnReasoning` (§4.6) — the reduction that keeps parts internal. `TranscriptEntry` follows, then the flag in both consumers: `fq invocation transcript` and the dashboard, including its `opaque — click to see raw` affordance. Golden files move here. | I7, golden updated |
