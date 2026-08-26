@@ -131,8 +131,8 @@ Five reasons it pays its weight:
 
 1. **Operator mental model.** "Where do I query things?" →
    control-plane. "Where does work happen?" → worker. The audit
-   log is still source of truth; the projection of it lives in
-   one well-named place.
+   log is still where events are published; the projection of it
+   lives in one well-named place.
 
 2. **Scaling characteristics differ.** Control-plane is
    read-heavy, coordination-heavy, low-throughput. Workers are
@@ -436,8 +436,17 @@ filesystems; use disk encryption if the host warrants it.
 
 **Each worker's SQLite is the source of truth for its in-flight
 invocations. The control-plane's SQLite is the source of truth
-for projections, coordination, schedules, and the completed
-archive. NATS is the source of truth for the audit log.**
+for coordination, schedules, and the completed archive. NATS
+holds the audit log — for 30 days, and then not at all.**
+
+That last clause is deliberate. ADR-0011 made NATS the source of truth
+for events; [ADR-0026](../../adrs/accepted/0026-event-log-system-of-record.md)
+overturned exactly that in 2026-07 and named a CAS-backed archive
+service in its place, which has not been built. So the audit log has no
+system of record: it has a retention window, past which the payloads
+are gone and only cost-bearing projection rows survive. The two SQLite
+rows above are unaffected — they were never derived from NATS — but
+nothing in this table should be read as promising the trail is kept.
 
 Today's invariant — "SQLite (projection) is rebuildable from
 NATS" — held because SQLite carried only projections. After this
@@ -623,9 +632,9 @@ the role and store.
 
 | Shape | Role | Store | Reason |
 |---|---|---|---|
-| Append-only audit log | shared | NATS JetStream | Already load-bearing per ADR-0011. |
-| Work queue (triggers) | shared | NATS JetStream | Same. |
-| Queryable projection | control-plane | Control-plane SQLite | Operator-queryable. Rebuildable from NATS. |
+| Append-only audit log | shared | NATS JetStream | Already load-bearing per ADR-0011. Bounded at 30 days; nothing holds it past that (see §5.5). |
+| Work queue (triggers) | shared | NATS JetStream | Same transport, 24-hour window. The trigger's durable *record* is a projection row and is kept indefinitely. |
+| Queryable projection | control-plane | Projection SQLite (`projection.db`) | Operator-queryable. Rebuildable from NATS, within the window. |
 | Coordination: worker membership, invocation ownership | control-plane | Control-plane SQLite | Single source of truth for "what's running where." |
 | Schedules / wakeups | control-plane | Control-plane SQLite | Time-driven; control-plane fires them. |
 | Pending approvals / waits | control-plane | Control-plane SQLite | Control-plane wakes them on signal arrival. |
