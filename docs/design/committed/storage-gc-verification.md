@@ -86,23 +86,29 @@ Each technique mapped to the claims it covers and when it runs.
 | **TLA⁺ / TLC model check** — exhaustive over interleavings + crash points | S1, I1–I4, L1–L3 (design level) | *before* code; re-run on any protocol change |
 | **Deterministic simulation + nemesis** — seed-reproducible, *real* code, injected crashes / I-O faults / conflicts | S1, all invariants, recovery | every `cargo test`, at 24 seeds × 40 steps; `FQ_SIM_SEEDS` / `FQ_SIM_STEPS` widen it |
 | **Fault-matrix failpoints** (`fail` crate) | the fault map, recovery | per slice |
-| **State-deduped concurrency checker** — exhaustive over reachable *states* rather than schedules | the concurrency (reserve-vs-claim) | per slice |
+| **Concurrency stress** — four writers re-putting shared blocks against a collector in a tight loop | block reserve-vs-claim; exactly-one-wins, checked through the oracle | `tests/concurrency.rs` |
+| **State-deduped exhaustive checker** — BFS over reachable *states* rather than schedules, oracle after every step | the object arm (ADR-0030 back-off), and the contract any future backend must pass | `tests/gc_exhaustive.rs` |
 | **Audit as oracle** — run after every op; assert zero drift + S1 | I1–I5, S1 | every test |
 | **Crash-consistency / fsync** — reorder/drop un-fsynced writes, tear files at crash | I2, I3, the `UNLINK` ordering | **not built** — I2 rests on the model alone |
 | **Adversarial reach-the-forbidden-state** — hand-crafted worst interleavings | S1 (as an attack) | dedicated |
 | **Soak / chaos** — long randomised workload + `kill -9` + restart + audit | accumulation / rare bugs | **not scheduled** — see below |
 | **Differential** — GC vs no-GC return identical content for every read | GC is observably invisible | per slice |
 
-Four rows in that table were aspirational when written and are corrected here
-rather than left to be discovered by someone relying on them.
+Several rows were aspirational when written, and are corrected here rather
+than left to be discovered by whoever relies on them. The dedicated fsync
+tests are the fourth: they were never written, so I2 — live blocks have files
+— rests on the model alone and on the fsync-before-insert ordering in the
+code, with nothing exercising it under torn or reordered writes.
 
 - **`loom` / `shuttle` are not in the tree** and were never adopted. The
-  concurrency row is served by the bespoke state-deduped checker, and
+  concurrency rows above replace that one, and
   [storage-concurrency-verification](storage-concurrency-verification.md) §2
   argues the case: `shuttle` explores schedules, cannot dedupe by our state,
   and is therefore a seeded bug-finder rather than the exhaustive prover the
   protocol wants. It is kept as an *optional complementary* fuzzer, which is
-  not the same as running per slice.
+  not the same as running per slice. Note what that leaves: the object arm is
+  exhaustive over reachable states, and the block reserve-vs-claim arm is a
+  randomised stress test checked through the oracle. Those are different bars.
 - **The failpoints are four**, at chosen boundaries — `put::before_bind`,
   `bind::before_commit`, `gc::obj::before_unlink`, `gc::obj::before_delete` —
   not one per named step. The vocabulary above names the steps the *model*
