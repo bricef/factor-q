@@ -4,6 +4,14 @@
 
 Accepted (2026-05-31)
 
+Implementation: complete — built as specified. `run_model_with_llm` is the
+single arbiter path for every LLM call, server-initiated or not, and the
+validation seam shipped with all three named types (`Validator`,
+`ValidatorChain`, `ValidatorResult`). It went past `DefaultAllow`: a concrete
+redactor is wired in, including on the `CreateMessageResult` outbound path,
+which is the security boundary §4 argues for. One §4 follow-on remains open —
+`includeContext` injection through the inbound redact chain (#345).
+
 ## Context
 
 [ADR-0017](./0017-mcp-human-in-the-loop.md) settled the *policy*
@@ -167,8 +175,9 @@ not just the injected context.
 A server-initiated LLM call in flight is WAL'd like any other. A
 worker crash mid-tool-call leaves it in the ambiguous `dispatched`
 state along with the tool call that triggered it; recovery does
-**not** auto-replay it — it surfaces via `fq recover` for operator
-triage (§3.4 contract), because the per-invocation server
+**not** auto-replay it — it surfaces for operator triage via
+`fq invocation resume` (or `fq invocation drop` to abandon it), per
+data-architecture.md **§4.4**, because the per-invocation server
 connection died with the crash and cannot receive a replayed
 result. No separate recovery story for sampling.
 

@@ -4,6 +4,14 @@
 
 Accepted (2026-06-12)
 
+Implementation: complete — built exactly as decided. The daemon drains every
+shared server's notification channel in a background task
+(`mcp_manager.take_notifications()` then `drain_server_notifications`), the
+tool registry is swappable behind a lock that invocations clone at start
+(`tools: RwLock<Arc<ToolRegistry>>`), and `refresh_tools` exists. The
+"Explicitly deferred" cancellation trigger is still correctly deferred:
+`call_tool_cancellable` has no production abort source, only a test caller.
+
 ## Context
 
 Connected MCP servers push out-of-band notifications at the client:
@@ -41,12 +49,17 @@ questionable:
 1. **The daemon drains every shared server's notification channel** in
    a background task (receivers are extracted from the
    `McpClientManager` at boot; the manager keeps its `&mut` lifecycle —
-   `shutdown()` — in `main`). No unbounded accumulation.
+   `shutdown()` — in `main`, which after the
+   [ADR-0031](0031-daemon-cli-split.md) split is
+   `services/fq-runtime/crates/fq-daemon/src/daemon.rs`). No unbounded
+   accumulation.
 2. **Logs and progress fold into `tracing`.** (Log records are already
    traced at the handler; the drain consumes them. Bridging logs onto
-   the event bus is the separate logs→bus step of the MCP-completion
-   plan; richer operator surfacing is owned by the Observability
-   backlog.)
+   the event bus was the separate logs→bus step of the MCP-completion
+   plan — **it landed** the same week, as step B2 of
+   [that plan](../../plans/closed/2026-06-04-mcp-completion.md): the
+   `fq.system.mcp.log` subject and `McpServerLogPayload` are live. Richer
+   operator surfacing is owned by the Observability backlog.)
 3. **`tools/list_changed` refreshes the registry *between*
    invocations.** The drain re-discovers the server's tools via a
    cloneable refresher handle (per-server client `Arc`s — the
@@ -78,7 +91,7 @@ questionable:
   (interior-mutable `Arc<ToolRegistry>`): invocations clone the `Arc`
   at start and stay consistent; the drain installs replacements.
 - The drain task is where future notification→action loops hook in
-  (logs→bus lands there next; `resources/updated` invalidation and
+  (logs→bus landed there, plan B2; `resources/updated` invalidation and
   operator progress surfacing later).
 - A server that mutates its tool list is fully supported across
   invocations and intentionally not supported within one.
