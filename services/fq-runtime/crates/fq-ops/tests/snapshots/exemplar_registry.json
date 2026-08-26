@@ -26,13 +26,12 @@
         "title": "EntryState",
         "type": "object",
         "properties": {
-          "content": {
-            "type": "string"
+          "seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
           },
           "invocation_id": {
-            "type": "string"
-          },
-          "role": {
             "type": "string"
           },
           "round": {
@@ -40,10 +39,11 @@
             "format": "uint64",
             "minimum": 0
           },
-          "seq": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
+          "role": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
           }
         },
         "required": [
@@ -59,13 +59,12 @@
         "title": "EntryState",
         "type": "object",
         "properties": {
-          "content": {
-            "type": "string"
+          "seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
           },
           "invocation_id": {
-            "type": "string"
-          },
-          "role": {
             "type": "string"
           },
           "round": {
@@ -73,10 +72,11 @@
             "format": "uint64",
             "minimum": 0
           },
-          "seq": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
+          "role": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
           }
         },
         "required": [
@@ -101,8 +101,8 @@
               "null"
             ],
             "format": "uint32",
-            "default": null,
-            "minimum": 0
+            "minimum": 0,
+            "default": null
           }
         },
         "required": [
@@ -136,10 +136,10 @@
         "title": "InvocationState",
         "type": "object",
         "properties": {
-          "agent_id": {
+          "invocation_id": {
             "type": "string"
           },
-          "invocation_id": {
+          "agent_id": {
             "type": "string"
           },
           "phase": {
@@ -175,20 +175,20 @@
         "title": "InvocationFilter",
         "type": "object",
         "properties": {
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
           "limit": {
             "type": [
               "integer",
               "null"
             ],
             "format": "uint32",
-            "default": null,
-            "minimum": 0
-          },
-          "status": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "minimum": 0,
             "default": null
           }
         }
@@ -222,15 +222,15 @@
         "title": "TriggerState",
         "type": "object",
         "properties": {
-          "agent_id": {
-            "type": "string"
-          },
-          "payload": true,
           "seq": {
             "type": "integer",
             "format": "uint64",
             "minimum": 0
-          }
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "payload": true
         },
         "required": [
           "seq",
@@ -243,15 +243,15 @@
         "title": "TriggerState",
         "type": "object",
         "properties": {
-          "agent_id": {
-            "type": "string"
-          },
-          "payload": true,
           "seq": {
             "type": "integer",
             "format": "uint64",
             "minimum": 0
-          }
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "payload": true
         },
         "required": [
           "seq",
@@ -287,14 +287,14 @@
         "title": "ControlState",
         "type": "object",
         "properties": {
+          "version": {
+            "type": "string"
+          },
           "nats_connected": {
             "type": "boolean"
           },
           "stream_ok": {
             "type": "boolean"
-          },
-          "version": {
-            "type": "string"
           }
         },
         "required": [
