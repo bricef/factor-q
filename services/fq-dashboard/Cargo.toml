@@ -15,19 +15,20 @@ path = "src/main.rs"
 # presentation, and the generic invoke/next_batch envelope. The same
 # crate `fq` uses, so a deadline or handshake fix lands in both.
 fq-edge = { path = "../fq-runtime/crates/fq-edge" }
-# Operation identities (`OpId`) — the contract half, transport-free.
-# The typed contract: the declared shapes and the view DTOs, from the
-# same crate the daemon declares them in, so a field rename fails this
-# compile instead of drifting silently. This is the whole dependency on
-# the runtime's types — the daemon crate itself, and the SQL and NATS
-# under it, are not linked here. tests/thin_reader_gate.rs holds that.
+# The typed contract, transport-free: operation identities (`OpId`),
+# the declared shapes and the view DTOs, from the same crate the daemon
+# declares them in, so a field rename fails this compile instead of
+# drifting silently. This is the whole dependency on the runtime's
+# types — the daemon crate itself, and the SQL and NATS under it, are
+# not linked here. tests/thin_reader_gate.rs holds that.
 fq-ops = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 # RFC3339 `since` strings for the costs page's time windows — the same
 # form the projection stores (envelope timestamp .to_rfc3339()), so the
 # store's lexicographic `timestamp >= ?` compare works. Already in the
-# tree via fq-runtime.
+# tree via fq-ops, which puts the same timestamps on the wire —
+# fq-runtime is not linked here.
 chrono = { workspace = true }
 clap = { workspace = true }
 # Server-side builders for the datastar SSE protocol (the client is
