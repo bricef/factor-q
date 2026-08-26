@@ -57,7 +57,7 @@ When present (on `llm.response` events, and on the `llm.failure` events that bil
 
 ```json
 {
-  "call_id": "llm-01HXJ...",
+  "call_id": "0198f2a1-4c3b-7d21-9e88-5a0b1c2d3e4f",
   "model": "claude-haiku",
   "input_tokens": 1234,
   "output_tokens": 567,
@@ -190,6 +190,8 @@ Concrete subjects:
 | `fq.agent.{agent_id}.invocation.archived` | Worker → control-plane: invocation reached terminal; hand off the final state |
 | `fq.agent.{agent_id}.invocation.operator_recovered` | Operator → control-plane: operator-issued terminal transition (`fq invocation drop`) |
 | `fq.agent.{agent_id}.invocation.operator_resumed` | Operator → worker: interrupted-result injection (`fq invocation resume`), with completed call ids and optional reason |
+| `fq.agent.{agent_id}.host_notice` | A durable host notice was injected into the conversation at a step boundary |
+| `fq.agent.{agent_id}.invocation_summary` | One-line operator-facing summary; always published under the reserved `summary` agent id |
 | `fq.agent.{agent_id}.completed` | Invocation has finished successfully |
 | `fq.agent.{agent_id}.failed` | Invocation has terminated with an error |
 | `fq.worker.{worker_id}.heartbeat` | Worker liveness signal (periodic) |
@@ -199,6 +201,7 @@ Concrete subjects:
 | `fq.system.shutdown` | Runtime lifecycle — shutdown |
 | `fq.system.task_failed` | A hosted task inside `fqd` exited with an error |
 | `fq.system.recovery` | Daemon-startup snapshot of in-flight invocation categorisation |
+| `fq.system.mcp.log` | A log record forwarded from a connected MCP server (ADR-0020); daemon-scoped, so no agent or invocation |
 
 ### Rationale
 
@@ -247,7 +250,7 @@ Published immediately before an LLM call is made.
 
 ```json
 {
-  "call_id": "llm-01HXJ...",
+  "call_id": "0198f2a1-4c3b-7d21-9e88-5a0b1c2d3e4f",
   "model": "claude-haiku",
   "messages": [
     { "role": "system", "content": "..." },
@@ -268,7 +271,8 @@ Published immediately before an LLM call is made.
 **Design notes:**
 - **Full message history is sent every time.** Reconstructing context from earlier events would be fragile.
 - **`tools_available` is a snapshot per call.** Tool schemas can change between calls.
-- **`call_id` correlates with the response.**
+- **`call_id` correlates with the response.** It is a UUID the runtime mints for the call, not a provider identifier — unlike `tool_call_id`, which comes from the provider and is carried through verbatim in whatever shape it arrives.
+- **`origin` says what prompted the call.** `agent_turn` for a reducer-driven reasoning turn, or `sampling` / `elicitation` with the requesting MCP server's name (ADR-0018), so the request/response trace is self-describing about whose spend it is. Absent on events written before the field existed, which read as `agent_turn`.
 
 ### `llm.dispatched`
 
@@ -276,7 +280,7 @@ WAL middle-state event for LLM calls. Emitted between `llm.request` and `llm.res
 
 ```json
 {
-  "call_id": "llm-01HXJ...",
+  "call_id": "0198f2a1-4c3b-7d21-9e88-5a0b1c2d3e4f",
   "model": "claude-haiku"
 }
 ```
@@ -291,7 +295,7 @@ Published when an LLM call returns and the response is durably written. The enve
 
 ```json
 {
-  "call_id": "llm-01HXJ...",
+  "call_id": "0198f2a1-4c3b-7d21-9e88-5a0b1c2d3e4f",
   "content": "I will research the topic by first...",
   "tool_calls": [
     {
@@ -322,7 +326,7 @@ The other terminal outcome of an LLM call (#447): the provider errored, or retur
 ```json
 {
   "round": 4,
-  "call_id": "llm-01HXJ...",
+  "call_id": "0198f2a1-4c3b-7d21-9e88-5a0b1c2d3e4f",
   "model": "claude-haiku-4-5",
   "error_kind": "auth | rate_limited | invalid_response | request_failed | unpriced_model | empty_response",
   "error_message": "rate limited",
@@ -348,11 +352,15 @@ Published when the agent invokes a tool. Each tool call in a single LLM response
 
 ```json
 {
+  "round": 3,
   "tool_call_id": "tool-01HXJ...",
   "tool_name": "read",
   "parameters": { "path": "/project/docs/overview.md" }
 }
 ```
+
+**Design notes:**
+- **`round` is the initiating assistant turn's Round**, so every call and result from one model response shares a number and a reader can group them without walking the chain. It reads `0` on events written before the field existed, which is not a real Round.
 
 ### `tool.dispatched`
 
@@ -371,6 +379,8 @@ Published when a tool invocation completes. Sandbox violations and other tool er
 
 ```json
 {
+  "round": 3,
+  "tool_name": "read",
   "tool_call_id": "tool-01HXJ...",
   "output": "# Overview\n\nThis project...",
   "is_error": false,
@@ -382,6 +392,8 @@ Error case:
 
 ```json
 {
+  "round": 3,
+  "tool_name": "read",
   "tool_call_id": "tool-01HXJ...",
   "output": "Path /etc/passwd is outside the agent's allowed filesystem scope",
   "is_error": true,
@@ -391,6 +403,25 @@ Error case:
 ```
 
 `error_kind` values: `sandbox_violation`, `invalid_parameters`, `execution_failed`, `timeout`, `permission_denied`.
+
+**Design notes:**
+- **`tool_name` is restated here**, even though the initiating `tool.call` already carries it, so a result renders on its own. The parameters are not restated — those stay on the call, reachable via `parent_event_id`. Empty on events written before the field existed.
+
+### `host_notice`
+
+Published by the runner when a queued host notice is drained into the conversation at a step boundary (#155, phase 1 of #88). It exists so an operator can see that the host spoke to the agent without diffing message arrays.
+
+```json
+{
+  "kind": "resume",
+  "body": "<host-notice>resumed</host-notice>"
+}
+```
+
+**Design notes:**
+- **The WAL row is the source of truth, not this event.** `queue_host_notice` persists the notice into `worker.db`'s `host_notice` table before the `StepInput` that carries it is built, and resume replays that row verbatim. A notice recorded by an incarnation that then crashed is *not* re-emitted on resume — the event is observability, the row is the channel.
+- **`body` arrives fully rendered**, `<host-notice>` sentinel included. Producers render once; replay never re-renders, so the exact string is what the model saw.
+- **The channel is wired ahead of its producers.** Nothing in the daemon queues a notice today; the only callers are the simulation harness. Expect the event on the wire when phase 2 of #88 lands, not before.
 
 ### `invocation.ambiguous`
 
@@ -408,7 +439,7 @@ Published by the worker on startup for an invocation in recovery limbo (#64), in
 ```
 
 **Design notes:**
-- **Operator-triage event.** The control-plane consumes this and surfaces the case via `fq recover` (a follow-up step in the data-architecture-v1 plan); the github-watcher treats it as a failed, operator-attention outcome.
+- **Operator-triage event.** The control-plane consumes it and marks the ownership row `ambiguous`, which is what `fq invocation list --status=ambiguous` surfaces; `fq invocation resume` and `fq invocation drop` are the two ways out. The github-watcher treats it as a failed, operator-attention outcome.
 - **Full context lives in the worker's WAL**, not on the wire. This payload is the minimum needed for an operator to find the row.
 - **Once per invocation, across restarts.** Emission is guarded by the worker store's `ambiguous_reported_at` stamp, so a persistently-broken invocation does not re-fire on every daemon restart.
 
@@ -517,6 +548,22 @@ Published by `fq invocation drop` (and any future operator-issued recovery actio
 - **Resume semantics are deferred.** The control-plane doesn't currently hold the worker's `state_blob` for ambiguous invocations; honest resume would require either enriching `invocation.ambiguous` with the blob or adding an operator-RPC to the worker. See the step-9 plan (`docs/plans/closed/2026-05-22-operator-cli.md`).
 - **No ack.** Unlike `invocation.archived`, no worker is waiting to clean up. The `invocation.archived` handler has a no-downgrade guard so a late `archived` event from a still-alive worker doesn't override the operator's `Failed`.
 
+### `invocation.operator_resumed`
+
+Published by `fq invocation resume` — the other half of the ambiguous-invocation exit, and the sibling of `invocation.operator_recovered` where progress is preserved rather than abandoned. The daemon durably completes each stuck tool dispatch with an interrupted result, then re-drives normal SafeReplay recovery; this event records which calls it closed.
+
+```json
+{
+  "completed_call_ids": ["tool-01HXJ...", "tool-01HXK..."],
+  "reason": "provider recovered; re-driving"
+}
+```
+
+**Design notes:**
+- **Audit-only, and published after the fact.** The WAL injection is the source of truth and has already committed by the time this goes out — a failed publish is warned about, never retried, because retrying it could not change what happened. That is why the resume reply carries `completed_call_ids` even when it reports failure.
+- **The coordination consumer ignores it.** No ownership status follows from a resume: the invocation is being re-driven, and its eventual `completed`/`failed` is what moves the row.
+- **`completed_call_ids` is the operator's receipt**, naming exactly the dispatches that were closed out. An empty list means the WAL held nothing stuck, which is itself worth seeing.
+
 ### `invocation_summary`
 
 Published by the daemon's summary consumer (#216) — never by an agent — under the reserved sentinel `agent_id` of `"summary"`, with `invocation_id` binding the line to the summarised invocation. Subject: `fq.agent.summary.invocation_summary`.
@@ -587,6 +634,24 @@ Emitted once per daemon startup with the counts of in-flight invocations classif
 }
 ```
 
+### `mcp_server_log`
+
+A log record a connected MCP server emitted (`notifications/message`), bridged onto the bus by the daemon's notification drain (ADR-0020). Subject: `fq.system.mcp.log`.
+
+```json
+{
+  "server": "github",
+  "level": "warning",
+  "logger": "rate-limiter",
+  "data": { "message": "secondary rate limit; backing off 30s" }
+}
+```
+
+**Design notes:**
+- **Daemon-scoped, so it carries no agent or invocation.** Shared MCP servers outlive any one invocation and serve several agents; attributing their logs to whichever agent happened to be running when they spoke would be a fiction. This is why the event sits in the `fq.system.*` namespace rather than under `fq.agent.*`.
+- **`data` is passed through as the server sent it.** The daemon does not reshape or validate the body — it is another process's log line, and the value of forwarding it is that it arrives unedited.
+- **`level` is the MCP level name** (`"debug"` through `"emergency"`), not the runtime's own `tracing` vocabulary.
+
 ## Invariants
 
 The following invariants hold across the event stream and are assumed by consumers:
@@ -602,8 +667,8 @@ The following invariants hold across the event stream and are assumed by consume
    contain several `llm.failure` events, because a failed *sampling* or
    *elicitation* call declines the server's request without ending the
    agent's invocation, while a failed *agent turn* additionally emits
-   `failed`. The legacy executor path skips `llm.dispatched` (no WAL).
-4. **Every `tool.call` is followed by `tool.dispatched` then `tool.result`** in the reducer path. Tool failures surface as `tool.result` with `is_error: true`, not as missing results.
+   `failed`.
+4. **Every `tool.call` is followed by `tool.dispatched` then `tool.result`.** Tool failures surface as `tool.result` with `is_error: true`, not as missing results. Both this invariant and the one above hold unconditionally: `ReducerRunner` is the only implementation of the `Worker` trait, so every invocation goes through the WAL and there is no dispatch-free path left to carve out.
 5. **`envelope.cost` is present on `llm.response` events that bill, and on
    `llm.failure` events where the provider's usage was recoverable** (an
    empty completion). It is *absent* — never zeroed — when usage is
@@ -628,21 +693,31 @@ The following invariants hold across the event stream and are assumed by consume
 ## Storage and Retention
 
 - All events are published to JetStream streams with file-based persistence.
-- Retention policy is `LimitsPolicy` with a configurable `MaxAge` (default: 30 days).
+- Retention policy is `LimitsPolicy` with a `MaxAge` of 30 days. That window is a compile-time constant (`bus::DEFAULT_MAX_AGE`), not an operator setting: changing it takes a rebuild, which [Design Principle 8](design-principles.md#8-tunable-parameters-are-configuration-not-code) says a tunable should not.
 - Events are projected into SQLite for complex queries.
 - The projection store is a read-optimised view, not the source of truth. Events can be re-projected from the NATS stream at any time.
 
 ### Retention and the trail's lifetime
 
-The event trail has no payload-bearing system of record beyond JetStream retention. The projection is a long-lived but lossy, derived view, while the CAS archive preserves invocation outcomes rather than their event trail.
+The event trail has no payload-bearing system of record beyond JetStream retention. The projection is a long-lived but lossy, derived view, and the invocation archive keeps outcomes rather than the trail that produced them.
 
 | Surface | Lifetime | What survives and record status |
 |---|---|---|
-| NATS `fq-events` | 30 days by default | Complete payload-bearing event trail; deleted after retention. Trigger and advisory streams retain messages for 24 hours by default. |
+| NATS `fq-events` | 30 days, fixed in code | Complete payload-bearing event trail; deleted after retention. The trigger and advisory streams keep messages for 24 hours, likewise fixed. |
 | SQLite projection (`events`) | 30 days by default (`[state].retention_days`); cost-bearing rows kept indefinitely | Typed columns only, without event payloads. The daemon prunes it on the scheduled retention sweep, except rows carrying `total_cost` (`llm_response`, `llm_failure`, `invocation_summary`) — cost accounting is a primary platform concern and spend figures must survive retention. |
-| CAS archive (`fq-cas`) | Archive retention policy | Invocation final-state blobs only, not the event trail. ADR-0026 designates these invocation outcomes as the system of record. |
+| `invocation_archive` in `control-plane.db` | 30 days by default — the same `[state].retention_days`, keyed on `archived_at` | Per-invocation final phase, final reducer-state blob and timestamps; not the event trail. Non-rebuildable while it lives, and swept on the same tick as the projection above. |
 
-After a projection sweep, replaying the retained NATS stream is the supported recovery path and can recover only events still inside JetStream retention. Events older than stream retention are gone by design; the projection intentionally does not preserve typed rows past that boundary. ADR-0026's system-of-record guarantee covers invocation outcomes, not the trail. A stronger re-projection guarantee is tracked in [#139](https://github.com/bricef/factor-q/issues/139) and [#163](https://github.com/bricef/factor-q/issues/163).
+**No CAS archive appears in that table, because none is wired up.**
+[ADR-0026](../../adrs/accepted/0026-event-log-system-of-record.md) accepted a
+dedicated content-addressed archive service as the event log's system of
+record; it has not been built. No runtime crate depends on `fq-store`, and
+`fq-cas` ships as a standalone binary the daemon never calls. What holds
+invocation outcomes today is the control-plane table above, expiring on the
+same 30-day clock as everything else — so nothing here outlives retention
+except the cost-bearing projection rows. Read ADR-0026 as the direction, not
+as a durability guarantee you already have.
+
+After a projection sweep, replaying the retained NATS stream is the supported recovery path and can recover only events still inside JetStream retention. Events older than stream retention are gone by design; the projection intentionally does not preserve typed rows past that boundary. A stronger re-projection guarantee is tracked in [#139](https://github.com/bricef/factor-q/issues/139) and [#163](https://github.com/bricef/factor-q/issues/163).
 
 Three consumer consequences follow. First, **cost figures are exempt from the sweep**: rows with `total_cost` set are retained indefinitely, so all-time spend totals (dashboard cost pages, `fq costs`) and per-invocation cost display survive retention by design. Second, non-cost aggregates computed from projected events — event counts, failure tallies — cover at most the retention window, not all time. Third, the retained cost rows are deliberately *not* rebuildable once older than stream retention: the projection is their only copy, so `projection.db` must be included in backups; a durable re-sourcing of cost aggregates (per ADR-0026's outcome-record direction) remains open as follow-up work. For non-cost rows, keep `[state].retention_days` at or below the NATS stream retention — a longer window re-creates the sole-holder inversion this sweep exists to remove.
 
