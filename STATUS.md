@@ -79,7 +79,7 @@ it is the licence to keep changing shape quickly.
   binary in the dogfood bundle.
 - **GitHub watcher (`github-watcher`)** — a standalone Go
   [trigger adapter](adapters/github-watcher/README.md): polls a repo for
-  issues labelled `ready`, triggers an agent per issue over the
+  issues labelled `status:ready`, triggers an agent per issue over the
   documented wire contracts, then observes the run's lifecycle events
   and moves the issue's label onward so nothing strands mid-flight. The
   intake side of the M0 change loop; ships in the dogfood bundle.
