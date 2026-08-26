@@ -537,6 +537,157 @@ mod tests {
         }
     }
 
+    /// **The wire oracle for #437's shape change.**
+    ///
+    /// `Message` becomes an enum over turn kinds and the response chain
+    /// becomes parts-shaped, which rewrites every construction site in the
+    /// tree. That is a *shape* change: the request that reaches the provider
+    /// must come out byte-identical on the other side. This snapshot is the
+    /// judge — built before the refactor, per the fq-ops review's lesson 10
+    /// ("build the oracle before the thing it will judge").
+    ///
+    /// If this file moves, the refactor changed behaviour. If it does not,
+    /// the diff is shape only, which is the phase-2 contract.
+    ///
+    /// The conversation deliberately exercises every message the reducer can
+    /// produce: the seeded system prompt, pinned static-resource context, the
+    /// trigger's user message, a bare-text assistant turn, the corrective host
+    /// notice that answers one, an assistant turn carrying parallel tool
+    /// calls, both tool results, and a trailing notice — plus tools and
+    /// per-request params. It also pins the two prompt-caching breakpoints
+    /// (system, and the final message), which are easy to lose in a refactor
+    /// and cost money rather than failing loudly.
+    ///
+    /// One thing it records is a known defect rather than a desired shape:
+    /// the two parallel tool results arrive as **two separate `Tool`-role
+    /// messages**, where Anthropic's documented shape is one turn carrying
+    /// both `tool_result` blocks. That is
+    /// [#511](https://github.com/bricef/factor-q/issues/511), deliberately
+    /// out of scope here — phase 2 must not change behaviour, including this
+    /// behaviour. When #511 lands, this snapshot moves on purpose.
+    #[test]
+    fn provider_request_shape_is_stable_for_a_full_conversation() {
+        let request = ChatRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            messages: vec![
+                Message {
+                    role: MessageRole::System,
+                    content: Some("You are a careful assistant.".to_string()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: Some("Pinned resource: the deploy runbook.".to_string()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: Some("Investigate the failing deploy.".to_string()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: MessageRole::Assistant,
+                    content: Some("Let me look at the logs.".to_string()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: Some("No tool calls were made and the run is not over.".to_string()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: MessageRole::Assistant,
+                    content: Some("Reading both logs.".to_string()),
+                    tool_calls: vec![
+                        MessageToolCall {
+                            tool_call_id: crate::events::ToolCallId::new("call_a".to_string())
+                                .expect("non-empty"),
+                            tool_name: "file_read".to_string(),
+                            parameters: serde_json::json!({"path": "/var/log/deploy.log"}),
+                        },
+                        MessageToolCall {
+                            tool_call_id: crate::events::ToolCallId::new("call_b".to_string())
+                                .expect("non-empty"),
+                            tool_name: "file_read".to_string(),
+                            parameters: serde_json::json!({"path": "/var/log/agent.log"}),
+                        },
+                    ],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: MessageRole::Tool,
+                    content: Some("deploy failed at step 3".to_string()),
+                    tool_calls: vec![],
+                    tool_call_id: Some(
+                        crate::events::ToolCallId::new("call_a".to_string()).expect("non-empty"),
+                    ),
+                },
+                Message {
+                    role: MessageRole::Tool,
+                    content: Some("agent restarted".to_string()),
+                    tool_calls: vec![],
+                    tool_call_id: Some(
+                        crate::events::ToolCallId::new("call_b".to_string()).expect("non-empty"),
+                    ),
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: Some("Budget is 80% spent.".to_string()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+            ],
+            tools: vec![ToolSchema {
+                name: "file_read".to_string(),
+                description: "Read a file from the workspace.".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+            }],
+            params: RequestParams {
+                effort: Some(Effort::High),
+                temperature: Some(0.2),
+                max_tokens: Some(4096),
+            },
+        };
+
+        let (model, chat_req, options) =
+            into_provider_request(request).expect("conversion must succeed");
+
+        let actual = fq_test_support::canonical_json(&serde_json::json!({
+            "model": model,
+            "chat_request": chat_req,
+            "chat_options": options,
+        }));
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots/provider_request.json");
+        if std::env::var_os("UPDATE_SNAPSHOT").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &actual).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "missing snapshot {path:?} — run `UPDATE_SNAPSHOT=1 cargo test -p fq-runtime \
+                 provider_request_shape_is_stable` and commit the result"
+            )
+        });
+        assert_eq!(
+            actual, expected,
+            "the request handed to the provider changed. During #437's phase 2 this means \
+             the shape change altered behaviour and is a bug; at any other time, review the \
+             diff before regenerating."
+        );
+    }
+
     #[test]
     fn maps_reasoning_effort_to_provider_options() {
         let options = convert_params(RequestParams {
