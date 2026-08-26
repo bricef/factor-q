@@ -278,14 +278,15 @@ moving them is a separate migration.
 
 ### Mounted volumes
 
-The image declares volumes at `/var/lib/factor-q` (agent definitions,
-and the state directory when `FQ_STATE_DIR` is unset) and
-`/var/cache/factor-q` (pricing JSON and the SQLite stores). Mount
+The image declares volumes at `/var/lib/factor-q` (agent definitions)
+and `/var/cache/factor-q` (pricing JSON and the SQLite stores). Mount
 persistent volumes at these paths for anything that needs to survive
-container restarts. Note that the image sets no `FQ_STATE_DIR`, so the
-edge identity lands wherever the fallback chain above resolves — set it
-explicitly to a path under `/var/lib/factor-q` if you want the identity
-inside a declared volume.
+container restarts.
+
+The image sets no `FQ_STATE_DIR`, so the edge identity — the one thing
+that must never be regenerated — lands wherever the fallback chain above
+resolves, which may be neither volume. Set it explicitly to a path under
+`/var/lib/factor-q`.
 
 ### Example compose stanza
 
