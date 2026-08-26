@@ -46,14 +46,16 @@ it is the licence to keep changing shape quickly.
   `self_inspect`). Full [MCP client](docs/guide/mcp.md) (spec 2025-11-25):
   stdio + Streamable HTTP transports; tools, resources, prompts, and the
   server-initiated capabilities (sampling, elicitation, roots). Operator
-  surface: `fq init / run / trigger / reload / down / agent / invocation`
+  surface, spoken by the thin client `fq` (it cannot start a daemon —
+  `fqd` is the daemon, and reads `fqd.toml` while the client reads
+  `fq.toml`): `fq init / trigger / reload / down / agent / invocation`
   (including `transcript`) `/ events / costs / status / workers /
   dead-letters / doctor` (read commands take `--json`), plus the
   authenticated-edge client verbs `fq connect` (TOFU cert pinning +
   token), `fq ops list`, and `fq token attenuate` (offline token
   narrowing), plus a read-only
-  web dashboard (`fq-dashboard` over the daemon's localhost tarpc read
-  service — the
+  web dashboard (`fq-dashboard` over the daemon's authenticated edge —
+  the
   [operator-dashboard plan](docs/plans/closed/2026-07-10-operator-dashboard.md)).
 - **Store (`fq-cas`)** — [content-addressed storage](services/fq-store/README.md)
   (BLAKE3, FastCDC dedup) + named objects with version history + verified
@@ -127,14 +129,18 @@ the public surface alone, and the `Turn` atom (3d) added
 Phase 3e closed decision D-3 with **no codegen**: shared data
 definitions in one workspace are the interface, so ADR-0006's held
 per-method-generation fallback is formally not taken. Phase 4, the fleet
-migration, is **underway**: cohort 4.0 (the pure flips over ops that
-already existed) landed 2026-07-28 — `fq invocation drop` (verb 18) and
-`fq invocation transcript` (verb 20) now speak only the edge — leaving
-**15 verb flips**, surveyed call point by call point in the
-[Phase-4 call-point inventory](docs/plans/active/2026-07-28-phase-4-call-point-inventory.md).
-A migration gate counts the operator surface's remaining legacy call
-points (10 at Phase-4 start, 8 now, zero at the end) so a flip cannot
-leave the old path behind as a fallback.
+migration, is **complete**: every verb in the
+[Phase-4 call-point inventory](docs/plans/active/2026-07-28-phase-4-call-point-inventory.md)
+is flipped, retired or deliberately local — the last of them
+(`invocation.resume`) in the same run as the split — and the migration
+gate that counts the operator surface's remaining legacy call points
+reads **zero** (10 at Phase-4 start), so no flip left an old path behind
+as a fallback. Phase 5, splitting the binary, has **landed**: `fqd` is
+its own binary that `install.sh` and the release bundle ship alongside
+`fq`, `fq` can no longer start a daemon and its crate links no
+`fq-runtime`, `async-nats` or `sqlx`, the two configs are split
+(`fqd.toml` for the daemon, `fq.toml` for the client), and the dogfood
+deploy runs the split pair.
 The dogfood loop **lands PRs**: the daily `doc-drift` agent
 (fq-cron-scheduled) now opens its own docs-only PRs for drift it can
 verify and fix, and files issues for the rest; alongside it the
