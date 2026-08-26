@@ -66,8 +66,9 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:9472", env = "FQ_DASHBOARD_BIND")]
     bind: String,
     /// Address of the daemon's authenticated edge (`[edge] bind` in
-    /// fq.toml). Note that its default is the same port this process
-    /// serves on, so a host running both must move one of them.
+    /// the daemon's `fqd.toml`). Note that its default is the same port
+    /// this process serves on, so a host running both must move one of
+    /// them.
     #[arg(long, default_value = "127.0.0.1:9472", env = "FQ_EDGE")]
     edge: String,
     /// The dashboard's capability token — an attenuated admin token
