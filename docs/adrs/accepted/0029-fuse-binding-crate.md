@@ -11,6 +11,18 @@ lower-stakes, more reversible decision than most ADRs (it is an
 implementation-library pick behind the `FileSystem` trait), recorded because
 it was made by experiment rather than by argument.
 
+Implementation: pending — the crate has not been adopted. No FUSE dependency
+appears in any manifest, because the VFS this pick sits behind does not exist
+either; the build question belongs to
+[ADR-0028](0028-tool-scoped-isolation-and-workspace.md), which is also
+unbuilt. This ADR never claimed otherwise — it is explicitly a forward pick
+("the VFS integration **wires** …", "gotchas **to carry into** the
+implementation"). Its evidence trail is intact: all four experiment branches
+(`experiment/fuse-vfs-fuser`, `-fuse3`, `-easy_fuser`, `-fuse-backend-rs`)
+still exist on `origin`, and
+[the bake-off results](../../plans/closed/2026-07-09-fuse-vfs-bakeoff.md)
+resolve (#60, #55).
+
 ## Context
 
 Four candidate crates — `fuser`, `fuse3`, `easy_fuser`, `fuse-backend-rs` —
