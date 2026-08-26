@@ -130,7 +130,7 @@ local-store fallback (that would re-link `sqlx` into `fq`).
 ## Appendix A — Amendment: capability tokens and the wire-crate split (2026-07-22)
 
 Recorded ahead of the Phase-2 edge implementation
-([execution plan](../../plans/active/2026-07-20-registry-and-split-execution.md)),
+([execution plan](../../plans/closed/2026-07-20-registry-and-split-execution.md)),
 superseding two details of the original decision. TLS with a pinned
 self-signed certificate, the auth-beneath-the-RPC-contract seam, the
 required daemon, and everything else stand unchanged.

@@ -9,7 +9,7 @@ than a code defect — the signal to model the domain unconstrained by
 the implementation; the review that refined it is distilled in
 [the design-review learnings](../../reviews/2026-07-21-fq-ops-design-review-learnings.md).
 Basis for the
-[registry+split execution plan](../../plans/active/2026-07-20-registry-and-split-execution.md)'s
+[registry+split execution plan](../../plans/closed/2026-07-20-registry-and-split-execution.md)'s
 registry work.
 
 **Amended 2026-08-05**, on four points. `invocation.resume` becomes a
@@ -29,7 +29,7 @@ described the world inaccurately — `traversal.run`, which does not
 exist, and `deadletter.requeue`, which is not how the codebase spells
 it — are reconciled before cohort 4.3 mints them into code. Unblocks
 verb 19 of the
-[Phase-4 call-point inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md).
+[Phase-4 call-point inventory](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md).
 
 ## The domain in one paragraph
 
@@ -645,7 +645,7 @@ the codebase: the graph executor is deliberately held (#414), so those
 three rows say where the ops *will* land, not what the registry serves.
 They are kept because the mapping is itself the finding below. Every
 other row names a real domain concept — which op is *registered* yet is
-the [Phase-4 inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md)'s
+the [Phase-4 inventory](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md)'s
 business, not this table's — and that is exactly why the traversal rows
 had to be marked: unmarked, they read as description, and cohort 4.3
 would mint a verb the model only imagined.

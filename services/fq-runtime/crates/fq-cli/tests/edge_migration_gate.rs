@@ -3,7 +3,7 @@
 //!
 //! ADR-0006/ADR-0031 move every operator verb off direct runtime
 //! access and onto the edge. The inventory
-//! (`docs/plans/active/2026-07-28-phase-4-call-point-inventory.md`)
+//! (`docs/plans/closed/2026-07-28-phase-4-call-point-inventory.md`)
 //! enumerates the call points; this gate makes the remaining count a
 //! fact the test suite asserts rather than a claim a reviewer has to
 //! re-derive from the diff. A flip that leaves the old path in place

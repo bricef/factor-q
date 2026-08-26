@@ -418,7 +418,7 @@ consumer reopens the question with `describe` as its input.
 Recorded alongside the `invocation.resume` amendment to
 [the operator-surface domain model](../../design/committed/operator-surface-domain-model.md),
 which unblocks verb 19 of the
-[Phase-4 call-point inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md).
+[Phase-4 call-point inventory](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md).
 D8 stands unchanged in substance; this is the same decision stated in
 the positive form the surface needs, plus the boundary its carve-out
 always implied.
@@ -576,7 +576,7 @@ carved out for one nature, which is the larger cost.
 `fq_ops::Synthetic` still carries a `state_schema`, and the registry
 still derives `Get` for it — so the contract crate and this decision
 disagree until cohort 4.4 of the
-[Phase-4 inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md),
+[Phase-4 inventory](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md),
 where the `Control` declaration lands. The correction is not a
 one-liner: it touches `Synthetic::new`'s type parameter, the
 registry's `derived_ops` and its synthetic-Get resolve arm, three
