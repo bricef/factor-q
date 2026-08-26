@@ -21,11 +21,6 @@ type Handler = Arc<
         + Sync,
 >;
 
-/// The read gate: called by the server before dispatching a Get/List
-/// whose request carries `min_seq` — the daemon installs one backed
-/// by the projection watermark; without one (the mock, a daemon
-/// without a projection) gated reads are refused rather than served
-/// stale. `Err(applied)` reports how far the fold actually got.
 /// A stream handler: `(filter, from_seq, max_wait_ms)` to one long-poll
 /// batch. Bound per stream op by [`EdgeRegistry::atom`].
 pub type StreamHandler = Arc<
@@ -38,6 +33,11 @@ pub type StreamHandler = Arc<
         + Sync,
 >;
 
+/// The read gate: called by the server before dispatching a Get/List
+/// whose request carries `min_seq` — the daemon installs one backed
+/// by the projection watermark; without one (the mock, a daemon
+/// without a projection) gated reads are refused rather than served
+/// stale. `Err(applied)` reports how far the fold actually got.
 pub type ReadGate = Arc<dyn Fn(u64) -> BoxFuture<'static, Result<(), u64>> + Send + Sync>;
 
 /// The declarations plus their handlers. `List(Operation)` — the

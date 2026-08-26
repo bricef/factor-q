@@ -25,8 +25,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
-# serde-transport-json on top of the workspace baseline: the preamble
-# rides JSON before the bincode session starts.
+# serde-transport-json on top of the workspace baseline: the tarpc
+# session is length-delimited JSON, end to end. The token preamble
+# ahead of it is raw length-prefixed bytes and needs no tarpc format
+# at all.
 tarpc = { workspace = true, features = ["serde-transport-json"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "rt", "macros", "time"] }
