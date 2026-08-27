@@ -93,18 +93,21 @@ every key used to be:
 
 ```yaml
 sandbox:
-  fs_writ:            # not `fs_write` — accepted, and grants nothing
+  fs_writ:             # not `fs_write` — accepted, and grants nothing
     - "${workspace}/**"
 mcp:
   - server: filesystem
-    samplingg: ask    # not `sampling` — accepted, and grants nothing
+    command: npx
+    samplingg: true    # not `sampling` — accepted, and grants nothing
 ```
 
-Both of those definitions validate as `✓ valid` and load. Both leave the
-agent with a grant its author believed they had written, which is the
-failure mode with the sharpest edge — so the spelling of a key nested
-under `sandbox:` or `mcp:` is still yours to check. The dimension names
-are listed under [Dimensions](#dimensions), the per-server grants under
+A definition carrying either one validates as `✓ valid` and loads. It
+runs *without* the grant its author believed they had written — which is
+the version of this failure with the sharpest edge, since the result is
+an agent quietly less able, or less contained, than its definition
+reads. The spelling of a key nested under `sandbox:` or `mcp:` is still
+yours to check: the dimension names are listed under
+[Dimensions](#dimensions), the per-server grants under
 [Capability grants](#capability-grants).
 
 ## Choosing the model
@@ -721,8 +724,8 @@ And know what `fq agent validate` is worth before you lean on it. It
 checks syntax and shape: that the frontmatter parses, that the fields it
 does know are well-formed, and that the definition builds. It catches a
 misspelled top-level key but not one nested inside `sandbox:` or `mcp:`,
-and it cannot reach the deployment's model or pricing config — so it both
-rejects the valid model-less shape and passes models the daemon will
-refuse (issue #508). The verdict that
-counts is the daemon starting and `fq agent list` showing the agent in the
+and it cannot reach the deployment's model or pricing config — so it
+both rejects the valid model-less shape and passes models the daemon
+will refuse (issue #508). The verdict that counts is the daemon starting
+and `fq agent list` showing the agent in the
 live registry.
