@@ -2,13 +2,18 @@
 
 Companion to [storage garbage collection](storage-garbage-collection.md): the
 explicit correctness claims for the online-reclaim protocol, the map of failure
-states it must recover from, and the verification strategy we run *before and
+states it must recover from, and the verification strategy run *before and
 during* M1c.
 
-The protocol is bedrock, so **verification leads implementation**: state what
+The protocol is bedrock, so **verification led implementation**: state what
 must always be true, model-check the design, *then* build slice by slice with
 fault injection and the invariants as live oracles. The unifying rule throughout
 is **every failure leans to retention — leak a block, never lose one.**
+
+M1c shipped (`49c8ed8`), and the model reproduces exactly. The [verification
+strategy](#verification-strategy) below marks the four techniques that were
+planned and not adopted, because a claimed technique that does not run is worse
+than an absent one: it is coverage a reader will count on.
 
 ## Vocabulary: the named steps
 
@@ -64,7 +69,7 @@ the recovered state, and each gets a test that proves it.
 | `RESERVE` | leaked reservation → block **retained**; audit reconciles when at rest | put fails; no state change | n/a — index txn is atomic |
 | `WRITE_FILE` / `MINT` | orphan file, no row → **reaper** (mtime grace) reclaims | put fails → `RELEASE`s reservation | orphan or absent → reaper / retry; canonical file is never torn (atomic temp + rename) |
 | `BIND` | reservations leaked → retained; audit reconciles | put fails → `RELEASE` | index txn is atomic |
-| `CLAIM` | block `CLAIMED`, file present → next GC / audit resumes or resets to available | GC retries | claim lost → block stays available (safe) |
+| `CLAIM` | block `CLAIMED`, file present → next GC / audit resumes the reclaim (a claim is one-way; nothing resets it to available, and a writer that wants the content mints a fresh generation) | GC retries | claim lost → block stays available (safe) |
 | `UNLINK` | `CLAIMED` row, no file, refcount 0 → audit / next GC deletes the row (no live ref) | GC retries; block retained | **requires unlink durable before `DELETE_ROW` commits** — tested under write-reorder faults |
 | `DELETE_ROW` | reclaimed | GC retries | row-delete lost → block stays `CLAIMED` → re-reclaimed (safe) |
 
@@ -79,14 +84,43 @@ Each technique mapped to the claims it covers and when it runs.
 | Technique | Covers | When |
 |---|---|---|
 | **TLA⁺ / TLC model check** — exhaustive over interleavings + crash points | S1, I1–I4, L1–L3 (design level) | *before* code; re-run on any protocol change |
-| **Deterministic simulation + nemesis** — seed-reproducible, *real* code, injected crashes / I-O faults / conflicts | S1, all invariants, recovery | continuous; millions of seeds |
-| **Fault-matrix failpoints** (`fail` crate, every named step) | the fault map, recovery | per slice |
-| **`loom` / `shuttle`** — exhaustive / randomised Rust interleavings | the concurrency (reserve-vs-claim) | per slice |
+| **Deterministic simulation + nemesis** — seed-reproducible, *real* code, injected crashes / I-O faults / conflicts | S1, all invariants, recovery | every `cargo test`, at 24 seeds × 40 steps; `FQ_SIM_SEEDS` / `FQ_SIM_STEPS` widen it |
+| **Fault-matrix failpoints** (`fail` crate) | the fault map, recovery | per slice |
+| **Concurrency stress** — four writers re-putting shared blocks against a collector in a tight loop | block reserve-vs-claim; exactly-one-wins, checked through the oracle | `tests/concurrency.rs` |
+| **State-deduped exhaustive checker** — BFS over reachable *states* rather than schedules, oracle after every step | the object arm (ADR-0030 back-off), and the contract any future backend must pass | `tests/gc_exhaustive.rs` |
 | **Audit as oracle** — run after every op; assert zero drift + S1 | I1–I5, S1 | every test |
-| **Crash-consistency / fsync** — reorder/drop un-fsynced writes, tear files at crash | I2, I3, the `UNLINK` ordering | dedicated |
+| **Crash-consistency / fsync** — reorder/drop un-fsynced writes, tear files at crash | I2, I3, the `UNLINK` ordering | **not built** — I2 rests on the model alone |
 | **Adversarial reach-the-forbidden-state** — hand-crafted worst interleavings | S1 (as an attack) | dedicated |
-| **Soak / chaos** — long randomised workload + `kill -9` + restart + audit | accumulation / rare bugs | CI nightly |
+| **Soak / chaos** — long randomised workload + `kill -9` + restart + audit | accumulation / rare bugs | **not scheduled** — see below |
 | **Differential** — GC vs no-GC return identical content for every read | GC is observably invisible | per slice |
+
+Several rows were aspirational when written, and are corrected here rather
+than left to be discovered by whoever relies on them. The dedicated fsync
+tests are the fourth: they were never written, so I2 — live blocks have files
+— rests on the model alone and on the fsync-before-insert ordering in the
+code, with nothing exercising it under torn or reordered writes.
+
+- **`loom` / `shuttle` are not in the tree** and were never adopted. The
+  concurrency rows above replace that one, and
+  [storage-concurrency-verification](storage-concurrency-verification.md) §2
+  argues the case: `shuttle` explores schedules, cannot dedupe by our state,
+  and is therefore a seeded bug-finder rather than the exhaustive prover the
+  protocol wants. It is kept as an *optional complementary* fuzzer, which is
+  not the same as running per slice. Note what that leaves: the object arm is
+  exhaustive over reachable states, and the block reserve-vs-claim arm is a
+  randomised stress test checked through the oracle. Those are different bars.
+- **The failpoints are four**, at chosen boundaries — `put::before_bind`,
+  `bind::before_commit`, `gc::obj::before_unlink`, `gc::obj::before_delete` —
+  not one per named step. The vocabulary above names the steps the *model*
+  distinguishes; the code injects at the four that bracket a durable commit.
+- **The DST does not run at millions of seeds.** Its default is 24 seeds ×
+  40 steps, on every `cargo test`, widened by environment variable when
+  something is being hunted. "Millions" is what the harness *can* do on a
+  machine given the time, not a figure any run reaches by default.
+- **There is no nightly soak.** The repository's only scheduled workflow is
+  `live-suites.yml`, which exercises live LLM calls and has nothing to do with
+  GC. A soak that never runs provides no coverage for accumulation bugs, which
+  is precisely the class it was listed against.
 
 TLC checks I1–I4 and L1–L3 directly; **I5** is a corollary of I4 (a referenced
 block has `refcount ≥ 1 > 0`), and **L4** (recovery in *bounded* work) is a
@@ -96,12 +130,16 @@ complexity property covered by the deterministic simulation, not TLC.
 
 - **Reproducibility:** every randomised run logs its seed; a failure replays the
   exact interleaving.
-- **Design-for-testability seams:** the filesystem, the clock, the crash point,
-  and named failpoints sit behind traits so the simulator and the fault matrix
-  can drive them. Baked in from slice 1, not retrofitted.
+- **Design-for-testability seams:** the filesystem sits behind
+  `ContentStore` / `BlockStore`, and the failpoints behind the `fail` crate,
+  so the simulator and the fault matrix can drive them. The clock and the
+  crash point were named here as seams too and never became ones — the audit
+  calls `SystemTime::now()` directly, so a test of the mtime grace has to
+  move real file timestamps rather than move a clock.
 - **History logging:** record the operation history so a Jepsen-style
   linearizability check (Elle/Knossos) can be added when the service goes
-  multi-node (M5). Single-node now ⟹ TLA⁺ + DST + `loom`; full Jepsen later.
+  multi-node (M5). Single-node now ⟹ TLA⁺ + DST + the state-deduped checker;
+  full Jepsen later.
 
 ## The model and how it was checked
 

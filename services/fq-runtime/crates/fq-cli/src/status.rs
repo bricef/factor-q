@@ -4,7 +4,8 @@
 //! The client half of `control.status` (plan Phase 4, verb 14): one
 //! edge call, then rendering. The report — the build, the stream
 //! probe, the registry census, the projection position and the
-//! recovery counts — is [`crate::status_report`], daemon-side.
+//! recovery counts — is `fq_daemon::status_report`, in the other
+//! binary.
 //!
 //! **This is the verb an operator runs when things are broken, so it
 //! must not become another broken thing.** Every other migrated read

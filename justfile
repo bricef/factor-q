@@ -29,9 +29,12 @@ default:
 nats_version := trim(read(".nats-version"))
 nats_bin := justfile_directory() / ".tools" / "nats-server"
 
-# The bus/integration tests need a NATS endpoint. Default to the local
-# dev instance (`just infra-up`); override by exporting FQ_NATS_URL in
-# the environment before invoking just.
+# The address of the shared dev broker (`just infra-up`), for the things
+# that use one: `just run`, `just smoke`, `just drill`, and a daemon
+# started by hand. NOT the test suite — every NATS-backed test spawns its
+# own private broker (#233) and points the code under test at that, so
+# `just test` ignores this. Override by exporting FQ_NATS_URL before
+# invoking just.
 # The dev broker requires token auth (infrastructure/nats/nats.conf);
 # the credential rides in the URL userinfo (see bus.rs url_credentials).
 export FQ_NATS_URL := env_var_or_default("FQ_NATS_URL", "nats://fq-dev-token@127.0.0.1:4222")
@@ -294,10 +297,18 @@ go-ci: gate-adapters
 # brings a broker up nor tears one down. The pinned binary provisions itself:
 # the Rust gates depend on `install-nats` (idempotent, a no-op once installed).
 #
-# smoke is intentionally NOT part of `ci`: it needs ANTHROPIC_API_KEY and makes
+# smoke is intentionally NOT part of `ci`: it needs a provider key and makes
 # a real, paid LLM call. Run it on its own with `just smoke`.
 #
-# The full local gate — every target CI runs, timed, fail-fast.
+# `docker-build` is not part of `ci` either: a cold image build compiles the
+# whole workspace again inside the container, which is minutes for a check
+# that only a Dockerfile or workspace-membership change can break. CI runs it
+# in its own path-filtered job. So the promise below has one carve-out —
+# after changing the Dockerfile, `Cargo.toml`'s members, or the lockfile, run
+# `just docker-build` by hand, because a green `just ci` does not cover it.
+#
+# The full local gate — every target CI runs bar the two carve-outs above,
+# timed, fail-fast.
 ci:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -341,7 +352,7 @@ test-shell-sandbox:
 # commands read them back.
 #
 # Requires:
-#   - ANTHROPIC_API_KEY in the environment
+#   - the provider key named by SMOKE_API_KEY_ENV (default OPENROUTER_API_KEY)
 #   - NATS running (see `just infra-up`)
 #   - fq binary built (this recipe builds it first)
 #
@@ -351,7 +362,8 @@ smoke: build-runtime
 
 # N concurrent invocations through drain / clean-shutdown / crash-recovery
 # on a scratch daemon (plan §3, the Phase-2 gate's live leg). Needs
-# ANTHROPIC_API_KEY and a running broker (`just infra-up`) with no other fq
+# the key named by DRILL_API_KEY_ENV (default OPENROUTER_API_KEY) and a running
+# broker (`just infra-up`) with no other fq
 # daemon on it.
 # Run the parallel-workers live drill.
 drill: build-runtime
@@ -380,7 +392,8 @@ soak iters="1000":
 # Uses "$@" (enabled by `set positional-arguments`) so quoted arguments
 # are forwarded to fq intact.
 #
-# Run the fq CLI (e.g. `just fq --agents-dir ./agents agent list`).
+# Run the fq client (e.g. `just fq --addr 127.0.0.1:9472 agent list`).
+# Note `--agents-dir` is the daemon's flag, not the client's.
 [no-cd]
 fq *args:
     cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fq -- "$@"
@@ -623,9 +636,12 @@ check-version tag:
     fi
     echo "release tag {{tag}} matches Cargo version v${cargo_version}"
 
-# Tagged releases still package only fq + fq-cas (`just package`); the
-# main-branch deploy bundle takes all of them (`just package-main`).
-# Build the release binaries (fq, fq-cas, fq-dashboard) for a target triple.
+# This builds all four; the two packaging recipes then differ in what
+# they ship. `just package` (tagged releases) takes fq, fqd and fq-cas —
+# the daemon has to be in a versioned install, and has been since the
+# fq/fqd split. `just package-main` (the deploy bundle) adds fq-dashboard
+# and the Go adapters.
+# Build the release binaries (fq, fqd, fq-cas, fq-dashboard) for a target triple.
 build-release target:
     cargo build --release --target {{target}} -p fq-cli --bin fq
     cargo build --release --target {{target}} -p fq-daemon --bin fqd

@@ -25,10 +25,16 @@
 # zero dirs means completed-and-reclaimed.
 #
 # Prerequisites:
-#   - ANTHROPIC_API_KEY set (each invocation makes 2 haiku calls)
+#   - the provider key named by DRILL_API_KEY_ENV set. The default is
+#     OPENROUTER_API_KEY, matching the DRILL_PROVIDER/DRILL_MODEL
+#     defaults below (openrouter / gpt-4o-mini) — twelve invocations a
+#     run, so the cheapest model that can call one tool is the right
+#     one. To run against a different provider, override the DRILL_*
+#     block below together — the provider, model, key env var, base URL
+#     and the per-Mtok prices, since an unpriced model refuses to start.
 #   - NATS with JetStream running (`just infra-up`), and no other fq
 #     daemon consuming the same broker's trigger stream
-#   - the fq binary built (`just drill` builds first)
+#   - the fq and fqd binaries built (`just drill` builds first)
 #
 # Run with `just drill`, or directly: tests/smoke/drain-drill.sh
 

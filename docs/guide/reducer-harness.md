@@ -12,7 +12,7 @@ This guide covers:
 5. [What's not yet supported](#whats-not-yet-supported)
 6. [Where the code and tests live](#where-the-code-and-tests-live)
 
-For background on **why** factor-q has this shape, see [`docs/design/committed/wasm-boundary-design.md`](../design/committed/wasm-boundary-design.md). For the prototype's verification report, see [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md). For the deprecation of the alternate ("legacy") direct-async path that preceded reducer-only, see [`docs/plans/closed/2026-05-27-deprecate-legacy-executor.md`](../plans/closed/2026-05-27-deprecate-legacy-executor.md).
+For background on **why** factor-q has this shape, see [`docs/design/aspirational/wasm-boundary-design.md`](../design/aspirational/wasm-boundary-design.md). For the prototype's verification report, see [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md). For the deprecation of the alternate ("legacy") direct-async path that preceded reducer-only, see [`docs/plans/closed/2026-05-27-deprecate-legacy-executor.md`](../plans/closed/2026-05-27-deprecate-legacy-executor.md).
 
 ## The reducer model
 
@@ -25,7 +25,9 @@ For background on **why** factor-q has this shape, see [`docs/design/committed/w
                     config, trigger,
                     state, last_result,
                     now_ms, random_seed,
-                    step_index
+                    step_index,
+                    static_resource_context,
+                    host_notices
                   }
                                 │
                                 ▼
@@ -41,7 +43,7 @@ For background on **why** factor-q has this shape, see [`docs/design/committed/w
                     CallModel(req)        → host runs LLM, emits events
                     CallTool(req)         → host runs tool, emits events
                     CallToolsParallel(rs) → host runs tools, emits events
-                    Complete(text)        → host emits `completed`, returns
+                    Complete { text, .. } → host emits `completed`, returns
                     Failed(err)           → host emits `failed`, returns
                             │
                             └────────────────────► loop with last_result set
@@ -85,14 +87,14 @@ Defined in [`fq-runtime/src/worker/reducer/types.rs`](../../services/fq-runtime/
 
 | Type | Role |
 |---|---|
-| `StepInput` | What the host hands to `step` on each call. |
+| `StepInput` | What the host hands to `step` on each call: the static `config`/`trigger`, the opaque `state`, the previous action's `last_result`, `now_ms`, `random_seed`, `step_index`, the step-0-only `static_resource_context` (rendered `static_resources` pins), and any `host_notices` queued for this boundary. |
 | `StepOutput` | What `step` hands back: `NextAction` plus updated state, logs, and semantic events. |
-| `NextAction` | One of: `CallModel`, `CallTool`, `CallToolsParallel`, `Complete(String)`, `Failed(HarnessError)`. |
+| `NextAction` | One of: `CallModel`, `CallTool`, `CallToolsParallel`, `Complete { text, task_status }`, `Failed(HarnessError)`. |
 | `CapabilityResult` | What the host puts in `last_result` on the next call: `ModelResult`, `ToolResult`, `ParallelToolResults`, `Cancelled`, `HostError`. |
 | `AgentConfig` | Static-for-the-invocation config (model, system prompt, tool schemas, allowed tool names, max iterations). |
 | `TriggerPayload` | Static-for-the-invocation trigger (source, subject, payload JSON). |
 | `LogEntry`, `EmittedEvent` | Fire-and-forget tracing/event emission. |
-| `HarnessError` | Terminal failure surfaced from the reducer (`MaxIterations`, `InternalError`). |
+| `HarnessError` | Terminal failure surfaced from the reducer: a `message` plus a `kind`. The variants live on `HarnessErrorKind` (`MaxIterations`, `InternalError`), not on the error itself. |
 
 All boundary types derive `Serialize`/`Deserialize`. The state blob is JSON in the native implementation; future WASM packaging will put the same shapes through the component-model ABI.
 
@@ -112,22 +114,41 @@ Four phases, three fields. If you write your own reducer (for retries, ReAct, pl
 
 ### Driving a reducer from your own code
 
-Most callers should use [`ReducerRunner`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs), which is what `fq trigger` and the in-process daemon worker both use. It composes the existing `LlmClient`, `ToolRegistry`, `EventBus`, `PricingTable`, and a per-worker `WorkerStore` (the WAL / archive persistence layer):
+Most callers should use [`ReducerRunner`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs), which is what the daemon's worker runs on. (`fq trigger` no longer drives a reducer itself: decision D-1 retired the CLI's second, in-process execution path, and every trigger now goes to the daemon. `fq-cli` does not even link `fq-runtime`.)
+
+`ReducerRunner::new` takes three arguments, not a dependency list. The dependencies are grouped into two read-only bundles, split along a deliberate line — [`ReducerContext`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner/config.rs) is what the *agent* may use, [`RunnerConfig`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner/config.rs) is what the *platform* provides — so a new dependency extends whichever bundle it belongs to instead of re-signing the constructor:
 
 ```rust
 use fq_runtime::{
-    Harness, ReducerRunner, EventBus, PricingTable, ToolRegistry,
-    WorkerStore, worker::WorkerId,
+    EventBus, Harness, PricingTable, ReducerContext, ReducerRunner,
+    RunnerConfig, ToolRegistry, WorkerStore, worker::WorkerId,
 };
 use fq_runtime::events::TriggerSource;
 use std::sync::Arc;
 
-let bus     = EventBus::connect("nats://localhost:4222").await?;
-let pricing = Arc::new(PricingTable::load(&cache_path).await);
-let tools   = Arc::new(ToolRegistry::with_builtins());
-let store   = Arc::new(WorkerStore::open(&db_path).await?);
+let bus       = EventBus::connect("nats://localhost:4222").await?;
+let pricing   = Arc::new(PricingTable::load(&cache_path).await);
+let tools     = Arc::new(ToolRegistry::with_builtins());
+let store     = Arc::new(WorkerStore::open(&db_path).await?);
 let worker_id = WorkerId::new(uuid::Uuid::now_v7().to_string())?;
-let runner  = ReducerRunner::new(bus, pricing, tools, store, worker_id, Harness::new());
+
+// What the agent may use. Only `tools` is required; MCP resources and
+// the sampling / elicitation validator chains are optional.
+let context = Arc::new(ReducerContext::builder().tools(tools).build());
+
+// What the platform provides. `bus` (or `event_sink`), `pricing`,
+// `store` and `worker_id` are required; `clock`, `max_iterations`,
+// `enforce_pricing` and `workspace` have defaults.
+let config = Arc::new(
+    RunnerConfig::builder()
+        .bus(bus)
+        .pricing(pricing)
+        .store(store)
+        .worker_id(worker_id)
+        .build(),
+);
+
+let runner = ReducerRunner::new(context, config, Harness::new());
 
 let outcome = runner
     .run(
@@ -142,13 +163,15 @@ let outcome = runner
 
 The return type is `InvocationOutcome`. The runner is generic over the `Reducer` impl; the type parameter defaults to `Harness`, so `Arc<ReducerRunner>` works without further annotation.
 
+Both builders **panic** on a missing required field rather than returning a `Result`. Every construction site is internal and known at compile time, so an unset field is a programmer error, not a runtime condition. For the production wiring — including the pieces this example omits, `enforce_pricing` and the `${workspace}` provider — see [`fq-daemon/src/daemon.rs`](../../services/fq-runtime/crates/fq-daemon/src/daemon.rs).
+
 ### Driving the reducer manually (no host loop)
 
 For tests, debuggers, or a custom host, call `step` directly:
 
 ```rust
 use fq_runtime::Harness;
-use fq_runtime::worker::reducer::types::{StepInput, AgentConfig, TriggerPayload, TriggerSourceKind};
+use fq_runtime::worker::reducer::types::{StepInput, AgentConfig, TriggerPayload};
 use fq_runtime::Reducer;
 
 let harness = Harness::new();
@@ -165,6 +188,11 @@ for step_index in 0.. {
         now_ms:       /* wall clock */ 0,
         random_seed:  /* host-provided */ 0,
         step_index,
+        // Rendered `static_resources` content. `Some` on step 0 only;
+        // a manual host that pins nothing leaves it `None` throughout.
+        static_resource_context: None,
+        // Durable host messages injected at this step boundary.
+        host_notices: Vec::new(),
     };
 
     let output = harness.step(input)?;
@@ -172,14 +200,16 @@ for step_index in 0.. {
 
     use fq_runtime::worker::reducer::NextAction::*;
     match output.next_action {
-        Complete(text)             => { return Ok(text); }
-        Failed(err)                => { return Err(err.into()); }
-        CallModel(_req)            => last_result = Some(/* run llm */),
-        CallTool(_req)             => last_result = Some(/* run tool */),
-        CallToolsParallel(_reqs)   => last_result = Some(/* run tools */),
+        Complete { text, task_status } => { return Ok((text, task_status)); }
+        Failed(err)                    => { return Err(err.into()); }
+        CallModel(_req)                => last_result = Some(/* run llm */),
+        CallTool(_req)                 => last_result = Some(/* run tool */),
+        CallToolsParallel(_reqs)       => last_result = Some(/* run tools */),
     }
 }
 ```
+
+`Complete` is a struct variant: `text` is the agent's final output and `task_status` is its own declaration of how the task went, both carried by the terminal `report_outcome` call. A manual host that discards `task_status` throws away the only signal distinguishing a successful run from a blocked one.
 
 This is the loop `ReducerRunner::run` performs internally. Writing your own is appropriate when you need fine control over how actions are executed (e.g. replay against captured `last_result` values, dry-run dispatch, instrumented testing).
 
@@ -266,8 +296,7 @@ Honest enumeration. The boundary supports each of these; the implementation hasn
 
 | Gap | Status |
 |---|---|
-| Concurrent parallel tool dispatch | Reducer emits `CallToolsParallel(Vec<...>)`; the runner dispatches them sequentially. One-line refactor with `futures::join_all`. |
-| Live-LLM end-to-end smoke test in CI | Done as of 2026-04-25 — exercised against a real Anthropic call (simple completion and tool-use loop). Not yet a permanent CI test. |
+| Concurrent parallel tool dispatch | Reducer emits `CallToolsParallel(Vec<...>)`; the runner dispatches them sequentially. Not the one-line `futures::join_all` it looks like: `run_tool` takes four exclusive borrows — the running invocation totals, the context tracker, the event cursor, and the sampling channel — so concurrency means first deciding how each of those is shared or split. |
 
 ## Where the code and tests live
 
@@ -277,18 +306,31 @@ Honest enumeration. The boundary supports each of these; the implementation hasn
 | Boundary types + `Reducer` trait | [`fq-runtime/src/worker/reducer/types.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/types.rs) |
 | `Harness` (state-enum reducer) | [`fq-runtime/src/worker/reducer/harness.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/harness.rs) |
 | `ReducerRunner` (host loop) | [`fq-runtime/src/worker/reducer/runner.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs) |
+| Runner construction (the two bundles) | [`fq-runtime/src/worker/reducer/runner/config.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner/config.rs) |
 | Pure unit tests | `harness.rs` `#[cfg(test)] mod tests` — runs without NATS. |
-| Behavioural tests | `runner.rs` `#[cfg(test)] mod tests` — skips silently when `FQ_NATS_URL` is unset. |
+| Behavioural tests | [`fq-runtime/src/worker/reducer/runner/tests.rs`](../../services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner/tests.rs) — each NATS-backed case spawns a private broker of its own. |
 
 To run only the reducer tests:
 
 ```sh
+just install-nats                       # once: the pinned broker, into .tools/
 cargo test -p fq-runtime --lib reducer::
 ```
 
+The behavioural tests **do not skip** when there is no broker — a missing
+`nats-server` is a hard failure, deliberately, because a suite that skips
+itself reports success having checked nothing. Each case starts a private
+broker on a random loopback port (#233), so nothing is shared with the dev
+broker and two runs cannot collide. The binary is pinned by `.nats-version`;
+`just` exports `FQ_TEST_NATS_SERVER` pointing at the copy `just install-nats`
+drops in `.tools/`, so running the suite through a `just` recipe needs no
+further setup. Invoking `cargo` directly, as above, resolves a bare
+`nats-server` from `PATH` instead — set `FQ_TEST_NATS_SERVER=.tools/nats-server`
+if you have not put it there.
+
 ## Cross-references
 
-- Boundary design: [`docs/design/committed/wasm-boundary-design.md`](../design/committed/wasm-boundary-design.md)
+- Boundary design: [`docs/design/aspirational/wasm-boundary-design.md`](../design/aspirational/wasm-boundary-design.md)
 - Native reducer prototype closing report: [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md)
 - Legacy-executor deprecation (consolidation onto the reducer path): [`docs/plans/closed/2026-05-27-deprecate-legacy-executor.md`](../plans/closed/2026-05-27-deprecate-legacy-executor.md)
 - WASM-packaging plan (deferred — superseded by tool-isolation-model): [`docs/plans/closed/2026-04-19-wasm-harness-prototype.md`](../plans/closed/2026-04-19-wasm-harness-prototype.md)

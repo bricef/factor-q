@@ -28,10 +28,12 @@
 //! prose, neither of which belongs in the runtime's core, and none of
 //! it is part of what the two clients must agree on.
 //!
-//! Shapes with only one consumer are deliberately still in `fq-cli`
-//! (`WorkerViewKey`, `WorkerListFilter`, `EventKey`, `TurnKey`, and
-//! the command inputs). One consumer needs no shared definition; they
-//! follow if and when a second one appears.
+//! Shapes with only one consumer stay private to the crate that owns
+//! the handler. What remains there is `TurnKey` and the command
+//! inputs (`DownCommandInput`, `ReloadCommandInput`), all in
+//! `fq-daemon`. One consumer needs no shared definition; they follow
+//! if and when a second one appears — as `WorkerViewKey`,
+//! `WorkerListFilter` and `EventKey` already have, and now live here.
 
 use serde::{Deserialize, Serialize};
 
@@ -514,19 +516,6 @@ pub const DEAD_LETTER_LIST_MAX_LIMIT: u32 = 500;
 /// quoting the promise.
 pub const TRIGGER_MAX_DELIVER: i64 = 5;
 
-/// Stuck-work threshold: an in-flight invocation whose
-/// `invocation_state.updated_at` is older than this many ms is
-/// flagged "stuck" by `fq doctor`. Reuses the control-plane's
-/// stale-worker value (`DEFAULT_STALE_THRESHOLD_MS = 30_000`,
-/// `coordination_consumer.rs:66`) rather than inventing a third
-/// hard-coded constant — an invocation that has not touched its
-/// WAL row in as long as a worker has not heartbeated is the same
-/// order of "not making progress" signal.
-///
-/// It is the daemon's choice, and the client renders it back in the
-/// ">30s" line. That works because one crate holds both halves today;
-/// when Phase 5 splits them, either the threshold travels in the
-/// report or the client stops naming a number it did not decide.
 /// How long a worker may go unheard from before the roster calls it
 /// stale. A contract value, not a tuning knob: it is what `stale` means
 /// on the surface, so the reader rendering it and the consumer applying
@@ -536,7 +525,18 @@ pub const DEFAULT_STALE_THRESHOLD_MS: i64 = 30_000;
 /// The `error_kind` a dead-lettered trigger is recorded under.
 const DEAD_LETTER_KIND: &str = "trigger_exhausted";
 
-/// In-flight work is "stuck" once it has not advanced for this long.
+/// Stuck-work threshold: an in-flight invocation whose
+/// `invocation_state.updated_at` is older than this many ms is
+/// flagged "stuck" by `fq doctor`. Reuses the sibling
+/// [`DEFAULT_STALE_THRESHOLD_MS`] rather than inventing a second
+/// hard-coded constant — an invocation that has not touched its
+/// WAL row in as long as a worker has not heartbeated is the same
+/// order of "not making progress" signal.
+///
+/// Being a contract value here rather than the daemon's private
+/// choice is what lets the client render it back in the ">30s" line
+/// across the `fq`/`fqd` split: both halves quote the same number
+/// from the same declaration.
 pub const DOCTOR_STUCK_THRESHOLD_MS: i64 = DEFAULT_STALE_THRESHOLD_MS;
 
 /// Pure: assemble a [`DoctorReport`] from the already-fetched read

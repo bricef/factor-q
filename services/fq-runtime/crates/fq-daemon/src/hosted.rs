@@ -383,10 +383,10 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
                     // graceful drain (ADR-0027): flip the shared drain signal
                     // — in-flight invocations suspend at their next step
                     // boundary, the dispatcher stops consuming — then run the
-                    // bounded-wait teardown below, exactly like `fq down`. A
-                    // second SIGTERM restores the default disposition and
-                    // hard-stops (the force-abort escape). Ctrl-C stays a fast
-                    // stop for interactive use.
+                    // bounded-wait teardown below, exactly like `fq down`.
+                    // Ctrl-C stays a fast stop for interactive use. A second
+                    // SIGTERM is absorbed, NOT the force-abort escape it was
+                    // once documented as — see `signals.rs` and #509.
                     println!();
                     println!("Received SIGTERM, draining...");
                     drain_probe

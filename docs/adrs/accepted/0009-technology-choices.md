@@ -2,7 +2,15 @@
 
 ## Status
 
-Accepted (language); event bus and persistence remain open — see ADR-0011.
+Accepted (language). The event bus and persistence questions this ADR left
+open were settled by [ADR-0011](0011-event-bus-and-persistence.md) (NATS +
+JetStream, SQLite projection), whose source-of-truth half was in turn
+amended by [ADR-0026](0026-event-log-system-of-record.md).
+
+Implementation: complete — the runtime, event bus, executor and work engine
+are Rust; `async-nats` and JetStream carry the bus; SQLite carries the
+stores. One prediction did not come true and is corrected in Consequences:
+the authoring surfaces are declarative text files, not Rust embedded DSLs.
 
 ## Context
 
@@ -39,7 +47,20 @@ These tradeoffs are accepted because the DSL and type-safety benefits compound o
 ## Consequences
 
 - The core runtime, event bus, agent executor, and task engine are implemented in Rust
-- Agent definitions and graph wiring will use Rust's macro system and type-state patterns as embedded DSLs
-- Custom tools and extensions are language-agnostic, communicating via subprocess or MCP protocols
+- Agent definitions and graph wiring were expected to use Rust's macro
+  system and type-state patterns as embedded DSLs. **That is not what
+  happened.** Both authoring surfaces are declarative text files —
+  Markdown + YAML frontmatter ([ADR-0005](0005-agent-definition-format.md))
+  and YAML graphs ([ADR-0012](0012-graph-definition-format.md)) — parsed by
+  `serde_yaml`. Rust's type system carries the *internal* domain model (the
+  agent builder, the `fq-ops` value declarations, the typed op identifiers),
+  not the surface a user writes. The embedded-DSL argument was the deciding
+  factor for choosing Rust; the thing it decided was then built another way.
+  The other reasons above are unaffected
+- Custom tools and extensions are language-agnostic, communicating via
+  MCP. (The subprocess tool protocol this also predicted was not built —
+  see [ADR-0015](0015-rust-runtime-polyglot-tools.md))
 - Contributors need Rust proficiency to work on the core — extension authors do not
-- Event bus and persistence technology choices remain open (see ADR-0011)
+- Event bus and persistence technology choices were left open here and
+  settled by [ADR-0011](0011-event-bus-and-persistence.md), as amended by
+  [ADR-0026](0026-event-log-system-of-record.md)

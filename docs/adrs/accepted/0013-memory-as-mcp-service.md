@@ -9,6 +9,15 @@ decision on dependency-isolation grounds, and adds the `_meta` cost
 protocol (deferring the embedding boundary to a future content-addressed
 storage design).
 
+Implementation: pending — no memory MCP server exists. The decision is about
+where memory *belongs*, and it is being honoured on the runtime side: there
+is no memory subsystem, storage schema or retrieval logic in the runtime.
+Its precondition shipped — the MCP client is built and `mcp:` is first-class
+agent frontmatter (ADR-0017/0018) — but its substrate did not. Memory needs
+[ADR-0023](0023-storage-and-vector-foundation.md)'s layer 3 (embeddings and
+a vector index), which is unbuilt: `services/fq-store/src/` carries no
+embedding or vector code at all.
+
 ## Context
 
 Agents need persistent memory that outlasts a single invocation — the ability to store what they've learned and retrieve relevant context in future runs. The architecture document identifies three memory layers: working memory (in-context), long-term per-agent memory, and collective memory across agents.

@@ -12,7 +12,13 @@ ADR-0019) and CI plumbing (`scripts/`).
 
 ## Discovery
 
-`AGENTS.md` points agents here. For Claude Code specifically,
-`.claude/skills/<name>/SKILL.md` holds a thin tracked shim per skill that
-defers to the `meta/skills/` copy, so each is invocable as a slash command —
-the substance stays agent-agnostic in this directory.
+`AGENTS.md` points agents here, and that is the discovery path every skill
+in this directory has.
+
+A skill that should *also* be invocable as a Claude Code slash command gets
+a thin tracked shim at `.claude/skills/<name>/SKILL.md` deferring to the
+`meta/skills/` copy — the substance stays agent-agnostic in this directory.
+The shim is opt-in, not automatic: `architecture-diagram` and
+`backlog-grooming` have one, `agent-prompt-engineering` does not. Adding a
+skill here therefore does not give it a slash command; add the shim if you
+want one.

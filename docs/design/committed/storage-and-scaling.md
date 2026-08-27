@@ -4,15 +4,26 @@ How factor-q stores its event history, how that history grows with
 usage, and what backing stores and operational practices are
 appropriate at different scales.
 
-## Architecture: NATS is the source of truth
+## Architecture: NATS holds the event bodies
 
 Every meaningful action in factor-q becomes an event on the event
-bus. Per ADR-0011, NATS with JetStream is the system's event store.
-A separate SQLite projection consumer materialises events into
-queryable tables for CLI inspection (`fq events query`, `fq costs`),
-but **the projection is not authoritative** — it can always be
+bus. NATS with JetStream is the system's event store: full payloads,
+30-day window. A separate SQLite projection consumer materialises
+events into queryable tables for CLI inspection (`fq events query`,
+`fq costs`), and **the projection is not authoritative** — it can be
 dropped and rebuilt from NATS by replaying the stream from
 `deliver_all`.
+
+That is a sizing statement, not a durability one, and the difference
+matters. ADR-0011 made NATS the source of truth;
+[ADR-0026](../../adrs/accepted/0026-event-log-system-of-record.md)
+overturned exactly that half in 2026-07 — NATS is transport and a
+replay window, not the log of record — and its replacement, a
+CAS-backed archive service, has not been built. So there is no
+system of record for the event trail today: past the 30-day window
+the bodies are gone, and what survives is cost-bearing projection
+rows and the archived per-invocation outcome. Size for the window;
+do not size as though anything behind it is being kept.
 
 This split matters for sizing because the two stores hold different
 shapes of data:
@@ -40,12 +51,17 @@ on the event type:
 | `llm.response`   | 500 B – 2 KB      | Content + tool calls + usage                                        |
 | `tool.call`      | 300 B – 1 KB      | Parameters                                                          |
 | `tool.result`    | 500 B – MBs       | Output (file contents, shell output) is unbounded                   |
-| `cost`           | ~400 B            | Numeric counters                                                    |
 | `completed`      | ~300 B            | Totals                                                              |
 | `failed`         | ~500 B            | Error kind + message                                                |
 
 The two fat drivers are `llm.request` (full history repeated each
 turn) and `tool.result` (unbounded output).
+
+**There is no `cost` event.** Cost rides `envelope.cost` on the
+`llm.response` (and on `llm.failure` where usage was recoverable), so
+it costs a few dozen bytes on an event that was being written anyway,
+not a ~400-byte event of its own. Every count below is one event per
+LLM call lighter than an older draft of this page assumed.
 
 ### Per-invocation examples
 
@@ -54,10 +70,9 @@ turn) and `tool.result` (unbounded output).
 ```
   triggered            2 KB
   llm.request          3 KB    # system + user
-  llm.response         1 KB
-  cost                 400 B
+  llm.response         1 KB    # cost rides its envelope
   completed            300 B
-  total             ~ 7 KB
+  total             ~ 6 KB
 ```
 
 **Three-tool-call loop with 2 KB file reads:**
@@ -68,7 +83,7 @@ turn) and `tool.result` (unbounded output).
   llm.request #2         5 KB    # + assistant + tool result
   llm.request #3         8 KB
   llm.request #4        11 KB
-  other events          10 KB    # responses, costs, tool calls/results
+  other events          10 KB    # responses, tool calls/results, dispatches
   total              ~ 38 KB
 ```
 
@@ -109,39 +124,51 @@ event carried.
 
 SQLite is genuinely happy into the hundreds of GB as long as queries
 hit indexes. Growth at moderate use is comfortable for years without
-intervention. The daemon applies `[state].retention_days` to projected
-events on its hourly retention schedule (30 days by default), keeping
-projection growth bounded and aligned with the default NATS window —
-with one deliberate exemption: cost-bearing rows (`total_cost` set)
-are never swept, because spend accounting is a primary platform
-concern and all-time cost figures must survive retention. Growth of
-the exempt set is one row per priced LLM call, typed columns only.
-Keep `retention_days` at or below the stream retention — a longer
+intervention. The daemon applies `[state].retention_days` on its
+hourly retention schedule (30 days by default), keeping growth
+bounded and aligned with the default NATS window — with one
+deliberate exemption: cost-bearing rows (`total_cost` set) are never
+swept, because spend accounting is a primary platform concern and
+all-time cost figures must survive retention. Growth of the exempt
+set is one row per priced LLM call, typed columns only.
+
+**That window is not projection-only.** The same setting and the same
+tick also sweep `invocation_archive` in `control-plane.db` — the
+per-invocation final phase, state blob and timestamps — keyed on
+`archived_at`. That table is *not* rebuildable from anything, so the
+one knob governs both a cache and a record, and turning it down
+discards outcome history rather than just re-derivable rows.
+
+Keep `retention_days` at or below the stream retention. A longer
 window makes the projection the sole holder of older non-cost rows,
 which replay cannot rebuild. Non-cost aggregates sourced from the
-projection (event counts, failure tallies) cover at most this window;
-back up `projection.db`, since swept-past cost rows exist nowhere
-else.
+projection (event counts, failure tallies) cover at most this window.
 
-### Recommended schema
+### Schema
+
+`projection.db` holds three tables. `events` is the one this page
+sizes; the other two are small and mentioned because a backup or a
+rebuild has to account for them.
 
 ```sql
 CREATE TABLE events (
     event_id        TEXT PRIMARY KEY,          -- UUID v7, time-sortable
+    seq             INTEGER,                   -- stream position, the universal cursor
     timestamp       TEXT NOT NULL,             -- RFC3339
     agent_id        TEXT NOT NULL,
     invocation_id   TEXT NOT NULL,
     event_type      TEXT NOT NULL,
 
     -- Denormalised columns for common filters; NULL when not applicable
-    model           TEXT,
-    input_tokens    INTEGER,
-    output_tokens   INTEGER,
-    total_cost      REAL,
-    cumulative_cost REAL,
-    error_kind      TEXT,
-    tool_name       TEXT,
-    duration_ms     INTEGER
+    model              TEXT,
+    input_tokens       INTEGER,
+    output_tokens      INTEGER,
+    cache_read_tokens  INTEGER,
+    cache_write_tokens INTEGER,
+    total_cost         REAL,                   -- NULL means "no known spend", and exempts the row from the sweep
+    error_kind         TEXT,
+    error_message      TEXT,
+    duration_ms        INTEGER
 );
 
 CREATE INDEX idx_events_agent_time ON events(agent_id, timestamp);
@@ -149,6 +176,18 @@ CREATE INDEX idx_events_invocation ON events(invocation_id);
 CREATE INDEX idx_events_type_time ON events(event_type, timestamp);
 CREATE INDEX idx_events_time ON events(timestamp);
 ```
+
+- **`invocation_summary`** — one operator-facing line per invocation
+  (#216), last write wins. Derived: a reprojection replays the summary
+  events and never re-calls the LLM.
+- **`triggers`** — the permanent record of a published trigger. Exempt
+  from the sweep *structurally* rather than by predicate: the sweep
+  deletes from `events` only, so a trigger's record outlives the log
+  it was noticed on without a second clause to keep in step.
+
+There is no `cumulative_cost` and no `tool_name` column; running
+totals are computed at query time, and a tool's name is read from the
+payload in NATS rather than denormalised here.
 
 ## NATS backing store sizing
 
@@ -220,9 +259,26 @@ JetStream streams can be backed up two ways:
 2. **`nats stream backup`** — NATS's own stream-level export/import.
    Works independently of the filesystem.
 
-The SQLite projection is rebuildable from the NATS stream, so it
-does not strictly need its own backup — but backing it up is
-cheaper than a full replay in most cases.
+**The runtime has three SQLite databases, and only one of them is the
+projection.** A backup plan that covers the stream and `projection.db`
+covers the least important two-thirds of the picture:
+
+| File | Rebuildable? | What losing it costs |
+|---|---|---|
+| `projection.db` | **Yes**, by replay — except cost-bearing rows older than the stream window, which exist nowhere else | Query history, and any spend figure past 30 days |
+| `control-plane.db` | **No** | Worker roster, schedules, pending waits, and `invocation_archive` — every finished invocation's outcome |
+| `worker.db` | **No** | Every in-flight invocation: the dispatch WAL and the reducer state resume reads from |
+
+So `control-plane.db` and `worker.db` are the ones a backup exists
+for, and neither was mentioned here before. `projection.db` is worth
+copying anyway — restoring it is cheaper than a full replay, and it
+is the sole holder of swept-past cost rows — but it is the one file
+of the three you could lose and rebuild.
+
+`worker.db` is the awkward one to snapshot, because a consistent copy
+of in-flight state is a moving target. Take it during a drained stop
+(`fq down`), when every invocation has checkpointed at a step
+boundary and nothing is mid-write.
 
 ### Monitoring
 
@@ -251,12 +307,12 @@ adjust:
 - **Cold tier** — set up a mirror stream with longer retention on a
   separate, cheaper backing store.
 
-Deferred work: factor-q should provide a scheduled job in the
-internal job scheduler that refreshes external data (see
-[the phase 1 plan](../../plans/closed/2026-04-02-phase-1-foundation.md)
-deferred-work section) and, in the same spirit, periodically prunes
-old SQLite projection rows. The SQLite cleanup can be an ordinary
-DELETE statement since NATS remains the source of truth.
+The SQLite pruning that was once deferred here has shipped: it is the
+hourly retention sweep described above, and it prunes the archive as
+well as the projection. What remains deferred from
+[the phase 1 plan](../../plans/closed/2026-04-02-phase-1-foundation.md)'s
+deferred-work section is the scheduled job that refreshes *external*
+data, which is a different thing on the same scheduler.
 
 ### Rebuilding the projection
 

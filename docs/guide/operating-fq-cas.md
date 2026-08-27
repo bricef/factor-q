@@ -9,7 +9,7 @@ long-lived store healthy.
 ## Orientation: where the data lives
 
 Everything sits under one root directory (`--root`, env `FQ_CAS_ROOT`, default
-`./.fq-cas`):
+`.fq-cas`, relative to the process's working directory):
 
 ```text
 <root>/blocks/<aa>/<hash>[.<gen>]   content-defined blocks, deduplicated
@@ -52,7 +52,7 @@ removes anything a live name still needs, and it never blocks writers.
 
 ### Machine-readable output
 
-For monitoring or scripting, `--json` emits the same report as JSON:
+For monitoring or scripting, `--json` emits the same figures as JSON:
 
 ```console
 $ fq-cas gc --json
@@ -65,6 +65,20 @@ $ fq-cas gc --json
   "alarms": []
 }
 ```
+
+Two things to know before you parse it. The object is **hand-built** at the
+CLI boundary rather than serialised from the report type, so treat these six
+keys as the contract and not the internal struct. And each entry in `alarms`
+is a Rust **debug string**, not a nested object — a populated array looks
+like:
+
+```json
+"alarms": ["LostLiveBlock { name: \"research.papers.doc1\", object: Cid(…) }"]
+```
+
+So a monitor should branch on `alarms` being non-empty (or on the exit code,
+which is the same signal), and treat the strings as text for a human to read
+rather than something to destructure.
 
 ### The grace period
 
@@ -121,6 +135,12 @@ ALARM: 1 invariant violation(s) — this must never happen; investigate:
   LostLiveBlock { name: "research.papers.doc1", object: Cid(…) }
 exit: 1
 ```
+
+That transcript is what a **terminal** shows, where both streams land
+together. The counters go to stdout; the `ALARM:` block goes to **stderr**,
+deliberately. A cron job that captures only stdout gets the counters, the
+`alarms none` line silently absent, and no sign of the violation — so keep
+stderr, or branch on the exit code, which carries the same signal on its own.
 
 An alarm means something outside the protocol corrupted the store — disk
 failure, an out-of-band file deletion, a bug. Treat it as data loss: stop,

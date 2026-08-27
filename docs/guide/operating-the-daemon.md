@@ -108,10 +108,46 @@ days: the default leaves a Friday-night failure still on the roster on
 Monday morning.
 
 A stale worker that still owns unresolved (`in_flight` or `ambiguous`)
-invocations is **never** collected, however old it is — its row is how
-`fq recovery` finds that work. If you see one persisting well past the
+invocations is **never** collected, however old it is — its row is what
+holds that work findable. If you see one persisting well past the
 window, the daemon is logging a warning about it, and the real problem
 is the unrecovered invocation rather than the leftover row.
+
+## Triaging unresolved invocations
+
+There is no `fq recovery` verb. (The daemon still names one in a couple
+of its warnings; that is a bug in those strings, not a command you can
+run.) Triage is three verbs under `fq invocation`:
+
+```sh
+# What is unresolved, and since when
+fq invocation list --status=ambiguous
+fq invocation list --status=in_flight
+
+# The detail on one: owner row, archive row, recent events
+fq invocation show <invocation-id>
+```
+
+`ambiguous` is the state that needs a decision: the daemon knows a tool
+dispatch was issued but not whether it took effect, so it will not replay
+on its own. Two verbs settle it, and which one you want depends on
+whether the work so far is worth keeping:
+
+```sh
+# Keep the progress: durably close every stuck dispatch with an honest
+# interrupted result, then re-drive normal SafeReplay recovery
+fq invocation resume <invocation-id>
+
+# Abandon it: an operator-issued terminal transition, published as
+# `invocation.operator_recovered` so the audit trail distinguishes it
+# from a worker-initiated ending
+fq invocation drop <invocation-id>
+```
+
+`resume` refuses an invocation this daemon is actively driving; so does
+`drop`, unless you pass `--live`, which halts it at its next step
+boundary first. `fq doctor` composes the same signals into one report if
+you would rather start from a summary.
 
 ## Quick reference
 
@@ -123,6 +159,9 @@ is the unrecovered invocation rather than the leftover row.
 | Hot-reload agent definitions | `fq reload` |
 | Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` (all three ask the daemon; `fq status` reports its absence as a finding rather than failing) |
 | Clear stale workers | *nothing — the daemon sweeps them* |
+| Find unresolved invocations | `fq invocation list --status=ambiguous` |
+| Settle one, keeping progress | `fq invocation resume <id>` |
+| Settle one, abandoning progress | `fq invocation drop <id>` |
 
 ## See also
 
@@ -133,5 +172,8 @@ is the unrecovered invocation rather than the leftover row.
   worker state after a **deploy**. Not after a stop: all three ask the
   daemon, so once it is down the answer is that it is down. `fq status`
   is the one that says so usefully — it names the absence as the
-  finding, still prints the configuration and store paths it resolved
-  locally, and exits non-zero so a deploy script can branch on it.
+  finding, still prints the edge address it resolved locally, and exits
+  non-zero so a deploy script can branch on it. It deliberately does
+  **not** print store paths in that state: those are the daemon's, and a
+  client printing its own guess would be describing this machine rather
+  than the runtime.

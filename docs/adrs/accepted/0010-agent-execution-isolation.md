@@ -2,7 +2,24 @@
 
 ## Status
 
-Accepted
+Accepted. **Partially superseded by
+[ADR-0028](0028-tool-scoped-isolation-and-workspace.md) (2026-07-09):** the
+agent-scoped *unit* of isolation assumed below is overturned — ADR-0028 makes
+isolation per-tool, behind a harness-owned virtual filesystem. The
+container/microVM tiering decision itself stands as the eventual enforcement
+shape.
+
+Implementation: pending — and ADR-0028 is pending too, so neither of the
+repo's two isolation models is built. What actually runs is the phase-1
+process sandbox this ADR describes as insufficient: `ToolSandbox` path
+canonicalisation plus `exec_cwd`
+(`services/fq-runtime/crates/fq-tools/src/sandbox.rs`, whose own "Known
+limitations" comment points back here for the container-level answer it
+defers). No container runtime integration, image pipeline or network proxy
+exists anywhere in the tree, and `sandbox.network` is parsed but enforced by
+nothing — #35 was closed with a load-time warning (#214), not with
+enforcement. Containerised execution is tracked by #209, the interim egress
+proxy by #208.
 
 ## Context
 
@@ -122,8 +139,17 @@ This decision must be taken before container support ships, but does not need to
 ## Consequences
 
 - The current process-level sandboxing (phase 1) continues to work for local development and is not removed.
-- Container support will be the next isolation milestone, requiring: a container image build pipeline, runtime integration to launch agents in containers, and a network proxy component.
+- Container support was expected to be the next isolation milestone,
+  requiring: a container image build pipeline, runtime integration to launch
+  agents in containers, and a network proxy component. The sequencing did not
+  hold. [ADR-0028](0028-tool-scoped-isolation-and-workspace.md) (tool-scoped
+  isolation plus a harness-owned VFS) took that slot in July 2026 and is
+  itself unbuilt, so containers remain the eventual tier rather than the next
+  step (#209)
 - Agent definitions do not change — the `sandbox` block already declares the right primitives. The deployment layer maps these to container/network configuration.
-- The network proxy becomes a required component for production deployments, even before microVM support is added.
+- The network proxy becomes a required component for production deployments,
+  even before microVM support is added — still true of the target shape, and
+  still unwritten. Agents declare `sandbox.network` and nothing enforces it
+  (#208)
 - MicroVM support via Kata + Firecracker is deferred until the trust or compliance requirements demand it, but the architecture does not need to change when it arrives.
 - The container orchestration question (self-managed vs Kubernetes/Nomad) is deferred but must be resolved before container support ships.

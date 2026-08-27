@@ -434,11 +434,14 @@ pub fn schema_id_for(payload: &EventPayload) -> &'static str {
     payload.schema_id()
 }
 
-/// Open key/value commentary. Producing agents may attach anything
-/// here. Step 4 of the envelope-refactor plan introduces the
-/// well-known keys module, the [`Event::annotate`] builder, and the
-/// consumer-context barrier method that strips annotations before
-/// they reach a downstream agent's prompt.
+/// Open key/value commentary, written by the runtime. Nothing lets a
+/// producing agent attach one (#90) — every writer is host code.
+///
+/// The three pieces that make that hold are already here: the
+/// well-known keys in [`annotation_keys`], the [`Event::annotate`]
+/// builder, and [`Event::for_consumer_context`], the barrier that
+/// strips annotations before an event reaches a downstream agent's
+/// prompt. Unknown keys are still permitted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Annotations(pub BTreeMap<String, Value>);

@@ -7,9 +7,24 @@ Two kinds of design doc live here, and the folder says which is which:
   [accepted ADR](../adrs/accepted/) or shipped code). If a committed doc
   contradicts the code, one of them is wrong — fix whichever it is.
 - **[`aspirational/`](aspirational/)** — design-ahead: explorations,
-  wishlists, and proposals for work that is not yet scheduled or accepted.
+  wishlists, and proposals for work that is not yet built.
   These are thinking tools, not commitments; they may be adopted, revised,
   or abandoned without ceremony.
+
+**The folders track construction, not agreement.** A decision can be
+accepted and still unbuilt, and that doc belongs in `aspirational/` — the
+ADR records that we agreed, the folder records whether it exists. Getting
+this backwards is what a 2026-08-26 review found across the design set:
+several documents described mechanisms nobody had written, in the present
+indicative, from `committed/`. A reader has no way to tell an account of
+the system from a plan for one unless the folder does that work.
+
+So: **a doc moves to `committed/` when the thing it describes runs**, not
+when its ADR is accepted. If a document is mostly built with a named
+unbuilt part, it may stay in `committed/` provided that part is called out
+explicitly — but the default for "accepted, not yet built" is
+`aspirational/`, with a Status section at the top saying what actually
+ships today.
 
 Dated files at this level (`YYYY-MM-DD-*-assessment.md`) are point-in-time
 assessments — snapshots that are never updated, only superseded.

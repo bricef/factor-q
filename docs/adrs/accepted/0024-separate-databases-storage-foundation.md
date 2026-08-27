@@ -7,6 +7,14 @@ Accepted (2026-06-27). Refines
 question; builds on
 [ADR-0011](0011-event-bus-and-persistence.md) (event-sourced projections).
 
+Implementation: complete for the stores that exist — `index.db` and
+`grants.db` are separate files, opened independently. The third store this
+ADR provides for, the vector index, has no implementation, because
+[ADR-0023](0023-storage-and-vector-foundation.md)'s layer 3 was never built;
+the decision here is conditional ("when there are three stores, keep them in
+three files") and is being correctly applied to the two there are. Read the
+Context table below as the intended set, not a running one.
+
 ## Context
 
 ADR-0023 establishes the storage + vector foundation and leaves open

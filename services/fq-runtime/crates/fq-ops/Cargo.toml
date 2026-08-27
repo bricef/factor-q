@@ -15,8 +15,9 @@ license.workspace = true
 [dependencies]
 # Timestamps on the wire (events and the DeadLetter atom) and the
 # `since` grammar's parsing. `serde` because a shape here is one both
-# ends (de)serialise; no `clock` feature — nothing in this crate reads
-# a clock.
+# ends (de)serialise; `clock` comes with the workspace default and is
+# used — `Event::new`/`Event::system` stamp the envelope with
+# `Utc::now()` (events.rs).
 chrono = { workspace = true, features = ["serde"] }
 schemars = { workspace = true }
 serde = { workspace = true }

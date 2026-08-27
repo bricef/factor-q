@@ -8,6 +8,17 @@ builds on [ADR-0004](0004-cost-controls-from-day-one.md) (cost controls)
 and [ADR-0018](0018-mcp-server-initiated-execution.md) (the runtime is
 the sole spend arbiter; advisory-roots precedent).
 
+Implementation: partial — §1 (memory stays an MCP service) stands and is
+honoured; **the §2 `_meta` cost protocol is not built**. The string
+`factorq.top` appears in no Rust source at all, so the runtime neither
+stamps `factorq.top/budget` on outbound tool calls nor reads
+`factorq.top/cost` off results. `CostMetadata` is real, but it rides LLM
+responses and invocation summaries, never a server-reported tool cost, and
+[the MCP guide](../../guide/mcp.md) has no `_meta` section to track. §3's
+table is the honest part of the file: the tool-dispatch gate it marks
+"(exists)" is the one row that does. §4's deferral has since been half
+answered — see the note there.
+
 ## Context
 
 [ADR-0013](0013-memory-as-mcp-service.md) decided memory is an MCP
@@ -56,6 +67,11 @@ the (retired) forcing-function reason. Working-memory / context-window
 management stays in the runtime, unchanged from ADR-0013.
 
 ### 2. A bidirectional `_meta` cost protocol (first-party convention)
+
+> **Decided, not built.** Everything in this section is written in the
+> present tense and none of it exists — `factorq.top` appears in no Rust
+> source. Treat it as the specification to build against, not as a
+> convention you can already speak.
 
 The runtime and a *cooperating* (first-party) MCP server exchange cost
 information through `_meta`, namespaced under `factorq.top/` — a domain
@@ -115,6 +131,17 @@ service that is yet to be defined, and the embedding / indexing strategy
 belongs to *that* design; picking it now would over-commit ahead of the
 storage architecture.
 
+> **Half answered since.** The content-addressed storage service was
+> defined 15 days later and then built:
+> [ADR-0023](0023-storage-and-vector-foundation.md) and
+> [ADR-0024](0024-separate-databases-storage-foundation.md) settle the
+> storage foundation, and `fq-store` ships the CAS. What ADR-0023 resolves
+> of the three questions above is only *where vectors live* (F9,
+> sqlite-vec) and the plugin protocol (F7). **Local-vs-metered and
+> embed-at-write-vs-query-time remain open** — and they are exactly the two
+> that decide whether the §2 protocol is a no-op or load-bearing. The
+> embedding half is also still unbuilt: ADR-0023's layer 3 does not exist.
+
 What this ADR guarantees is that whichever boundary that design lands on
 is **cost-accountable and budgetable** through §2/§3:
 
@@ -144,7 +171,9 @@ factor-q limitation.
   and reads on results, plus a `CostMetadata` on `tool.result` when a
   cost is reported. (Reuses the `Meta`/`CostMetadata` types already in
   the codebase; the outbound `_meta` writer already exists for progress
-  tokens.)
+  tokens.) **Not built** — the vocabulary was never written and neither
+  reader nor writer exists. The reuse premise still holds, which is why
+  this remains cheap; but nothing in the codebase speaks it today
 - Memory — and any first-party cost-bearing MCP service — is **budget-
   aware and accounted without being native**, which removes cost as a
   reason to pull memory into the runtime.
@@ -153,5 +182,7 @@ factor-q limitation.
   speaking the `factorq.top/*` `_meta` convention, and `fq`-side wiring
   that stamps the budget hint and folds the cost report into the event
   bus + budget.
-- Guides track the live `_meta` convention; this ADR is the point-in-time
-  rationale.
+- Guides would track the live `_meta` convention, leaving this ADR as the
+  point-in-time rationale. They do not, because there is no convention to
+  track: [the MCP guide](../../guide/mcp.md) has no `_meta` section. Until
+  §2 is built, this ADR is the only description of it.

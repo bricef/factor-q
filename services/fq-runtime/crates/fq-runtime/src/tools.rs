@@ -90,7 +90,7 @@ impl ToolRegistry {
 
     /// Like [`with_builtins`](Self::with_builtins), but registers the
     /// exec tool with an explicit [`ExecConfig`] — the seam that lets
-    /// the runtime thread `[tools.exec]` timeouts from `fq.toml` into the
+    /// the runtime thread `[tools.exec]` timeouts from `fqd.toml` into the
     /// registered tool. Every other built-in is identical.
     pub fn with_builtins_exec(exec: ExecConfig) -> Self {
         let mut registry = Self::new();

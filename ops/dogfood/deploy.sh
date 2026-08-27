@@ -45,7 +45,6 @@ DOGFOOD="${FQ_DOGFOOD:-$HOME/fq-dogfood}"
 REPO_SLUG="${FQ_REPO_SLUG:-bricef/factor-q}"
 TARGET="${FQ_TARGET:-x86_64-unknown-linux-musl}"
 CHANNEL="${FQ_CHANNEL:-main-latest}"
-DRAIN_WAIT="${DRAIN_WAIT:-180}"   # seconds to wait for a graceful drain
 READY_WAIT="${READY_WAIT:-90}"    # seconds to wait for daemon "Runtime ready"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"
 

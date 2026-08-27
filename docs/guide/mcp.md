@@ -74,9 +74,14 @@ than offering a partial tool set:
 - Server ids must match `[a-z0-9-]+` and be at most 48 characters. The
   charset excludes `_`, so the first `__` in a canonical name always
   splits server from tool; `builtin` is reserved for runtime tools.
-- The combined `<server>__<tool>` name must fit provider tool-name
-  rules: at most 64 characters of `[a-zA-Z0-9_-]` (the strictest
-  provider limit — names reach the LLM API verbatim).
+- The combined `<server>__<tool>` name is checked for **length only**:
+  at most 64 characters, the strictest provider limit (Anthropic's).
+  The charset providers accept — `[a-zA-Z0-9_-]` — is *not* enforced on
+  the tool half, which arrives from the remote server as it chose to
+  name it. Names reach the LLM API verbatim, so a server exposing a tool
+  with a character outside that set fails at the provider rather than at
+  discovery. If a server's tools are rejected on the wire with nothing
+  in the daemon log, look there first.
 - Registrations never replace an existing name: a collision with a
   built-in or another server's tool is rejected and logged, not
   silently shadowed.
@@ -122,9 +127,17 @@ agent's transcript). The request is gated first:
 1. Is the server granted `sampling`? If not → declined, no model call.
 2. Is there sampling budget left (`sampling_budget`, and the overall
    `budget`)? If not → declined, no model call.
-3. Otherwise run it, tagged `origin = sampling{server}` for cost
-   attribution, then pass the result through the outbound validation
-   seam before replying.
+3. Do the `input_validation` evaluators approve the request? A deny
+   short-circuits before the sampling call is made. Note that an `llm`
+   evaluator is itself a model call, charged to `sampling_cost` — so
+   this step can spend even when it ends in a decline.
+4. Otherwise run it, tagged `origin = sampling{server}` for cost
+   attribution.
+5. Pass the result through the outbound validation seam: the context
+   validator chain, then the definition's declarative config
+   (`redact_secrets`).
+6. Do the `output_validation` evaluators approve the result? A deny
+   declines the request rather than returning the completion.
 
 ```yaml
 budget: 1.00
@@ -225,8 +238,12 @@ invocation ([ADR-0020](../adrs/accepted/0020-mcp-notification-handling.md)).
   the registry for the *next* invocation; an in-flight invocation keeps
   the tool set it started with
   ([ADR-0020](../adrs/accepted/0020-mcp-notification-handling.md)).
-- **`includeContext` is forced to `none`** — sampling does not yet inject
-  the agent's own context into a server's prompt.
+- **`includeContext` is ignored** — the field is not read, and nothing
+  reflects a value back to the server. Sampling does not yet inject the
+  agent's own context into a server's prompt, so the effect matches
+  `none`, but a server that asks for `thisServer` or `allServers` is not
+  told it was refused: it simply gets a completion built from its own
+  messages. The inbound redaction seam lands with context injection.
 - **Roots advertise `file://` only**; audio prompt content awaits an
   upstream rmcp fix.
 

@@ -6,13 +6,15 @@
 //! when an operation is added, and it has no reason to know a payload
 //! type. Its consumers do: `fq-cli` and `fq-dashboard` deserialise the
 //! output into view types and render them, and those types live in
-//! `fq-runtime` today.
+//! `fq-ops` — the transport-free contract half, which is itself a leaf.
 //!
 //! The property worth keeping is that the *dependency* lives in the
 //! consumers rather than here. `fq-runtime` pulls `sqlx`, `async-nats`,
-//! `reqwest` and `rmcp`; ADR-0031 Phase 5 reduces `fq` to a client plus
-//! renderers by dropping exactly those, and this crate is the one half
-//! that is already free of them. Nothing about that is enforced by the
+//! `reqwest` and `rmcp`; ADR-0031 Phase 5 reduced `fq` to a client plus
+//! renderers by dropping exactly those — `fq-cli` links `fq-edge` and
+//! `fq-ops` and no longer links `fq-runtime` at all. This crate was
+//! already free of them, and the gate is what keeps it that way as the
+//! surface grows. Nothing about that is enforced by the
 //! type system — an `EventView` in a signature here would compile
 //! perfectly well — so it is a convention until something checks it,
 //! and conventions about dependencies are lost in review.

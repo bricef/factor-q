@@ -1,5 +1,16 @@
 # Daemon / CLI split — execution plan for `fqd` + `fq` (ADR-0031)
 
+> **Closed 2026-08-26 — filed, not finished.** This plan marked itself
+> superseded on 2026-07-20 but stayed in `active/` for five weeks, so
+> anyone reading the active set found two plans for one piece of work.
+> Nothing here was executed under this document: the successor plan
+> carried its survivable parts forward and ran them to completion.
+> Moved on the strength of that successor closing — the migration gate
+> (`fq-cli/tests/edge_migration_gate.rs`) reaching `REMAINING = 0` on
+> 2026-08-14, and the binary split landing on 2026-08-23. Kept as the
+> record of the `ControlService` design that ADR-0006's Appendix A
+> replaced. The body below is unedited.
+
 **Status:** superseded (2026-07-20) by the
 [joint ADR-0006 + ADR-0031 execution plan](2026-07-20-registry-and-split-execution.md).
 ADR-0006's Appendix A replaced the hand-enumerated `ControlService` this plan

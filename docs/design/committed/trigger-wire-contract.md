@@ -97,13 +97,28 @@ silence an agent.
 Downstream, the identity appears on the invocation's `triggered` event as
 `trigger_id` (see [event schema](event-schema.md)), which is what links
 an invocation to the trigger that caused it, and on the dead-letter
-event's `trigger_id` annotation when a trigger exhausts its deliveries.
+event's `trigger_id` annotation when a trigger exhausts its deliveries —
+**usually, not always.** Two cases produce a dead letter that names no
+trigger: one recorded before triggers were named, and one the advisory path
+reconstructs after the original has already aged off the trigger stream,
+which reads the identity rather than inventing one. Such a dead letter still
+lists and still carries its payload, but it cannot be requeued idempotently —
+there would be nothing to refuse a second attempt on — so `dead_letter.requeue`
+refuses it and re-running it means `trigger.publish`, as new work with a new
+name.
 
 It is also the identity the operator surface knows a trigger by: `trigger.get`
 takes it, `trigger.publish` returns it in its receipt, and the record it
-resolves — source, subject and payload — is retained indefinitely. A trigger
-the runtime has not yet acted on has no record and reads as such, distinctly
-from an id that names nothing.
+resolves — source, subject and payload — is retained indefinitely.
+
+A trigger the runtime has not yet acted on has no record yet, and answers
+`Unlocatable` rather than "not found" — saying "no such trigger" about a name
+a receipt has just issued would be a lie. But it does **not** read distinctly
+from an id that names nothing: a primary-key miss cannot tell "queued, not yet
+dispatched" from "recorded before triggers were kept" from "never real", so
+all three get the one answer, and the message names all three causes rather
+than the daemon guessing between them. A producer that needs to know whether
+its trigger ran has to watch for the invocation, not poll `trigger.get`.
 
 **A requeue is a new trigger, and says which one it re-ran.**
 `dead_letter.requeue` publishes a **fresh** id rather than the original's, and
@@ -177,12 +192,29 @@ the opaque transport contract.
 
 ### Delivery semantics
 
-Delivery is **at-least-once**. The trigger dispatcher acks a trigger on
-*dispatch*, not on completion (the reducer WAL owns in-flight durability and
-crash recovery), so a slow invocation does not cause redelivery. A producer
-should publish each logical trigger once; de-duplication of a re-seen source
-event is the *producer's* responsibility (e.g. the github-watcher relabels an
-issue out of `ready` before publishing, so it cannot re-trigger).
+Delivery is **at-least-once**, and where the ack lands is the one thing a
+producer has to know, because it defines the only window in which the same
+trigger runs twice.
+
+The dispatcher acks on **durable start** — the moment the invocation's first
+WAL write lands, signalled back through the `Worker` seam — not at dispatch
+and not at completion. Both other choices were tried and are wrong in
+opposite directions. Acking at completion re-ran anything longer than the
+30s ack-wait, one trigger producing N invocations; that is the redelivery
+storm the M0 dogfood loop found on 2026-07-06. Acking at dispatch would drop
+a trigger whose process died before writing anything, with no record that it
+had ever arrived.
+
+So the redelivery window is *dispatch → first WAL write*, seconds wide, and a
+crash inside it is exactly the case where redelivery is what you want: nothing
+durable happened, so the redelivered trigger is the run, not a duplicate of
+it. From the first WAL write on, in-flight durability is the reducer WAL's
+job and a crash resumes rather than re-runs.
+
+A producer should still publish each logical trigger once; de-duplication of a
+re-seen source event is the *producer's* responsibility (e.g. the
+github-watcher relabels an issue out of `ready` before publishing, so it
+cannot re-trigger).
 
 ## Minimal producer (any language)
 

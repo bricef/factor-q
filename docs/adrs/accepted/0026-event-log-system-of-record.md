@@ -13,6 +13,26 @@ durability-class separation of
 [the 2026-07-05 project assessment](../../reviews/2026-07-05-project-assessment.md)
 §5 ("Two source-of-truth patterns now coexist").
 
+Implementation: pending — **nothing in Decisions 2–6 is built**, and the
+whole Decision below is written in the present tense about a service that
+does not exist. There is no archive service: no `fq-archive` crate, no
+`ArchiveService` type, no archive binary, and no archive crate among the
+workspace members. Decision 4's CAS extraction did not happen — the CAS is
+still inside `fq-store`, and no runtime crate depends on it. Decision 6 did
+not happen either; the code says the opposite, with `projection.db`
+"derived from the NATS stream; disposable (delete + replay rebuilds it)".
+
+What stands in for it today is a SQLite table, not a CAS service:
+`invocation_archive` in `control-plane.db`, holding invocation *outcomes* —
+final phase, final reducer-state blob, timestamps — and not the event
+trail. **It is swept**, at `[state].retention_days`, default 30 days. So
+this ADR is the direction, not a durability guarantee anyone already has;
+[ADR-0011 § Where events durably live today](0011-event-bus-and-persistence.md)
+and
+[event-schema.md](../../design/committed/event-schema.md) carry the current
+picture. The honest-guarantee note this residual called for was written up
+as #80.
+
 ## Context
 
 The runtime's stated stance is "NATS is the source of truth; the SQLite
@@ -144,7 +164,11 @@ persistent system of record.** Concretely:
   a small workspace-topology decision (where the shared crate lives). This
   is also the first real cross-service integration — the step
   [assessment critique #2](../../reviews/2026-07-05-project-assessment.md)
-  was implicitly asking for.
+  was implicitly asking for. **Overtaken:** #194 unified the repo into a
+  single workspace, and shared crates (`fq-ops`, `fq-agent`,
+  `fq-test-support`) are now routine. The topology question was settled
+  independently, so the CAS extraction is an ordinary crate move and no
+  longer the first of anything.
 - **A new cross-boundary seam: the projection rebuild path.** With the
   archive as a separate service, the projection rebuilds *from the archive*
   across a service boundary — a replay/query API to be designed once this
@@ -175,7 +199,14 @@ persistent system of record.** Concretely:
   also *lowers* archive write volume below the raw event rate.
 - **Reconcile in implementation:** the projection stops being
   authoritative-by-nobody, and the archive-retention doc/code drift (7 vs
-  30 days) is retired — the archive no longer expires at all.
+  30 days) is retired — the archive will no longer expire at all, **once the
+  archive service exists**. It does not, so this is not today's behaviour:
+  the interim `invocation_archive` in `control-plane.db` is swept at
+  `[state].retention_days`, **default 30 days**, and Decision 2's
+  "append-only and GC-free: every event is permanent" is false of what runs.
+  The one thing that *is* permanent is cost — cost-bearing projection rows
+  are exempt from the sweep and kept indefinitely. Do not read this bullet
+  as a promise that your invocation history survives past 30 days.
 - **Scope discipline:** this establishes the boundary now and defers the
   scaling (single instance, single consumer) until throughput demands it.
 

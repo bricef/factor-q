@@ -76,7 +76,7 @@ have paired with more than one daemon and want a default.
   `FQ_CACHE_DIR`, `FQ_STATE_DIR`). These configure the runtime, so they
   belong to the daemon; `fq` does not accept them.
 - Point `fq` at a particular daemon with `--addr` (or `FQ_ADDR`), and
-  at a different client config with `--config` (or `FQ_CONFIG`).
+  at a different client config with `--config` (or `FQ_CLI_CONFIG`).
 
 ## Documentation
 

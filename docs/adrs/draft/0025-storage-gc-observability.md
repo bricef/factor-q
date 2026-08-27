@@ -8,6 +8,17 @@ foundation and its M5 service) and the
 [storage GC design](../../design/committed/storage-garbage-collection.md) (M1c, built);
 sets the metrics convention later runtime instrumentation should follow.
 
+Implementation: pending — correctly, since this is a draft, and nothing has
+moved either way. There is still no `metrics` or
+`metrics-exporter-prometheus` dependency in any manifest, no `/metrics`
+endpoint in any crate, and no `--prom-textfile` flag on `fq-cas gc`; the
+operator manual still has no monitoring section. This remains the project's
+first metrics decision, untaken (#342 tracks the runtime-wide successor).
+Worth knowing when it is picked up: its target, M5, sits behind a pause —
+[the storage/vector plan](../../plans/active/2026-06-27-storage-vector-foundation.md)
+is paused at M3, which puts stage 2 further out than this draft assumes and
+strengthens the case for its stage-1 interim.
+
 ## Context
 
 M1c shipped garbage collection with strong correctness guarantees but no

@@ -56,9 +56,10 @@ pub mod validation;
 pub mod views;
 pub mod watermark;
 
-// Role modules. Both stay `pub` so that downstream code (fq-cli,
-// integration tests) can reach typed APIs that haven't been
-// surfaced at the crate root yet (e.g. `control_plane::projection::store::EventFilter`).
+// Role modules. Both stay `pub` so that downstream code (fq-daemon —
+// the only crate that links this one — and integration tests) can reach
+// typed APIs that haven't been surfaced at the crate root yet
+// (e.g. `control_plane::projection::store::EventFilter`).
 // The role boundary is enforced primarily by the `Worker` trait
 // — `TriggerDispatcher` consumes `Arc<dyn Worker>`, so the
 // control-plane has no compile-time handle on the worker's
@@ -68,10 +69,10 @@ pub mod control_plane;
 pub mod worker;
 
 // Compiled for this crate's own tests, and — reduced to the
-// self-contained mock LLM server — for sibling crates' integration
-// tests via the `test-support` feature (fq-cli's resume e2e spawns a
-// daemon against it). The dev-dep-heavy helpers stay test-only; see
-// the cfg gates inside the module.
+// self-contained mock LLM server — for fq-daemon's integration tests
+// via the `test-support` feature, which is how its dev-dependency on
+// this crate is declared. The dev-dep-heavy helpers stay test-only;
+// see the cfg gates inside the module.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 

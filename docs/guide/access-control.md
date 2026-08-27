@@ -30,9 +30,10 @@ invalidates every delegation standing on it, transitively.
 Two details worth knowing up front. **Listing** a namespace enumerates its
 whole subtree, so it needs a `list` grant over the **namespace** (a
 `Namespace` scope) — a grant on a single `Name` lets you read that one object
-but not enumerate a tree. And an **agent id** is a plain slug (no dots,
-wildcards, or whitespace); the dot-free rule is what keeps one agent's own
-scope from nesting inside another's.
+but not enumerate a tree. And an **agent id** is a plain slug — non-empty,
+with no `.`, no `*` or `>`, no whitespace, and no control characters; the
+dot-free rule is what keeps one agent's own scope from nesting inside
+another's.
 
 ## Where authorization is decided
 
@@ -105,9 +106,13 @@ bound **different operation shapes**:
 
 - Attenuated to a **namespace** (`research.papers.*`): the token permits
   point operations on names inside the subtree *and* subtree operations
-  (`list`, a namespace-scoped `grant` or `revoke`) anchored at or below
-  the root. A subtree operation on a strict parent is outside the
-  attenuation.
+  (`list`, and a namespace-scoped `grant`) anchored at or below the
+  root. A subtree operation on a strict parent is outside the
+  attenuation. Revocation is not a verb of its own: it is checked
+  against `grant` over the target grant's scope, on top of the rule that
+  only a grant's issuer — or the operator — may revoke it. So a token
+  attenuated away from `grant` cannot revoke, and revoking never needs a
+  permission its issuance did not.
 - Attenuated to a **name** (`research.papers`): the token permits point
   operations on exactly that name — and **nothing with namespace
   semantics**, including a `list` or a namespace delegation anchored at

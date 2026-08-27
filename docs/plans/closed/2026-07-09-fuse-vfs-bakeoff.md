@@ -21,7 +21,7 @@ design" below. This document is written to be implementable from itself alone.
   isolates and validates the **FUSE-binding** half of that decision.
 - The in-memory store used here is a deliberate stand-in for the CAS. The
   experiment measures the *crate*, not the store, so the store is trivial.
-- Related design: `docs/design/committed/tool-isolation-model.md` (the tier
+- Related design: `docs/design/aspirational/tool-isolation-model.md` (the tier
   model), `docs/design/aspirational/wasm-posix-sandbox.md` (the sibling WASM
   binding), and design principle 3 (nothing ambient; the agent's filesystem
   reality *is* the mount).

@@ -4,8 +4,8 @@
 //!
 //! The client half of `control.doctor` (plan Phase 4, verb 15): one
 //! edge call, then rendering. The report itself — its shape, its
-//! checks, and the reads behind them — is [`crate::doctor_report`],
-//! daemon-side.
+//! checks, and the reads behind them — is `fq_daemon::doctor_report`,
+//! in the other binary.
 //!
 //! **This verb used to work with the daemon stopped, and no longer
 //! does.** It read the projection directly, so it answered from

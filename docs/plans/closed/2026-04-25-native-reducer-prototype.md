@@ -3,7 +3,7 @@
 **Date**: 2026-04-25
 **Status**: Closed (initial slice landed)
 **Design references**:
-- [`docs/design/committed/wasm-boundary-design.md`](../../design/committed/wasm-boundary-design.md) — the boundary the reducer is built to.
+- [`docs/design/aspirational/wasm-boundary-design.md`](../../design/aspirational/wasm-boundary-design.md) — the boundary the reducer is built to.
 - [`docs/reviews/2026-04-19-design-assessment.md`](../../reviews/2026-04-19-design-assessment.md) — recommended building a *native* reducer prototype before WASM packaging.
 
 ## Goal
@@ -235,7 +235,7 @@ WASM-specific
 was the natural successor for Fork C above but is now
 **deferred (2026-05-22)** — the security rationale that
 motivated it was reframed by
-[`docs/design/committed/tool-isolation-model.md`](../../design/committed/tool-isolation-model.md),
+[`docs/design/aspirational/tool-isolation-model.md`](../../design/aspirational/tool-isolation-model.md),
 which puts WASM around individual tools rather than the whole
 harness. See that plan's status block for the details.
 

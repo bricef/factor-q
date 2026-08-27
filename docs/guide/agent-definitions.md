@@ -12,7 +12,10 @@ For ready-made examples, see
 
 ## Minimal agent
 
-The smallest valid definition has a `name`, a `model`, and a body:
+The smallest definition the daemon will load is a `name` and a body.
+`model:` is shown here because it is what you will usually write, but it
+is optional — see [Choosing the model](#choosing-the-model), which also
+covers the trap that comes with leaving it out.
 
 ```markdown
 ---
@@ -25,25 +28,48 @@ You are a friendly assistant. Greet the user warmly.
 
 This agent has no tools, no sandbox, and no budget. It can only
 produce text responses — it cannot read files, run commands, or
-call any external service.
+call any external service. It can still *end its run*: every invocation
+is offered `report_outcome` whether or not the definition asks for it —
+see [Ending the run](#ending-the-run).
 
-Save this as `agents/greeter.md`, then:
+Save this as `agents/greeter.md`. `fq agent validate` works offline, but
+every other `fq` verb answers over the daemon's authenticated edge, so
+the daemon has to be running and this client paired with it before any
+of them do anything:
 
 ```sh
-fq agent validate agents/greeter.md
+fq agent validate agents/greeter.md     # offline; needs no daemon
+
+fqd                                     # (another terminal) start the daemon —
+                                        # it prints a certificate fingerprint
+                                        # and an admin token once, on its first
+                                        # run
+fq connect 127.0.0.1:9472 --token <token>
+
 fq trigger greeter "Hello!"
 ```
 
+Skip the middle two and `fq trigger` stops at ``no daemon paired — run
+`fq connect <addr> --token <token>` first``. The daemon reads `fqd.toml`
+and the client reads `fq.toml`; `fq init` writes both, along with
+`agents/` and a sample agent.
+
 ## The frontmatter is strict
 
-Every key in the frontmatter must be one the runtime recognises. An
-unknown key is a **hard error** — the definition fails to load and the
-error names the offending key, lists the keys that were expected, and
-gives the line and column. The recognised set is:
+Every **top-level** key in the frontmatter must be one the runtime
+recognises. An unknown key is a **hard error** — the definition fails to
+load, and the error names the offending key, lists the keys that were
+expected, and gives the line and column:
 
-`name` · `model` · `tools` · `sandbox` · `budget` · `max_iterations` ·
-`effort` · `trigger` · `mcp` · `static_resources` · `sampling_budget` ·
-`elicitation_budget`
+```
+agents/greeter.md is invalid: invalid YAML: unknown field `budgett`,
+expected one of `name`, `model`, `tools`, `sandbox`, `budget`,
+`max_iterations`, `effort`, `trigger`, `mcp`, `static_resources`,
+`sampling_budget`, `elicitation_budget` at line 3 column 1
+```
+
+That list is the whole recognised set — twelve keys, and the error
+prints them in the order the runtime declares them.
 
 Strictness is deliberate: a dropped key is silent, and silence here is
 expensive. `budgett: 0.05` used to parse as a definition with *no* cost
@@ -53,9 +79,33 @@ missing line in its output (ADR-0004 is "cost controls from day one").
 with no grants rather than the ones its author wrote. Both are now
 rejected outright.
 
-Because an unknown key is fatal at load time, a stray key in *any*
-definition the daemon loads fails that definition — run
-`fq agent validate` over a definition before adding it.
+An unknown key is fatal to the definition that carries it, and only to
+that one: the daemon records the parse failure and carries on loading
+the rest of the directory, so one bad file costs you one agent rather
+than the registry. Run `fq agent validate` over a definition before
+adding it.
+
+### The nested blocks are not strict
+
+The check stops at the top level. Keys **inside** the `sandbox:` block
+and inside an `mcp:` entry are still dropped in silence, exactly as
+every key used to be:
+
+```yaml
+sandbox:
+  fs_writ:            # not `fs_write` — accepted, and grants nothing
+    - "${workspace}/**"
+mcp:
+  - server: filesystem
+    samplingg: ask    # not `sampling` — accepted, and grants nothing
+```
+
+Both of those definitions validate as `✓ valid` and load. Both leave the
+agent with a grant its author believed they had written, which is the
+failure mode with the sharpest edge — so the spelling of a key nested
+under `sandbox:` or `mcp:` is still yours to check. The dimension names
+are listed under [Dimensions](#dimensions), the per-server grants under
+[Capability grants](#capability-grants).
 
 ## Choosing the model
 
@@ -81,10 +131,32 @@ Declaring providers, the default model, and price overrides is a
 deployment (`fqd.toml`) concern — see the generated config's `[providers]`
 and `[agents]` sections (`fq init`).
 
+> **⚠ `fq agent validate` cannot see any of this (issue #508).** The
+> client reads the definition through the same parser the daemon's
+> registry uses, but it runs offline, with no `fqd.toml` and no pricing
+> table — so its verdict diverges from the daemon's in **both**
+> directions:
+>
+> - **It rejects a definition the daemon accepts.** With no deployment
+>   config to read, the client has no default model to substitute, so a
+>   definition that omits `model:` — the supported shape described just
+>   above — fails with `invalid agent: missing required field: model`
+>   and exit code 1. That is the client's blind spot, not a problem with
+>   your definition.
+> - **It accepts definitions the daemon refuses.** Nothing on the client
+>   side knows which models the deployment declares or prices, so a
+>   typo'd or unpriced model passes validation and then takes the
+>   *daemon* down at startup — the ADR-0004 coverage guarantee is
+>   fail-fast, so one bad model stops every other agent loading too.
+>
+> Treat `fq agent validate` as a syntax and shape check, not as the
+> deployment's verdict. The model-and-pricing half is answered only by
+> starting the daemon.
+
 ## Adding tools
 
 Tools give the agent capabilities beyond text generation. factor-q
-ships six built-in tools:
+ships seven built-in tools:
 
 | Tool | What it does | Sandbox dimension |
 |---|---|---|
@@ -94,6 +166,7 @@ ships six built-in tools:
 | `builtin__file_search` | Find text in sandboxed files | `fs_read` |
 | `builtin__exec` | Run a single program (argv, no shell) | `exec_cwd` |
 | `builtin__self_inspect` | Ask the runtime about this invocation's own state — budget, iteration count, model, available tools. | none — host-fulfilled |
+| `builtin__report_outcome` | Declare how the task went and end the invocation. | none — never dispatched; see [Ending the run](#ending-the-run) |
 
 Every tool name is namespaced: built-ins live under the reserved
 `builtin__` prefix, MCP tools under their server's id
@@ -113,6 +186,10 @@ no sandbox declaration cannot touch the filesystem or run commands.
 itself, not by an external process, so it has no sandbox dimension
 to declare. Granting it just adds it to the `tools:` list. See the
 [self-aware example](../../agents/examples/self-aware.md).
+
+`builtin__report_outcome` is more special still: it is the one tool you
+never need to grant, because granting it is not a decision an author gets
+to make. See [Ending the run](#ending-the-run) below.
 
 ### File reader
 
@@ -212,6 +289,43 @@ You have read access to the project, write access to the output
 directory, and can run commands in the project root.
 ```
 
+## Ending the run
+
+An agent ends its invocation by calling `builtin__report_outcome` with a
+`status` and a `summary`:
+
+| `status` | Means |
+|---|---|
+| `success` | The goal was achieved. |
+| `failed` | The goal was not achieved. |
+| `blocked` | The agent could not proceed — the summary says what blocked it. |
+| `partial` | Some of the goal was delivered. |
+
+The status describes how the **task** went, independently of whether the
+runtime worked. `summary` is one short paragraph a human can act on. Both
+are required.
+
+Three consequences worth knowing before you write a system prompt:
+
+- **This is the only clean ending.** It is the sole path to a `completed`
+  event. Nothing else the model can do ends an invocation successfully;
+  the remaining exits are the iteration cap, the budget ceiling, and
+  errors, all of which are failures.
+- **Bare text does not finish anything.** A turn that returns prose and no
+  tool calls is recorded, answered with a durable host notice asking the
+  model to continue or report an outcome, and followed by another model
+  turn. An agent whose prompt says "reply with your answer when done" will
+  loop until it hits `max_iterations`.
+- **Every invocation is offered it, declared or not.** The runtime appends
+  `builtin__report_outcome` to the effective tool list of every agent,
+  including one whose `tools:` list is empty — an agent that could not
+  call it could not finish. It is not a capability to opt into: do not
+  list it in `tools:`, and there is no sandbox dimension to grant.
+
+What is worth writing in the definition is *when* to call it and what
+belongs in the summary. Its availability is not something the definition
+controls.
+
 ## The sandbox
 
 Every tool call is checked against the agent's sandbox **before**
@@ -244,9 +358,20 @@ clear error message that the LLM sees and can adapt to.
 
 - Paths are canonicalised (resolved to their real location) before
   comparison, so `..` traversal and symlink escapes are defeated.
-- Paths in the agent definition can be absolute (`/data/project`)
-  or relative (`./data`). Relative paths are resolved against the
-  config file's directory.
+- **Prefer absolute paths** (`/data/project`). A relative path is
+  accepted, but it is stored verbatim and canonicalised at the moment of
+  each tool call — so it resolves against the **daemon's working
+  directory**, not the definition's directory and not the config's. Move
+  the definition and it still means the same thing; start `fqd` from
+  somewhere else and it does not.
+- **A prefix that cannot be canonicalised is skipped in silence.** If a
+  declared directory does not exist when the check runs — a typo, a
+  relative path that missed, a volume not yet mounted — that prefix
+  simply grants nothing. There is no error at load and no warning at use;
+  the agent gets `resolved path … is outside every allowed prefix` on
+  every call, as though it had been denied. When a grant appears to have
+  no effect, check that the directory exists as the daemon sees it before
+  suspecting the sandbox.
 - The sandbox is enforced at the **process level**, not the OS
   level. For stronger isolation see [ADR-0010](../adrs/accepted/0010-agent-execution-isolation.md).
 
@@ -306,8 +431,17 @@ sandbox:
 
 **Where the token resolves.** Sandbox paths always bind. In tool calls,
 substitution happens **only in declared path parameters** — properties
-whose JSON schema carries `format: "path"` (`cwd` on `builtin__exec`, `path` on
-`builtin__file_read`/`builtin__file_write`). Everything else is passed through verbatim:
+whose JSON schema carries `format: "path"`. There are five:
+
+| Tool | Parameter |
+|---|---|
+| `builtin__file_read` | `path` |
+| `builtin__file_write` | `path` |
+| `builtin__exec` | `cwd` |
+| `builtin__file_list` | `root` |
+| `builtin__file_search` | `root` |
+
+Everything else is passed through verbatim:
 file *contents*, command *arguments*, and any other string reach the tool
 exactly as the agent wrote them, so writing the literal text
 `${workspace}` into a file works and nothing silently rewrites agent
@@ -337,6 +471,29 @@ budget: 0.50   # half a dollar per invocation
 
 Omit `budget` to run without a ceiling. This is not recommended
 for unattended agents.
+
+## Iteration cap and reasoning effort
+
+Two further optional fields tune the invocation itself.
+
+```yaml
+max_iterations: 40      # per-agent cap on LLM turns
+effort: high            # reasoning effort for each request
+```
+
+- **`max_iterations`** overrides the daemon's default cap on LLM turns in
+  a single invocation. Omit it to inherit `fqd.toml`'s value. The cap is
+  literal, including `0`: an agent with `max_iterations: 0` stops before
+  its first model turn. Hitting the cap is a failure, not a completion —
+  it is the exit an agent takes when it never called `report_outcome`.
+- **`effort`** sets the model's reasoning effort per request: `minimal`,
+  `low`, `medium`, `high`, or `xhigh`. Omit it to leave the provider's
+  default. `minimal` exists for a real failure mode rather than for
+  economy — on gpt-5-family models the default reasoning scales to fill
+  `max_tokens` and can return empty content on short mechanical tasks.
+
+Both are top-level keys, so a typo in either is refused at load rather
+than ignored — see [The frontmatter is strict](#the-frontmatter-is-strict).
 
 ## MCP servers
 
@@ -377,10 +534,11 @@ mcp:
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
 ```
 
-A server that exposes **resources** also gets two host-fulfilled tools,
-`<server>__list_resources` and `<server>__read_resource` (e.g.
-`filesystem__read_resource`), so the agent can browse and read them on
-demand. Grant those by listing them in `tools:` too.
+A server that exposes **resources** also gets three host-fulfilled tools —
+`<server>__list_resources`, `<server>__read_resource`, and
+`<server>__list_resource_templates` (e.g. `filesystem__read_resource`) — so
+the agent can browse, read, and expand parameterised URIs on demand. Grant
+those by listing them in `tools:` too.
 
 ### Pinning resources with `static_resources`
 
@@ -501,8 +659,22 @@ recognises. Examples:
 
 Cost is calculated from the
 [LiteLLM pricing table](https://github.com/BerriAI/litellm),
-fetched at runtime start. If the model identifier is not in the
-table, cost is reported as $0 with a warning.
+fetched at daemon start and merged with any
+`[providers.<name>.pricing]` overrides.
+
+An identifier that resolves to no price is not tolerated at any stage —
+that is the whole of ADR-0004's guarantee, since a model tracking as $0
+would silently defeat every budget:
+
+- **At startup**, the daemon refuses to run and names each offending
+  model: `model "…" is declared but has no pricing — add
+  [providers.<name>.pricing."…"] or ensure the LiteLLM table lists it`.
+  The same check rejects an agent naming a model no provider declares.
+- **At use**, a second backstop refuses the dispatch before any WAL write
+  rather than proceeding at $0.
+
+So an unpriced model does not produce a $0 invocation and a warning; it
+produces a daemon that will not start.
 
 ## System prompt (the Markdown body)
 
@@ -512,6 +684,10 @@ system prompt. Write it as you would any LLM system prompt:
 - State the agent's role and personality
 - Describe what tools are available and when to use them
 - Specify output format expectations
+- Say when to call `report_outcome` and what belongs in the summary —
+  see [Ending the run](#ending-the-run); a prompt that instead says
+  "reply with your answer when you are done" produces an agent that
+  never finishes
 - Include any domain-specific instructions
 
 The body supports full Markdown formatting. Use headers, lists,
@@ -521,8 +697,9 @@ code blocks — anything that helps the LLM understand its task.
 
 ```sh
 # Check that the definition parses correctly (offline, no daemon needed).
-# Prints every optional field, set or not — `budget: not set (no cap)`
-# rather than an omitted line, so an absence is something you can read.
+# `budget` and `max_iterations` print whether or not they are set —
+# `budget: not set (no cap)` rather than an omitted line, so an absence
+# is something you can read rather than something you have to notice.
 fq agent validate agents/my-agent.md
 
 # List the agents the running daemon has loaded — its live registry,
@@ -535,3 +712,17 @@ fq trigger my-agent "Your prompt here."
 # Watch events as they flow (in another terminal)
 fq events tail --agent my-agent
 ```
+
+Only the first of those runs offline. The rest reach the daemon over its
+authenticated edge, so `fqd` must be running and this client paired with
+`fq connect` — see [Minimal agent](#minimal-agent).
+
+And know what `fq agent validate` is worth before you lean on it. It
+checks syntax and shape: that the frontmatter parses, that the fields it
+does know are well-formed, and that the definition builds. It catches a
+misspelled top-level key but not one nested inside `sandbox:` or `mcp:`,
+and it cannot reach the deployment's model or pricing config — so it both
+rejects the valid model-less shape and passes models the daemon will
+refuse (issue #508). The verdict that
+counts is the daemon starting and `fq agent list` showing the agent in the
+live registry.

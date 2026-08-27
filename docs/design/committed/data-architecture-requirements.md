@@ -78,7 +78,7 @@ Mapping the open problems on factor-q's roadmap to the shapes above. The point i
 | Approval gates | [`ARCHITECTURE.md` cross-cutting concerns](../../../ARCHITECTURE.md#security-and-access-control) | Pending approvals / waits | Same shape as suspension plus metadata about what's needed. |
 | Scheduled refresh of pricing data | [#344](https://github.com/bricef/factor-q/issues/344) | Schedules / wakeups | Tiny, low-frequency, but durable — pricing should refresh even if the operator restarts. |
 | Scheduled agent triggers | `adapters/fq-cron` (shipped) | Schedules / wakeups | Same shape; user-facing rather than runtime-internal. |
-| Workspace snapshotting | [`tool-isolation-model.md`](./tool-isolation-model.md) backlog | Per-invocation workspaces | Likely needs its own store; large blobs. |
+| Workspace snapshotting | [`tool-isolation-model.md`](../aspirational/tool-isolation-model.md) backlog | Per-invocation workspaces | Likely needs its own store; large blobs. |
 | Hot-reload of agent definitions | shipped (`fq reload`); config half [#114](https://github.com/bricef/factor-q/issues/114) | Static configuration (read-side) | Doesn't introduce new persistence; introduces a watcher. |
 | Long-lived agent waits (e.g. webhook receivers) | [`agent-os-architecture.md`](../aspirational/agent-os-architecture.md) | Latest state + a wakeup trigger | Composite — needs both the suspension shape and the wakeup shape. |
 | Crash recovery | discussed during reducer prototype | Latest state + a "what was in-flight" index | Composite — uses suspension state plus a way to enumerate it on startup. |
@@ -366,13 +366,14 @@ are constraints, not choices.
 
 | Decision | Source |
 |---|---|
-| NATS+JetStream is the source of truth for the agent audit log and the trigger work queue. | [`ADR-0011`](../../adrs/accepted/0011-event-bus-and-persistence.md) |
-| SQLite holds the queryable projection over the audit log. | [`event-schema.md`](./event-schema.md), implementation in `fq-runtime/src/projection/`. |
+| NATS+JetStream is the event bus and the trigger work queue, and holds the only copy of event bodies — but for a bounded window, not indefinitely. It is **not** the system of record. | [`ADR-0011`](../../adrs/accepted/0011-event-bus-and-persistence.md), whose source-of-truth half [`ADR-0026`](../../adrs/accepted/0026-event-log-system-of-record.md) overturned in 2026-07. The archive service ADR-0026 put in that role has not been built, so **nothing is the system of record for the trail today.** |
+| SQLite holds the queryable projection over the audit log. | [`event-schema.md`](./event-schema.md), implementation in `fq-runtime/src/control_plane/projection/`. |
 | The projection is **rebuildable from events**. | implementation invariant; the projection consumer is idempotent on `event_id`. |
 | Memory (long-term, collective) is delivered as MCP services, not built into the runtime's persistence. | [`ADR-0013`](../../adrs/accepted/0013-memory-as-mcp-service.md) |
 | Static configuration (`fqd.toml`), agent definitions, and skills are filesystem files. | [`ADR-0005`](../../adrs/accepted/0005-agent-definition-format.md), implementation. |
 | Pricing data is fetched from a remote source and cached locally; the cache is rebuildable. | implementation. |
-| Audit-log retention is operator-set; events default to 30 days, triggers to 24 hours. | [`bus.rs`](../../../services/fq-runtime/crates/fq-runtime/src/bus.rs) defaults. |
+| Audit-log retention is **fixed in code**, not operator-set: 30 days for events, 24 hours for triggers and advisories. Changing it means editing a constant and rebuilding, which Design Principle 8 says a tunable should not require. | [`bus.rs`](../../../services/fq-runtime/crates/fq-runtime/src/bus.rs) — `DEFAULT_MAX_AGE`, `DEFAULT_TRIGGER_MAX_AGE`. |
+| Control-plane retention **is** operator-set: `[state].retention_days` (default 30) sweeps `invocation_archive` and the projection's non-cost rows; `stale_worker_retention_days` (default 7) is a separate window on the worker roster. | [`config.rs`](../../../services/fq-runtime/crates/fq-runtime/src/config.rs) `StateConfig`. |
 | Secrets (API keys) are read from environment variables; factor-q itself does not write them anywhere. | [`fqd.toml`](../../../services/fq-runtime/crates/fq-cli/src/templates/fqd.toml) provider section. |
 
 ---
