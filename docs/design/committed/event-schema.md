@@ -63,6 +63,7 @@ When present (on `llm.response` events, and on the `llm.failure` events that bil
   "output_tokens": 567,
   "cache_read_tokens": 0,
   "cache_write_tokens": 0,
+  "reasoning_tokens": 402,
   "input_cost": 0.000308,
   "output_cost": 0.000710,
   "total_cost": 0.001018,
@@ -77,6 +78,8 @@ same name (`agent_turn`, or `sampling` / `elicitation` naming the MCP
 server that asked): sampling spend is attributable to its server and
 still counts toward the invocation total, which needs both facts on the
 one record.
+
+`reasoning_tokens` is the share of `output_tokens` the model spent thinking rather than speaking. It is carried here because the cost record is where anyone looks to ask what a call cost, and for a reasoning-first model that split is most of the answer — it was previously invisible in the cost data entirely. **It changes no figure**: reasoning is already inside `output_tokens`, so `output_cost` and `total_cost` are what they always were, and the pricing table is deliberately not told about it. `0` where the provider does not report the split, which is most of them — read that as "not reported", not as "no thinking happened".
 
 ## Annotations
 

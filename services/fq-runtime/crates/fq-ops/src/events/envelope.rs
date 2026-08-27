@@ -60,6 +60,16 @@ pub struct CostMetadata {
     pub cache_read_tokens: u32,
     #[serde(default)]
     pub cache_write_tokens: u32,
+    /// The share of `output_tokens` spent thinking rather than speaking.
+    ///
+    /// **Carried here because the cost record is where anyone looks to
+    /// ask what a call cost, and for a reasoning-first model this split
+    /// is most of the answer** — it was invisible in the cost data
+    /// entirely (#437). It changes no figure: reasoning is already
+    /// inside `output_tokens`, so `output_cost` and `total_cost` are what
+    /// they always were. `0` where the provider does not report it.
+    #[serde(default)]
+    pub reasoning_tokens: u32,
     pub input_cost: f64,
     pub output_cost: f64,
     pub total_cost: f64,

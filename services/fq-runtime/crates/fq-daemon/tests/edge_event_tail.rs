@@ -128,6 +128,7 @@ fn fixture_events() -> Vec<Event> {
                     output_tokens: 340,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
+                    reasoning_tokens: 0,
                 },
                 origin: LlmCallOrigin::AgentTurn,
             }),
@@ -148,6 +149,7 @@ fn fixture_events() -> Vec<Event> {
         cumulative_invocation_cost: 0.0125,
         cumulative_agent_cost: 0.0125,
         origin: LlmCallOrigin::AgentTurn,
+        reasoning_tokens: 0,
     });
     let tool = stamp(
         Event::new(

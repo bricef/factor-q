@@ -460,6 +460,7 @@ impl SimWorld {
                     output_tokens: 10,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
+                    reasoning_tokens: 0,
                 },
             }
         }
@@ -802,6 +803,7 @@ mod tests {
                 output_tokens: 10,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                reasoning_tokens: 0,
             },
         }
     }
@@ -822,6 +824,7 @@ mod tests {
                 output_tokens: 8,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                reasoning_tokens: 0,
             },
         }
     }
@@ -847,6 +850,7 @@ mod tests {
                 output_tokens: 10,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                reasoning_tokens: 0,
             },
         }
     }
@@ -1974,6 +1978,7 @@ mod budget_properties {
             output_tokens: output,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            reasoning_tokens: 0,
         }
     }
 
@@ -2265,6 +2270,7 @@ mod soak {
                 output_tokens: pick(&mut rng, 80_000) as u32,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                reasoning_tokens: 0,
             })
             .collect();
         let tool_kinds: Vec<Option<bool>> = (0..turns)

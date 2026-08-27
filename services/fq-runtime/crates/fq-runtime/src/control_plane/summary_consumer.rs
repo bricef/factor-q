@@ -346,6 +346,7 @@ impl SummaryConsumer {
             cumulative_invocation_cost: total_cost,
             cumulative_agent_cost: total_cost,
             origin: Default::default(),
+            reasoning_tokens: 0,
         });
 
         match self.bus.publish(&summary_event).await {

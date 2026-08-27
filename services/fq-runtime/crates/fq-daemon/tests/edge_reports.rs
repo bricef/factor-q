@@ -98,6 +98,7 @@ fn cost(seq: u32, total_cost: f64, model: &str) -> CostMetadata {
         cumulative_invocation_cost: total_cost,
         cumulative_agent_cost: total_cost,
         origin: LlmCallOrigin::AgentTurn,
+        reasoning_tokens: 0,
     }
 }
 
@@ -127,6 +128,7 @@ async fn seed_costs(cache: &std::path::Path) {
                     output_tokens: 340,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
+                    reasoning_tokens: 0,
                 },
                 origin: LlmCallOrigin::AgentTurn,
             }),

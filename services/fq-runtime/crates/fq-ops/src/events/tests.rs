@@ -623,6 +623,7 @@ fn llm_failure_omits_usage_when_unknown() {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            reasoning_tokens: 0,
         }),
         origin: LlmCallOrigin::default(),
     });
@@ -797,6 +798,7 @@ fn event_with_cost_sets_envelope_cost() {
         cumulative_invocation_cost: 0.0006,
         cumulative_agent_cost: 0.0006,
         origin: LlmCallOrigin::AgentTurn,
+        reasoning_tokens: 0,
     };
     let event = event.with_cost(cost.clone());
     assert_eq!(event.envelope.cost.as_ref(), Some(&cost));
@@ -818,6 +820,7 @@ fn cost_metadata_round_trips_on_envelope() {
         cumulative_invocation_cost: 0.3,
         cumulative_agent_cost: 0.3,
         origin: LlmCallOrigin::AgentTurn,
+        reasoning_tokens: 0,
     };
     let event = Event::new(
         AgentId::new("agent").unwrap(),
@@ -1002,9 +1005,18 @@ fn consumer_view_serialises_without_annotations_field_even_with_annotations() {
 
     let view = event.for_consumer_context();
     let serialised = serde_json::to_string(&view).unwrap();
+    // Assert on the annotation's *value*, not on the substring
+    // "reasoning". The payload legitimately carries `usage.
+    // reasoning_tokens` — a cost figure, not a trace — and a name-based
+    // check cannot tell the two apart. What must never appear is the
+    // trace itself.
     assert!(
-        !serialised.contains("reasoning"),
+        !serialised.contains("I tried 41"),
         "reasoning trace must not leak through consumer view"
+    );
+    assert!(
+        !serialised.contains("\"annotations\""),
+        "the annotations layer must not appear at all"
     );
     assert!(
         !serialised.contains("I tried 41"),

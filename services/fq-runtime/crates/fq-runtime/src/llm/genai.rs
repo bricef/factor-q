@@ -588,11 +588,28 @@ fn convert_usage(usage: &provider::chat::Usage) -> TokenUsage {
         None => (0, 0),
     };
 
+    // The thought-vs-spoken split. Providers fold reasoning into
+    // `completion_tokens`, so this is a decomposition of a number we
+    // already have — reading it cannot change what anything costs, and
+    // the pricing table is deliberately not told about it.
+    //
+    // Most providers omit `completion_tokens_details` entirely, which
+    // reads as 0: not "no thinking happened", but "not reported". The
+    // two are indistinguishable on this wire and the distinction is not
+    // worth an Option here, because nothing branches on it.
+    let reasoning_tokens = usage
+        .completion_tokens_details
+        .as_ref()
+        .and_then(|d| d.reasoning_tokens)
+        .unwrap_or(0)
+        .max(0) as u32;
+
     TokenUsage {
         input_tokens,
         output_tokens,
         cache_read_tokens: cache_read,
         cache_write_tokens: cache_write,
+        reasoning_tokens,
     }
 }
 
@@ -1044,6 +1061,106 @@ mod tests {
             Some("call_1"),
             "the tool call rides along unchanged"
         );
+    }
+
+    /// The split is captured when the provider reports it.
+    #[test]
+    fn reasoning_tokens_are_captured_from_completion_details() {
+        let usage = provider::chat::Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(500),
+            completion_tokens_details: Some(provider::chat::CompletionTokensDetails {
+                reasoning_tokens: Some(400),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let converted = convert_usage(&usage);
+
+        assert_eq!(converted.output_tokens, 500);
+        assert_eq!(converted.reasoning_tokens, 400);
+        assert_eq!(
+            converted.spoken_tokens(),
+            100,
+            "the split decomposes output_tokens; it does not add to them"
+        );
+    }
+
+    /// **I4, the invariant that makes this safe.** `reasoning_tokens` is
+    /// a decomposition of a number we already had, so pricing must not
+    /// see it and the bill must not move. Asserted by pricing the same
+    /// usage twice — once with the split reported, once without — and
+    /// requiring bit-identical costs.
+    ///
+    /// If this ever fails, we started charging twice for thinking.
+    #[test]
+    fn the_reasoning_split_does_not_change_what_a_call_costs() {
+        let pricing = crate::pricing::ModelPricing {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+            cache_read_per_million: Some(0.3),
+            cache_write_per_million: Some(3.75),
+        };
+
+        let without = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 200,
+            cache_write_tokens: 100,
+            reasoning_tokens: 0,
+        };
+        let with_split = TokenUsage {
+            reasoning_tokens: 400,
+            ..without
+        };
+
+        let (in_a, out_a, total_a) = pricing.calculate(&without);
+        let (in_b, out_b, total_b) = pricing.calculate(&with_split);
+
+        assert_eq!(
+            total_a.to_bits(),
+            total_b.to_bits(),
+            "reporting the thought/spoken split must not change total_cost"
+        );
+        assert_eq!(in_a.to_bits(), in_b.to_bits());
+        assert_eq!(
+            out_a.to_bits(),
+            out_b.to_bits(),
+            "output cost is priced on output_tokens, which already includes reasoning"
+        );
+    }
+
+    /// A provider that does not report the split reads as 0 rather than
+    /// failing the conversion — most of them do not report it, and an
+    /// unreported split is not an error.
+    #[test]
+    fn absent_completion_details_read_as_no_reported_reasoning() {
+        let usage = provider::chat::Usage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            completion_tokens_details: None,
+            ..Default::default()
+        };
+        let converted = convert_usage(&usage);
+        assert_eq!(converted.reasoning_tokens, 0);
+        assert_eq!(converted.spoken_tokens(), 20);
+    }
+
+    /// Defence against a provider reporting more reasoning than
+    /// completion tokens — genai already corrects one such case for xAI,
+    /// so the shape is real. `spoken_tokens` saturates rather than
+    /// wrapping to four billion.
+    #[test]
+    fn a_nonsensical_split_saturates_rather_than_wrapping() {
+        let usage = TokenUsage {
+            input_tokens: 0,
+            output_tokens: 10,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 99,
+        };
+        assert_eq!(usage.spoken_tokens(), 0);
     }
 
     // endregion: reasoning round-trip
