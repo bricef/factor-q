@@ -68,21 +68,12 @@ fn everything_config() -> McpServerConfig {
     }
 }
 
-/// E3: factor-q speaks the **Streamable HTTP** remote transport (the
-/// 2025-11-25 spec transport), not just stdio. Start the *same* pinned
-/// everything server in `streamableHttp` mode on a loopback port and
-/// drive a full discovery handshake over HTTP. Loopback TCP, so this
-/// runs under direct `cargo` (the `just` sandbox blocks it, same as
-/// NATS).
+/// Start the pinned everything server in `streamableHttp` mode on a
+/// free loopback port and wait until it is serving. Returns the child
+/// (reaped as a group on drop) and the `/mcp` url to dial.
 #[cfg(unix)]
-#[tokio::test]
-async fn streamable_http_transport_discovers_tools_over_http() {
+async fn spawn_http_everything_server() -> (GroupedChild, String) {
     use std::time::Duration;
-
-    if !require_npx() {
-        eprintln!("skipping: npx not found");
-        return;
-    }
 
     // Allocate a free loopback port (drop the listener so the child can
     // bind it), then start the everything server in streamable-HTTP mode.
@@ -99,7 +90,7 @@ async fn streamable_http_transport_discovers_tools_over_http() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     fq_test_support::spawn_grouped(&mut command);
-    let mut child = GroupedChild(
+    let child = GroupedChild(
         command
             .spawn()
             .expect("spawn streamable-http everything server"),
@@ -121,18 +112,43 @@ async fn streamable_http_transport_discovers_tools_over_http() {
     assert!(listening, "everything server never listened on port {port}");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    (child, format!("http://127.0.0.1:{port}/mcp"))
+}
+
+/// A tool-only remote server config — the shape a `url:` declaration
+/// produces (`command`/`args`/`env` are stdio-only and stay empty).
+fn remote_config(name: &str, url: &str) -> McpServerConfig {
+    McpServerConfig {
+        name: name.to_string(),
+        command: String::new(),
+        args: vec![],
+        env: vec![],
+        url: Some(url.to_string()),
+    }
+}
+
+/// E3: factor-q speaks the **Streamable HTTP** remote transport (the
+/// 2025-11-25 spec transport), not just stdio. Start the *same* pinned
+/// everything server in `streamableHttp` mode on a loopback port and
+/// drive a full discovery handshake over HTTP. Loopback TCP, so this
+/// runs under direct `cargo` (the `just` sandbox blocks it, same as
+/// NATS).
+#[cfg(unix)]
+#[tokio::test]
+async fn streamable_http_transport_discovers_tools_over_http() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let (mut child, url) = spawn_http_everything_server().await;
+
     // Connect over Streamable HTTP and discover tools — the handshake
     // and every operation are transport-agnostic, so success here proves
     // the remote transport works end to end.
     let mut manager = McpClientManager::new();
     let result = manager
-        .start_server(McpServerConfig {
-            name: "everything-http".to_string(),
-            command: String::new(),
-            args: vec![],
-            env: vec![],
-            url: Some(format!("http://127.0.0.1:{port}/mcp")),
-        })
+        .start_server(remote_config("everything-http", &url))
         .await;
     let tools = result.expect("start everything server over streamable HTTP");
     assert!(
@@ -144,6 +160,75 @@ async fn streamable_http_transport_discovers_tools_over_http() {
     manager.shutdown().await;
     fq_test_support::kill_group(&child);
     let _ = child.wait().await;
+}
+
+/// Two *different* remote servers must both start, and a repeat of one
+/// must still collapse onto the running connection.
+///
+/// The shared-server dedup key used to be `(command, args)`, and both
+/// are empty for a `url:` server — so every remote server hashed to
+/// `("", [])`, the second one declared was mistaken for a duplicate of
+/// the first, skipped, and logged only at `debug`. Declaring two remote
+/// servers silently gave you one. This drives both halves of the key's
+/// job at once: separate distinct endpoints, share identical ones.
+#[cfg(unix)]
+#[tokio::test]
+async fn distinct_remote_servers_both_start_while_a_repeated_one_dedups() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+
+    let (mut first_child, first_url) = spawn_http_everything_server().await;
+    let (mut second_child, second_url) = spawn_http_everything_server().await;
+    assert_ne!(first_url, second_url, "two distinct endpoints");
+
+    let mut manager = McpClientManager::new();
+    let first = manager
+        .start_server(remote_config("remote-one", &first_url))
+        .await
+        .expect("start the first remote server");
+    assert!(
+        !first.is_empty(),
+        "the first remote server should contribute tools"
+    );
+
+    // A different endpoint is a different server: it must actually
+    // start, not be written off as a duplicate of the first.
+    let second = manager
+        .start_server(remote_config("remote-two", &second_url))
+        .await
+        .expect("start the second remote server");
+    assert!(
+        second
+            .iter()
+            .any(|tool| tool.name().starts_with("remote-two__")),
+        "the second remote server must start and register its own \
+         namespaced tools, not be skipped as a duplicate; got {:?}",
+        second
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // ...while the *same* endpoint declared again — a second agent
+    // naming the server it already shares — still collapses onto the
+    // one running connection. That sharing is what dedup is for.
+    let repeat = manager
+        .start_server(remote_config("remote-one-again", &first_url))
+        .await
+        .expect("re-declaring a started endpoint is a no-op, not an error");
+    assert!(
+        repeat.is_empty(),
+        "a repeat declaration of a running endpoint must dedup, got {} tools",
+        repeat.len()
+    );
+
+    manager.shutdown().await;
+    for child in [&mut first_child, &mut second_child] {
+        fq_test_support::kill_group(child);
+        let _ = child.wait().await;
+    }
 }
 
 #[cfg(unix)]

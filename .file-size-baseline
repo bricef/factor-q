@@ -30,7 +30,7 @@ services/fq-dashboard/src/render.rs 1402
 # count would be worse code than the count it saved. Raised rather than
 # budgeted, per the rule above, so the trade is visible in the diff.
 services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1050
-services/fq-runtime/crates/fq-runtime/src/mcp.rs 1850
+services/fq-runtime/crates/fq-runtime/src/mcp.rs 1844
 services/fq-runtime/crates/fq-runtime/src/views.rs 815
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 2605
 services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1416
