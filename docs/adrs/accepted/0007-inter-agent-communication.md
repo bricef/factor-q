@@ -15,6 +15,11 @@ operations); and adds spawn to the capability-grant lineage of
 §7, which flagged this as the frontier the project's "multi-agent" identity
 depends on.
 
+Implementation: pending — nothing here is built. There is no graph executor
+and no spawn; the reserved `trace_id` / `parent_event_id` envelope fields
+this ADR makes load-bearing exist but carry no traversal yet. Its two-node
+vertical plan is **held, not stalled** (#414, #429).
+
 ## Context
 
 factor-q's identity is a multi-agent runtime, but multi-agent is unbuilt: there

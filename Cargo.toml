@@ -36,6 +36,17 @@ repository = "https://github.com/bricef/factor-q"
 # manifests use it; single-crate deps stay in their crate's manifest so
 # this table reads as the genuinely shared surface.
 #
+# The internal entries below have drifted from that policy in both
+# directions, and the table does not currently read as the shared
+# surface (#512):
+#   * `fq-daemon` is listed here and no member opts into it;
+#     `fq-runtime` has exactly one user (fq-daemon).
+#   * `fq-edge` has three (fq-cli, fq-daemon, fq-dashboard) and is
+#     declared by path in each, unlike its sibling `fq-ops`.
+# Reconciling them is a manifest change, not a comment change; until
+# then, read the internal half of this table as historical rather than
+# as the policy applied.
+#
 # tokio is version-only on purpose: feature sets are per-crate policy
 # (binaries take "full"; library crates carry a trimmed list, with the
 # dev-dependency re-adding "full" for their test builds).
@@ -61,8 +72,11 @@ proptest = "1"
 schemars = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # A deserialiser wrapper that reports the keys serde silently dropped.
-# Test-only: it is how the `fq init` template gate tells "the daemon
-# accepts this file" from "the daemon reads every key in it".
+# Production: `Config::from_toml_str` runs every daemon config through
+# it and refuses to start on an unknown key, which `deny_unknown_fields`
+# cannot express while `ProvidersConfig` needs `#[serde(flatten)]`. Also
+# how the `fq init` template gate tells "the daemon accepts this file"
+# from "the daemon reads every key in it".
 serde_ignored = "0.1"
 serde_json = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }

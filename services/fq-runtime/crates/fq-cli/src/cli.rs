@@ -53,9 +53,10 @@ pub(crate) struct GlobalArgs {
     ///
     /// The variable names the binary, because the two binaries' configs
     /// are different files with different shapes. A shared `FQ_CONFIG`
-    /// pointed both at one file, and since neither config rejects
-    /// unknown fields, each silently ignored the other's tables rather
-    /// than saying so.
+    /// pointed both at one file, which now breaks in two different
+    /// ways: this client still ignores keys it does not know, so it
+    /// would silently skip the daemon's tables, while `fqd` rejects
+    /// unknown keys outright and would refuse to start on this file's.
     #[arg(long, env = "FQ_CLI_CONFIG", default_value = DEFAULT_CONFIG_PATH, global = true)]
     config: PathBuf,
 
@@ -173,11 +174,13 @@ pub(crate) enum Commands {
     ///
     /// Asks the running daemon (`control.status`). With none reachable
     /// it does NOT fail outright: it reports the absence as the
-    /// finding, still answers what needed no daemon — the resolved
-    /// configuration, and whether the store files that configuration
-    /// names exist — and exits non-zero, so a script can tell "there
-    /// is a runtime" from "there is not". Counts are reported, not
-    /// judged; `fq doctor --fail-on-issues` is the health gate.
+    /// finding, still answers what needed no daemon — the edge address
+    /// this client resolved — and exits non-zero, so a script can tell
+    /// "there is a runtime" from "there is not". The store paths are
+    /// the daemon's and are deliberately withheld when none answers,
+    /// rather than guessed at from local configuration. Counts are
+    /// reported, not judged; `fq doctor --fail-on-issues` is the
+    /// health gate.
     Status {
         /// Emit the structured report as JSON instead of the
         /// human-readable overview.
@@ -427,10 +430,12 @@ pub(crate) enum InvocationCommands {
     },
     /// Show the full conversation transcript for an invocation: the
     /// LLM turns and tool calls WITH their payloads (assistant text,
-    /// tool parameters, tool results), reconstructed from the worker
-    /// WAL. Unlike `show`/`events query`, which print headers only.
-    /// Read-only; snapshot mode needs no NATS. `--follow` appends new
-    /// turns live from the event bus until Ctrl-C.
+    /// tool parameters, tool results). Unlike `show`/`events query`,
+    /// which print headers only. Read-only, and every read rides the
+    /// authenticated edge: the snapshot is `turn.list` behind the
+    /// opening prompt from `invocation.get`, and `--follow` long-polls
+    /// `turn.stream` until Ctrl-C. The daemon owns the worker WAL these
+    /// are folded from; this client never opens it.
     ///
     /// NOTE: tool output is shown verbatim and is NOT redacted — a
     /// transcript may contain secrets that appeared in a tool result
@@ -439,7 +444,8 @@ pub(crate) enum InvocationCommands {
         /// Invocation id to inspect.
         id: String,
         /// After printing the snapshot, block and append new turns
-        /// live from `fq.agent.<agent_id>.>` until Ctrl-C.
+        /// live from `turn.stream`, resuming from a cursor pinned
+        /// before the snapshot, until Ctrl-C.
         #[arg(long, short = 'f')]
         follow: bool,
         /// Emit machine-readable JSON instead of human-readable output.

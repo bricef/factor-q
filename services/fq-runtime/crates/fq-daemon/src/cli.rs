@@ -56,9 +56,10 @@ pub(crate) fn init_tracing(format: LogFormat) {
     }
 }
 
-/// Global arguments available on every subcommand. Each flag has a
-/// corresponding environment variable, and together they override values
-/// loaded from the config file.
+/// The daemon's arguments. `fqd` has no subcommands — it starts, runs
+/// and stops — so these are simply its flags. Each has a corresponding
+/// environment variable, and together they override values loaded from
+/// the config file.
 ///
 /// Precedence: CLI flag > env var > config file > default.
 #[derive(Args, Clone)]
@@ -67,9 +68,10 @@ pub(crate) struct GlobalArgs {
     ///
     /// The variable names the binary, because the two binaries' configs
     /// are different files with different shapes. A shared `FQ_CONFIG`
-    /// pointed both at one file, and since neither config rejects
-    /// unknown fields, each silently ignored the other's tables rather
-    /// than saying so.
+    /// pointed both at one file, which now breaks in two different
+    /// ways: this daemon rejects unknown keys outright and would refuse
+    /// to start on the client's tables, while `fq` still ignores keys
+    /// it does not know and would silently skip this file's.
     #[arg(long, env = "FQ_DAEMON_CONFIG", default_value = DEFAULT_CONFIG_PATH, global = true)]
     config: PathBuf,
 

@@ -2,9 +2,31 @@
 
 ## Status
 
-Draft. Designed around the reducer model for the guest. Most
-initial open questions are resolved; remaining open items are
-listed at the end.
+**Aspirational — target design, not a description of what runs.**
+Moved here from `committed/` on 2026-08-25.
+
+The premise is retired: harness-level WASM was abandoned on
+2026-05-22 (see
+[the prototype's closing note](../../plans/closed/2026-04-19-wasm-harness-prototype.md)),
+and the reducer runs natively. There are no wasm/wasmtime/wit
+dependencies in the workspace and no `.wit` package. ADR-0028 keeps
+WASM only as a possible *per-tool* isolation tier, which is a
+different boundary from the host/guest one described here.
+
+**The reducer shape below is real and faithfully implemented** — that
+is the part worth reading. The host/guest ABI is not. Five claims in
+particular describe the opposite of what the runtime does, and are
+left in place rather than rewritten because this is now a design
+document: resume *is* deterministic replay over the WAL; the
+persisted state blob is written but not read on resume; requests
+dispatch sequentially, not concurrently; budget exhaustion bypasses
+the reducer rather than returning through it; and sub-agent
+orchestration tools do not exist.
+
+One practical warning: the `models:` frontmatter block in the agent
+example below is not a real shape. `Frontmatter` has a single
+`model:` field and does not reject unknown keys, so copying that
+block gets it silently ignored rather than refused.
 
 ## Context
 

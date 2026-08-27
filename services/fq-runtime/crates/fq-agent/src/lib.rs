@@ -237,8 +237,16 @@ impl Agent {
     /// Produce a [`ConfigSnapshot`] for inclusion in a `Triggered` event.
     ///
     /// Snapshots are how replay is made meaningful: even if the underlying
-    /// agent definition is later modified, the event log still shows
-    /// exactly what was running at trigger time.
+    /// agent definition is later modified, the event log still shows the
+    /// captured configuration rather than today's.
+    ///
+    /// **It is not the whole configuration.** [`Agent`] carries 16
+    /// fields and `ConfigSnapshot` 11: `max_iterations`, `effort`,
+    /// `trigger`, `mcp_servers` and `static_resources` are dropped, and
+    /// each of them changes what actually ran. Read a snapshot as "the
+    /// prompt, tools, sandbox, budget and grants at trigger time", not
+    /// as the definition. Tracked in #512; until it is fixed, adding a
+    /// field to `Agent` does not add it here.
     pub fn to_snapshot(&self) -> ConfigSnapshot {
         ConfigSnapshot {
             name: self.id.as_str().to_string(),
@@ -360,7 +368,7 @@ impl Sandbox {
     /// canonicalisation happens at tool-check time.
     ///
     /// Fails loud when a path uses the token and no workspace is bound
-    /// (design principle 7 — an unresolvable grant must not silently
+    /// (design principle 3 — an unresolvable grant must not silently
     /// narrow or widen).
     pub fn to_tool_sandbox(
         &self,

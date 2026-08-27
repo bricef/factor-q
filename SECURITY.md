@@ -9,9 +9,14 @@ one-line caveats.
 - **Sandbox:** built-in tools are denied by default, and filesystem and
   command working-directory path allowlists are enforced. Agent definitions
   may also declare `sandbox.env` and `sandbox.network`, but those declarations
-  are not yet enforced ([#34](https://github.com/bricef/factor-q/issues/34),
-  [#35](https://github.com/bricef/factor-q/issues/35)). Until they are, treat
-  every agent as network-unrestricted regardless of its definition.
+  are not yet enforced. Until they are, treat every agent as
+  network-unrestricted regardless of its definition. Enforcement is tracked
+  by [#208](https://github.com/bricef/factor-q/issues/208) (a CONNECT-filtering
+  forward proxy) and [#209](https://github.com/bricef/factor-q/issues/209)
+  (containerised isolation, ADR-0010); the issues that first identified the
+  gap, [#34](https://github.com/bricef/factor-q/issues/34) and
+  [#35](https://github.com/bricef/factor-q/issues/35), are closed — #35 by a
+  change that added a load-time warning, not enforcement.
 - **NATS:** the bundled NATS service requires a static development token. The
   token is committed to this public repository, so it is not a secret: do not
   expose the port beyond the host, and replace the token for any non-local

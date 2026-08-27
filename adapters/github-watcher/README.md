@@ -1,7 +1,7 @@
 # github-watcher
 
 A **standalone external trigger adapter** for factor-q. It polls a GitHub
-repository for issues labelled `ready` and, for each, triggers a factor-q
+repository for issues labelled `status:ready` and, for each, triggers a factor-q
 agent — so the human input becomes *"write a clear issue and label it
 `ready`"* and the fleet does the rest. It then **observes the outcome** of
 what it triggered and moves the issue's label onward, so a triggered issue
@@ -34,7 +34,7 @@ ready ──trigger──▶ in-progress ──completed (task success/partial)�
                         └──failed (terminal / retries exhausted)──▶ failed
 ```
 
-**On each poll**, for every open issue labelled `ready`:
+**On each poll**, for every open issue labelled `status:ready`:
 
 1. **Relabel** the issue `ready` → `in-progress`.
 2. **Then** publish a trigger on `fq.trigger.<agent>`.
@@ -100,11 +100,11 @@ Every flag has an environment-variable fallback.
 | `--repo` | `GHW_REPO` | *(required)* | `owner/name` |
 | `--agent` | `GHW_AGENT` | `m0-issue-fix` | target agent id |
 | `--nats-url` | `GHW_NATS_URL` | `nats://127.0.0.1:4222` | the daemon's NATS |
-| `--ready-label` | `GHW_READY_LABEL` | `ready` | the label that triggers |
-| `--in-progress-label` | `GHW_IN_PROGRESS_LABEL` | `in-progress` | applied on trigger |
-| `--in-review-label` | `GHW_IN_REVIEW_LABEL` | `in-review` | applied when the agent completes (PR open) |
-| `--failed-label` | `GHW_FAILED_LABEL` | `failed` | applied when retries are exhausted / terminal failure |
-| `--done-label` | `GHW_DONE_LABEL` | `done` | applied when the proposed PR merges |
+| `--ready-label` | `GHW_READY_LABEL` | `status:ready` | the label that triggers |
+| `--in-progress-label` | `GHW_IN_PROGRESS_LABEL` | `status:in-progress` | applied on trigger |
+| `--in-review-label` | `GHW_IN_REVIEW_LABEL` | `status:in-review` | applied when the agent completes (PR open) |
+| `--failed-label` | `GHW_FAILED_LABEL` | `status:failed` | applied when retries are exhausted / terminal failure |
+| `--done-label` | `GHW_DONE_LABEL` | `status:done` | applied when the proposed PR merges |
 | `--poll` | `GHW_POLL` | `60s` | must be ≥ 60s (rate limits) |
 | `--max-per-poll` | `GHW_MAX_PER_POLL` | `3` | 0 = unbounded |
 | `--max-retries` | `GHW_MAX_RETRIES` | `2` | bounded auto-retry budget per issue for transient failures |

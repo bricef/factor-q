@@ -4,6 +4,18 @@
 
 Accepted
 
+Implementation: complete — the reducer harness is built
+(`services/fq-runtime/crates/fq-runtime/src/worker/reducer/`), verified to
+the bar this ADR asks for
+([reducer verification](../../plans/closed/2026-07-05-reducer-verification.md),
+after [the native prototype](../../plans/closed/2026-04-25-native-reducer-prototype.md)),
+and documented live in
+[the reducer-harness guide](../../guide/reducer-harness.md). The fold, the
+runtime-owned loop, per-step state persistence and the language boundary at
+tool dispatch are all real. Two clauses of the "what an agent is" list below
+are not — agents carry no signature and no compiled prompt artifact; see the
+note there.
+
 ## Context
 
 Factor-q's value proposition rests substantially on durable execution: long-running agentic work that survives crashes, supports replay against modified configurations, and provides cost enforcement and sandbox discipline throughout. The locus of these properties is the agent harness — the loop that constructs LLM requests, dispatches tool calls, and accumulates state across steps within a single agent invocation.
@@ -31,6 +43,18 @@ An "agent" in factor-q is a configuration consumed by this harness:
 - A declared tool set
 - A capability/sandbox declaration
 - A cost budget
+
+> Two of those five never landed. The real `Agent`
+> (`services/fq-runtime/crates/fq-agent/src/lib.rs`) carries `id`, `model`,
+> `system_prompt`, `tools`, `sandbox`, `budget`, `max_iterations`, `effort`,
+> `trigger`, `mcp_servers`, `static_resources` and the three MCP grants —
+> there is **no signature field of any kind**, and no compiled prompt
+> artifact: the prompt is the Markdown body verbatim
+> ([ADR-0005](0005-agent-definition-format.md)). Signatures remain a design
+> concept in
+> [signatures-and-optimization-hierarchy.md](../../design/aspirational/signatures-and-optimization-hierarchy.md),
+> and the only place they are being made concrete is the held graph-executor
+> plan (#414). Read this list as the target shape, not as today's agent.
 
 The harness loop is in Rust. Tool implementations may be in any language and are dispatched by the harness as subprocess calls, MCP tool invocations, or in-process Rust functions. The language boundary is at the tool dispatch boundary, not the loop boundary.
 
@@ -88,6 +112,10 @@ This option was rejected because long-running autonomous work is a primary use c
 ## References
 
 - ADR-0013 (memory delegation to MCP services) — establishes the pattern of runtime + MCP for capabilities the runtime doesn't own
-- inter-node-contracts-and-event-layers.md — establishes the typed contract boundary the harness operates over
-- signatures-and-optimization-hierarchy.md — establishes signatures as primary, agents as bindings
-- storage-taxonomy-and-signature-kinds.md — establishes the storage mechanisms the harness writes to
+- [inter-node-contracts-and-event-layers.md](../../design/aspirational/inter-node-contracts-and-event-layers.md) — establishes the typed contract boundary the harness operates over
+- [signatures-and-optimization-hierarchy.md](../../design/aspirational/signatures-and-optimization-hierarchy.md) — establishes signatures as primary, agents as bindings
+- [storage-taxonomy-and-signature-kinds.md](../../design/aspirational/storage-taxonomy-and-signature-kinds.md) — establishes the storage mechanisms the harness writes to
+
+All three are in `design/aspirational/`, which is load-bearing for reading
+this ADR: they are the source of the signature framing above, and their
+being aspirational is why that framing has not landed.

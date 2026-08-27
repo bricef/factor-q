@@ -12,6 +12,17 @@ losing or corrupting in-flight work. The surrounding continuous-delivery
 context here and is captured separately; this ADR fixes the drain/suspend/
 resume model those depend on.
 
+Implementation: complete, and in daily use. Drain is the default bring-down
+(#23, #24, #29, #32, then #303 folding it into `fq down` per #271), and the
+dogfood deploy script uses it, citing this ADR by number. **Read the verb as
+`fq down`, not `fq drain`, throughout the Decision below** — see the
+Addendum. Manual rollback exists (`deploy.sh <previous-sha>`). Two of the
+Open questions have since been answered and are annotated there. Still open:
+the post-deploy health gate and automated rollback (#339), an auto-deploy
+watcher, and an operator escape from a stalled drain other than SIGKILL
+(#509 — the deadline hard-stop this ADR promises does work; a signal-based
+abort was never part of it).
+
 ## Context
 
 The dogfood daemon is stateful and long-running: it holds in-flight agent
@@ -43,7 +54,9 @@ Suspend/resume is therefore not adjacent to continuous delivery here — it
    clean checkpoint, then resuming it under the new binary — never by
    interrupting it and relying on crash recovery for the common case.
 
-2. **`fq drain` is the mechanism** — a control command in the same family as
+2. **`fq drain` is the mechanism** (since folded into `fq down`, which
+   drains by default — see the Addendum; `--now` / `--no-drain` skip it) — a
+   control command in the same family as
    `fq reload` (control message → daemon acts). On receipt the daemon:
    a. stops consuming new triggers (pauses/unsubscribes the trigger
       consumer);
@@ -55,7 +68,7 @@ Suspend/resume is therefore not adjacent to continuous delivery here — it
 
 3. **Bounded wait, with a defined fallback.** A step that wraps a long tool
    call (e.g. a `just ci` build) will not reach a boundary quickly, so
-   `fq drain` waits gracefully only up to a deadline *T*; past *T* it hard-
+   the drain (`fq down`) waits gracefully only up to a deadline *T*; past *T* it hard-
    stops and lets ordinary crash-recovery pick up the remainder. Graceful-
    with-a-deadline — never block forever.
 
@@ -113,8 +126,12 @@ exerciser.
 
 **Interlocks.** Builds directly on the reducer WAL/recovery, `ConfigSnapshot`
 (ADR-0020), and ack-on-dispatch; composes with ADR-0010 (containers /
-isolation) and reuses the [ADR-0026](../accepted/0026-event-log-system-of-record.md)
-event log for the audit of a deploy as a first-class event.
+isolation) and would reuse the
+[ADR-0026](../accepted/0026-event-log-system-of-record.md)
+event log for the audit of a deploy as a first-class event. That last
+interlock is intent only, and rests on two things that do not exist: there
+is no deploy event (no deploy payload and no deploy subject), and ADR-0026's
+archive service is itself unbuilt.
 
 ## Alternatives considered
 
@@ -136,7 +153,12 @@ event log for the audit of a deploy as a first-class event.
   already emitted an external side effect? (The safety argument above assumes
   the result is persisted at the boundary; the mid-step hard-stop case
   inherits crash-recovery's existing categorisation.)
-- **The drain deadline *T*** and the exact hard-stop fallback semantics.
+- ~~**The drain deadline *T*** and the exact hard-stop fallback
+  semantics.~~ **Answered.** *T* is `drain_deadline_ms`, a config setting
+  defaulting to 120 s; past it, `fq down` hard-stops and recovery takes
+  over. The dogfood deploy script layers its own `DRAIN_WAIT` (default
+  180 s) on top. The operator-abort half is not answered — a stalled drain
+  still has no escape but SIGKILL (#509).
 - **Health-check definition** (consumers connected? a synthetic trigger
   round-trips?) and the **rollback mechanism** (image pinning, versions
   retained) — likely a companion ADR on the CD pipeline + safety layer.

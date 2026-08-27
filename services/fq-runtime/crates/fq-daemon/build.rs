@@ -1,5 +1,7 @@
-//! Build script: stamps git + build metadata into the binary so `fq
-//! version` (and `fq --version`) report exactly which build is running.
+//! Build script: stamps git + build metadata into the binary so `fqd
+//! --version`, the startup banner and the `system.startup` event report
+//! exactly which build is running. `fq status` renders the same string
+//! back to an operator, from `control.status`.
 //! Every value degrades gracefully to "unknown"/empty when git or the
 //! `.git` directory is unavailable (e.g. building from a crate tarball).
 

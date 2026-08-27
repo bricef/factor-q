@@ -1,17 +1,24 @@
 //! Build-time version metadata and the `fq version` verb.
 //!
-//! Split out of `lib.rs` (#189). [`FQ_VERSION`] carries the commit as semver
-//! build metadata, so the **running** daemon reports which build it is — the
-//! `system.startup` event and banner carry the SHA, not just the semver.
+//! Split out of `lib.rs` (#189). Everything here describes **this
+//! client's** build — [`print_version`] reads no daemon and makes no
+//! edge call. The daemon's build travels the other way: it stamps its
+//! own `system.startup` event and banner from `fq-daemon`'s copy of
+//! this metadata, and an operator asks for it with `fq status`, which
+//! renders what `control.status` reports.
 
 /// Build-time version metadata, emitted by `build.rs`.
 const FQ_GIT_SHA: &str = env!("FQ_GIT_SHA");
 const FQ_BUILD_EPOCH: &str = env!("FQ_BUILD_EPOCH");
 const FQ_TARGET: &str = env!("FQ_TARGET");
-/// Semver + commit (valid semver build metadata), so the **running**
-/// daemon reports which build it is — the `system.startup` event and
-/// banner carry the SHA, not just the semver. Lets a deploy check
-/// confirm the live process is on the expected commit.
+/// Semver + commit, as valid semver build metadata, so a build is
+/// identifiable by more than its semver.
+///
+/// Unused in this crate — `fq version` prints the fields separately
+/// and `fq status` renders the daemon's own string. The live copy is
+/// `fq_daemon::version::FQ_VERSION`, which is what reaches the
+/// `system.startup` event and the banner, and what a deploy check
+/// compares against the expected commit.
 #[allow(dead_code)]
 pub(crate) const FQ_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("FQ_GIT_SHA"));
 

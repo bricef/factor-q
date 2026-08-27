@@ -8,6 +8,40 @@ supersede earlier ones; guides track the current state).
 Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 `NNNN-slug.md`.
 
+## Status and Implementation are different questions
+
+Every ADR carries two lines near the top, and they answer different things:
+
+```text
+Status: Accepted
+Implementation: partial — the edge and the typed registry ship (#489, #498);
+                the MCP server face is not built (#84)
+```
+
+- **`Status:`** — what we decided, and whether a later ADR has replaced it.
+  `Proposed` / `Accepted` / `Superseded by ADR-NNNN`. This is the historical
+  record and does not change because code did or did not get written.
+- **`Implementation:`** — whether the thing exists, as one of **`pending`**,
+  **`partial`** or **`complete`**, followed by a short note naming the PRs
+  and issues involved. Partial is the interesting case: say which half
+  shipped and which did not.
+
+**Why both.** Until 2026-08-26 an ADR said only `Status: Accepted`, and a
+reader had no way to tell a decision that shipped from one nobody had
+started. A review that year found five accepted ADRs describing systems that
+were never built and saying nothing about it, and two that shipped the
+current architecture and were equally silent. Neither is a documentation
+error in the ordinary sense — the decisions really were accepted. The
+missing information was construction state, and the fix is to state it
+rather than leave it to inference.
+
+Keep the note short and pointed at evidence. `Implementation: complete
+(#498)` is worth more than a paragraph, because the PR carries the detail
+and does not go stale.
+
+A design doc's *folder* answers the same question for prose:
+[`design/committed/` vs `design/aspirational/`](../design/README.md).
+
 ## Accepted
 
 | ADR | Decision |
@@ -17,30 +51,30 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 | [0003](accepted/0003-model-agnostic-per-agent.md) | Model-agnostic, per-agent model selection |
 | [0004](accepted/0004-cost-controls-from-day-one.md) | Cost controls from day one (per-invocation budget; sampling/elicitation sub-budget attribution) |
 | [0005](accepted/0005-agent-definition-format.md) | Agent definition format — Markdown + YAML frontmatter |
-| [0006](accepted/0006-registry-first-api.md) | Registry-first runtime API — typed operations, CQRS surface, derived interfaces; replaces the prior draft, amends ADR-0031 (Appendix A); NATS is not an external control surface (Appendix C); a synthetic has no Get (Appendix D) |
+| [0006](accepted/0006-registry-first-api.md) | Registry-first runtime API — typed operations, CQRS surface, derived interfaces; replaces the prior draft, amends ADR-0031 (Appendix A); NATS is not an external control surface (Appendix C); a synthetic has no Get (Appendix D); `worker.prune` is retired, not evented (Appendix E) |
 | [0009](accepted/0009-technology-choices.md) | Technology choices (Rust runtime) |
-| [0010](accepted/0010-agent-execution-isolation.md) | Agent execution isolation (containers by default; nothing-by-default sandbox) |
+| [0010](accepted/0010-agent-execution-isolation.md) | Agent execution isolation (containers by default; nothing-by-default sandbox) — the agent-scoped unit of isolation is superseded by [ADR-0028](accepted/0028-tool-scoped-isolation-and-workspace.md), and neither model is built; the phase-1 process sandbox is what runs (#209) |
 | [0011](accepted/0011-event-bus-and-persistence.md) | Event bus and persistence (NATS + JetStream) — persistence/source-of-truth role partially superseded by [ADR-0026](accepted/0026-event-log-system-of-record.md); bus role stands |
-| [0012](accepted/0012-graph-definition-format.md) | Execution graph definition format |
+| [0012](accepted/0012-graph-definition-format.md) | Execution graph definition format — unimplemented, and its subject-wired structure is superseded by [ADR-0007](accepted/0007-inter-agent-communication.md); do not author a graph from it |
 | [0013](accepted/0013-memory-as-mcp-service.md) | Memory as an MCP service |
 | [0014](accepted/0014-agent-harness-as-reducer.md) | Agent harness as a reducer with a runtime-owned loop |
 | [0015](accepted/0015-rust-runtime-polyglot-tools.md) | Rust runtime, polyglot tools, language boundary at the event bus |
 | [0016](accepted/0016-typed-operations-no-free-form-apis.md) | Typed operations exposed to agents, no free-form storage APIs — the *shape* agent side effects must take; the annotation operations it names (`annotations.add_note`, `annotations.record_confidence`) are not built, and the annotations layer is runtime-written today (#90) |
 | [0017](accepted/0017-mcp-human-in-the-loop.md) | Autonomous resolution of MCP human-in-the-loop primitives (the capability-grant policy) |
 | [0018](accepted/0018-mcp-server-initiated-execution.md) | Execution model for server-initiated MCP calls (sampling/elicitation/roots) |
-| [0019](accepted/0019-skill-format.md) | Skill format and discovery |
+| [0019](accepted/0019-skill-format.md) | Skill format and discovery — none of it is built, and the `skills: access:` frontmatter it documents parses and is silently discarded, so the declared restriction does not exist (#514) |
 | [0020](accepted/0020-mcp-notification-handling.md) | MCP server notifications — drained in the daemon, tools refresh between invocations |
 | [0021](accepted/0021-mcp-cost-control-and-memory-boundary.md) | Cost control for MCP services via `_meta` (budget hint + cost report); memory stays MCP; embedding boundary deferred to the storage design |
 | [0022](accepted/0022-binary-distribution-and-licensing.md) | Binary distribution (musl/Apple Silicon release matrix, install.sh, cargo-binstall) and BSL 1.1 licensing |
-| [0023](accepted/0023-storage-and-vector-foundation.md) | Storage, extraction, and vector index foundation (Phase 2 pillar #2) |
+| [0023](accepted/0023-storage-and-vector-foundation.md) | Storage, extraction, and vector index foundation (Phase 2 pillar #2) — layer 1 (CAS, name index, GC, access control) is built; layers 2 and 3 (extraction, embeddings, vector index) are not, which is what blocks ADR-0013 and ADR-0019 |
 | [0024](accepted/0024-separate-databases-storage-foundation.md) | Separate databases for the storage foundation's three stores (refines ADR-0023 F9) |
 | [0007](accepted/0007-inter-agent-communication.md) | Inter-agent communication — agents never touch the transport; one graph executor with two authoring surfaces (declared graphs + spawn as sugar); per-traversal budget with an ε cost floor; graduated from the April draft |
-| [0026](accepted/0026-event-log-system-of-record.md) | A dedicated CAS-backed archive service is the event log's system of record (supersedes ADR-0011's source-of-truth half; NATS becomes transport) |
+| [0026](accepted/0026-event-log-system-of-record.md) | A dedicated CAS-backed archive service is the event log's system of record (supersedes ADR-0011's source-of-truth half; NATS becomes transport) — **not built**, so it is a direction, not a durability guarantee: today's `invocation_archive` is swept at 30 days |
 | [0027](accepted/0027-graceful-drain-deploys.md) | Deploys are a graceful drain — a `fq drain` control command suspends in-flight invocations to a step boundary; the new binary resumes via recovery (not kill-and-replace) (verb folded into `fq down`, #271) |
-| [0028](accepted/0028-tool-scoped-isolation-and-workspace.md) | Tool-scoped isolation + a harness-owned virtual filesystem (safe by construction); supersedes ADR-0010's agent-scoped unit of isolation |
-| [0029](accepted/0029-fuse-binding-crate.md) | FUSE binding crate for the harness-owned VFS is `fuse-backend-rs` (`fuse3` fallback), chosen by a blind bake-off; refines ADR-0028 |
+| [0028](accepted/0028-tool-scoped-isolation-and-workspace.md) | Tool-scoped isolation + a harness-owned virtual filesystem (safe by construction); supersedes ADR-0010's agent-scoped unit of isolation — none of its seven Decision clauses is built |
+| [0029](accepted/0029-fuse-binding-crate.md) | FUSE binding crate for the harness-owned VFS is `fuse-backend-rs` (`fuse3` fallback), chosen by a blind bake-off; refines ADR-0028 — the pick stands, unadopted, because ADR-0028's VFS does not exist |
 | [0030](accepted/0030-object-manifest-gc-back-off.md) | Object/manifest GC uses back-off (no generations) — objects get the block protocol's claim CAS + reserve-before-rely, but a writer meeting a claimed object retries rather than minting a generation; TLC-checked, refines ADR-0023 (F2) |
-| [0031](accepted/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; shared-secret-over-TLS auth as swappable middleware |
+| [0031](accepted/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; capability-token-over-TLS auth (Appendix A, superseding the original shared secret) as swappable middleware; built |
 | [0033](accepted/0033-bsl-reaffirmation.md) | BSL 1.1 stands after the 2026-07-25 cleanroom review's finding 1.4 — reaffirms [ADR-0022](accepted/0022-binary-distribution-and-licensing.md) §7 unamended; costs carried knowingly, the named-scenario gap left open, revisit triggers proposed |
 
 ## Draft
@@ -49,7 +83,7 @@ Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 |---|---|
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
-| [0032](draft/0032-exactly-once-trigger-dispatch.md) | Trigger dispatch is exactly-once by durable claim (trigger inbox in NATS KV, CAS-arbitrated), not by ack timing; broker responsibility ends at the post-claim ack |
+| [0032](draft/0032-exactly-once-trigger-dispatch.md) | Trigger dispatch is exactly-once by durable claim (trigger inbox in NATS KV, CAS-arbitrated), not by ack timing; broker responsibility ends at the post-claim ack — unstarted, while the incident it fixes (#327) is still open |
 
 ## Related guides
 

@@ -155,6 +155,6 @@ production.
 
 - [`VISION.md`](../../../VISION.md) — high-level use case categories
 - [`data-architecture.md`](./data-architecture.md) — the storage / persistence design these workloads stress-test
-- [`tool-isolation-model.md`](./tool-isolation-model.md) — workspace and sandbox model
+- [`tool-isolation-model.md`](../aspirational/tool-isolation-model.md) — workspace and sandbox model
 - [`agent-os-architecture.md`](../aspirational/agent-os-architecture.md) — the broader runtime architecture
 - [`ADR-0013`](../../adrs/accepted/0013-memory-as-mcp-service.md) — memory-as-MCP-services (TradingAgents' `trading_memory.md` is a primary use case)

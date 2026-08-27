@@ -2,23 +2,27 @@
 //! `docs/design/committed/operator-surface-domain-model.md`) — and
 //! the sqlx-free wire crate ADR-0031 calls for.
 //!
-//! Four categories of boundary promise, mirroring the domain model:
+//! Three categories of boundary promise, mirroring the domain model:
 //!
 //! - **Resources** ([`model`]): [`Atom`], [`View`], and [`Synthetic`]
 //!   are explicit value types — the nature is the type, and one
 //!   constructor call derives the whole generic read surface (atoms
-//!   Get + List + Stream, views Get + List, synthetics Get) with
-//!   derived Read authority. The generic surface is read-only: every
-//!   mutation on the whole surface is a declared command.
+//!   Get + List + Stream, views Get + List) with derived Read
+//!   authority. The generic surface is read-only: every mutation on
+//!   the whole surface is a declared command. A [`Synthetic`] derives
+//!   *no* generic read at all: it is a permission scope that hosts
+//!   bespoke verbs and reports, and nothing more.
 //! - **Domain verbs** ([`model`]): the bespoke commands whose
 //!   semantics are the contract; output is always a [`Receipt`] by
 //!   construction (D3). A declaration is one site — the impl carries
 //!   its identity, types, authority, and contract text.
-//! - **Reports**: named, typed computations over resources.
-//! - **Machinery reads**: `Get` on the synthetic `Control` resource —
-//!   no category of their own.
+//! - **Reports**: named, typed computations over resources. The
+//!   machinery reads live here too — `control.status` and
+//!   `control.doctor` are reports on the synthetic `Control` scope,
+//!   not a category of their own and not a `Get` (ADR-0006
+//!   Appendix D, which withdrew the earlier `control.get` reading).
 //!
-//! Alongside those four categories it holds the vocabularies the
+//! Alongside those three categories it holds the vocabularies the
 //! surface answers *in*: the view shapes ([`views`]), the transcript
 //! ([`transcript`]) and turn ([`turn`]) renderings, and the event
 //! schema ([`events`]) with the identifiers and grants an event

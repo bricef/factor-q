@@ -1,7 +1,7 @@
 //! Regression gate for #261: read commands must never reacquire a raw
 //! store handle. Every direct `ProjectionStore::open*` /
 //! `WorkerStore::open*` / `ControlPlaneStore::open*` / `Views::open*`
-//! in non-test fq-cli source must carry an explicit allow-marker
+//! in non-test fq-daemon source must carry an explicit allow-marker
 //! naming why it is not a read path (the daemon, an operator write,
 //! the trigger WAL writer).
 //!

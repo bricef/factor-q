@@ -1,87 +1,117 @@
 # fq-runtime
 
-The core factor-q runtime service. Provides the agent executor, event bus integration, and CLI.
+The core factor-q runtime service: the agent executor, event bus
+integration, the daemon, and the CLI. It ships two binaries — `fqd` (the
+daemon) and `fq` (the client that talks to it over the authenticated
+edge).
 
 ## Structure
 
-A Cargo workspace with three crates:
+Seven crates, all members of the single workspace rooted at the
+[repository root](../../Cargo.toml) (#194) — there is no per-service
+workspace manifest and no per-service justfile; every recipe is a `-p`
+filter from the root.
 
 | Crate | Purpose |
 |---|---|
-| [`fq-cli`](crates/fq-cli/) | The `fq` binary — command parsing and dispatch |
-| [`fq-runtime`](crates/fq-runtime/) | Core library — agent definition loader, config, event schema, executor, reducer harness |
+| [`fq-daemon`](crates/fq-daemon/) | The `fqd` binary — daemon assembly, hosted tasks, the operator surface's handlers |
+| [`fq-cli`](crates/fq-cli/) | The `fq` binary — command parsing, and the verb modules that dial the edge |
+| [`fq-runtime`](crates/fq-runtime/) | Core library — config, event schema, the bus, the worker and its reducer harness, the control plane and its stores |
+| [`fq-agent`](crates/fq-agent/) | Agent definitions: the Markdown + YAML frontmatter parser, the registry, the config snapshot |
+| [`fq-ops`](crates/fq-ops/) | The operator surface as data — operation identities, declared shapes, view DTOs. Transport-free, store-free |
+| [`fq-edge`](crates/fq-edge/) | The edge transport — TLS with certificate pinning, biscuit tokens, the invoke/stream envelope, the registry a server binds handlers into |
 | [`fq-tools`](crates/fq-tools/) | Built-in tool implementations and the `Tool` trait |
 
-```
-services/fq-runtime/
-├── Cargo.toml              # workspace manifest
-├── justfile                # build tasks
-└── crates/
-    ├── fq-cli/
-    │   └── src/main.rs     # clap command structure
-    ├── fq-runtime/
-    │   └── src/
-    │       ├── lib.rs
-    │       ├── config.rs   # runtime configuration
-    │       ├── events.rs   # NATS subjects and event schema
-    │       └── agent/
-    │           └── definition.rs  # Markdown + YAML frontmatter parser
-    └── fq-tools/
-        └── src/
-            ├── lib.rs
-            └── tool.rs     # Tool trait and error types
-```
+`fq-ops` and `fq-edge` are the seam: the daemon declares its surface in
+terms of them and the client (and [`fq-dashboard`](../fq-dashboard/))
+consumes it, so neither reader links the daemon or the storage under it.
+Gate tests hold that shape — `fq-cli/tests/edge_migration_gate.rs` and
+`thin_client_gate.rs`, `fq-edge/tests/thin_client_gate.rs`,
+`fq-daemon/tests/store_open_gate.rs`.
 
 ## Prerequisites
 
-- Rust toolchain (edition 2024 — see `rust-toolchain.toml` if present)
+- Rust toolchain (edition 2024 — pinned in `rust-toolchain.toml` at the
+  repository root)
 - [just](https://github.com/casey/just) for running tasks
-- A running NATS server for integration (use `just infra-up` from the repo root)
+- `nats-server` for the tests, which spawn a private broker per test
+  (#233): `just install-nats` drops the pinned build in `.tools/` and the
+  Rust gates depend on it, so a plain `just test` provisions itself. A
+  shared broker is *not* a prerequisite — `just infra-up` is for running
+  a daemon by hand (`just run`, `just smoke`, `just drill`), not for the
+  suite.
 
 ## Development
 
-All tasks run via `just`. Run `just` or `just --list` to see available recipes.
+Every task runs via `just` **from the repository root** — this directory
+has no justfile of its own. Run `just --list` to see the recipes.
 
 ```sh
-# Build
+# Build every Rust service, or just this one
 just build
+just build-runtime
 
-# Run tests
+# Run every suite, or just this one
 just test
+just test-runtime
 
-# Type-check without building
+# Type-check the whole workspace without building
 just check
 
-# Format and lint
+# Format; then every non-test quality gate (source policy, sizes, fmt,
+# clippy, creep, coupling)
 just fmt
-just lint
+just quality
 
-# All quality checks (format, lint, test)
+# This suite's doc/build/test gate; `just rust-ci` for all of them
+just runtime-ci
+
+# The full local gate — every target CI runs bar `docker-build` and
+# `smoke`, timed, fail-fast
 just ci
 
-# Run the CLI
-just fq -- --help
-just fq -- agent list
+# Run the client (note: no `--` separator; `just fq -- agent list`
+# passes `--` to clap and fails)
+just fq --help
+just fq agent list
+just fq --addr 127.0.0.1:9472 agent list
 ```
 
-## The CLI
+## The binaries
+
+`fqd` is the daemon and takes no subcommand. `fq` is a thin client:
+almost every verb reaches a paired daemon over the authenticated edge,
+so `fqd` has to be running and `fq connect` has to have paired with it.
+The exceptions are marked *local* — they touch no daemon.
 
 ```
-fq init [-f|--force]                        # create a new project (config, agents/, sample)
-fqd                                      # start the daemon (projection + dispatcher)
-fq trigger <agent> [payload]                # ask the daemon to dispatch a trigger to an agent
-                                            # (--via-nats is accepted and ignored: the
-                                            #  in-process runner is retired)
-fq agent list                               # list agents in the configured directory
-fq agent validate <path>                    # validate an agent definition
-fq events tail [--agent] [--event-type]     # tail the live event stream
-fq events query [--agent] [--event-type] [--since] [--limit 50]
-                                            # query the SQLite projection (no payloads)
-fq events get <event-id> [--json]           # read one whole event back, payload included
-fq costs [--agent] [--since]                # per-agent cost totals, over the edge
-fq status                                   # runtime overview, over the edge: build, streams,
-                                            # consumers, registry, projection, recovery
-fq doctor [--json] [--fail-on-issues]       # durable-execution health, over the edge
+fqd                                         # start the daemon (edge, projection, dispatcher,
+                                            #   worker, recovery, retention sweep)
+
+fq init [-f|--force]                        # local: scaffold a project — fq.toml, fqd.toml,
+                                            #   README.md, docker-compose.yml,
+                                            #   agents/sample-agent.md
+fq connect                                  # pair with a daemon: pin its certificate
+                                            #   fingerprint (TOFU) and store the token
+fq trigger <agent> [payload]                # queue work on the daemon's durable trigger stream
+                                            #   (--via-nats is accepted and ignored: the
+                                            #    in-process runner is retired)
+fq agent list                               # the daemon's live registry, as `fq reload` left it
+fq agent validate <path>                    # local: validate one definition file
+fq events tail | query | get <id>           # the live stream, the projection, one whole event
+fq costs [--agent] [--since]                # per-agent cost totals
+fq invocation list | show | drop | resume   # triage: the ambiguous and the stuck
+fq invocation transcript <id> [--follow]    # turns and tool calls, payloads included
+fq workers list | show                      # worker liveness
+fq dead-letters list | requeue              # dead-lettered triggers (#49/#169)
+fq status                                   # build, streams, consumers, registry, projection,
+                                            #   recovery
+fq doctor [--json] [--fail-on-issues]       # durable-execution health, composed from the above
+fq reload                                   # hot-swap the agent registry, no restart
+fq down [--now]                             # drain and stop the daemon, confirmed
+fq ops list                                 # the surface describing itself
+fq token attenuate --grant <verb:domain>    # local: narrow a token, no round trip
+fq version                                  # version and build information
 ```
 
 Every trigger runs through the reducer runner documented in
@@ -90,25 +120,39 @@ a pure synchronous `step(StepInput) -> StepOutput` driven by a
 host loop, with suspend/resume as a structural property of the
 boundary.
 
-Global flags (`--config`, `--agents-dir`, `--nats-url`, `--cache-dir`)
-and their corresponding `FQ_*` environment variables are available on
-every subcommand. See `fq --help` for details.
+**The two binaries' global flags are different, and so are their
+configs.** `fq` takes `--config` (`FQ_CLI_CONFIG`, default `fq.toml`),
+`--addr` (`FQ_ADDR`) and `--log-format`. `fqd` takes `--config`
+(`FQ_DAEMON_CONFIG`, default `fqd.toml`), `--agents-dir`, `--nats-url`,
+`--cache-dir`, `--state-dir` and `--log-format` — and no subcommands, so
+"available on every subcommand" is only ever a statement about `fq`. The
+agents directory, the broker and the cache are the daemon's; a client
+that configured them would be describing a machine it may not be on. See
+`fq --help` and `fqd --help`.
 
 ## Testing
 
 Test tiers, each with different prerequisites:
 
-| Tier | Command | Prerequisites | Count |
-|---|---|---|---|
-| Unit + integration | `just test` | NATS (`just infra-up`, set `FQ_NATS_URL`) | 278 |
-| Binary smoke | `just test` (covered) | — | 4 |
-| Smoke (real LLM) | `just smoke` (repo root) | NATS + `ANTHROPIC_API_KEY` | 6 |
-| Drift detector (real LLM) | `just acceptance-drift` | `ANTHROPIC_API_KEY` | 1 |
-| Shell sandbox (container) | `just test-shell-sandbox` | Docker | 16 |
+| Tier | Command | Prerequisites |
+|---|---|---|
+| Unit + integration | `just test-runtime` | `nats-server` in `.tools/` (`just install-nats`; the gates depend on it) |
+| Binary smoke | `just test-runtime` (covered) | — |
+| Smoke (real LLM) | `just smoke` (repo root) | a running broker + the key named by `SMOKE_API_KEY_ENV` (default `OPENROUTER_API_KEY`) |
+| Parallel-workers drill (real LLM) | `just drill` (repo root) | a running broker with no other daemon on it + `DRILL_API_KEY_ENV` (default `OPENROUTER_API_KEY`) |
+| Drift detector (real LLM) | `just acceptance-drift` | `ANTHROPIC_API_KEY` |
+| Shell sandbox (container) | `just test-shell-sandbox` | Docker |
+
+**No shared broker for the suite.** Every NATS-backed test spawns its own
+private `nats-server` (#233, via `fq-test-support`) and points the code
+under test at it, so `just test` neither needs `just infra-up` nor an
+`FQ_NATS_URL` in the environment. The live tiers are the exception: they
+run a real daemon against a real broker, which is what `just infra-up`
+is for.
 
 The unit-and-integration tier includes the in-process acceptance
 harness (`test_support::runtime::TestRuntime`) that boots the full
-`fqd` runtime against live NATS and the mock Anthropic server,
+`fqd` runtime against a private broker and the mock Anthropic server,
 plus four end-to-end scenarios (drop-ambiguous, stale-worker,
 retry-sweeper-recovers-from-CP-outage, drop-vs-late-archived race).
 New acceptance tests for future plans should reach for the harness
@@ -163,21 +207,35 @@ ask a daemon in a container anything.
 just docker-build
 ```
 
-The image is not exercised by CI. Nothing builds it on a push, so it
-drifts silently: before 2026-08-25 its member-manifest list had been
-missing two crates since they were added, which made `cargo build` fail
-on the first line it reached, and its `CMD` still named a subcommand
-that no longer existed. If you change the workspace's membership,
-build this by hand.
+CI builds it, but only on a Docker-relevant change. The `docker` job in
+[`ci.yml`](../../.github/workflows/ci.yml) is path-filtered to this
+Dockerfile, the workspace manifest, the lockfile, the justfile and the
+toolchain pin — nothing else — because a cold build compiles the whole
+workspace again inside the image, minutes for a check only those files
+can break. It builds the real image rather than
+linting it (the failure mode is a manifest cargo cannot resolve, which
+only a build finds) and then runs `fqd --version` inside it, because an
+image that builds but cannot start is still broken.
+
+That job exists because both halves had happened. Until 2026-08-25 the
+image was in no workflow at all: its member-manifest list had been
+missing `fq-agent` and `fq-daemon` since they were added, so `cargo
+build` failed on the first line it reached, and its `CMD` still named a
+subcommand the fq/fqd split had deleted. Note the filter's edge:
+`just docker-build` is deliberately **not** part of `just ci`, so a
+green local gate does not cover the image — after changing the
+Dockerfile, the root `Cargo.toml`'s members, or the lockfile, run it by
+hand.
 
 ### Environment variables
 
-Every runtime path is configurable via an environment variable. The
-defaults baked into the container image are conventional Linux paths
-that operators can mount volumes at; on a fresh host they all fall
-through to safe locations.
+Every runtime path is configurable via an environment variable. These
+are the **daemon's** — `fqd`'s flags, not `fq`'s. The defaults baked
+into the container image are conventional Linux paths that operators can
+mount volumes at; on a fresh host they all fall through to safe
+locations.
 
-| Variable          | CLI flag          | Default (container)          | Notes                                     |
+| Variable          | `fqd` flag        | Default (container)          | Notes                                     |
 |-------------------|-------------------|------------------------------|-------------------------------------------|
 | `FQ_DAEMON_CONFIG`| `--config`        | `/etc/factor-q/fqd.toml`       | Optional — defaults apply if unset        |
 | `FQ_AGENTS_DIR`   | `--agents-dir`    | `/var/lib/factor-q/agents`    | Mount a volume with your agent definitions |
@@ -220,11 +278,15 @@ moving them is a separate migration.
 
 ### Mounted volumes
 
-The image declares volumes at `/var/lib/factor-q` (agent definitions,
-skills, and the state directory when `FQ_STATE_DIR` is unset) and
-`/var/cache/factor-q` (pricing JSON and the SQLite stores). Mount
+The image declares volumes at `/var/lib/factor-q` (agent definitions)
+and `/var/cache/factor-q` (pricing JSON and the SQLite stores). Mount
 persistent volumes at these paths for anything that needs to survive
 container restarts.
+
+The image sets no `FQ_STATE_DIR`, so the edge identity — the one thing
+that must never be regenerated — lands wherever the fallback chain above
+resolves, which may be neither volume. Set it explicitly to a path under
+`/var/lib/factor-q`.
 
 ### Example compose stanza
 
@@ -254,4 +316,7 @@ volumes:
 
 ## Status
 
-Phase 1 foundation — scaffolding in place, implementation in progress. Nothing production-ready yet.
+Pre-alpha, and the phase this crate is in moves faster than a paragraph
+here can. [`STATUS.md`](../../STATUS.md) at the repository root is the
+one place that says where the project is; it is maintained, this line is
+not.

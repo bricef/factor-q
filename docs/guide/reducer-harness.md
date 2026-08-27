@@ -12,7 +12,7 @@ This guide covers:
 5. [What's not yet supported](#whats-not-yet-supported)
 6. [Where the code and tests live](#where-the-code-and-tests-live)
 
-For background on **why** factor-q has this shape, see [`docs/design/committed/wasm-boundary-design.md`](../design/committed/wasm-boundary-design.md). For the prototype's verification report, see [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md). For the deprecation of the alternate ("legacy") direct-async path that preceded reducer-only, see [`docs/plans/closed/2026-05-27-deprecate-legacy-executor.md`](../plans/closed/2026-05-27-deprecate-legacy-executor.md).
+For background on **why** factor-q has this shape, see [`docs/design/aspirational/wasm-boundary-design.md`](../design/aspirational/wasm-boundary-design.md). For the prototype's verification report, see [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md). For the deprecation of the alternate ("legacy") direct-async path that preceded reducer-only, see [`docs/plans/closed/2026-05-27-deprecate-legacy-executor.md`](../plans/closed/2026-05-27-deprecate-legacy-executor.md).
 
 ## The reducer model
 
@@ -288,7 +288,7 @@ cargo test -p fq-runtime --lib reducer::
 
 ## Cross-references
 
-- Boundary design: [`docs/design/committed/wasm-boundary-design.md`](../design/committed/wasm-boundary-design.md)
+- Boundary design: [`docs/design/aspirational/wasm-boundary-design.md`](../design/aspirational/wasm-boundary-design.md)
 - Native reducer prototype closing report: [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../plans/closed/2026-04-25-native-reducer-prototype.md)
 - Legacy-executor deprecation (consolidation onto the reducer path): [`docs/plans/closed/2026-05-27-deprecate-legacy-executor.md`](../plans/closed/2026-05-27-deprecate-legacy-executor.md)
 - WASM-packaging plan (deferred — superseded by tool-isolation-model): [`docs/plans/closed/2026-04-19-wasm-harness-prototype.md`](../plans/closed/2026-04-19-wasm-harness-prototype.md)

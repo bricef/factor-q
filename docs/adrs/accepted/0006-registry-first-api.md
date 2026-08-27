@@ -7,6 +7,16 @@ Accepted on 2026-07-20 by Brice — proposed 2026-07-18. Replaces the prior draf
 Amends ADR-0031 (Appendix A). Informed by the interface inventory of
 2026-07-18 and #84.
 
+Implementation: partial — the `fq-ops` registry and the authenticated edge
+shipped in 2026-07 (#346, #354, #360), and the fleet-sized verb migration
+closed in 2026-08 (#438 through #498). Every client verb is now a declared
+op over the edge (the migration gate reads zero), the dashboard reads
+through the same registry, and the `fq.control.*` NATS subjects are gone.
+Not built: the MCP server face and the fq-store registry instance (#84).
+Note also that Appendix B's Phase 3e resolution closed the codegen fallback
+unexercised — the "generated typed client wrappers" of D6, the two
+consequence bullets and Appendix A are superseded by it.
+
 ## Context
 
 factor-q's operator surface is described many times over. A read operation
@@ -17,7 +27,8 @@ unrelated mechanisms (NATS control subjects, the operator API over the bus,
 JetStream trigger publish), and three paths bypass every boundary entirely
 (`fq trigger`'s in-process default, `fq workers prune`'s direct store write,
 `fq agent list`'s local-filesystem registry). The full census is in
-`docs/design/interface-inventory.md`: 21 CLI verbs, 16 `Views` methods, 15
+[the interface inventory](../../reviews/2026-07-20-interface-inventory.md):
+21 CLI verbs, 16 `Views` methods, 15
 `ReadService` RPCs, 9 `CasService` RPCs, 24 `fq-cas` verbs, 11 dashboard
 routes — roughly 21 runtime operations and 20 store operations at steady
 state, before traversal operations arrive.
@@ -128,7 +139,9 @@ everything else is a `Query`.
    `invoke(name, input) / next_batch(...)` pair behind the 0031 auth
    middleware, with **generated typed client wrappers** so end-to-end static
    typing survives while the wire stays uniform — one choke point for auth,
-   audit, versioning, and cost middleware.
+   audit, versioning, and cost middleware. *(The generated-wrapper clause is
+   superseded by Appendix B's Phase 3e resolution: typing is derived from
+   the shared `fq-ops` definitions, not generated.)*
 2. **CLI**: parsing and dispatch derive from `Input` (the structs carry
    serde + clap + schemars derives together); the ~19 human renderers remain
    hand-written (P7). `--json` becomes uniform and free, structurally
@@ -253,20 +266,29 @@ default posture.
 
 ## Migration
 
-- **Phase 0** — adopt this ADR; amend ADR-0031 per Appendix A. Decision
+The sketch below was the shape at proposal time. **It is not the numbering
+that ran**, and the rest of this ADR — Appendix B's "Phase 3e", "the
+Phase-4 inventory" — uses the executed plan's numbering instead, as does
+the code. The authoritative sequence is
+[the registry + split execution plan](../../plans/closed/2026-07-20-registry-and-split-execution.md):
+Phase 3 = exemplars, Phase 4 = fleet migration, Phase 5 = split the binary,
+Phase 6 = MCP operator face. Read phase numbers anywhere else in this
+document as the plan's, not this list's.
+
+- **Stage A** — adopt this ADR; amend ADR-0031 per Appendix A. Decision
   only.
-- **Phase 1** — `fq-ops` crate + three exemplar ops, one per kind:
+- **Stage B** — `fq-ops` crate + three exemplar ops, one per kind:
   `invocation.show` (Query), `invocation.drop` (Command),
   `invocation.transcript.tail` (Stream), wired through the generic edge
   behind 0031 auth. Old paths intact.
-- **Phase 2** — fleet-sized migration of the remaining ops; CLI and
-  dashboard flip to the generated client; delete the `ReadService` mirror.
+- **Stage C** — fleet-sized migration of the remaining ops; CLI and
+  dashboard flip to the typed client; delete the `ReadService` mirror.
   Completes #261/#264 as side effects.
-- **Phase 3** — MCP server face; traversal ops land registry-native.
-- **Phase 4** — fq-store registry instance; ADR-0016 built-in convergence;
+- **Stage D** — MCP server face; traversal ops land registry-native.
+- **Stage E** — fq-store registry instance; ADR-0016 built-in convergence;
   transport unification per M5 sequencing.
 
-Phases 0–1 are human work (days). Phase 2 is ~17 near-identical PRs — fleet
+Stages A–B are human work (days). Stage C is ~17 near-identical PRs — fleet
 fodder once the exemplars fix the pattern.
 
 ## Alternatives considered
@@ -305,9 +327,9 @@ fodder once the exemplars fix the pattern.
 
 ## References
 
-See pul requests #84 · #166 · #183 · #190 · #200 · #261 · #264 · #139 ·
+See pull requests #84 · #166 · #183 · #190 · #200 · #261 · #264 · #139 ·
 ADR-0002 · ADR-0004 · ADR-0016 · ADR-0022 · ADR-0026 · ADR-0027 · ADR-0031 ·
-`docs/design/interface-inventory.md` (2026-07-18) ·
+[the interface inventory](../../reviews/2026-07-20-interface-inventory.md) (2026-07-18) ·
 github-watcher trigger wire contract · fq-store M2 access-control model.
 
 ---
@@ -413,12 +435,26 @@ where richer typing is wanted, derive it from the shared definitions
 (macros included) rather than generating source. An out-of-workspace
 consumer reopens the question with `describe` as its input.
 
+**What this supersedes.** Stated explicitly, because the reversal was
+otherwise buried and four earlier clauses read as current:
+
+- **D6 item 1** — "with **generated typed client wrappers** so end-to-end
+  static typing survives". Typing is shared, not generated.
+- **Positive consequences** — "M5's 'SDK' becomes codegen from schemas
+  rather than a project". It becomes shared definitions plus `describe`.
+- **Negative consequences** — "mitigated by generated typed wrappers, at
+  the cost of a codegen step". There is no codegen step, and no such cost.
+- **Appendix A's replacement text for ADR-0031** — "fronted by generated
+  typed client wrappers in the shared wire crate". The wrappers are
+  hand-written glue over `invoke`/`next_batch`; the same sentence lives in
+  [ADR-0031](0031-daemon-cli-split.md) and is annotated there.
+
 ## Appendix C — Amendment: NATS is not an external control surface (2026-08-05)
 
 Recorded alongside the `invocation.resume` amendment to
 [the operator-surface domain model](../../design/committed/operator-surface-domain-model.md),
 which unblocks verb 19 of the
-[Phase-4 call-point inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md).
+[Phase-4 call-point inventory](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md).
 D8 stands unchanged in substance; this is the same decision stated in
 the positive form the surface needs, plus the boundary its carve-out
 always implied.
@@ -523,6 +559,14 @@ category is a declared op.
   that offers NATS as an external interface. This appendix describes
   the decision, not yet the state of the documentation.
 
+  **Resolved 2026-08-13** (`196b951`, PR #482): the trigger wire
+  contract now opens by calling itself an "internal SPI for co-located,
+  first-party adapters" and says it "is **not** a public interface for
+  arbitrary external callers". The two documents no longer disagree.
+  The wider sweep is not finished — the Go adapters still publish
+  direct to NATS (#478, #479) — so the sweep's subject outlives this
+  particular fix.
+
 ## Appendix D — Amendment: a synthetic has no Get (2026-08-06)
 
 Supersedes one sentence of Appendix B. Everything else in B stands.
@@ -576,16 +620,23 @@ carved out for one nature, which is the larger cost.
 `fq_ops::Synthetic` still carries a `state_schema`, and the registry
 still derives `Get` for it — so the contract crate and this decision
 disagree until cohort 4.4 of the
-[Phase-4 inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md),
+[Phase-4 inventory](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md),
 where the `Control` declaration lands. The correction is not a
 one-liner: it touches `Synthetic::new`'s type parameter, the
 registry's `derived_ops` and its synthetic-Get resolve arm, three
 assertions in `fq-ops/tests/registry.rs`, the `ControlState` fixture,
 `opid.rs`'s module documentation, and the committed schema-snapshot
 oracle `tests/snapshots/exemplar_registry.json`, whose `synthetic`
-entry serialises a `state_schema` today. It also needs `Control`
-report identities that do not exist yet. Sequenced with 4.4
+entry serialises a `state_schema` today. Sequenced with 4.4
 deliberately; noted here so the gap is a known one rather than drift.
+
+*(This note originally added "It also needs `Control` report identities
+that do not exist yet." They exist: `ControlReport::{Doctor, Status}`
+ships and is wired through the daemon, the CLI, the dashboard and the
+edge tests (#484, #487). The rest of the gap above is still open, though
+its blast radius has shrunk — the only surviving `.synthetic::<…>`
+declaration in the tree is a test fixture; the production registry
+declares no synthetic at all.)*
 
 ## Appendix E — Amendment: `worker.prune` is retired, not evented (2026-08-10)
 
@@ -644,8 +695,10 @@ feed, and can remove a row an unhandled `worker.orphaned` still needs.
 
 Deletion therefore gets its own window, in days rather than seconds,
 and its own ownership guard: a worker that still owns `in_flight` or
-`ambiguous` invocations is never collected, because `fq recovery`
-follows `worker_id` back to them. As an occasional human act prune got
+`ambiguous` invocations is never collected, because recovery follows
+`worker_id` back to them. (Written as `fq recovery`; there is no such
+verb. Operator triage of an ambiguous invocation is `fq invocation
+resume`, or `fq invocation drop` to abandon it.) As an occasional human act prune got
 away with omitting that check. On a timer it would not have.
 
 ### Consequence for the surface

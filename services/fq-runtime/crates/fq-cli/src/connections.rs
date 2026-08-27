@@ -240,7 +240,6 @@ pub(crate) async fn edge_client(
         })
 }
 
-/// Load the stored pairing for `addr`, with guidance when absent.
 /// Every address this client has a pairing for, in stored order.
 ///
 /// The client needs this to answer "which daemon" without being told:
@@ -251,6 +250,7 @@ pub(crate) fn paired_addresses() -> anyhow::Result<Vec<String>> {
     Ok(load_connections(&path)?.connections.into_keys().collect())
 }
 
+/// Load the stored pairing for `addr`, with guidance when absent.
 pub(crate) fn stored_connection(addr: &str) -> anyhow::Result<ConnectionEntry> {
     let path = connections_path()?;
     load_connections(&path)?

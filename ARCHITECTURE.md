@@ -170,7 +170,7 @@ cumulative cost against the agent's declared budget ceiling.
 
 See the [reducer harness guide](docs/guide/reducer-harness.md)
 for the full surface, the
-[boundary design](docs/design/committed/wasm-boundary-design.md) for the
+[boundary design](docs/design/aspirational/wasm-boundary-design.md) for the
 rationale, and the
 [legacy-executor deprecation plan](docs/plans/closed/2026-05-27-deprecate-legacy-executor.md)
 for the consolidation that landed in 2026-05.
@@ -203,12 +203,18 @@ violations are reported as `tool.result` events with
 
 ### Built-in tools (`fq-tools/src/builtin/`)
 
+Seven, in the order `ToolRegistry::with_builtins_exec` registers them
+(`BUILTIN_TOOL_BASENAMES` pins the list):
+
 | Tool | Module | Sandbox check |
 |---|---|---|
 | `file_read` | `file_read.rs` | `check_read` |
+| `file_list` | `discovery.rs` | `check_read` |
+| `file_search` | `discovery.rs` | `check_read` |
 | `file_write` | `file_write.rs` | `check_write` |
 | `exec` | `exec.rs` | `check_exec_cwd` |
 | `self_inspect` | `self_inspect.rs` | none — host-fulfilled (see [guide](docs/guide/reducer-harness.md#host-fulfilled-tools)) |
+| `report_outcome` | `report_outcome.rs` | none — host-fulfilled; the reducer harness intercepts it as the terminal transition, so it is the only way an invocation reaches `Complete` with a declared status (#125) |
 
 The exec tool uses argv (no shell invocation), mandatory timeout,
 output cap, and a fresh child env with only a pinned PATH.
@@ -237,11 +243,22 @@ rebuildable by deleting the file and replaying from the stream.
 ### Trigger dispatcher (`fq-runtime/src/control_plane/dispatcher.rs`)
 
 A durable JetStream consumer on `fq.trigger.>` that dispatches
-incoming trigger messages to the correct agent via the executor.
-Extracts the agent id from the NATS subject, looks it up in the
-registry, parses the JSON payload, and runs the executor. Errors
-are acked (not NAK'd) because the executor already emits
-`Failed` events for executor-level errors.
+incoming trigger messages to the correct agent. Extracts the agent id
+from the NATS subject, looks it up in the registry, parses the JSON
+payload, and runs the invocation. Errors are acked (not NAK'd)
+because unknown agent ids, invalid payloads and executor errors are
+permanent problems a retry would not fix, and the worker already
+emits `Failed` events for them.
+
+The trigger is acked on **durable start** — the invocation's first
+WAL write, signalled through the `Worker` seam — not on dispatch and
+not on completion (#41). That is the fact a producer has to plan
+around, and it closes both windows: a crash *before* the first WAL
+write leaves the trigger unacked, so JetStream redelivers it and the
+run is not lost; and because the ack fires seconds in rather than at
+completion, a long-running invocation is not redelivered past the ack
+deadline and re-run. From the first WAL write on, in-flight
+durability is the reducer WAL's job (`recovery::scan_in_flight`).
 
 ### Pricing (`fq-runtime/src/pricing.rs`)
 
@@ -263,6 +280,48 @@ either dies before a Ctrl-C, the daemon publishes
 `system.task_failed`, shuts down the other task, and exits
 non-zero.
 
+### API layer — the authenticated edge (`fq-ops/`, `fq-edge/`)
+
+The API layer described above, built to ADR-0006 (registry-first) and
+ADR-0031 (daemon/CLI split). It is not a future surface: since the
+Phase 4 migration completed on 2026-08-14 it is the **only** path any
+client has to the runtime, and `fq-cli/tests/edge_migration_gate.rs`
+asserts `REMAINING = 0` legacy call points so no verb can keep a
+direct-access fallback.
+
+Two crates, split along the transport line:
+
+- **`fq-ops`** — the transport-free contract. Every operation is
+  declared once as a value: resources (atoms, views, synthetics, whose
+  generic read surface is *derived* rather than hand-written), domain
+  verbs (bespoke commands, output always a `Receipt`), and reports
+  (named typed computations). It also holds the vocabularies the
+  surface answers in — view shapes, transcript and turn renderings,
+  the event schema. Shared definitions in one workspace are the
+  interface; there is no code generation (ADR-0006 decision D-3).
+- **`fq-edge`** — the transport. One tarpc service (`invoke` /
+  `next_batch`) carries every declared operation. TLS is terminated by
+  the daemon with a self-signed certificate the client **pins** by
+  fingerprint (trust-on-first-use via `fq connect`), and a bearer
+  **biscuit capability token** is presented beneath the RPC contract.
+  The token carries `(verb, domain)` grants and a principal; per
+  request the edge resolves the operation against the registry and
+  subset-checks its required authority against the token's grants, so
+  the declared authority model is the enforced one. `fq token
+  attenuate` narrows a token offline — how `fq-dashboard` runs as a
+  second principal with six read grants and no command authority.
+
+### Scheduled triggers (`adapters/fq-cron/`)
+
+A standalone Go binary, not part of the daemon: it reads cron jobs
+from a hot-reloaded TOML file and publishes their payloads to NATS
+subjects (typically `fq.trigger.<agent>`), reaching factor-q only
+through the documented trigger wire contract. Durable fire state lives
+in a JetStream KV bucket so restarts do not double-fire or silently
+skip, with a per-job missed-fire policy. See its
+[design](adapters/fq-cron/DESIGN.md). The sibling `github-watcher`
+adapter is the reactive-trigger counterpart.
+
 ### CLI (`fq-cli/src/`)
 
 One module per verb group — `status.rs`, `doctor.rs`, `invocations.rs`,
@@ -282,7 +341,7 @@ that serves it. `bin/fq.rs` is a shim. The daemon is not here — it is the
 | `fq events query` | Historical query — `event.list` over the edge, answered from the daemon's projection index (no payloads; the `event-id` column is the identity `fq events get` takes, printed in full so the walk is one copy-paste) |
 | `fq events get` | One whole event by its identity — `event.get` over the edge, read from the log with its payload, for as long as the log still holds it. Names the three ways that fails apart: `not found`, `unlocatable`, `gone` |
 | `fq costs` | Per-agent cost aggregation — `cost.summary` over the edge, the surface's first declared report. Answers over the whole history: cost rows are exempt from retention, and the total names its unallocated remainder (`framework_cost`) rather than leaving it to be derived |
-| `fq status` | Runtime overview — `control.status` over the edge: the daemon's build, its stream and consumer health, its live agent registry, its projection position and its recovery counts. The one migrated read that still answers with no daemon: it reports the absence as the finding, keeps the local half (configuration, store-file existence) and exits non-zero |
+| `fq status` | Runtime overview — `control.status` over the edge: the daemon's build, its stream and consumer health, its live agent registry, its projection position and its recovery counts. The one migrated read that still answers with no daemon: it reports the absence as the finding, keeps the genuinely local half — the edge address this client dials, and nothing else — and exits non-zero. The store paths are *not* local: they belong to the process that owns those files, so they travel on the daemon's report and are absent, with the reason, when none arrives |
 | `fq doctor` | Durable-execution health in one report — `control.doctor` over the edge. A composite over workers, current work, ambiguity and failures; needs the daemon it reports on, and says so when there is none |
 
 ### Content store (`services/fq-store`)
@@ -321,10 +380,8 @@ These subsystems from the vision are not implemented:
 - Agent graph / multi-agent orchestration
 - Memory system (the memory *servers* per ADR-0013; the MCP *client* that would consume them is implemented — see the [MCP guide](docs/guide/mcp.md))
 - Skill registry (AgentSkills format — scoped to phase 2)
-- API layer (REST/gRPC/WebSocket — ADR-0006 is still draft)
 - Continuous learning
 - Container-level isolation (ADR-0010 accepted: containers by default, Kata+Firecracker upgrade path)
-- Scheduled triggers / internal job scheduler
 - Observability floor beyond `fq status` (JSON logs landed, #36;
   metrics + lag alerting tracked in
   [#342](https://github.com/bricef/factor-q/issues/342))

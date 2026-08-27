@@ -947,7 +947,7 @@
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "One row of the Agent view's index (`agent.list`): a definition file\nthe daemon read, and what became of it.\n\nA registry snapshot is not only its agents. A file that failed to\nparse is usually the most operationally interesting thing in the\ndirectory — the agent someone expects to be running and is not —\nand it has no agent id to be listed under, so it rides the index as\nits own kind of row. Dropping it would make the listing lie by\nomission, and there is nowhere else on today's surface to put it.",
+        "description": "One row of the Agent view's index (`agent.list`): a definition file\nthe daemon read, and what became of it.\n\nA registry snapshot is not only its agents. A file that failed to\nparse is usually the most operationally interesting thing in the\ndirectory — the agent someone expects to be running and is not —\nand it has no agent id to be listed under, so it rides the index as\nits own kind of row. Dropping it would make the listing lie by\nomission.\n\nThat last clause used to end \"and there is nowhere else on today's\nsurface to put it\", which stopped being true when `control.status`\ngrew `registry.load_errors`. The 2026-08-05 amendment to the\noperator-surface model decided this index should become homogeneous\nonce load errors had another home; the `control.status` half shipped\nand this half did not, so the union is what the surface still\npromises. Narrowing it is a wire break and wants doing deliberately,\nnot incidentally.",
         "oneOf": [
           {
             "$ref": "#/$defs/AgentSummaryView",
@@ -1636,7 +1636,7 @@
       "domain": "control",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "The typed input of `control.reload` on the wire. Empty, and declared\nanyway: the daemon reloads from the directory *it* was started with,\nnever one the caller names — that choice is the whole point of the\nverb, and this is where a future option (a `fq.toml` refresh)\nwould appear.",
+        "description": "The typed input of `control.reload` on the wire. Empty, and declared\nanyway: the daemon reloads from the directory *it* was started with,\nnever one the caller names — that choice is the whole point of the\nverb, and this is where a future option (an `fqd.toml` refresh)\nwould appear.",
         "title": "ReloadCommandInput",
         "type": "object"
       },
@@ -2441,7 +2441,7 @@
             "type": "object"
           },
           "StreamHealth": {
-            "description": "Health of one JetStream stream plus its primary durable consumer.\n\nExternally tagged (serde's default) rather than internally: internal\ntagging is a JSON-only representation, and the edge's session is\nbincode once its JSON preamble is done, so an internally-tagged enum\nwould fail to encode there.",
+            "description": "Health of one JetStream stream plus its primary durable consumer.\n\nExternally tagged (serde's default). The edge does not force the\nchoice: its token preamble is raw length-prefixed bytes and the\ntarpc session that follows is length-delimited JSON end to end\n(`fq_edge::server`, `fq_edge::client`), so an internally-tagged\nenum would encode there too. What pins the representation is that\nit is *declared* — the schema `describe` publishes for this type\nspells the tagging out, so changing it is a wire break, not a\nstylistic edit.",
             "oneOf": [
               {
                 "additionalProperties": false,

@@ -19,11 +19,11 @@ diplomatic.
 
 Written in sequence through April 2026:
 
-- [`wasm-boundary-design.md`](../design/committed/wasm-boundary-design.md) —
+- [`wasm-boundary-design.md`](../design/aspirational/wasm-boundary-design.md) —
   the agent harness as a reducer: the guest exports a single
   pure `step(StepInput) -> StepOutput` function with zero
   imports; the host drives the loop.
-- [`tool-isolation-model.md`](../design/committed/tool-isolation-model.md) —
+- [`tool-isolation-model.md`](../design/aspirational/tool-isolation-model.md) —
   trust boundary moved from agent-scoped to tool-scoped;
   per-tool isolation tiers (in-process, subprocess,
   container, WASM, microVM); workspace state introduced as

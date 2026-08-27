@@ -70,7 +70,7 @@ struct DownCommandInput {
 /// The typed input of `control.reload` on the wire. Empty, and declared
 /// anyway: the daemon reloads from the directory *it* was started with,
 /// never one the caller names — that choice is the whole point of the
-/// verb, and this is where a future option (a `fq.toml` refresh)
+/// verb, and this is where a future option (an `fqd.toml` refresh)
 /// would appear.
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 struct ReloadCommandInput {}

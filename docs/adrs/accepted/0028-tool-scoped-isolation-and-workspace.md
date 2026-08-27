@@ -6,10 +6,39 @@ Accepted 2026-07-09 by Brice.
 
 Supersedes the agent-scoped framing of
 [ADR-0010](../accepted/0010-agent-execution-isolation.md); ratifies the
-committed [tool-isolation model](../../design/committed/tool-isolation-model.md)
-and extends it with a harness-owned virtual filesystem. It is a single
+[tool-isolation model](../../design/aspirational/tool-isolation-model.md)
+and extends it with a harness-owned virtual filesystem. That model moved to
+`design/aspirational/` on 2026-08-26: this ADR ratifies its *direction*, and
+the mechanism — isolation tiers, the network proxy, workspace overlays — is
+not built. It is a single
 application of [design principle 3 — safe by construction, not by
 restriction](../../design/committed/design-principles.md).
+
+Implementation: pending — none of the seven Decision clauses is built, and
+the gap is wide enough to be worth enumerating, because this ADR is cited as
+the reason [ADR-0010](0010-agent-execution-isolation.md) is superseded.
+
+- **D2, isolation per tool by tier** — there is no tier dispatch. Every tool
+  runs in-process and `exec` is a plain subprocess. No wasmtime.
+- **D3/D4, harness-owned VFS over fq-store's CAS, WASI and FUSE mounts** —
+  no `FileSystem` trait and no VFS. The `virtual-filesystem` crate named in
+  References is not a workspace member, and no FUSE dependency exists in any
+  manifest — which also means [ADR-0029](0029-fuse-binding-crate.md)'s crate
+  choice has not been acted on.
+- **D6, narrow typed tools replacing the shell** — the built-in set is still
+  discovery, exec, file_read, file_write, report_outcome, self_inspect.
+  There is no `sect-core`, no `Git` tool, no `WebFetch`, and the general
+  `exec` shell is still there.
+- **D7, the network proxy as the single egress choke-point** — no proxy.
+  `sandbox.network` is parsed and carried and deliberately not enforced;
+  the code says so in four places, and #35 was closed with a load-time
+  warning (#214) rather than enforcement. The interim proxy is #208.
+
+What runs is the phase-1 process sandbox this ADR's own Context describes as
+the starting point: `ToolSandbox` path canonicalisation plus `exec_cwd`, with
+workspaces per-invocation or shared and no overlay. So between this ADR and
+ADR-0010 the repo holds two isolation models, one superseded and one
+unbuilt — and the shipped reality is the older one's phase 1.
 
 ## Context
 
@@ -23,7 +52,7 @@ Two shifts changed the picture:
 - [ADR-0014](../accepted/0014-agent-harness-as-reducer.md): the harness is a
   pure function that returns a `NextAction`. It cannot execute anything, so it
   is not an attack surface, and the host has total control over what runs.
-- The [tool-isolation model](../../design/committed/tool-isolation-model.md)
+- The [tool-isolation model](../../design/aspirational/tool-isolation-model.md)
   drew the consequence: the security boundary belongs around each *tool*, not
   the agent as a whole. Each tool has its own threat profile and its own
   isolation need; wrapping the whole agent is both overkill for pure tools and
@@ -188,7 +217,7 @@ or aggregate resource limits, but no longer as the primary security boundary.
   builds on [ADR-0014](../accepted/0014-agent-harness-as-reducer.md),
   [ADR-0016](../accepted/0016-typed-operations-no-free-form-apis.md),
   [ADR-0005](../accepted/0005-agent-definition-format.md).
-- Design: [tool-isolation-model](../../design/committed/tool-isolation-model.md),
+- Design: [tool-isolation-model](../../design/aspirational/tool-isolation-model.md),
   [wasm-posix-sandbox](../../design/aspirational/wasm-posix-sandbox.md).
 - Substrate: fq-store (CAS); `sect` (`sect-core` + its DESIGN.md); the
   `virtual-filesystem` crate (trait + `ScopedFS`/`RocFS`/`MountableFS`).

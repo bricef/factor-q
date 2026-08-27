@@ -7,6 +7,19 @@ Accepted (2026-06-27). Builds on
 shapes the "getting started" story) and the CI-through-`just` convention
 in [AGENTS.md](../../../AGENTS.md).
 
+Implementation: partial — the distribution machinery is built; no release
+has been cut. The tag-triggered pipeline through `just` is real
+(`.github/workflows/release.yml`), with exactly the matrix §2 specifies —
+musl x86_64 on `ubuntu-latest`, musl aarch64 on `ubuntu-24.04-arm`,
+`aarch64-apple-darwin` on `macos-latest`, no cross-compilation. `install.sh`
+is the primary path, `fq init` still writes a `docker-compose.yml` for NATS,
+and the templates are still `include_str!`-embedded. The repo has one tag
+(`main-latest`) and no `v*.*.*`, so the pipeline remains unproven, and
+neither a CLA/DCO in `CONTRIBUTING.md` nor a `deny.toml` exists yet. §3's
+artifact contract drifted and is corrected in place below. *This line covers
+§§1–6; §7 is a licensing decision and its standing is
+[ADR-0033](0033-bsl-reaffirmation.md)'s to record.*
+
 ## Context
 
 A visitor to the GitHub repository should be able to download `fq` and
@@ -50,9 +63,12 @@ built — Intel Macs are a shrinking slice, and the scope is Linux + macOS.
 
 ### 3. Artifact contract and install channels
 
-- **Artifacts:** `fq-<version>-<target>.tar.gz` plus a `.sha256`,
-  attached to the GitHub release. The tarball holds the `fq` binary,
-  `LICENSE`, and `README.md`.
+- **Artifacts:** `factor-q-<version>-<target>.tar.gz` plus a `.sha256`,
+  attached to the GitHub release. The tarball holds the `fq`, `fqd` and
+  `fq-cas` binaries, `LICENSE`, and `README.md`. (As accepted this read
+  `fq-<version>-<target>.tar.gz` holding the single `fq` binary; both halves
+  changed when the [ADR-0031](0031-daemon-cli-split.md) daemon/CLI split
+  reached the distribution layer, and `install.sh` now installs all three.)
 - **`install.sh`** (`curl -fsSL .../install.sh | sh`) detects platform,
   downloads the matching artifact, verifies the checksum, and installs to
   `~/.local/bin`. This is the primary "quick start" path.
@@ -62,7 +78,9 @@ built — Intel Macs are a shrinking slice, and the scope is Linux + macOS.
 
 The artifact naming is a **contract** shared by `scripts/package.sh`,
 `install.sh`, and the binstall metadata; changing it is a breaking
-change to all three.
+change to all three. It has changed once already, before the first release —
+see the correction above, and keep this section in step with those three,
+because it is the document they are supposed to agree with.
 
 ### 4. macOS: unsigned, with quarantine instructions
 

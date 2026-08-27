@@ -9,10 +9,14 @@ use serde::{Deserialize, Serialize};
 
 /// Health of one JetStream stream plus its primary durable consumer.
 ///
-/// Externally tagged (serde's default) rather than internally: internal
-/// tagging is a JSON-only representation, and the edge's session is
-/// bincode once its JSON preamble is done, so an internally-tagged enum
-/// would fail to encode there.
+/// Externally tagged (serde's default). The edge does not force the
+/// choice: its token preamble is raw length-prefixed bytes and the
+/// tarpc session that follows is length-delimited JSON end to end
+/// (`fq_edge::server`, `fq_edge::client`), so an internally-tagged
+/// enum would encode there too. What pins the representation is that
+/// it is *declared* — the schema `describe` publishes for this type
+/// spells the tagging out, so changing it is a wire break, not a
+/// stylistic edit.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamHealth {
