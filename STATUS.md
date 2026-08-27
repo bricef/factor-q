@@ -53,7 +53,9 @@ it is the licence to keep changing shape quickly.
   status). Full [MCP client](docs/guide/mcp.md) (spec 2025-11-25):
   stdio + Streamable HTTP transports; tools, resources, prompts, and the
   server-initiated capabilities (sampling, elicitation, roots). Operator
-  surface: `fq init / trigger / reload / down / agent / invocation`
+  surface, spoken by the thin client `fq` (it cannot start a daemon —
+  `fqd` is the daemon, and reads `fqd.toml` while the client reads
+  `fq.toml`): `fq init / trigger / reload / down / agent / invocation`
   (including `transcript`) `/ events / costs / status / workers /
   dead-letters / doctor` (read commands take `--json`), plus the
   authenticated-edge client verbs `fq connect` (TOFU cert pinning +
@@ -136,13 +138,17 @@ so ADR-0006's held per-method-generation fallback is formally not
 taken. Phase 4, the fleet migration, finished on **2026-08-14**: the
 migration gate (`fq-cli/tests/edge_migration_gate.rs`) counts the
 operator surface's remaining legacy call points and now asserts
-`REMAINING = 0`, so no verb keeps the old path as a fallback. The route
+`REMAINING = 0`, so no verb keeps the old path as a fallback — the last
+to flip was `invocation.resume`, in the same run as the split. The route
 was surveyed call point by call point in the
 [Phase-4 call-point inventory](docs/plans/closed/2026-07-28-phase-4-call-point-inventory.md).
 Phase 5, the binary split, shipped on **2026-08-23**: the daemon left
 the CLI crate for `fq-daemon` and its `fqd` binary, and `fq` is now a
 thin client that cannot link the runtime at all —
-`fq-cli/tests/thin_client_gate.rs` holds that.
+`fq-cli/tests/thin_client_gate.rs` holds that. `install.sh` and the
+release bundle ship `fqd` alongside `fq`, the two configs are split
+(`fqd.toml` for the daemon, `fq.toml` for the client), and the dogfood
+deploy runs the split pair.
 The dogfood loop **lands PRs**: the daily `doc-drift` agent
 (fq-cron-scheduled) now opens its own docs-only PRs for drift it can
 verify and fix, and files issues for the rest; alongside it the
