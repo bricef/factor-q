@@ -435,6 +435,131 @@ fn schema_version_constant_is_three() {
     assert_eq!(SCHEMA_VERSION, 3);
 }
 
+/// The consumer barrier must strip reasoning from the **payload**, not
+/// just the annotations.
+///
+/// Reasoning became a payload part in ADR-0034, which moved it from the
+/// side of the barrier that was stripped to the side that was not. This
+/// pins the rule while it is still cheap: `for_consumer_context` has no
+/// production caller until multi-node lands (#414), so writing it now
+/// costs nothing and writing it later means retrofitting a discipline
+/// onto a shipped graph.
+///
+/// Fresh-context verification is the reason: a verifier that can see the
+/// producer's working is no longer independent of the path that produced
+/// it.
+#[test]
+fn the_consumer_barrier_strips_reasoning_from_a_response_payload() {
+    let event = Event::new(
+        AgentId::new("producer").unwrap(),
+        Uuid::now_v7(),
+        EventPayload::LlmResponse(LlmResponsePayload {
+            round: 1,
+            origin: LlmCallOrigin::AgentTurn,
+            call_id: Uuid::now_v7(),
+            parts: vec![
+                AssistantPart::Reasoning(Reasoning {
+                    model: "kimi-k2".to_string(),
+                    content: ReasoningContent::Plain {
+                        text: "the working a verifier must not see".to_string(),
+                    },
+                }),
+                AssistantPart::Text {
+                    text: "the answer a verifier may see".to_string(),
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        }),
+    );
+
+    let view = event.for_consumer_context();
+    let EventPayload::LlmResponse(seen) = &view.payload else {
+        panic!("variant must be preserved");
+    };
+    assert!(
+        !seen
+            .parts
+            .iter()
+            .any(|p| matches!(p, AssistantPart::Reasoning(_))),
+        "a consuming agent must never see upstream reasoning"
+    );
+    assert_eq!(
+        seen.text().as_deref(),
+        Some("the answer a verifier may see"),
+        "the barrier removes the working, not the output — a consumer is \
+         entitled to the producer's typed result"
+    );
+
+    // The stored event is untouched: the barrier is a view, and the log
+    // keeps everything for humans, debugging and the learning loop.
+    let EventPayload::LlmResponse(stored) = &event.payload else {
+        unreachable!()
+    };
+    assert!(
+        stored
+            .parts
+            .iter()
+            .any(|p| matches!(p, AssistantPart::Reasoning(_))),
+        "stripping is for the consumer path only; the log retains it"
+    );
+}
+
+/// The same rule on the request side, where prior assistant turns are
+/// replayed — the larger leak, since a request carries the whole
+/// conversation rather than one turn.
+#[test]
+fn the_consumer_barrier_strips_reasoning_from_replayed_messages() {
+    let event = Event::new(
+        AgentId::new("producer").unwrap(),
+        Uuid::now_v7(),
+        EventPayload::LlmRequest(LlmRequestPayload {
+            call_id: Uuid::now_v7(),
+            model: "kimi-k2".to_string(),
+            messages: vec![
+                Message::user("go"),
+                Message::Assistant {
+                    parts: vec![
+                        AssistantPart::Reasoning(Reasoning {
+                            model: "kimi-k2".to_string(),
+                            content: ReasoningContent::Plain {
+                                text: "private working".to_string(),
+                            },
+                        }),
+                        AssistantPart::Text {
+                            text: "public answer".to_string(),
+                        },
+                    ],
+                },
+            ],
+            tools_available: vec![],
+            request_params: RequestParams {
+                effort: None,
+                temperature: None,
+                max_tokens: None,
+            },
+            origin: LlmCallOrigin::AgentTurn,
+        }),
+    );
+
+    let view = event.for_consumer_context();
+    let EventPayload::LlmRequest(seen) = &view.payload else {
+        panic!("variant must be preserved");
+    };
+    let leaked = seen.messages.iter().any(|m| match m {
+        Message::Assistant { parts } => parts
+            .iter()
+            .any(|p| matches!(p, AssistantPart::Reasoning(_))),
+        _ => false,
+    });
+    assert!(!leaked, "replayed reasoning must not cross the barrier");
+    assert_eq!(
+        seen.messages[1].text().as_deref(),
+        Some("public answer"),
+        "the assistant turn survives without its working"
+    );
+}
+
 /// #447: subject leaf, schema id and projection `event_type` are three
 /// spellings of one name and are minted together. They are also easy
 /// to desync later, so they are pinned here as a triple.

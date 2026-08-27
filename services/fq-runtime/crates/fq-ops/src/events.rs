@@ -234,13 +234,27 @@ impl Event {
     ///
     /// The reasoning-trace case matters specifically: fresh-context
     /// verification only works if the verifier does not see the
-    /// producer's reasoning. If reasoning leaks via annotations
-    /// into a downstream agent's input, the path-independence is
-    /// lost.
+    /// producer's reasoning. If reasoning leaks into a downstream
+    /// agent's input, the path-independence is lost.
+    ///
+    /// **That is why this strips the payload too, not just the
+    /// annotations.** Since [ADR-0034] reasoning is a first-class
+    /// content part, which puts it in the payload — the layer this
+    /// barrier historically left alone. The rule is therefore stated on
+    /// the content rather than on its container: a consuming agent sees
+    /// no upstream reasoning, whether it arrives as an annotation or as
+    /// a part.
+    ///
+    /// The boundary is the **invocation**, not the turn. A model
+    /// replaying its own reasoning inside its own conversation never
+    /// passes through here — that is continuity, and it is what #437
+    /// exists to restore.
+    ///
+    /// [ADR-0034]: https://github.com/bricef/factor-q/blob/main/docs/adrs/accepted/0034-reasoning-as-a-content-part.md
     pub fn for_consumer_context(&self) -> ConsumerView<'_> {
         ConsumerView {
             envelope: &self.envelope,
-            payload: &self.payload,
+            payload: self.payload.without_reasoning(),
         }
     }
 
@@ -261,7 +275,10 @@ impl Event {
 #[derive(Debug, Clone, Serialize)]
 pub struct ConsumerView<'a> {
     pub envelope: &'a Envelope,
-    pub payload: &'a EventPayload,
+    /// Owned, not borrowed: the barrier has to *remove* reasoning parts,
+    /// which a reference to the stored payload cannot do. The cost is one
+    /// clone per event on a path that builds prompts, not on a hot loop.
+    pub payload: EventPayload,
 }
 
 /// Validated identifier for a tool call.
@@ -347,6 +364,49 @@ impl<'de> Deserialize<'de> for ToolCallId {
 /// exhaustive definition for its subject and schema. The projection event type
 /// is derived from the schema id rather than maintained as a fourth mapping.
 impl EventPayload {
+    /// This payload with every reasoning part removed.
+    ///
+    /// The enforcement half of the consumer barrier
+    /// ([`Event::for_consumer_context`]). Reasoning is a payload part
+    /// since ADR-0034, so "strip annotations" no longer discharges the
+    /// rule — a consuming agent must see no upstream reasoning whatever
+    /// layer carries it.
+    ///
+    /// Two payloads can carry it: `llm.request`, whose message list
+    /// replays prior assistant turns, and `llm.response`, which is an
+    /// assistant turn. Everything else is returned unchanged.
+    ///
+    /// Note this strips *reasoning*, not the turn: text and tool calls
+    /// survive, because a consumer is entitled to the producer's output
+    /// — its typed result — just not to the working behind it.
+    pub fn without_reasoning(&self) -> Self {
+        fn strip(parts: &[llm::AssistantPart]) -> Vec<llm::AssistantPart> {
+            parts
+                .iter()
+                .filter(|part| !matches!(part, llm::AssistantPart::Reasoning(_)))
+                .cloned()
+                .collect()
+        }
+
+        match self {
+            Self::LlmRequest(payload) => {
+                let mut payload = payload.clone();
+                for message in payload.messages.iter_mut() {
+                    if let Message::Assistant { parts } = message {
+                        *parts = strip(parts);
+                    }
+                }
+                Self::LlmRequest(payload)
+            }
+            Self::LlmResponse(payload) => {
+                let mut payload = payload.clone();
+                payload.parts = strip(&payload.parts);
+                Self::LlmResponse(payload)
+            }
+            other => other.clone(),
+        }
+    }
+
     pub fn subject(&self, agent: &str) -> String {
         match self {
             Self::Triggered(_) => subjects::agent_triggered(agent),
