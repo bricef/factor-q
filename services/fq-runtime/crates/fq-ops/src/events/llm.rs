@@ -369,6 +369,29 @@ pub struct TokenUsage {
     pub cache_read_tokens: u32,
     #[serde(default)]
     pub cache_write_tokens: u32,
+    /// The share of `output_tokens` the model spent thinking rather than
+    /// speaking. **A decomposition, not an addition** — providers already
+    /// fold reasoning into the completion count, so this never changes
+    /// what a call costs. `0` where the provider does not report it,
+    /// which is most of them.
+    ///
+    /// It exists because for a reasoning-first model that split is most
+    /// of the bill, and it was invisible everywhere in the cost data
+    /// (#437). Additive on the wire, so it needs no schema bump.
+    #[serde(default)]
+    pub reasoning_tokens: u32,
+}
+
+impl TokenUsage {
+    /// The output tokens that were *spoken* rather than thought.
+    ///
+    /// Saturating because the split is the provider's arithmetic, not
+    /// ours: a provider reporting more reasoning than completion tokens
+    /// is a provider bug (genai already corrects one such case for xAI),
+    /// and this should read 0 rather than panic or wrap.
+    pub fn spoken_tokens(&self) -> u32 {
+        self.output_tokens.saturating_sub(self.reasoning_tokens)
+    }
 }
 
 /// Why an LLM call failed — a serialisable projection of the
