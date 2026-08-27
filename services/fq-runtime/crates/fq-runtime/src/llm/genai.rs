@@ -940,6 +940,112 @@ mod tests {
         );
     }
 
+    /// **The issue's acceptance criterion, at the wire.**
+    ///
+    /// > *A fixture-backed multi-turn test over an OpenAI-compatible
+    /// > provider: model returns `reasoning_content` on turn 1, makes a
+    /// > tool call; assert the assistant message factor-q sends on turn 2
+    /// > carries that `reasoning_content` back.*
+    ///
+    /// Every other test here asserts on our own types, which proves the
+    /// halves of the chain but not the join. This one runs a real HTTP
+    /// server and reads the bytes we actually sent — so it also covers
+    /// genai's hoisting, which we depend on and otherwise only verified
+    /// by reading its source.
+    ///
+    /// Turn 1 is deliberately **silent**: no visible text, only reasoning
+    /// and a tool call. That is the shape a reasoning-first model
+    /// routinely returns, and the one where dropping reasoning drops the
+    /// entire substance of the turn rather than a supplement to it.
+    #[tokio::test]
+    async fn reasoning_content_round_trips_over_the_wire() {
+        use crate::test_support::mock_openai::{MockChoice, MockOpenAiServer};
+
+        const MODEL: &str = "kimi-k2";
+        const THINKING: &str = "The runbook is the cheapest place to start.";
+
+        let mock = MockOpenAiServer::start().await;
+        mock.push(
+            MockChoice::silent()
+                .with_reasoning(THINKING)
+                .with_tool_call(
+                    "call_1",
+                    "read_file",
+                    serde_json::json!({"path": "/runbook"}),
+                ),
+        );
+        mock.push(MockChoice::text("Done."));
+        let client = mock.client(MODEL);
+
+        // -- Turn 1
+        let first = client
+            .chat(ChatRequest {
+                model: MODEL.to_string(),
+                messages: vec![Message::user("Investigate the deploy.")],
+                tools: vec![],
+                params: RequestParams {
+                    effort: None,
+                    temperature: None,
+                    max_tokens: Some(1024),
+                },
+            })
+            .await
+            .expect("turn 1 succeeds");
+
+        let call_id = first
+            .tool_calls()
+            .first()
+            .expect("turn 1 requested a tool")
+            .tool_call_id
+            .clone();
+
+        // -- Turn 2: replay the assistant turn and answer the tool, which
+        //    is exactly what the reducer does at its own replay point.
+        client
+            .chat(ChatRequest {
+                model: MODEL.to_string(),
+                messages: vec![
+                    Message::user("Investigate the deploy."),
+                    Message::Assistant {
+                        parts: first.parts.clone(),
+                    },
+                    Message::tool_result(call_id, "runbook says: restart"),
+                ],
+                tools: vec![],
+                params: RequestParams {
+                    effort: None,
+                    temperature: None,
+                    max_tokens: Some(1024),
+                },
+            })
+            .await
+            .expect("turn 2 succeeds");
+
+        let sent = mock.requests();
+        mock.shutdown().await;
+
+        assert_eq!(sent.len(), 2, "two turns were sent");
+        let assistant = sent[1]["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("turn 2 replays the assistant turn");
+
+        assert_eq!(
+            assistant["reasoning_content"].as_str(),
+            Some(THINKING),
+            "the provider must get its own reasoning back on the next turn; \
+             sent body was {}",
+            sent[1]
+        );
+        assert_eq!(
+            assistant["tool_calls"][0]["id"].as_str(),
+            Some("call_1"),
+            "the tool call rides along unchanged"
+        );
+    }
+
     // endregion: reasoning round-trip
 
     #[test]
