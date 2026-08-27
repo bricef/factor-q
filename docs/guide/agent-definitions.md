@@ -727,5 +727,4 @@ misspelled top-level key but not one nested inside `sandbox:` or `mcp:`,
 and it cannot reach the deployment's model or pricing config — so it
 both rejects the valid model-less shape and passes models the daemon
 will refuse (issue #508). The verdict that counts is the daemon starting
-and `fq agent list` showing the agent in the
-live registry.
+and `fq agent list` showing the agent in the live registry.
