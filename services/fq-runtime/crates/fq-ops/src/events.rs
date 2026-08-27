@@ -513,7 +513,7 @@ pub enum EventPayload {
     /// The worker publishes this when its WAL categorisation
     /// finds a `dispatched`-without-`completed` row. The
     /// control-plane consumes the event to surface the case
-    /// via `fq recover` (step 9).
+    /// via `fq invocation resume`/`drop` (step 9).
     InvocationAmbiguous(InvocationAmbiguousPayload),
 
     /// Worker → control-plane archive hand-off (step 8 of
@@ -556,7 +556,7 @@ pub enum EventPayload {
     /// in-flight invocations classified by recovery category
     /// (data-architecture.md §7.1). The projection records
     /// these so operators can see recovery history via
-    /// `fq events query --type=system_recovery` without
+    /// `fq events query --event-type=system_recovery` without
     /// needing a Prometheus-style endpoint. A live snapshot
     /// is also available via `fq status`.
     SystemRecovery(SystemRecoveryPayload),

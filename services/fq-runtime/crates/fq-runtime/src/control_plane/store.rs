@@ -28,7 +28,7 @@
 //!   `fq-cli/src/main.rs` as part of step 3.
 //! - Subscribing to `invocation.ambiguous` /
 //!   `invocation.archived` events on NATS — that's step 7.
-//! - The `fq recover` and `fq workers` commands — that's step 9.
+//! - `fq invocation list --status=ambiguous` and `fq workers` — step 9.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -1028,7 +1028,9 @@ pub enum ControlPlaneStoreError {
 
     #[error(
         "incompatible schema: db is at version {db_version}, this binary supports {binary_version}. \
-         Roll back the runtime or use `fq invocation drop --schema-mismatch` to abandon coordination state."
+         Roll back the runtime to a build that supports version {db_version}, or delete the \
+         control-plane store under `[cache] directory` in fqd.toml to abandon coordination \
+         state — the daemon recreates it, and invocations it was tracking become unrecoverable."
     )]
     IncompatibleSchema {
         db_version: u32,

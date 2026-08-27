@@ -20,7 +20,7 @@
 //! `worker_id` *is* the daemon's `runtime_id`, a fresh UUID per
 //! run. So the table gains a row on every restart and grows
 //! without bound. The only thing that ever reclaimed those rows
-//! was `fq workers prune`, which needed a human to remember it.
+//! was `fq workers prune`, which needed a human to remember it.  allow-dead-command: retired verb, named as history
 //!
 //! **The system should not depend on operator remediations to
 //! work normally.** So the verb was retired and the reclamation
@@ -88,7 +88,7 @@ pub fn owner_status_pins_worker(status: OwnerStatus) -> bool {
     match status {
         // Unresolved. `in_flight` is work the control plane still
         // believes is running; `ambiguous` is work whose outcome
-        // is unknown. Both are resolved by `fq recovery`, which
+        // is unknown. Both are resolved by `fq invocation resume`/`drop`, which
         // reads `worker_id` back to decide what to re-drive.
         OwnerStatus::InFlight | OwnerStatus::Ambiguous => true,
         // Terminal. The record of what happened is in
@@ -284,11 +284,12 @@ impl RetentionSweeper {
                 // Loud, because this is a stuck invocation, not a
                 // tidy-up problem: something has been in_flight or
                 // ambiguous on a dead worker for the whole retention
-                // window and `fq recovery` has never been run on it.
+                // window and no operator has resolved it.
                 warn!(
                     worker_id = %worker.worker_id,
                     "stale worker past its retention window still owns unresolved \
-                     invocations; keeping the row so `fq recovery` can still resolve them"
+                     invocations; keeping the row so `fq invocation resume`/`drop` can still \
+                      resolve them"
                 );
                 continue;
             }
@@ -594,6 +595,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     /// The one thing that must never regress: `stale` alone is not a
+    // allow-dead-command: `fq workers prune` is retired; the doc says so.
     /// licence to delete. The retired `fq workers prune` deleted on
     /// exactly that predicate, which is why it could not become a
     /// timer.
@@ -694,7 +696,7 @@ mod tests {
 
     /// The guard that matters most now the sweep is on a timer: a dead
     /// worker whose invocations were never recovered keeps its row, so
-    /// `fq recovery` can still follow `worker_id` back to them.
+    /// `fq invocation list --status=ambiguous` can still follow `worker_id` back to them.
     ///
     /// Reachable, not theoretical: nothing consumes `worker.orphaned`.
     /// It is published for observability and never handled, so the only

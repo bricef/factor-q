@@ -17,7 +17,7 @@
 //! The consumer also runs a periodic stale-worker sweep:
 //! workers whose `last_heartbeat` is older than the
 //! configured threshold get marked `stale` in
-//! `coordination_worker`. This makes `fq workers stale`
+//! `coordination_worker`. This makes `fq workers stale`  allow-dead-command: describes the capability, served today by `fq workers list --stale-only`
 //! meaningful even if a worker process disappears without
 //! emitting a shutdown event.
 //!
