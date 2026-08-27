@@ -224,6 +224,15 @@ fn transcript_entries() -> Vec<fq_ops::transcript::TranscriptEntry> {
             timestamp_ms: NOW_MS - 590_000,
             model: "claude-opus-4-8".to_string(),
             content: Some("Reading the issue first, then cloning into the workspace.".to_string()),
+            // Readable working, nothing withheld — the common case.
+            reasoning: Some(fq_ops::transcript::TurnReasoning {
+                text: Some(
+                    "The issue body will say which crate this touches, and cloning first \
+                     avoids a second round trip if it turns out to be a one-line fix."
+                        .to_string(),
+                ),
+                opaque: None,
+            }),
             tool_calls: vec![AssistantToolCall {
                 tool_call_id: "tc-1".to_string(),
                 tool_name: "exec".to_string(),

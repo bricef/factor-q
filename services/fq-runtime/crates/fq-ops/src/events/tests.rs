@@ -560,6 +560,112 @@ fn the_consumer_barrier_strips_reasoning_from_replayed_messages() {
     );
 }
 
+/// **I7 at the boundary: absence and opacity are different facts.**
+///
+/// This is the reduction that keeps parts internal, and the place the
+/// distinction is most easily lost — an opaque block has no text, so the
+/// lazy reduction reports "no reasoning" and an operator reading the
+/// transcript concludes the model did not think. It did; we just cannot
+/// read what it thought.
+///
+/// All four honest states, pinned.
+#[test]
+fn reducing_reasoning_keeps_absence_and_opacity_distinct() {
+    fn reasoning(content: ReasoningContent) -> Vec<AssistantPart> {
+        vec![AssistantPart::Reasoning(Reasoning {
+            model: "m".to_string(),
+            content,
+        })]
+    }
+
+    // 1. No reasoning at all.
+    assert!(
+        reduce_reasoning(&[AssistantPart::Text {
+            text: "hi".to_string()
+        }])
+        .is_none(),
+        "a turn with no reasoning reduces to None"
+    );
+
+    // 2. Readable, nothing withheld.
+    let plain = reduce_reasoning(&reasoning(ReasoningContent::Plain {
+        text: "worked it out".to_string(),
+    }))
+    .expect("plain reasoning is present");
+    assert_eq!(plain.text.as_deref(), Some("worked it out"));
+    assert!(!plain.has_opaque());
+
+    // 3. Readable plus a token we carry but cannot read.
+    let signed = reduce_reasoning(&reasoning(ReasoningContent::Signed {
+        text: "worked it out".to_string(),
+        token: "sig".to_string(),
+    }))
+    .expect("signed reasoning is present");
+    assert_eq!(signed.text.as_deref(), Some("worked it out"));
+    assert!(
+        signed.has_opaque(),
+        "the signature must be carried, not dropped"
+    );
+
+    // 4. The one that matters: no text, and still present.
+    let opaque = reduce_reasoning(&reasoning(ReasoningContent::Opaque {
+        token: "blob".to_string(),
+    }))
+    .expect("opaque reasoning is PRESENT, not absent — this is I7");
+    assert!(opaque.text.is_none(), "there is genuinely nothing to read");
+    assert!(
+        opaque.has_opaque(),
+        "…but the turn still carried reasoning, and the surface must say so"
+    );
+}
+
+/// The provider vocabulary must not cross the boundary: what reaches the
+/// operator is text and opacity, never the three-way shape or the model
+/// tie (ADR-0034 D3).
+#[test]
+fn the_reduction_drops_provider_vocabulary() {
+    let reduced = reduce_reasoning(&[AssistantPart::Reasoning(Reasoning {
+        model: "kimi-k2".to_string(),
+        content: ReasoningContent::Signed {
+            text: "t".to_string(),
+            token: "sig".to_string(),
+        },
+    })])
+    .expect("present");
+    let json = serde_json::to_string(&reduced).unwrap();
+    assert!(
+        !json.contains("kimi-k2"),
+        "the model tie is an internal concern; it must not reach the operator surface: {json}"
+    );
+    assert!(
+        !json.contains("signed"),
+        "nor should the three-way shape: {json}"
+    );
+}
+
+/// Several reasoning parts in one turn join, for the same reason text
+/// parts do — the operator asked what the turn thought, not how the
+/// provider chunked it.
+#[test]
+fn multiple_reasoning_parts_join() {
+    let parts = vec![
+        AssistantPart::Reasoning(Reasoning {
+            model: "m".to_string(),
+            content: ReasoningContent::Plain {
+                text: "first".to_string(),
+            },
+        }),
+        AssistantPart::Reasoning(Reasoning {
+            model: "m".to_string(),
+            content: ReasoningContent::Plain {
+                text: "second".to_string(),
+            },
+        }),
+    ];
+    let reduced = reduce_reasoning(&parts).expect("present");
+    assert_eq!(reduced.text.as_deref(), Some("first\nsecond"));
+}
+
 /// #447: subject leaf, schema id and projection `event_type` are three
 /// spellings of one name and are minted together. They are also easy
 /// to desync later, so they are pinned here as a triple.

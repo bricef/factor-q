@@ -15,7 +15,7 @@
 #   services/fq-runtime/crates/fq-cli/src/lib.rs                       -> #189
 #   services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs -> #78
 #   services/fq-runtime/crates/fq-runtime/src/mcp.rs                   -> #191
-services/fq-dashboard/src/render.rs 1402
+services/fq-dashboard/src/render.rs 1265
 # Raised by hand, 2026-08-27 (#512): three error modules grew by a total
 # of nine lines when three dead commands in operator-facing errors were
 # replaced with instructions that work. `fq recovery`, `fq recover` and

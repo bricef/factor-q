@@ -457,6 +457,14 @@ pub(crate) enum InvocationCommands {
         /// Do not truncate large payloads (alias: --no-truncate).
         #[arg(long, visible_alias = "no-truncate")]
         full: bool,
+        /// Show each turn's model reasoning.
+        ///
+        /// Hidden by default: a transcript is usually read to answer
+        /// what happened, and reasoning is the least useful part of that
+        /// while often being the longest. It is always recorded, and
+        /// `--json` carries it regardless of this flag.
+        #[arg(long)]
+        reasoning: bool,
     },
 }
 

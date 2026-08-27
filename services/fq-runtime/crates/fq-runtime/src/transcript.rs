@@ -45,9 +45,9 @@ pub fn collect_transcript(
     }
 
     for row in llm_rows {
-        let (content, tool_calls, is_error) = match &row.response {
+        let (content, reasoning, tool_calls, is_error) = match &row.response {
             Some(raw) => parse_llm_response(raw),
-            None => (None, Vec::new(), row.is_error),
+            None => (None, None, Vec::new(), row.is_error),
         };
         entries.push(TranscriptEntry::Assistant {
             // `intent_at` (when the turn started) is the sort key for
@@ -58,6 +58,7 @@ pub fn collect_transcript(
             timestamp_ms: row.intent_at,
             model: row.model.clone(),
             content,
+            reasoning,
             tool_calls,
             cost_usd: row.cost_usd,
             is_error: row.is_error.or(is_error),
@@ -171,7 +172,14 @@ struct LlmRequestLike {
 /// always fails and falls back to raw JSON. Lenient: a payload that does
 /// not match is rendered as raw text rather than dropped, so a schema
 /// drift never blanks the turn.
-fn parse_llm_response(raw: &str) -> (Option<String>, Vec<AssistantToolCall>, Option<bool>) {
+type ParsedResponse = (
+    Option<String>,
+    Option<fq_ops::transcript::TurnReasoning>,
+    Vec<AssistantToolCall>,
+    Option<bool>,
+);
+
+fn parse_llm_response(raw: &str) -> ParsedResponse {
     match serde_json::from_str::<ChatResponse>(raw) {
         Ok(resp) => {
             let calls = resp
@@ -183,9 +191,14 @@ fn parse_llm_response(raw: &str) -> (Option<String>, Vec<AssistantToolCall>, Opt
                     parameters: tc.parameters.clone(),
                 })
                 .collect();
-            (resp.text(), calls, None)
+            (
+                resp.text(),
+                crate::events::reduce_reasoning(&resp.parts),
+                calls,
+                None,
+            )
         }
-        Err(_) => (Some(raw.to_string()), Vec::new(), None),
+        Err(_) => (Some(raw.to_string()), None, Vec::new(), None),
     }
 }
 
@@ -235,6 +248,7 @@ pub fn assistant_entry(
         timestamp_ms,
         model,
         content: payload.text(),
+        reasoning: crate::events::reduce_reasoning(&payload.parts),
         tool_calls,
         cost_usd,
         is_error: None,
@@ -430,6 +444,93 @@ mod tests {
         }
     }
 
+    fn assistant_with(reasoning: Option<fq_ops::transcript::TurnReasoning>) -> TranscriptEntry {
+        TranscriptEntry::Assistant {
+            timestamp_ms: 100,
+            model: "kimi-k2".to_string(),
+            content: Some("The answer is 4.".to_string()),
+            reasoning,
+            tool_calls: Vec::new(),
+            cost_usd: None,
+            is_error: None,
+        }
+    }
+
+    /// Reasoning is recorded either way; the flag governs display only.
+    /// Hidden by default because a transcript is read to answer *what
+    /// happened*, and reasoning is the least useful part of that while
+    /// often being the longest.
+    #[test]
+    fn reasoning_renders_only_behind_the_flag() {
+        let entries = vec![assistant_with(Some(fq_ops::transcript::TurnReasoning {
+            text: Some("I ruled out 41 first.".to_string()),
+            opaque: None,
+        }))];
+
+        let hidden = render_pretty(&entries, RenderOptions::pretty());
+        assert!(
+            !hidden.contains("I ruled out 41"),
+            "reasoning is hidden by default: {hidden}"
+        );
+        assert!(
+            hidden.contains("The answer is 4."),
+            "…but the turn itself still renders: {hidden}"
+        );
+
+        let shown = render_pretty(
+            &entries,
+            RenderOptions {
+                truncate_bytes: Some(DEFAULT_TRUNCATE_BYTES),
+                reasoning: true,
+            },
+        );
+        assert!(
+            shown.contains("I ruled out 41"),
+            "--reasoning shows it: {shown}"
+        );
+    }
+
+    /// **I7 in the rendering.** A turn whose reasoning we cannot read
+    /// must not render as a turn that had none. Presentation may collapse
+    /// the distinction; it may not erase it.
+    #[test]
+    fn opaque_reasoning_renders_as_present_not_absent() {
+        let entries = vec![assistant_with(Some(fq_ops::transcript::TurnReasoning {
+            text: None,
+            opaque: Some(serde_json::json!("encrypted-blob")),
+        }))];
+
+        let shown = render_pretty(
+            &entries,
+            RenderOptions {
+                truncate_bytes: Some(DEFAULT_TRUNCATE_BYTES),
+                reasoning: true,
+            },
+        );
+        assert!(
+            shown.contains("opaque"),
+            "an unreadable turn must say so rather than show nothing: {shown}"
+        );
+    }
+
+    /// A turn that genuinely had no reasoning prints nothing about it,
+    /// even with the flag on — the other half of the same distinction.
+    #[test]
+    fn absent_reasoning_prints_nothing_even_with_the_flag() {
+        let entries = vec![assistant_with(None)];
+        let shown = render_pretty(
+            &entries,
+            RenderOptions {
+                truncate_bytes: Some(DEFAULT_TRUNCATE_BYTES),
+                reasoning: true,
+            },
+        );
+        assert!(
+            !shown.contains("reasoning"),
+            "no reasoning means no reasoning line: {shown}"
+        );
+    }
+
     #[test]
     fn render_pretty_contains_payloads() {
         let llm = vec![llm_row(
@@ -447,7 +548,7 @@ mod tests {
             "a.txt\nb.txt",
         )];
         let entries = collect_transcript(&llm, &tools);
-        let text = render_pretty(&entries, Some(DEFAULT_TRUNCATE_BYTES));
+        let text = render_pretty(&entries, RenderOptions::pretty());
 
         assert!(
             text.contains("You are a helpful agent."),
@@ -469,11 +570,17 @@ mod tests {
         let tools = vec![tool_row(200, 200, "shell", "{}", &result)];
         let entries = collect_transcript(&llm, &tools);
 
-        let truncated = render_pretty(&entries, Some(DEFAULT_TRUNCATE_BYTES));
+        let truncated = render_pretty(&entries, RenderOptions::pretty());
         assert!(truncated.contains("truncated"), "should note truncation");
         assert!(truncated.len() < result.len(), "truncated output shorter");
 
-        let full = render_pretty(&entries, None);
+        let full = render_pretty(
+            &entries,
+            RenderOptions {
+                truncate_bytes: None,
+                reasoning: false,
+            },
+        );
         assert!(!full.contains("truncated"), "full must not truncate");
         assert!(full.contains(&big), "full must contain the whole output");
     }
@@ -500,7 +607,16 @@ mod tests {
     fn empty_rows_produce_empty_transcript() {
         let entries = collect_transcript(&[], &[]);
         assert!(entries.is_empty());
-        assert!(render_pretty(&entries, None).is_empty());
+        assert!(
+            render_pretty(
+                &entries,
+                RenderOptions {
+                    truncate_bytes: None,
+                    reasoning: false
+                }
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -591,7 +707,7 @@ mod tests {
         assert!(matches!(entries[2], TranscriptEntry::ToolResult { .. }));
         assert!(matches!(entries[3], TranscriptEntry::Assistant { .. }));
 
-        let text = render_pretty(&entries, Some(DEFAULT_TRUNCATE_BYTES));
+        let text = render_pretty(&entries, RenderOptions::pretty());
         assert!(text.contains("You are a helpful agent."));
         assert!(text.contains("Let me list the files."));
         assert!(text.contains("a.txt"));
