@@ -202,8 +202,15 @@ pub(crate) async fn transcript_stream(
 }
 
 /// The whole conversation, not a page of it — `turn.list` pages at 200
-/// by default, which would silently clip a long run's tail.
-const TRANSCRIPT_TURN_LIMIT: u32 = u32::MAX;
+/// by default, which would silently clip a long run's tail. So: the
+/// largest page the atom will serve, read off its declaration rather
+/// than hardcoded here.
+///
+/// It asked for `u32::MAX` while that `limit` was a default the daemon
+/// applied with `unwrap_or`. It is a ceiling now, and an over-cap ask
+/// is refused rather than shortened, so a client naming its own number
+/// would break the day the cap moved.
+const TRANSCRIPT_TURN_LIMIT: u32 = fq_ops::surface::TURN_LIST_MAX_LIMIT;
 
 pub(crate) async fn transcript_page(
     State(state): State<Arc<AppState>>,

@@ -11,7 +11,8 @@
 use std::sync::Arc;
 
 use fq_runtime::surface::{
-    AgentListFilter, AgentViewKey, InvocationListFilter, InvocationViewKey, TurnFilter,
+    AgentListFilter, AgentViewKey, InvocationListFilter, InvocationViewKey, TURN_LIST_MAX_LIMIT,
+    TurnFilter,
 };
 use fq_runtime::views::Views;
 
@@ -371,9 +372,10 @@ pub fn operator_registry(
         fq_ops::Stability::Experimental,
     )
     .description(
-        "Event-log-backed: `seq` is the stream sequence — the same \
-         cursor receipts and min_seq gates speak. Stream long-polls \
-         via next_batch; from_seq = u64::MAX seeks the tail.",
+        "Event-log-backed: `seq` is the stream sequence — the same cursor receipts and \
+         min_seq gates speak. List pages the invocation from its start, oldest turn \
+         first, and REFUSES an over-cap `limit` rather than shortening it. Stream \
+         long-polls via next_batch; from_seq = u64::MAX seeks the tail.",
     );
     let get_bus = turn_bus.clone();
     let list_bus = turn_bus.clone();
@@ -390,8 +392,10 @@ pub fn operator_registry(
                 let bus = list_bus.clone();
                 let views = list_views.clone();
                 async move {
+                    // Before the lookup: an over-cap `limit` is a verdict on the request.
+                    let limit = turn_list_limit(&filter)?;
                     let agent = agent_for_turns(&views, &filter.invocation_id).await?;
-                    list_turns(&bus, &agent, &filter).await
+                    list_turns(&bus, &agent, &filter, limit).await
                 }
             },
             move |filter: TurnFilter, from_seq, max_wait_ms| {
@@ -565,16 +569,40 @@ fn register_agent_view(
 
 /// Hard cap on one stream batch, applied whatever the caller asks.
 const TURN_BATCH_CAP: usize = 64;
-/// The page size `turn.list` uses when the caller names none — a
-/// **default, not a cap**. Unlike `event_atom`, `dead_letter_atom` and
-/// `trigger_command`, which reject an over-limit request with
-/// `InvalidInput`, `TurnFilter` carries no maximum and the handler
-/// applies this via `unwrap_or`, so `limit: u32::MAX` is an unbounded
-/// log walk over the edge. Tracked in #512 as a code defect; the
-/// number here is only the default until it is fixed.
+/// The page size `turn.list` serves when the caller names none — a
+/// default, and only a default: [`TURN_LIST_MAX_LIMIT`] is the ceiling,
+/// a separate number for a separate question, and one number doing both
+/// jobs is how the missing ceiling stayed invisible. 200 rather than the
+/// siblings' 50 because this atom's consumer is a transcript, which
+/// wants the conversation whole.
 const TURN_LIST_DEFAULT_LIMIT: u32 = 200;
 /// Ceiling on a `next_batch` long poll, whatever the caller asks.
 const TURN_MAX_WAIT_CEILING_MS: u64 = 60_000;
+
+/// The page size `turn.list` serves: the caller's own number, checked
+/// against [`TURN_LIST_MAX_LIMIT`], or the default when they named none.
+/// **Over the cap is a refusal, not a shorter page** — reasoning with the
+/// constant, on the filter it bounds. Here because it speaks `WireError`.
+fn turn_list_limit(filter: &TurnFilter) -> Result<u32, fq_edge::wire::WireError> {
+    let Some(limit) = filter.limit else {
+        return Ok(TURN_LIST_DEFAULT_LIMIT);
+    };
+    if limit > TURN_LIST_MAX_LIMIT {
+        return Err(fq_edge::wire::WireError::InvalidInput {
+            op: "turn.list".into(),
+            message: format!(
+                "limit {limit} is over the {TURN_LIST_MAX_LIMIT}-turn cap on one List \
+                 page — ask for {TURN_LIST_MAX_LIMIT} or fewer. The cap is not applied \
+                 silently because a shortened page and a complete one are the same \
+                 answer to look at, and a page of turns is the transcript itself rather \
+                 than an index over it. For more than a page, read on with \
+                 `turn.stream`, which is cursored and selects the same turns for the \
+                 same filter, from the `seq` this page ended on."
+            ),
+        });
+    }
+    Ok(limit)
+}
 
 async fn agent_for_turns(
     views: &Views,
@@ -627,11 +655,12 @@ async fn turn_at(
 }
 
 /// List an invocation's turns from the log, full payloads, bounded by
-/// the stream tip observed at entry.
+/// `limit` (ruled on at the call site) and by the tip seen at entry.
 async fn list_turns(
     bus: &fq_runtime::EventBus,
     agent: &str,
     filter: &TurnFilter,
+    limit: u32,
 ) -> Result<Vec<fq_runtime::turn::TurnState>, fq_edge::wire::WireError> {
     use futures::StreamExt;
     let internal = |e: fq_runtime::bus::BusError| fq_edge::wire::WireError::Internal {
@@ -651,7 +680,7 @@ async fn list_turns(
     if tip == 0 {
         return Ok(Vec::new());
     }
-    let limit = filter.limit.unwrap_or(TURN_LIST_DEFAULT_LIMIT) as usize;
+    let limit = limit as usize;
     let mut events = bus.events_from(&subject, 1).await.map_err(internal)?;
     let mut fold = fq_runtime::turn::TurnFold::new();
     let mut turns = Vec::new();
@@ -757,6 +786,133 @@ pub(crate) fn parse_invocation_status_filter(
         "completed" => OwnerStatus::Completed,
         _ => OwnerStatus::Failed,
     })
+}
+
+#[cfg(test)]
+mod turn_list_limit_tests {
+    use fq_edge::wire::WireError;
+    use fq_runtime::surface::TurnFilter;
+
+    use super::{TURN_LIST_DEFAULT_LIMIT, TURN_LIST_MAX_LIMIT, turn_list_limit};
+
+    fn filter_with_limit(limit: Option<u32>) -> TurnFilter {
+        TurnFilter {
+            invocation_id: "01936f8a-0000-7000-8000-000000000000".into(),
+            limit,
+        }
+    }
+
+    /// **A page over the cap is refused, not silently shortened.**
+    ///
+    /// The shortening is the failure this exists to prevent: List
+    /// answers with a bare array of turns, so a page the daemon cut
+    /// down looks exactly like a conversation that ended, and an
+    /// operator would read a partial transcript as the whole one. The
+    /// assertion is therefore two things at once — that the over-cap
+    /// ask errors, and that no shortened page comes back in its place.
+    #[test]
+    fn a_page_over_the_cap_is_refused_rather_than_shortened() {
+        for asked in [
+            TURN_LIST_MAX_LIMIT + 1,
+            TURN_LIST_MAX_LIMIT * 10,
+            // What both first-party transcript clients used to ask
+            // for, which the atom accepted because `limit` was a
+            // default rather than a ceiling.
+            u32::MAX,
+        ] {
+            let err = turn_list_limit(&filter_with_limit(Some(asked)))
+                .expect_err("a page over the cap must be refused, not served short");
+            // The refusal names the cap, so the caller's next request
+            // is one edit away rather than a guess — and names the op,
+            // because Stream ignores `limit` entirely.
+            assert!(
+                matches!(&err, WireError::InvalidInput { op, message }
+                    if op == "turn.list"
+                        && message.contains(&asked.to_string())
+                        && message.contains(&TURN_LIST_MAX_LIMIT.to_string())),
+                "expected an InvalidInput naming {asked} and the cap; got {err:?}"
+            );
+            // …and it names the way out, because a cap a caller cannot
+            // page past would be a dead end: List carries no cursor of
+            // its own, so the answer to "more than a page" is the
+            // stream, resumed at the `seq` the page ended on.
+            let WireError::InvalidInput { message, .. } = &err else {
+                unreachable!("checked above")
+            };
+            assert!(
+                message.contains("turn.stream"),
+                "the refusal must point at the cursored read; got {message}"
+            );
+        }
+    }
+
+    /// Under the cap, the page size is the caller's own number — the
+    /// boundary included, which is the half a `>` comparison gets
+    /// wrong most easily.
+    ///
+    /// The daemon never substitutes a number of its own, so a listing
+    /// shorter than the `limit` asked for is the complete answer, and
+    /// one exactly as long as the `limit` may have more behind it. A
+    /// clamp would have broken that inference for a bound the caller
+    /// never chose, which is the whole objection to clamping.
+    #[test]
+    fn under_the_cap_the_page_is_the_callers_own_number() {
+        for asked in [0, 1, TURN_LIST_DEFAULT_LIMIT, TURN_LIST_MAX_LIMIT] {
+            assert_eq!(
+                turn_list_limit(&filter_with_limit(Some(asked))).ok(),
+                Some(asked),
+                "a page within the cap must be exactly the size asked for"
+            );
+        }
+        // No `limit` is the documented default, not the cap: asking
+        // for nothing in particular must not become asking for the
+        // largest page the daemon will serve. These are two numbers
+        // for two questions, and a fix that collapsed them would have
+        // re-made the defect from the other side.
+        assert_eq!(
+            turn_list_limit(&filter_with_limit(None)).ok(),
+            Some(TURN_LIST_DEFAULT_LIMIT)
+        );
+        const {
+            assert!(
+                TURN_LIST_DEFAULT_LIMIT < TURN_LIST_MAX_LIMIT,
+                "the default must sit under the cap it is not"
+            )
+        };
+    }
+
+    /// **The cap is on the declared surface, not only in the code.**
+    ///
+    /// A consumer has to be able to read the bound off
+    /// `operator_surface.json` rather than discover it by being
+    /// refused — so it ships twice on the filter's `limit` property:
+    /// as the schema's machine-readable `maximum`, and in the prose a
+    /// human reads. Both are asserted against the constant the daemon
+    /// actually enforces, so the declaration cannot drift away from
+    /// the behaviour: that drift is precisely how a surface comes to
+    /// say less than it means, and is exactly what this atom had — a
+    /// `limit` the daemon applied with `unwrap_or` under a schema that
+    /// declared no maximum at all.
+    #[test]
+    fn the_surface_declares_the_cap_it_enforces() {
+        let schema = serde_json::to_value(schemars::schema_for!(TurnFilter))
+            .expect("the filter schema serialises");
+        let limit = &schema["properties"]["limit"];
+        assert_eq!(
+            limit["maximum"].as_u64(),
+            Some(u64::from(TURN_LIST_MAX_LIMIT)),
+            "the schema's maximum must be the cap the daemon enforces; got {limit}"
+        );
+        let described = limit["description"].as_str().expect("a described property");
+        assert!(
+            described.contains(&TURN_LIST_MAX_LIMIT.to_string()),
+            "the declared description must name the cap; got {described:?}"
+        );
+        assert!(
+            described.contains(&TURN_LIST_DEFAULT_LIMIT.to_string()),
+            "the declared description must name the default too; got {described:?}"
+        );
+    }
 }
 
 #[cfg(test)]
