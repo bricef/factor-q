@@ -619,6 +619,110 @@ mod tests {
         }
     }
 
+    /// **The acceptance test for #437.** A reasoning-first model carries
+    /// the substance of a turn in its reasoning, not its visible text.
+    /// The reducer replays the whole conversation on every step, so if
+    /// the assistant turn it stores drops reasoning, turn N+1 re-derives
+    /// from a weaker base than the provider's contract assumes — silently,
+    /// and worse the longer the loop runs.
+    ///
+    /// This drives two real turns through the harness and asserts the
+    /// reasoning survives into the request for the second. Paired with
+    /// `llm::genai`'s `reasoning_reaches_the_provider_on_the_next_turn`,
+    /// which takes it from there to the wire, that is the full round trip
+    /// the issue asks for.
+    #[test]
+    fn reasoning_survives_into_the_next_turn_of_the_conversation() {
+        let h = Harness::new();
+        let s0 = h.step(step_input(Vec::new(), None, 0)).unwrap();
+
+        // Turn 1: the model reasons, then calls a tool.
+        let turn_one = ModelResponse {
+            parts: vec![
+                AssistantPart::Reasoning(crate::events::Reasoning {
+                    model: "kimi-k2".to_string(),
+                    content: crate::events::ReasoningContent::Plain {
+                        text: "The runbook is the cheapest place to start.".to_string(),
+                    },
+                }),
+                AssistantPart::Text {
+                    text: "Reading the runbook.".to_string(),
+                },
+                AssistantPart::ToolCall(crate::events::MessageToolCall {
+                    tool_call_id: crate::events::ToolCallId::new("c1").unwrap(),
+                    tool_name: "builtin__exec".to_string(),
+                    parameters: json!({"command": ["true"]}),
+                }),
+            ],
+            stop_reason: crate::events::StopReason::ToolUse,
+            usage: crate::events::TokenUsage::default(),
+        };
+        let s1 = h
+            .step(step_input(
+                s0.state,
+                Some(CapabilityResult::ModelResult(turn_one)),
+                1,
+            ))
+            .unwrap();
+        assert!(matches!(s1.next_action, NextAction::CallTool(_)));
+
+        // The tool answers, and the reducer asks for turn 2.
+        let s2 = h
+            .step(step_input(
+                s1.state,
+                Some(CapabilityResult::ToolResult(ToolCallResult {
+                    tool_call_id: crate::events::ToolCallId::new("c1").unwrap(),
+                    output: "ok".to_string(),
+                    is_error: false,
+                    error_kind: None,
+                    duration_ms: 0,
+                })),
+                2,
+            ))
+            .unwrap();
+        let NextAction::CallModel(request) = s2.next_action else {
+            panic!("expected another model turn after the tool result");
+        };
+
+        let replayed: Vec<&crate::events::Reasoning> = request
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Assistant { parts } => Some(parts),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|part| match part {
+                AssistantPart::Reasoning(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            replayed.len(),
+            1,
+            "the model's own reasoning must be replayed to it on the next turn"
+        );
+        assert!(matches!(
+            &replayed[0].content,
+            crate::events::ReasoningContent::Plain { text }
+                if text == "The runbook is the cheapest place to start."
+        ));
+        assert_eq!(
+            replayed[0].model, "kimi-k2",
+            "the part stays tagged, so a later cross-model edge can strip it"
+        );
+
+        // The rest of the turn is intact alongside it — this is addition,
+        // not replacement.
+        let assistant = request
+            .messages
+            .iter()
+            .find(|m| matches!(m, Message::Assistant { .. }))
+            .expect("the assistant turn is in the conversation");
+        assert_eq!(assistant.text().as_deref(), Some("Reading the runbook."));
+    }
+
     fn tool_use_response(name: &str, call_id: &str, params: Value) -> ModelResponse {
         ModelResponse {
             parts: crate::events::assistant_parts(

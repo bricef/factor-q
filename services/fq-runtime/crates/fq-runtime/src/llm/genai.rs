@@ -249,7 +249,7 @@ fn into_provider_request(
 
     let mut chat_messages = Vec::with_capacity(messages.len());
     for msg in messages {
-        chat_messages.push(convert_message(msg)?);
+        chat_messages.push(convert_message(msg, &model)?);
     }
 
     // Prompt-caching breakpoints. Two markers per request: the system
@@ -283,12 +283,16 @@ fn into_provider_request(
 
 /// Convert one of our turns into the provider's message shape.
 ///
-/// The match is exhaustive over turn kinds, which is the point of
-/// [`Message`] being an enum: there is no "role says tool but the id is
-/// missing" branch to defend against, because that state cannot be
-/// constructed. The `LlmError` return survives for the reasoning strip in
-/// phase 3, which can fail.
-fn convert_message(msg: Message) -> Result<provider::chat::ChatMessage, LlmError> {
+/// `target_model` is what this request will be sent to, and it is what
+/// makes the cross-model reasoning strip possible: reasoning is tied to
+/// the model that produced it, so a part from a different model is
+/// dropped here rather than replayed (ADR-0034 D5). This is the single
+/// choke point for that rule — the last place before the wire, and the
+/// only one that knows both sides.
+fn convert_message(
+    msg: Message,
+    target_model: &str,
+) -> Result<provider::chat::ChatMessage, LlmError> {
     let chat_msg = match msg {
         Message::System { text } => provider::chat::ChatMessage::system(text),
         Message::User { text } => provider::chat::ChatMessage::user(text),
@@ -312,11 +316,9 @@ fn convert_message(msg: Message) -> Result<provider::chat::ChatMessage, LlmError
                             thought_signatures: None,
                         }),
                     ),
-                    // Phase 3 encodes this. Dropping it here keeps phase 2 a
-                    // pure shape change: nothing constructs a reasoning part
-                    // yet, so this arm is unreachable in practice and the
-                    // request on the wire is unchanged.
-                    crate::events::AssistantPart::Reasoning(_) => None,
+                    crate::events::AssistantPart::Reasoning(reasoning) => {
+                        encode_reasoning(reasoning, target_model)
+                    }
                 })
                 .collect();
 
@@ -354,6 +356,58 @@ fn convert_message(msg: Message) -> Result<provider::chat::ChatMessage, LlmError
         },
     };
     Ok(chat_msg)
+}
+
+/// Encode one reasoning part for the wire, or drop it and say why.
+///
+/// Two reasons a part does not go out, and neither is silent:
+///
+/// **Model mismatch.** Reasoning is verified or ignored against the model
+/// that produced it, so replaying it to a different model is at best
+/// wasted input tokens and at worst a protocol violation. Multi-agent
+/// graphs have cross-model edges by construction (ADR-0003), so this is
+/// an expected drop rather than an error — logged at debug, not warn.
+///
+/// **No readable text.** `Opaque` reasoning carries its content in a
+/// provider token, and genai's `ContentPart::ReasoningContent` is a bare
+/// string with nowhere to put one. Anthropic's signed and redacted blocks
+/// round-trip through `ContentPart::Custom` instead, which is phase 6 and
+/// its upstream dependency.
+///
+/// Note what this deliberately does *not* do: branch on the provider. We
+/// hand genai the semantic part and let its adapter encode it — the
+/// OpenAI-compatible adapter hoists `ReasoningContent` into the sibling
+/// `reasoning_content` field, which is exactly the Kimi/DeepSeek
+/// round-trip, while the Anthropic adapter drops it. That drop is correct
+/// today and stays correct after phase 6: a `Plain` block has no
+/// signature, and Anthropic rejects a thinking block that lacks one, so
+/// it must never reach that wire.
+fn encode_reasoning(
+    reasoning: crate::events::Reasoning,
+    target_model: &str,
+) -> Option<provider::chat::ContentPart> {
+    if reasoning.model != target_model {
+        tracing::debug!(
+            produced_by = %reasoning.model,
+            target_model = %target_model,
+            "dropping reasoning on a cross-model edge; it is tied to the model that produced it"
+        );
+        return None;
+    }
+    match reasoning.content {
+        crate::events::ReasoningContent::Plain { text }
+        | crate::events::ReasoningContent::Signed { text, .. } => {
+            Some(provider::chat::ContentPart::ReasoningContent(text))
+        }
+        crate::events::ReasoningContent::Opaque { .. } => {
+            tracing::debug!(
+                model = %reasoning.model,
+                "opaque reasoning cannot be encoded through `ReasoningContent`; it needs the \
+                 signature-carrying path (#437 phase 6)"
+            );
+            None
+        }
+    }
 }
 
 fn convert_tool_schema(tool: ToolSchema) -> provider::chat::Tool {
@@ -403,6 +457,36 @@ fn from_provider_response(
     // returning an empty string is a protocol bug we surface immediately
     // rather than letting it propagate.
     let mut parts: Vec<AssistantPart> = Vec::new();
+
+    // Reasoning first, which is where Anthropic requires it and where
+    // position is meaningless for OpenAI-compatible providers (they
+    // carry it as a sibling field, not in the content list) — so leading
+    // is correct for both.
+    //
+    // genai normalises every provider's reasoning into
+    // `ChatResponse.reasoning_content` on the non-streaming path, and
+    // populates it unconditionally — no capture flag needed. For
+    // Kimi/DeepSeek that is `/message/reasoning` or
+    // `/message/reasoning_content`; for Anthropic it is the `thinking`
+    // block's text, which arrives WITHOUT its signature (genai drops it),
+    // so it is `Plain` rather than `Signed` here. Phase 6 and its
+    // upstream fix change that; until then an Anthropic part is
+    // deliberately never re-encoded onto that wire — see
+    // `encode_reasoning`.
+    if let Some(text) = response
+        .reasoning_content
+        .as_ref()
+        .filter(|t| !t.is_empty())
+    {
+        parts.push(AssistantPart::Reasoning(crate::events::Reasoning {
+            // The model we ASKED for, not the one the provider reported:
+            // the strip compares against the next request's target, and
+            // that is expressed in the same vocabulary.
+            model: response.model_iden.model_name.to_string(),
+            content: crate::events::ReasoningContent::Plain { text: text.clone() },
+        }));
+    }
+
     for part in response.content.iter() {
         match part {
             provider::chat::ContentPart::Text(text) => {
@@ -664,6 +748,200 @@ mod tests {
         );
     }
 
+    // region: reasoning round-trip (#437 phase 3)
+
+    fn reasoning_part(model: &str, text: &str) -> AssistantPart {
+        AssistantPart::Reasoning(crate::events::Reasoning {
+            model: model.to_string(),
+            content: crate::events::ReasoningContent::Plain {
+                text: text.to_string(),
+            },
+        })
+    }
+
+    /// **The test the issue asks for.** A reasoning-first model carries
+    /// the substance of a turn in `reasoning_content`; if we do not send
+    /// it back, turn N+1 re-derives from a weaker base than the
+    /// provider's own contract assumes, and pays for the thinking again.
+    ///
+    /// So this asserts on the outbound wire shape, not on output quality:
+    /// an assistant turn holding a reasoning part must reach genai as a
+    /// `ReasoningContent` part, which its OpenAI-compatible adapter hoists
+    /// into the sibling `reasoning_content` field — the Kimi/DeepSeek
+    /// round-trip.
+    #[test]
+    fn reasoning_reaches_the_provider_on_the_next_turn() {
+        let msg = convert_message(
+            Message::Assistant {
+                parts: vec![
+                    reasoning_part("kimi-k2", "The runbook is the cheapest place to start."),
+                    AssistantPart::Text {
+                        text: "Reading the runbook.".to_string(),
+                    },
+                ],
+            },
+            "kimi-k2",
+        )
+        .expect("conversion succeeds");
+
+        let reasoning: Vec<&String> = msg
+            .content
+            .parts()
+            .iter()
+            .filter_map(|part| match part {
+                provider::chat::ContentPart::ReasoningContent(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasoning.len(),
+            1,
+            "the turn's reasoning must survive to the provider"
+        );
+        assert_eq!(reasoning[0], "The runbook is the cheapest place to start.");
+    }
+
+    /// Reasoning is tied to the model that produced it, and ADR-0003
+    /// guarantees per-agent model selection — so a multi-node graph has
+    /// cross-model edges by construction. On each one the reasoning must
+    /// go, or we bill input tokens for a block the model will ignore.
+    #[test]
+    fn reasoning_is_stripped_on_a_cross_model_edge() {
+        let msg = convert_message(
+            Message::Assistant {
+                parts: vec![
+                    reasoning_part("kimi-k2", "thought hard about it"),
+                    AssistantPart::Text {
+                        text: "done".to_string(),
+                    },
+                ],
+            },
+            "gpt-4o",
+        )
+        .expect("conversion succeeds");
+
+        assert!(
+            !msg.content
+                .parts()
+                .iter()
+                .any(|p| matches!(p, provider::chat::ContentPart::ReasoningContent(_))),
+            "reasoning from another model must not be replayed"
+        );
+        // …and the rest of the turn is untouched: a strip is not a drop.
+        assert!(
+            msg.content
+                .parts()
+                .iter()
+                .any(|p| matches!(p, provider::chat::ContentPart::Text(t) if t == "done")),
+            "stripping reasoning must not take the turn's text with it"
+        );
+    }
+
+    /// Opaque reasoning has no readable text, and genai's
+    /// `ReasoningContent` is a bare string with nowhere to put a
+    /// continuity token. It is dropped rather than encoded as if the
+    /// token were prose — sending a signature as text would be rejected
+    /// by the provider and is a corruption, not a degradation.
+    #[test]
+    fn opaque_reasoning_is_not_encoded_as_text() {
+        let msg = convert_message(
+            Message::Assistant {
+                parts: vec![AssistantPart::Reasoning(crate::events::Reasoning {
+                    model: "claude-sonnet-4-6".to_string(),
+                    content: crate::events::ReasoningContent::Opaque {
+                        token: "encrypted-blob".to_string(),
+                    },
+                })],
+            },
+            "claude-sonnet-4-6",
+        )
+        .expect("conversion succeeds");
+
+        assert!(
+            !msg.content.parts().iter().any(|p| matches!(
+                p,
+                provider::chat::ContentPart::ReasoningContent(t) if t.contains("encrypted-blob")
+            )),
+            "an opaque token must never be sent as if it were reasoning text"
+        );
+    }
+
+    /// The read side: genai normalises every provider's reasoning into
+    /// `ChatResponse.reasoning_content`, and it must become a part tagged
+    /// with the model that produced it — the tag is what the strip above
+    /// keys on, so an untagged part would silently defeat it.
+    #[test]
+    fn provider_reasoning_becomes_a_tagged_part() {
+        let response = provider::chat::ChatResponse {
+            content: provider::chat::MessageContent::from_parts(vec![
+                provider::chat::ContentPart::Text("Answer.".to_string()),
+            ]),
+            reasoning_content: Some("Worked it through.".to_string()),
+            model_iden: provider::ModelIden::new(provider::adapter::AdapterKind::OpenAI, "kimi-k2"),
+            provider_model_iden: provider::ModelIden::new(
+                provider::adapter::AdapterKind::OpenAI,
+                "kimi-k2-0905",
+            ),
+            stop_reason: None,
+            usage: provider::chat::Usage::default(),
+            captured_raw_body: None,
+            response_id: None,
+        };
+
+        let parsed = from_provider_response(response).expect("parses");
+
+        let reasoning = parsed
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                AssistantPart::Reasoning(r) => Some(r),
+                _ => None,
+            })
+            .expect("reasoning must be captured");
+        assert_eq!(
+            reasoning.model, "kimi-k2",
+            "tagged with the model we asked for, which is what the strip compares against"
+        );
+        assert!(matches!(
+            &reasoning.content,
+            crate::events::ReasoningContent::Plain { text } if text == "Worked it through."
+        ));
+        // Reasoning leads the turn — the order Anthropic requires and one
+        // OpenAI-compatible providers are indifferent to.
+        assert!(matches!(parsed.parts[0], AssistantPart::Reasoning(_)));
+        assert_eq!(parsed.text().as_deref(), Some("Answer."));
+    }
+
+    /// A response with no reasoning must produce no reasoning part —
+    /// absence stays absence, rather than becoming an empty one.
+    #[test]
+    fn a_response_without_reasoning_gains_no_part() {
+        let response = provider::chat::ChatResponse {
+            content: provider::chat::MessageContent::from_parts(vec![
+                provider::chat::ContentPart::Text("Answer.".to_string()),
+            ]),
+            reasoning_content: None,
+            model_iden: provider::ModelIden::new(provider::adapter::AdapterKind::OpenAI, "gpt-4o"),
+            provider_model_iden: provider::ModelIden::new(
+                provider::adapter::AdapterKind::OpenAI,
+                "gpt-4o",
+            ),
+            stop_reason: None,
+            usage: provider::chat::Usage::default(),
+            captured_raw_body: None,
+            response_id: None,
+        };
+        let parsed = from_provider_response(response).expect("parses");
+        assert!(
+            !parsed
+                .parts
+                .iter()
+                .any(|p| matches!(p, AssistantPart::Reasoning(_)))
+        );
+    }
+
+    // endregion: reasoning round-trip
+
     #[test]
     fn maps_reasoning_effort_to_provider_options() {
         let options = convert_params(RequestParams {
@@ -923,10 +1201,13 @@ mod tests {
 
     #[test]
     fn converts_tool_result_message() {
-        let msg = convert_message(Message::tool_result(
-            crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
-            "file contents",
-        ))
+        let msg = convert_message(
+            Message::tool_result(
+                crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
+                "file contents",
+            ),
+            "claude-sonnet-4-6",
+        )
         .unwrap();
         assert!(matches!(msg.role, provider::chat::ChatRole::Tool));
     }
@@ -940,16 +1221,19 @@ mod tests {
 
     #[test]
     fn converts_assistant_message_with_tool_calls() {
-        let msg = convert_message(Message::Assistant {
-            parts: crate::events::assistant_parts(
-                Some("I'll read that file.".to_string()),
-                vec![MessageToolCall {
-                    tool_call_id: crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
-                    tool_name: "read_file".to_string(),
-                    parameters: serde_json::json!({"path": "/tmp/x"}),
-                }],
-            ),
-        })
+        let msg = convert_message(
+            Message::Assistant {
+                parts: crate::events::assistant_parts(
+                    Some("I'll read that file.".to_string()),
+                    vec![MessageToolCall {
+                        tool_call_id: crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
+                        tool_name: "read_file".to_string(),
+                        parameters: serde_json::json!({"path": "/tmp/x"}),
+                    }],
+                ),
+            },
+            "claude-sonnet-4-6",
+        )
         .unwrap();
         assert!(matches!(msg.role, provider::chat::ChatRole::Assistant));
     }
