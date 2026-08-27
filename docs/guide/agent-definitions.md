@@ -34,6 +34,29 @@ fq agent validate agents/greeter.md
 fq trigger greeter "Hello!"
 ```
 
+## The frontmatter is strict
+
+Every key in the frontmatter must be one the runtime recognises. An
+unknown key is a **hard error** — the definition fails to load and the
+error names the offending key, lists the keys that were expected, and
+gives the line and column. The recognised set is:
+
+`name` · `model` · `tools` · `sandbox` · `budget` · `max_iterations` ·
+`effort` · `trigger` · `mcp` · `static_resources` · `sampling_budget` ·
+`elicitation_budget`
+
+Strictness is deliberate: a dropped key is silent, and silence here is
+expensive. `budgett: 0.05` used to parse as a definition with *no* cost
+cap, and `fq agent validate` called it valid — the only trace was a
+missing line in its output (ADR-0004 is "cost controls from day one").
+`sandboxx:` is the same shape with a security edge: the agent would run
+with no grants rather than the ones its author wrote. Both are now
+rejected outright.
+
+Because an unknown key is fatal at load time, a stray key in *any*
+definition the daemon loads fails that definition — run
+`fq agent validate` over a definition before adding it.
+
 ## Choosing the model
 
 `model:` names a model the deployment makes available. Different agents
@@ -497,7 +520,9 @@ code blocks — anything that helps the LLM understand its task.
 ## Validating and testing
 
 ```sh
-# Check that the definition parses correctly (offline, no daemon needed)
+# Check that the definition parses correctly (offline, no daemon needed).
+# Prints every optional field, set or not — `budget: not set (no cap)`
+# rather than an omitted line, so an absence is something you can read.
 fq agent validate agents/my-agent.md
 
 # List the agents the running daemon has loaded — its live registry,
