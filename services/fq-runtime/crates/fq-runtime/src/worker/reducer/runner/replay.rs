@@ -113,7 +113,7 @@ pub(super) fn truncate_incomplete_final_batch(
         return 0;
     };
     let requested = match &completed[last_model].1 {
-        CapabilityResult::ModelResult(response) => response.tool_calls.len(),
+        CapabilityResult::ModelResult(response) => response.tool_calls().count(),
         _ => unreachable!("rposition matched a ModelResult"),
     };
     // Everything after the last model turn is that turn's tool results —

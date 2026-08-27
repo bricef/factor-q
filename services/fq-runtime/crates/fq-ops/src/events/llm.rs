@@ -58,25 +58,211 @@ pub struct LlmDispatchedPayload {
     pub model: String,
 }
 
+/// One turn in a conversation.
+///
+/// **The turn kind is the variant, so the role is carried by the type**
+/// rather than by a `role` field that a separate content list can
+/// disagree with ([ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md)
+/// D1). Four states the previous `{role, content, tool_calls,
+/// tool_call_id}` shape left representable are now unrepresentable: a
+/// tool message with no correlation id, reasoning in a user turn, a tool
+/// call in a user turn, and a tool result in an assistant turn.
+///
+/// Each variant carries the parts its kind can hold rather than sharing
+/// one flat part type, which is what keeps those states gone. Upstream
+/// shows the cost of the alternative: genai carries the comment *"ToolCall
+/// is not valid in user content for Anthropic; skip gracefully"* — an
+/// invalid combination handled by dropping it silently.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: MessageRole,
-    pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<MessageToolCall>,
-    /// ID correlating a `tool` role message with a prior assistant tool
-    /// call. Assigned by the LLM provider and carried through as-is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<ToolCallId>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Message {
+    /// The system prompt. Seeded once, first, per conversation.
+    System { text: String },
+    /// A user turn: the trigger's rendered prompt, host notices, or
+    /// pinned static-resource context.
+    ///
+    /// Plain text today because every user message the runtime builds is
+    /// plain text, and MCP sampling already flattens multimodal content
+    /// upstream of this type. It becomes a part list when binary content
+    /// arrives — a variant is cheap to widen, and a one-variant part enum
+    /// today would be structure nothing branches on.
+    User { text: String },
+    /// An assistant turn: text, reasoning, and tool calls, in the order
+    /// the provider returned them.
+    Assistant { parts: Vec<AssistantPart> },
+    /// Every result answering a single assistant turn's tool calls.
+    ///
+    /// One message, N results — which matches the Anthropic wire shape,
+    /// where `tool_result` blocks are batched into one turn. Note the
+    /// runtime does not yet *emit* the batched form
+    /// ([#511](https://github.com/bricef/factor-q/issues/511)); this makes
+    /// it representable.
+    ToolResults { results: Vec<ToolResult> },
 }
 
+impl Message {
+    /// The system prompt.
+    pub fn system(text: impl Into<String>) -> Self {
+        Self::System { text: text.into() }
+    }
+
+    /// A user turn.
+    pub fn user(text: impl Into<String>) -> Self {
+        Self::User { text: text.into() }
+    }
+
+    /// An assistant turn carrying a single text part — scripted context,
+    /// or a model turn that said something and did nothing else.
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self::Assistant {
+            parts: vec![AssistantPart::Text { text: text.into() }],
+        }
+    }
+
+    /// One tool result as its own turn.
+    ///
+    /// The batched form is `Message::ToolResults` with several results;
+    /// this is the single-result convenience, which is what the runtime
+    /// emits today (see [#511](https://github.com/bricef/factor-q/issues/511)).
+    pub fn tool_result(tool_call_id: ToolCallId, output: impl Into<String>) -> Self {
+        Self::ToolResults {
+            results: vec![ToolResult {
+                tool_call_id,
+                output: output.into(),
+                is_error: false,
+            }],
+        }
+    }
+
+    /// The text this turn carries, whatever kind it is — `None` only when
+    /// it genuinely carries none. Lets a reader ask "what is in this
+    /// message?" without matching on the kind first.
+    ///
+    /// A tool-results turn answers with its outputs joined, for the same
+    /// reason an assistant turn joins its text parts: the caller asked
+    /// what the message contains, and the outputs are what it contains.
+    /// Returning `None` there would be a semantic distinction ("data, not
+    /// speech") that no caller wants and that reads as a bug at every
+    /// call site.
+    ///
+    /// Callers that care *which* kind they have should match on the
+    /// variant instead — that is what the enum is for.
+    pub fn text(&self) -> Option<String> {
+        match self {
+            Self::System { text } | Self::User { text } => Some(text.clone()),
+            Self::Assistant { parts } => assistant_text(parts),
+            Self::ToolResults { results } => {
+                let outputs: Vec<&str> = results.iter().map(|r| r.output.as_str()).collect();
+                (!outputs.is_empty()).then(|| outputs.join("\n"))
+            }
+        }
+    }
+}
+
+/// The visible text of an assistant turn, joined when the provider split
+/// it across parts. `None` when the turn carried none — a tool-only turn,
+/// or one that was pure reasoning.
+///
+/// Defined once so every consumer answers "what did this turn say?" the
+/// same way; the payload and the runtime's response type both delegate here.
+pub fn assistant_text(parts: &[AssistantPart]) -> Option<String> {
+    let texts: Vec<&str> = parts
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!texts.is_empty()).then(|| texts.join("\n"))
+}
+
+/// Build an assistant turn's parts from text and tool calls — the
+/// inverse of [`assistant_text`] and [`assistant_tool_calls`].
+///
+/// Text first, then calls, which is the order every provider returns and
+/// the order Anthropic requires. Reasoning is not expressible here by
+/// design: it comes from a provider response, never from a caller
+/// assembling a turn by hand.
+pub fn assistant_parts(
+    text: Option<String>,
+    tool_calls: Vec<MessageToolCall>,
+) -> Vec<AssistantPart> {
+    let mut parts = Vec::with_capacity(tool_calls.len() + 1);
+    if let Some(text) = text.filter(|t| !t.is_empty()) {
+        parts.push(AssistantPart::Text { text });
+    }
+    parts.extend(tool_calls.into_iter().map(AssistantPart::ToolCall));
+    parts
+}
+
+/// The tool calls an assistant turn requested, in order.
+pub fn assistant_tool_calls(parts: &[AssistantPart]) -> impl Iterator<Item = &MessageToolCall> {
+    parts.iter().filter_map(|part| match part {
+        AssistantPart::ToolCall(call) => Some(call),
+        _ => None,
+    })
+}
+
+/// A part of an assistant turn. The three things such a turn can hold —
+/// and nothing else, which is the point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageRole {
-    System,
-    User,
-    Assistant,
-    Tool,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AssistantPart {
+    Text { text: String },
+    Reasoning(Reasoning),
+    ToolCall(MessageToolCall),
+}
+
+/// The model's own working for one turn.
+///
+/// **Reasoning is model-tied.** Providers verify or reject it against the
+/// model that produced it, so `model` is not annotation — the cross-model
+/// strip keys on it (ADR-0034 D5).
+///
+/// The three shapes are the ones providers actually return, and code
+/// branches on the difference: the transcript can render `Plain` and
+/// `Signed`'s text but not `Opaque`'s, and each adapter encodes them
+/// differently on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reasoning {
+    /// The model that produced this. Replaying reasoning to a different
+    /// model is at best wasted input tokens and at worst a protocol
+    /// violation.
+    pub model: String,
+    pub content: ReasoningContent,
+}
+
+/// What a reasoning part actually carries.
+///
+/// **`Opaque` is not "empty".** A provider block we cannot read still
+/// carries the turn's reasoning — Anthropic's `signature` encrypts the
+/// full chain of thought — so it is recorded as present-and-opaque rather
+/// than omitted. Absence and opacity are different facts (ADR-0034 D4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReasoningContent {
+    /// Readable working, no continuity token. Kimi, DeepSeek.
+    Plain { text: String },
+    /// Readable working plus a token that must be echoed verbatim.
+    /// Anthropic `thinking` — where the token, not the text, is the
+    /// payload.
+    Signed { text: String, token: String },
+    /// No readable content: the token *is* the content. Anthropic
+    /// `redacted_thinking`, Gemini thought signatures.
+    Opaque { token: String },
+}
+
+/// One tool's result, answering the call with the matching id.
+///
+/// The id lives on the result rather than beside it, which is what
+/// deletes the "tool message is missing tool_call_id" failure the old
+/// shape could reach at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub tool_call_id: ToolCallId,
+    pub output: String,
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,14 +316,31 @@ pub struct LlmResponsePayload {
     #[serde(default)]
     pub round: u64,
     pub call_id: Uuid,
-    pub content: Option<String>,
+    /// The turn's content, ordered as the provider returned it.
+    ///
+    /// **A response is an assistant turn**, so it carries that turn kind's
+    /// parts rather than a flat part type — which makes a tool result in a
+    /// response unrepresentable (ADR-0034 D3). Replaced the flat
+    /// `content: Option<String>` + `tool_calls` pair in schema v3.
     #[serde(default)]
-    pub tool_calls: Vec<MessageToolCall>,
+    pub parts: Vec<AssistantPart>,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
     /// What prompted this call (see [`LlmRequestPayload::origin`]).
     #[serde(default)]
     pub origin: LlmCallOrigin,
+}
+
+impl LlmResponsePayload {
+    /// What this turn said. See [`assistant_text`].
+    pub fn text(&self) -> Option<String> {
+        assistant_text(&self.parts)
+    }
+
+    /// What this turn called. See [`assistant_tool_calls`].
+    pub fn tool_calls(&self) -> impl Iterator<Item = &MessageToolCall> {
+        assistant_tool_calls(&self.parts)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

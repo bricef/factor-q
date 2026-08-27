@@ -310,8 +310,9 @@ mod tests {
                 round: 0,
                 origin: crate::events::LlmCallOrigin::AgentTurn,
                 call_id: Uuid::now_v7(),
-                content: Some("hi".to_string()),
-                tool_calls: vec![],
+                parts: vec![crate::events::AssistantPart::Text {
+                    text: "hi".to_string(),
+                }],
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
             }),

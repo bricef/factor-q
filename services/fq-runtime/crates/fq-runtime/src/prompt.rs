@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::events::{Message, MessageRole};
+use crate::events::Message;
 
 /// A fetched MCP prompt, materialised into factor-q-owned types as
 /// a reusable seed. Captures the server's response losslessly;
@@ -77,11 +77,15 @@ impl PromptSeedMessage {
     /// Convert to a factor-q transcript [`Message`], if the content
     /// is supported. Maps the user/assistant role directly.
     pub fn to_message(&self) -> Result<Message, PromptError> {
-        Ok(Message {
-            role: self.role.into(),
-            content: Some(self.content.to_text()?),
-            tool_calls: vec![],
-            tool_call_id: None,
+        let text = self.content.to_text()?;
+        Ok(match self.role {
+            PromptRole::User => Message::User { text },
+            // A prompt's assistant turn is seeded text: it is scripted
+            // context, never a turn a model produced, so it carries a
+            // single text part and nothing else.
+            PromptRole::Assistant => Message::Assistant {
+                parts: vec![crate::events::AssistantPart::Text { text }],
+            },
         })
     }
 }
@@ -93,15 +97,6 @@ impl PromptSeedMessage {
 pub enum PromptRole {
     User,
     Assistant,
-}
-
-impl From<PromptRole> for MessageRole {
-    fn from(role: PromptRole) -> Self {
-        match role {
-            PromptRole::User => MessageRole::User,
-            PromptRole::Assistant => MessageRole::Assistant,
-        }
-    }
 }
 
 /// Optional MCP content annotations + protocol `_meta`, preserved
@@ -336,9 +331,9 @@ mod tests {
 
         let transcript = seed.to_transcript().expect("renders");
         assert_eq!(transcript.len(), 2);
-        assert!(matches!(transcript[0].role, MessageRole::User));
-        assert_eq!(transcript[0].content.as_deref(), Some("hello"));
-        assert_eq!(transcript[1].content.as_deref(), Some("body"));
+        assert!(matches!(transcript[0], Message::User { .. }));
+        assert_eq!(transcript[0].text().as_deref(), Some("hello"));
+        assert_eq!(transcript[1].text().as_deref(), Some("body"));
     }
 
     #[test]

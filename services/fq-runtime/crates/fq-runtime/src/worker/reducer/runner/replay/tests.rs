@@ -20,8 +20,9 @@ fn sequence_order_preserves_tool_batch_boundaries_across_timestamp_ties() {
         })
     };
     let model = CapabilityResult::ModelResult(ModelResponse {
-        content: Some("next".to_string()),
-        tool_calls: vec![],
+        parts: vec![crate::events::AssistantPart::Text {
+            text: "next".to_string(),
+        }],
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage::default(),
     });

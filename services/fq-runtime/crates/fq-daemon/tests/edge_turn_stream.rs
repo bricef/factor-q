@@ -49,14 +49,16 @@ fn assistant_with_call(
         agent.clone(),
         invocation,
         fq_runtime::events::EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
+            parts: fq_runtime::events::assistant_parts(
+                Some("reading the file".into()),
+                vec![fq_runtime::events::MessageToolCall {
+                    tool_call_id: fq_runtime::events::ToolCallId::new(call_id).unwrap(),
+                    tool_name: "read_file".into(),
+                    parameters: json!({"path": "fixture.txt"}),
+                }],
+            ),
             round: 1,
             call_id: uuid::Uuid::now_v7(),
-            content: Some("reading the file".into()),
-            tool_calls: vec![fq_runtime::events::MessageToolCall {
-                tool_call_id: fq_runtime::events::ToolCallId::new(call_id).unwrap(),
-                tool_name: "read_file".into(),
-                parameters: json!({"path": "fixture.txt"}),
-            }],
             stop_reason: fq_runtime::events::StopReason::ToolUse,
             usage: fq_runtime::events::TokenUsage::default(),
             origin: Default::default(),

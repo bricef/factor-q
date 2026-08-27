@@ -42,10 +42,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::agent::{Agent, AgentId, EvaluatorSpec};
 use crate::bus::EventBus;
 use crate::events::{
-    self, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
-    HostNoticePayload, InvocationArchivedPayload, InvocationTotals, LlmCallOrigin,
-    LlmRequestPayload, Message, MessageRole, RequestParams, StopReason, ToolCallPayload,
-    ToolErrorKind, ToolSchema, TriggerSource, TriggeredPayload,
+    self, AssistantPart, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind,
+    FailurePhase, HostNoticePayload, InvocationArchivedPayload, InvocationTotals, LlmCallOrigin,
+    LlmRequestPayload, Message, RequestParams, StopReason, ToolCallPayload, ToolErrorKind,
+    ToolSchema, TriggerSource, TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::mcp::{
@@ -1320,12 +1320,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
                     return Ok(InvocationOutcome::Completed {
                         invocation_id,
-                        response: ChatResponse {
-                            content: summary,
-                            tool_calls: vec![],
-                            stop_reason: events::StopReason::EndTurn,
-                            usage: events::TokenUsage::default(),
-                        },
+                        response: ChatResponse::completed(summary),
                         cost: totals.total_cost,
                         duration_ms,
                     });
@@ -2471,8 +2466,7 @@ fn llm_row_to_capability(row: &LlmDispatchRow) -> Result<CapabilityResult, Execu
         ))
     })?;
     Ok(CapabilityResult::ModelResult(ModelResponse {
-        content: response.content,
-        tool_calls: response.tool_calls,
+        parts: response.parts,
         stop_reason: response.stop_reason,
         usage: response.usage,
     }))

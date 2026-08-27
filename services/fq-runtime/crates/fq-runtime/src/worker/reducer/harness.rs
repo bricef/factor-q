@@ -16,7 +16,7 @@ use super::types::{
     AgentConfig, CapabilityResult, HarnessError, HarnessErrorKind, LogEntry, LogLevel,
     ModelRequest, NextAction, Reducer, StepInput, StepOutput, ToolCallRequest, TriggerPayload,
 };
-use crate::events::{Message, MessageRole, RequestParams, TaskStatus};
+use crate::events::{AssistantPart, Message, RequestParams, TaskStatus, ToolResult};
 
 /// Built-in fallback cap on LLM turns per invocation — a backstop
 /// against a wedged agent, distinct from and well below the host's
@@ -162,19 +162,20 @@ impl HarnessState {
             }),
             Phase::AwaitingModel => match self.messages.last() {
                 None => Some("phase AwaitingModel requires a seeded conversation".to_string()),
-                Some(last) if matches!(last.role, MessageRole::Assistant) => {
+                Some(Message::Assistant { .. }) => {
                     Some("phase AwaitingModel cannot follow an assistant message".to_string())
                 }
                 Some(_) => None,
             },
             Phase::DispatchingTools => match self.messages.last() {
-                Some(last) if matches!(last.role, MessageRole::Assistant) => {
-                    last.tool_calls.is_empty().then(|| {
+                Some(Message::Assistant { parts }) => parts
+                    .iter()
+                    .all(|part| !matches!(part, AssistantPart::ToolCall(_)))
+                    .then(|| {
                         "phase DispatchingTools requires the last assistant message to carry \
                          tool calls"
                             .to_string()
-                    })
-                }
+                    }),
                 Some(_) => Some(
                     "phase DispatchingTools requires the last message to be an assistant \
                      message"
@@ -191,7 +192,7 @@ impl HarnessState {
             let assistant_count = self
                 .messages
                 .iter()
-                .filter(|m| matches!(m.role, MessageRole::Assistant))
+                .filter(|m| matches!(m, Message::Assistant { .. }))
                 .count();
             ((self.iteration as usize) < assistant_count).then(|| {
                 format!(
@@ -213,11 +214,8 @@ impl HarnessState {
 fn initial_step(input: StepInput, state: &mut HarnessState) -> Result<StepOutput, HarnessError> {
     debug_assert_eq!(state.phase, Phase::Initial);
 
-    state.messages.push(Message {
-        role: MessageRole::System,
-        content: Some(input.config.system_prompt.clone()),
-        tool_calls: vec![],
-        tool_call_id: None,
+    state.messages.push(Message::System {
+        text: input.config.system_prompt.clone(),
     });
     // Host-curated `static_resources` content, injected once right
     // after the system prompt and before the trigger. The runner
@@ -225,18 +223,12 @@ fn initial_step(input: StepInput, state: &mut HarnessState) -> Result<StepOutput
     // `None` here means no pins, or this is a resumed invocation
     // where the content already lives in the persisted history.
     if let Some(context) = &input.static_resource_context {
-        state.messages.push(Message {
-            role: MessageRole::User,
-            content: Some(context.clone()),
-            tool_calls: vec![],
-            tool_call_id: None,
+        state.messages.push(Message::User {
+            text: context.clone(),
         });
     }
-    state.messages.push(Message {
-        role: MessageRole::User,
-        content: Some(payload_to_user_message(&input.trigger)),
-        tool_calls: vec![],
-        tool_call_id: None,
+    state.messages.push(Message::User {
+        text: payload_to_user_message(&input.trigger),
     });
 
     append_host_notices(state, &input.host_notices);
@@ -302,7 +294,7 @@ fn model_response_step(
     // where the schema-only tool's execute() error teaches the model
     // to correct the call — a malformed declaration must never
     // mis-stamp a terminal status.
-    if let Some(declared) = response.tool_calls.iter().find_map(|call| {
+    if let Some(declared) = response.tool_calls().find_map(|call| {
         if !is_report_outcome(&call.tool_name) {
             return None;
         }
@@ -326,16 +318,18 @@ fn model_response_step(
         );
     }
 
-    state.messages.push(Message {
-        role: MessageRole::Assistant,
-        content: response.content.clone(),
-        tool_calls: response.tool_calls.clone(),
-        tool_call_id: None,
+    // The replay path. Every part the model produced is carried into the
+    // conversation the next turn re-sends — which is what makes reasoning
+    // round-trip once phase 3 starts producing reasoning parts. Nothing
+    // here needs to know about reasoning specifically; it carries whatever
+    // the turn contained.
+    state.messages.push(Message::Assistant {
+        parts: response.parts.clone(),
     });
 
     // Bare text is not a stop signal. Persist a host notice in the
     // transcript so replay produces the same corrective follow-up.
-    if response.tool_calls.is_empty() {
+    if response.tool_calls().next().is_none() {
         append_host_notices(
             state,
             &["No tool calls were made and the run is not over — continue working, or end it by calling `report_outcome` with success, failed, blocked, or partial.".to_string()],
@@ -358,7 +352,7 @@ fn model_response_step(
         );
     }
 
-    if response.tool_calls.is_empty() {
+    if response.tool_calls().next().is_none() {
         let request = build_model_request(&input.config, &state.messages);
         state.phase = Phase::AwaitingModel;
         return Ok(StepOutput {
@@ -372,8 +366,7 @@ fn model_response_step(
     }
 
     let pending: Vec<ToolCallRequest> = response
-        .tool_calls
-        .iter()
+        .tool_calls()
         .map(|tc| ToolCallRequest {
             tool_call_id: tc.tool_call_id.clone(),
             tool_name: tc.tool_name.clone(),
@@ -431,12 +424,21 @@ fn tool_results_step(
         }
     };
 
+    // One message per result, not one message carrying all of them.
+    //
+    // `Message::ToolResults` can express the batched form, and Anthropic
+    // wants it — but changing what we emit is a behaviour change, and this
+    // phase is a shape change. Batching is #511, which also needs mock
+    // coverage for multi-`tool_use` responses before it can be tested.
+    // Until then this keeps the wire byte-identical, which the provider
+    // request snapshot in `llm::genai` asserts.
     for result in results {
-        state.messages.push(Message {
-            role: MessageRole::Tool,
-            content: Some(result.output),
-            tool_calls: vec![],
-            tool_call_id: Some(result.tool_call_id),
+        state.messages.push(Message::ToolResults {
+            results: vec![ToolResult {
+                tool_call_id: result.tool_call_id,
+                output: result.output,
+                is_error: result.is_error,
+            }],
         });
     }
 
@@ -459,12 +461,7 @@ fn tool_results_step(
 
 fn append_host_notices(state: &mut HarnessState, notices: &[String]) {
     for body in notices {
-        state.messages.push(Message {
-            role: MessageRole::User,
-            content: Some(body.clone()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
+        state.messages.push(Message::User { text: body.clone() });
     }
 }
 
@@ -614,8 +611,9 @@ mod tests {
 
     fn end_turn_response(text: &str) -> ModelResponse {
         ModelResponse {
-            content: Some(text.to_string()),
-            tool_calls: vec![],
+            parts: vec![AssistantPart::Text {
+                text: text.to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }
@@ -623,12 +621,14 @@ mod tests {
 
     fn tool_use_response(name: &str, call_id: &str, params: Value) -> ModelResponse {
         ModelResponse {
-            content: None,
-            tool_calls: vec![MessageToolCall {
-                tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
-                tool_name: name.to_string(),
-                parameters: params,
-            }],
+            parts: crate::events::assistant_parts(
+                None,
+                vec![MessageToolCall {
+                    tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
+                    tool_name: name.to_string(),
+                    parameters: params,
+                }],
+            ),
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage::default(),
         }
@@ -642,9 +642,9 @@ mod tests {
             NextAction::CallModel(req) => {
                 assert_eq!(req.model, "claude-haiku");
                 assert_eq!(req.messages.len(), 2, "system + user");
-                assert!(matches!(req.messages[0].role, MessageRole::System));
-                assert!(matches!(req.messages[1].role, MessageRole::User));
-                assert_eq!(req.messages[1].content.as_deref(), Some("hello"));
+                assert!(matches!(req.messages[0], Message::System { .. }));
+                assert!(matches!(req.messages[1], Message::User { .. }));
+                assert_eq!(req.messages[1].text().as_deref(), Some("hello"));
             }
             other => panic!("expected CallModel, got {other:?}"),
         }
@@ -665,15 +665,15 @@ mod tests {
         match &s1.next_action {
             NextAction::CallModel(request) => {
                 assert!(matches!(
-                    request.messages.last().unwrap().role,
-                    MessageRole::User
+                    request.messages.last().unwrap(),
+                    Message::User { .. }
                 ));
                 assert!(
                     request
                         .messages
                         .last()
                         .unwrap()
-                        .content
+                        .text()
                         .as_deref()
                         .unwrap()
                         .contains("run is not over")
@@ -739,11 +739,13 @@ mod tests {
             "c1",
             serde_json::json!({"command": ["true"]}),
         );
-        response.tool_calls.push(MessageToolCall {
-            tool_call_id: crate::events::ToolCallId::new("c2").unwrap(),
-            tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-            parameters: serde_json::json!({"status": "failed", "summary": "gave up"}),
-        });
+        response
+            .parts
+            .push(AssistantPart::ToolCall(MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("c2").unwrap(),
+                tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: serde_json::json!({"status": "failed", "summary": "gave up"}),
+            }));
         let s1 = h
             .step(step_input(
                 s0.state,
@@ -833,13 +835,13 @@ mod tests {
                 let tool_msgs = req
                     .messages
                     .iter()
-                    .filter(|m| matches!(m.role, MessageRole::Tool))
+                    .filter(|m| matches!(m, Message::ToolResults { .. }))
                     .count();
                 assert_eq!(tool_msgs, 1);
                 let assistant_msgs = req
                     .messages
                     .iter()
-                    .filter(|m| matches!(m.role, MessageRole::Assistant))
+                    .filter(|m| matches!(m, Message::Assistant { .. }))
                     .count();
                 assert_eq!(assistant_msgs, 1);
             }
@@ -861,22 +863,21 @@ mod tests {
         let out = h.step(input).unwrap();
         match out.next_action {
             NextAction::CallModel(req) => {
-                let contents: Vec<Option<&str>> =
-                    req.messages.iter().map(|m| m.content.as_deref()).collect();
+                let contents: Vec<Option<String>> = req.messages.iter().map(|m| m.text()).collect();
                 assert_eq!(
                     contents,
                     vec![
-                        Some("You are a test agent."),
-                        Some("hello"),
-                        Some("<host-notice>first</host-notice>"),
-                        Some("<host-notice>second</host-notice>"),
+                        Some("You are a test agent.".to_string()),
+                        Some("hello".to_string()),
+                        Some("<host-notice>first</host-notice>".to_string()),
+                        Some("<host-notice>second</host-notice>".to_string()),
                     ],
                     "each notice folds exactly once, in order, after the trigger"
                 );
                 assert!(
                     req.messages[2..]
                         .iter()
-                        .all(|m| matches!(m.role, MessageRole::User)),
+                        .all(|m| matches!(m, Message::User { .. })),
                     "notices are user-role messages"
                 );
             }
@@ -923,11 +924,11 @@ mod tests {
                 let roles: Vec<&str> = req
                     .messages
                     .iter()
-                    .map(|m| match m.role {
-                        MessageRole::System => "system",
-                        MessageRole::User => "user",
-                        MessageRole::Assistant => "assistant",
-                        MessageRole::Tool => "tool",
+                    .map(|m| match m {
+                        Message::System { .. } => "system",
+                        Message::User { .. } => "user",
+                        Message::Assistant { .. } => "assistant",
+                        Message::ToolResults { .. } => "tool",
                     })
                     .collect();
                 assert_eq!(
@@ -937,7 +938,7 @@ mod tests {
                      tool call and result stay adjacent"
                 );
                 assert_eq!(
-                    req.messages[2].content.as_deref(),
+                    req.messages[2].text().as_deref(),
                     Some("<host-notice>mid</host-notice>")
                 );
             }
@@ -980,14 +981,17 @@ mod tests {
         match s2.next_action {
             NextAction::CallModel(req) => {
                 let last = req.messages.last().expect("non-empty request");
-                assert!(matches!(last.role, MessageRole::User));
+                assert!(matches!(last, Message::User { .. }));
                 assert_eq!(
-                    last.content.as_deref(),
+                    last.text().as_deref(),
                     Some("<host-notice>late</host-notice>"),
                     "notice is the final message before the request"
                 );
                 assert!(
-                    matches!(req.messages[req.messages.len() - 2].role, MessageRole::Tool),
+                    matches!(
+                        req.messages[req.messages.len() - 2],
+                        Message::ToolResults { .. }
+                    ),
                     "notice follows the tool results"
                 );
             }
@@ -1001,19 +1005,21 @@ mod tests {
         let s0 = h.step(step_input(vec![], None, 0)).unwrap();
 
         let two_call = ModelResponse {
-            content: None,
-            tool_calls: vec![
-                MessageToolCall {
-                    tool_call_id: crate::events::ToolCallId::new("a").unwrap(),
-                    tool_name: "echo".to_string(),
-                    parameters: json!({}),
-                },
-                MessageToolCall {
-                    tool_call_id: crate::events::ToolCallId::new("b").unwrap(),
-                    tool_name: "echo".to_string(),
-                    parameters: json!({}),
-                },
-            ],
+            parts: crate::events::assistant_parts(
+                None,
+                vec![
+                    MessageToolCall {
+                        tool_call_id: crate::events::ToolCallId::new("a").unwrap(),
+                        tool_name: "echo".to_string(),
+                        parameters: json!({}),
+                    },
+                    MessageToolCall {
+                        tool_call_id: crate::events::ToolCallId::new("b").unwrap(),
+                        tool_name: "echo".to_string(),
+                        parameters: json!({}),
+                    },
+                ],
+            ),
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage::default(),
         };

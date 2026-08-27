@@ -118,10 +118,9 @@ async fn seed_costs(cache: &std::path::Path) {
             AgentId::new(AGENT).unwrap(),
             invocation,
             EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
+                parts: fq_runtime::events::assistant_parts(Some("Probe reply.".into()), Vec::new()),
                 round: 0,
                 call_id: fixed_uuid(2),
-                content: Some("Probe reply.".into()),
-                tool_calls: Vec::new(),
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage {
                     input_tokens: 1_200,

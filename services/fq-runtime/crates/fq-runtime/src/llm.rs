@@ -18,7 +18,7 @@ pub use genai::GenAiClient;
 
 use async_trait::async_trait;
 
-use crate::events::{Message, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolSchema};
+use crate::events::{AssistantPart, Message, RequestParams, StopReason, TokenUsage, ToolSchema};
 
 /// A request to an LLM, without the call_id (assigned by the executor).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -30,12 +30,56 @@ pub struct ChatRequest {
 }
 
 /// A response from an LLM, without the call_id.
+///
+/// A response *is* an assistant turn, so it carries that turn kind's
+/// parts (ADR-0034 D3) — which is why a tool result cannot appear here.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatResponse {
-    pub content: Option<String>,
-    pub tool_calls: Vec<MessageToolCall>,
+    pub parts: Vec<AssistantPart>,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
+}
+
+impl ChatResponse {
+    /// The synthetic response for an invocation that ended by declaring
+    /// an outcome: the declared summary as the turn's only text, and no
+    /// tool calls, because `report_outcome` is a terminal declaration
+    /// rather than a dispatch (ADR-0014).
+    pub fn completed(summary: Option<String>) -> Self {
+        Self {
+            parts: summary
+                .map(|text| vec![AssistantPart::Text { text }])
+                .unwrap_or_default(),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        }
+    }
+
+    /// The turn's visible text, joined when the provider split it across
+    /// parts. `None` when the turn carried none — a tool-only turn, or one
+    /// that was pure reasoning.
+    pub fn text(&self) -> Option<String> {
+        let joined: Vec<&str> = self
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                AssistantPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        (!joined.is_empty()).then(|| joined.join("\n"))
+    }
+
+    /// The tool calls this turn requested, in order.
+    pub fn tool_calls(&self) -> Vec<&crate::events::MessageToolCall> {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                AssistantPart::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// Abstraction over any LLM client. Implementations are responsible for
@@ -208,8 +252,9 @@ mod retry_tests {
 
     fn canned() -> ChatResponse {
         ChatResponse {
-            content: Some("done".to_string()),
-            tool_calls: vec![],
+            parts: vec![AssistantPart::Text {
+                text: "done".to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage {
                 input_tokens: 0,

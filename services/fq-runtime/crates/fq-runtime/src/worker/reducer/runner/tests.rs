@@ -226,12 +226,14 @@ fn test_pricing() -> Arc<PricingTable> {
 
 fn canned(text: &str, input: u32, output: u32) -> ChatResponse {
     ChatResponse {
-        content: None,
-        tool_calls: vec![crate::events::MessageToolCall {
-            tool_call_id: crate::events::ToolCallId::new("report-outcome").unwrap(),
-            tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-            parameters: json!({"status": "success", "summary": text}),
-        }],
+        parts: crate::events::assistant_parts(
+            None,
+            vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("report-outcome").unwrap(),
+                tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: json!({"status": "success", "summary": text}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: input,
@@ -244,12 +246,14 @@ fn canned(text: &str, input: u32, output: u32) -> ChatResponse {
 
 fn tool_use(name: &str, call_id: &str, params: Value, tokens: (u32, u32)) -> ChatResponse {
     ChatResponse {
-        content: None,
-        tool_calls: vec![crate::events::MessageToolCall {
-            tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
-            tool_name: name.to_string(),
-            parameters: params,
-        }],
+        parts: crate::events::assistant_parts(
+            None,
+            vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
+                tool_name: name.to_string(),
+                parameters: params,
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: tokens.0,
@@ -518,8 +522,14 @@ async fn reducer_suspend_resume_yields_same_completion() {
             trigger: trig,
             state: snapshot,
             last_result: Some(CapabilityResult::ModelResult(ModelResponse {
-                content: None,
-                tool_calls: canned("pong", 10, 10).tool_calls,
+                parts: crate::events::assistant_parts(
+                    None,
+                    canned("pong", 10, 10)
+                        .tool_calls()
+                        .into_iter()
+                        .cloned()
+                        .collect(),
+                ),
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage::default(),
             })),
@@ -865,12 +875,14 @@ async fn reducer_suspends_and_resumes_across_tool_dispatch() {
         .step(mk(
             s0.state,
             Some(CapabilityResult::ModelResult(ModelResponse {
-                content: None,
-                tool_calls: vec![crate::events::MessageToolCall {
-                    tool_call_id: crate::events::ToolCallId::new("si").unwrap(),
-                    tool_name: "builtin__self_inspect".to_string(),
-                    parameters: json!({"include": ["budget"]}),
-                }],
+                parts: crate::events::assistant_parts(
+                    None,
+                    vec![crate::events::MessageToolCall {
+                        tool_call_id: crate::events::ToolCallId::new("si").unwrap(),
+                        tool_name: "builtin__self_inspect".to_string(),
+                        parameters: json!({"include": ["budget"]}),
+                    }],
+                ),
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage::default(),
             })),
@@ -944,12 +956,14 @@ async fn reducer_suspends_and_resumes_across_tool_dispatch() {
     };
     // The conversation history must contain the tool message
     // we just resumed with — verifies state round-tripping.
+    // `Message::text()` is deliberately `None` for a tool-results turn —
+    // tool output is data, not the turn's speech — so this reaches into
+    // the results, which is the more precise assertion anyway.
     assert!(
-        next_req
-            .messages
-            .iter()
-            .any(|m| matches!(m.role, crate::events::MessageRole::Tool)
-                && m.content.as_deref() == Some(tool_output.as_str())),
+        next_req.messages.iter().any(|m| match m {
+            Message::ToolResults { results } => results.iter().any(|r| r.output == tool_output),
+            _ => false,
+        }),
         "resumed conversation missing tool message"
     );
 
@@ -958,8 +972,14 @@ async fn reducer_suspends_and_resumes_across_tool_dispatch() {
         .step(mk(
             s2.state,
             Some(CapabilityResult::ModelResult(ModelResponse {
-                content: None,
-                tool_calls: canned("inspected.", 10, 10).tool_calls,
+                parts: crate::events::assistant_parts(
+                    None,
+                    canned("inspected.", 10, 10)
+                        .tool_calls()
+                        .into_iter()
+                        .cloned()
+                        .collect(),
+                ),
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage::default(),
             })),
@@ -1078,12 +1098,14 @@ fn end_turn_response(text: &str) -> ChatResponse {
 
 fn tool_call_response(tool: &str, call_id: &str, params: serde_json::Value) -> ChatResponse {
     ChatResponse {
-        content: None,
-        tool_calls: vec![crate::events::MessageToolCall {
-            tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
-            tool_name: tool.to_string(),
-            parameters: params,
-        }],
+        parts: crate::events::assistant_parts(
+            None,
+            vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
+                tool_name: tool.to_string(),
+                parameters: params,
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 50,
@@ -1472,8 +1494,9 @@ async fn budget_exceeded_emits_failed_event_on_reducer_path() {
 
     // 1M input tokens at $1/M = $1.00 — well over $0.0001.
     let expensive = ChatResponse {
-        content: Some("expensive".to_string()),
-        tool_calls: vec![],
+        parts: vec![crate::events::AssistantPart::Text {
+            text: "expensive".to_string(),
+        }],
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage {
             input_tokens: 1_000_000,
@@ -1714,8 +1737,9 @@ async fn empty_model_response_fails_the_invocation_as_llm_error() {
     // Whitespace-only content pins the trim() semantics — this is
     // "empty" exactly like `None` is.
     let empty = ChatResponse {
-        content: Some("   \n".to_string()),
-        tool_calls: vec![],
+        parts: vec![crate::events::AssistantPart::Text {
+            text: "   \n".to_string(),
+        }],
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage {
             input_tokens: 10,
@@ -1786,8 +1810,7 @@ async fn empty_response_bills_its_prefill_on_the_failure_event() {
         .unwrap();
 
     let empty = ChatResponse {
-        content: None,
-        tool_calls: vec![],
+        parts: vec![],
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage {
             input_tokens: 1_000,
@@ -1960,8 +1983,9 @@ async fn bare_text_only_model_fails_at_the_iteration_ceiling() {
         .unwrap();
 
     let text_turn = || ChatResponse {
-        content: Some("still thinking out loud".to_string()),
-        tool_calls: vec![],
+        parts: vec![crate::events::AssistantPart::Text {
+            text: "still thinking out loud".to_string(),
+        }],
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage {
             input_tokens: 10,
@@ -2187,7 +2211,7 @@ async fn resume_safe_replay_continues_to_completion() {
             ..
         } => {
             assert_eq!(inv, invocation_id);
-            assert_eq!(response.content.as_deref(), Some("done."));
+            assert_eq!(response.text().as_deref(), Some("done."));
         }
         other => panic!("expected Completed, got {other:?}"),
     }
@@ -2282,12 +2306,14 @@ async fn injected_interrupted_result_reaches_replay_byte_identical() {
     // was handed off (dispatched) and the process died before any
     // completion write.
     let tool_use = ChatResponse {
-        content: None,
-        tool_calls: vec![crate::events::MessageToolCall {
-            tool_call_id: crate::events::ToolCallId::new("tc-0").unwrap(),
-            tool_name: "builtin__self_inspect".to_string(),
-            parameters: json!({}),
-        }],
+        parts: crate::events::assistant_parts(
+            None,
+            vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("tc-0").unwrap(),
+                tool_name: "builtin__self_inspect".to_string(),
+                parameters: json!({}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 50,
@@ -2490,12 +2516,14 @@ async fn resume_with_same_ms_interleave(
     // happen in this order, so the store's shared seq records it —
     // regardless of how the timestamps tie.
     let tool_use = ChatResponse {
-        content: None,
-        tool_calls: vec![crate::events::MessageToolCall {
-            tool_call_id: crate::events::ToolCallId::new("tc-0").unwrap(),
-            tool_name: "builtin__self_inspect".to_string(),
-            parameters: json!({}),
-        }],
+        parts: crate::events::assistant_parts(
+            None,
+            vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("tc-0").unwrap(),
+                tool_name: "builtin__self_inspect".to_string(),
+                parameters: json!({}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 50,
@@ -2581,7 +2609,7 @@ async fn resume_with_same_ms_interleave(
         .expect("resume replays the interleave in true order");
     match outcome {
         InvocationOutcome::Completed { response, .. } => {
-            assert_eq!(response.content.as_deref(), Some("done."));
+            assert_eq!(response.text().as_deref(), Some("done."));
         }
         other => panic!("expected Completed, got {other:?}"),
     }
@@ -2695,12 +2723,14 @@ async fn resume_enforces_lifetime_budget() {
     // runner feeds back a synthetic error result and the
     // reducer asks for the next model turn.
     let response = ChatResponse {
-        content: None,
-        tool_calls: vec![crate::events::MessageToolCall {
-            tool_call_id: crate::events::ToolCallId::new("call-0").unwrap(),
-            tool_name: "unavailable_tool".to_string(),
-            parameters: json!({}),
-        }],
+        parts: crate::events::assistant_parts(
+            None,
+            vec![crate::events::MessageToolCall {
+                tool_call_id: crate::events::ToolCallId::new("call-0").unwrap(),
+                tool_name: "unavailable_tool".to_string(),
+                parameters: json!({}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 50,
@@ -2751,8 +2781,9 @@ async fn resume_enforces_lifetime_budget() {
     // tool error is fed back to the reducer).
     let llm = FixtureClient::new();
     llm.push_response(ChatResponse {
-        content: Some("wrapping up".to_string()),
-        tool_calls: vec![],
+        parts: vec![crate::events::AssistantPart::Text {
+            text: "wrapping up".to_string(),
+        }],
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage {
             input_tokens: 50,

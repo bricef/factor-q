@@ -446,12 +446,14 @@ impl SimWorld {
         // (100 input tokens at $10k per million).
         fn turn(call_id: &str, tool_name: &str, parameters: Value) -> ChatResponse {
             ChatResponse {
-                content: None,
-                tool_calls: vec![MessageToolCall {
-                    tool_call_id: ToolCallId::new(call_id).unwrap(),
-                    tool_name: tool_name.to_string(),
-                    parameters,
-                }],
+                parts: crate::events::assistant_parts(
+                    None,
+                    vec![MessageToolCall {
+                        tool_call_id: ToolCallId::new(call_id).unwrap(),
+                        tool_name: tool_name.to_string(),
+                        parameters,
+                    }],
+                ),
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage {
                     input_tokens: 100,
@@ -760,12 +762,14 @@ mod tests {
 
     pub(super) fn sim_tool_call_with(call_id: &str, parameters: Value) -> ChatResponse {
         ChatResponse {
-            content: None,
-            tool_calls: vec![MessageToolCall {
-                tool_call_id: ToolCallId::new(call_id).unwrap(),
-                tool_name: SIM_TOOL.to_string(),
-                parameters,
-            }],
+            parts: crate::events::assistant_parts(
+                None,
+                vec![MessageToolCall {
+                    tool_call_id: ToolCallId::new(call_id).unwrap(),
+                    tool_name: SIM_TOOL.to_string(),
+                    parameters,
+                }],
+            ),
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage {
                 input_tokens: 100,
@@ -778,12 +782,14 @@ mod tests {
 
     pub(super) fn end_turn(text: &str) -> ChatResponse {
         ChatResponse {
-            content: None,
-            tool_calls: vec![MessageToolCall {
-                tool_call_id: ToolCallId::new("report-outcome").unwrap(),
-                tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-                parameters: json!({"status": "success", "summary": text}),
-            }],
+            parts: crate::events::assistant_parts(
+                None,
+                vec![MessageToolCall {
+                    tool_call_id: ToolCallId::new("report-outcome").unwrap(),
+                    tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                    parameters: json!({"status": "success", "summary": text}),
+                }],
+            ),
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage {
                 input_tokens: 120,
@@ -799,15 +805,16 @@ mod tests {
     /// the parallel-batch path — and, once persisted, its resume/replay.
     pub(super) fn sim_tool_calls(ids: &[&str]) -> ChatResponse {
         ChatResponse {
-            content: None,
-            tool_calls: ids
-                .iter()
-                .map(|id| MessageToolCall {
-                    tool_call_id: ToolCallId::new(*id).unwrap(),
-                    tool_name: SIM_TOOL.to_string(),
-                    parameters: json!({ "step": id }),
-                })
-                .collect(),
+            parts: crate::events::assistant_parts(
+                None,
+                ids.iter()
+                    .map(|id| MessageToolCall {
+                        tool_call_id: ToolCallId::new(*id).unwrap(),
+                        tool_name: SIM_TOOL.to_string(),
+                        parameters: json!({ "step": id }),
+                    })
+                    .collect(),
+            ),
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage {
                 input_tokens: 100,
@@ -951,9 +958,9 @@ mod tests {
         let first_user = requests[0]
             .messages
             .iter()
-            .find(|m| matches!(m.role, crate::events::MessageRole::User))
+            .find(|m| matches!(m, crate::events::Message::User { .. }))
             .expect("a user message");
-        let preamble = first_user.content.as_deref().unwrap_or_default();
+        let preamble = first_user.text().unwrap_or_default();
         assert!(
             preamble.contains(ws.as_ref()) && preamble.contains("${workspace}"),
             "preamble must name the real path and the token; got: {preamble}"
@@ -1233,7 +1240,7 @@ mod resume_equivalence {
 
     pub(super) fn summary_of(outcome: &InvocationOutcome) -> Option<String> {
         match outcome {
-            InvocationOutcome::Completed { response, .. } => response.content.clone(),
+            InvocationOutcome::Completed { response, .. } => response.text(),
             other => panic!("expected Completed, got {other:?}"),
         }
     }
@@ -2275,7 +2282,11 @@ mod soak {
         for k in 0..s.turns {
             let mut r = sim_tool_call(&format!("c{k}"));
             if s.tool_kinds[k].is_none() {
-                r.tool_calls[0].tool_name = "ghost_tool".to_string();
+                for part in r.parts.iter_mut() {
+                    if let crate::events::AssistantPart::ToolCall(call) = part {
+                        call.tool_name = "ghost_tool".to_string();
+                    }
+                }
             }
             r.usage = s.usages[k];
             responses.push(r);
@@ -2607,7 +2618,7 @@ mod host_notice_channel {
                 EventPayload::LlmRequest(p) => Some(
                     p.messages
                         .iter()
-                        .filter(|m| m.content.as_deref() == Some(NOTICE_BODY))
+                        .filter(|m| m.text().as_deref() == Some(NOTICE_BODY))
                         .count(),
                 ),
                 _ => None,

@@ -94,8 +94,9 @@ mod tests {
 
     fn sample_response(text: &str) -> ChatResponse {
         ChatResponse {
-            content: Some(text.to_string()),
-            tool_calls: vec![],
+            parts: vec![crate::events::AssistantPart::Text {
+                text: text.to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage {
                 input_tokens: 10,
@@ -115,8 +116,8 @@ mod tests {
         let r1 = client.chat(sample_request()).await.unwrap();
         let r2 = client.chat(sample_request()).await.unwrap();
 
-        assert_eq!(r1.content.as_deref(), Some("first"));
-        assert_eq!(r2.content.as_deref(), Some("second"));
+        assert_eq!(r1.text().as_deref(), Some("first"));
+        assert_eq!(r2.text().as_deref(), Some("second"));
     }
 
     #[tokio::test]
