@@ -42,25 +42,9 @@ use crate::agent::RootsGrant;
 use crate::tools::ToolRegistry;
 use crate::validation::ValidatorChain;
 
-/// Configuration for an MCP server: a stdio child process (`command`),
-/// or — when `url` is set — a remote server reached over the Streamable
-/// HTTP transport (the 2025-11-25 spec remote transport).
-#[derive(Debug, Clone)]
-pub struct McpServerConfig {
-    /// Human-readable name for logging.
-    pub name: String,
-    /// Executable to spawn (stdio transport).
-    pub command: String,
-    /// Command-line arguments (stdio transport).
-    pub args: Vec<String>,
-    /// Environment variables to set on the child process (stdio
-    /// transport).
-    pub env: Vec<(String, String)>,
-    /// When set, the server is reached over the Streamable HTTP remote
-    /// transport at this URL instead of a stdio child process;
-    /// `command` / `args` / `env` are then unused.
-    pub url: Option<String>,
-}
+mod server_config;
+pub use server_config::McpServerConfig;
+use server_config::SharedServerKey;
 
 /// Errors from MCP server lifecycle and tool calls.
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +60,11 @@ pub enum McpError {
 
     #[error("no MCP server named '{name}' is running")]
     UnknownServer { name: String },
+
+    #[error(
+        "MCP server '{name}' declares no transport: set `command` (stdio) or `url` (Streamable HTTP)"
+    )]
+    UndeclaredTransport { name: String },
 
     #[error("resource operation on '{server}' failed: {reason}")]
     ResourceOp { server: String, reason: String },
@@ -908,12 +897,13 @@ struct RunningServer {
 /// Manages the lifecycle of MCP server child processes.
 ///
 /// Starts servers, discovers their tools (wrapping each as an [`McpTool`]),
-/// and provides graceful shutdown. Deduplicates servers by `(command, args)`
-/// so the same server declared by multiple agents is only started once.
+/// and provides graceful shutdown. Deduplicates servers by transport
+/// identity — the stdio process spawned, or the remote endpoint dialled
+/// — so the same server declared by multiple agents starts only once.
 pub struct McpClientManager {
     servers: Vec<RunningServer>,
-    /// Track `(command, args)` tuples to deduplicate.
-    started: HashSet<(String, Vec<String>)>,
+    /// Transport identities already started, to deduplicate.
+    started: HashSet<SharedServerKey>,
 }
 
 impl Default for McpClientManager {
@@ -933,18 +923,20 @@ impl McpClientManager {
     /// Start an MCP server, discover its tools, and return them as
     /// `Arc<dyn Tool>` values ready for registration in a [`ToolRegistry`].
     ///
-    /// If a server with the same `(command, args)` has already been started,
-    /// this is a no-op and returns an empty vec (the tools were already
-    /// registered on the first call).
+    /// If a server with the same transport identity — the stdio process
+    /// spawned, or the remote endpoint dialled — has already been started,
+    /// this is a no-op returning an empty vec (its tools were registered
+    /// on the first call). A config declaring no transport at all is
+    /// unstartable, and errors rather than deduplicating.
     pub async fn start_server(
         &mut self,
         config: McpServerConfig,
     ) -> Result<Vec<Arc<dyn Tool>>, McpError> {
-        let key = (config.command.clone(), config.args.clone());
+        let key = SharedServerKey::from_config(&config)?;
         if self.started.contains(&key) {
             debug!(
                 server = %config.name,
-                command = %config.command,
+                target = %key.target(),
                 "MCP server already started, skipping duplicate"
             );
             return Ok(Vec::new());
@@ -1007,7 +999,9 @@ impl McpClientManager {
     ) -> Result<(Vec<Arc<dyn Tool>>, RootsHandle), McpError> {
         info!(
             server = %config.name,
-            command = %config.command,
+            // The endpoint or the command: `command` alone is empty for
+            // a remote server, so that log line named nothing.
+            target = %config.url.as_deref().unwrap_or(&config.command),
             args = ?config.args,
             "starting MCP server"
         );
