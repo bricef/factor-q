@@ -760,16 +760,42 @@ mod tests {
         sim_tool_call_with(call_id, json!({"step": call_id}))
     }
 
+    /// The model that scripted turns claim to come from. Reasoning is
+    /// model-tied, so a part tagged with anything else would be stripped
+    /// on the way out and the fixtures would silently stop exercising
+    /// the round trip.
+    pub(super) const SIM_MODEL: &str = "claude-sim";
+
+    /// A reasoning part for a scripted turn, so the verification net
+    /// carries one.
+    ///
+    /// Reasoning is what #437 exists to preserve, and it round-trips
+    /// through the WAL as JSON inside the reducer's state blob — so
+    /// whether it survives a crash, a resume, or a replay is a question
+    /// only this net can answer. Putting it in the workhorse fixture
+    /// means resume-equivalence, the crash DST and the soak all exercise
+    /// it, rather than a separate test asserting it once in isolation.
+    fn sim_reasoning(call_id: &str) -> crate::events::AssistantPart {
+        crate::events::AssistantPart::Reasoning(crate::events::Reasoning {
+            model: SIM_MODEL.to_string(),
+            content: crate::events::ReasoningContent::Plain {
+                text: format!("deciding to run step {call_id}"),
+            },
+        })
+    }
+
     pub(super) fn sim_tool_call_with(call_id: &str, parameters: Value) -> ChatResponse {
+        let mut parts = vec![sim_reasoning(call_id)];
+        parts.extend(crate::events::assistant_parts(
+            None,
+            vec![MessageToolCall {
+                tool_call_id: ToolCallId::new(call_id).unwrap(),
+                tool_name: SIM_TOOL.to_string(),
+                parameters,
+            }],
+        ));
         ChatResponse {
-            parts: crate::events::assistant_parts(
-                None,
-                vec![MessageToolCall {
-                    tool_call_id: ToolCallId::new(call_id).unwrap(),
-                    tool_name: SIM_TOOL.to_string(),
-                    parameters,
-                }],
-            ),
+            parts,
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage {
                 input_tokens: 100,
@@ -2587,6 +2613,7 @@ mod host_notice_channel {
         RunResult, assert_equivalent, load_fixture, queue_tool_outputs, run_reference, script,
         summary_of,
     };
+    use super::tests::SIM_MODEL;
     use super::*;
     use crate::events::EventPayload;
     use crate::test_support::oracle::{check_resume_trace, observational_trace};
@@ -2694,6 +2721,65 @@ mod host_notice_channel {
     /// carry the recorded row into its first live step (no duplicate
     /// row, no re-emit), and the conversation must end up identical to
     /// the single-crash case.
+    /// Reasoning must survive a crash.
+    ///
+    /// It lives in the reducer's state blob, which round-trips through
+    /// the WAL as JSON, so a resumed invocation rebuilds its conversation
+    /// from storage rather than memory. If reasoning were lost there, the
+    /// model would silently re-derive from a weaker base after every
+    /// restart — exactly the failure #437 exists to fix, reintroduced by
+    /// the recovery path.
+    ///
+    /// The scripted fixtures carry a reasoning part (see `sim_reasoning`),
+    /// so the whole verification net exercises this; the assertion here is
+    /// what stops the fixture quietly losing it and the net going green
+    /// on nothing.
+    #[tokio::test]
+    async fn reasoning_survives_a_crash_and_resume() {
+        let turns = 2;
+        let (world, _inv_str, inv_id) = crashed_world(79, turns).await;
+
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &script(turns)[1..]);
+        world.resume(&resume_llm).await.expect("resume");
+
+        // The request the resumed leg sent must replay the pre-crash
+        // assistant turn *including* its reasoning.
+        let requests = resume_llm.requests();
+        let replayed: Vec<&crate::events::Reasoning> = requests
+            .iter()
+            .flat_map(|r| r.messages.iter())
+            .filter_map(|m| match m {
+                crate::events::Message::Assistant { parts } => Some(parts),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|p| match p {
+                crate::events::AssistantPart::Reasoning(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !replayed.is_empty(),
+            "a resumed invocation must replay the reasoning it recorded before the crash"
+        );
+        assert!(
+            replayed.iter().all(|r| r.model == SIM_MODEL),
+            "reasoning must keep its model tag across the WAL round trip, or the \
+             cross-model strip silently stops working"
+        );
+        assert!(
+            replayed.iter().any(|r| matches!(
+                &r.content,
+                crate::events::ReasoningContent::Plain { text } if text.contains("deciding to run step")
+            )),
+            "the reasoning text itself must survive, not just the part"
+        );
+
+        let _ = inv_id;
+    }
+
     #[tokio::test]
     async fn notice_recorded_by_a_crashed_incarnation_still_reaches_the_conversation() {
         let turns = 2;
