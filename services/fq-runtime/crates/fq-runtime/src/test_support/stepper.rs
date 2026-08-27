@@ -162,12 +162,14 @@ mod tests {
 
     fn end_turn(text: &str) -> ModelResponse {
         ModelResponse {
-            content: None,
-            tool_calls: vec![MessageToolCall {
-                tool_call_id: crate::events::ToolCallId::new("report-outcome").unwrap(),
-                tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-                parameters: json!({"status": "success", "summary": text}),
-            }],
+            parts: crate::events::assistant_parts(
+                None,
+                vec![MessageToolCall {
+                    tool_call_id: crate::events::ToolCallId::new("report-outcome").unwrap(),
+                    tool_name: crate::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                    parameters: json!({"status": "success", "summary": text}),
+                }],
+            ),
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage::default(),
         }
@@ -175,12 +177,14 @@ mod tests {
 
     fn tool_use(name: &str, call_id: &str) -> ModelResponse {
         ModelResponse {
-            content: None,
-            tool_calls: vec![MessageToolCall {
-                tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
-                tool_name: name.to_string(),
-                parameters: json!({}),
-            }],
+            parts: crate::events::assistant_parts(
+                None,
+                vec![MessageToolCall {
+                    tool_call_id: crate::events::ToolCallId::new(call_id).unwrap(),
+                    tool_name: name.to_string(),
+                    parameters: json!({}),
+                }],
+            ),
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage::default(),
         }

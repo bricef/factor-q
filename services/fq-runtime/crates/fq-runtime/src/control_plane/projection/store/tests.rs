@@ -7,8 +7,7 @@ use crate::agent::AgentId;
 use crate::events::{
     CompletedPayload, ConfigSnapshot, CostMetadata, Event, EventPayload, FailedPayload,
     FailureKind, FailurePhase, InvocationTotals, LlmRequestPayload, LlmResponsePayload, Message,
-    MessageRole, RequestParams, SandboxSnapshot, StopReason, TokenUsage, TriggerSource,
-    TriggeredPayload,
+    RequestParams, SandboxSnapshot, StopReason, TokenUsage, TriggerSource, TriggeredPayload,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -380,8 +379,9 @@ fn sample_llm_response_with_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
             round: 0,
             origin: crate::events::LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
-            content: Some("ok".to_string()),
-            tool_calls: vec![],
+            parts: vec![crate::events::AssistantPart::Text {
+                text: "ok".to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage {
                 input_tokens: 100,
@@ -450,12 +450,7 @@ fn sample_llm_request(agent: &str, inv: Uuid) -> Event {
             origin: crate::events::LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
             model: "claude-haiku-4-5".to_string(),
-            messages: vec![Message {
-                role: MessageRole::System,
-                content: Some("hi".to_string()),
-                tool_calls: vec![],
-                tool_call_id: None,
-            }],
+            messages: vec![Message::system("hi".to_string())],
             tools_available: vec![],
             request_params: RequestParams {
                 effort: None,
@@ -474,8 +469,9 @@ fn sample_llm_response(agent: &str, inv: Uuid) -> Event {
             round: 0,
             origin: crate::events::LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
-            content: Some("hi".to_string()),
-            tool_calls: vec![],
+            parts: vec![crate::events::AssistantPart::Text {
+                text: "hi".to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage {
                 input_tokens: 5,

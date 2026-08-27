@@ -60,8 +60,7 @@ pub(crate) fn llm_response_event(
         EventPayload::LlmResponse(LlmResponsePayload {
             round,
             call_id,
-            content: response.content.clone(),
-            tool_calls: response.tool_calls.clone(),
+            parts: response.parts.clone(),
             stop_reason: response.stop_reason,
             usage: response.usage,
             origin: origin.clone(),

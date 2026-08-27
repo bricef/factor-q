@@ -6,8 +6,6 @@ Events are the primary observability and audit surface of factor-q. Every meanin
 
 **Schema version: 3** — see the [v2 → v3 changelog](#changelog-v2--v3), and [v1 → v2](#changelog-v1--v2) below it.
 
-> **This document leads the code, deliberately and temporarily.** v3 was decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md) and is specified here; the runtime still emits **v2** until the shape change lands (phase 2 of the [execution plan](../../plans/active/2026-08-25-reasoning-as-message-parts.md)), at which point `SCHEMA_VERSION` flips with the payloads it describes. Flagged rather than left to be discovered: a committed doc contradicting the code normally means one of them is wrong, and this is the exception that proves it — it is a design-first sequence with a named end. Delete this note when phase 2 lands.
-
 ## The three-layer model
 
 Every event has three structurally distinct layers, each with different write permissions, read audiences, and rules. The rationale lives in `docs/design/aspirational/inter-node-contracts-and-event-layers.md` and ADR-0016; the table below summarises:
@@ -36,7 +34,7 @@ Closed schema — if a new field is needed, the runtime grows. Producing agents 
 
 | Field | Type | Purpose |
 |---|---|---|
-| `schema_version` | `u32` | Always `3` once the v3 shape lands; `2` on the wire until then (see the note at the top). Monotonic version of the envelope shape. |
+| `schema_version` | `u32` | Always `3`. Monotonic version of the envelope shape. |
 | `event_id` | `string` (UUID v7) | Globally unique event identifier. UUID v7 gives time-ordered IDs. |
 | `parent_event_id` | `string` (UUID v7), optional | The previous event in this invocation, if any. Omitted on the `triggered` event, on system events, and on the first event of a recovery re-emit. |
 | `trace_id` | `string` (UUID v7) | Trace correlation id. Equal to `invocation_id` for now; reserved as a separate field so multi-invocation traces (graph workflows spanning multiple invocations) can be stitched together later without a wire-format change. |
@@ -275,7 +273,7 @@ Published immediately before an LLM call is made.
     {
       "kind": "assistant",
       "parts": [
-        { "kind": "reasoning", "model": "claude-haiku", "reasoning": { "kind": "signed", "text": "...", "token": "..." } },
+        { "kind": "reasoning", "model": "claude-haiku", "content": { "kind": "signed", "text": "...", "token": "..." } },
         { "kind": "text", "text": "..." },
         { "kind": "tool_call", "tool_call_id": "...", "tool_name": "read", "parameters": {} }
       ]
@@ -335,7 +333,7 @@ Published when an LLM call returns and the response is durably written. The enve
     {
       "kind": "reasoning",
       "model": "kimi-k2-instruct",
-      "reasoning": { "kind": "plain", "text": "The docs overview is the cheapest place to..." }
+      "content": { "kind": "plain", "text": "The docs overview is the cheapest place to..." }
     },
     { "kind": "text", "text": "I will research the topic by first..." },
     {

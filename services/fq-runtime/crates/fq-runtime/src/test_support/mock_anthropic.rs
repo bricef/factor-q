@@ -306,7 +306,7 @@ async fn messages_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{Message, MessageRole, RequestParams};
+    use crate::events::{Message, RequestParams};
     use crate::llm::{ChatRequest, GenAiClient, LlmClient};
 
     #[test]
@@ -344,18 +344,8 @@ mod tests {
         ChatRequest {
             model: "claude-haiku-4-5".to_string(),
             messages: vec![
-                Message {
-                    role: MessageRole::System,
-                    content: Some("You are a helper.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: Some("Say hello.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
+                Message::system("You are a helper.".to_string()),
+                Message::user("Say hello.".to_string()),
             ],
             tools: vec![],
             params: RequestParams {
@@ -380,7 +370,7 @@ mod tests {
         let client = GenAiClient::with_base_url(mock.base_url());
         let response = client.chat(simple_request()).await.expect("chat");
         assert_eq!(
-            response.content.as_deref(),
+            response.text().as_deref(),
             Some("hello from mock"),
             "expected mock content"
         );
@@ -405,9 +395,9 @@ mod tests {
 
         let client = GenAiClient::with_base_url(mock.base_url());
         let response = client.chat(simple_request()).await.expect("chat");
-        assert_eq!(response.tool_calls.len(), 1, "expected one tool call");
-        assert_eq!(response.tool_calls[0].tool_name, "file_read");
-        assert_eq!(response.tool_calls[0].tool_call_id.as_str(), "toolu_99");
+        assert_eq!(response.tool_calls().len(), 1, "expected one tool call");
+        assert_eq!(response.tool_calls()[0].tool_name, "file_read");
+        assert_eq!(response.tool_calls()[0].tool_call_id.as_str(), "toolu_99");
 
         mock.shutdown().await;
     }
@@ -423,8 +413,8 @@ mod tests {
         let client = GenAiClient::with_base_url(mock.base_url());
         let r1 = client.chat(simple_request()).await.expect("chat 1");
         let r2 = client.chat(simple_request()).await.expect("chat 2");
-        assert_eq!(r1.content.as_deref(), Some("first"));
-        assert_eq!(r2.content.as_deref(), Some("second"));
+        assert_eq!(r1.text().as_deref(), Some("first"));
+        assert_eq!(r2.text().as_deref(), Some("second"));
 
         mock.shutdown().await;
     }

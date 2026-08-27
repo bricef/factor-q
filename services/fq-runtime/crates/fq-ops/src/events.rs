@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentId;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 /// Well-known annotation keys — a **reserved vocabulary, not an
 /// agent-facing channel** (#90). Nothing lets an agent annotate; every
 /// writer is host code and four of the five have no writer at all. The
@@ -88,9 +88,10 @@ pub mod transient;
 
 pub use envelope::{CostMetadata, Envelope};
 pub use llm::{
-    Effort, LlmCallOrigin, LlmDispatchedPayload, LlmErrorKind, LlmFailurePayload,
-    LlmRequestPayload, LlmResponsePayload, Message, MessageRole, MessageToolCall, RequestParams,
-    StopReason, TokenUsage, ToolSchema,
+    AssistantPart, Effort, LlmCallOrigin, LlmDispatchedPayload, LlmErrorKind, LlmFailurePayload,
+    LlmRequestPayload, LlmResponsePayload, Message, MessageToolCall, Reasoning, ReasoningContent,
+    RequestParams, StopReason, TokenUsage, ToolResult, ToolSchema, assistant_parts, assistant_text,
+    assistant_tool_calls,
 };
 pub use payloads::*;
 

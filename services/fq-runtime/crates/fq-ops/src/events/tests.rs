@@ -426,9 +426,13 @@ fn annotations_skip_serialise_when_empty() {
     assert!(json.get("envelope").is_some());
 }
 
+/// The version is pinned by a test so a bump is always a deliberate,
+/// reviewable line in a diff rather than a side effect. v3 came with
+/// ADR-0034: `Message` became an enum over turn kinds and `llm.response`
+/// an ordered part list.
 #[test]
-fn schema_version_constant_is_two() {
-    assert_eq!(SCHEMA_VERSION, 2);
+fn schema_version_constant_is_three() {
+    assert_eq!(SCHEMA_VERSION, 3);
 }
 
 /// #447: subject leaf, schema id and projection `event_type` are three
@@ -650,8 +654,7 @@ fn event_with_cost_sets_envelope_cost() {
             round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
-            content: None,
-            tool_calls: vec![],
+            parts: vec![],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }),
@@ -698,8 +701,9 @@ fn cost_metadata_round_trips_on_envelope() {
             round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
-            content: Some("ok".to_string()),
-            tool_calls: vec![],
+            parts: vec![AssistantPart::Text {
+                text: "ok".to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }),
@@ -720,8 +724,7 @@ fn envelope_cost_omits_when_none() {
             round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
-            content: None,
-            tool_calls: vec![],
+            parts: vec![],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }),
@@ -823,8 +826,9 @@ fn consumer_view_strips_annotations_round_trip() {
             round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
-            content: Some("hello".to_string()),
-            tool_calls: vec![],
+            parts: vec![AssistantPart::Text {
+                text: "hello".to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }),
@@ -859,8 +863,9 @@ fn consumer_view_serialises_without_annotations_field_even_with_annotations() {
             round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: Uuid::now_v7(),
-            content: Some("answer: 42".to_string()),
-            tool_calls: vec![],
+            parts: vec![AssistantPart::Text {
+                text: "answer: 42".to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }),
@@ -943,8 +948,7 @@ fn schema_id_for_every_payload_variant() {
             round: 0,
             origin: LlmCallOrigin::AgentTurn,
             call_id: inv,
-            content: None,
-            tool_calls: vec![],
+            parts: vec![],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }),

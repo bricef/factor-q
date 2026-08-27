@@ -25,8 +25,8 @@ use serde_json::Value;
 
 use crate::agent::AgentId;
 use crate::events::{
-    Effort, Message, MessageToolCall, RequestParams, StopReason, TokenUsage, ToolCallId,
-    ToolErrorKind, ToolSchema,
+    AssistantPart, Effort, Message, MessageToolCall, RequestParams, StopReason, TokenUsage,
+    ToolCallId, ToolErrorKind, ToolSchema,
 };
 
 /// Static-for-the-invocation configuration the host hands to the
@@ -166,13 +166,31 @@ pub struct ModelRequest {
     pub params: RequestParams,
 }
 
+/// The model's turn, handed back to the reducer.
+///
+/// Parts-shaped for the same reason [`crate::llm::ChatResponse`] is: a
+/// response is an assistant turn, and the reducer replays it as one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelResponse {
-    pub content: Option<String>,
     #[serde(default)]
-    pub tool_calls: Vec<MessageToolCall>,
+    pub parts: Vec<AssistantPart>,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
+}
+
+impl ModelResponse {
+    /// What this turn said. See [`crate::events::assistant_text`].
+    pub fn text(&self) -> Option<String> {
+        crate::events::assistant_text(&self.parts)
+    }
+
+    /// The tool calls this turn requested, in order.
+    pub fn tool_calls(&self) -> impl Iterator<Item = &MessageToolCall> {
+        self.parts.iter().filter_map(|part| match part {
+            AssistantPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -386,17 +386,11 @@ fn evaluator_to_model_request(model: &str, context: &str, subject: &str) -> Mode
     ModelRequest {
         model: model.to_string(),
         messages: vec![
-            Message {
-                role: MessageRole::System,
-                content: Some(format!("{EVALUATOR_SYSTEM_PREAMBLE}\n\nAction: {context}")),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
+            Message::System {
+                text: format!("{EVALUATOR_SYSTEM_PREAMBLE}\n\nAction: {context}"),
             },
-            Message {
-                role: MessageRole::User,
-                content: Some(subject.to_string()),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
+            Message::User {
+                text: subject.to_string(),
             },
         ],
         tools: Vec::new(),
@@ -454,22 +448,20 @@ fn sampling_decline(reason: &str) -> rmcp::ErrorData {
 fn sampling_to_model_request(model: &str, params: &CreateMessageRequestParams) -> ModelRequest {
     let mut messages = Vec::with_capacity(params.messages.len() + 1);
     if let Some(system) = &params.system_prompt {
-        messages.push(Message {
-            role: MessageRole::System,
-            content: Some(system.clone()),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
+        messages.push(Message::System {
+            text: system.clone(),
         });
     }
     for sampling_message in &params.messages {
-        messages.push(Message {
-            role: match sampling_message.role {
-                Role::User => MessageRole::User,
-                Role::Assistant => MessageRole::Assistant,
+        // MCP sampling turns are scripted context, not turns a model
+        // produced here, so an assistant turn is a single text part.
+        // `sampling_message_text` already flattens non-text content.
+        let text = sampling_message_text(&sampling_message.content);
+        messages.push(match sampling_message.role {
+            Role::User => Message::User { text },
+            Role::Assistant => Message::Assistant {
+                parts: vec![AssistantPart::Text { text }],
             },
-            content: Some(sampling_message_text(&sampling_message.content)),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
         });
     }
     ModelRequest {
@@ -510,7 +502,7 @@ fn sampling_item_text(item: &SamplingMessageContent) -> String {
 /// `CreateMessageResult` shape the protocol returns to the server.
 fn model_response_to_create_message(model: &str, response: ModelResponse) -> CreateMessageResult {
     CreateMessageResult::new(
-        SamplingMessage::assistant_text(response.content.unwrap_or_default()),
+        SamplingMessage::assistant_text(response.text().unwrap_or_default()),
         model.to_string(),
     )
     .with_stop_reason(stop_reason_to_mcp(response.stop_reason))
@@ -549,19 +541,11 @@ fn elicitation_to_model_request(
     ModelRequest {
         model: model.to_string(),
         messages: vec![
-            Message {
-                role: MessageRole::System,
-                content: Some(format!(
-                    "{ELICITATION_SYSTEM_PREAMBLE}\n\nJSON schema:\n{schema_json}"
-                )),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
+            Message::System {
+                text: format!("{ELICITATION_SYSTEM_PREAMBLE}\n\nJSON schema:\n{schema_json}"),
             },
-            Message {
-                role: MessageRole::User,
-                content: Some(message.to_string()),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
+            Message::User {
+                text: message.to_string(),
             },
         ],
         tools: Vec::new(),

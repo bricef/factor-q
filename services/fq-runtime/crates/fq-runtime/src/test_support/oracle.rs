@@ -462,16 +462,22 @@ pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
     ];
 
     /// A serialized [`crate::events::Message`] carrying a host notice:
-    /// user role, content starting with the fixed sentinel.
+    /// a user turn whose text starts with the fixed sentinel.
+    ///
+    /// Reads `kind`/`text` because schema v3 made `Message` an enum over
+    /// turn kinds (ADR-0034) — the pre-v3 shape was `role`/`content`.
+    /// This matcher is why the equivalence comparison is *modulo* host
+    /// notices, so a stale field name here silently reintroduces them
+    /// into the diff rather than failing loudly.
     fn is_host_notice_message(value: &serde_json::Value) -> bool {
         let Some(map) = value.as_object() else {
             return false;
         };
-        map.get("role").and_then(|role| role.as_str()) == Some("user")
+        map.get("kind").and_then(|kind| kind.as_str()) == Some("user")
             && map
-                .get("content")
-                .and_then(|content| content.as_str())
-                .is_some_and(|content| content.starts_with(crate::events::HOST_NOTICE_SENTINEL))
+                .get("text")
+                .and_then(|text| text.as_str())
+                .is_some_and(|text| text.starts_with(crate::events::HOST_NOTICE_SENTINEL))
     }
 
     fn strip(value: &mut serde_json::Value) {
@@ -613,12 +619,7 @@ mod tests {
     }
 
     fn user_message(content: &str) -> crate::events::Message {
-        crate::events::Message {
-            role: crate::events::MessageRole::User,
-            content: Some(content.to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        }
+        crate::events::Message::user(content.to_string())
     }
 
     fn host_notice() -> EventPayload {
@@ -639,8 +640,9 @@ mod tests {
         EventPayload::LlmResponse(LlmResponsePayload {
             round: 0,
             call_id: Uuid::now_v7(),
-            content: Some("ok".to_string()),
-            tool_calls: vec![],
+            parts: vec![crate::events::AssistantPart::Text {
+                text: "ok".to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
             origin: Default::default(),

@@ -15,7 +15,7 @@ use serde_json::Value;
 // event vocabulary, which is this crate's.
 pub use fq_ops::turn::*;
 
-use crate::events::{Event, EventPayload, LlmCallOrigin, LlmRequestPayload, MessageRole};
+use crate::events::{Event, EventPayload, LlmCallOrigin, LlmRequestPayload, Message};
 use crate::transcript::AssistantToolCall;
 
 /// The fold from events to turns. Stateful across a window so a tool
@@ -71,7 +71,7 @@ fn is_opening_request(payload: &LlmRequestPayload) -> bool {
         && !payload
             .messages
             .iter()
-            .any(|m| matches!(m.role, MessageRole::Assistant | MessageRole::Tool))
+            .any(|m| matches!(m, Message::Assistant { .. } | Message::ToolResults { .. }))
 }
 
 impl TurnFold {
@@ -120,7 +120,7 @@ impl TurnFold {
                 ))
             }
             EventPayload::LlmResponse(p) => {
-                for call in &p.tool_calls {
+                for call in p.tool_calls() {
                     self.calls.insert(
                         call.tool_call_id.to_string(),
                         PendingCall {
@@ -138,10 +138,9 @@ impl TurnFold {
                         model: cost
                             .map(|c| c.model.clone())
                             .unwrap_or_else(|| "?".to_string()),
-                        content: p.content.clone(),
+                        content: p.text(),
                         tool_calls: p
-                            .tool_calls
-                            .iter()
+                            .tool_calls()
                             .map(|c| AssistantToolCall {
                                 tool_call_id: c.tool_call_id.to_string(),
                                 tool_name: c.tool_name.clone(),
@@ -226,13 +225,8 @@ mod tests {
     use crate::transcript::TranscriptEntry;
     use uuid::Uuid;
 
-    fn msg(role: MessageRole, content: &str) -> Message {
-        Message {
-            role,
-            content: Some(content.into()),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-        }
+    fn user_msg(content: &str) -> Message {
+        Message::user(content)
     }
 
     /// An `llm.request` event for one invocation, carrying `messages`
@@ -260,8 +254,8 @@ mod tests {
     /// trigger's user message. Nothing else.
     fn opening_messages() -> Vec<Message> {
         vec![
-            msg(MessageRole::System, "You are a deterministic fixture."),
-            msg(MessageRole::User, "Summarise the fixture."),
+            Message::system("You are a deterministic fixture."),
+            user_msg("Summarise the fixture."),
         ]
     }
 
@@ -269,8 +263,11 @@ mod tests {
     /// turn and tool result included.
     fn continued_messages() -> Vec<Message> {
         let mut messages = opening_messages();
-        messages.push(msg(MessageRole::Assistant, "Reading the file first."));
-        messages.push(msg(MessageRole::Tool, "deterministic"));
+        messages.push(Message::assistant_text("Reading the file first."));
+        messages.push(Message::tool_result(
+            crate::events::ToolCallId::new("call_1").unwrap(),
+            "deterministic",
+        ));
         messages
     }
 
@@ -279,18 +276,20 @@ mod tests {
             AgentId::new("fold-probe").unwrap(),
             Uuid::now_v7(),
             EventPayload::LlmResponse(LlmResponsePayload {
+                parts: crate::events::assistant_parts(
+                    Some("thinking".into()),
+                    with_call
+                        .map(|id| {
+                            vec![MessageToolCall {
+                                tool_call_id: ToolCallId::new(id).unwrap(),
+                                tool_name: "read_file".into(),
+                                parameters: serde_json::json!({"path": "x"}),
+                            }]
+                        })
+                        .unwrap_or_default(),
+                ),
                 round,
                 call_id: Uuid::now_v7(),
-                content: Some("thinking".into()),
-                tool_calls: with_call
-                    .map(|id| {
-                        vec![MessageToolCall {
-                            tool_call_id: ToolCallId::new(id).unwrap(),
-                            tool_name: "read_file".into(),
-                            parameters: serde_json::json!({"path": "x"}),
-                        }]
-                    })
-                    .unwrap_or_default(),
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
                 origin: LlmCallOrigin::default(),

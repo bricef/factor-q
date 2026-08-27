@@ -12,7 +12,7 @@
 pub use fq_ops::transcript::*;
 
 use crate::ChatResponse;
-use crate::events::{LlmResponsePayload, Message, MessageRole, ToolResultPayload};
+use crate::events::{LlmResponsePayload, Message, ToolResultPayload};
 use crate::worker::{LlmDispatchRow, ToolDispatchRow};
 use serde::Serialize;
 use serde_json::Value;
@@ -138,9 +138,9 @@ pub(crate) fn prompt_from_messages(
     let mut system = None;
     let mut user = None;
     for msg in messages {
-        match msg.role {
-            MessageRole::System if system.is_none() => system = msg.content.clone(),
-            MessageRole::User if user.is_none() => user = msg.content.clone(),
+        match msg {
+            Message::System { text } if system.is_none() => system = Some(text.clone()),
+            Message::User { text } if user.is_none() => user = Some(text.clone()),
             _ => {}
         }
     }
@@ -175,15 +175,15 @@ fn parse_llm_response(raw: &str) -> (Option<String>, Vec<AssistantToolCall>, Opt
     match serde_json::from_str::<ChatResponse>(raw) {
         Ok(resp) => {
             let calls = resp
-                .tool_calls
+                .tool_calls()
                 .into_iter()
                 .map(|tc| AssistantToolCall {
                     tool_call_id: tc.tool_call_id.as_str().to_string(),
-                    tool_name: tc.tool_name,
-                    parameters: tc.parameters,
+                    tool_name: tc.tool_name.clone(),
+                    parameters: tc.parameters.clone(),
                 })
                 .collect();
-            (resp.content, calls, None)
+            (resp.text(), calls, None)
         }
         Err(_) => (Some(raw.to_string()), Vec::new(), None),
     }
@@ -224,8 +224,7 @@ pub fn assistant_entry(
     payload: &LlmResponsePayload,
 ) -> TranscriptEntry {
     let tool_calls = payload
-        .tool_calls
-        .iter()
+        .tool_calls()
         .map(|tc| AssistantToolCall {
             tool_call_id: tc.tool_call_id.as_str().to_string(),
             tool_name: tc.tool_name.clone(),
@@ -235,7 +234,7 @@ pub fn assistant_entry(
     TranscriptEntry::Assistant {
         timestamp_ms,
         model,
-        content: payload.content.clone(),
+        content: payload.text(),
         tool_calls,
         cost_usd,
         is_error: None,
@@ -293,22 +292,24 @@ mod tests {
     }
 
     const FIRST_REQUEST: &str = r#"{"messages":[
-        {"role":"system","content":"You are a helpful agent."},
-        {"role":"user","content":"List the files."}
+        {"kind":"system","text":"You are a helpful agent."},
+        {"kind":"user","text":"List the files."}
     ]}"#;
 
     // These mirror the *real* wire shape the WAL persists: a serialised
-    // `ChatResponse` (content + tool_calls + stop_reason + usage) — NO
-    // `call_id`. A fixture that adds `call_id` would spuriously parse as
-    // an `LlmResponsePayload` and hide the response-type mismatch.
+    // `ChatResponse` (parts + stop_reason + usage) — NO `call_id`. A
+    // fixture that adds `call_id` would spuriously parse as an
+    // `LlmResponsePayload` and hide the response-type mismatch.
+    //
+    // `parts` rather than `content` + `tool_calls` since schema v3
+    // (ADR-0034): an assistant turn is an ordered part list.
     fn response_with_tool_call() -> String {
         serde_json::json!({
-            "content": "Let me list the files.",
-            "tool_calls": [{
-                "tool_call_id": "tc-100",
-                "tool_name": "shell",
-                "parameters": {"cmd": "ls"}
-            }],
+            "parts": [
+                {"kind": "text", "text": "Let me list the files."},
+                {"kind": "tool_call", "tool_call_id": "tc-100", "tool_name": "shell",
+                 "parameters": {"cmd": "ls"}}
+            ],
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 10, "output_tokens": 5}
         })
@@ -317,8 +318,7 @@ mod tests {
 
     fn response_final() -> String {
         serde_json::json!({
-            "content": "Done — there are two files.",
-            "tool_calls": [],
+            "parts": [{"kind": "text", "text": "Done — there are two files."}],
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 20, "output_tokens": 8}
         })

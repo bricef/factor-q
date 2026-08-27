@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::events::{
-    Effort, Message, MessageRole, MessageToolCall, RequestParams, StopReason, TokenUsage,
+    AssistantPart, Effort, Message, MessageToolCall, RequestParams, StopReason, TokenUsage,
     ToolSchema,
 };
 
@@ -281,64 +281,77 @@ fn into_provider_request(
     Ok((model, chat_req, options))
 }
 
+/// Convert one of our turns into the provider's message shape.
+///
+/// The match is exhaustive over turn kinds, which is the point of
+/// [`Message`] being an enum: there is no "role says tool but the id is
+/// missing" branch to defend against, because that state cannot be
+/// constructed. The `LlmError` return survives for the reasoning strip in
+/// phase 3, which can fail.
 fn convert_message(msg: Message) -> Result<provider::chat::ChatMessage, LlmError> {
-    let Message {
-        role,
-        content,
-        tool_calls,
-        tool_call_id,
-    } = msg;
+    let chat_msg = match msg {
+        Message::System { text } => provider::chat::ChatMessage::system(text),
+        Message::User { text } => provider::chat::ChatMessage::user(text),
 
-    // A `tool` role message carries a tool response and MUST have a
-    // matching tool_call_id from the earlier assistant message.
-    if matches!(role, MessageRole::Tool) {
-        let call_id = tool_call_id.ok_or_else(|| {
-            LlmError::InvalidResponse("tool role message is missing tool_call_id".to_string())
-        })?;
-        let content = content.unwrap_or_default();
-        let tool_response = provider::chat::ToolResponse::new(call_id.into_inner(), content);
-        return Ok(provider::chat::ChatMessage {
-            role: provider::chat::ChatRole::Tool,
-            content: provider::chat::MessageContent::from_parts(vec![
-                provider::chat::ContentPart::ToolResponse(tool_response),
-            ]),
-            options: None,
-        });
-    }
+        Message::Assistant { parts } => {
+            // Empty text parts are dropped rather than sent: providers
+            // reject an empty text block, and the previous shape filtered
+            // them the same way.
+            let converted: Vec<provider::chat::ContentPart> = parts
+                .into_iter()
+                .filter_map(|part| match part {
+                    crate::events::AssistantPart::Text { text } if text.is_empty() => None,
+                    crate::events::AssistantPart::Text { text } => {
+                        Some(provider::chat::ContentPart::Text(text))
+                    }
+                    crate::events::AssistantPart::ToolCall(call) => Some(
+                        provider::chat::ContentPart::ToolCall(provider::chat::ToolCall {
+                            call_id: call.tool_call_id.into_inner(),
+                            fn_name: call.tool_name,
+                            fn_arguments: call.parameters,
+                            thought_signatures: None,
+                        }),
+                    ),
+                    // Phase 3 encodes this. Dropping it here keeps phase 2 a
+                    // pure shape change: nothing constructs a reasoning part
+                    // yet, so this arm is unreachable in practice and the
+                    // request on the wire is unchanged.
+                    crate::events::AssistantPart::Reasoning(_) => None,
+                })
+                .collect();
 
-    // Assistant messages with tool calls: carry the tool calls as
-    // content parts alongside any text.
-    if matches!(role, MessageRole::Assistant) && !tool_calls.is_empty() {
-        let mut parts: Vec<provider::chat::ContentPart> = Vec::new();
-        if let Some(text) = content
-            && !text.is_empty()
-        {
-            parts.push(provider::chat::ContentPart::Text(text));
-        }
-        for call in tool_calls {
-            parts.push(provider::chat::ContentPart::ToolCall(
-                provider::chat::ToolCall {
-                    call_id: call.tool_call_id.into_inner(),
-                    fn_name: call.tool_name,
-                    fn_arguments: call.parameters,
-                    thought_signatures: None,
+            // A turn with a single text part and nothing else is sent as a
+            // plain assistant message, which is the shape the previous code
+            // produced and what the provider snapshot pins.
+            match converted.as_slice() {
+                [provider::chat::ContentPart::Text(text)] => {
+                    provider::chat::ChatMessage::assistant(text.clone())
+                }
+                _ => provider::chat::ChatMessage {
+                    role: provider::chat::ChatRole::Assistant,
+                    content: provider::chat::MessageContent::from_parts(converted),
+                    options: None,
                 },
-            ));
+            }
         }
-        return Ok(provider::chat::ChatMessage {
-            role: provider::chat::ChatRole::Assistant,
-            content: provider::chat::MessageContent::from_parts(parts),
-            options: None,
-        });
-    }
 
-    // Ordinary text-only messages.
-    let text = content.unwrap_or_default();
-    let chat_msg = match role {
-        MessageRole::System => provider::chat::ChatMessage::system(text),
-        MessageRole::User => provider::chat::ChatMessage::user(text),
-        MessageRole::Assistant => provider::chat::ChatMessage::assistant(text),
-        MessageRole::Tool => unreachable!("handled above"),
+        Message::ToolResults { results } => provider::chat::ChatMessage {
+            role: provider::chat::ChatRole::Tool,
+            content: provider::chat::MessageContent::from_parts(
+                results
+                    .into_iter()
+                    .map(|result| {
+                        provider::chat::ContentPart::ToolResponse(
+                            provider::chat::ToolResponse::new(
+                                result.tool_call_id.into_inner(),
+                                result.output,
+                            ),
+                        )
+                    })
+                    .collect::<Vec<provider::chat::ContentPart>>(),
+            ),
+            options: None,
+        },
     };
     Ok(chat_msg)
 }
@@ -378,34 +391,45 @@ fn convert_params(params: RequestParams) -> provider::chat::ChatOptions {
 fn from_provider_response(
     response: provider::chat::ChatResponse,
 ) -> Result<ChatResponse, LlmError> {
-    let content_text = response.first_text().map(|s| s.to_string());
     let usage = convert_usage(&response.usage);
 
-    // Clone tool calls out of the content before consuming it. The
-    // response's own `into_tool_calls` consumes the whole response, so
-    // we collect both text and calls via separate accessors.
-    // Wrap tool_call_id at the provider->internal boundary. A
-    // provider returning an empty string is a protocol bug we
-    // surface immediately rather than letting it propagate.
-    let tool_calls: Vec<MessageToolCall> = response
-        .tool_calls()
-        .into_iter()
-        .map(|tc| {
-            let tool_call_id = crate::events::ToolCallId::new(tc.call_id.clone())
-                .map_err(|err| LlmError::InvalidResponse(err.to_string()))?;
-            Ok::<_, LlmError>(MessageToolCall {
-                tool_call_id,
-                tool_name: tc.fn_name.clone(),
-                parameters: tc.fn_arguments.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // Build the turn's parts in the order the provider returned them.
+    // Ordering is a provider concern (ADR-0034 I6) — Anthropic requires
+    // thinking blocks first, OpenAI-compatible providers carry reasoning
+    // as a sibling field where position is meaningless — so we preserve
+    // what arrived rather than imposing an order of our own.
+    //
+    // Wrap tool_call_id at the provider->internal boundary. A provider
+    // returning an empty string is a protocol bug we surface immediately
+    // rather than letting it propagate.
+    let mut parts: Vec<AssistantPart> = Vec::new();
+    for part in response.content.iter() {
+        match part {
+            provider::chat::ContentPart::Text(text) => {
+                parts.push(crate::events::AssistantPart::Text { text: text.clone() });
+            }
+            provider::chat::ContentPart::ToolCall(call) => {
+                let tool_call_id = crate::events::ToolCallId::new(call.call_id.clone())
+                    .map_err(|err| LlmError::InvalidResponse(err.to_string()))?;
+                parts.push(crate::events::AssistantPart::ToolCall(MessageToolCall {
+                    tool_call_id,
+                    tool_name: call.fn_name.clone(),
+                    parameters: call.fn_arguments.clone(),
+                }));
+            }
+            // Reasoning is read in phase 3. Everything else a provider
+            // may send is not part of an assistant turn as we model it.
+            _ => {}
+        }
+    }
 
-    let stop_reason = map_stop_reason(response.stop_reason.as_ref(), !tool_calls.is_empty());
+    let has_tool_calls = parts
+        .iter()
+        .any(|part| matches!(part, crate::events::AssistantPart::ToolCall(_)));
+    let stop_reason = map_stop_reason(response.stop_reason.as_ref(), has_tool_calls);
 
     Ok(ChatResponse {
-        content: content_text,
-        tool_calls,
+        parts,
         stop_reason,
         usage,
     })
@@ -509,24 +533,14 @@ fn map_error(err: provider::Error) -> LlmError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{Effort, MessageRole, RequestParams};
+    use crate::events::{Effort, RequestParams};
 
     fn request_with_system_and_user(model: &str) -> ChatRequest {
         ChatRequest {
             model: model.to_string(),
             messages: vec![
-                Message {
-                    role: MessageRole::System,
-                    content: Some("You are a helper.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: Some("Say hello.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
+                Message::system("You are a helper.".to_string()),
+                Message::user("Say hello.".to_string()),
             ],
             tools: vec![],
             params: RequestParams {
@@ -570,77 +584,39 @@ mod tests {
         let request = ChatRequest {
             model: "claude-sonnet-4-6".to_string(),
             messages: vec![
-                Message {
-                    role: MessageRole::System,
-                    content: Some("You are a careful assistant.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: Some("Pinned resource: the deploy runbook.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: Some("Investigate the failing deploy.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
-                Message {
-                    role: MessageRole::Assistant,
-                    content: Some("Let me look at the logs.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: Some("No tool calls were made and the run is not over.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
-                Message {
-                    role: MessageRole::Assistant,
-                    content: Some("Reading both logs.".to_string()),
-                    tool_calls: vec![
-                        MessageToolCall {
+                Message::system("You are a careful assistant."),
+                Message::user("Pinned resource: the deploy runbook."),
+                Message::user("Investigate the failing deploy."),
+                Message::assistant_text("Let me look at the logs."),
+                Message::user("No tool calls were made and the run is not over."),
+                Message::Assistant {
+                    parts: vec![
+                        crate::events::AssistantPart::Text {
+                            text: "Reading both logs.".to_string(),
+                        },
+                        crate::events::AssistantPart::ToolCall(MessageToolCall {
                             tool_call_id: crate::events::ToolCallId::new("call_a".to_string())
                                 .expect("non-empty"),
                             tool_name: "file_read".to_string(),
                             parameters: serde_json::json!({"path": "/var/log/deploy.log"}),
-                        },
-                        MessageToolCall {
+                        }),
+                        crate::events::AssistantPart::ToolCall(MessageToolCall {
                             tool_call_id: crate::events::ToolCallId::new("call_b".to_string())
                                 .expect("non-empty"),
                             tool_name: "file_read".to_string(),
                             parameters: serde_json::json!({"path": "/var/log/agent.log"}),
-                        },
+                        }),
                     ],
-                    tool_call_id: None,
                 },
-                Message {
-                    role: MessageRole::Tool,
-                    content: Some("deploy failed at step 3".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: Some(
-                        crate::events::ToolCallId::new("call_a".to_string()).expect("non-empty"),
-                    ),
-                },
-                Message {
-                    role: MessageRole::Tool,
-                    content: Some("agent restarted".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: Some(
-                        crate::events::ToolCallId::new("call_b".to_string()).expect("non-empty"),
-                    ),
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: Some("Budget is 80% spent.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
+                Message::tool_result(
+                    crate::events::ToolCallId::new("call_a".to_string()).expect("non-empty"),
+                    "deploy failed at step 3",
+                ),
+                Message::tool_result(
+                    crate::events::ToolCallId::new("call_b".to_string()).expect("non-empty"),
+                    "agent restarted",
+                ),
+                Message::user("Budget is 80% spent."),
             ],
             tools: vec![ToolSchema {
                 name: "file_read".to_string(),
@@ -739,18 +715,8 @@ mod tests {
     #[test]
     fn marks_only_system_and_final_message_in_longer_conversations() {
         let mut request = request_with_system_and_user("claude-sonnet-4-5");
-        request.messages.push(Message {
-            role: MessageRole::Assistant,
-            content: Some("Hello!".to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
-        request.messages.push(Message {
-            role: MessageRole::User,
-            content: Some("And again.".to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        });
+        request.messages.push(Message::assistant_text("Hello!"));
+        request.messages.push(Message::user("And again."));
         let (_, req, _) = into_provider_request(request).unwrap();
         let marked: Vec<bool> = req
             .messages
@@ -956,40 +922,33 @@ mod tests {
     }
 
     #[test]
-    fn converts_tool_message_with_id() {
-        let msg = convert_message(Message {
-            role: MessageRole::Tool,
-            content: Some("file contents".to_string()),
-            tool_calls: vec![],
-            tool_call_id: Some(crate::events::ToolCallId::new("toolu_01ABC").unwrap()),
-        })
+    fn converts_tool_result_message() {
+        let msg = convert_message(Message::tool_result(
+            crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
+            "file contents",
+        ))
         .unwrap();
         assert!(matches!(msg.role, provider::chat::ChatRole::Tool));
     }
 
-    #[test]
-    fn tool_message_without_id_is_error() {
-        let err = convert_message(Message {
-            role: MessageRole::Tool,
-            content: Some("nothing".to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-        })
-        .unwrap_err();
-        assert!(matches!(err, LlmError::InvalidResponse(_)));
-    }
+    // `tool_message_without_id_is_error` lived here. It asserted that a
+    // `Tool`-role message with no `tool_call_id` was rejected at
+    // conversion — a state `Message::ToolResults` cannot represent, since
+    // the id lives on each `ToolResult`. The test is deleted rather than
+    // rewritten because there is no longer anything to assert: the
+    // compiler enforces it (ADR-0034 D1).
 
     #[test]
     fn converts_assistant_message_with_tool_calls() {
-        let msg = convert_message(Message {
-            role: MessageRole::Assistant,
-            content: Some("I'll read that file.".to_string()),
-            tool_calls: vec![MessageToolCall {
-                tool_call_id: crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
-                tool_name: "read_file".to_string(),
-                parameters: serde_json::json!({"path": "/tmp/x"}),
-            }],
-            tool_call_id: None,
+        let msg = convert_message(Message::Assistant {
+            parts: crate::events::assistant_parts(
+                Some("I'll read that file.".to_string()),
+                vec![MessageToolCall {
+                    tool_call_id: crate::events::ToolCallId::new("toolu_01ABC").unwrap(),
+                    tool_name: "read_file".to_string(),
+                    parameters: serde_json::json!({"path": "/tmp/x"}),
+                }],
+            ),
         })
         .unwrap();
         assert!(matches!(msg.role, provider::chat::ChatRole::Assistant));
@@ -1018,18 +977,8 @@ mod tests {
         let request = ChatRequest {
             model: "claude-haiku-4-5".to_string(),
             messages: vec![
-                Message {
-                    role: MessageRole::System,
-                    content: Some("You are a test. Reply in exactly one word: OK".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: Some("Say OK.".to_string()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
+                Message::system("You are a test. Reply in exactly one word: OK".to_string()),
+                Message::user("Say OK.".to_string()),
             ],
             tools: vec![],
             params: RequestParams {
@@ -1041,9 +990,9 @@ mod tests {
 
         let response = client.chat(request).await.expect("chat");
         assert!(
-            response.content.as_deref().is_some_and(|c| !c.is_empty()),
+            response.text().as_deref().is_some_and(|c| !c.is_empty()),
             "expected non-empty content, got {:?}",
-            response.content
+            response.text()
         );
         assert!(
             response.usage.input_tokens > 0,
@@ -1196,9 +1145,9 @@ mod tests {
             .expect("live OpenRouter chat");
 
         assert!(
-            response.content.as_deref().is_some_and(|c| !c.is_empty()),
+            response.text().as_deref().is_some_and(|c| !c.is_empty()),
             "expected non-empty content from OpenRouter, got {:?}",
-            response.content
+            response.text()
         );
         assert!(
             response.usage.output_tokens > 0,

@@ -189,11 +189,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
         };
 
-        if response.tool_calls.is_empty()
-            && response
-                .content
-                .as_deref()
-                .is_none_or(|content| content.trim().is_empty())
+        if response.tool_calls().is_empty()
+            && response.text().is_none_or(|text| text.trim().is_empty())
         {
             // A 200 with nothing in it. Skips `ctx.totals.total_llm_calls`
             // — no outcome to count — but *not* the spend: the provider
@@ -333,8 +330,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
         Ok(Ok((
             ModelResponse {
-                content: response.content,
-                tool_calls: response.tool_calls,
+                parts: response.parts,
                 stop_reason: response.stop_reason,
                 usage: response.usage,
             },
@@ -383,7 +379,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 Err(_) => return Ok(None),
             };
 
-            let Some(value) = parse(response.content.as_deref()) else {
+            let Some(value) = parse(response.text().as_deref()) else {
                 continue; // unparseable → retry
             };
             if validate(&value).is_err() {

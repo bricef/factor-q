@@ -116,10 +116,12 @@ fn fixture_events() -> Vec<Event> {
             AgentId::new(AGENT).unwrap(),
             Uuid::parse_str(INV).unwrap(),
             EventPayload::LlmResponse(LlmResponsePayload {
+                parts: fq_runtime::events::assistant_parts(
+                    Some("Reading the fixture file first.".into()),
+                    Vec::new(),
+                ),
                 round: 1,
                 call_id: uuid_at(20),
-                content: Some("Reading the fixture file first.".into()),
-                tool_calls: Vec::new(),
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage {
                     input_tokens: 1_200,
@@ -1529,8 +1531,10 @@ fn a_list_row_walks_to_its_whole_event() {
         "the walk must land on the event the row described"
     );
     // …and what the walk buys is the payload the row does not carry.
+    // `parts[0].text` rather than `content`: schema v3 made an assistant
+    // turn an ordered part list (ADR-0034), so the turn's text is a part.
     assert_eq!(
-        whole["event"]["payload"]["payload"]["content"].as_str(),
+        whole["event"]["payload"]["payload"]["parts"][0]["text"].as_str(),
         Some("Reading the fixture file first."),
         "event.get answers with the whole event: {whole}"
     );
@@ -1644,7 +1648,7 @@ fn a_listed_event_walks_to_its_whole_event_from_the_command_line() {
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("one JSON event");
     assert_eq!(parsed["envelope"]["event_id"].as_str(), Some(printed));
     assert_eq!(
-        parsed["payload"]["payload"]["content"].as_str(),
+        parsed["payload"]["payload"]["parts"][0]["text"].as_str(),
         Some("Reading the fixture file first.")
     );
 }

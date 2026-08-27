@@ -46,8 +46,8 @@ use uuid::Uuid;
 use crate::agent::AgentId;
 use crate::bus::{BusError, EventBus};
 use crate::events::{
-    CostMetadata, Event, EventPayload, InvocationSummaryPayload, Message, MessageRole,
-    RequestParams, SummaryKind, subjects,
+    CostMetadata, Event, EventPayload, InvocationSummaryPayload, Message, RequestParams,
+    SummaryKind, subjects,
 };
 use crate::llm::{ChatRequest, LlmClient};
 use crate::pricing::PricingTable;
@@ -189,12 +189,11 @@ impl SummaryConsumer {
             }
             EventPayload::LlmResponse(p) => {
                 let mut latest = String::new();
-                if let Some(content) = &p.content {
-                    latest.push_str(&truncate_chars(content, MAX_CONTENT_CHARS));
+                if let Some(content) = p.text() {
+                    latest.push_str(&truncate_chars(&content, MAX_CONTENT_CHARS));
                 }
-                if !p.tool_calls.is_empty() {
-                    let names: Vec<&str> =
-                        p.tool_calls.iter().map(|t| t.tool_name.as_str()).collect();
+                let names: Vec<&str> = p.tool_calls().map(|t| t.tool_name.as_str()).collect();
+                if !names.is_empty() {
                     latest.push_str(&format!("\n[calling tools: {}]", names.join(", ")));
                 }
                 if latest.trim().is_empty() {
@@ -259,25 +258,17 @@ impl SummaryConsumer {
         let request = ChatRequest {
             model: self.model.clone(),
             messages: vec![
-                Message {
-                    role: MessageRole::System,
-                    content: Some(format!(
+                Message::System {
+                    text: format!(
                         "You maintain a one-line status summary of an autonomous agent's \
                          work for a human operator's dashboard. Reply with EXACTLY one \
                          line, at most {} characters: present tense, status first, no \
                          preamble, no quotes. Example: `Fixing #83: tests green, opening \
                          the PR`.",
                         self.max_line_chars
-                    )),
-                    tool_calls: vec![],
-                    tool_call_id: None,
+                    ),
                 },
-                Message {
-                    role: MessageRole::User,
-                    content: Some(instruction),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                },
+                Message::User { text: instruction },
             ],
             tools: vec![],
             params: RequestParams {
@@ -304,7 +295,7 @@ impl SummaryConsumer {
         };
 
         let line = one_line(
-            response.content.as_deref().unwrap_or(""),
+            response.text().as_deref().unwrap_or(""),
             self.max_line_chars,
         );
         if line.is_empty() {
@@ -438,8 +429,9 @@ mod tests {
 
     fn canned(line: &str) -> ChatResponse {
         ChatResponse {
-            content: Some(line.to_string()),
-            tool_calls: vec![],
+            parts: vec![crate::events::AssistantPart::Text {
+                text: line.to_string(),
+            }],
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage {
                 input_tokens: 400,
@@ -692,8 +684,9 @@ mod tests {
                 EventPayload::LlmResponse(LlmResponsePayload {
                     round: 0,
                     call_id: Uuid::now_v7(),
-                    content: Some("I'll edit widget.rs to reverse the frob.".to_string()),
-                    tool_calls: vec![],
+                    parts: vec![crate::events::AssistantPart::Text {
+                        text: "I'll edit widget.rs to reverse the frob.".to_string(),
+                    }],
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
                     origin: Default::default(),
@@ -713,7 +706,8 @@ mod tests {
         // otherwise burn the whole max_tokens budget thinking and
         // return no content at all.
         assert_eq!(second.params.effort, Some(crate::events::Effort::Minimal));
-        let user = second.messages[1].content.as_deref().unwrap();
+        let user_text = second.messages[1].text().unwrap();
+        let user = user_text.as_str();
         assert!(
             user.contains("Fixing #7: reading the issue"),
             "prior line fed in: {user}"

@@ -107,12 +107,14 @@ impl LlmClient for ParkedLlm {
                 .forget();
         }
         Ok(ChatResponse {
-            content: None,
-            tool_calls: vec![fq_runtime::events::MessageToolCall {
-                tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
-                tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-                parameters: serde_json::json!({"status": "success", "summary": "ran to the end"}),
-            }],
+            parts: fq_runtime::events::assistant_parts(
+                None,
+                vec![fq_runtime::events::MessageToolCall {
+                    tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+                    tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                    parameters: serde_json::json!({"status": "success", "summary": "ran to the end"}),
+                }],
+            ),
             stop_reason: fq_runtime::events::StopReason::ToolUse,
             usage: fq_runtime::events::TokenUsage {
                 input_tokens: 10,

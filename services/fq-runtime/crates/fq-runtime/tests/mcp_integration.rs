@@ -748,12 +748,14 @@ async fn static_resource_pin_appears_in_first_model_request() {
     // after exactly one model request — the one we inspect.
     let llm = FixtureClient::new();
     llm.push_response(ChatResponse {
-        content: None,
-        tool_calls: vec![fq_runtime::events::MessageToolCall {
-            tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
-            tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-            parameters: serde_json::json!({"status": "success", "summary": "done."}),
-        }],
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+                tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: serde_json::json!({"status": "success", "summary": "done."}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 10,
@@ -820,7 +822,7 @@ async fn static_resource_pin_appears_in_first_model_request() {
     let first = &requests[0];
     assert!(
         first.messages.iter().any(|m| m
-            .content
+            .text()
             .as_deref()
             .is_some_and(|c| c.contains(&expected_body))),
         "the pinned resource's content must appear in the first model request; \
@@ -967,7 +969,7 @@ async fn embedded_text_resource_prompt_renders() {
     assert_eq!(transcript.len(), 2);
     assert!(
         transcript[1]
-            .content
+            .text()
             .as_deref()
             .is_some_and(|c| c.contains("This is a plaintext resource")),
         "embedded resource text should reach the transcript"
@@ -1156,8 +1158,8 @@ fn saw_sampling_call(requests: &[fq_runtime::ChatRequest]) -> bool {
             // serialized request (which also contains that prompt) in a
             // *User* message, so match on role to avoid counting the
             // judge call as a sampling completion.
-            matches!(m.role, fq_runtime::events::MessageRole::System)
-                && m.content
+            matches!(m, fq_runtime::events::Message::System { .. })
+                && m.text()
                     .as_deref()
                     .is_some_and(|c| c.contains(SAMPLING_SYSTEM_PROMPT))
         })
@@ -1223,8 +1225,9 @@ async fn run_sampling_scenario(
     // no model call consumes (2), so the agent's step 1 does — the
     // invocation still completes, just with one fewer model call.
     let canned = |text: &str| ChatResponse {
-        content: Some(text.to_string()),
-        tool_calls: vec![],
+        parts: vec![fq_runtime::events::AssistantPart::Text {
+            text: text.to_string(),
+        }],
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage {
             input_tokens: 8,
@@ -1235,12 +1238,14 @@ async fn run_sampling_scenario(
     };
     let llm = FixtureClient::new();
     llm.push_response(ChatResponse {
-        content: None,
-        tool_calls: vec![fq_runtime::events::MessageToolCall {
-            tool_call_id: fq_runtime::events::ToolCallId::new("call-sampling").unwrap(),
-            tool_name: "everything__trigger-sampling-request".to_string(),
-            parameters: serde_json::json!({"prompt": "hello from agent", "maxTokens": 16}),
-        }],
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("call-sampling").unwrap(),
+                tool_name: "everything__trigger-sampling-request".to_string(),
+                parameters: serde_json::json!({"prompt": "hello from agent", "maxTokens": 16}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 10,
@@ -1256,12 +1261,14 @@ async fn run_sampling_scenario(
     }
     llm.push_response(canned("SAMPLED-ANSWER"));
     llm.push_response(ChatResponse {
-        content: None,
-        tool_calls: vec![fq_runtime::events::MessageToolCall {
-            tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
-            tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-            parameters: serde_json::json!({"status": "success", "summary": "done."}),
-        }],
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+                tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: serde_json::json!({"status": "success", "summary": "done."}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 10,
@@ -1753,7 +1760,7 @@ const ELICITATION_MARKER: &str = "completing a structured form";
 fn saw_elicitation_call(requests: &[fq_runtime::ChatRequest]) -> bool {
     requests.iter().any(|r| {
         r.messages.iter().any(|m| {
-            m.content
+            m.text()
                 .as_deref()
                 .is_some_and(|c| c.contains(ELICITATION_MARKER))
         })
@@ -1810,8 +1817,9 @@ async fn run_elicitation_scenario(
     let agent = builder.build().expect("build agent");
 
     let canned = |text: &str, stop: StopReason| ChatResponse {
-        content: Some(text.to_string()),
-        tool_calls: vec![],
+        parts: vec![fq_runtime::events::AssistantPart::Text {
+            text: text.to_string(),
+        }],
         stop_reason: stop,
         usage: TokenUsage {
             input_tokens: 8,
@@ -1824,12 +1832,14 @@ async fn run_elicitation_scenario(
     let llm = FixtureClient::new();
     // (1) call the elicitation tool.
     llm.push_response(ChatResponse {
-        content: None,
-        tool_calls: vec![fq_runtime::events::MessageToolCall {
-            tool_call_id: fq_runtime::events::ToolCallId::new("call-elicit").unwrap(),
-            tool_name: "everything__trigger-elicitation-request".to_string(),
-            parameters: serde_json::json!({}),
-        }],
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("call-elicit").unwrap(),
+                tool_name: "everything__trigger-elicitation-request".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 10,
@@ -1844,12 +1854,14 @@ async fn run_elicitation_scenario(
     }
     // (3) end the agent turn.
     llm.push_response(ChatResponse {
-        content: None,
-        tool_calls: vec![fq_runtime::events::MessageToolCall {
-            tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
-            tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-            parameters: serde_json::json!({"status": "success", "summary": "done."}),
-        }],
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+                tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: serde_json::json!({"status": "success", "summary": "done."}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 10,
@@ -1948,7 +1960,7 @@ async fn elicitation_permitted_accepts_schema_valid_value() {
     // tool result, which lands in the agent's next model request.
     assert!(
         requests.iter().any(|r| r.messages.iter().any(|m| m
-            .content
+            .text()
             .as_deref()
             .is_some_and(|c| c.contains("Ada Lovelace")))),
         "the accepted value should round-trip into the agent transcript"
@@ -2042,7 +2054,7 @@ async fn elicitation_retries_exhausted_declines() {
         requests.iter().any(|r| r
             .messages
             .iter()
-            .any(|m| m.content.as_deref().is_some_and(|c| c.contains("declined")))),
+            .any(|m| m.text().as_deref().is_some_and(|c| c.contains("declined")))),
         "the decline should round-trip into the agent transcript"
     );
 }
@@ -2370,8 +2382,9 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
         .expect("build agent");
 
     let canned = |text: &str| ChatResponse {
-        content: Some(text.to_string()),
-        tool_calls: vec![],
+        parts: vec![fq_runtime::events::AssistantPart::Text {
+            text: text.to_string(),
+        }],
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage {
             input_tokens: 8,
@@ -2382,12 +2395,14 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
     };
     let llm = FixtureClient::new();
     llm.push_response(ChatResponse {
-        content: None,
-        tool_calls: vec![fq_runtime::events::MessageToolCall {
-            tool_call_id: fq_runtime::events::ToolCallId::new("call-sampling").unwrap(),
-            tool_name: "everything__trigger-sampling-request".to_string(),
-            parameters: serde_json::json!({"prompt": "hello", "maxTokens": 16}),
-        }],
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("call-sampling").unwrap(),
+                tool_name: "everything__trigger-sampling-request".to_string(),
+                parameters: serde_json::json!({"prompt": "hello", "maxTokens": 16}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 10,
@@ -2398,12 +2413,14 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
     });
     llm.push_response(canned("SAMPLED-ANSWER"));
     llm.push_response(ChatResponse {
-        content: None,
-        tool_calls: vec![fq_runtime::events::MessageToolCall {
-            tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
-            tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-            parameters: serde_json::json!({"status": "success", "summary": "done."}),
-        }],
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+                tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: serde_json::json!({"status": "success", "summary": "done."}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 10,

@@ -33,7 +33,7 @@ use fq_runtime::control_plane::store::{
 };
 use fq_runtime::events::{
     CostMetadata, Event, EventPayload, FailureKind, FailurePhase, InvocationTotals, LlmCallOrigin,
-    Message, MessageRole, StopReason, TokenUsage, TriggerSource, TriggeredPayload,
+    Message, StopReason, TokenUsage, TriggerSource, TriggeredPayload,
 };
 use fq_runtime::llm::ChatResponse;
 use fq_runtime::worker::InvocationStateRow;
@@ -125,18 +125,8 @@ fn triggered(agent: &str, invocation: &str, seq: u32, at_ms: i64) -> Event {
 /// lying, not the code.
 fn opening_messages() -> Vec<Message> {
     vec![
-        Message {
-            role: MessageRole::System,
-            content: Some("You are a deterministic fixture.".into()),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-        },
-        Message {
-            role: MessageRole::User,
-            content: Some("Summarise the fixture, then read a file.".into()),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-        },
+        Message::system("You are a deterministic fixture."),
+        Message::user("Summarise the fixture, then read a file."),
     ]
 }
 
@@ -159,10 +149,12 @@ fn cost(call: u32, total: f64, cumulative: f64) -> CostMetadata {
 
 fn llm_response(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost: f64) -> Event {
     let payload = EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
+        parts: fq_runtime::events::assistant_parts(
+            Some("Fixture assistant reply.".into()),
+            Vec::new(),
+        ),
         round: 0,
         call_id: fixed_uuid(seq),
-        content: Some("Fixture assistant reply.".into()),
-        tool_calls: Vec::new(),
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage {
             input_tokens: 1_200,
@@ -367,12 +359,14 @@ async fn seed_at(dir: &Path, base_ms: i64) {
 
     let request_payload = serde_json::json!({ "messages": opening_messages() }).to_string();
     let first_response = serde_json::to_string(&ChatResponse {
-        content: Some("Reading the fixture file first.".into()),
-        tool_calls: vec![fq_runtime::events::MessageToolCall {
-            tool_call_id: fq_runtime::events::ToolCallId::new("tc-1").unwrap(),
-            tool_name: "read_file".into(),
-            parameters: serde_json::json!({"path": "fixture.txt"}),
-        }],
+        parts: fq_runtime::events::assistant_parts(
+            Some("Reading the fixture file first.".into()),
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("tc-1").unwrap(),
+                tool_name: "read_file".into(),
+                parameters: serde_json::json!({"path": "fixture.txt"}),
+            }],
+        ),
         stop_reason: StopReason::ToolUse,
         usage: TokenUsage {
             input_tokens: 1_200,
@@ -383,8 +377,10 @@ async fn seed_at(dir: &Path, base_ms: i64) {
     })
     .unwrap();
     let second_response = serde_json::to_string(&ChatResponse {
-        content: Some("The fixture file says: deterministic.".into()),
-        tool_calls: Vec::new(),
+        parts: fq_runtime::events::assistant_parts(
+            Some("The fixture file says: deterministic.".into()),
+            Vec::new(),
+        ),
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage {
             input_tokens: 1_400,
@@ -1132,14 +1128,16 @@ fn conversation_events() -> Vec<Event> {
                 agent.clone(),
                 inv(INV_COMPLETED),
                 EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
+                    parts: fq_runtime::events::assistant_parts(
+                        Some("Reading the fixture file first.".into()),
+                        vec![fq_runtime::events::MessageToolCall {
+                            tool_call_id: call(),
+                            tool_name: "read_file".into(),
+                            parameters: serde_json::json!({"path": "fixture.txt"}),
+                        }],
+                    ),
                     round: 1,
                     call_id: fixed_uuid(20),
-                    content: Some("Reading the fixture file first.".into()),
-                    tool_calls: vec![fq_runtime::events::MessageToolCall {
-                        tool_call_id: call(),
-                        tool_name: "read_file".into(),
-                        parameters: serde_json::json!({"path": "fixture.txt"}),
-                    }],
                     stop_reason: StopReason::ToolUse,
                     usage: TokenUsage {
                         input_tokens: 1_200,
@@ -1176,10 +1174,12 @@ fn conversation_events() -> Vec<Event> {
                 agent,
                 inv(INV_COMPLETED),
                 EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
+                    parts: fq_runtime::events::assistant_parts(
+                        Some("The fixture file says: deterministic.".into()),
+                        Vec::new(),
+                    ),
                     round: 2,
                     call_id: fixed_uuid(22),
-                    content: Some("The fixture file says: deterministic.".into()),
-                    tool_calls: Vec::new(),
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage {
                         input_tokens: 1_400,
