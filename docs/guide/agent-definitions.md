@@ -54,6 +54,62 @@ Skip the middle two and `fq trigger` stops at ``no daemon paired — run
 and the client reads `fq.toml`; `fq init` writes both, along with
 `agents/` and a sample agent.
 
+## The frontmatter is strict
+
+Every **top-level** key in the frontmatter must be one the runtime
+recognises. An unknown key is a **hard error** — the definition fails to
+load, and the error names the offending key, lists the keys that were
+expected, and gives the line and column:
+
+```
+agents/greeter.md is invalid: invalid YAML: unknown field `budgett`,
+expected one of `name`, `model`, `tools`, `sandbox`, `budget`,
+`max_iterations`, `effort`, `trigger`, `mcp`, `static_resources`,
+`sampling_budget`, `elicitation_budget` at line 3 column 1
+```
+
+That list is the whole recognised set — twelve keys, and the error
+prints them in the order the runtime declares them.
+
+Strictness is deliberate: a dropped key is silent, and silence here is
+expensive. `budgett: 0.05` used to parse as a definition with *no* cost
+cap, and `fq agent validate` called it valid — the only trace was a
+missing line in its output (ADR-0004 is "cost controls from day one").
+`sandboxx:` is the same shape with a security edge: the agent would run
+with no grants rather than the ones its author wrote. Both are now
+rejected outright.
+
+An unknown key is fatal to the definition that carries it, and only to
+that one: the daemon records the parse failure and carries on loading
+the rest of the directory, so one bad file costs you one agent rather
+than the registry. Run `fq agent validate` over a definition before
+adding it.
+
+### The nested blocks are not strict
+
+The check stops at the top level. Keys **inside** the `sandbox:` block
+and inside an `mcp:` entry are still dropped in silence, exactly as
+every key used to be:
+
+```yaml
+sandbox:
+  fs_writ:             # not `fs_write` — accepted, and grants nothing
+    - "${workspace}/**"
+mcp:
+  - server: filesystem
+    command: npx
+    samplingg: true    # not `sampling` — accepted, and grants nothing
+```
+
+A definition carrying either one validates as `✓ valid` and loads. It
+runs *without* the grant its author believed they had written — which is
+the version of this failure with the sharpest edge, since the result is
+an agent quietly less able, or less contained, than its definition
+reads. The spelling of a key nested under `sandbox:` or `mcp:` is still
+yours to check: the dimension names are listed under
+[Dimensions](#dimensions), the per-server grants under
+[Capability grants](#capability-grants).
+
 ## Choosing the model
 
 `model:` names a model the deployment makes available. Different agents
@@ -439,28 +495,8 @@ effort: high            # reasoning effort for each request
   economy — on gpt-5-family models the default reasoning scales to fill
   `max_tokens` and can return empty content on short mechanical tasks.
 
-### Misspelled keys are ignored, not rejected
-
-The frontmatter parser does not reject unknown fields. A definition with
-`budgett: 0.10` or `maxiterations: 3` parses cleanly, validates as `✓
-valid`, loads into the daemon, and runs with **no budget and the default
-iteration cap** — the misspelled key is dropped without a word anywhere.
-
-Nothing catches this for you, so check the spelling of every field you
-rely on against this page. The one partial signal is `fq agent validate`'s
-own summary, which echoes the id, model, tool count, and — only when it
-parsed — the budget:
-
-```
-✓ agents/greeter.md is valid
-  id:      greeter
-  model:   claude-haiku-4-5
-  tools:   0
-```
-
-A missing `budget:` line means `budget:` did not parse. `max_iterations`,
-`effort`, `trigger`, `sandbox` and `mcp` are not echoed at all, so a typo
-in any of those is invisible until you notice the behaviour is wrong.
+Both are top-level keys, so a typo in either is refused at load rather
+than ignored — see [The frontmatter is strict](#the-frontmatter-is-strict).
 
 ## MCP servers
 
@@ -663,7 +699,10 @@ code blocks — anything that helps the LLM understand its task.
 ## Validating and testing
 
 ```sh
-# Check that the definition parses correctly (offline, no daemon needed)
+# Check that the definition parses correctly (offline, no daemon needed).
+# `budget` and `max_iterations` print whether or not they are set —
+# `budget: not set (no cap)` rather than an omitted line, so an absence
+# is something you can read rather than something you have to notice.
 fq agent validate agents/my-agent.md
 
 # List the agents the running daemon has loaded — its live registry,
@@ -683,9 +722,9 @@ authenticated edge, so `fqd` must be running and this client paired with
 
 And know what `fq agent validate` is worth before you lean on it. It
 checks syntax and shape: that the frontmatter parses, that the fields it
-does know are well-formed, and that the definition builds. It does not
-check spelling of unknown keys, and it cannot reach the deployment's
-model or pricing config — so it both rejects the valid model-less shape
-and passes models the daemon will refuse (issue #508). The verdict that
-counts is the daemon starting and `fq agent list` showing the agent in the
-live registry.
+does know are well-formed, and that the definition builds. It catches a
+misspelled top-level key but not one nested inside `sandbox:` or `mcp:`,
+and it cannot reach the deployment's model or pricing config — so it
+both rejects the valid model-less shape and passes models the daemon
+will refuse (issue #508). The verdict that counts is the daemon starting
+and `fq agent list` showing the agent in the live registry.
