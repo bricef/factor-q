@@ -55,9 +55,18 @@ pub struct StreamBatch {
 }
 
 /// The wire-level failure vocabulary. Domain failures are op outputs;
-/// these are the envelope's own: registration, schema, authorisation,
-/// and the daemon-side catch-all. `op` fields carry the rendered name
-/// (these errors are for humans and logs).
+/// these nine are the envelope's own: registration
+/// ([`NotRegistered`](WireError::NotRegistered)), input schema
+/// ([`InvalidInput`](WireError::InvalidInput)), the three ways a
+/// well-formed request finds nothing whole
+/// ([`NotFound`](WireError::NotFound),
+/// [`Unlocatable`](WireError::Unlocatable), [`Gone`](WireError::Gone) —
+/// each variant's doc says why they are not one error), idempotence
+/// ([`Conflict`](WireError::Conflict)), authorisation
+/// ([`Denied`](WireError::Denied)), read freshness
+/// ([`Lagging`](WireError::Lagging)), and the daemon-side catch-all
+/// ([`Internal`](WireError::Internal)). `op` fields carry the rendered
+/// name (these errors are for humans and logs).
 // Externally tagged (serde's default) and no skipped fields: the
 // envelopes must survive any serde transport, self-describing or not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]

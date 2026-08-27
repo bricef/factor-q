@@ -2,7 +2,25 @@
 
 ## Status
 
-Accepted
+Accepted. **Partially superseded by
+[ADR-0007](0007-inter-agent-communication.md) (2026-07-05):** the
+YAML-file-as-source-of-truth decision stands, and ADR-0007 keeps declared
+graphs as one of its two authoring surfaces. The subject-wired *structure*
+below does not stand — ADR-0007 §1 makes it structural that agents never
+publish to, or address, NATS subjects, §3 dissolves fan-out/fan-in into
+"(graph edge vs spawn) × (await vs not)" rather than an annotation on an
+edge, and [ADR-0006](0006-registry-first-api.md) D8 narrowed `fq.*` to
+internal infrastructure. The buildable spec that followed models a node as a
+signature bound to an implementation strategy, and an edge as
+`{ from, to, guard, bind }`. **Do not author a graph from the example
+below.**
+
+Implementation: pending — nothing implements this format. There is no graph
+loader, no `Graph`/`GraphDefinition` type, no `parse_graph` under
+`services/`, and no `.yaml` graph definition in the tree; ADR-0007's Context
+calls it "a spec without an engine". All five Consequences below are
+unrealised, including the published JSON Schema. The two-node vertical that
+would build an executor is held, not stalled (#414, #429).
 
 ## Context
 
@@ -102,7 +120,11 @@ YAML is widely understood, diffs cleanly, and is natively validateable against J
 ## Consequences
 
 - Graph definitions are stored as `.yaml` files alongside agent definition directories
-- A JSON Schema is published for graph definitions, enabling editor validation
+- A JSON Schema for graph definitions, enabling editor validation — **not
+  built**, and neither is the format it would describe. No `*.schema.json`
+  exists in the repo; `schemars` is used for operation params and
+  operator-surface types only. Same gap as
+  [ADR-0005](0005-agent-definition-format.md)'s frontmatter schema
 - The runtime validates graph definitions at load time (no dangling agent references, compatible pub/sub wiring)
 - Spawn and exec are capabilities granted per-agent in the graph, not global permissions
 - Graph versions are tracked; the learning loop produces new versions rather than mutating the running graph

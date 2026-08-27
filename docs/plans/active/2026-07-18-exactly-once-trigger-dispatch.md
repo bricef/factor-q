@@ -1,5 +1,54 @@
 # Exactly-once trigger dispatch — execution plan
 
+> **Rescoped 2026-08-26 — still active, and the core has not landed.**
+> Verified against `main`:
+>
+> | Slice | State |
+> |---|---|
+> | PR-0 (this plan + ADR-0032) | **Done** — ADR-0032 is in `docs/adrs/draft/` |
+> | PR-1 identity plumbing | **Partial** — the delivery attempt reaches `run_invocation` (`dispatcher.rs:473`) and the transcript preamble; `trigger_stream_seq` is persisted on dead-letter annotations, not on `invocation_state` |
+> | PR-2 claim registry | **Not started** — no `TriggerClaims` seam, no `fq-trigger-claims` bucket anywhere in the tree |
+> | PR-3 inbox dispatch | **Not started** — `DurableStart` is still the mechanism (`dispatcher.rs:474`), and PR-3 is what would delete it |
+> | PR-4 multi-worker recovery | **Not started** |
+> | PR-5 pull discipline | **Not started** |
+> | PR-6 backoff + `ack_wait` reconcile | **Not started** — `TRIGGER_RETRY_BACKOFF` is still `[1s, 5s, 30s, 2m]`, not the approved `[30s, 2m, 10m, 30m]`, and the consumer drift-update (`bus.rs:497`) reconciles `max_deliver` and `backoff` but not `ack_wait` |
+> | PR-7 watcher alarm + `fq doctor` checks | **Not started** |
+>
+> **What protects the system today is not this plan.** The dispatcher
+> acks on durable start — the invocation's first WAL write — rather
+> than on dispatch or on completion. That is the pre-existing #41
+> mechanism, which bounds the 2026-07-06 storm (an invocation
+> outliving the ack deadline being re-run). It does **not** deliver
+> the property this plan is named for: a redelivery *before* the first
+> WAL write still starts a second invocation, which is exactly the
+> 2026-07-18 incident in §1. §5.3 keeps that mechanism's invariants as
+> a preservation map precisely because PR-3 replaces it.
+>
+> **§9's checkboxes are staler than they look** — two of the four are
+> done and were never ticked:
+>
+> - *Adjudicate PRs #322/#323/#324* — **done.** All three were closed
+>   unmerged on 2026-07-19, within a day of the incident. None was
+>   picked; the underlying debt stayed with #189, whose split has
+>   since landed by other means (`fq-cli/src/lib.rs` is 233 lines, one
+>   module per verb group). Tick it.
+> - *Re-check issue #189* — **effectively done**, per the above; #189
+>   itself is still open and is a backlog-grooming question, not a
+>   blocker here.
+> - *File the upstream async-nats report* — **still open, still
+>   relevant.** The tree is on async-nats 0.38, the version whose pull
+>   behaviour §2 blames; the item's own precondition ("check ≥0.39
+>   changelogs first") has not been discharged.
+> - *Keep the three invocation archives* — **standing**, nothing to
+>   do; it is a do-not-delete note, and the cost-retention sweep
+>   exempts those rows.
+>
+> **So the real remaining work is the code, not the remediation.** The
+> next action is PR-1/PR-2, and the open question worth putting to the
+> maintainer first is whether the ADR-0032 claim registry is still the
+> shape wanted five weeks on, given that the single-daemon dogfood has
+> run since 2026-07-19 on the #41 mechanism without a recurrence.
+
 **Status:** active (2026-07-19). Highest-priority correctness fix. Written up
 from the 2026-07-18 duplicate-PR incident (issue #189 → PRs #322/#323/#324,
 board capture #327); root cause reproduced empirically against a scratch

@@ -350,9 +350,11 @@ separates ([ops/dogfood](../../ops/dogfood/README.md)):
 - **Integration:** one test against a private `nats-server` (the repo
   already pins `.nats-version` and spawns private brokers for tests):
   real JetStream publish + dedup header + KV round-trip.
-- **Gate:** `gate-adapters` currently names github-watcher explicitly; it
-  generalises to fan out over `adapters/*/go.mod` (gofmt, vet, test,
-  build) so both adapters ride the same gate.
+- **Gate:** `gate-adapters` fans out over `adapters/*/go.mod` (gofmt,
+  vet, test, build), so both adapters ride the same gate and a third
+  needs no justfile edit. It depends on `install-nats` and passes
+  `FQ_TEST_NATS_SERVER`, which is what makes the integration test above
+  runnable from a cold checkout.
 
 ## Non-goals
 

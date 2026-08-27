@@ -68,8 +68,11 @@ factor-q/
 │   ├── docker-compose.yml       NATS + JetStream
 │   └── nats/                    NATS server configuration
 │
+├── adapters/                  Standalone trigger adapters — talk to factor-q
+│   ├── fq-cron/                 durable cron scheduler (Go)
+│   └── github-watcher/          polls a repo for `status:ready` issues (Go)
+│
 ├── agents/examples/           Sample agent definitions
-├── skills/                    Skill registry (future, AgentSkills format)
 ├── tests/smoke/               End-to-end smoke tests against a real LLM
 │
 ├── docs/

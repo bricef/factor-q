@@ -195,7 +195,7 @@ pub struct EventBus {
 /// Extract auth credentials from a NATS URL's userinfo.
 /// `async_nats::connect` ignores URL userinfo entirely; factor-q
 /// honours it so credentials can travel inside `FQ_NATS_URL` /
-/// `fq.toml`'s `url` without a separate secret channel (project
+/// `fqd.toml`'s `url` without a separate secret channel (project
 /// assessment 2026-07-05, critique #4):
 /// `nats://TOKEN@host` selects token auth,
 /// `nats://USER:PASS@host` selects user/password auth.

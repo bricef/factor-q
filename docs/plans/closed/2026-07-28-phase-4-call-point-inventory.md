@@ -1,5 +1,25 @@
 # Phase 4 — call-point inventory and work breakdown
 
+> **Closed 2026-08-26.** Every row in this inventory has been worked.
+> Phase 4 finished on **2026-08-14** in `944a74a`, "fq status asks the
+> daemon, and the gate reaches zero": the last verb flipped, and the
+> migration gate this document is the basis of —
+> `fq-cli/tests/edge_migration_gate.rs` — now asserts
+> `REMAINING = 0`. That is the close condition the inventory set for
+> itself ("zero at the end"), and it is asserted by the test suite
+> rather than claimed here.
+>
+> **The body below is a record and is left as written**, including its
+> "Count check: flips remaining 14, 19 = **2**" at §A. That was the
+> count on 2026-07-28; the gate is the live number, and it is zero.
+> Line coordinates throughout are as of the survey commit and have
+> since moved — several of the files named were split by the Phase 5
+> binary split (`fq-cli/src/lib.rs` is no longer the daemon host).
+>
+> Kept because the gate's own module docs cite this inventory as the
+> enumeration behind the count, and because the cohort structure is
+> the record of how a 17-verb migration was made dispatchable.
+
 Every consumer of runtime state that does not go through the
 authenticated edge, surveyed at main `1323c62` (2026-07-28). This
 document is the basis of the Phase-4 migration (the

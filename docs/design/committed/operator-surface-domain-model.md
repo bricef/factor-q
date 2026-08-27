@@ -9,7 +9,7 @@ than a code defect — the signal to model the domain unconstrained by
 the implementation; the review that refined it is distilled in
 [the design-review learnings](../../reviews/2026-07-21-fq-ops-design-review-learnings.md).
 Basis for the
-[registry+split execution plan](../../plans/active/2026-07-20-registry-and-split-execution.md)'s
+[registry+split execution plan](../../plans/closed/2026-07-20-registry-and-split-execution.md)'s
 registry work.
 
 **Amended 2026-08-05**, on four points. `invocation.resume` becomes a
@@ -29,7 +29,7 @@ described the world inaccurately — `traversal.run`, which does not
 exist, and `deadletter.requeue`, which is not how the codebase spells
 it — are reconciled before cohort 4.3 mints them into code. Unblocks
 verb 19 of the
-[Phase-4 call-point inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md).
+[Phase-4 call-point inventory](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md).
 
 ## The domain in one paragraph
 
@@ -100,8 +100,18 @@ Domains need not all carry catalogue resources: `Cost` exists purely as
 a permission scope for reports, as `Control` exists for the machinery.
 
 That last row is deliberate self-similarity: "describe the registry" is
-just List(Operation) — the catalogue is a resource like any other, read
-through the same generic verbs it describes.
+just List(Operation) — the catalogue named with the same generic verb
+it describes, so a client needs no second protocol to discover the
+first.
+
+*As built, the self-similarity is in the name only.* `List(Operation)`
+is a branch in the edge's request handler, matched before dispatch and
+answered from `EdgeRegistry::describe_value`; it is not a registered
+resource with a bound handler like every other row above. The reason is
+the obvious one — a catalogue cannot register itself into the
+catalogue it is enumerating without deciding whether it appears in its
+own listing — and the cost is that this row is the one place the model
+is uniform on the wire and special in the code.
 
 ## Generic verbs and the stream overlay
 
@@ -362,9 +372,23 @@ overtaken and its effect cannot outrun its answer.**
 
 The kind the earlier taxonomy was missing. A report is a **named, typed
 computation over resources**: `cost.summary`, `cost.by_agent`,
-`control.doctor`, `control.status`. Reports are not Gets on a
-pretend-resource and not a query language — each is an individually
-named promise with typed parameters and a typed result, few by design.
+`control.doctor`, `control.status`, `invocation.active`. Reports are
+not Gets on a pretend-resource and not a query language — each is an
+individually named promise with typed parameters and a typed result,
+few by design.
+
+**`invocation.active` is the clearest case of what a report is for.**
+It answers what this daemon is executing right now — one row per
+running invocation, with its open tool and model calls — and that is a
+different question from `List(Invocation)` filtered to in-flight, not
+a faster route to the same answer. A listing is a fold of the log: it
+answers as of a position, it can be gated on one, and it reports what
+has been *recorded*. This reports what is *happening*, which has no
+position at all — the work advances while the answer is assembled, so
+two calls a second apart legitimately differ and neither is stale. Ask
+the listing for history and for anything needing read-your-writes; ask
+the report for a live picture. It also describes one daemon, the one
+answering, not a fleet.
 
 **A report is not watermarked, and cannot be.** It answers at a point
 in time; there is nothing to transact onto. `min_seq` gates a read of a
@@ -422,11 +446,29 @@ hosts bespoke verbs, and nothing more.
 
 ### `control.status` — the accumulation point for machinery state
 
-*Amended 2026-08-05, resolved 2026-08-06.* **The registry's current
-state — load errors included — rides `control.status`, and `agent.list`
-returns homogeneous agent rows.** `control.status` is also where
-further machinery information accumulates, by growing one schema rather
-than by growing the op roster.
+*Amended 2026-08-05.* **The registry's current state — load errors
+included — rides `control.status`, and `agent.list` returns
+homogeneous agent rows.** `control.status` is also where further
+machinery information accumulates, by growing one schema rather than
+by growing the op roster.
+
+*Half built, as of 2026-08-26.* The accumulation point exists:
+`control.status` declares `registry: { agents, load_errors }`, and
+that is where a load error belongs. The narrowing did not follow.
+`agent.list` still answers a heterogeneous index —
+`AgentEntryView::Agent(..) | ::LoadError { message }` — so every
+consumer still partitions it back into two lists on receipt, which is
+the exact tell the argument below rests on. Load errors are therefore
+on the surface twice, in two shapes, with no rule saying which a
+client should read.
+
+The amendment was recorded as resolved on 2026-08-06, when the first
+half landed. It was not. The Agent view's own declared prose still
+justifies the union by saying a load error has "nowhere else on
+today's surface to put it" — true when written, and no longer true
+the moment `control.status.registry.load_errors` existed. That
+sentence ships on the wire, so narrowing the row type means fixing
+both.
 
 The forcing case was `agent.list`, whose index row is a sum today
 (`AgentEntryView::Agent(..) | ::LoadError { message }`) because a
@@ -599,8 +641,11 @@ finding about the verb — not a reason to reach for the bus.
 - **Per-domain op enumerations dissolve.** `agent.list` / `worker.show` /
   `invocation.get` were never domain facts — they are the catalogue ×
   generic-verb cross-product, derivable. What remains hand-declared is
-  exactly what is semantically bespoke: the catalogue itself, seven
-  domain verbs, four reports.
+  exactly what is semantically bespoke: the catalogue itself, six
+  domain verbs (`trigger.publish`, `invocation.drop`,
+  `invocation.resume`, `dead_letter.requeue`, `control.reload`,
+  `control.down`), five reports (`cost.summary`, `cost.by_agent`,
+  `control.status`, `control.doctor`, `invocation.active`).
 - **D6's generic envelopes are edge artifacts**, designed with the
   Phase-2 tarpc service rather than in the contract crate.
 - Everything else stands: receipts (D3), watermarks (D4), sequence
@@ -637,7 +682,7 @@ remains declared is declared on purpose.
 | `traversal.status` / `.tail` — **planned** | Get(Traversal) / Stream(TraversalEvent) |
 | `trigger.publish` · `invocation.drop` · `invocation.resume` · `dead_letter.requeue` · `control.down` · `control.reload` | domain verbs |
 | `traversal.run` — **planned** | a domain verb, when there is a graph executor to run |
-| `cost.summary` · `cost.by_agent` (scope `Cost`) · `control.doctor` · `control.status` (scope `Control`) | reports |
+| `cost.summary` · `cost.by_agent` (scope `Cost`) · `control.doctor` · `control.status` (scope `Control`) · `invocation.active` (scope `Invocation`) | reports |
 | `runtime.health` · `runtime.status` · `runtime.version` | `control.status` — one machinery report |
 
 **Planned rows are not surface.** Nothing named `traversal` exists in
@@ -645,7 +690,7 @@ the codebase: the graph executor is deliberately held (#414), so those
 three rows say where the ops *will* land, not what the registry serves.
 They are kept because the mapping is itself the finding below. Every
 other row names a real domain concept — which op is *registered* yet is
-the [Phase-4 inventory](../../plans/active/2026-07-28-phase-4-call-point-inventory.md)'s
+the [Phase-4 inventory](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md)'s
 business, not this table's — and that is exactly why the traversal rows
 had to be marked: unmarked, they read as description, and cohort 4.3
 would mint a verb the model only imagined.

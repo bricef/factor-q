@@ -99,14 +99,37 @@ pub(crate) fn validate_agent(path: &Path) -> anyhow::Result<()> {
             println!("  id:      {}", agent.id().as_str());
             println!("  model:   {}", agent.model());
             println!("  tools:   {}", agent.tools().len());
-            if let Some(budget) = agent.budget() {
-                println!("  budget:  ${budget:.2}");
+            // Every optional field the definition can carry gets a line,
+            // present or not. Printing only what parsed is what let
+            // `budgett:` hide (#514): the sole trace of a dropped key was
+            // a *missing* line, and nobody reads for an absence. An
+            // explicit "not set" is a fact a reader can check against
+            // what they wrote. `deny_unknown_fields` now rejects the
+            // typo outright, so these lines are the second line of
+            // defence rather than the first — but the first one is a
+            // parser and this one is a human.
+            match agent.budget() {
+                Some(budget) => println!("  budget:  ${budget:.2}"),
+                None => println!("  budget:  not set (no cap)"),
+            }
+            match agent.max_iterations() {
+                Some(n) => println!("  max_iterations: {n}"),
+                None => println!("  max_iterations: not set (daemon default)"),
+            }
+            if let Some(effort) = agent.effort() {
+                println!("  effort:  {effort:?}");
+            }
+            if let Some(trigger) = agent.trigger() {
+                println!("  trigger: {trigger}");
+            }
+            if !agent.mcp_servers().is_empty() {
+                println!("  mcp:     {} server(s)", agent.mcp_servers().len());
             }
             // #35: valid, but do not let "✓ is valid" imply the declared
             // network boundary holds — nothing enforces it yet.
             if let Some(declared) = agent.sandbox().unenforced_network() {
                 println!();
-                println!("  ⚠ sandbox.network is declared but NOT enforced (#35)");
+                println!("  ⚠ sandbox.network is declared but NOT enforced");
                 println!("    declared: {}", declared.join(", "));
                 println!("    This agent has ambient network access — it can reach any");
                 println!("    host regardless. Enforcement: #208 (proxy), #209 (ADR-0010).");

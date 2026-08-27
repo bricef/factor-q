@@ -1,11 +1,14 @@
 name: Main artifacts
 
 # Hermetic deploy artifacts (#102): every merge to main publishes a
-# checksummed, SHA-stamped bundle (fq, fq-cas, github-watcher, fq-cron — static
-# x86_64 musl — plus the dogfood launchers) to the rolling `main-latest`
-# pre-release. Deploy hosts fetch + verify + swap and never compile
-# (ops/dogfood/deploy.sh). Rollback history lives on the hosts as
-# releases/<sha>/ dirs, so this channel only ever holds the newest build.
+# checksummed, SHA-stamped bundle (fq, fqd, fq-dashboard, fq-cas,
+# github-watcher, fq-cron — static x86_64 musl — plus the four dogfood
+# launchers) to the rolling `main-latest` pre-release. The exact contents
+# are `package-main` in the root justfile; deploy.sh checks that fq, fqd,
+# fq-dashboard and github-watcher all report the same commit. Deploy hosts
+# fetch + verify + swap and never compile (ops/dogfood/deploy.sh). Rollback
+# history lives on the hosts as releases/<sha>/ dirs, so this channel only
+# ever holds the newest build.
 #
 # Like ci.yml/release.yml, every job drives its work through a `just`
 # target so the pipeline stays reproducible locally.

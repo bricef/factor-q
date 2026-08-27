@@ -1,5 +1,30 @@
 # Registry-first API + daemon/CLI split — joint execution plan (ADR-0006 + ADR-0031)
 
+> **Closed 2026-08-26.** Phases 0–5 — the whole of what this plan set
+> out to execute — are done:
+>
+> - **Phase 4** (fleet migration) finished on **2026-08-14** in
+>   `944a74a`, "fq status asks the daemon, and the gate reaches zero".
+>   The evidence is a test, not a judgement:
+>   `fq-cli/tests/edge_migration_gate.rs` asserts `REMAINING = 0`, so
+>   no operator verb retains a legacy call point as a fallback.
+> - **Phase 5** (split the binary) landed on **2026-08-23** in
+>   `32accc2`, "the daemon leaves the CLI crate". `fqd` lives in
+>   `fq-daemon/src/bin/fqd.rs`, `fq` is a thin client, and
+>   `fq-cli/tests/thin_client_gate.rs` holds the dependency boundary
+>   the phase called a "build fact, greppable in `Cargo.toml`".
+>
+> **The body below is a record and is left as written.** Read it as of
+> 2026-07-20, not as of today. In particular Phase 4 still says
+> "~17 near-identical PRs" and the survey still says "neither ADR has
+> begun in code" — both were true when written and neither is now.
+>
+> **Not orphaned by this close:** Phase 6 (the MCP operator face) and
+> the Phase 7 horizon items — the `fq-store` registry instance,
+> ADR-0016 convergence, traversal ops, REST+SSE, mTLS — were written
+> here as *separately sequenced*, and none has been built. They are
+> not part of what completed; they need their own tracking issues.
+
 **Status:** accepted (2026-07-20, via #335). **Progress:** Phase 0 done
 (#337); Phase 1 done (#346) — shipped as the value-type realization of
 [the committed domain model](../../design/committed/operator-surface-domain-model.md)
@@ -331,7 +356,7 @@ audit events carry the MCP caller identity. *(1–2 PRs.)*
   a compatibility boundary (D8 carve-out); unchanged through Phase 5; the
   watcher's outcome subscription migrates to a stream op when convenient.
 - **Graph executor plan**
-  ([2026-07-07](2026-07-07-graph-executor-two-node-vertical.md)) —
+  ([2026-07-07](../active/2026-07-07-graph-executor-two-node-vertical.md)) —
   traversal ops are born derived (Phase 7).
 - **M5** — this plan hardens the operator edge only; `fqd↔NATS` and
   `worker↔NATS` stay named as M5 scope.

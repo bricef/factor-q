@@ -2,18 +2,25 @@
 
 ## Status
 
-Draft proposal. Builds on
+**Built, with one named exception.** Every step of the
+implementation order in [§10](#10-implementation-order) shipped, and
+this document is an account of the running system rather than a
+proposal for one. The exception is
+[§7.3](#73-nats-consistency-reconciliation--not-built), the NATS
+consistency reconciliation, which was never written; that section
+says so at its head and §5.5's crash table no longer relies on it.
+The multi-node (v2) shape in §7.4 and §11 is likewise design — there
+is no role flag and no separate worker binary.
+
+Builds on
 [`data-architecture-requirements.md`](./data-architecture-requirements.md);
 references that document for the requirements baseline rather than
 re-deriving it. Where the requirements doc surveys the open
 solution space, this doc *commits* — to a contract, to a role
 model, to a set of stores, to a backup unit, and to a named
-recovery semantics.
-
-The document lands once the open questions in
-[§12](#12-what-this-doc-leaves-open) are resolved or explicitly
-deferred, and once a first slice (durable suspension on a
-single-node deployment) is built and operated against it.
+recovery semantics. The open questions in
+[§12](#12-what-this-doc-leaves-open) remain open by decision, not
+by neglect.
 
 ## 1. What this document is
 
@@ -124,8 +131,8 @@ Five reasons it pays its weight:
 
 1. **Operator mental model.** "Where do I query things?" →
    control-plane. "Where does work happen?" → worker. The audit
-   log is still source of truth; the projection of it lives in
-   one well-named place.
+   log is still where events are published; the projection of it
+   lives in one well-named place.
 
 2. **Scaling characteristics differ.** Control-plane is
    read-heavy, coordination-heavy, low-throughput. Workers are
@@ -364,26 +371,47 @@ next to LLM calls that take seconds. Acceptable.
 
 ### 5.3 State retention — DECIDED
 
-**Delete on terminal status + 7-day grace period. Operator
-configurable.**
+**Delete on acknowledged hand-off, then age the archive out on a
+30-day window. Operator configurable.**
 
 Concrete:
 
 - Invocation reaches `Completed` or `Failed` on a worker → state
   row marked `terminal_at = now()`.
-- Worker emits `invocation.archived` to NATS. Control-plane
-  consumer copies the final state into its archive table.
-  Worker deletes its local state row after a configurable
-  hand-off-confirmation window (default 60 seconds).
-- Background sweep on the control-plane deletes archive rows
-  where `terminal_at < now() - retention_days`.
+- Worker emits `invocation.archived` to NATS. The control-plane
+  consumer copies the final state into `invocation_archive` and
+  replies `invocation.archive_acked` on the worker-scoped subject.
+  **The ack is what deletes the worker's local state row** — not a
+  timer. Until it arrives the row is held, and the worker's retry
+  sweeper republishes `invocation.archived` every 10s indefinitely;
+  after 60s past `terminal_at` it also logs a warning once per row,
+  which is an operator signal, not a deadline. Correctness over
+  cleanup: an unacknowledged row is never dropped.
+- Background sweep on the control-plane deletes archive rows where
+  `archived_at < now() - retention_days` — keyed on when the
+  control-plane wrote the row, not on when the worker finished, so
+  the window measures how long the record has existed to be read.
+  The same sweep prunes the rebuildable projection `events` table on
+  the same cutoff, **except rows carrying `total_cost`**, which are
+  kept indefinitely because spend figures must outlive retention.
 - Operator override: `fqd.toml` key `state.retention_days`
-  (default 7).
+  (default 30). `-1` disables the sweep.
 - Operator-driven force: `fq invocation drop <id>`.
 
-Why 7 days: long enough for the "I'll look at this Monday"
-debug pattern, short enough that the archive stays small. No
-correctness implication of the number.
+Why 30 days: it matches the event stream's own `MaxAge`, which is
+the number that actually constrains it. Set the archive window
+longer than the stream's and the archive becomes the sole holder of
+records that can no longer be re-derived — the inversion this sweep
+exists to prevent. Below that ceiling the choice is a debugging
+convenience with no correctness implication.
+
+**Not to be confused with `state.stale_worker_retention_days`**,
+which defaults to 7 and bounds a different table: how long a
+`coordination_worker` row that has already gone *stale* is kept
+before collection. The two windows are independent, disable
+independently on their own `-1`, and hold unrelated things — one the
+record of work that finished, the other the roster of daemons that
+died.
 
 ### 5.4 Secret handling — DEFERRED, NAMED
 
@@ -408,8 +436,17 @@ filesystems; use disk encryption if the host warrants it.
 
 **Each worker's SQLite is the source of truth for its in-flight
 invocations. The control-plane's SQLite is the source of truth
-for projections, coordination, schedules, and the completed
-archive. NATS is the source of truth for the audit log.**
+for coordination, schedules, and the completed archive. NATS
+holds the audit log — for 30 days, and then not at all.**
+
+That last clause is deliberate. ADR-0011 made NATS the source of truth
+for events; [ADR-0026](../../adrs/accepted/0026-event-log-system-of-record.md)
+overturned exactly that in 2026-07 and named a CAS-backed archive
+service in its place, which has not been built. So the audit log has no
+system of record: it has a retention window, past which the payloads
+are gone and only cost-bearing projection rows survive. The two SQLite
+rows above are unaffected — they were never derived from NATS — but
+nothing in this table should be read as promising the trail is kept.
 
 Today's invariant — "SQLite (projection) is rebuildable from
 NATS" — held because SQLite carried only projections. After this
@@ -418,9 +455,16 @@ data. The invariant changes:
 
 > | Store | Tables | Source of truth? | Rebuildable from NATS? |
 > |---|---|---|---|
-> | Control-plane SQLite | `events_*` | No | **Yes** |
-> | Control-plane SQLite | `coordination_*`, `schedule_*`, `pending_wait`, `invocation_archive` | **Yes** | No |
-> | Per-worker SQLite | `invocation_state`, `tool_dispatch`, `llm_dispatch` | **Yes** | No |
+> | Projection SQLite (`projection.db`) | `events`, `invocation_summary`, `triggers` | No | **Yes** |
+> | Control-plane SQLite (`control-plane.db`) | `coordination_*`, `schedule_entry`, `pending_wait`, `invocation_archive` | **Yes** | No |
+> | Per-worker SQLite (`worker.db`) | `invocation_state`, `tool_dispatch`, `llm_dispatch` | **Yes** | No |
+>
+> The rebuildable row is its own file, not a table prefix inside the
+> control-plane's. That is the point of the split (§11): the one store
+> you can delete and replay is physically separable from the two you
+> cannot, so a restore procedure can act on that distinction. Cost-bearing
+> `events` rows are the exception that proves it — kept past the sweep
+> because past NATS retention nothing can re-derive them.
 
 Write order at every dispatch boundary on a worker:
 
@@ -435,15 +479,23 @@ Write order at every dispatch boundary on a worker:
 
 Crash semantics:
 
-- (1)→(2): SQLite ahead of NATS by one intent row. Recovery
-  republishes; NATS is idempotent on `event_id`.
+- (1)→(2): SQLite ahead of NATS by one intent row. Execution is
+  correct — the WAL has what recovery needs — but the audit event
+  is lost. §7.3's republish was to close this and is **not built**.
 - (2)→(3): safe. Intent recorded, nothing happened externally.
   Re-dispatch is correct.
 - (3)→(4): ambiguous. Intent recorded, dispatched not, but tool
   may have started. **Operator surface.**
 - (4)→(5): ambiguous. Dispatched recorded, completed not.
   **Operator surface.**
-- (5)→(6): safe-direction. Result is durable; replay the audit.
+- (5)→(6): safe for execution — the result is durable and replay
+  continues from it — but the `tool.result` event is lost, on the
+  same unbuilt republish. Same shape as (1)→(2).
+
+The two lossy windows cost audit completeness, not correctness. A
+reader of the raw NATS stream cannot assume it holds every event a
+worker committed; a reader of the projection sees the same gap, since
+the projection is folded from that stream.
 
 Each worker's WAL is consulted independently on its own restart;
 the control-plane's view of "what's stuck globally" comes from
@@ -507,17 +559,28 @@ its workers (or vice versa) only across compatible versions.
 Incompatibility surfaces at startup with a clear message
 identifying which role and which schema is mismatched.
 
-Concrete behaviour on a worker:
+Concrete behaviour, and it is coarser than the paragraph above
+implies. The check happens once, when a store is opened, on the whole
+database rather than per invocation — each store records a version in
+`schema_meta` and compares it against the binary's constant
+(`WORKER_SCHEMA_VERSION`, `CONTROL_PLANE_SCHEMA_VERSION`). Only one
+direction refuses:
 
-```
-$ fqd --role=worker
-ERROR: 2 invocations have incompatible state schema (v0.3 -> v0.4):
-  inv_abc123: tool_dispatch table format changed
-  inv_def456: same
+- **Database older than the binary** → migrations run forward
+  automatically. No operator involvement, no flag.
+- **Database newer than the binary** → the open fails with
+  `IncompatibleSchema`, naming both versions, and the daemon does not
+  start. This is the downgrade case, and it is the only one the
+  "refuse-and-flag" stance actually covers.
 
-Use `fq invocation drop --schema-mismatch` to abandon them, or
-roll back to fq v0.3.x to resume.
-```
+So an operator never sees a per-invocation list of what is
+incompatible, because the refusal is not per-invocation. The remedy is
+to roll the binary forward again, or to delete the store and lose the
+in-flight state deliberately.
+
+> The error string the runtime prints points at
+> `fq invocation drop --schema-mismatch`, a flag that does not exist.
+> That is a code defect, not a doc one, and is recorded as such.
 
 ### 5.7 Multi-process / multi-node ownership — DECIDED
 
@@ -569,9 +632,9 @@ the role and store.
 
 | Shape | Role | Store | Reason |
 |---|---|---|---|
-| Append-only audit log | shared | NATS JetStream | Already load-bearing per ADR-0011. |
-| Work queue (triggers) | shared | NATS JetStream | Same. |
-| Queryable projection | control-plane | Control-plane SQLite | Operator-queryable. Rebuildable from NATS. |
+| Append-only audit log | shared | NATS JetStream | Already load-bearing per ADR-0011. Bounded at 30 days; nothing holds it past that (see §5.5). |
+| Work queue (triggers) | shared | NATS JetStream | Same transport, 24-hour window. The trigger's durable *record* is a projection row and is kept indefinitely. |
+| Queryable projection | control-plane | Projection SQLite (`projection.db`) | Operator-queryable. Rebuildable from NATS, within the window. |
 | Coordination: worker membership, invocation ownership | control-plane | Control-plane SQLite | Single source of truth for "what's running where." |
 | Schedules / wakeups | control-plane | Control-plane SQLite | Time-driven; control-plane fires them. |
 | Pending approvals / waits | control-plane | Control-plane SQLite | Control-plane wakes them on signal arrival. |
@@ -631,41 +694,88 @@ Recovery is per-role.
    - Workers in `coordination_invocation_owner` but not
      heartbeating after a grace period: marked stale.
    - Invocations owned by stale workers: surface to operator
-     via `fq workers stale`.
+     via `fq workers list --stale-only`.
 6. Begin trigger dispatch.
 
-### 7.3 NATS consistency reconciliation
+### 7.3 NATS consistency reconciliation — NOT BUILT
 
-On worker startup, after the local categorisation, the worker
-republishes any audit events that may have been lost between
-SQLite commit and NATS publish (intent rows without a matching
-NATS event, completed rows without a matching `tool.result`).
-Idempotent on `event_id`.
+> **This section describes a mechanism that does not exist.** It is
+> the one part of this document that is design rather than account,
+> and it is called out here rather than moved because everything
+> around it is built. `worker/recovery.rs` classifies; it does not
+> reconcile. Treat the paragraph below as the intended shape and the
+> paragraph after it as what an operator actually has.
 
-This handles the (1)→(2) and (5)→(6) crash windows in §5.5.
-Both are safe-direction; reconciliation makes them invisible to
+The intent: on worker startup, after the local categorisation, the
+worker republishes any audit events that may have been lost between
+SQLite commit and NATS publish — intent rows without a matching NATS
+event, completed rows without a matching `tool.result` — so the
+(1)→(2) and (5)→(6) crash windows in §5.5 become invisible to
 downstream consumers.
+
+What runs instead: startup classification, and nothing else. Nothing
+scans for events that were persisted but never published, so a crash
+in either window leaves a permanent hole in the audit stream. The
+worker's own WAL is unaffected and recovery is still correct — this
+costs completeness of the audit log, not correctness of execution —
+but a consumer reading the stream cannot assume it saw every event
+a worker committed.
+
+The "idempotent on `event_id`" the original design leaned on is
+also not what it sounds like. Nothing sets `Nats-Msg-Id`, so
+JetStream performs no deduplication: a republished event would be
+stored twice on the stream. What dedups is the **projection**, whose
+`events` table has `event_id` as its primary key and inserts with
+`INSERT OR IGNORE`. That is enough for the projection and for any
+consumer that folds through it, and not enough for one reading the
+stream directly.
 
 ### 7.4 Operator workflow
 
-Single-node (v1), `fqd --role=both`:
+Single-node (v1). There is no role flag: one `fqd` process plays
+both roles, and that is the only shape that ships.
 
 ```
 $ fqd
-[fq] role: both (control-plane + worker)
-[fq] opening control-plane store          ✓
-[fq] opening worker store                  ✓
-[fq] verifying schemas (cp v1, w v1)       ✓
-[fq] connecting to NATS                    ✓
-[fq] checking for in-flight invocations
-       3 found
-       1 safe-resume → resuming inv_abc123
-       1 safe-replay → resuming inv_def456
-       1 ambiguous   → holding (run `fq recover` to triage)
-[fq] daemon ready
+factor-q runtime starting
+  runtime id:       01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f
+  version:          0.1.0
+  NATS:             nats://127.0.0.1:4222
+  agent directory:  ./agents
+  cache directory:  /home/op/.cache/factor-q
+  state directory:  /home/op/.local/state/factor-q
+  agents loaded:    4 (errors: 0)
+  worker db:        /home/op/.cache/factor-q/worker.db
+  control-plane db: /home/op/.cache/factor-q/control-plane.db
+  projection db:    /home/op/.cache/factor-q/projection.db
+  control plane:    v1
+  worker schema:    v9
+  worker:           01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f (host: prod-1)
+  in-flight:        3 (1 safe-resume, 1 safe-replay, 1 ambiguous)
+  pricing entries:  62 (cache: /home/op/.cache/factor-q/pricing.json)
+
+Runtime ready. Press Ctrl-C to stop.
+  - projection consumer is materialising events into SQLite
+  - trigger dispatcher is listening on fq.trigger.*
+  - edge is listening on 127.0.0.1:9472
 ```
 
-Multi-node (v2):
+Two things the transcript will not show you. The `in-flight:` line is
+printed only when there is something to recover — a clean boot omits
+it entirely, so its absence is the normal case, not a failure to
+report. And the safe-resume and safe-replay invocations are resumed
+in detached tasks after this line, so "resuming" is not narrated
+per-invocation; the `system.recovery` event carries the same counts
+for anything that needs them after the fact.
+
+The ambiguous one is held. `fq invocation list --status=ambiguous`
+finds it, `fq invocation resume` re-drives it, `fq invocation drop`
+abandons it.
+
+Multi-node (v2) — **design, not shipped.** There is no `--role` flag
+and no separate worker binary; what follows is the shape the role
+boundary in §3 exists to make possible, sketched so v1 choices can be
+checked against it.
 
 ```
 $ fqd --role=control-plane
@@ -676,8 +786,8 @@ $ fqd --role=control-plane
        w-001 registered (host: prod-1)
        w-002 registered (host: prod-2)
 [fq] reconciling coordination state
-       2 stale-worker invocations (use `fq workers stale`)
-       1 ambiguous (use `fq recover`)
+       2 stale-worker invocations
+       1 ambiguous
 [fq] dispatcher ready
 ```
 
@@ -694,8 +804,10 @@ $ fqd --role=worker --worker-id=w-001
 [fq] worker ready
 ```
 
-`fq recover` and `fq workers stale` are control-plane commands.
-They aggregate across the cluster.
+The triage verbs — `fq invocation list`, `fq workers list
+--stale-only` — read the control-plane store, so under v2 they
+already aggregate across the cluster without changing shape. That is
+the property the role boundary buys.
 
 ## 8. Backup unit
 
@@ -822,7 +934,10 @@ CREATE TABLE llm_dispatch (
 
 ### 9.2 Control-plane SQLite schema
 
-Existing projection tables (`events_*`) are unchanged.
+The projection tables are unchanged by this section, and since the
+three-way store split (§11) they are not in this database at all:
+`events`, `invocation_summary` and `triggers` live in `projection.db`,
+which is the one file of the three that can be deleted and replayed.
 
 ```sql
 -- Live worker membership.
@@ -913,17 +1028,24 @@ state.
 
 ### 9.4 New CLI commands
 
-| Command | Role | Purpose |
-|---|---|---|
-| `fq recover` | control-plane | Triage ambiguous invocations interactively, across the cluster. |
-| `fq invocation list` | control-plane | Enumerate non-terminal invocations cluster-wide. |
-| `fq invocation drop <id>` | control-plane | Force-terminate; retains audit trail. |
-| `fq invocation show <id>` | control-plane | Show full state for one invocation. |
-| `fq workers list` | control-plane | List registered workers and status. |
-| `fq workers stale` | control-plane | List workers whose heartbeat has lapsed. |
+| Command | Role | Purpose | Shipped as |
+|---|---|---|---|
+| `fq recover` | control-plane | Triage ambiguous invocations interactively, across the cluster. | Never built under this name. Triage is `fq invocation list --status=ambiguous`, then `resume` or `drop`. |
+| `fq invocation list` | control-plane | Enumerate non-terminal invocations cluster-wide. | As designed, plus `--status` and `--include-archived`. |
+| `fq invocation drop <id>` | control-plane | Force-terminate; retains audit trail. | As designed. |
+| `fq invocation show <id>` | control-plane | Show full state for one invocation. | As designed. |
+| `fq workers list` | control-plane | List registered workers and status. | As designed. |
+| `fq workers stale` | control-plane | List workers whose heartbeat has lapsed. | Folded into `fq workers list --stale-only` rather than given its own verb. |
 
-`fqd` startup gains the in-flight summary block from §7.4,
-keyed off the role.
+The interactive-triage verb is the one row that did not survive
+contact. What replaced it is not a rename: `fq invocation resume`
+completes each stuck dispatch with a durable interrupted result and
+re-drives the invocation (§4.4), which is a different and more
+honest operation than a triage prompt.
+
+`fqd` startup gains the in-flight summary block from §7.4. It is
+printed unconditionally by the single process, not keyed off a role —
+there is no role flag.
 
 ## 10. Implementation order
 
@@ -963,6 +1085,13 @@ end-to-end on single-node before touching the multi-node split.
 Each step is independently demonstrable. Steps 1–6 deliver the
 correctness contract for single-node. Steps 7–9 deliver the
 operator surface. Step 10 makes it bounded.
+
+All ten landed. Two arrived in a different shape than the list
+anticipated: step 9's triage verb became `fq invocation
+resume`/`drop` rather than an interactive `fq recover` (§9.4), and
+the stores of steps 2 and 3 ended up in three separate files rather
+than one (§11.2). Step 10's sweep is the retention task described in
+§5.3.
 
 ## 11. v1 to v2 evolution path
 
@@ -1005,14 +1134,26 @@ What changes when an operator splits the deployment.
 ### 11.3 What v1 must commit to to not block v2
 
 - Invocation IDs are globally unique (already true).
-- Workers and control-plane communicate strictly through NATS
-  in v1 too (no in-process shortcuts that wouldn't work across
-  processes).
-- The internal role boundary is enforced at build time (Rust
-  module visibility), so v1 cannot accidentally couple the two
-  roles in a way v2 has to undo.
+- Workers and control-plane communicate through NATS for the
+  invocation lifecycle in v1 too, so the paths that matter would
+  work across processes unchanged.
 - The trigger dispatch path goes through the control-plane
   module even on a single-node deployment.
+- The role boundary is a convention, **not a build-time
+  guarantee.** `WorkerStore` and `ControlPlaneStore` are both
+  `pub`, and nothing stops one role's code from opening the
+  other's store. At least one path already does:
+  `reconcile_terminal_owners`, run once at startup, reads the
+  control-plane store and writes the worker store in the same
+  function. It exists to repair worker rows left live by operator
+  transitions made before the running binary was deployed — a real
+  need, and one that has no NATS expression today.
+
+  This is worth naming rather than glossing, because the whole
+  argument for v1's role split is that v2 lifts the worker out
+  without redesigning contracts. Every in-process crossing is one
+  more thing that lift has to replace. Module visibility would make
+  the count checkable; today it is a thing you have to grep for.
 - The per-store files are fixed names under the cache directory
   (`fq_runtime::db::RuntimeDbPaths`), so the roles are already
   physically separate (#262). A per-role `state_db` config

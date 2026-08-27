@@ -7,19 +7,24 @@ losing a block a live object still needs. This elaborates
 (GC algorithm: two-level reference counting + reachability-audit backstop) into
 the concrete concurrency protocol for **M1c** of the
 [storage + vector foundation plan](../../plans/active/2026-06-27-storage-vector-foundation.md).
-M1a (the CAS) and M1b (the storage index) are built; this is the design for the
-collector that reclaims what the index reports as unreferenced.
+
+**M1c shipped on 2026-07-03 (`49c8ed8`).** Read this as an account of the
+collector `fq-store` runs, not a proposal for one: the generation schema, the
+reserve-before-rely write path, the `Collector` trait and its reference
+implementation, the reachability audit, and `fq-cas gc` are all in the tree.
+[What M1c built](#what-m1c-built) records the three places the shipped shape
+differs from the plan below it.
 
 The design is **lock-free, wait-free on the write path, loss-free, and
 self-healing toward retention**. It leans on one relaxation and one existing
 property of the system.
 
-## What M1b provides
+## What M1b provided
 
 The storage index (`NameIndex`) maintains two-level reference counts
 transactionally, and exposes `unreferenced_objects()` / `unreferenced_blocks()`
-(refcount 0). So *what* to reclaim is already computed. M1c is *reclaiming it
-safely*, plus the audit backstop. M1c also refines *when* block refcounts move
+(refcount 0). So *what* to reclaim was already computed. M1c added *reclaiming
+it safely*, plus the audit backstop, and refined *when* block refcounts move
 (see "reserve-before-rely" below): from bind-time to write-time reservations.
 
 ## The hazard
@@ -209,8 +214,13 @@ Transitions:
   (it was refcount 0).
 - Crash mid-`put` after reserving → a leaked reservation keeps the block
   **retained**; the audit reconciles the count down once at rest.
-- A block stuck `unavailable` because GC died mid-reclaim is reset by
-  startup/the audit (or carries a lease), so a writer never waits on a dead GC.
+- A block stuck `unavailable` because GC died mid-reclaim is never reset. There
+  is no unclaim, no lease, and no startup repair — a claim is one-way. What
+  makes that safe is the same thing that makes claiming safe at all: a writer
+  that finds no available generation **mints a fresh one** rather than waiting,
+  and the stuck generation is reaped independently by the next pass or the
+  audit. So the writer never waits on a dead GC, and the row does not need
+  rescuing — it needs collecting, which is what the backstop is for.
 - A brand-new file written before its row is committed is an orphan; the orphan
   reaper skips files younger than an **mtime grace**, so in-flight writes and
   crash-retries are safe.
@@ -232,19 +242,31 @@ A periodic worker, the safety net ADR-0023 F2 requires:
   The protocol makes this impossible; if the audit ever sees it, that is a bug to
   investigate, not a routine repair.
 
-## What M1c builds
+## What M1c built
 
 In dependency order (each slice independently testable, per the M1b playbook).
-**Verification leads**: the harness lands first so every feature slice below is
-born testable, with the invariants as live oracles.
+**Verification led**: the harness landed first so every feature slice below was
+born testable, with the invariants as live oracles. All seven shipped in
+`49c8ed8`; three differ from the plan as written, and each difference is noted
+on its item.
 
-1. **Verification harness** — the design-for-testability seams (filesystem,
-   clock, crash point, and named `fail`-points behind traits) and the **invariant
-   oracle**: a `check_index(index, store)` that reads the real index +
-   filesystem and asserts S1 and I1, I3–I5 (I2 — durability — is left to the
-   model and the fsync tests). Plus the deterministic-simulation
-   scaffold (seeded scheduler, seed logging for replay). Everything below is built
-   and fault-tested against it, and the oracle becomes the audit's core.
+1. **Verification harness** — the invariant oracle
+   (`verify::check_index(index, store)`, reading the real index + filesystem
+   and asserting S1 and I1, I3–I5) and the deterministic-simulation scaffold
+   (seeded scheduler, seed logging for replay). I2 — durability — is left to
+   the model, as planned.
+
+   *Two of the four named seams were never built.* The filesystem seam is real
+   (`ContentStore` / `BlockStore` behind traits, with `FilesystemStore` as one
+   implementation), and so are the `fail`-points, though there are four of
+   them at chosen boundaries rather than one per named step:
+   `put::before_bind`, `bind::before_commit`, `gc::obj::before_unlink`,
+   `gc::obj::before_delete`. There is **no clock seam** — the audit calls
+   `SystemTime::now()` directly, so any test of the mtime grace has to move
+   real file timestamps — and **no crash-point seam** distinct from the
+   fail-points. The plan's "fsync tests" were likewise never written; I2 rests
+   on the model alone, which is a thinner footing than the sentence above
+   implies.
 2. **CAS deletion primitive** — `ContentStore::remove` for objects and blocks,
    plus generation-aware block paths and a cheap existence check.
    Conformance-tested.
@@ -259,8 +281,13 @@ born testable, with the invariants as live oracles.
    state alarm. Provides the systematic (strong-fairness) coverage the model
    shows is **required** for reclamation liveness — the online collector alone can
    leave a crash-orphaned generation unreclaimed forever.
-7. **UX** — `fq-cas gc` (run a pass, report bytes reclaimed). The always-on
-   background worker lands with the service in M5.
+7. **UX** — `fq-cas gc` runs one pass and reports what it did. *It reports
+   counts, not bytes*: reclaimed objects, reclaimed blocks, orphan files
+   reaped, refcounts reconciled, and alarms. Bytes would need a size lookup
+   per reclaimed file, which is exactly the filesystem traffic a pass is
+   trying to avoid. It exits non-zero when it alarms, so a script can gate on
+   the forbidden state. The always-on background worker lands with the service
+   in M5.
 
 ## Test plan
 
@@ -294,4 +321,4 @@ summary:
 - [ADR-0024](../../adrs/accepted/0024-separate-databases-storage-foundation.md) —
   the storage index is SQLite #1, the single writer this protocol linearises on.
 - [Storage + vector foundation plan](../../plans/active/2026-06-27-storage-vector-foundation.md)
-  — M1c is where this is built.
+  — M1c is where this was built; M3–M5 remain.

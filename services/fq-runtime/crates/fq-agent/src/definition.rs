@@ -224,7 +224,23 @@ impl<'de> Deserialize<'de> for CapabilityGrant {
 
 /// YAML frontmatter structure. Private to this module — callers work with
 /// [`Agent`] directly.
+///
+/// `deny_unknown_fields` because the alternative is silence, and silence
+/// here is expensive. Without it serde drops any key it does not
+/// recognise, so `budgett:` for `budget:` left the agent with no budget
+/// cap at all — and `fq agent validate` reported `✓ valid`, because the
+/// only trace was a *missing* line in its output. ADR-0004 is "cost
+/// controls from day one"; one transposed character defeated it, past a
+/// tool that said the definition was fine (#514).
+///
+/// `sandboxx:` is the same shape with a security edge: the agent runs
+/// with no grants rather than the ones its author wrote.
+///
+/// Legal here because this struct flattens nothing — the same reasoning,
+/// and the same fix, as `ProviderConfig` in `fq-runtime`'s config, where
+/// `api` was silently accepted for `api_shape`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Frontmatter {
     name: String,
     /// Optional: falls back to `agents.default_model` when omitted. A
@@ -317,6 +333,51 @@ pub enum ParseError {
 
 #[cfg(test)]
 mod tests {
+
+    /// The defect #514 was filed for: a misspelled key was dropped in
+    /// silence, so `budgett:` produced an agent with no budget cap and
+    /// `fq agent validate` still said it was fine. The error must name
+    /// the offending field — an operator who mistyped one character
+    /// needs to be told which one.
+    #[test]
+    fn a_misspelled_key_is_rejected_and_named() {
+        let err = parse_agent("---\nname: typo\nmodel: m\nbudgett: 0.05\n---\nBody.\n")
+            .expect_err("an unknown key must not be silently dropped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("budgett"),
+            "the error must name the offending key, got: {msg}"
+        );
+        assert!(
+            msg.contains("budget"),
+            "the error should list the field that was meant, got: {msg}"
+        );
+    }
+
+    /// The same trap with a security edge rather than a cost one: a
+    /// dropped `sandbox` left the agent with no grants at all, not the
+    /// ones its author wrote.
+    #[test]
+    fn a_misspelled_sandbox_key_is_rejected() {
+        let err = parse_agent(
+            "---\nname: typo\nmodel: m\nsandboxx:\n  fs_read: [\"/tmp\"]\n---\nBody.\n",
+        )
+        .expect_err("a misspelled sandbox key must not be silently dropped");
+        assert!(err.to_string().contains("sandboxx"));
+    }
+
+    /// Strictness must not cost us the fields that are genuinely
+    /// optional — every one of them omitted is still a valid definition.
+    #[test]
+    fn every_optional_field_may_still_be_omitted() {
+        let agent = parse_agent("---\nname: bare\nmodel: m\n---\nBody.\n")
+            .expect("name and model alone are a valid definition");
+        assert!(agent.budget().is_none());
+        assert!(agent.max_iterations().is_none());
+        assert!(agent.effort().is_none());
+        assert!(agent.trigger().is_none());
+        assert!(agent.mcp_servers().is_empty());
+    }
     use super::*;
 
     #[test]

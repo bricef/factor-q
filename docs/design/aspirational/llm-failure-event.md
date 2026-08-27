@@ -6,7 +6,7 @@ answers are folded into the sections they affect, and §8 records them
 together. Implementation follows this document.
 Resolves [#447](https://github.com/bricef/factor-q/issues/447) by closing the
 hole in code rather than weakening the doc; scheduled by
-[Phase 4 cohort 4.2](../../plans/active/2026-07-28-phase-4-call-point-inventory.md).
+[Phase 4 cohort 4.2](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md).
 Adopting this means an ADR and a move to `committed/`, plus the amendment to
 [`event-schema.md`](../committed/event-schema.md) drafted in §5.
 

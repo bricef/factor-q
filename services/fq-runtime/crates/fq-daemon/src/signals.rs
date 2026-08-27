@@ -12,9 +12,12 @@
 ///   orchestrators send to stop a service — triggers a **graceful drain**:
 ///   in-flight invocations suspend at a step boundary and the daemon exits,
 ///   bounded by `drain_deadline_ms`. The orchestrator's own SIGKILL grace
-///   period must be ≥ that deadline or it truncates the drain; a second
-///   SIGTERM restores the default disposition and hard-stops. See the
-///   deploy plan for per-orchestrator grace settings.
+///   period must be ≥ that deadline, because nothing shortens the drain
+///   once it starts: this function returns on the *first* SIGTERM and
+///   stops reading the stream, tokio never unregisters its handler, and
+///   nothing here restores `SIG_DFL` — so a second SIGTERM is absorbed
+///   silently and SIGKILL is the only way out of a wedged drain (#509).
+///   See the deploy plan for per-orchestrator grace settings.
 /// - **SIGINT (Ctrl-C)** — interactive stop — is a fast clean shutdown that
 ///   does not wait out in-flight work (crash-recovery resumes it).
 ///

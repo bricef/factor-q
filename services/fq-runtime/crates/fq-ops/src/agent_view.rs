@@ -35,7 +35,16 @@ pub struct AgentSummaryView {
 /// directory — the agent someone expects to be running and is not —
 /// and it has no agent id to be listed under, so it rides the index as
 /// its own kind of row. Dropping it would make the listing lie by
-/// omission, and there is nowhere else on today's surface to put it.
+/// omission.
+///
+/// That last clause used to end "and there is nowhere else on today's
+/// surface to put it", which stopped being true when `control.status`
+/// grew `registry.load_errors`. The 2026-08-05 amendment to the
+/// operator-surface model decided this index should become homogeneous
+/// once load errors had another home; the `control.status` half shipped
+/// and this half did not, so the union is what the surface still
+/// promises. Narrowing it is a wire break and wants doing deliberately,
+/// not incidentally.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "entry", rename_all = "snake_case")]
 pub enum AgentEntryView {

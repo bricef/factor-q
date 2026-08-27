@@ -19,8 +19,8 @@ url = "2"
 # feature set leaks to every consumer. The list is the observed need of
 # the daemon loops (spawn/select/timers/channels), the SQLite projection
 # and config IO, and the MCP child-process transport; the dev-dependency
-# below re-adds "full" for test builds. Binaries (fq-cli, fq-dashboard)
-# take "full" themselves.
+# below re-adds "full" for test builds. The binaries (fq-cli, fq-daemon,
+# fq-dashboard) take "full" themselves.
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
 schemars = { workspace = true }
 serde = { workspace = true }
