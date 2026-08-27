@@ -167,7 +167,7 @@ pub struct ToolDispatchedPayload {
 /// decision: which kind of dispatch was stuck, and which
 /// call_id it was on. The full context (parameters, request
 /// payload, etc.) is in the worker's WAL and surfaced via
-/// `fq recover` (step 9).
+/// `fq invocation resume`/`drop` (step 9).
 ///
 /// A failed automatic resume also rides this event (#64) with
 /// the sentinel `stuck_entity: "recovery"`; there is no stuck
@@ -448,7 +448,7 @@ pub struct SystemTaskFailedPayload {
 /// The same counts are surfaced live via `fq status`; this
 /// event records the snapshot so historical recovery
 /// behaviour is queryable through the existing event
-/// projection (`fq events query --type=system_recovery`).
+/// projection (`fq events query --event-type=system_recovery`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemRecoveryPayload {
     pub runtime_id: Uuid,

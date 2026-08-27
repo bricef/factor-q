@@ -295,7 +295,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // rows (step 10), except cost-bearing rows, kept indefinitely so
     // spend figures survive retention. `stale_worker_retention_days`
     // bounds stale coordination_worker rows, which accrue one per
-    // daemon restart and used to need `fq workers prune`. Either at
+    // daemon restart and used to need `fq workers prune`. Either at  allow-dead-command: retired verb, named as history
     // < 0 skips its own sweep; both < 0 exits the task.
     let (retention_shutdown_tx, retention_shutdown_rx) = tokio::sync::oneshot::channel();
     let retention_sweeper = fq_runtime::control_plane::retention::RetentionSweeper::new(

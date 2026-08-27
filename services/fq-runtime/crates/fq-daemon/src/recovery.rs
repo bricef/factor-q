@@ -218,7 +218,7 @@ pub(crate) async fn classify_in_flight(
     }
 
     // Every in-flight invocation — resumable *or* ambiguous — keeps its
-    // workspace: resume continues from it, and `fq recover` triage may
+    // workspace: resume continues from it, and `fq invocation resume` may
     // need to inspect it. The startup prune below sweeps workspaces of
     // everything else (terminal or unknown).
     let in_flight_ids: std::collections::HashSet<String> = classified

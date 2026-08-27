@@ -278,6 +278,7 @@ pub struct ModelCostView {
 
 /// One agent's cost drill-down: its own totals plus per-model and
 /// per-invocation breakdowns — the dashboard's `/costs/<agent>` page
+// allow-dead-command: `fq costs show` is a hypothetical, named as one.
 /// and any future `fq costs show <agent>`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct AgentCostDetailView {

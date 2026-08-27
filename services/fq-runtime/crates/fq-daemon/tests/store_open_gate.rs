@@ -183,7 +183,7 @@ fn read_handlers_never_open_stores_directly() {
     // that one.
     //
     // 4 -> 3 retires the last exemption that was not the runtime opening
-    // its own stores: `fq workers prune` opened the control-plane store
+    // its own stores: `fq workers prune`  allow-dead-command: retired verb, named as history opened the control-plane store
     // to delete stale registration rows. Reclaiming those rows is a
     // daemon retention sweep now — the system should not depend on
     // operator remediations to work normally — so the write moved inside

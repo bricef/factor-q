@@ -16,10 +16,23 @@
 #   services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs -> #78
 #   services/fq-runtime/crates/fq-runtime/src/mcp.rs                   -> #191
 services/fq-dashboard/src/render.rs 1402
-services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1048
+# Raised by hand, 2026-08-27 (#512): three error modules grew by a total
+# of nine lines when three dead commands in operator-facing errors were
+# replaced with instructions that work. `fq recovery`, `fq recover` and
+# `fq invocation drop --schema-mismatch` were each one line; what they
+# should have said needs two, because the honest answer to a schema
+# mismatch is not a command at all — the daemon cannot start, so there is
+# no edge and no verb, and the operator has to roll back or delete a
+# store.
+#
+# The `#[error(...)]` text has to live with its error type, so there is
+# no module to move it to; extracting a two-line string to dodge a line
+# count would be worse code than the count it saved. Raised rather than
+# budgeted, per the rule above, so the trade is visible in the diff.
+services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1050
 services/fq-runtime/crates/fq-runtime/src/mcp.rs 1850
 services/fq-runtime/crates/fq-runtime/src/views.rs 815
-services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 2600
-services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1414
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 2605
+services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1416
 services/fq-store/src/cli.rs 842
 services/fq-store/src/index.rs 849

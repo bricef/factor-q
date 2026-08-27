@@ -1382,7 +1382,9 @@ pub enum WorkerStoreError {
 
     #[error(
         "incompatible schema: db is at version {db_version}, this binary supports {binary_version}. \
-         Roll back the runtime or use `fq invocation drop --schema-mismatch` to abandon in-flight state."
+         Roll back the runtime to a build that supports version {db_version}, or delete the \
+         worker store under `[cache] directory` in fqd.toml to abandon in-flight state — the \
+         daemon recreates it, and any suspended invocations become unrecoverable."
     )]
     IncompatibleSchema {
         db_version: u32,

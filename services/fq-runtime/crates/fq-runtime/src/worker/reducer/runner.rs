@@ -207,6 +207,12 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     live: super::liveness::LiveRegistry,
 }
 
+/// Triage guidance for an ambiguous WAL. Both verbs are real — `fq-cli`'s
+/// `error_commands_gate` checks they still parse.
+const AMBIGUOUS_WAL_TRIAGE: &str = "has ambiguous WAL state; triage with \
+     `fq invocation resume <id>` to reconcile and continue, or \
+     `fq invocation drop <id> --reason ...` to abandon it";
+
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     pub fn new(context: Arc<ReducerContext>, config: Arc<RunnerConfig>, reducer: R) -> Self {
         Self {
@@ -697,7 +703,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     ///
     /// **Refuses ambiguous invocations** (any WAL row in
     /// `dispatched` state). Those need operator triage via
-    /// `fq recover` (step 9) per the §3.4 contract; the
+    /// `fq invocation resume`/`drop` per the §3.4 contract; the
     /// runtime cannot auto-resume them under the
     /// tool-idempotency constraint.
     ///
@@ -769,8 +775,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             || llms.iter().any(|r| r.status == DispatchStatus::Dispatched)
         {
             return Err(ExecutorError::WorkerStore(format!(
-                "invocation {invocation_id} has ambiguous WAL state; \
-                 use `fq recover` to triage"
+                "invocation {invocation_id} {AMBIGUOUS_WAL_TRIAGE}"
             )));
         }
 
@@ -1038,7 +1043,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // No inbound server channel on resume: the per-invocation
                 // server connection died with the crash, so a resumed run
                 // cannot service (or replay) sampling (ADR-0018 §5). Any
-                // in-flight sampling is surfaced via `fq recover`.
+                // in-flight sampling is surfaced via `fq invocation list`.
                 None,
                 // Resume acks nothing — the trigger was acked on the
                 // original attempt (issue #41).
