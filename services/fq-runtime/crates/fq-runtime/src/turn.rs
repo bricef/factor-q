@@ -139,6 +139,7 @@ impl TurnFold {
                             .map(|c| c.model.clone())
                             .unwrap_or_else(|| "?".to_string()),
                         content: p.text(),
+                        reasoning: crate::events::reduce_reasoning(&p.parts),
                         tool_calls: p
                             .tool_calls()
                             .map(|c| AssistantToolCall {
@@ -172,6 +173,9 @@ impl TurnFold {
                 TurnAction::Assistant {
                     model: p.model.clone(),
                     content: Some(p.error_message.clone()),
+                    // A failed call produced no turn, so there is no
+                    // reasoning to show — absent, not opaque.
+                    reasoning: None,
                     tool_calls: Vec::new(),
                     cost_usd: envelope.cost.as_ref().map(|c| c.total_cost),
                     is_error: Some(true),
@@ -563,7 +567,13 @@ mod tests {
         assert_eq!(cost_usd, &None, "no cost metadata, no cost claim");
 
         // And it renders as the operator saw it before the flip.
-        let rendered = crate::transcript::render_pretty(&[turn.transcript_entry()], None);
+        let rendered = crate::transcript::render_pretty(
+            &[turn.transcript_entry()],
+            crate::transcript::RenderOptions {
+                truncate_bytes: None,
+                reasoning: false,
+            },
+        );
         assert!(rendered.contains("[error]"), "got:\n{rendered}");
     }
 

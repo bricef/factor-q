@@ -310,8 +310,11 @@ pub(crate) async fn invocation_transcript(
     json: bool,
     format: Option<TranscriptFormat>,
     full: bool,
+    reasoning: bool,
 ) -> anyhow::Result<()> {
-    use fq_ops::transcript::{DEFAULT_TRUNCATE_BYTES, dedup_key, render_pretty, snapshot_keys};
+    use fq_ops::transcript::{
+        DEFAULT_TRUNCATE_BYTES, RenderOptions, dedup_key, render_pretty, snapshot_keys,
+    };
 
     let as_json = json || matches!(format, Some(TranscriptFormat::Json));
     if json && matches!(format, Some(TranscriptFormat::Pretty)) {
@@ -320,10 +323,13 @@ pub(crate) async fn invocation_transcript(
     if follow && as_json {
         anyhow::bail!("--follow is not supported with --json (json emits a snapshot array)");
     }
-    let truncate_bytes = if full {
-        None
-    } else {
-        Some(DEFAULT_TRUNCATE_BYTES)
+    let render = RenderOptions {
+        truncate_bytes: if full {
+            None
+        } else {
+            Some(DEFAULT_TRUNCATE_BYTES)
+        },
+        reasoning,
     };
 
     // One client for the whole verb: the snapshot's two reads and the
@@ -374,7 +380,7 @@ pub(crate) async fn invocation_transcript(
         return Ok(());
     }
 
-    print!("{}", render_pretty(&entries, truncate_bytes));
+    print!("{}", render_pretty(&entries, render));
 
     // Snapshot-only mode: done. Otherwise long-poll the turn stream
     // from the cursor pinned above (before the snapshot).
@@ -399,10 +405,7 @@ pub(crate) async fn invocation_transcript(
             {
                 continue;
             }
-            print!(
-                "{}",
-                render_pretty(std::slice::from_ref(&entry), truncate_bytes)
-            );
+            print!("{}", render_pretty(std::slice::from_ref(&entry), render));
         }
     }
     // The tail loop runs until Ctrl-C or a transport error (`?`).

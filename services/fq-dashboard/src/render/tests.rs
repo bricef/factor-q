@@ -175,6 +175,7 @@ fn transcript_renders_all_entry_kinds() {
             timestamp_ms: 1_000,
             model: "claude-opus-4-8".into(),
             content: Some("on it".into()),
+            reasoning: None,
             tool_calls: vec![AssistantToolCall {
                 tool_call_id: "tc-1".into(),
                 tool_name: "exec".into(),
@@ -1125,4 +1126,74 @@ fn invocation_rows_escape_link_and_show_start() {
     assert!(!html.contains("<agent>"));
     assert!(html.contains("<th>started</th>"));
     assert!(html.contains("<td>10m ago</td>"), "got: {html}");
+}
+
+/// The dashboard's answer to I7: a turn whose reasoning we cannot read
+/// gets its own line and its raw form behind a disclosure — "we hold
+/// this, we cannot render it, here it is" — rather than being dropped
+/// for having no text.
+#[test]
+fn opaque_reasoning_offers_its_raw_form() {
+    use fq_ops::transcript::{TranscriptEntry, TurnReasoning};
+
+    let entry = TranscriptEntry::Assistant {
+        timestamp_ms: 0,
+        model: "claude-sonnet-4-6".to_string(),
+        content: Some("Done.".to_string()),
+        reasoning: Some(TurnReasoning {
+            text: None,
+            opaque: Some(serde_json::json!("encrypted-blob")),
+        }),
+        tool_calls: Vec::new(),
+        cost_usd: None,
+        is_error: None,
+    };
+
+    let html = super::transcript_entry_html(&entry, 1_000);
+
+    assert!(
+        html.contains("opaque"),
+        "an unreadable turn must be labelled, not omitted: {html}"
+    );
+    assert!(
+        html.contains("click to see raw"),
+        "and its raw form must be reachable: {html}"
+    );
+    assert!(
+        html.contains("encrypted-blob"),
+        "the token itself is what 'raw' means: {html}"
+    );
+}
+
+/// Readable reasoning collapses rather than hiding: present in the DOM,
+/// folded away by default, because it is usually not what the reader
+/// came for.
+#[test]
+fn readable_reasoning_is_collapsed_not_omitted() {
+    use fq_ops::transcript::{TranscriptEntry, TurnReasoning};
+
+    let entry = TranscriptEntry::Assistant {
+        timestamp_ms: 0,
+        model: "kimi-k2".to_string(),
+        content: Some("Four.".to_string()),
+        reasoning: Some(TurnReasoning {
+            text: Some("I ruled out 41 first.".to_string()),
+            opaque: None,
+        }),
+        tool_calls: Vec::new(),
+        cost_usd: None,
+        is_error: None,
+    };
+
+    let html = super::transcript_entry_html(&entry, 1_000);
+
+    assert!(html.contains("<details"), "folded away: {html}");
+    assert!(
+        html.contains("I ruled out 41 first."),
+        "…but present, so a reader can open it: {html}"
+    );
+    assert!(
+        !html.contains("click to see raw"),
+        "nothing is withheld here, so no raw disclosure: {html}"
+    );
 }

@@ -176,6 +176,48 @@ pub fn assistant_text(parts: &[AssistantPart]) -> Option<String> {
     (!texts.is_empty()).then(|| texts.join("\n"))
 }
 
+/// Reduce an assistant turn's reasoning to what the operator surface can
+/// say about it: readable text, and whatever is carried but not readable.
+///
+/// **This is where parts stop** ([ADR-0034] D3). Provider vocabulary —
+/// the three-way shape, the model tie, the signature — is internal; the
+/// operator domain gets the two facts it can act on. Several reasoning
+/// parts in one turn join, for the same reason text parts do.
+///
+/// `None` when the turn produced no reasoning at all, which is a
+/// different fact from producing some we cannot read (D4) — that returns
+/// `Some` with no `text`.
+///
+/// [ADR-0034]: https://github.com/bricef/factor-q/blob/main/docs/adrs/accepted/0034-reasoning-as-a-content-part.md
+pub fn reduce_reasoning(parts: &[AssistantPart]) -> Option<crate::transcript::TurnReasoning> {
+    let mut texts: Vec<&str> = Vec::new();
+    let mut opaque: Vec<Value> = Vec::new();
+    for part in parts {
+        let AssistantPart::Reasoning(reasoning) = part else {
+            continue;
+        };
+        match &reasoning.content {
+            ReasoningContent::Plain { text } => texts.push(text.as_str()),
+            ReasoningContent::Signed { text, token } => {
+                texts.push(text.as_str());
+                opaque.push(Value::String(token.clone()));
+            }
+            ReasoningContent::Opaque { token } => opaque.push(Value::String(token.clone())),
+        }
+    }
+    if texts.is_empty() && opaque.is_empty() {
+        return None;
+    }
+    Some(crate::transcript::TurnReasoning {
+        text: (!texts.is_empty()).then(|| texts.join("\n")),
+        opaque: match opaque.len() {
+            0 => None,
+            1 => Some(opaque.remove(0)),
+            _ => Some(Value::Array(opaque)),
+        },
+    })
+}
+
 /// Build an assistant turn's parts from text and tool calls — the
 /// inverse of [`assistant_text`] and [`assistant_tool_calls`].
 ///

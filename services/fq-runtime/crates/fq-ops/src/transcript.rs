@@ -36,6 +36,11 @@ pub enum TranscriptEntry {
         timestamp_ms: i64,
         model: String,
         content: Option<String>,
+        /// The model's own working for this turn, when it produced any.
+        /// `None` means it did not — see [`TurnReasoning`] for why that
+        /// is a different fact from "we cannot read it".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<TurnReasoning>,
         tool_calls: Vec<AssistantToolCall>,
         cost_usd: Option<f64>,
         is_error: Option<bool>,
@@ -64,6 +69,52 @@ pub enum TranscriptEntry {
         /// The terminal phase, `completed` / `failed`.
         phase: String,
     },
+}
+
+/// An assistant turn's reasoning, as the operator sees it.
+///
+/// **The reduction that keeps parts internal.** The wire-facing model
+/// has three reasoning shapes carrying provider signatures and model
+/// ties; none of that belongs in the operator domain, which speaks of
+/// costs, errors and rounds ([ADR-0034] D3). What crosses is this: what
+/// can be read, and what is carried but cannot be.
+///
+/// **Absence and opacity are different facts** (ADR-0034 D4). A block we
+/// cannot interpret is still information the model acted on — Anthropic's
+/// signature encrypts the entire chain of thought — so it is recorded as
+/// present-and-opaque rather than dropped. Rendering may collapse the
+/// two; this type may not.
+///
+/// The four honest states:
+///
+/// | `text` | `opaque` | meaning |
+/// |---|---|---|
+/// | — | — | *(the field is `None`; the turn had no reasoning)* |
+/// | set | none | readable working, nothing withheld (Kimi, DeepSeek) |
+/// | set | set | readable working plus a token we carry but cannot read (Anthropic `thinking`) |
+/// | none | set | no readable text at all; the token **is** the content (`redacted_thinking`) |
+///
+/// [ADR-0034]: https://github.com/bricef/factor-q/blob/main/docs/adrs/accepted/0034-reasoning-as-a-content-part.md
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct TurnReasoning {
+    /// Readable working, when the provider exposed any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Provider content carried but not interpretable here. `None` means
+    /// there genuinely was none — **never** that it was dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opaque: Option<Value>,
+}
+
+impl TurnReasoning {
+    /// Whether this turn carries reasoning we cannot render.
+    ///
+    /// The question a UI asks before offering "opaque — click to see
+    /// raw", and the reason the two fields are separate rather than one
+    /// `Option<String>`.
+    pub fn has_opaque(&self) -> bool {
+        self.opaque.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -176,9 +227,37 @@ pub fn truncate_entries(entries: &mut [TranscriptEntry], max: usize) {
     }
 }
 
-/// Render the transcript as human-readable pretty text. `truncate_bytes`
-/// = `None` means no truncation (`--full`).
-pub fn render_pretty(entries: &[TranscriptEntry], truncate_bytes: Option<usize>) -> String {
+/// How a pretty transcript is rendered.
+///
+/// A struct rather than a growing parameter list: both fields answer
+/// "how much do you want to see", and a bare `bool` at a call site says
+/// nothing about which knob it is.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderOptions {
+    /// `None` means no truncation (`--full`).
+    pub truncate_bytes: Option<usize>,
+    /// Show each turn's reasoning (`--reasoning`).
+    ///
+    /// **Off by default**, because a transcript is usually read to answer
+    /// *what happened*, and reasoning is the least useful part of that
+    /// while often being the longest. It is recorded either way — this
+    /// governs display only, and the JSON output always carries it.
+    pub reasoning: bool,
+}
+
+impl RenderOptions {
+    /// The default read: truncated payloads, reasoning hidden.
+    pub fn pretty() -> Self {
+        Self {
+            truncate_bytes: Some(DEFAULT_TRUNCATE_BYTES),
+            reasoning: false,
+        }
+    }
+}
+
+/// Render the transcript as human-readable pretty text.
+pub fn render_pretty(entries: &[TranscriptEntry], options: RenderOptions) -> String {
+    let truncate_bytes = options.truncate_bytes;
     let mut out = String::new();
     for entry in entries {
         match entry {
@@ -198,6 +277,7 @@ pub fn render_pretty(entries: &[TranscriptEntry], truncate_bytes: Option<usize>)
             TranscriptEntry::Assistant {
                 model,
                 content,
+                reasoning,
                 tool_calls,
                 cost_usd,
                 is_error,
@@ -212,6 +292,24 @@ pub fn render_pretty(entries: &[TranscriptEntry], truncate_bytes: Option<usize>)
                     ""
                 };
                 out.push_str(&format!("── assistant (model={model}{cost}){err} ──\n"));
+                if let Some(r) = reasoning
+                    && options.reasoning
+                {
+                    match &r.text {
+                        Some(text) => {
+                            out.push_str("  reasoning:\n");
+                            out.push_str(&indent(&indent(&truncate(text, truncate_bytes))));
+                            out.push('\n');
+                        }
+                        // Present but unreadable is not the same as
+                        // absent, and a transcript that showed nothing
+                        // here would be saying the wrong one.
+                        None => out.push_str("  reasoning: [opaque — carried, not readable]\n"),
+                    }
+                    if r.has_opaque() && r.text.is_some() {
+                        out.push_str("  reasoning: [+ an opaque provider token]\n");
+                    }
+                }
                 match content {
                     Some(c) if !c.is_empty() => {
                         out.push_str(&indent(&truncate(c, truncate_bytes)));

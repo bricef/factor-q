@@ -174,7 +174,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 json,
                 format,
                 full,
-            } => invocation_transcript(&cli.global, &id, follow, json, format, full).await?,
+                reasoning,
+            } => {
+                invocation_transcript(&cli.global, &id, follow, json, format, full, reasoning)
+                    .await?
+            }
         },
         Commands::Workers { command } => match command {
             WorkerCommands::List {

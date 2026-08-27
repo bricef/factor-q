@@ -91,7 +91,7 @@ pub use llm::{
     AssistantPart, Effort, LlmCallOrigin, LlmDispatchedPayload, LlmErrorKind, LlmFailurePayload,
     LlmRequestPayload, LlmResponsePayload, Message, MessageToolCall, Reasoning, ReasoningContent,
     RequestParams, StopReason, TokenUsage, ToolResult, ToolSchema, assistant_parts, assistant_text,
-    assistant_tool_calls,
+    assistant_tool_calls, reduce_reasoning,
 };
 pub use payloads::*;
 

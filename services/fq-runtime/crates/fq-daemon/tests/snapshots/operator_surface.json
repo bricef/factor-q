@@ -2757,6 +2757,17 @@
                   "model": {
                     "type": "string"
                   },
+                  "reasoning": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/TurnReasoning"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The model's own working, reduced to what the operator domain\ncan say about it. Absent when the turn produced none — which\nis not the same as present-but-unreadable, see\n[`TurnReasoning`]."
+                  },
                   "tool_calls": {
                     "items": {
                       "$ref": "#/$defs/AssistantToolCall"
@@ -2808,6 +2819,22 @@
                 "type": "object"
               }
             ]
+          },
+          "TurnReasoning": {
+            "description": "An assistant turn's reasoning, as the operator sees it.\n\n**The reduction that keeps parts internal.** The wire-facing model\nhas three reasoning shapes carrying provider signatures and model\nties; none of that belongs in the operator domain, which speaks of\ncosts, errors and rounds ([ADR-0034] D3). What crosses is this: what\ncan be read, and what is carried but cannot be.\n\n**Absence and opacity are different facts** (ADR-0034 D4). A block we\ncannot interpret is still information the model acted on — Anthropic's\nsignature encrypts the entire chain of thought — so it is recorded as\npresent-and-opaque rather than dropped. Rendering may collapse the\ntwo; this type may not.\n\nThe four honest states:\n\n| `text` | `opaque` | meaning |\n|---|---|---|\n| — | — | *(the field is `None`; the turn had no reasoning)* |\n| set | none | readable working, nothing withheld (Kimi, DeepSeek) |\n| set | set | readable working plus a token we carry but cannot read (Anthropic `thinking`) |\n| none | set | no readable text at all; the token **is** the content (`redacted_thinking`) |\n\n[ADR-0034]: https://github.com/bricef/factor-q/blob/main/docs/adrs/accepted/0034-reasoning-as-a-content-part.md",
+            "properties": {
+              "opaque": {
+                "description": "Provider content carried but not interpretable here. `None` means\nthere genuinely was none — **never** that it was dropped."
+              },
+              "text": {
+                "description": "Readable working, when the provider exposed any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2951,6 +2978,17 @@
                   "model": {
                     "type": "string"
                   },
+                  "reasoning": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/TurnReasoning"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The model's own working, reduced to what the operator domain\ncan say about it. Absent when the turn produced none — which\nis not the same as present-but-unreadable, see\n[`TurnReasoning`]."
+                  },
                   "tool_calls": {
                     "items": {
                       "$ref": "#/$defs/AssistantToolCall"
@@ -3002,6 +3040,22 @@
                 "type": "object"
               }
             ]
+          },
+          "TurnReasoning": {
+            "description": "An assistant turn's reasoning, as the operator sees it.\n\n**The reduction that keeps parts internal.** The wire-facing model\nhas three reasoning shapes carrying provider signatures and model\nties; none of that belongs in the operator domain, which speaks of\ncosts, errors and rounds ([ADR-0034] D3). What crosses is this: what\ncan be read, and what is carried but cannot be.\n\n**Absence and opacity are different facts** (ADR-0034 D4). A block we\ncannot interpret is still information the model acted on — Anthropic's\nsignature encrypts the entire chain of thought — so it is recorded as\npresent-and-opaque rather than dropped. Rendering may collapse the\ntwo; this type may not.\n\nThe four honest states:\n\n| `text` | `opaque` | meaning |\n|---|---|---|\n| — | — | *(the field is `None`; the turn had no reasoning)* |\n| set | none | readable working, nothing withheld (Kimi, DeepSeek) |\n| set | set | readable working plus a token we carry but cannot read (Anthropic `thinking`) |\n| none | set | no readable text at all; the token **is** the content (`redacted_thinking`) |\n\n[ADR-0034]: https://github.com/bricef/factor-q/blob/main/docs/adrs/accepted/0034-reasoning-as-a-content-part.md",
+            "properties": {
+              "opaque": {
+                "description": "Provider content carried but not interpretable here. `None` means\nthere genuinely was none — **never** that it was dropped."
+              },
+              "text": {
+                "description": "Readable working, when the provider exposed any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",

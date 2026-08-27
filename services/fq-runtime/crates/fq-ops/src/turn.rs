@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::transcript::{AssistantToolCall, TranscriptEntry};
+use crate::transcript::{AssistantToolCall, TranscriptEntry, TurnReasoning};
 
 /// One turn, addressed by its event-log sequence — the universal
 /// cursor (P5): the same number that cursors `turn.stream`, feeds
@@ -51,6 +51,12 @@ pub enum TurnAction {
     Assistant {
         model: String,
         content: Option<String>,
+        /// The model's own working, reduced to what the operator domain
+        /// can say about it. Absent when the turn produced none — which
+        /// is not the same as present-but-unreadable, see
+        /// [`TurnReasoning`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<TurnReasoning>,
         tool_calls: Vec<AssistantToolCall>,
         cost_usd: Option<f64>,
         is_error: Option<bool>,
@@ -81,6 +87,7 @@ impl TurnState {
             TurnAction::Assistant {
                 model,
                 content,
+                reasoning,
                 tool_calls,
                 cost_usd,
                 is_error,
@@ -88,6 +95,7 @@ impl TurnState {
                 timestamp_ms: self.timestamp_ms,
                 model: model.clone(),
                 content: content.clone(),
+                reasoning: reasoning.clone(),
                 tool_calls: tool_calls.clone(),
                 cost_usd: *cost_usd,
                 is_error: *is_error,
