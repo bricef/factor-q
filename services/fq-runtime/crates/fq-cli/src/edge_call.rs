@@ -84,9 +84,19 @@ pub(crate) async fn edge_invoke(
 /// The transcript wants the whole conversation, not a page of it.
 /// `turn.list` pages at 200 by default, which would silently clip a
 /// long run's tail; the daemon walks the invocation's stream either
-/// way, so asking for everything costs the same scan and only makes
-/// the answer complete.
-const TRANSCRIPT_TURN_LIMIT: u32 = u32::MAX;
+/// way, so asking for the largest page it will serve costs the same
+/// scan and only makes the answer complete.
+///
+/// **The atom's own cap, read off the declaration rather than
+/// guessed.** This asked for `u32::MAX` while `turn.list` applied its
+/// `limit` with `unwrap_or` — a default, so any number was accepted
+/// and the answer was every turn the invocation had. Now that the
+/// number is a ceiling, over-asking is refused outright, and a client
+/// that hardcoded its own would break the day the cap moved.
+/// Transcripts longer than the cap now surface the daemon's refusal,
+/// which names the cursored read that pages past it, rather than a
+/// silently short conversation.
+const TRANSCRIPT_TURN_LIMIT: u32 = fq_ops::surface::TURN_LIST_MAX_LIMIT;
 
 /// The transcript snapshot, over the edge: `turn.list`, rendered
 /// through the turn→entry bridge. One question, one answer.

@@ -114,12 +114,88 @@ pub struct WorkerListFilter {
 // Turn
 // ---------------------------------------------------------------------
 
+/// The most turns one List page may carry, whatever a caller asks for
+/// — refused rather than quietly applied. This crate *declares* the
+/// bound; the daemon's `turn.list` handler is what rules on a caller's
+/// `limit` against it (`fq-daemon`'s `operator_surface::turn_list_limit`,
+/// which speaks `WireError` and so cannot live on the shape). It is
+/// also declared on the surface as this filter's `limit` maximum, so a
+/// consumer reads it off the schema instead of discovering it by
+/// failing.
+///
+/// **A turn is a payload row, not an index row, which is why this is
+/// not the Event atom's 2,000.** `event.list`, `dead_letter.list` and
+/// `trigger.list` all answer with extracted fields and hand back an
+/// identity that walks to the payload; their rows measure in the low
+/// hundreds of bytes with one or two unbounded fields between them.
+/// `turn.list` has no index to answer from — it folds the log and
+/// returns whole [`crate::turn::TurnState`]s, so the page *is* the
+/// payload. Five of its fields have no bound at all: `Prompt.system`
+/// (the agent's entire system prompt — the `backlog-groomer` definition
+/// this project runs is 5,712 bytes on its own), `Prompt.user`,
+/// `Assistant.content`, `ToolResult.output` (a tool's whole stdout, or
+/// a file it read), and the opaque `parameters` on both a call and its
+/// result. Nothing truncates any of them on the way to the wire: `fq
+/// invocations show` truncates for *display* only, and `--json` prints
+/// them whole. At 2,000 a page would afford 4,194 bytes per turn, less
+/// than that one system prompt.
+///
+/// **500 is what the frame affords, and more than a real transcript
+/// needs.** One List answer is one frame, and both ends of the edge
+/// frame with `LengthDelimitedCodec::new()`, whose default ceiling is
+/// 8 MiB (8,388,608 bytes) — so 500 turns leaves 16,777 bytes for each
+/// of them. From the other direction, the population this atom pages
+/// over is one invocation's turns, and that is bounded by the runtime
+/// rather than by accumulated history, which is what separates it from
+/// every sibling listing: `max_iterations` caps model turns (100 by
+/// default; the `backlog-groomer` sets 150) and the host's own step
+/// budget caps steps at 1,000. One turn is recorded per model call and
+/// one per tool call, so 500 holds a whole default-capped run of a
+/// hundred model turns making three tool calls apiece (1 + 100 + 300),
+/// and the groomer's 150 at two apiece (1 + 150 + 300). Both
+/// first-party clients ask this atom for the whole conversation, so a
+/// cap that clipped ordinary transcripts would be the wrong cap however
+/// safe its arithmetic.
+///
+/// **It does not make the frame safe, and does not pretend to.** With
+/// every large field unbounded, one turn can outgrow a whole response
+/// by itself: the only ceiling any of them has is the broker's
+/// `max_payload` — 16 MB on the dogfood broker, *above* the 8 MiB
+/// frame. What the cap bounds is the ordinary page, and the
+/// `Vec<TurnState>` the daemon materialises in full before the codec
+/// ever sees it.
+///
+/// What it replaces had no bound at all. The daemon applied `limit`
+/// with `unwrap_or`, which makes a default and never a ceiling, so
+/// `limit: u32::MAX` returned every turn the invocation ever produced
+/// as one value in daemon memory — and then, past the frame, as a
+/// transport error the operator paid the allocation for.
+pub const TURN_LIST_MAX_LIMIT: u32 = 500;
+
 /// List/Stream selection for Turns — full payloads by default; an
 /// `abbreviate` option waits for a consumer that wants it (P11).
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TurnFilter {
     pub invocation_id: String,
+    /// Cap on one List page — the **first** N turns of the invocation,
+    /// and at most 500 of them (this property's `maximum`). Absent asks
+    /// for the default 200.
+    ///
+    /// First rather than most recent, unlike the other atoms'
+    /// listings: a conversation is read from its opening prompt
+    /// forward, so this pages the beginning of a transcript rather than
+    /// its tail.
+    ///
+    /// **A larger N is refused, never quietly shrunk.** So the count
+    /// that comes back is always the one you asked for or the whole
+    /// answer, and it reads unambiguously: fewer turns than you asked
+    /// for means there are no more; exactly as many means there may be.
+    /// For more than a page, read on with `turn.stream`, which is
+    /// cursored — every turn carries the `seq` that continues from it.
+    ///
+    /// Ignored by Stream, which is cursored rather than paged.
     #[serde(default)]
+    #[schemars(range(max = TURN_LIST_MAX_LIMIT))]
     pub limit: Option<u32>,
 }
 

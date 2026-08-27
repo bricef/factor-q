@@ -2655,7 +2655,7 @@
   },
   {
     "atom": {
-      "description": "Event-log-backed: `seq` is the stream sequence — the same cursor receipts and min_seq gates speak. Stream long-polls via next_batch; from_seq = u64::MAX seeks the tail.",
+      "description": "Event-log-backed: `seq` is the stream sequence — the same cursor receipts and min_seq gates speak. List pages the invocation from its start, oldest turn first, and REFUSES an over-cap `limit` rather than shortening it. Stream long-polls via next_batch; from_seq = u64::MAX seeks the tail.",
       "domain": "turn",
       "filter_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2666,7 +2666,9 @@
           },
           "limit": {
             "default": null,
+            "description": "Cap on one List page — the **first** N turns of the invocation,\nand at most 500 of them (this property's `maximum`). Absent asks\nfor the default 200.\n\nFirst rather than most recent, unlike the other atoms'\nlistings: a conversation is read from its opening prompt\nforward, so this pages the beginning of a transcript rather than\nits tail.\n\n**A larger N is refused, never quietly shrunk.** So the count\nthat comes back is always the one you asked for or the whole\nanswer, and it reads unambiguously: fewer turns than you asked\nfor means there are no more; exactly as many means there may be.\nFor more than a page, read on with `turn.stream`, which is\ncursored — every turn carries the `seq` that continues from it.\n\nIgnored by Stream, which is cursored rather than paged.",
             "format": "uint32",
+            "maximum": 500,
             "minimum": 0,
             "type": [
               "integer",
