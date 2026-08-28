@@ -395,18 +395,30 @@ fn encode_reasoning(
         return None;
     }
     match reasoning.content {
-        crate::events::ReasoningContent::Plain { text }
-        | crate::events::ReasoningContent::Signed { text, .. } => {
+        // Readable-only reasoning is a semantic part: genai's
+        // OpenAI-compatible adapter hoists it into the sibling
+        // `reasoning_content` field (the Kimi/DeepSeek round trip), and
+        // its Anthropic adapter drops it — correctly, since a block with
+        // no signature is one Anthropic would reject.
+        crate::events::ReasoningContent::Plain { text } => {
             Some(provider::chat::ContentPart::ReasoningContent(text))
         }
-        crate::events::ReasoningContent::Opaque { .. } => {
-            tracing::debug!(
-                model = %reasoning.model,
-                "opaque reasoning cannot be encoded through `ReasoningContent`; it needs the \
-                 signature-carrying path (#437 phase 6)"
-            );
-            None
-        }
+        // Signed and opaque reasoning goes back as the provider's own
+        // block, verbatim. Anthropic verifies a thinking block *against*
+        // its signature, so the block is the unit that can be replayed —
+        // not the text, and not the signature alone.
+        //
+        // `Custom` rather than a provider branch: genai's Anthropic
+        // adapter echoes these blocks unchanged and its OpenAI adapter
+        // ignores them, so this arm is right for both without asking
+        // which one we are talking to — which this layer cannot know.
+        crate::events::ReasoningContent::Signed { token, .. }
+        | crate::events::ReasoningContent::Opaque { token } => Some(
+            provider::chat::ContentPart::Custom(provider::chat::CustomPart {
+                model_iden: None,
+                data: token,
+            }),
+        ),
     }
 }
 
@@ -463,26 +475,60 @@ fn from_provider_response(
     // carry it as a sibling field, not in the content list) — so leading
     // is correct for both.
     //
-    // genai normalises every provider's reasoning into
-    // `ChatResponse.reasoning_content` on the non-streaming path, and
-    // populates it unconditionally — no capture flag needed. For
-    // Kimi/DeepSeek that is `/message/reasoning` or
-    // `/message/reasoning_content`; for Anthropic it is the `thinking`
-    // block's text, which arrives WITHOUT its signature (genai drops it),
-    // so it is `Plain` rather than `Signed` here. Phase 6 and its
-    // upstream fix change that; until then an Anthropic part is
-    // deliberately never re-encoded onto that wire — see
-    // `encode_reasoning`.
-    if let Some(text) = response
-        .reasoning_content
-        .as_ref()
-        .filter(|t| !t.is_empty())
+    // The model we ASKED for, not the one the provider reported: the
+    // strip compares against the next request's target, and that is
+    // expressed in the same vocabulary.
+    let model = response.model_iden.model_name.to_string();
+
+    // Anthropic's blocks arrive as `Custom` parts carrying the raw JSON,
+    // signature included — the only form that can be replayed, and what
+    // our genai fork preserves. Preferred over the flattened
+    // `reasoning_content`, which is the same reasoning with the signature
+    // stripped off.
+    let mut block_seen = false;
+    for part in response.content.iter() {
+        let provider::chat::ContentPart::Custom(custom) = part else {
+            continue;
+        };
+        let content = match custom.typ() {
+            Some("thinking") => crate::events::ReasoningContent::Signed {
+                text: custom
+                    .data()
+                    .get("thinking")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                token: custom.data().clone(),
+            },
+            Some("redacted_thinking") => crate::events::ReasoningContent::Opaque {
+                token: custom.data().clone(),
+            },
+            // Some other block type we do not model. Skipped rather than
+            // guessed at: inventing a meaning for it would be worse than
+            // not carrying it, and it is not reasoning as far as we know.
+            _ => continue,
+        };
+        block_seen = true;
+        parts.push(AssistantPart::Reasoning(crate::events::Reasoning {
+            model: model.clone(),
+            content,
+        }));
+    }
+
+    // Providers that report reasoning as a sibling field rather than a
+    // block: Kimi, DeepSeek, and Anthropic without our fork. genai
+    // populates `reasoning_content` unconditionally on the non-streaming
+    // path — no capture flag needed. Skipped when blocks were already
+    // captured, or the same reasoning would be recorded twice: once
+    // replayable, once not.
+    if !block_seen
+        && let Some(text) = response
+            .reasoning_content
+            .as_ref()
+            .filter(|t| !t.is_empty())
     {
         parts.push(AssistantPart::Reasoning(crate::events::Reasoning {
-            // The model we ASKED for, not the one the provider reported:
-            // the strip compares against the next request's target, and
-            // that is expressed in the same vocabulary.
-            model: response.model_iden.model_name.to_string(),
+            model: model.clone(),
             content: crate::events::ReasoningContent::Plain { text: text.clone() },
         }));
     }
@@ -866,7 +912,7 @@ mod tests {
                 parts: vec![AssistantPart::Reasoning(crate::events::Reasoning {
                     model: "claude-sonnet-4-6".to_string(),
                     content: crate::events::ReasoningContent::Opaque {
-                        token: "encrypted-blob".to_string(),
+                        token: serde_json::json!("encrypted-blob"),
                     },
                 })],
             },
@@ -1161,6 +1207,134 @@ mod tests {
             reasoning_tokens: 99,
         };
         assert_eq!(usage.spoken_tokens(), 0);
+    }
+
+    /// **What the fork exists for.** Anthropic requires thinking blocks
+    /// to be passed back within a tool-use turn and verifies them by
+    /// their `signature`, so a block replayed without one is rejected —
+    /// and stock genai discards the signature on the way in, which makes
+    /// the turn unreplayable.
+    ///
+    /// Turn 1 returns a signed thinking block and a tool call; turn 2
+    /// replays that turn. The assertion is on the bytes we send: the
+    /// block must go back **whole**, signature intact, and first — the
+    /// order Anthropic's API requires.
+    #[tokio::test]
+    async fn anthropic_thinking_block_round_trips_over_the_wire() {
+        use crate::test_support::mock_anthropic::{
+            ContentBlock, MockAnthropicServer, MockResponse,
+        };
+
+        const MODEL: &str = "claude-sonnet-4-6";
+        const THINKING: &str = "The runbook is the cheapest place to start.";
+        const SIGNATURE: &str = "sig-abc123";
+
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+        let mock = MockAnthropicServer::start().await;
+        mock.push_response(MockResponse {
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: THINKING.to_string(),
+                    signature: SIGNATURE.to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "toolu_01".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "/runbook"}),
+                },
+            ],
+            stop_reason: "tool_use".to_string(),
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        });
+        mock.push_response(MockResponse::text("Done.", 120, 5));
+
+        let client = GenAiClient::with_base_url(mock.base_url());
+
+        // -- Turn 1
+        let first = client
+            .chat(ChatRequest {
+                model: MODEL.to_string(),
+                messages: vec![Message::user("Investigate the deploy.")],
+                tools: vec![],
+                params: RequestParams {
+                    effort: None,
+                    temperature: None,
+                    max_tokens: Some(1024),
+                },
+            })
+            .await
+            .expect("turn 1 succeeds");
+
+        // The signature must survive parsing, or nothing downstream can
+        // replay it.
+        let reasoning = first
+            .parts
+            .iter()
+            .find_map(|p| match p {
+                AssistantPart::Reasoning(r) => Some(r),
+                _ => None,
+            })
+            .expect("the thinking block became a reasoning part");
+        let crate::events::ReasoningContent::Signed { text, token } = &reasoning.content else {
+            panic!("an Anthropic thinking block is signed, not plain: {reasoning:?}");
+        };
+        assert_eq!(text, THINKING);
+        assert_eq!(
+            token["signature"].as_str(),
+            Some(SIGNATURE),
+            "the signature is what makes the block replayable"
+        );
+
+        let call_id = first.tool_calls()[0].tool_call_id.clone();
+
+        // -- Turn 2: replay the assistant turn, as the reducer does.
+        client
+            .chat(ChatRequest {
+                model: MODEL.to_string(),
+                messages: vec![
+                    Message::user("Investigate the deploy."),
+                    Message::Assistant {
+                        parts: first.parts.clone(),
+                    },
+                    Message::tool_result(call_id, "runbook says: restart"),
+                ],
+                tools: vec![],
+                params: RequestParams {
+                    effort: None,
+                    temperature: None,
+                    max_tokens: Some(1024),
+                },
+            })
+            .await
+            .expect("turn 2 succeeds");
+
+        let sent = mock.received_requests();
+        mock.shutdown().await;
+
+        assert_eq!(sent.len(), 2);
+        let assistant = sent[1]["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("turn 2 replays the assistant turn");
+        let blocks = assistant["content"]
+            .as_array()
+            .expect("a replayed thinking turn is a block array, not a bare string");
+
+        assert_eq!(
+            blocks[0]["type"], "thinking",
+            "Anthropic requires thinking blocks first in an assistant turn; sent: {}",
+            sent[1]
+        );
+        assert_eq!(
+            blocks[0]["signature"], SIGNATURE,
+            "the signature must be echoed verbatim, or the API rejects the turn"
+        );
+        assert_eq!(blocks[0]["thinking"], THINKING);
     }
 
     // endregion: reasoning round-trip
