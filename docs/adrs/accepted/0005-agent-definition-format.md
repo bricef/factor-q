@@ -138,9 +138,12 @@ let agent = Agent::build("researcher")
 - A JSON Schema for the frontmatter, enabling editor validation and
   autocomplete — **not built**. No `*.schema.json` exists in the repo and
   `fq-agent` does not depend on `schemars`; frontmatter is parsed straight
-  into a private `Frontmatter` struct by `serde_yaml`. Unknown keys are
-  silently ignored, which is the failure behind the
-  [ADR-0019](0019-skill-format.md) `skills:` finding
+  into a private `Frontmatter` struct by `serde_yaml`. Unknown top-level
+  keys are **rejected** — the struct carries `deny_unknown_fields`, so a
+  misspelled key now fails the definition to load rather than being
+  dropped in silence (#514). That closes the failure behind the
+  [ADR-0019](0019-skill-format.md) `skills:` finding: a definition
+  carrying an unrecognised block no longer loads without it
 - The Rust builder pattern remains the internal API for constructing agents programmatically
 - Graph and workflow definitions are a separate concern (see
   [ADR-0012](0012-graph-definition-format.md), execution graph format)

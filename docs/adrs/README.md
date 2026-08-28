@@ -62,7 +62,7 @@ A design doc's *folder* answers the same question for prose:
 | [0016](accepted/0016-typed-operations-no-free-form-apis.md) | Typed operations exposed to agents, no free-form storage APIs — the *shape* agent side effects must take; the annotation operations it names (`annotations.add_note`, `annotations.record_confidence`) are not built, and the annotations layer is runtime-written today (#90) |
 | [0017](accepted/0017-mcp-human-in-the-loop.md) | Autonomous resolution of MCP human-in-the-loop primitives (the capability-grant policy) |
 | [0018](accepted/0018-mcp-server-initiated-execution.md) | Execution model for server-initiated MCP calls (sampling/elicitation/roots) |
-| [0019](accepted/0019-skill-format.md) | Skill format and discovery — none of it is built, and the `skills: access:` frontmatter it documents parses and is silently discarded, so the declared restriction does not exist (#514) |
+| [0019](accepted/0019-skill-format.md) | Skill format and discovery — none of it is built, and since #514 the `skills: access:` frontmatter it documents is rejected as an unknown key, so a definition carrying it fails to load rather than running without the declared restriction |
 | [0020](accepted/0020-mcp-notification-handling.md) | MCP server notifications — drained in the daemon, tools refresh between invocations |
 | [0021](accepted/0021-mcp-cost-control-and-memory-boundary.md) | Cost control for MCP services via `_meta` (budget hint + cost report); memory stays MCP; embedding boundary deferred to the storage design |
 | [0022](accepted/0022-binary-distribution-and-licensing.md) | Binary distribution (musl/Apple Silicon release matrix, install.sh, cargo-binstall) and BSL 1.1 licensing |

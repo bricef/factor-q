@@ -18,15 +18,15 @@ runtime's preamble is a fixed `Environment:` block. (`meta/skills/` in this
 repo holds Claude Code skills for factor-q's own development agents — it is
 unrelated to this ADR.) Read every Consequence below as intent.
 
-**The `skills: access:` block below is worse than unbuilt — it fails
-silently.** `Frontmatter`
-(`services/fq-runtime/crates/fq-agent/src/definition.rs`) has no `skills`
-field and carries no `deny_unknown_fields`, so an agent definition written
-to this ADR loads cleanly, passes `fq agent validate`, and has its access
-list dropped on the floor. An author believes they have declared an access
-restriction that does not exist. The general silent-discard defect is #514;
-daemon config was deliberately tightened the other way, where an unknown
-setting is an error rather than a shrug.
+**The `skills: access:` block below is unbuilt, and now fails loudly.**
+`Frontmatter` (`services/fq-runtime/crates/fq-agent/src/definition.rs`)
+still has no `skills` field, but it now carries `deny_unknown_fields`, so
+an agent definition written to this ADR is **rejected at load** and
+`fq agent validate` reports the unknown field rather than a clean bill.
+That is the fix for #514: an author can no longer believe they declared
+an access restriction that does not exist — they get an error instead.
+The frontmatter now matches daemon config, which was always tightened
+this way, where an unknown setting is an error rather than a shrug.
 
 ## Context
 
@@ -73,10 +73,13 @@ The vector database is a shared primitive with the memory MCP service (ADR-0013)
 
 ### Namespace-based access control
 
-> **Not implemented, and silently ignored — see Status.** The runtime's
-> frontmatter parser has no `skills` field and does not reject unknown keys,
-> so a definition carrying the block below loads without error *and without
-> the restriction* (#514). Nothing here grants or denies anything today.
+> **Not implemented, and now a hard error — see Status.** The runtime's
+> frontmatter parser still has no `skills` field, and since #514 it
+> rejects unknown top-level keys outright. A definition carrying the
+> block below therefore **fails to load**, with an error naming `skills`
+> as an unknown field. It no longer loads silently without the
+> restriction — but it does not work either. Nothing here grants or
+> denies anything today.
 
 Agent definitions declare which skill namespaces they can access:
 
