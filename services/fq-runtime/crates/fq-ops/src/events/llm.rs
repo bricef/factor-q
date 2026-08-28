@@ -200,9 +200,9 @@ pub fn reduce_reasoning(parts: &[AssistantPart]) -> Option<crate::transcript::Tu
             ReasoningContent::Plain { text } => texts.push(text.as_str()),
             ReasoningContent::Signed { text, token } => {
                 texts.push(text.as_str());
-                opaque.push(Value::String(token.clone()));
+                opaque.push(token.clone());
             }
-            ReasoningContent::Opaque { token } => opaque.push(Value::String(token.clone())),
+            ReasoningContent::Opaque { token } => opaque.push(token.clone()),
         }
     }
     if texts.is_empty() && opaque.is_empty() {
@@ -288,11 +288,25 @@ pub enum ReasoningContent {
     /// Readable working plus a token that must be echoed verbatim.
     /// Anthropic `thinking` — where the token, not the text, is the
     /// payload.
-    Signed { text: String, token: String },
+    Signed { text: String, token: Value },
     /// No readable content: the token *is* the content. Anthropic
     /// `redacted_thinking`, Gemini thought signatures.
-    Opaque { token: String },
+    Opaque { token: Value },
 }
+
+// A note on `token: Value` rather than `String`.
+//
+// It is the provider's opaque payload in whatever shape that provider
+// uses, and for Anthropic that is the **whole block** — not the bare
+// signature. Anthropic verifies a thinking block *against* its signature,
+// so a signature without the block it signs cannot be replayed, and
+// reconstructing the block from text + signature would silently drop any
+// field the API adds later (I5). Keeping the block verbatim is the only
+// lossless option, and it is what the adapter echoes back.
+//
+// Gemini's thought signature is a bare string, which `Value` also holds.
+// ADR-0034 wrote this field as `String`; the shape is wider than the ADR
+// anticipated for exactly the reason above.
 
 /// One tool's result, answering the call with the matching id.
 ///

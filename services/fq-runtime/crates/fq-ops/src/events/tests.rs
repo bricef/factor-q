@@ -598,7 +598,7 @@ fn reducing_reasoning_keeps_absence_and_opacity_distinct() {
     // 3. Readable plus a token we carry but cannot read.
     let signed = reduce_reasoning(&reasoning(ReasoningContent::Signed {
         text: "worked it out".to_string(),
-        token: "sig".to_string(),
+        token: serde_json::json!("sig"),
     }))
     .expect("signed reasoning is present");
     assert_eq!(signed.text.as_deref(), Some("worked it out"));
@@ -609,7 +609,7 @@ fn reducing_reasoning_keeps_absence_and_opacity_distinct() {
 
     // 4. The one that matters: no text, and still present.
     let opaque = reduce_reasoning(&reasoning(ReasoningContent::Opaque {
-        token: "blob".to_string(),
+        token: serde_json::json!("blob"),
     }))
     .expect("opaque reasoning is PRESENT, not absent — this is I7");
     assert!(opaque.text.is_none(), "there is genuinely nothing to read");
@@ -628,7 +628,7 @@ fn the_reduction_drops_provider_vocabulary() {
         model: "kimi-k2".to_string(),
         content: ReasoningContent::Signed {
             text: "t".to_string(),
-            token: "sig".to_string(),
+            token: serde_json::json!("sig"),
         },
     })])
     .expect("present");

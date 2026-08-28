@@ -59,6 +59,17 @@ pub struct MockResponse {
 /// Either a text block or a tool_use block in the response.
 #[derive(Debug, Clone)]
 pub enum ContentBlock {
+    /// An extended-thinking block. `signature` is what Anthropic
+    /// verifies the block by, and what a replayed turn must carry.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    /// Thinking the API withheld: no readable text, only an opaque
+    /// payload that must still be echoed back.
+    RedactedThinking {
+        data: String,
+    },
     Text {
         text: String,
     },
@@ -152,6 +163,18 @@ impl MockResponse {
                     "id": id,
                     "name": name,
                     "input": input,
+                }),
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => json!({
+                    "type": "thinking",
+                    "thinking": thinking,
+                    "signature": signature,
+                }),
+                ContentBlock::RedactedThinking { data } => json!({
+                    "type": "redacted_thinking",
+                    "data": data,
                 }),
             })
             .collect();

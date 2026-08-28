@@ -552,7 +552,7 @@ through a hand-rolled probe.
 | **3** ✅ | **OpenAI-compatible read + write.** `from_provider_response` reads `ChatResponse.reasoning_content`; `convert_message` emits `ContentPart::ReasoningContent`; `harness.rs:329` carries it into the replayed conversation. The cross-model strip (I2) lands here with its assertion. | I1, I2, I5 |
 | **4** ✅ | **The operator surface and the transcript.** `TurnAction::Assistant` gains `TurnReasoning` (§4.6) — the reduction that keeps parts internal. `TranscriptEntry` follows, then the flag in both consumers: `fq invocation transcript` and the dashboard, including its `opaque — click to see raw` affordance. Golden files move here. | I7, golden updated |
 | **5** ✅ | **Cost decomposition.** `reasoning_tokens` into `TokenUsage` from `completion_tokens_details`; `convert_usage` reads it; `total_cost` provably unchanged. | I4 |
-| **6** | **Anthropic encoder** behind the resolved genai dependency (upstream or fork). Re-run the round-trip experiment's `echo` arm through factor-q. | I1 on Anthropic |
+| **6** ✅ | **Anthropic encoder** behind the resolved genai dependency (upstream or fork). Re-run the round-trip experiment's `echo` arm through factor-q. | I1 on Anthropic |
 
 Phase 2 is the one to hold the line on: a pure shape change with an unchanged
 golden net is the cheapest possible place to discover the model is wrong.

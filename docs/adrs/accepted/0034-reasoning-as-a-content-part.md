@@ -210,6 +210,27 @@ transcript would conclude the model did no thinking, when in fact it did
 thinking we chose not to display. Absence and opacity are different facts and
 the system must say which one it is holding.
 
+## Appendix A — Amendment: the continuity token is a `Value` (2026-08-27)
+
+D2 wrote `Signed { text, token }` and `Opaque { token }` with `token` as a
+`String`, on the reading that a continuity token is a signature. Implementing
+the Anthropic round trip (phase 6) showed that is too narrow, so the field is
+`serde_json::Value`.
+
+**Anthropic verifies a thinking block *against* its signature.** The
+replayable unit is therefore the whole block — `{type, thinking, signature}` —
+not the signature alone. A signature without the block it signs cannot be sent,
+and reconstructing the block from `text` + signature would silently drop any
+field the API adds later, which is exactly the loss I5 forbids. Keeping the
+provider's block verbatim is the only lossless option.
+
+`Value` also still holds the narrow case: Gemini's thought signature is a bare
+string.
+
+Nothing above the adapter changes. `TurnReasoning.opaque` was already a
+`Value`, so the operator surface is unaffected, and the readable/opaque
+distinction D4 turns on is unchanged.
+
 ## Consequences
 
 ### Positive

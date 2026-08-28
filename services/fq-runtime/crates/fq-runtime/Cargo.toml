@@ -39,13 +39,20 @@ bytes = "1"
 getrandom = "0.3"
 toml = { workspace = true }
 async-trait = { workspace = true }
-# Pinned to an exact pre-release: cargo's caret rules do not admit new
-# pre-releases automatically, and a beta's API can move between betas, so
-# the version is a deliberate choice rather than a floating range. Taken
-# for #437 — beta.19 echoes `ContentPart::Custom` parts back on the
-# Anthropic request path (0.6 dropped them), which is most of what the
-# reasoning round-trip needs from this crate.
-genai = "=0.7.0-beta.19"
+# Pointed at our fork, pinned to a commit.
+#
+# Upstream 0.7 echoes `ContentPart::Custom` parts back on the Anthropic
+# request path, which is most of the reasoning round trip — but its
+# non-streaming parser still consumes a `thinking` block into
+# `reasoning_content` as text alone, discarding the `signature` Anthropic
+# verifies the block by. One match arm fixes it; the fork carries that arm
+# and its tests (#437 phase 1c), and the change is offered upstream.
+#
+# `rev` rather than `branch`: a branch is a moving target, and a
+# dependency that can change under a fixed Cargo.lock is exactly the
+# spooky action this codebase has already paid for once. Revisit when the
+# change lands upstream — at which point this returns to a version pin.
+genai = { git = "https://github.com/bricef/rust-genai", rev = "dc3f7b8a57410dcaf2e776470daa95f2b58e34d7" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 strum = { workspace = true }
