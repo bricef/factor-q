@@ -696,8 +696,9 @@ feed, and can remove a row an unhandled `worker.orphaned` still needs.
 Deletion therefore gets its own window, in days rather than seconds,
 and its own ownership guard: a worker that still owns `in_flight` or
 `ambiguous` invocations is never collected, because recovery follows
-`worker_id` back to them. (Written as `fq recovery`; there is no such
-verb. Operator triage of an ambiguous invocation is `fq invocation
+`worker_id` back to them. (The warning was first written as
+`fq recovery`; there is no such verb, and it was corrected on
+2026-08-27 to name the triage that does exist — `fq invocation
 resume`, or `fq invocation drop` to abandon it.) As an occasional human act prune got
 away with omitting that check. On a timer it would not have.
 

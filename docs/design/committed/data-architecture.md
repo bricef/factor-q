@@ -578,9 +578,10 @@ incompatible, because the refusal is not per-invocation. The remedy is
 to roll the binary forward again, or to delete the store and lose the
 in-flight state deliberately.
 
-> The error string the runtime prints points at
-> `fq invocation drop --schema-mismatch`, a flag that does not exist.
-> That is a code defect, not a doc one, and is recorded as such.
+> The error string the runtime printed used to point at
+> `fq invocation drop --schema-mismatch`, a flag that never existed.
+> That code defect was fixed on 2026-08-27: both schema-mismatch
+> errors now state the remedy above and name which store to delete.
 
 ### 5.7 Multi-process / multi-node ownership — DECIDED
 

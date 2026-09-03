@@ -115,9 +115,11 @@ is the unrecovered invocation rather than the leftover row.
 
 ## Triaging unresolved invocations
 
-There is no `fq recovery` verb. (The daemon still names one in a couple
-of its warnings; that is a bug in those strings, not a command you can
-run.) Triage is three verbs under `fq invocation`:
+There is no `fq recovery` verb. (The daemon used to name one in a
+couple of its warnings; those strings were corrected on 2026-08-27 and
+now name the verbs below, with a test gate holding every `fq …`
+reference in the source against the real CLI.) Triage is three verbs
+under `fq invocation`:
 
 ```sh
 # What is unresolved, and since when
