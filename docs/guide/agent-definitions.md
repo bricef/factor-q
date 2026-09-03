@@ -85,30 +85,38 @@ the rest of the directory, so one bad file costs you one agent rather
 than the registry. Run `fq agent validate` over a definition before
 adding it.
 
-### The nested blocks are not strict
+### The nested blocks are strict too
 
-The check stops at the top level. Keys **inside** the `sandbox:` block
-and inside an `mcp:` entry are still dropped in silence, exactly as
-every key used to be:
+The same check applies **inside** the `sandbox:` block and inside each
+`mcp:` entry, and the error names the block it came from:
 
-```yaml
-sandbox:
-  fs_writ:             # not `fs_write` — accepted, and grants nothing
-    - "${workspace}/**"
-mcp:
-  - server: filesystem
-    command: npx
-    samplingg: true    # not `sampling` — accepted, and grants nothing
+```
+invalid YAML: sandbox: unknown field `fs_writ`, expected one of
+`fs_read`, `fs_write`, `network`, `env`, `exec_cwd` at line 4 column 3
+
+invalid YAML: mcp[0]: unknown field `commandd`, expected one of
+`server`, `command`, `url`, `args`, `env`, `sampling`, `elicitation`,
+`roots` at line 5 column 5
 ```
 
-A definition carrying either one validates as `✓ valid` and loads. It
-runs *without* the grant its author believed they had written — which is
-the version of this failure with the sharpest edge, since the result is
-an agent quietly less able, or less contained, than its definition
-reads. The spelling of a key nested under `sandbox:` or `mcp:` is still
-yours to check: the dimension names are listed under
-[Dimensions](#dimensions), the per-server grants under
-[Capability grants](#capability-grants).
+`mcp[0]` is the index of the offending entry, which matters once a
+definition declares several servers.
+
+These are the typos worth catching, because the nested keys are the ones
+an author actually edits, and every one of them defaults to *empty*: a
+misspelled `fs_writ:` used to grant no write access while reporting a
+valid definition, surfacing much later as a permission denial with
+nothing to connect it back to the missing letter.
+
+> **One level is still silent (issue #526).** A typo *inside* a
+> `sampling:` or `elicitation:` grant — `redact_secretz: true` rather
+> than `redact_secrets:` — is still accepted, and leaves redaction
+> **off**, which is the opposite of what the author wrote. The grant is
+> parsed through an untagged representation that buffers its content, so
+> closing it needs a hand-written deserializer rather than the attribute
+> used everywhere else. Until then, check the spelling of keys nested
+> under a capability grant; they are listed under
+> [Capability grants](#capability-grants).
 
 ## Choosing the model
 

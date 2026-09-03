@@ -269,7 +269,25 @@ struct Frontmatter {
     elicitation_budget: Option<f64>,
 }
 
+/// A misspelled key here drops a server's transport, command or grants —
+/// the declaration still loads, and the agent gets an MCP server that is
+/// not the one its author described.
+///
+/// `deny_unknown_fields` for the same reason `Frontmatter` has it (#514):
+/// silence is the expensive failure. Legal here because this struct
+/// flattens nothing. #515 closed the top level only, so `mcp: [{ commandd:
+/// … }]` still loaded — a server with no command at all — until #520.
+///
+/// One level deeper is still silent: a typo *inside* a `sampling` or
+/// `elicitation` grant is swallowed by the untagged `Repr` that
+/// `CapabilityGrant`'s `Deserialize` delegates to, which buffers content
+/// the way `flatten` does. The attribute alone does not fix it — added to
+/// `CapabilityValidation` it rejects the typo but reports "data did not
+/// match any variant of untagged enum Repr", naming an internal type
+/// instead of the bad key. `Repr` has to dispatch on the value explicitly
+/// so the inner error survives (#526).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct McpFrontmatter {
     server: String,
     #[serde(default)]
@@ -291,7 +309,19 @@ struct McpFrontmatter {
     roots: bool,
 }
 
+/// Every field here is `#[serde(default)]` over a `Vec<String>`, so a
+/// misspelled key does not fail — it yields an *empty grant list*. The
+/// author wrote a grant, the tool confirmed the definition, and the agent
+/// silently cannot do the thing, surfacing later as a tool failure with no
+/// connection to the typo that caused it.
+///
+/// `deny_unknown_fields` for the same reason `Frontmatter` has it (#514):
+/// silence is the expensive failure. Legal here because this struct
+/// flattens nothing. #515 closed the top level and left this one open —
+/// `sandbox: { fs_writ: … }` was the more likely typo of the two, because
+/// the nested keys are the ones an author actually edits (#520).
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SandboxFrontmatter {
     #[serde(default)]
     fs_read: Vec<String>,
@@ -364,6 +394,64 @@ mod tests {
         )
         .expect_err("a misspelled sandbox key must not be silently dropped");
         assert!(err.to_string().contains("sandboxx"));
+    }
+
+    /// #515 closed the top level, which left the more likely typo open:
+    /// the nested keys are the ones an author actually edits, and every
+    /// one of them defaults to an empty `Vec`, so `fs_writ:` granted no
+    /// write access at all while reporting a valid definition. The failure
+    /// surfaced later as a permission denial with nothing to connect it
+    /// back to the missing `e` (#520).
+    #[test]
+    fn a_misspelled_key_inside_sandbox_is_rejected_and_named() {
+        let err =
+            parse_agent("---\nname: typo\nmodel: m\nsandbox:\n  fs_writ: [\"/tmp\"]\n---\nBody.\n")
+                .expect_err("a typo inside sandbox must not be silently dropped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fs_writ"),
+            "the error must name the offending key, got: {msg}"
+        );
+        assert!(
+            msg.contains("fs_write"),
+            "the error should list the field that was meant, got: {msg}"
+        );
+    }
+
+    /// The same one level down in `mcp`, where a dropped key means the
+    /// server runs with a transport its author did not write — here, no
+    /// command at all (#520).
+    #[test]
+    fn a_misspelled_key_inside_an_mcp_entry_is_rejected_and_named() {
+        let err = parse_agent(
+            "---\nname: typo\nmodel: m\nmcp:\n  - server: notes\n    commandd: notes-mcp\n---\nBody.\n",
+        )
+        .expect_err("a typo inside an mcp entry must not be silently dropped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("commandd"),
+            "the error must name the offending key, got: {msg}"
+        );
+        assert!(
+            msg.contains("mcp"),
+            "the error should locate which block it came from, got: {msg}"
+        );
+    }
+
+    /// The other half of strictness: correctly-spelled nested blocks must
+    /// still load. A `deny_unknown_fields` that also rejected valid input
+    /// would be caught by the example definitions, but not before it had
+    /// stopped a daemon from starting.
+    #[test]
+    fn correctly_spelled_nested_blocks_still_load() {
+        let agent = parse_agent(
+            "---\nname: nested\nmodel: m\nsandbox:\n  fs_read: [\"/tmp\"]\n  fs_write: [\"/out\"]\n  network: [\"api.example.com\"]\nmcp:\n  - server: notes\n    command: notes-mcp\n    args: [\"--fast\"]\n    roots: true\n---\nBody.\n",
+        )
+        .expect("valid nested blocks must still parse");
+        assert_eq!(agent.sandbox().fs_read_paths(), ["/tmp"]);
+        assert_eq!(agent.sandbox().fs_write_paths(), ["/out"]);
+        assert_eq!(agent.sandbox().network_patterns(), ["api.example.com"]);
+        assert_eq!(agent.mcp_servers().len(), 1);
     }
 
     /// Strictness must not cost us the fields that are genuinely
