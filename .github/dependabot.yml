@@ -41,3 +41,11 @@ updates:
     groups:
       actions-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # dtolnay/rust-toolchain publishes no version tags; its
+      # `scripts/update-revs.sh` regenerates a branch for every Rust
+      # minor from 1.0.0 through 1.120.0 ahead of any release. Dependabot
+      # reads those branch names as versions and proposes the highest,
+      # which rustup cannot download (#564). The ref is moved by hand, in
+      # lockstep with rust-toolchain.toml, as the workflow comments say.
+      - dependency-name: dtolnay/rust-toolchain
