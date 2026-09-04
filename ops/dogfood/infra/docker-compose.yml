@@ -1,6 +1,8 @@
 services:
   nats:
-    image: nats:latest
+    # Pinned to the broker version the test suite runs (.nats-version), so
+    # what the dogfood host runs is what CI tested against; bump together.
+    image: nats:2.14.3
     container_name: fq-dogfood-nats
     # Survive reboots without a supervisor: docker restarts the broker
     # whenever the docker daemon comes up.

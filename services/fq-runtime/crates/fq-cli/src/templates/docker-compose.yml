@@ -13,7 +13,8 @@
 # JetStream data persists in the `nats-data` volume across restarts.
 services:
   nats:
-    image: nats:latest
+    # The broker version this release of factor-q was tested against.
+    image: nats:2.14.3
     command:
       [
         "--jetstream",

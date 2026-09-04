@@ -1,6 +1,8 @@
 services:
   nats:
-    image: nats:latest
+    # Pinned to the broker version the test suite runs (.nats-version), so
+    # the dev broker and the per-test broker agree; bump both together.
+    image: nats:2.14.3
     ports:
       # Bound to loopback: the dev broker is reachable only from this
       # host (assessment critique #4). Client connections require the
