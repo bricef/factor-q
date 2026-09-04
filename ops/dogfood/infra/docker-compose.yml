@@ -9,12 +9,17 @@ services:
     restart: unless-stopped
     command: ["--config", "/etc/nats/nats.conf"]
     ports:
-      # Loopback-only: this broker is unauthenticated and must not be
-      # reachable off-box (factor-q assessment critique 4).
+      # Loopback-only (factor-q assessment critique 4) AND
+      # token-authenticated (#542): loopback alone left the broker open
+      # to every process on the host, agent exec children included.
       - "127.0.0.1:4223:4222"
       - "127.0.0.1:8223:8222"
     volumes:
       - ./nats.conf:/etc/nats/nats.conf:ro
+      # The broker token — `authorization { token: "…" }` — a host-side
+      # chmod-600 file, never committed; nats.conf includes it. Compose
+      # refuses to start the broker without it, which is the point.
+      - ../.secrets/nats-auth.conf:/etc/nats/auth.conf:ro
       - nats-data:/data/nats
 
   # The single public door to the operator dashboard (#105): TLS +
