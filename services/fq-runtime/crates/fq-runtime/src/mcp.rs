@@ -30,9 +30,8 @@ use rmcp::service::{
     MaybeSendFuture, NotificationContext, PeerRequestOptions, RequestContext, RoleClient,
     RunningService,
 };
-use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::transport::StreamableHttpClientTransport;
 use serde_json::Value;
-use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -43,8 +42,10 @@ use crate::tools::ToolRegistry;
 use crate::validation::ValidatorChain;
 
 mod server_config;
+mod stdio;
 pub use server_config::McpServerConfig;
 use server_config::SharedServerKey;
+pub(crate) use stdio::default_server_root;
 
 /// Errors from MCP server lifecycle and tool calls.
 #[derive(Debug, thiserror::Error)]
@@ -904,6 +905,8 @@ pub struct McpClientManager {
     servers: Vec<RunningServer>,
     /// Transport identities already started, to deduplicate.
     started: HashSet<SharedServerKey>,
+    /// Root of the stdio servers' working directories, `<root>/<server>` (see [`stdio`]).
+    server_root: std::path::PathBuf,
 }
 
 impl Default for McpClientManager {
@@ -913,10 +916,17 @@ impl Default for McpClientManager {
 }
 
 impl McpClientManager {
+    /// Stdio servers start under [`default_server_root`] (the temp dir, never the cwd).
     pub fn new() -> Self {
+        Self::with_server_root(default_server_root())
+    }
+
+    /// Stdio servers start in `<server_root>/<server>`, created on demand (#541).
+    pub fn with_server_root(server_root: std::path::PathBuf) -> Self {
         Self {
             servers: Vec::new(),
             started: HashSet::new(),
+            server_root,
         }
     }
 
@@ -1030,21 +1040,9 @@ impl McpClientManager {
                     command: url.clone(),
                     reason: err.to_string(),
                 })?,
-            // stdio child-process transport.
+            // stdio child process: cleared env, pinned PATH, own cwd (#541, `stdio`).
             None => {
-                let env_vars = config.env.clone();
-                let args = config.args.clone();
-                let transport =
-                    TokioChildProcess::new(Command::new(&config.command).configure(|cmd| {
-                        cmd.args(&args);
-                        for (k, v) in &env_vars {
-                            cmd.env(k, v);
-                        }
-                    }))
-                    .map_err(|err| McpError::ServerStart {
-                        command: config.command.clone(),
-                        reason: err.to_string(),
-                    })?;
+                let transport = stdio::spawn_transport(&config, &self.server_root)?;
                 handler
                     .serve(transport)
                     .await

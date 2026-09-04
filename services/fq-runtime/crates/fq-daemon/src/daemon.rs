@@ -216,7 +216,7 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
 
     // Build tool registry: built-ins + MCP servers from all agents.
     let mut tools = ToolRegistry::with_builtins_exec(config.tools.exec.to_exec_config());
-    let mut mcp_manager = McpClientManager::new();
+    let mut mcp_manager = McpClientManager::with_server_root(config.state.directory.join("mcp"));
     for loaded in registry.iter() {
         for decl in loaded.agent.mcp_servers() {
             // Grant-bearing servers run per-invocation, wired by the
@@ -289,6 +289,7 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                     .max_iterations(config.max_iterations)
                     .enforce_pricing(true)
                     .workspace(workspace.clone())
+                    .mcp_server_root(config.state.directory.join("mcp"))
                     .build(),
             ),
             fq_runtime::Harness::new(),

@@ -12,6 +12,8 @@
 //! what the *platform* provides. A new dependency extends whichever
 //! bundle it belongs to instead of re-signing `ReducerRunner::new`.
 
+use std::path::PathBuf;
+
 use super::*;
 
 /// Agent-relevant context for an invocation: the services and
@@ -181,6 +183,11 @@ pub struct RunnerConfig {
     /// `None` (the default) leaves the token unbound: agents that don't
     /// use it are unaffected, agents that do fail loud at start.
     pub(super) workspace: Option<Arc<dyn WorkspaceProvider>>,
+    /// Where the per-invocation (grant-bearing) stdio MCP servers get
+    /// their working directories, `<root>/<server>` (#541). The daemon
+    /// passes `<state dir>/mcp`, the same root its shared servers use;
+    /// the default is the temp-dir root, never the process cwd.
+    pub(super) mcp_server_root: PathBuf,
 }
 
 impl RunnerConfig {
@@ -204,6 +211,7 @@ pub struct RunnerConfigBuilder {
     max_iterations: Option<u32>,
     enforce_pricing: Option<bool>,
     workspace: Option<Arc<dyn WorkspaceProvider>>,
+    mcp_server_root: Option<PathBuf>,
 }
 
 impl RunnerConfigBuilder {
@@ -271,6 +279,15 @@ impl RunnerConfigBuilder {
         self
     }
 
+    /// Root for the per-invocation stdio MCP servers' working
+    /// directories (#541). Optional; defaults to the temp-dir root the
+    /// [`McpClientManager`](crate::McpClientManager) uses when given
+    /// none. The daemon passes `<state dir>/mcp`.
+    pub fn mcp_server_root(mut self, root: PathBuf) -> Self {
+        self.mcp_server_root = Some(root);
+        self
+    }
+
     /// Finalise the config. Panics if any required field was not set
     /// (`clock` is optional and defaults to [`SystemClock`]).
     pub fn build(self) -> RunnerConfig {
@@ -293,6 +310,9 @@ impl RunnerConfigBuilder {
                 .unwrap_or(crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS),
             enforce_pricing: self.enforce_pricing.unwrap_or(false),
             workspace: self.workspace,
+            mcp_server_root: self
+                .mcp_server_root
+                .unwrap_or_else(crate::mcp::default_server_root),
         }
     }
 }

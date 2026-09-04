@@ -103,6 +103,12 @@ use tracing::{debug, warn};
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
+/// The `PATH` every child the runtime starts with a cleared environment
+/// gets by default: the `exec` tool's children, and the stdio MCP
+/// servers the runtime spawns (which prepend the directory their
+/// command resolved to). One definition, so the two can never drift.
+pub const DEFAULT_CHILD_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
 /// Runtime-configurable parameters for the exec tool.
 #[derive(Debug, Clone)]
 pub struct ExecConfig {
@@ -132,7 +138,7 @@ impl Default for ExecConfig {
             default_timeout: Duration::from_secs(30),
             max_timeout: Duration::from_secs(300),
             max_output_bytes: 100 * 1024,
-            default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
+            default_path: DEFAULT_CHILD_PATH.to_string(),
             drain_grace: Duration::from_secs(2),
         }
     }
