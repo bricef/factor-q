@@ -5,13 +5,22 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/install.sh | sh
 #
+# Verification fails closed: the bundle's published `.sha256` must be
+# fetched and must match, and a SHA-256 tool must be present — none of
+# the three is optional, and no failure of any of them installs anything
+# (https://github.com/bricef/factor-q/issues/405).
+#
 # Environment overrides:
 #   FQ_VERSION       version to install (e.g. 0.1.0 or v0.1.0; default: latest)
 #   FQ_INSTALL_DIR   install directory (default: $HOME/.local/bin)
+#   FQ_RELEASE_BASE  where the release assets are fetched from — a mirror,
+#                    or a local server when testing this script (default:
+#                    https://github.com/bricef/factor-q/releases/download)
 set -eu
 
 REPO="bricef/factor-q"
 INSTALL_DIR="${FQ_INSTALL_DIR:-$HOME/.local/bin}"
+RELEASE_BASE="${FQ_RELEASE_BASE:-https://github.com/$REPO/releases/download}"
 
 err() {
     echo "error: $*" >&2
@@ -25,6 +34,15 @@ need() {
 need curl
 need tar
 need uname
+
+# --- pick the checksum tool up front: no tool, no install ---
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256_of() { sha256sum "$1" | awk '{print $1}'; }
+elif command -v shasum >/dev/null 2>&1; then
+    sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+else
+    err "required command not found: sha256sum or shasum (needed to verify the download; refusing to install unverified)"
+fi
 
 # --- detect target triple ---
 os="$(uname -s)"
@@ -60,7 +78,7 @@ fi
 version="${tag#v}"
 
 name="factor-q-${version}-${target}"
-url="https://github.com/$REPO/releases/download/${tag}/${name}.tar.gz"
+url="${RELEASE_BASE}/${tag}/${name}.tar.gz"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -68,17 +86,20 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 echo "Installing factor-q ${tag} (${target}) -> ${INSTALL_DIR}"
 curl -fsSL "$url" -o "$tmp/bundle.tar.gz" || err "download failed: $url"
 
-# --- verify checksum when the .sha256 is published ---
-if curl -fsSL "${url}.sha256" -o "$tmp/bundle.sha256" 2>/dev/null; then
-    expected="$(awk '{print $1}' "$tmp/bundle.sha256")"
-    if command -v sha256sum >/dev/null 2>&1; then
-        actual="$(sha256sum "$tmp/bundle.tar.gz" | awk '{print $1}')"
-    else
-        actual="$(shasum -a 256 "$tmp/bundle.tar.gz" | awk '{print $1}')"
-    fi
-    [ "$expected" = "$actual" ] || err "checksum mismatch (expected $expected, got $actual)"
-    echo "  checksum ok"
-fi
+# --- verify the checksum; every failure here aborts the install ---
+# The .sha256 is mandatory. Installing when it cannot be fetched would
+# hand anyone who can make one request fail (a MITM, a CDN blip, a
+# mispublished release) an unverified install, silently.
+curl -fsSL "${url}.sha256" -o "$tmp/bundle.sha256" \
+    || err "could not fetch the checksum file ${url}.sha256 — refusing to install an unverified bundle (the release may be mispublished, or the connection interfered with; retry, or check https://github.com/$REPO/releases)"
+expected="$(awk 'NF { print $1; exit }' "$tmp/bundle.sha256")"
+case "$expected" in
+    *[!0-9a-fA-F]* | "") err "checksum file ${url}.sha256 is malformed (expected a SHA-256 hex digest, got '$expected') — refusing to install" ;;
+esac
+[ "${#expected}" -eq 64 ] || err "checksum file ${url}.sha256 is malformed (expected 64 hex chars, got ${#expected}) — refusing to install"
+actual="$(sha256_of "$tmp/bundle.tar.gz")"
+[ "$expected" = "$actual" ] || err "checksum mismatch for $url (expected $expected, got $actual) — refusing to install"
+echo "  checksum ok"
 
 tar -xzf "$tmp/bundle.tar.gz" -C "$tmp"
 
