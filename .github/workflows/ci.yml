@@ -136,7 +136,7 @@ jobs:
       - uses: actions/checkout@v7
       # markdownlint runs via npx inside `just lint-docs`; setup-node
       # provides npx (a Rust container / minimal runner has none).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - uses: extractions/setup-just@v4
@@ -248,7 +248,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.11
       # The MCP integration tests spawn the reference server via npx.
       - if: needs.changes.outputs.runtime == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
       - if: needs.changes.outputs.runtime == 'true'
