@@ -26,6 +26,13 @@ one-line caveats.
 - **Agent identity:** agent GitHub actions currently use the owner's
   `GH_TOKEN`; per-agent identity and attestation are still
   [design work](docs/design/aspirational/agent-identity-and-attestation.md).
+- **Dependencies:** every push and pull request runs `just audit` —
+  `cargo audit` and `cargo deny` against `deny.toml`, the reviewed advisory
+  and licence baseline (one explained ignore per accepted finding, never a
+  blanket allow). Dependabot opens weekly update PRs for the Cargo
+  workspace, the Go adapters and the workflow actions. The `main-latest`
+  binaries the dogfood host pulls are built from a lockfile that has
+  passed this gate.
 
 ## Reporting a Vulnerability
 

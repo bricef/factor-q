@@ -273,9 +273,10 @@ gate-adapters: install-nats
 # Compatibility name used by CI.
 go-ci: gate-adapters
 
-# Run all quality checks — docs lint + link check + both Rust gates + the Go
-# adapters (the full local gate) — and print a per-phase wall-clock timing
-# summary at the end, so an operator can see where `just ci` spent its time.
+# Run all quality checks — docs lint + link check + dependency audit + both
+# Rust gates + the Go adapters (the full local gate) — and print a per-phase
+# wall-clock timing summary at the end, so an operator can see where
+# `just ci` spent its time.
 #
 # Why a script body instead of `ci: lint-docs check-links rust-ci go-ci`:
 # recipe *dependencies* run before the body, so a dependency chain cannot be
@@ -330,6 +331,7 @@ ci:
     run_phase "lint-docs"   just lint-docs
     run_phase "check-links" just check-links
     run_phase "quality"     just quality
+    run_phase "audit"       just audit
     run_phase "runtime"     just runtime-ci
     run_phase "store"       just store-ci
     run_phase "dashboard"   just dashboard-ci
@@ -437,6 +439,59 @@ check-links: test-check-links
 # Run check-links.py's own tests.
 test-check-links:
     python3 -m unittest discover -s scripts -p 'test_check_links.py'
+
+# === Dependency audit ===
+
+# The audit tools are pinned here and read back by the CI job with
+# `just --evaluate`, so a version bump is one edit. Bump both together and
+# re-run `just audit`: a new cargo-deny can change what deny.toml means.
+cargo_audit_version := "0.22.2"
+cargo_deny_version := "0.20.2"
+
+# `cargo install` of an already-installed version is a no-op, so this is
+# cheap to repeat. CI fetches prebuilt binaries of the same versions rather
+# than compiling them (the Dependency audit job in .github/workflows/ci.yml).
+# Install the pinned cargo-audit and cargo-deny.
+install-audit-tools:
+    cargo install --locked cargo-audit@{{cargo_audit_version}} cargo-deny@{{cargo_deny_version}}
+
+# Two views of one Cargo.lock, one reviewed baseline (deny.toml, #406):
+#
+#   * `cargo audit` scans the flat lockfile — every crate cargo could ever
+#     build, including ones no feature of ours reaches. `--deny warnings`
+#     makes unmaintained, unsound and yanked findings fail alongside
+#     vulnerabilities: a warning nobody is made to read is a finding nobody
+#     reviews.
+#   * `cargo deny check` resolves the workspace's real dependency graph
+#     (every feature on — deny.toml [graph]) and fails on any advisory not
+#     explicitly ignored there, on a yanked crate, on a licence outside the
+#     allow-list, and on a source outside crates.io and the one pinned git
+#     fork. `--locked`: an audit that rewrote Cargo.lock would have audited
+#     something other than what gets built.
+#
+# deny.toml is the ONLY ignore list. Its advisory ids are handed to
+# `cargo audit` verbatim, so one explained line accepts a finding in both
+# tools, and an id the grep misses fails closed (audit goes red), never
+# open. Each tool covers the other's blind spot: audit sees lockfile-only
+# crates deny cannot reach (and, in cargo-deny 0.20, unsound advisories
+# that carry an `unaffected` range, which deny skips); deny gates licences
+# and sources audit knows nothing about.
+# Audit dependencies: RustSec advisories, licences, sources (deny.toml).
+audit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for tool in cargo-audit cargo-deny; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "$tool is not installed — run \`just install-audit-tools\`" >&2
+            exit 1
+        fi
+    done
+    ignore_flags=()
+    while IFS= read -r id; do
+        ignore_flags+=(--ignore "$id")
+    done < <(grep -oE 'id *= *"RUSTSEC-[0-9]{4}-[0-9]{4}"' deny.toml | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]{4}')
+    cargo audit --deny warnings ${ignore_flags[@]+"${ignore_flags[@]}"}
+    cargo deny --locked check
 
 # === Code quality ===
 
