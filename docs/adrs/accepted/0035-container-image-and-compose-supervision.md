@@ -20,10 +20,13 @@ one volume at `/var/lib/factor-q` and a `HEALTHCHECK` on the daemon
 ([#587](https://github.com/bricef/factor-q/issues/587), slice 1); every
 merge to `main` pushes them to `ghcr.io/bricef/<name>` tagged with the
 twelve-hex commit the binaries report and with a moving `main-latest`
-(slice 2). Not built: the compose stack and the supervisor it is (2, 5,
-7), the tag-bump `deploy.sh`, and probes on the adapter and dashboard
-images (8); `ops/dogfood/deploy.sh` still flips symlinks and launches
-with `setsid`. The tracking issue carries the slices.
+(slice 2); `ops/dogfood/compose.yml` is the stack definition and
+supervisor of clause 2 with clause 7's network shape and the one volume
+of clause 6 (slice 3). Not built: the tag-bump `deploy.sh` of clause 5
+and probes on the adapter and dashboard images (8); `ops/dogfood/deploy.sh`
+still deploys the tarball and launches with `setsid`, so the compose
+stack is defined but not yet what runs. The tracking issue carries the
+slices.
 
 ## Context
 

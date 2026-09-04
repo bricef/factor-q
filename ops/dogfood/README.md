@@ -339,3 +339,101 @@ reopened the systemd question as Phase 1 work (#553); the answer is
 — container images under docker compose, no systemd units. Nothing of
 it is built yet, and this README describes the `setsid` shape until it
 is.
+
+## The compose stack (ADR-0035)
+
+[compose.yml](compose.yml) is the stack the instance moves to under
+[ADR-0035](../../docs/adrs/accepted/0035-container-image-and-compose-supervision.md):
+six services — the broker, the proxy, the daemon, the watcher, the
+dashboard and the scheduler — with `restart: unless-stopped`, health
+ordering on the broker, a stop grace period longer than the daemon's
+drain deadline, resource limits on the daemon and rotated logs, running
+the images `main-artifacts.yml` publishes to `ghcr.io/bricef` (the
+[runtime README](../../services/fq-runtime/README.md#published-images)
+describes them). No systemd units. Tracked as
+[#587](https://github.com/bricef/factor-q/issues/587); this section is
+slice 3, the stack definition.
+
+**Not yet the live shape.** `deploy.sh` still deploys the tarball and
+launches the four `setsid` processes; moving it to a tag bump against
+this file is slice 4, and the migration runbook is slice 6. Until then
+the two shapes coexist in this directory and **must not run at once on
+one host**: both bind the edge on `127.0.0.1:9470` and the dashboard on
+`9472`, and `infra/docker-compose.yml` (the broker and proxy of the
+launcher shape) and `compose.yml` both want `:443`. Bring one down
+before the other comes up.
+
+What differs from the launcher shape, in the order it bites:
+
+- **The daemon runs in the `fq-dogfood` image**, whose one volume
+  `fq-data` at `/var/lib/factor-q` is the instance: `fqd.toml`,
+  `fq.toml`, `fq-cron.toml`, `agents/`, `state/`, `cache/`,
+  `workspace/`, `build/`. The tree under `~/fq-dogfood` becomes the
+  content of that volume (minus `releases/`, `current`, `.secrets/`).
+- **`fqd.toml` needs three settings for this shape**: `[edge] bind =
+  "0.0.0.0:9470"` (compose publishes it on host loopback; the container's
+  loopback would be unreachable), `[workspace] path =
+  "/var/lib/factor-q/workspace"` (no environment form exists), and
+  `[nats] token_env = "FQ_NATS_TOKEN"` with **no** `url` override needed
+  — the image's `FQ_NATS_URL=nats://nats:4222` outranks it. Every other
+  directory setting is pinned by the image's environment and ignored
+  in the file.
+- **The broker leaves host loopback.** It lives on the stack's network
+  as `nats:4222`, so `GHW_NATS_URL` and `FQCRON_NATS_URL` in
+  `.secrets/env` read `nats://<token>@nats:4222`. Host-side tooling
+  that spoke to `127.0.0.1:4223` (a `nats` CLI for a stream backup)
+  runs as a one-off container on the `fq-dogfood_default` network
+  instead.
+- **`.secrets/env` is a plain KEY=VALUE file** under compose: no shell
+  expansion, so `GH_TOKEN` must be a literal token. The dashboard's
+  three edge settings move to `.secrets/dashboard.env`
+  ([template](dashboard.env.example)), the compose-shape equivalent of
+  `dashboard.sh`'s `env -i` (#545). The launcher tuning
+  `FQ_WATCH_REPO` / `FQ_WATCH_AGENT` / `FQ_WATCH_POLL` becomes the
+  watcher's own `GHW_REPO` (required — it has no default) / `GHW_AGENT`
+  / `GHW_POLL`.
+- **`.env` beside `compose.yml`** ([template](.env.example)) holds
+  `FQ_TAG`, the twelve-hex commit to run, plus the resource limits and
+  the stop grace period. It is compose's substitution file, not the
+  processes' environment. `deploy.sh` will own `FQ_TAG` from slice 4;
+  never set it to `main-latest`, which moves under a running instance.
+- **The dashboard and Caddy stay on the host network**, loopback-bound
+  exactly as the processes were: the dashboard refuses any bind but
+  loopback (its safety property — Caddy is the only door), and a
+  loopback bind inside a container is unreachable from outside it. The
+  `Caddyfile` is unchanged.
+- **Pairing happens inside the daemon's container.** The daemon's
+  `HEALTHCHECK` is `fq status` over the edge, which needs a pairing the
+  container's `fq` keeps under `state/client/` in the volume; until it
+  exists the container reports unhealthy. Pair once, from the host:
+
+  ```sh
+  docker compose exec fqd fq connect 127.0.0.1:9470 \
+    --token "$(docker compose exec fqd cat /var/lib/factor-q/state/edge/admin.token)" \
+    --fingerprint "$(docker compose exec fqd cat /var/lib/factor-q/state/edge/fingerprint)"
+  ```
+
+  The operator's own `fq` on the host pairs to the same published
+  address with the same two files, read through `docker compose exec`
+  as above (or from a `docker run --rm -v fq-dogfood_fq-data:/v` view of
+  the volume).
+- **The broker's health check needs `wget`**, so the stack runs
+  `nats:2.14.3-alpine` — the same pinned version as `.nats-version`, the
+  variant with a shell. Bump the two together.
+- **Zombies.** The daemon is PID 1 in its container and spawns agents'
+  processes; `init: true` puts a tiny init above it to reap what a
+  killed agent leaves behind.
+
+Bring-up on a host that already has the tree, once the four secrets
+files and `.env` exist:
+
+```sh
+cd ~/fq-dogfood && docker compose up -d      # all six, broker first
+docker compose ps                            # every service, its health
+docker compose logs -f fqd                   # the daemon's log
+docker compose stop fqd                      # a drain (SIGTERM, ADR-0027), within FQ_STOP_GRACE
+```
+
+A deploy or rollback in this shape is `FQ_TAG=<sha>` in `.env` and
+`docker compose up -d`; slice 4 gives that a script with the drain,
+verification and `flock` the launcher `deploy.sh` has.

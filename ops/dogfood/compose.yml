@@ -1,0 +1,200 @@
+# The dogfood stack (ADR-0035): docker compose is the stack definition and
+# the supervisor. Six services — the broker, the proxy, the daemon, the
+# watcher, the dashboard and the scheduler — each with a restart policy, a
+# health check where the image has one, dependency ordering, a stop grace
+# period longer than the daemon's drain deadline, resource limits and log
+# rotation. No systemd units; the host's init starts the container
+# runtime and nothing else of ours.
+#
+# Layout on the host (`~/fq-dogfood`, the same tree as before):
+#
+#   compose.yml            this file (copied from ops/dogfood/)
+#   .env                   FQ_TAG and the knobs below (see .env.example)
+#   infra/nats.conf        broker config; infra/Caddyfile the proxy's
+#   .secrets/env           provider keys, GH_TOKEN, the broker token and
+#                          the adapters' URLs — a plain KEY=VALUE file
+#                          under compose, NOT a shell fragment
+#   .secrets/dashboard.env the dashboard's three edge settings, and only
+#                          those (#545: the web-facing process never
+#                          holds a provider key)
+#   .secrets/nats-auth.conf, .secrets/caddy.env   as before
+#
+# Everything the daemon persists lives in ONE named volume, fq-data,
+# mounted at /var/lib/factor-q: fqd.toml, fq.toml, fq-cron.toml, agents/,
+# state/ (the edge identity), cache/ (the stores), workspace/ and build/.
+# Backing up or migrating the instance is that volume plus the broker's
+# nats-data (services/fq-runtime/README.md, "One volume").
+#
+# The daemon's config must say, for this shape:
+#   [edge]      bind = "0.0.0.0:9470"           # published on host loopback below
+#   [workspace] path = "/var/lib/factor-q/workspace"
+#   [nats]      token_env = "FQ_NATS_TOKEN"     # the URL comes from the image
+#
+# Bring-up: `docker compose up -d` here, after `.env` names a tag. Deploy
+# and rollback are a tag change and the same command (ops/dogfood/deploy.sh
+# drives that from #587 slice 4 on; until then this file and the setsid
+# launchers coexist and must not run at once — both would bind 9470).
+
+name: fq-dogfood
+
+# Rotated logs for every service: the driver, not the process, bounds them.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+  nats:
+    # Pinned to the broker version the test suite runs (.nats-version); the
+    # alpine variant because the health check below needs `wget`, and the
+    # plain image is a bare binary with no shell. Bump both together.
+    image: nats:2.14.3-alpine
+    restart: unless-stopped
+    command: ["--config", "/etc/nats/nats.conf"]
+    # No published ports: the broker lives on the compose network only.
+    # The daemon reaches it as nats://nats:4222 (the image's default
+    # FQ_NATS_URL), the adapters through their own URL variables. Agents
+    # run inside the daemon's container and so share its network — the
+    # token (#542) is what stands between an agent and the trigger
+    # subject, as it did on the host.
+    volumes:
+      - ./infra/nats.conf:/etc/nats/nats.conf:ro
+      # `authorization { token: "…" }`, host-side, chmod 600, never
+      # committed; nats.conf includes it. Compose refuses to start the
+      # broker without it, which is the point.
+      - ./.secrets/nats-auth.conf:/etc/nats/auth.conf:ro
+      - nats-data:/data/nats
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    logging: *logging
+
+  fqd:
+    image: ${FQ_IMAGE_REPO:-ghcr.io/bricef}/fq-dogfood:${FQ_TAG:?set FQ_TAG in .env to the twelve-hex commit to run}
+    restart: unless-stopped
+    depends_on:
+      nats:
+        condition: service_healthy
+    # The daemon spawns agents' processes and is PID 1 in its container;
+    # a tiny init reaps the orphans a killed agent leaves behind, which the
+    # daemon would otherwise accumulate as zombies.
+    init: true
+    env_file:
+      - ./.secrets/env
+    volumes:
+      # The one volume (ADR-0035 clause 6). Nothing else is mounted, and
+      # never the docker socket: agents run inside this container.
+      - fq-data:/var/lib/factor-q
+    ports:
+      # The edge, for the operator's `fq` on the host and for the
+      # dashboard (host-networked below). Loopback only; the edge is
+      # authenticated, but nothing here needs to be reachable off-box.
+      - "127.0.0.1:9470:9470"
+    # `docker stop` sends SIGTERM, which the daemon treats as a drain
+    # (ADR-0027): in-flight invocations suspend at their next step
+    # boundary, bounded by [worker] drain_deadline_ms (120 s by default).
+    # The grace period must exceed that deadline plus teardown, or every
+    # deploy is a kill. Change the two together.
+    stop_grace_period: ${FQ_STOP_GRACE:-150s}
+    # The image's HEALTHCHECK is `fq status` over the edge; it needs the
+    # one-time pairing described in the README, and reports unhealthy
+    # until then. The start period covers recovery at boot.
+    healthcheck:
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          # The job cap of #292: agents compile the repo inside this
+          # container, and an unbounded cargo takes the whole host.
+          cpus: "${FQ_CPUS:-6}"
+          memory: ${FQ_MEMORY:-24g}
+    logging: *logging
+
+  github-watcher:
+    image: ${FQ_IMAGE_REPO:-ghcr.io/bricef}/github-watcher:${FQ_TAG:?set FQ_TAG in .env to the twelve-hex commit to run}
+    restart: unless-stopped
+    depends_on:
+      nats:
+        condition: service_healthy
+    # Everything the watcher reads is GHW_* in the environment (repo,
+    # agent, poll, labels, and GHW_NATS_URL with the token as userinfo —
+    # nats://<token>@nats:4222 in this shape) plus GH_TOKEN; no flags.
+    env_file:
+      - ./.secrets/env
+    logging: *logging
+
+  fq-cron:
+    image: ${FQ_IMAGE_REPO:-ghcr.io/bricef}/fq-cron:${FQ_TAG:?set FQ_TAG in .env to the twelve-hex commit to run}
+    restart: unless-stopped
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      # The schedule lives in the instance volume beside fqd.toml; the
+      # scheduler watches it and reloads on edit, so the mount is
+      # read-only and the file is edited from the host or via the daemon
+      # container.
+      FQCRON_CONFIG: /var/lib/factor-q/fq-cron.toml
+    env_file:
+      - ./.secrets/env
+    volumes:
+      - fq-data:/var/lib/factor-q:ro
+    logging: *logging
+
+  fq-dashboard:
+    image: ${FQ_IMAGE_REPO:-ghcr.io/bricef}/fq-dashboard:${FQ_TAG:?set FQ_TAG in .env to the twelve-hex commit to run}
+    restart: unless-stopped
+    depends_on:
+      fqd:
+        # Not `service_healthy`: the daemon's probe needs a pairing that
+        # a fresh instance does not have yet, and the dashboard renders
+        # "runtime unreachable" on its own when the edge is down.
+        condition: service_started
+    # Host networking, on purpose: the dashboard refuses any bind but
+    # loopback (its own safety property — Caddy is the only door), and a
+    # loopback bind inside a container is unreachable from outside it.
+    # On the host's network it binds 127.0.0.1:9472 exactly as the
+    # process did, reaches the edge at 127.0.0.1:9470 through the port
+    # published above, and Caddy proxies to it unchanged.
+    network_mode: host
+    # Its own env file with exactly the three edge settings and its
+    # FQ_DASHBOARD_* tuning (#545): the web-facing process never sees
+    # the provider keys or GH_TOKEN. Not `.secrets/env`.
+    env_file:
+      - ./.secrets/dashboard.env
+    logging: *logging
+
+  caddy:
+    # The single public door to the dashboard (#105): TLS + basic-auth
+    # with a session cookie, admin API off (#543). Host networking so it
+    # can reach 127.0.0.1:9472 and bind :443 for the TLS-ALPN challenge.
+    image: caddy:2
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - fq-dashboard
+    # DASH_USER / DASH_HASH / DASH_COOKIE — a host-side chmod-600 file,
+    # never committed. An edit needs a container recreate
+    # (`docker compose up -d --force-recreate caddy`): with the admin API
+    # off there is no reload, and env is read at start regardless.
+    env_file:
+      - ./.secrets/caddy.env
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging: *logging
+
+volumes:
+  # The instance. Seeded from the fq-dogfood image on first mount with the
+  # layout owned by uid 65532, so the daemon can write before it starts.
+  fq-data:
+  # The event log (JetStream). The other half of "the complete state".
+  nats-data:
+  # Caddy's certificates and its autosaved config; regenerable.
+  caddy-data:
+  caddy-config:

@@ -48,3 +48,7 @@ __pycache__/
 # file was committed by accident (finding E4 of the 2026-09-03 review) and
 # removed in the Phase 0 work; nothing under here is ever a source.
 .local/
+
+# The dogfood instance's secrets never live in the repo; a local
+# validation of ops/dogfood/compose.yml may create them here.
+ops/dogfood/.secrets/
