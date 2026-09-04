@@ -65,7 +65,9 @@ fq-dogfood/
 │                                #   repo-tracked ones live in ops/dogfood/agents/ —
 │                                #   install with scp (declare the model first, below)
 ├── .secrets/env                 # the single declared environment (chmod 600)
-├── infra/                       # NATS compose + config (copied from ./infra)
+├── .secrets/nats-auth.conf      # the broker token, included by infra/nats.conf (#542)
+├── .secrets/caddy.env           # dashboard basic-auth + session secret for Caddy
+├── infra/                       # NATS + Caddy compose and config (copied from ./infra)
 ├── logs/                        # fq-run.log, watcher.log, dashboard.log, cron.log
 └── workspace/ cache/            # runtime state
 ```
@@ -102,6 +104,16 @@ swaps.
 mkdir -p ~/fq-dogfood/{releases,logs,agents,.secrets} && chmod 700 ~/fq-dogfood/.secrets
 cp -r ops/dogfood/infra ~/fq-dogfood/
 install -m 600 ops/dogfood/env.example ~/fq-dogfood/.secrets/env  # then edit
+# Broker token (#542): one value in four places — the include file the
+# broker reads, and the three variables env.example describes.
+tok="$(openssl rand -hex 32)"
+printf 'authorization { token: "%s" }\n' "$tok" > ~/fq-dogfood/.secrets/nats-auth.conf
+chmod 600 ~/fq-dogfood/.secrets/nats-auth.conf
+#   .secrets/env: FQ_NATS_TOKEN=$tok; GHW_NATS_URL and FQCRON_NATS_URL
+#                 as nats://$tok@127.0.0.1:4223
+#   fqd.toml:     [nats] url = "nats://127.0.0.1:4223" (no credential — the
+#                 daemon refuses one) and token_env = "FQ_NATS_TOKEN"
+# .secrets/caddy.env: DASH_USER / DASH_HASH / DASH_COOKIE (dashboard section)
 # fqd.toml: copy an existing instance config. `fq init` does write one,
 #           but it is a fresh-project starter — one provider, one model,
 #           the dev broker's URL, and no [edge] bind — so a daemon
@@ -171,6 +183,77 @@ retention edit takes effect on `deploy.sh --force`, not on a reload. A
 new provider key is the same story for a different reason: only launch
 reads `.secrets/env`.
 
+### Before any restart
+
+`deploy.sh`, `deploy.sh --force` and the two procedures below all stop
+the daemon. Two checks first, every time:
+
+1. **In-flight work.** `fq invocation list` and look for anything not in
+   a terminal state. `fq status` showing dispatcher lag 0 only means no
+   *pending* triggers; an already-dispatched invocation can be
+   executing. The drain suspends in-flight invocations at a step
+   boundary and the next start resumes them, but a run that is mid
+   tool-call when the deadline expires becomes ambiguous and can never
+   be resumed.
+2. **Disk.** `df -h /`. Per-invocation workspaces and cargo target dirs
+   fill it; a full disk killed the daemon on 2026-07-20.
+
+After the flip, the known-defect noise above aside: `fq status` answers
+with the new version and the agents loaded, the projector consumer is
+caught up, and the previous worker's terminal state is `shutdown`, not
+`stale`. The `fq` client prints tarpc INFO spans to stderr on every call
+(#535); `2>/dev/null` is safe when reading its output.
+
+A deploy that crosses an event `SCHEMA_VERSION` bump (2 → 3 with #510)
+does not rebuild the projection — the projector continues from its
+durable position and only new events are projected — but transcripts of
+invocations recorded under the old version may not render until #409
+is done. Do **not** delete `cache/projection.db` across such a bump: a
+rebuild replays every event and silently drops the ones it cannot parse
+(#409).
+
+### Broker token (#542)
+
+The instance broker on 4223 requires a token: `infra/nats.conf`
+includes `auth.conf`, which compose mounts from
+`.secrets/nats-auth.conf`. Every client presents the same value — the
+daemon through `[nats] token_env` (`FQ_NATS_TOKEN`), the watcher and
+cron as URL userinfo in `GHW_NATS_URL` and `FQCRON_NATS_URL`, each in
+the process environment and never in argv. Set or rotate it in one
+window, because every consumer restarts:
+
+1. Write the new value into `.secrets/nats-auth.conf` and the three
+   variables in `.secrets/env` (the bootstrap block above).
+2. `./current/fq down` (the drain), then SIGTERM the watcher, cron and
+   dashboard — the bring-down `deploy.sh` performs, done by hand here
+   because the broker has to restart while nothing is connected to it.
+3. `docker compose -f infra/docker-compose.yml up -d --force-recreate nats`,
+   then wait for `curl -sf http://127.0.0.1:8223/healthz`.
+4. `deploy.sh --force` (or a plain `deploy.sh` if a newer build is due):
+   it finds no daemon, installs, and relaunches all four processes with
+   the new environment.
+5. Verify: `fq status` answers; `logs/watcher.log` and `logs/cron.log`
+   show no authorization errors; and an unauthenticated publish is
+   refused —
+
+   ```sh
+   exec 3<>/dev/tcp/127.0.0.1/4223; printf 'PUB x 1\r\na\r\n' >&3; timeout 2 cat <&3; exec 3>&-
+   ```
+
+   answers `-ERR 'Authorization Violation'` after the broker's `INFO`
+   line. This is the Phase 0 exit criterion for the broker
+   ([#554](https://github.com/bricef/factor-q/issues/554)).
+
+### Caddy (#543)
+
+The admin API is off (`admin off` in the Caddyfile's global block), so
+no process on the host can read or replace the running config through
+`localhost:2019`; `curl localhost:2019/config/` must be refused. The
+cost is that `caddy reload` is gone: after any Caddyfile or `caddy.env`
+change, recreate the container
+(`docker compose -f infra/docker-compose.yml up -d --force-recreate caddy`).
+Certificates live in the `caddy-data` volume and survive it.
+
 One-line invocation summaries (#216): set `[summary] model = "<cheap-model>"`
 in `fqd.toml` and restart (`deploy.sh --force`) and the daemon keeps a one-line,
 cheap-model status per invocation on the dashboard's invocation surfaces —
@@ -205,7 +288,7 @@ commands):
 3. **Mint an attenuated token.** `FQ_EDGE_TOKEN` must be an
    *attenuation* of the admin token, not the admin token itself:
 
-   ```
+   ```sh
    fq token attenuate --addr "$FQ_EDGE" \
      --grant read:agent --grant read:control --grant read:cost \
      --grant read:event --grant read:invocation --grant read:turn
@@ -248,6 +331,7 @@ someone launched a process by hand from the wrong `releases/<sha>/`).
 `fq-dashboard --version` prints the dashboard's build SHA.
 
 Not built yet, by design (see #102): health-gate + auto-rollback after
-the flip, and any supervisor (systemd is deliberately out of scope; the
-launchers are detached with `setsid`, NATS restarts via docker's
-`restart: unless-stopped`).
+the flip, and any supervisor (systemd was ruled out of scope there; the
+launchers are detached with `setsid`, NATS and Caddy restart via
+docker's `restart: unless-stopped`). The production-readiness review
+reopens the systemd question as Phase 1 work (#553).
