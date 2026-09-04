@@ -229,6 +229,7 @@ impl MockOpenAiServer {
             anthropic: None,
             extra,
         })
+        .expect("the mock's client builds")
     }
 
     pub async fn shutdown(mut self) {

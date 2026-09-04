@@ -359,7 +359,7 @@ impl TestRuntime {
     /// Convenience: build a `GenAiClient` pointed at the
     /// harness's mock.
     pub fn llm_client(&self) -> GenAiClient {
-        GenAiClient::with_base_url(self.mock.base_url())
+        GenAiClient::with_base_url(self.mock.base_url()).expect("the mock's client builds")
     }
 
     /// Convenience: push a response to the mock's queue.

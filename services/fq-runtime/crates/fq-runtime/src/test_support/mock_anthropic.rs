@@ -21,7 +21,7 @@
 //! # async fn example() {
 //! let mock = MockAnthropicServer::start().await;
 //! mock.push_response(MockResponse::text("hello", 12, 4));
-//! let _client = GenAiClient::with_base_url(mock.base_url());
+//! let _client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
 //! // ... drive the runtime ...
 //! mock.shutdown().await;
 //! # }
@@ -390,7 +390,7 @@ mod tests {
         let mock = MockAnthropicServer::start().await;
         mock.push_response(MockResponse::text("hello from mock", 50, 10));
 
-        let client = GenAiClient::with_base_url(mock.base_url());
+        let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
         let response = client.chat(simple_request()).await.expect("chat");
         assert_eq!(
             response.text().as_deref(),
@@ -416,7 +416,7 @@ mod tests {
             6,
         ));
 
-        let client = GenAiClient::with_base_url(mock.base_url());
+        let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
         let response = client.chat(simple_request()).await.expect("chat");
         assert_eq!(response.tool_calls().len(), 1, "expected one tool call");
         assert_eq!(response.tool_calls()[0].tool_name, "file_read");
@@ -433,7 +433,7 @@ mod tests {
         mock.push_response(MockResponse::text("first", 10, 2));
         mock.push_response(MockResponse::text("second", 10, 2));
 
-        let client = GenAiClient::with_base_url(mock.base_url());
+        let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
         let r1 = client.chat(simple_request()).await.expect("chat 1");
         let r2 = client.chat(simple_request()).await.expect("chat 2");
         assert_eq!(r1.text().as_deref(), Some("first"));
@@ -449,7 +449,7 @@ mod tests {
         let mock = MockAnthropicServer::start().await;
         mock.push_response(MockResponse::text("ok", 5, 1));
 
-        let client = GenAiClient::with_base_url(mock.base_url());
+        let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
         client.chat(simple_request()).await.expect("chat");
 
         let received = mock.received_requests();
@@ -473,7 +473,7 @@ mod tests {
         let mock = MockAnthropicServer::start().await;
         // No push_response — queue is empty.
 
-        let client = GenAiClient::with_base_url(mock.base_url());
+        let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
         let err = client
             .chat(simple_request())
             .await

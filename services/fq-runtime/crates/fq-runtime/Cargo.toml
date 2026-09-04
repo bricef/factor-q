@@ -41,20 +41,20 @@ bytes = "1"
 getrandom = "0.4"
 toml = { workspace = true }
 async-trait = { workspace = true }
-# Pointed at our fork, pinned to a commit.
+# Pinned exactly: a beta's API can move between betas, and this one did
+# (0.7.0-beta.20 -> 21 changed how the client is built and how Anthropic
+# thinking is modelled).
 #
-# Upstream 0.7 echoes `ContentPart::Custom` parts back on the Anthropic
-# request path, which is most of the reasoning round trip — but its
-# non-streaming parser still consumes a `thinking` block into
-# `reasoning_content` as text alone, discarding the `signature` Anthropic
-# verifies the block by. One match arm fixes it; the fork carries that arm
-# and its tests (#437 phase 1c), and the change is offered upstream.
-#
-# `rev` rather than `branch`: a branch is a moving target, and a
-# dependency that can change under a fixed Cargo.lock is exactly the
-# spooky action this codebase has already paid for once. Revisit when the
-# change lands upstream — at which point this returns to a version pin.
-genai = { git = "https://github.com/bricef/rust-genai", rev = "dc3f7b8a57410dcaf2e776470daa95f2b58e34d7" }
+# 0.7.0-beta.21 is the first release that carries an Anthropic thinking
+# block's `signature` through a non-streaming response (upstream PR #275),
+# which is what #437 phase 6 needed and what a fork of ours supplied in
+# the meantime. Upstream models the block as a `ThoughtSignature` part
+# beside a `ReasoningContent` part; the fork kept the raw block as a
+# `Custom` part. The adapter reads upstream's shape and still replays the
+# block whole (see `llm/genai.rs`); the wire goldens under
+# `tests/snapshots/reasoning_wire/` pin that nothing the provider or the
+# reducer sees changed across the switch.
+genai = "=0.7.0-beta.21"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 strum = { workspace = true }
