@@ -1,0 +1,43 @@
+# Dependabot (#406): weekly update PRs for every ecosystem this repo builds
+# from — the Cargo workspace, the two Go adapters, and the Actions the
+# workflows run. Minor and patch bumps arrive grouped, one PR per ecosystem
+# per week; a major bump gets its own PR, because that is the one someone
+# has to read a changelog for. The audit gate (`just audit`, the Dependency
+# audit job) is what makes a green Dependabot PR safe to merge.
+#
+# Actions are pinned to full commit SHAs with a `# vX.Y.Z` comment where
+# they have been reviewed (production-readiness review, E2); Dependabot
+# moves the SHA and the comment together.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: gomod
+    directory: /adapters/fq-cron
+    schedule:
+      interval: weekly
+    groups:
+      go-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: gomod
+    directory: /adapters/github-watcher
+    schedule:
+      interval: weekly
+    groups:
+      go-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]
