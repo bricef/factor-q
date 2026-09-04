@@ -65,8 +65,29 @@ mcp:
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
 ```
 
-Tool calls go through the same sandbox/budget/event machinery as
-built-ins. A tool-only server is shared across invocations.
+A tool-only server is shared across invocations.
+
+**MCP tool execution is server-enforced, and trust is per server.** The
+runtime's sandbox (`fs_read`, `fs_write`, `exec_cwd`, `env`) governs the
+built-in tools only; it is not consulted for an MCP tool call. In the
+example above, `/data` is whatever `server-filesystem` was told to serve
+— no `fs_read` the agent declares narrows it, and declaring one would
+not. A filesystem or shell server therefore acts with the daemon's
+privileges over whatever its arguments name: declare one only for a
+server you would run by hand with those arguments. Deriving a server's
+arguments from the sandbox, or refusing a filesystem-shaped server whose
+arguments fall outside it, is future work tracked with the isolation
+epic ([#209](https://github.com/bricef/factor-q/issues/209)).
+
+What the runtime *does* control is the process. A stdio server starts
+with a constructed environment — a pinned `PATH` plus the directory its
+`command` resolved to, then exactly the declared `env:` and nothing
+inherited from the daemon — in a working directory of its own under the
+daemon's state directory, with its stderr forwarded to the daemon log
+under the server's name
+([#541](https://github.com/bricef/factor-q/issues/541)). Each call is
+still recorded in the invocation's event trail like any other tool
+call; what the call *does* is the server's.
 
 Naming rules — enforced at discovery, failing the server loudly rather
 than offering a partial tool set:
@@ -200,8 +221,10 @@ for the full syntax.
 factor-q derives the advertised roots from the agent's sandbox
 `fs_read`/`fs_write` paths — **advertised roots ⊆ the sandbox boundary**
 (you can never advertise a path the sandbox doesn't permit). Roots are
-**advisory**: they tell a cooperative server its intended scope; the
-sandbox is the actual enforcement wall.
+**advisory**: they tell a cooperative server its intended scope, and
+nothing enforces them on the server's side. The sandbox walls the
+built-in tools, not what a server does with its own arguments — see
+[Tools](#tools).
 
 ```yaml
 sandbox:
