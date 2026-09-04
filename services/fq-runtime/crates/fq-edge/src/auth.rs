@@ -47,7 +47,7 @@ impl EdgeIdentity {
         let cert = rcgen::generate_simple_self_signed(vec!["fqd".to_string()])?;
         Ok(EdgeIdentity {
             cert_der: cert.cert.der().to_vec(),
-            key_der: cert.key_pair.serialize_der(),
+            key_der: cert.signing_key.serialize_der(),
             root: KeyPair::new(),
         })
     }
