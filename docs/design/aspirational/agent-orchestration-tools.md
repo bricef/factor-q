@@ -111,7 +111,7 @@ The runtime executes one kind of thing: a graph of agent nodes. `AgentGraph` is 
 
 A directed graph of agent nodes with typed edges. Not a DAG — cycles are first-class, guarded by edge predicates and bounded by iteration caps.
 
-```
+```text
 AgentGraph({
   nodes: [
     {
@@ -148,6 +148,7 @@ AgentGraph({
 **Cycles and convergence.** A back-edge (an edge whose `to` is upstream of its `from` in the entry-rooted traversal) is fine. Iteration semantics are expressed by the guard on the back-edge — e.g. "loop while quality score < threshold" — and bounded by `max_iterations`. A cycle with no guard that can exit fails graph validation at submission time.
 
 **Compilation of the sugar tools.** Informally:
+
 - `AgentSpawn` compiles to a graph with one `agent` node, `entry = exit`.
 - `AgentMap` compiles to `source → map → aggregate → exit`. The aggregator is optional today; once added (below), it's the default shape.
 - `AgentLoop` compiles to `worker ↔ reviewer` with a guarded back-edge from reviewer to worker, plus an exit edge when the reviewer approves.
@@ -162,7 +163,7 @@ Callers who need shapes the sugar tools don't cover — dynamic branching, multi
 
 A handle returned by `AgentSpawn`, `AgentMap`, `AgentLoop`, or `AgentGraph` is opaque, globally-scoped, and persistent.
 
-```
+```text
 HandleRef = string                 // opaque, globally unique, stable across restarts
 ```
 
@@ -183,7 +184,7 @@ A completed agent's result needs to go somewhere. Sometimes that's back to the c
 
 Sinks are declared at spawn time via `notify_on_complete`:
 
-```
+```text
 SinkSpec = OneOf<{
   bus: { subject: string, payload_shape?: JSONSchema },
   webhook: { url: string, method: "POST" | "PUT", headers?: map, retries?: number },
@@ -212,7 +213,7 @@ Graphs are data. Named, versioned, parameterised graphs are reusable data — **
 
 A fragment is:
 
-```
+```text
 Fragment = {
   name: string,                        // e.g. "std.map", "org.research.scatter_gather"
   version: string,                     // semver and/or content hash (see versioning, below)
@@ -238,7 +239,7 @@ Fragments reference other fragments through `subgraph` nodes in their graph body
 
 Dedicated tools for publishing, resolving, and discovering fragments. These are administrative — used during authoring and at graph compile time, rarely inside a hot loop.
 
-```
+```text
 FragmentPublish({
   name: string,
   version: string,
@@ -250,9 +251,10 @@ FragmentPublish({
 })
   → { ref: FragmentRef, canonical_hash: string }
 ```
+
 Validates the graph (type-checks edges against node parameter/result schemas, rejects unresolvable fragment refs, verifies no unguarded cycles), computes the canonical content hash, and stores the fragment.
 
-```
+```text
 FragmentResolve({ ref: FragmentRef })
   → {
       name, version, graph, parameter_schema, result_schema,
@@ -260,9 +262,10 @@ FragmentResolve({ ref: FragmentRef })
       resolved_dependencies: FragmentRef[],   // transitive closure, fully pinned
     }
 ```
+
 Returns the full fragment record with all transitive dependencies resolved to specific versions — the "lockfile view" for a given reference. Deterministic for a given registry state.
 
-```
+```text
 FragmentList({
   namespace?: string,                  // e.g. "std", "org.research"
   tag?: string,
@@ -271,9 +274,10 @@ FragmentList({
 })
   → [FragmentSummary]
 ```
+
 Discovery. Returns summaries (name, latest version, description, tags) rather than full records.
 
-```
+```text
 FragmentInspect({ ref: FragmentRef })
   → {
       ...full fragment record,
@@ -281,9 +285,10 @@ FragmentInspect({ ref: FragmentRef })
       usage: { spawn_count_30d: number, last_spawned_at: timestamp },
     }
 ```
+
 Full metadata plus usage telemetry, useful before deprecating or modifying widely-used fragments.
 
-```
+```text
 FragmentDeprecate({
   ref: FragmentRef,
   successor?: FragmentRef,             // recommend callers migrate here
@@ -291,6 +296,7 @@ FragmentDeprecate({
 })
   → ack
 ```
+
 Marks a version as deprecated without deleting it. Callers still resolving the deprecated version get a warning event on the bus; existing dependents continue to work.
 
 **Explicitly out of scope for the first pass:** a full package-manager transport (publish to a remote registry, pull from upstream, mirror, vendor). The initial registry is local to the factor-q instance. Remote federation is future work.
@@ -316,7 +322,7 @@ These replace patterns I currently compose by hand on every complex task.
 
 Replaces the current foreground/background split with a uniform handle-returning call.
 
-```
+```text
 AgentSpawn({
   type: string,                  // agent type to spawn
   prompt: string,                // the brief
@@ -340,7 +346,7 @@ AgentSpawn({
 
 Explicit join with configurable semantics. Replaces the implicit "foreground blocks / background notifies" model.
 
-```
+```text
 AgentWait({
   ids: string[],
   mode: "all" | "any" | "n",
@@ -365,7 +371,7 @@ AgentWait({
 
 Templated fan-out with a concurrency cap. The most common pattern in practice.
 
-```
+```text
 AgentMap({
   type: string,
   items: any[],
@@ -402,7 +408,7 @@ AgentMap({
 
 Stops a running agent cleanly.
 
-```
+```text
 AgentCancel({ id: string, reason?: string })
   → { final_state: "cancelled" | "already_done", partial_result?: any }
 ```
@@ -421,7 +427,7 @@ These enable workflows that technically work today but are prohibitively expensi
 
 Worker/reviewer loops that iterate inside the subagent system without filling the orchestrator's context with intermediate drafts.
 
-```
+```text
 AgentLoop({
   worker: { type, prompt_template, model? },     // receives {{previous_output}} and {{review}} on iterations > 1
   reviewer: { type, prompt_template, model? },   // receives {{worker_output}}, must return approval signal
@@ -449,7 +455,7 @@ AgentLoop({
 
 Pass refs between agents instead of bodies.
 
-```
+```text
 ArtifactWrite({ name?: string, content: string | bytes, ttl_s?: number })
   → { ref: ArtifactRef }
 
@@ -469,7 +475,7 @@ ArtifactRead({ ref: ArtifactRef })
 
 Not a separate tool — a parameter on `AgentSpawn`, `AgentMap`, and on each `worker` / `reviewer` sub-config inside `AgentLoop`.
 
-```
+```text
 ModelSelector = string
   // Either a tier alias — "fast" | "default" | "deep"
   // Or a concrete model id — e.g. "claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"
@@ -491,7 +497,7 @@ ModelSelector = string
 
 Not a separate tool — a parameter on `AgentSpawn`, `AgentMap`, and `AgentLoop`.
 
-```
+```text
 AgentSpawn({ ..., output_schema: JSONSchema })
   → { id }
 
@@ -511,7 +517,7 @@ Currently impossible to answer basic operational questions like "what's running 
 
 ### `AgentList`
 
-```
+```text
 AgentList({ status?: "running" | "done" | "failed" | "cancelled" })
   → [{
       id,
@@ -534,7 +540,7 @@ AgentList({ status?: "running" | "done" | "failed" | "cancelled" })
 
 A `Budget` type used by `AgentSpawn`, `AgentMap`, and `AgentLoop`:
 
-```
+```text
 Budget = {
   max_tokens?: number,
   max_duration_s?: number,
@@ -553,7 +559,7 @@ Budget = {
 
 Streaming-ish progress without blocking.
 
-```
+```text
 AgentPeek({ id: string, last_n_events?: number })
   → {
       status,
@@ -576,7 +582,7 @@ Lower priority but would smooth rough edges.
 
 Named pool with a standing concurrency cap; submit work to it instead of re-specifying `max_concurrency` per call.
 
-```
+```text
 PoolCreate({ name, max_concurrency, default_budget? }) → { pool_id }
 PoolSubmit({ pool_id, type, prompt, ... }) → { id }
 PoolDrain({ pool_id }) → waits for all submitted work
@@ -590,7 +596,7 @@ Deterministic cache keyed on `{type, prompt, tool_state_hash}`, with an opt-in f
 
 The current harness has a `SendMessage` primitive for resuming an agent. Make it explicit and documented:
 
-```
+```text
 AgentMessage({ id, message }) → { ack, estimated_resume_delay_ms? }
 ```
 

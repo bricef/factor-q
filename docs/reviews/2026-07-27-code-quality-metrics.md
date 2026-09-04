@@ -46,6 +46,8 @@ I'd note the scalar "instability" number is a heuristic — Martin's formulation
 
 **Tier 2 — highest signal available, needs git history rather than the AST:**
 
+<!-- markdownlint-disable MD029 -->
+
 6. **Change coupling (logical coupling).** Files that repeatedly change in the same commit but live in different modules. This is the best coupling metric in practice because it measures *actual* coupling rather than declared coupling — two files that always change together are one concept split across a seam that isn't real. It's a `git log --name-only` parse, no instrumentation. And it independently catches the bad-split failure mode: if a `runner.rs` split produces two files that always change together, you split the wrong seam, and only this metric can tell you.
 7. **Churn × size hotspots.** The size gate says "`runner.rs` is big." Churn says "and you edit it every week" — which is the argument that converts *should* refactor into *must*. Given the dogfood loop's commit density, you have unusually good data for this.
 
@@ -54,6 +56,8 @@ I'd note the scalar "instability" number is a heuristic — Martin's formulation
 8. **Mutation score (`cargo-mutants`).** Your review named the test-suite gap precisely: *"the suite thoroughly explores the state space it imagined and does not probe the boundary of that imagination."* Coverage percentage won't find that; mutation testing is the one measurement that does, because it attacks the suite rather than the code. For a repo whose strongest asset is verification, this is the metric that proves the asset is load-bearing rather than merely voluminous. Expensive — run it sampled or incrementally on changed files, not in `just quality`.
 9. **`cargo-deny` / `cargo-audit`.** Neither is present; finding 3.6 (510 crates, no vuln scanning) is still open. This is a quality gate as much as a security one.
 10. **Cyclomatic/cognitive complexity** — I'd skip it. It correlates so heavily with function length that it adds little over what `lint-creep` already tells you.
+
+<!-- markdownlint-enable MD029 -->
 
 ## One measurement-correctness note
 

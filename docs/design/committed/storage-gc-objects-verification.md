@@ -40,7 +40,7 @@ loser falls back. Objects, in the shipped code, have **neither** — the `object
 table is `(cid, refcount)` with no `available` bit, and the collector unlinks the
 manifest *unconditionally*, before the only refcount re-check:
 
-```
+```python
 for cid in unreferenced_objects():   # refcount = 0
     content.remove(cid)               # (1) unlink manifest — UNCONDITIONAL
     index.delete_object(cid)          # (2) delete row — guarded (refcount==0)

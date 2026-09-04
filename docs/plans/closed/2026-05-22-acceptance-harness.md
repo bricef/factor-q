@@ -5,6 +5,7 @@
 `c5b7a43` (TestRuntime harness), `ad53960` (drop-ambiguous
 scenario + extracted operator::drop_invocation), `3577e41`
 (stale-worker scenario), `42a9682` (retry-sweeper scenario
+
 + cross-test contamination fix + projection-consumer flake
 fix), `9926882` (drop-vs-late-archived race), `7f6b13b`
 (binary smoke test), and the doc-only close (this commit).
@@ -24,9 +25,11 @@ Two real bugs found and fixed inline (per the plan's
    history.** `consumer_projects_events_into_store` timed out
    replaying days of stream history. Fix: narrow the test
    consumer's filter to its own agent.
+
 **Design references**:
-- [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) §3.4 (ambiguous), §5.5 (archive write order), §7 (recovery).
-- [`docs/design/committed/event-schema.md`](../../design/committed/event-schema.md) — every event the harness asserts on.
+
++ [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) §3.4 (ambiguous), §5.5 (archive write order), §7 (recovery).
++ [`docs/design/committed/event-schema.md`](../../design/committed/event-schema.md) — every event the harness asserts on.
 
 ## Goal
 
@@ -45,43 +48,43 @@ acceptance test.
 
 What the codebase already has:
 
-- Many NATS-gated component-level tests (250+ pass against
++ Many NATS-gated component-level tests (250+ pass against
   live NATS as of `2e4b592`).
-- `completed_invocation_archives_and_worker_cleans_up_against_mock`
++ `completed_invocation_archives_and_worker_cleans_up_against_mock`
   — one full-pipeline test that constructs the worker side
   (ReducerRunner + ArchiveAckConsumer), a test variant of
   the CoordinationConsumer, MockAnthropicServer, and asserts
   the happy-path archive flow. ~150 lines, all inline.
-- `MockAnthropicServer` in `test_support::mock_anthropic`
++ `MockAnthropicServer` in `test_support::mock_anthropic`
   — already production-grade.
-- `run_test_consumer` in `coordination_consumer.rs` tests
++ `run_test_consumer` in `coordination_consumer.rs` tests
   — dispatches `InvocationAmbiguous`,
   `InvocationArchived`, and `InvocationOperatorRecovered`
   under a custom durable name.
 
 What's missing:
 
-- No reusable harness — every full-stack test re-builds the
++ No reusable harness — every full-stack test re-builds the
   same setup inline. New scenarios pay full setup tax.
-- No coverage of failure paths end-to-end: worker crash
++ No coverage of failure paths end-to-end: worker crash
   mid-tool, stale worker, CP outage, race conditions.
-- No binary-level smoke (`cargo run --bin fq -- --help`
++ No binary-level smoke (`cargo run --bin fq -- --help`
   could break without any test catching it).
 
 ## Decisions taken on 2026-05-22
 
-- **In-process harness, with one subprocess smoke test.**
++ **In-process harness, with one subprocess smoke test.**
   The runtime's logic lives in `fq-runtime`; binary-level
   bugs are usually CLI-arg parsing or startup logic. An
   in-process harness gives us deterministic, fast scenarios;
   a single subprocess test exercises `fq --help` /
   `fq status` to catch the rare binary-only regression.
-- **Harness lives in `fq-runtime::test_support::runtime`.**
++ **Harness lives in `fq-runtime::test_support::runtime`.**
   Already-`cfg(test)`-gated module; sibling to
   `mock_anthropic`. fq-runtime's own tests use it directly;
   fq-cli tests can build a stripped-down variant if they
   need to (separate concern, not in scope here).
-- **Test isolation by uniqueness, not by reset.** Each
++ **Test isolation by uniqueness, not by reset.** Each
   `TestRuntime::start()` invocation gets a fresh
   `WorkerId`, `AgentId`-prefix, durable consumer name, and
   tempdir for each SQLite store. NATS state is shared across
@@ -92,21 +95,21 @@ What's missing:
   causing the projection-consumer test to time out. That's a
   pre-existing flake; we'll note a fix idea in the closing
   notes but not solve it in this plan.
-- **Mock LLM only — no live-Anthropic in this harness.**
++ **Mock LLM only — no live-Anthropic in this harness.**
   The drift detector at
   `llm::genai::tests::anthropic_real_api_basic_response_parses`
   already covers protocol-drift detection (manual,
   `just acceptance-drift`). The harness uses
   `MockAnthropicServer` exclusively so scenarios are
   deterministic.
-- **Scenarios match what failure modes are actually
++ **Scenarios match what failure modes are actually
   reachable in v1.** The four selected:
-  - Drop ambiguous end-to-end (step 9's deferred acceptance).
-  - Stale worker detection (step 7's stale-sweep, full path).
-  - Retry sweeper recovers from CP outage (step 8's retry
+  + Drop ambiguous end-to-end (step 9's deferred acceptance).
+  + Stale worker detection (step 7's stale-sweep, full path).
+  + Retry sweeper recovers from CP outage (step 8's retry
     sweeper, but exercised through real NATS publish/
     redeliver rather than direct method calls).
-  - Race: drop vs late `invocation.archived` (the
+  + Race: drop vs late `invocation.archived` (the
     no-downgrade guard, exercised live).
   Other failure modes (workspace corruption, partial WAL,
   etc.) are out of scope for this harness — they belong
@@ -163,20 +166,20 @@ rt.shutdown().await;
 
 Components spun up:
 
-- `EventBus::connect(FQ_NATS_URL)`.
-- `WorkerStore`, `ControlPlaneStore`, `ProjectionStore` in
++ `EventBus::connect(FQ_NATS_URL)`.
++ `WorkerStore`, `ControlPlaneStore`, `ProjectionStore` in
   three separate tempdirs (so the WAL files don't collide).
-- `MockAnthropicServer`.
-- `ProjectionConsumer` (custom durable name).
-- A test-variant CoordinationConsumer (the existing
++ `MockAnthropicServer`.
++ `ProjectionConsumer` (custom durable name).
++ A test-variant CoordinationConsumer (the existing
   `run_test_consumer` helper, or a similar function lifted
   out so it can be called from this module).
-- `HeartbeatProducer` + `HeartbeatConsumer` (separate test
++ `HeartbeatProducer` + `HeartbeatConsumer` (separate test
   durables).
-- `ArchiveAckConsumer`.
-- `ArchiveRetrySweeper` (with short retry interval for tests).
-- A real `GenAiClient::with_base_url(mock.base_url())`.
-- `ReducerRunner` wired with the above.
++ `ArchiveAckConsumer`.
++ `ArchiveRetrySweeper` (with short retry interval for tests).
++ A real `GenAiClient::with_base_url(mock.base_url())`.
++ `ReducerRunner` wired with the above.
 
 Each long-running task gets a `oneshot::Sender<()>` shutdown
 handle; `TestRuntime::shutdown()` fires all of them and
@@ -184,12 +187,12 @@ awaits the handles.
 
 #### Done when
 
-- [x] `TestRuntime::start()` and `::shutdown()` work; one
++ [x] `TestRuntime::start()` and `::shutdown()` work; one
       smoke test that just starts, runs no invocation,
       shuts down cleanly passes.
-- [x] All store and mock accessors compile and return the
++ [x] All store and mock accessors compile and return the
       expected types.
-- [x] The existing
++ [x] The existing
       `completed_invocation_archives_and_worker_cleans_up_against_mock`
       test is rewritten to use `TestRuntime` and stays
       green — proves the harness is a faithful replacement
@@ -225,8 +228,8 @@ Assert:   - Within 5s: coordination_invocation_owner.status
 
 #### Done when
 
-- [x] Test green against live NATS.
-- [x] Step 9 parent plan's status block updated to mark
++ [x] Test green against live NATS.
++ [x] Step 9 parent plan's status block updated to mark
       this acceptance test as shipped.
 
 ---
@@ -255,8 +258,8 @@ Assert:   - coordination_worker row for the worker_id has
 
 #### Done when
 
-- [x] Test green against live NATS.
-- [x] TestRuntime exposes a way to start with overridden
++ [x] Test green against live NATS.
++ [x] TestRuntime exposes a way to start with overridden
       stale/sweep thresholds (test-only constructor or a
       builder method).
 
@@ -294,10 +297,10 @@ Assert 2: - Within 3 seconds: invocation_archive row exists.
 
 #### Done when
 
-- [x] Test green against live NATS.
-- [x] TestRuntime gains a `start_without_coordination()`
++ [x] Test green against live NATS.
++ [x] TestRuntime gains a `start_without_coordination()`
       builder variant.
-- [x] TestRuntime gains a way to start the coordination
++ [x] TestRuntime gains a way to start the coordination
       consumer post-hoc (or a separate
       `start_coordination_consumer()` method).
 
@@ -333,8 +336,8 @@ Assert:   - coordination_invocation_owner.status remains
 
 #### Done when
 
-- [x] Test green against live NATS.
-- [x] Confirms the no-downgrade guard works through the
++ [x] Test green against live NATS.
++ [x] Confirms the no-downgrade guard works through the
       live event bus, not just through direct handler calls.
 
 ---
@@ -361,36 +364,36 @@ A single integration test in `fq-cli/tests/` that:
 
 #### Done when
 
-- [x] `cargo test -p fq-cli --test smoke` green.
-- [x] Test doesn't require NATS to be running (uses a
++ [x] `cargo test -p fq-cli --test smoke` green.
++ [x] Test doesn't require NATS to be running (uses a
       bogus URL so connection fails predictably).
 
 ---
 
 ### Step 7 — Documentation and closing
 
-- [x] Update `services/fq-runtime/README.md` testing table:
++ [x] Update `services/fq-runtime/README.md` testing table:
       mention the harness module and the acceptance-test
       scenarios it covers. Bump the "Count" column to
       reflect the new tests.
-- [x] Move this plan to `docs/plans/closed/`.
-- [x] Update parent plan's step-7 / step-8 / step-9 status
++ [x] Move this plan to `docs/plans/closed/`.
++ [x] Update parent plan's step-7 / step-8 / step-9 status
       blocks where the corresponding deferred acceptance
       tests are now covered.
 
 ## Cross-cutting concerns
 
-- **No regression on existing tests.** Each step's "Done
++ **No regression on existing tests.** Each step's "Done
   when" includes a full `cargo test -p fq-runtime` pass
   against live NATS.
-- **Test isolation by uniqueness.** Every long-lived NATS
++ **Test isolation by uniqueness.** Every long-lived NATS
   resource (durable consumer names, subject filters tied
   to agent/worker ids) gets a unique suffix per test.
-- **Test runtime overhead.** Each scenario costs ~1s of
++ **Test runtime overhead.** Each scenario costs ~1s of
   test time (component startup + scenario actions +
   shutdown). The bulk of `cargo test` time will still be
   in compile + the existing 260 tests.
-- **Bugs surfaced by scenarios are fixed in the same step.**
++ **Bugs surfaced by scenarios are fixed in the same step.**
   No `#[ignore]` escape hatch. If a scenario fails because
   the runtime's behaviour doesn't match the spec, the bug
   fix lands before the step is considered done. The whole
@@ -410,7 +413,7 @@ A single integration test in `fq-cli/tests/` that:
 
 This plan closes when:
 
-- All 7 steps' "Done when" boxes are ticked.
-- Parent plan's step-7/8/9 status blocks reflect the
++ All 7 steps' "Done when" boxes are ticked.
++ Parent plan's step-7/8/9 status blocks reflect the
   deferred acceptance tests now landing here.
-- This plan moves to `docs/plans/closed/`.
++ This plan moves to `docs/plans/closed/`.

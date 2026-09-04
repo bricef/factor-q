@@ -17,7 +17,9 @@ one process** — jobs running in parallel inside the daemon, not N daemons — 
 in its own git worktree so they don't corrupt each other's checkout, with drain,
 shutdown, and crash-recovery proven correct with *N* in flight.
 
+<!-- markdownlint-disable-next-line MD036 -->
 **In scope**
+
 - **In-executor concurrent execution (#70):** semaphore-bounded fan-out so one
   `fq run` runs N invocations at once, *including* making the executor
   (`ReducerRunner`) safe for concurrent `run_invocation` calls. Default off.
@@ -27,6 +29,7 @@ shutdown, and crash-recovery proven correct with *N* in flight.
   the gate before concurrency is enabled (per the plan's own requirement).
 
 **Explicitly out of scope** (tracked / deferred, not blockers here)
+
 - The harness-owned VFS (**ADR-0028**) — the safe-by-construction successor that
   makes this safe for *untrusted* agents. This plan is the bridge to it.
 - **Shell escape is an accepted risk.** The `ToolSandbox` is check-based and
@@ -159,6 +162,7 @@ invocation-lifecycle coupling**:
 
 **Verification (DST, in `test_support::sim::SimWorld`):** drive N concurrent
 invocations and assert, for each independently:
+
 1. **Happy path:** N complete concurrently; each reads/writes only its own
    worktree (no cross-contamination); per-invocation budget holds.
 2. **Drain mid-flight:** `request_drain` with N running → each suspends at a step
@@ -169,7 +173,6 @@ invocations and assert, for each independently:
 4. **Shutdown:** `fq down` with N running → clean teardown, single deregister,
    no orphaned worktrees for terminal invocations.
 Extend the existing budget-across-resume property test to the N-invocation case.
-
 
 ### Phase 2 verification design (2026-07-10)
 
@@ -275,7 +278,6 @@ CI (the backlog already tracks broker-sharing flakiness locally).
 - **ADR-0028** — the safe-by-construction successor; this plan is the interim
   bridge and should be retired when the VFS lands.
 
-
 ## Decisions taken while building
 
 - **2026-07-10 — git is out of the runtime; worktrees dropped for
@@ -298,7 +300,6 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   scale, and shallow clones are available to the agent if it ever
   matters.
 
-
 - **2026-07-10 — Phase 1 audit came back bounded; H3 deferred to Phase 2.**
   The §2 concurrency-safety audit found the executor already clean for
   N-concurrent `run_invocation`: recovery has always spawned N
@@ -314,7 +315,6 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   test locking in "every WAL row leads with invocation_id". The shared
   base-MCP-connection concurrent-read smoke (H3) and per-invocation
   sim-clock seeding (H1) move to Phase 2, where the harness work lives.
-
 
 - **2026-07-10 — Phase 2 shipped: the multi-invocation harness and the
   concurrent gate are green.** Delivered per the verification design:
@@ -334,7 +334,6 @@ CI (the backlog already tracks broker-sharing flakiness locally).
   and `fq down` on a scratch daemon with N real invocations in flight —
   and a decision on whether the D2/D3 dispatcher loop invariants need
   property-level coverage beyond the gated overlap/serial tests.
-
 
 - **2026-07-10 — the live drill is scripted and green: the Phase-2 gate
   is complete.** `just drill` (tests/smoke/drain-drill.sh) runs the

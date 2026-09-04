@@ -66,6 +66,7 @@ This document describes the resulting architecture.
 ### Trust boundaries
 
 What's trusted under the new model:
+
 - The agent harness code (first-party, pure function,
   auditable)
 - The host runtime (first-party, audited)
@@ -73,6 +74,7 @@ What's trusted under the new model:
   host inspects, not code it executes)
 
 What's untrusted:
+
 - Tool *implementations* that execute arbitrary behaviour on
   behalf of the model (`shell`, code runners, external API
   clients)
@@ -142,7 +144,7 @@ orthogonal to this document.
 Tool definitions gain several declarations beyond name and
 argument schema:
 
-```
+```yaml
 tool:
   name: shell
   description: Execute a shell command...
@@ -205,6 +207,7 @@ but lives outside the harness's view.
 ### Why the workspace matters
 
 Any useful agent mutates a filesystem:
+
 - Reads files to gather context
 - Writes files to produce output
 - Modifies files iteratively
@@ -217,7 +220,7 @@ a codebase; resuming must restore it.
 
 The full invocation state is therefore:
 
-```
+```text
 (config, trigger, harness_state, workspace_state, last_result)
 ```
 
@@ -255,6 +258,7 @@ otherwise need dedicated tools become filesystem operations**.
 
 Without pre-loading, an agent working with the Stripe API
 might need:
+
 - A `fetch_stripe_docs(topic)` tool
 - A `get_stripe_example(pattern)` tool
 - A `lookup_stripe_error(code)` tool
@@ -374,6 +378,7 @@ table; in the new model it is the policy enforcement point
 for most of the security story.
 
 The registry's tool lookup is where:
+
 - Tool name → implementation binding happens
 - Isolation tier is applied (spawn container, create WASM
   instance, call native function)
@@ -422,12 +427,14 @@ execution. The reducer-model shift and this
 per-tool-isolation architecture require revisiting it.
 
 Core decisions still hold:
+
 - Containers are a key isolation primitive
 - Kata+Firecracker is the high-security upgrade path
 - WASM is a first-class future investigation
 - Network proxy is load-bearing
 
 What changes:
+
 - The *unit of isolation* is the tool invocation (or the
   workspace, for state), not the agent invocation
 - Per-agent containers may still appear, but for workspace
@@ -448,11 +455,13 @@ phase-1 sandbox keeps working in the meantime.
 Confirming the directions the architecture has settled into.
 
 ### Per-tool isolation tier declaration
+
 Each tool declares its tier. The runtime dispatches through
 the corresponding sandbox implementation. Overhead is paid
 only for tools that need it.
 
 ### Per-agent workspace directory
+
 Each agent has a persistent workspace. Filesystem operations
 in tools act on this directory. The workspace is snapshotable
 for suspension, migration, and fault recovery. Overlay
@@ -460,6 +469,7 @@ filesystems and container snapshotting are the likely target
 mechanisms; stable-path workspaces are the starting point.
 
 ### Pre-loaded workspace base layers
+
 Agent definitions can declare a read-only base layer
 (container image, tarball, git ref) mounted as the lower
 layer of the workspace overlay. This enables context-rich
@@ -467,12 +477,14 @@ agents without proliferating tool definitions — the
 filesystem becomes the universal data interface.
 
 ### Network proxy is load-bearing
+
 Every network-touching tool passes through the proxy. The
 proxy enforces allowlists, injects credentials, logs
 traffic, and supports shadow mode. Its correctness matters
 disproportionately to the overall security posture.
 
 ### External state is out of scope
+
 Runtime does not provide undo semantics for external
 effects. Tool design uses idempotency where needed; agents
 and humans reason about external effects at the task level.

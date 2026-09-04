@@ -67,7 +67,7 @@ LLM call lighter than an older draft of this page assumed.
 
 **Simple single-turn call:**
 
-```
+```text
   triggered            2 KB
   llm.request          3 KB    # system + user
   llm.response         1 KB    # cost rides its envelope
@@ -77,7 +77,7 @@ LLM call lighter than an older draft of this page assumed.
 
 **Three-tool-call loop with 2 KB file reads:**
 
-```
+```text
   triggered              2 KB
   llm.request #1         2 KB    # system + user
   llm.request #2         5 KB    # + assistant + tool result

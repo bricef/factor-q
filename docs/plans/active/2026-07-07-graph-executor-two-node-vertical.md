@@ -73,7 +73,7 @@ The *shapes* are the spec.
 implement the smallest change that does it, validate it, and open a
 reviewable pull request."
 
-```
+```text
 input  { task: RawText }                       // the scoped change description
 output {
   pr_number: u64,
@@ -92,7 +92,7 @@ grants: `file_read`, `file_write`, `shell`; env `PATH`, `GH_TOKEN`.
 **Intent:** "Given a pull request, produce a typed review verdict with
 structured findings, without modifying the code."
 
-```
+```text
 input  { pr_number: u64, pr_url: String }
 output {
   verdict:  enum { approve, request_changes, reject },
@@ -110,7 +110,7 @@ to expose.
 
 ## The edge and the traversal
 
-```
+```text
 edge  propose → review
   guard: propose.outcome == Completed            // default (fail-fast if propose fails)
   bind:  { pr_number: propose.output.pr_number,

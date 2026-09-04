@@ -46,7 +46,7 @@ bincode over loopback, non-loopback refused).
 
 ## Target shape
 
-```
+```text
   fq  ──ControlService (tarpc, TLS + shared secret)──▶  fqd
  (client crate only:                                   (fq-runtime: stores + NATS,
   wire types + client,                                  ControlService handlers,
@@ -68,7 +68,7 @@ operator at the point where the two binaries stop looking alike.
 No subcommands. It starts, it runs, it drains on signal. Everything it
 takes is about where its state lives and what it talks to.
 
-```
+```text
 fqd [--config fqd.toml] [--agents-dir DIR] [--nats-url URL]
     [--cache-dir DIR] [--state-dir DIR] [--log-format text|json]
 fqd --version
@@ -76,7 +76,7 @@ fqd --version
 
 ### `fq` — the operator CLI
 
-```
+```text
 fq [--config fq.toml] [--addr HOST:PORT] [--log-format text|json] <command>
 ```
 

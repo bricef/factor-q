@@ -107,7 +107,7 @@ divergence is minimal.
 
 ### The cycle
 
-```
+```text
 Propose  -->  Evaluate (shadow mode)  -->  Promote or Reject
    ^                                            |
    |____________________________________________|
@@ -135,12 +135,14 @@ The evaluator is itself an agent. Given a pair of (live, shadow)
 event streams for the same input, it assesses:
 
 **Mechanically measurable dimensions:**
+
 - Cost (token usage, external API calls)
 - Latency (time to completion)
 - Tool call efficiency (fewer calls for the same result)
 - Error rate (tool failures, sandbox violations)
 
 **Judgment-requiring dimensions:**
+
 - Output quality (does the shadow output address the original
   request as well or better?)
 - Reasoning quality (is the shadow agent's chain of thought

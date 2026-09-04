@@ -259,7 +259,7 @@ non-interactive subcommands rooted at `fq invocation` (per-
 invocation triage) and `fq workers` (worker liveness), with
 `fq status` summarising what needs attention:
 
-```
+```console
 $ fq status
 ...
 Recovery state
@@ -736,7 +736,7 @@ stream directly.
 Single-node (v1). There is no role flag: one `fqd` process plays
 both roles, and that is the only shape that ships.
 
-```
+```console
 $ fqd
 factor-q runtime starting
   runtime id:       01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f
@@ -778,7 +778,7 @@ and no separate worker binary; what follows is the shape the role
 boundary in §3 exists to make possible, sketched so v1 choices can be
 checked against it.
 
-```
+```console
 $ fqd --role=control-plane
 [fq] role: control-plane
 [fq] opening control-plane store          ✓
@@ -792,7 +792,7 @@ $ fqd --role=control-plane
 [fq] dispatcher ready
 ```
 
-```
+```console
 $ fqd --role=worker --worker-id=w-001
 [fq] role: worker, id: w-001
 [fq] opening worker store                  ✓
@@ -1002,7 +1002,7 @@ and retention sweep) is committed.
 `tool.dispatched` joins the canonical event sequence between
 `tool.call` and `tool.result`:
 
-```
+```text
 triggered → llm.request → llm.dispatched → llm.response (cost on envelope)
           → tool.call  → tool.dispatched → tool.result
           → ... → completed

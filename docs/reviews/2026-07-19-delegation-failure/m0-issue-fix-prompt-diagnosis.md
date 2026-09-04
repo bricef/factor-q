@@ -61,7 +61,7 @@ provides no sentence saying the checklist is necessary but not sufficient.
   corrections that had to *add* tests (#263, #293, #306, #319, #320) are the residue.
   Disclosure makes shallow validation compliant — honest, but shallow.
 - **Nothing forbids deleting or weakening tests, docs, or lints.** "Never commit red"
-  + budget pressure + no preservation rule = deleting the failing test is a compliant
+  - budget pressure + no preservation rule = deleting the failing test is a compliant
   path to green. #210 (registry tests + docs deleted) and #206 (docs deleted) are this
   rule's absence, made flesh.
 - Step 7 asks the body to "note which acceptance criteria are met" — assertion, not
@@ -122,6 +122,6 @@ vs terra profiles once n grows — current split: sol 14/24 needing intervention
 
 ## Note on model attribution
 
-Kimi K3 appears nowhere in the provenance record; the measurable fleet is gpt-5.6-sol
-+ gpt-5.6-terra (+ opus-4.8 on doc-drift). If K3 ran, it was in the pre-provenance
+Kimi K3 appears nowhere in the provenance record; the measurable fleet is
+gpt-5.6-sol - gpt-5.6-terra (+ opus-4.8 on doc-drift). If K3 ran, it was in the pre-provenance
 early cohort or outside this pipeline. Worth confirming before designing K3 adapters.

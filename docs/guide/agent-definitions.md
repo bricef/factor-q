@@ -61,7 +61,7 @@ recognises. An unknown key is a **hard error** — the definition fails to
 load, and the error names the offending key, lists the keys that were
 expected, and gives the line and column:
 
-```
+```text
 agents/greeter.md is invalid: invalid YAML: unknown field `budgett`,
 expected one of `name`, `model`, `tools`, `sandbox`, `budget`,
 `max_iterations`, `effort`, `trigger`, `mcp`, `static_resources`,
@@ -90,7 +90,7 @@ adding it.
 The same check applies **inside** the `sandbox:` block and inside each
 `mcp:` entry, and the error names the block it came from:
 
-```
+```text
 invalid YAML: sandbox: unknown field `fs_writ`, expected one of
 `fs_read`, `fs_write`, `network`, `env`, `exec_cwd` at line 4 column 3
 
@@ -419,7 +419,6 @@ operator (a shell is needed for the expansion):
 #   ["sh", "-c", "git config user.name \"$FQ_AGENT_ID (factor-q agent)\" \
 #     && git config user.email \"$FQ_AGENT_ID+$FQ_INVOCATION_ID@agents.invalid\""]
 ```
-
 
 ### The `${workspace}` token
 

@@ -223,7 +223,7 @@ cannot re-trigger).
 3. Publish to `fq.trigger.<agent_id>` with a JSON-value body, and await the
    publish ack.
 
-```
+```text
 subject = "fq.trigger.m0-issue-fix"
 body    = "\"Implement the fix described in GitHub issue #6 (bricef/factor-q). Today is 2026-07-07.\""
 js.Publish(subject, body)   // await ack
@@ -231,7 +231,7 @@ js.Publish(subject, body)   // await ack
 
 Optionally, name the trigger so you can refer to it later:
 
-```
+```text
 headers = { "Fq-Trigger-Id": uuidv7() }
 js.PublishMsg(subject, body, headers)   // await ack
 ```

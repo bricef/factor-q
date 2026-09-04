@@ -115,7 +115,7 @@ runs the rung ladder against the mount, re-runs each rung against a real
 `tmpdir` **baseline**, checks correctness (the resulting tree must be
 byte-identical to the baseline's), and prints a results table:
 
-```
+```text
 rung           correct  impl(s)  baseline(s)  ratio
 smoke          ok       0.03     0.01         3.0x
 many-small     ok       1.84     0.12         15x
@@ -307,8 +307,8 @@ bridge proves awkward in practice.
   identity loss in PathBuf mode are too much risk under a load-bearing
   foundation. Revisit if it matures.
 
-**The hinge (state it plainly):** this ranking puts *concurrent-I/O throughput
-+ CAS-native addressing* above *raw maturity + leanness*, because the backend is
+**The hinge (state it plainly):** this ranking puts *concurrent-I/O throughput -
+CAS-native addressing* above *raw maturity + leanness*, because the backend is
 an async content-addressed store and the workload is parallel builds. **If the
 VFS backend turns out sync + single-consumer, `fuser` wins instead** on maturity
 and footprint.

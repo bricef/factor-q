@@ -198,7 +198,7 @@ Standard configuration for factor-q's SQLite usage:
 
 Hash-derived paths with two-level directory split to avoid any single directory holding millions of entries:
 
-```
+```text
 /var/lib/factor-q/artifacts/sha256/ab/cd/abcdef...
 ```
 

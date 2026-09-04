@@ -151,7 +151,7 @@ public:  f31c…
 $ fq-cas grant add bob read,write research.papers.*
 7                                    # the grant id
 $ fq-cas grant ls bob
-7	read,write	research.papers.*
+7   read,write   research.papers.*
 $ fq-cas grant check bob read research.papers.doc1
 allowed                              # exit 0 (denied -> exit 1): scriptable
 $ fq-cas grant rm 7                  # immediate, cascades through delegations

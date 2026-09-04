@@ -94,8 +94,8 @@ running agent assumes no human is available** (see Step 1).
 ## Implementation Steps
 
 Each step: write the failing everything-server test first,
-then implement until green; full `cargo test -p fq-runtime`
-+ clippy + fmt before the per-step commit.
+then implement until green; full `cargo test -p fq-runtime` - clippy + fmt
+before the per-step commit.
 
 ### Step 1 — ADR: autonomous resolution of MCP human-in-the-loop primitives
 
@@ -123,7 +123,7 @@ stating:
   initiate requests *into* the agent, so the policy layer is
   the only gate and the LLM is never the authorizer.
 
-**Done when**
+#### Done when
 
 - [x] ADR-0017 written and marked Accepted.
 - [ ] The capability fields it defines are referenced by
@@ -153,7 +153,7 @@ elicitation slots.
 spec's "not supported" responses. Pin
 `@modelcontextprotocol/server-everything@<v>` in the fixture.
 
-**Done when**
+#### Done when
 
 - [x] `()` handler replaced; capability negotiation asserted.
 - [x] Pinned fixture shared by `mcp_integration.rs`.
@@ -210,7 +210,7 @@ templates; the read tool returns content; subscribe + receive
 `resources/updated`; and a `static_resources` concrete pin's
 content appears in the assembled prompt context.
 
-**Done when**
+#### Done when
 
 - [x] Protocol wrappers + read/templates tools +
       subscribe/notifications green against the pinned server.
@@ -285,7 +285,7 @@ to expect: the reducer's `phase == Initial ⇒
 messages.is_empty()` invariant must relax to accept a seeded
 transcript.
 
-**Done when**
+#### Done when
 
 - [x] Prompt list/get/completion tests green.
 - [x] A fetched prompt is exposed as a reusable seed value
@@ -338,6 +338,7 @@ policy and budget, emitting events like any other LLM call.**
 
 **Failing tests first** (driven by the everything server's
 sampling tool, with `mock_anthropic` as the agent model):
+
 1. *Permitted path*: server requests sampling; handler runs it
    on the mock model; asserts the response is returned, an
    `llm.request`/`llm.response` pair is emitted, and cost is
@@ -361,7 +362,7 @@ evented / budgeted LLM path tagged `origin = sampling{server}` →
 not the harness; the reducer is untouched. No human review step;
 no LLM authorization step.
 
-**Done when**
+#### Done when
 
 - [x] All three sampling tests green (`sampling_permitted_runs_on_the_agent_model`,
       `sampling_over_subbudget_is_declined_without_a_model_call`,
@@ -445,6 +446,7 @@ answer elicitation autonomously via the agent LLM (or decline
 per policy).
 
 **Failing tests first.**
+
 - *Roots*: advertise roots derived from the sandbox fs grant;
   assert the everything server receives them on `roots/list`, and
   that an automated trigger fires `roots/list_changed`.
@@ -461,6 +463,7 @@ bidirectional validation seam. They differ in *arbitration*:
 
 *Roots — handler-only, no LLM, no budget.* `list_roots` returns
 invocation-scoped config; it never touches the runner.
+
 - **Source: derived from the agent's sandbox filesystem grant**,
   with the invariant **advertised roots ⊆ sandbox fs boundary**
   (narrowable, never wideable — can't advertise a path you don't
@@ -478,6 +481,7 @@ invocation-scoped config; it never touches the runner.
 *Elicitation — sampling-shaped (runner-arbitrated).* Same
 `select!` path / budget / events / validation seam as Step 5; only
 the answer stage differs:
+
 - **Schema-constrained structured output** via a **reusable runner
   "structured completion against a schema" primitive**: validate
   against `requested_schema` → **bounded retry** (default N=2, each
@@ -500,7 +504,7 @@ Sampling + elicitation unify under one server-initiated request
 path (`ServerRequest { Sampling | Elicitation }`, one channel, one
 `select!` arm); only the answer stage differs.
 
-**Done when**
+#### Done when
 
 - [x] **6a** (`c8eaa4c`) — Roots advertised (⊆ sandbox fs grant via
       `roots_from_sandbox`/`advertised_roots`); `roots/list` +
@@ -552,7 +556,7 @@ sink folded into `tracing` / the event bus; ensure
 `*_list_changed` handlers from Steps 3–4 refresh cached
 capability lists rather than serving stale data.
 
-**Done when**
+#### Done when
 
 - [x] Progress, cancellation, pagination, logging tests green.
       Commits: `f18d1e1` (7a logging — notification backbone +
@@ -613,7 +617,7 @@ the resulting `SamplingChannel` + `RootsHandle` + `advertised_roots`
 into `run_with_server_requests`, so the gates run in a real
 invocation, not only under test.
 
-**Done when**
+#### Done when
 
 - [x] **8a** (`9d97d09`) — Sampling / elicitation / roots grants parse
       from frontmatter (per-server flags + aggregate sub-budgets),

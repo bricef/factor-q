@@ -24,7 +24,7 @@ Primitives that let the agent see its own state. Today the agent is flying on vi
 
 ### `SelfInspect`
 
-```
+```text
 SelfInspect({
   include?: ("budget" | "context" | "tools" | "model" | "lineage")[],   // default: all
 })
@@ -72,7 +72,7 @@ Pacing, spawn decisions, and budget requests are what the agent *does with* intr
 
 ### `ToolVersions`
 
-```
+```text
 ToolVersions({ names?: string[] })
   → [{ name, version, fingerprint, last_changed_at, changelog_ref?: ArtifactRef }]
 ```
@@ -104,7 +104,7 @@ So the answer is: crash recovery within a single execution is free from event so
 
 #### Tool surface
 
-```
+```text
 Checkpoint({
   summary: string,                     // the agent's own words: what has been established, what remains
   structured_state?: any,              // optional machine-readable state, conforms to agent's own state schema if declared
@@ -116,7 +116,7 @@ Checkpoint({
   → { checkpoint_id, event_ref }
 ```
 
-```
+```text
 LoadCheckpoint({
   handle_id?: HandleRef,               // defaults to current execution
   strategy: "latest" | "at_event" | "id",
@@ -143,7 +143,7 @@ LoadCheckpoint({
 
 Declarative approval gates — the agent can pause its own execution at a structured gate before doing something irreversible, rather than typing "are you sure?" in prose and hoping the user reads it.
 
-```
+```text
 RequireApproval({
   action: string,                      // short label, e.g. "git push --force", "rm -rf /srv/data"
   blast_radius: "local" | "shared" | "external",
@@ -167,7 +167,7 @@ RequireApproval({
 
 ### `ValidatePlan`
 
-```
+```text
 ValidatePlan({
   plan: string | structured_plan,
   validator_type: string,              // agent type to run as critic
@@ -194,7 +194,7 @@ The orchestration primitives (`AgentSpawn`, `AgentMap`) are heavyweight — new 
 
 ### `Consult`
 
-```
+```text
 Consult({
   model: ModelSelector,
   question: string,
@@ -213,7 +213,7 @@ Consult({
 
 ### `ShareContext`
 
-```
+```text
 ShareContext({
   include: ("turn_ids" | "artifact_refs" | "summaries")[],
   turn_ids?: string[],                 // specific prior turns from the caller's history
@@ -241,7 +241,7 @@ Tool failures currently return strings. Pattern-matching on strings is brittle, 
 
 Proposal: every tool returns either a success value or a `ToolError`:
 
-```
+```text
 ToolError = {
   kind: "timeout" | "permission_denied" | "rate_limited" | "validation_failed"
       | "not_found" | "conflict" | "dependency_unavailable" | "budget_exceeded"
@@ -263,7 +263,7 @@ ToolError = {
 
 `output_schema` on `AgentSpawn` lets the orchestrator validate a child's output. The agent should be able to validate *its own* outputs symmetrically:
 
-```
+```text
 ValidateSelf({ output: any, schema: JSONSchema })
   → { valid: true } | { valid: false, errors: [{ path, message }] }
 ```
@@ -276,7 +276,7 @@ ValidateSelf({ output: any, schema: JSONSchema })
 
 Not a dedicated tool — a convention plus a schema fragment that can be attached to any output.
 
-```
+```text
 Uncertainty = {
   confidence: number,                  // 0..1
   reasons?: string[],                  // why the confidence is what it is

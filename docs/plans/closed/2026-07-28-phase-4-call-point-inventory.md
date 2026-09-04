@@ -238,6 +238,7 @@ edge harness; the store-open gate count never grows; `fq-cli` calls
 no `operator::*` when the phase completes.
 
 **4.0 — pure flips over existing ops** — ✅ **done 2026-07-28**
+
 1. Verb 18 `invocation drop` — its own PR, as planned. Delete the
    CLI's legacy implementation, relocate `--live` halting into the
    daemon's command handler, `--json`/human output preserved
@@ -304,6 +305,7 @@ Four things this cohort taught, which the later ones inherit:
   daemon exited*, which the flipped verb cannot do by construction.
   The section-B survey looked at production callers only.
 
+<!-- markdownlint-disable-next-line MD036 -->
 **4.2 — atoms and the event surface**
 
 *Carried in from verb 20:* **a failed LLM call publishes no event at
@@ -317,10 +319,14 @@ content/stop_reason/usage. Do this before or with the event surface,
 since `event.list` is where an operator would otherwise have to go
 looking.
 
+<!-- markdownlint-disable MD029 -->
+
 5. `event` atom (`event.list`) + verb 12 flip.
 6. `event.stream` + verb 11 flip (sequence-resumable tail replaces
    silent-drop subscribe).
 7. `dead_letter` atom (`dead_letter.list`) + verb 7 flip.
+
+<!-- markdownlint-enable MD029 -->
 
 **4.3 — commands** *(each needs its enum variant; resume's model
 amendment landed 2026-08-05 — see section C)* — items 8, 9, 10 and 11

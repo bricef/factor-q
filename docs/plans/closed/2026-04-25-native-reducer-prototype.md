@@ -3,6 +3,7 @@
 **Date**: 2026-04-25
 **Status**: Closed (initial slice landed)
 **Design references**:
+
 - [`docs/design/aspirational/wasm-boundary-design.md`](../../design/aspirational/wasm-boundary-design.md) — the boundary the reducer is built to.
 - [`docs/reviews/2026-04-19-design-assessment.md`](../../reviews/2026-04-19-design-assessment.md) — recommended building a *native* reducer prototype before WASM packaging.
 
@@ -25,8 +26,9 @@ From [`2026-04-19-design-assessment.md`](../../reviews/2026-04-19-design-assessm
 > Specifically: port `AgentExecutor::run()` to a state-enum
 > reducer, behind a Rust trait, in a native crate. **No WASM
 > yet.** The reducer claim is architectural; WASM is packaging.
-
+>
 > What the prototype should demonstrate or falsify:
+>
 > - Whether the state enum stays small and tractable for
 >   realistic agents
 > - Whether suspension and resumption actually work end-to-end
@@ -174,7 +176,7 @@ Honest enumeration, not a buried disclaimer:
 
 ## Test results at close
 
-```
+```text
 cargo test -p fq-runtime --lib reducer::
 running 10 tests
 test reducer::harness::tests::pure_step_is_deterministic_for_equal_inputs ... ok
