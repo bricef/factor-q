@@ -156,7 +156,10 @@ async fn first_run_provisions_and_restart_reuses_the_identity() {
     let token_path = state.join("edge").join("admin.token");
     let token = fq_test_support::admin_token(&state);
     assert!(
-        text1.contains(&format!("edge: admin token written to {}", token_path.display())),
+        text1.contains(&format!(
+            "edge: admin token written to {}",
+            token_path.display()
+        )),
         "the first run must name the token file\n--- log ---\n{text1}"
     );
     assert!(
