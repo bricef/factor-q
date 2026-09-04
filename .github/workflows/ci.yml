@@ -55,7 +55,7 @@ jobs:
       coupling: ${{ steps.filter.outputs.coupling }}
       docker: ${{ steps.filter.outputs.docker }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -133,7 +133,7 @@ jobs:
     name: Docs lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # markdownlint runs via npx inside `just lint-docs`; setup-node
       # provides npx (a Rust container / minimal runner has none).
       - uses: actions/setup-node@v4
@@ -161,7 +161,7 @@ jobs:
     name: Code quality
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: extractions/setup-just@v4
       # Keep the version ref in lockstep with rust-toolchain.toml — the
       # size ratchets parse Rust with syn (tools/fq-lint), and clippy
@@ -197,7 +197,7 @@ jobs:
     name: Dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: extractions/setup-just@v4
       # Keep in lockstep with rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -231,7 +231,7 @@ jobs:
       - if: needs.changes.outputs.runtime != 'true'
         run: echo "No runtime-relevant changes — skipping the runtime build."
       - if: needs.changes.outputs.runtime == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       # Keep the version ref in lockstep with rust-toolchain.toml (#102) —
       # rustup enforces the pin either way; matching here avoids installing
       # a second, unused toolchain.
@@ -280,7 +280,7 @@ jobs:
       - if: needs.changes.outputs.store != 'true'
         run: echo "No store-relevant changes — skipping the store build."
       - if: needs.changes.outputs.store == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       # Same lockstep note as runtime-ci: match rust-toolchain.toml.
       - if: needs.changes.outputs.store == 'true'
         uses: dtolnay/rust-toolchain@1.95.0
@@ -345,7 +345,7 @@ jobs:
       - if: needs.changes.outputs.runtime != 'true' && needs.changes.outputs.dashboard != 'true'
         run: echo "No dashboard-relevant changes — skipping the dashboard build."
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       # Keep in lockstep with rust-toolchain.toml (#102).
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: dtolnay/rust-toolchain@1.95.0
@@ -386,7 +386,7 @@ jobs:
       - if: needs.changes.outputs.dashboard != 'true'
         run: echo "No dashboard changes — skipping screenshots."
       - if: needs.changes.outputs.dashboard == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       # Keep in lockstep with rust-toolchain.toml (#102).
       - if: needs.changes.outputs.dashboard == 'true'
         uses: dtolnay/rust-toolchain@1.95.0
@@ -440,7 +440,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history: the script resolves the merge base and materialises
           # it as a worktree. The default depth-1 checkout has neither.
@@ -464,7 +464,7 @@ jobs:
       - if: needs.changes.outputs.go != 'true'
         run: echo "No Go-relevant changes — skipping the build."
       - if: needs.changes.outputs.go == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - if: needs.changes.outputs.go == 'true'
         uses: actions/setup-go@v5
         with:
@@ -497,7 +497,7 @@ jobs:
       - if: needs.changes.outputs.docker != 'true'
         run: echo "No Docker-relevant changes — skipping the image build."
       - if: needs.changes.outputs.docker == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - if: needs.changes.outputs.docker == 'true'
         uses: extractions/setup-just@v4
       # No layer cache: this is a cold build every time, and it compiles
