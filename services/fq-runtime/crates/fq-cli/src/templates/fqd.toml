@@ -21,11 +21,23 @@
 # max_iterations = 100
 
 [nats]
-# URL of the NATS server. JetStream must be enabled on the server.
-# The token in the userinfo must match the broker's (see
-# docker-compose.yml's --auth flag). Change both together for any
+# URL of the NATS server, host and port only. JetStream must be enabled
+# on the server.
+url = "nats://localhost:4222"
+#
+# The broker's token comes from the environment, never from this file:
+# name the variable here and export it before starting fqd. The
+# scaffolded docker-compose.yml starts NATS with the development token
+# `fq-dev-token`, so for that broker:
+#
+#   export FQ_NATS_TOKEN=fq-dev-token
+#
+# A URL with a credential in it (`nats://TOKEN@host`) is refused at
+# startup: the URL is printed in the banner, the log and the
+# `system.startup` event, and a secret must never be. Change the token
+# in the compose file and the exported variable together for any
 # deployment that leaves this machine.
-url = "nats://fq-dev-token@localhost:4222"
+token_env = "FQ_NATS_TOKEN"
 
 [agents]
 # Directory containing agent definition files (.md with YAML frontmatter).

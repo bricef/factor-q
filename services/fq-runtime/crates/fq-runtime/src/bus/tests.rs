@@ -5,20 +5,40 @@
 use super::*;
 use crate::agent::AgentId;
 
-#[test]
-fn url_credentials_parses_token_user_pass_and_bare_forms() {
-    assert_eq!(
-        url_credentials("nats://fq-dev-token@127.0.0.1:4222"),
-        Some(("fq-dev-token".to_string(), None)),
-        "bare userinfo is a token"
+/// The token reaches the broker as a connect option, never as URL
+/// userinfo (#540): against a token-authenticated private broker the
+/// tokened connect succeeds and the anonymous one is refused. Both
+/// attempts are bounded, because "refused" and "never answers" are the
+/// same verdict here and neither may hang the suite.
+#[tokio::test]
+async fn connect_with_token_authenticates_against_a_token_broker() {
+    let token = format!("tok-{}", Uuid::now_v7().simple());
+    let server = crate::test_support::nats::NatsServer::start_with_token(&token);
+    let url = server.url().to_string();
+    assert!(
+        !url.contains(&token),
+        "the broker's client URL must stay credential-free: {url}"
     );
-    assert_eq!(
-        url_credentials("nats://fq:secret@localhost:4222"),
-        Some(("fq".to_string(), Some("secret".to_string()))),
-        "user:pass form"
+
+    let bound = std::time::Duration::from_secs(10);
+    let anonymous = tokio::time::timeout(bound, EventBus::connect(&url)).await;
+    assert!(
+        !matches!(anonymous, Ok(Ok(_))),
+        "an anonymous connect must be refused by a token broker"
     );
-    assert_eq!(url_credentials("nats://127.0.0.1:4222"), None);
-    assert_eq!(url_credentials("not a url"), None);
+
+    let bus = tokio::time::timeout(bound, EventBus::connect_with_token(&url, Some(&token)))
+        .await
+        .expect("tokened connect timed out")
+        .expect("tokened connect");
+    // Not just a socket: the streams were ensured, so JetStream accepted
+    // the authenticated client too.
+    bus.publish(&sample_event(&format!(
+        "bus-token-{}",
+        Uuid::now_v7().simple()
+    )))
+    .await
+    .expect("publish over the tokened connection");
 }
 use crate::events::{
     ConfigSnapshot, EventPayload, SandboxSnapshot, TriggerSource, TriggeredPayload,

@@ -192,36 +192,17 @@ pub struct EventBus {
     max_payload: usize,
 }
 
-/// Extract auth credentials from a NATS URL's userinfo.
-/// `async_nats::connect` ignores URL userinfo entirely; factor-q
-/// honours it so credentials can travel inside `FQ_NATS_URL` /
-/// `fqd.toml`'s `url` without a separate secret channel (project
-/// assessment 2026-07-05, critique #4):
-/// `nats://TOKEN@host` selects token auth,
-/// `nats://USER:PASS@host` selects user/password auth.
-fn url_credentials(url: &str) -> Option<(String, Option<String>)> {
-    let parsed = url::Url::parse(url).ok()?;
-    let user = parsed.username();
-    if user.is_empty() {
-        return None;
-    }
-    Some((user.to_string(), parsed.password().map(str::to_string)))
-}
-
-/// Connect a raw NATS client, honouring URL userinfo (see
-/// `url_credentials` above). `EventBus::connect` and the CLI's
-/// direct client path both route through this.
-pub async fn connect_with_url_credentials(
-    url: &str,
-) -> Result<async_nats::Client, async_nats::ConnectError> {
-    let options = match url_credentials(url) {
-        Some((user, Some(password))) => {
-            async_nats::ConnectOptions::with_user_and_password(user, password)
-        }
-        Some((token, None)) => async_nats::ConnectOptions::with_token(token),
+/// Connect options for the broker: token auth when a token is given,
+/// anonymous otherwise. The credential arrives as its own argument and
+/// never as URL userinfo — `NatsConfig::validate` refuses that shape and
+/// nothing here parses it (`async_nats` ignores userinfo too) — so a URL
+/// that reaches a log line, the banner or the `system.startup` event is
+/// printable by construction (#540).
+fn connect_options(token: Option<&str>) -> async_nats::ConnectOptions {
+    match token {
+        Some(token) => async_nats::ConnectOptions::with_token(token.to_string()),
         None => async_nats::ConnectOptions::new(),
-    };
-    options.connect(url).await
+    }
 }
 
 /// Pre-flight payload size check: the pure heart of the publish
@@ -240,11 +221,23 @@ fn check_payload_size(size: usize, limit: usize) -> Result<(), BusError> {
 }
 
 impl EventBus {
-    /// Connect to a NATS server and ensure both the event and
-    /// trigger streams exist.
+    /// Connect anonymously — a private test broker or an unauthenticated
+    /// deployment. See [`Self::connect_with_token`].
     pub async fn connect(url: &str) -> Result<Self, BusError> {
-        info!(nats_url = url, "connecting to NATS");
-        let client = connect_with_url_credentials(url).await?;
+        Self::connect_with_token(url, None).await
+    }
+
+    /// Connect to a NATS server, presenting `token` when the broker
+    /// requires one, and ensure the event, trigger and advisory streams
+    /// exist. The URL is logged as given: it carries no credential by
+    /// construction (see [`connect_options`]).
+    pub async fn connect_with_token(url: &str, token: Option<&str>) -> Result<Self, BusError> {
+        info!(
+            nats_url = url,
+            token_auth = token.is_some(),
+            "connecting to NATS"
+        );
+        let client = connect_options(token).connect(url).await?;
         let max_payload = client.server_info().max_payload;
         info!(max_payload, "NATS server max_payload");
         let jetstream = jetstream::new(client.clone());

@@ -87,12 +87,18 @@ fn the_daemon_template_parses_as_the_daemon_config() {
         ignored.join(", "),
     );
 
-    // The two settings the template actually commits to. Both are load
-    // bearing on day one: the broker token has to match the one the
-    // scaffolded docker-compose.yml starts NATS with, and the agents
-    // directory has to be the one `fq init` created.
-    assert_eq!(config.nats.url, "nats://fq-dev-token@localhost:4222");
+    // The settings the template actually commits to. All load bearing on
+    // day one: the broker URL must be credential-free (#540 — a URL with
+    // userinfo is refused at startup), the token must be named by the
+    // variable the README tells the user to export for the scaffolded
+    // docker-compose.yml's broker, and the agents directory has to be
+    // the one `fq init` created.
+    assert_eq!(config.nats.url, "nats://localhost:4222");
+    assert_eq!(config.nats.token_env.as_deref(), Some("FQ_NATS_TOKEN"));
     assert!(config.agents.directory.ends_with("agents"));
+    config
+        .validate()
+        .expect("the scaffolded daemon config must pass the daemon's own validation");
 }
 
 /// The commented-out examples too. They are most of the file and all of
