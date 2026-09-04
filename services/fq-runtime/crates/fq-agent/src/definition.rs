@@ -207,18 +207,37 @@ impl CapabilityGrant {
 
 impl<'de> Deserialize<'de> for CapabilityGrant {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // A bare bool, or a validation table.
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Flag(bool),
-            Config(CapabilityValidation),
-        }
-        Ok(match Repr::deserialize(deserializer)? {
-            Repr::Flag(false) => CapabilityGrant::Off,
-            Repr::Flag(true) => CapabilityGrant::On,
-            Repr::Config(cv) => CapabilityGrant::Configured(cv),
+        deserializer.deserialize_any(GrantVisitor)
+    }
+}
+
+/// Dispatches on the shape of the value — a bool or a map — rather than
+/// through an `#[serde(untagged)]` enum. Untagged buffers the content and
+/// tries each variant in turn, and when none fits it reports "data did
+/// not match any variant of untagged enum Repr": an internal type name in
+/// place of the offending key, which fails the half of #514 that
+/// mattered. Handing the map straight to `CapabilityValidation` lets its
+/// own `unknown field` error through with the key intact (#526).
+struct GrantVisitor;
+
+impl<'de> serde::de::Visitor<'de> for GrantVisitor {
+    type Value = CapabilityGrant;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("`true`, `false`, or a validation table")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, granted: bool) -> Result<Self::Value, E> {
+        Ok(if granted {
+            CapabilityGrant::On
+        } else {
+            CapabilityGrant::Off
         })
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        CapabilityValidation::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            .map(CapabilityGrant::Configured)
     }
 }
 
@@ -278,14 +297,16 @@ struct Frontmatter {
 /// flattens nothing. #515 closed the top level only, so `mcp: [{ commandd:
 /// … }]` still loaded — a server with no command at all — until #520.
 ///
-/// One level deeper is still silent: a typo *inside* a `sampling` or
-/// `elicitation` grant is swallowed by the untagged `Repr` that
-/// `CapabilityGrant`'s `Deserialize` delegates to, which buffers content
-/// the way `flatten` does. The attribute alone does not fix it — added to
-/// `CapabilityValidation` it rejects the typo but reports "data did not
-/// match any variant of untagged enum Repr", naming an internal type
-/// instead of the bad key. `Repr` has to dispatch on the value explicitly
-/// so the inner error survives (#526).
+/// One level deeper — a typo *inside* a `sampling` or `elicitation`
+/// grant — is strict too, and needed two pieces rather than one. The
+/// attribute on `CapabilityValidation` is what rejects `redact_secretz`,
+/// but `CapabilityGrant` used to reach that struct through an untagged
+/// `Repr` enum, which buffers content the way `flatten` does and reported
+/// "data did not match any variant of untagged enum Repr" — an internal
+/// type instead of the bad key. `CapabilityGrant` now deserializes through
+/// `GrantVisitor`, which dispatches on the value's shape and hands a map
+/// straight to `CapabilityValidation`, so the inner `unknown field` error
+/// survives with the key intact (#526).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct McpFrontmatter {
@@ -436,6 +457,86 @@ mod tests {
             msg.contains("mcp"),
             "the error should locate which block it came from, got: {msg}"
         );
+    }
+
+    /// One level deeper still, and the one that governs a security
+    /// default: `redact_secretz: true` used to parse as a table with
+    /// redaction *off* — the opposite of what the author wrote — while
+    /// `fq agent validate` said the definition was fine. The attribute
+    /// alone rejected it with "did not match any variant of untagged enum
+    /// Repr", naming an internal type instead of the key; the error must
+    /// name the key, and must not leak the internal name (#526).
+    #[test]
+    fn a_misspelled_key_inside_a_capability_grant_is_rejected_and_named() {
+        let err = parse_agent(
+            "---\nname: typo\nmodel: m\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling:\n      redact_secretz: true\n---\nBody.\n",
+        )
+        .expect_err("a typo inside a capability grant must not be silently dropped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("redact_secretz"),
+            "the error must name the offending key, got: {msg}"
+        );
+        assert!(
+            msg.contains("redact_secrets"),
+            "the error should list the field that was meant, got: {msg}"
+        );
+        assert!(
+            msg.contains("mcp"),
+            "the error should locate which block it came from, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Repr"),
+            "the error must not name an internal type, got: {msg}"
+        );
+    }
+
+    /// The bool spelling of a grant is unchanged by the visitor: `true`
+    /// grants with the default seam, `false` is the same as absent.
+    #[test]
+    fn a_bool_capability_grant_still_loads() {
+        let granted = parse_agent(
+            "---\nname: b\nmodel: m\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling: true\n---\nBody.\n",
+        )
+        .expect("`sampling: true` must still parse");
+        assert!(granted.sampling_grant().is_some());
+        assert!(granted.sampling_validation().is_empty());
+
+        let refused = parse_agent(
+            "---\nname: b\nmodel: m\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling: false\n---\nBody.\n",
+        )
+        .expect("`sampling: false` must still parse");
+        assert!(refused.sampling_grant().is_none());
+    }
+
+    /// And a correctly-spelled table still grants, with its policy
+    /// applied — strictness that also rejected valid input would stop a
+    /// daemon from starting.
+    #[test]
+    fn a_correctly_spelled_capability_table_still_loads() {
+        let agent = parse_agent(
+            "---\nname: t\nmodel: m\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling:\n      redact_secrets: true\n---\nBody.\n",
+        )
+        .expect("a correctly-spelled validation table must still parse");
+        assert!(agent.sampling_grant().is_some());
+        assert!(agent.sampling_validation().redact_secrets);
+    }
+
+    /// A grant that is neither a bool nor a table is refused, and the
+    /// error says what a grant may be rather than what it is not.
+    #[test]
+    fn a_wrong_typed_capability_grant_is_rejected_with_what_was_expected() {
+        for grant in ["42", "\"yes\""] {
+            let err = parse_agent(&format!(
+                "---\nname: w\nmodel: m\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling: {grant}\n---\nBody.\n"
+            ))
+            .expect_err("a grant that is neither a bool nor a table must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("`true`, `false`, or a validation table"),
+                "the error should say what was expected for `sampling: {grant}`, got: {msg}"
+            );
+        }
     }
 
     /// The other half of strictness: correctly-spelled nested blocks must

@@ -152,8 +152,17 @@ impl<'de> serde::Deserialize<'de> for EvaluatorSpec {
 /// synchronous validators in the runtime's `policy` module (redactor /
 /// request gate), while the `*_validation` lists drive the async
 /// evaluator sequence in the runner.
+///
+/// `deny_unknown_fields` because every field here defaults to *off*, so
+/// a key serde does not recognise is not dropped so much as inverted:
+/// `redact_secretz: true` parsed as a table with redaction disabled, the
+/// opposite of what the author wrote, and nothing said so. A security
+/// default is the wrong place for silence (#514 set the rule, #515 and
+/// #520 applied it to the frontmatter levels above, #526 to this one).
+/// Legal because this struct flattens nothing. This is a wire type
+/// (`config_snapshot`, `describe`), so strictness here is wire-visible.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, deny_unknown_fields, rename_all = "snake_case")]
 pub struct CapabilityValidation {
     /// Install `HighEntropyRedactor` on the outbound value / result.
     pub redact_secrets: bool,
