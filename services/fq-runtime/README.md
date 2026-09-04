@@ -235,6 +235,35 @@ deliberately **not** part of `just ci` — it needs release binaries and a
 docker daemon — so after changing the Dockerfile, run the four commands
 above by hand.
 
+### Published images
+
+Every merge to `main` publishes the five images to the repository's
+container registry, from the same binaries as the tarball
+([`main-artifacts.yml`](../../.github/workflows/main-artifacts.yml)):
+
+```text
+ghcr.io/bricef/fq-runtime:<sha>       ghcr.io/bricef/fq-runtime:main-latest
+ghcr.io/bricef/fq-dogfood:<sha>       ghcr.io/bricef/fq-dogfood:main-latest
+ghcr.io/bricef/github-watcher:<sha>   …
+ghcr.io/bricef/fq-cron:<sha>
+ghcr.io/bricef/fq-dashboard:<sha>
+```
+
+`<sha>` is the twelve-hex commit the binaries inside the image report
+from `--version`, and `just docker-publish` refuses to push an image
+whose `fq` reports anything else — a dirty build, or staging left over
+from another commit — so the tag is a fact about the content, not a
+label. It is what a host deploys and rolls back to. `main-latest` moves
+with every merge and only ever names the newest build, like the tarball
+channel of the same name; nothing should pin to it.
+
+Pulling needs a registry login with `read:packages` if the packages are
+private (`docker login ghcr.io`); the first publish of a package under a
+personal account creates it private, and its visibility is set once in
+the package's settings. Publishing from elsewhere — a fork, a mirror —
+is `FQ_DOCKER_REGISTRY=<registry>/<owner> just docker-publish <sha>`
+after a `docker login` to it.
+
 **The dogfood image's toolchain is real binaries, not rustup proxies.**
 The `exec` tool starts agent processes with
 `PATH=/usr/local/bin:/usr/bin:/bin` and no inherited variable, and a
