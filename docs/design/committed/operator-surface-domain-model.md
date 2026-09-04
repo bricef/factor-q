@@ -661,7 +661,6 @@ built-ins converge on this model later (plan Phase 7); the graph
 executor's signature work should check itself against the Resource/Report
 split when it arrives.
 
-
 ## Appendix — the roster, stress-tested
 
 Every operation from the

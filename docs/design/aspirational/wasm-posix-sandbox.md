@@ -366,6 +366,7 @@ cleanest upstream.
 ### Pipe implementation
 
 Shells depend on process pipes. Options:
+
 - Shell runs in one WASM instance and uses internal job
   control / thread-like primitives to implement pipes.
   Simpler but needs a shell implementation that supports it.

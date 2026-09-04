@@ -72,6 +72,7 @@ These method bodies are the transplant source for read-op handlers.
 `agent_id_for_invocation` · `invocation`
 
 Notes:
+
 - `failures`, `recovery`, `executions`, `event_count` are consumed only by
   doctor/status compositions — decide per-method whether each is an op in its own
   right or internal to a composite handler.

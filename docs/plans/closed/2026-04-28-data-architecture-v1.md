@@ -64,6 +64,7 @@ multi-node deployment, approval-gate UI/flow, per-agent
 durability mode opt-in.
 
 **Design references**:
+
 - [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) — the architectural commitments this plan implements.
 - [`docs/design/committed/data-architecture-requirements.md`](../../design/committed/data-architecture-requirements.md) — the requirements baseline.
 
@@ -734,8 +735,8 @@ match their behaviour 1:1; intent is preserved):
   `disabled_sweep_returns_on_shutdown_without_work` (covers
   the disabled-mode path).
 - **`config_sweep_interval_parser`** → `state_config_parses_overrides`
-  + `state_config_accepts_negative_retention_to_disable`
-  + `state_config_defaults_when_absent`.
+  - `state_config_accepts_negative_retention_to_disable`
+  - `state_config_defaults_when_absent`.
 - **`sweep_runs_on_schedule`** is exercised by the
   end-to-end acceptance test (which runs the real ticker
   against a live store).

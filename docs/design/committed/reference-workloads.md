@@ -51,7 +51,7 @@ External brief: [`Canopy/docs/product/canopy_brief.md` (sibling repo)](../../../
   storage layer (data-architecture.md §3.3).
 - **Cost accounting per customer** rolled up from
   per-invocation cost. Validates the existing cost-event
-  + projection rollup model.
+  - projection rollup model.
 
 ### What it doesn't probe
 

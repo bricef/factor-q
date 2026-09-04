@@ -171,6 +171,7 @@ actions. We have named the gap without filling it.
 ### Several critical follow-up docs do not exist
 
 Specifically:
+
 - Workspace snapshot design (mechanism, base-layer format,
   migration protocol)
 - Network proxy design (architecture, performance, security)

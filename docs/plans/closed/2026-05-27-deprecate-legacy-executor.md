@@ -58,6 +58,7 @@ The "no #[ignore] escape hatch" discipline held throughout:
 the one bug surfaced (the coordination-consumer flake) got
 fixed in the same commit as the step that surfaced it.
 **Design references**:
+
 - [`docs/design/aspirational/wasm-boundary-design.md`](../../design/aspirational/wasm-boundary-design.md) — reducer model the runner implements.
 - [`docs/plans/closed/2026-04-25-native-reducer-prototype.md`](../closed/2026-04-25-native-reducer-prototype.md) — native reducer that made `AgentExecutor` redundant.
 
@@ -319,6 +320,7 @@ test exists. If not, write one.
 
 A short audit note in the closing commit listing each
 legacy test and either:
+
 - "covered by reducer test X", or
 - "added new reducer test Y in this step".
 

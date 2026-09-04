@@ -43,6 +43,7 @@ rmcp = { version = "1.4", default-features = false, features = ["client", "trans
 ### Step 2: Create `crates/fq-runtime/src/mcp.rs`
 
 **`McpServerConfig`** — plain data struct for server declarations:
+
 ```rust
 pub struct McpServerConfig {
     pub name: String,           // human-readable, for logging
@@ -53,12 +54,14 @@ pub struct McpServerConfig {
 ```
 
 **`McpTool`** — adapts one MCP server tool to `fq_tools::Tool`:
+
 - Fields: `tool_name: String`, `tool_description: String`, `tool_input_schema: Value`, `client: Arc<RunningService<RoleClient, ()>>`
 - `name()` / `description()` / `parameters_schema()` return the stored metadata
 - `execute()` calls `client.call_tool(CallToolRequestParams)`, extracts text content from the response, maps `is_error`, returns `ToolResult`. On RPC failure, returns `ToolError::ExecutionFailed`.
 - Ignores `ToolContext` (sandbox) — MCP servers manage their own isolation
 
 **`McpClientManager`** — owns server processes:
+
 - `start_server(config) -> Result<Vec<Arc<dyn Tool>>, McpError>` — spawns child process via `TokioChildProcess`, performs MCP handshake via `().serve(transport)`, calls `list_all_tools()`, wraps each in `McpTool`, retains the client handle
 - `shutdown()` — calls `client.cancel()` on each, best-effort
 - Deduplicates by `(command, args)` tuple — same server declared by multiple agents is only started once
@@ -72,12 +75,14 @@ pub struct McpServerConfig {
 **File:** `crates/fq-runtime/src/agent/definition.rs`
 
 Add to `Frontmatter`:
+
 ```rust
 #[serde(default)]
 mcp: Vec<McpFrontmatter>,
 ```
 
 New struct:
+
 ```rust
 #[derive(Debug, Deserialize)]
 struct McpFrontmatter {
@@ -97,6 +102,7 @@ Map to `McpServerDeclaration` in `parse_agent()` and pass to builder.
 **File:** `crates/fq-runtime/src/agent.rs`
 
 New public type:
+
 ```rust
 #[derive(Debug, Clone)]
 pub struct McpServerDeclaration {
@@ -114,6 +120,7 @@ Add field `mcp_servers: Vec<McpServerDeclaration>` to `Agent`, `AgentBuilder`. A
 **File:** `crates/fq-cli/src/main.rs`, `trigger_agent()` function (~line 424)
 
 Replace `let tools = Arc::new(ToolRegistry::with_builtins());` with:
+
 1. `let mut tools = ToolRegistry::with_builtins();`
 2. `let mut mcp_manager = McpClientManager::new();`
 3. For each MCP server in the agent's declarations, call `mcp_manager.start_server(config)`, register returned tools
