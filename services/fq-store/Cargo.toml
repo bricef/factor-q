@@ -56,7 +56,7 @@ pkg-fmt = "tgz"
 bin-dir = "fq-cas"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 # The shared private-broker guard, for the grant_bus integration test (#233).
 fq-test-support = { workspace = true }
 futures = { workspace = true }
