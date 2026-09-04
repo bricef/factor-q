@@ -33,7 +33,7 @@ chrono = { workspace = true }
 clap = { workspace = true }
 # Server-side builders for the datastar SSE protocol (the client is
 # vendored at assets/datastar.js — v1.0.0, MIT, served from the binary).
-datastar = { version = "0.3", features = ["axum"] }
+datastar = { version = "0.4", features = ["axum"] }
 futures = { workspace = true }
 # The edge envelope carries payloads as JSON, so every read decodes
 # through here into the shared contract types; also pretty-prints tool
