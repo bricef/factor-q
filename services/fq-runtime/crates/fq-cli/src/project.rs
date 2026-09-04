@@ -107,8 +107,12 @@ pub(crate) fn init_project(force: bool) -> anyhow::Result<()> {
     println!("  4. In another shell, pair with it (the edge listens on");
     println!("     127.0.0.1:9472 unless fqd.toml's [edge] bind says otherwise).");
     println!("     From a terminal it shows the fingerprint and asks you to confirm;");
-    println!("     from a script add --fingerprint \"$(cat <state>/edge/fingerprint)\":");
-    println!("     fq connect 127.0.0.1:9472 --token \"$(cat <state>/edge/admin.token)\"");
+    println!(
+        "     from a script add --fingerprint \"$(cat ~/.local/state/factor-q/edge/fingerprint)\":"
+    );
+    println!(
+        "     fq connect 127.0.0.1:9472 --token \"$(cat ~/.local/state/factor-q/edge/admin.token)\""
+    );
     println!("  5. Trigger the sample agent:");
     println!("     fq trigger sample-agent \"Say hello in one sentence.\"");
     Ok(())

@@ -56,7 +56,7 @@ Then, in another shell, pair the client with it. The edge listens on
 `127.0.0.1:9472` unless `fqd.toml`'s `[edge] bind` says otherwise. From
 a terminal the first connection shows the fingerprint the daemon
 printed and asks you to confirm it; from a script pass
-`--fingerprint "$(cat <state>/edge/fingerprint)"` — without a terminal
+`--fingerprint "$(cat ~/.local/state/factor-q/edge/fingerprint)"` — without a terminal
 `fq connect` refuses to pair on trust alone:
 
 ```sh

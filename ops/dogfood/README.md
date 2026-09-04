@@ -145,9 +145,10 @@ the all-authority token, written once when the identity is minted,
 mode 0600 and **never printed** — the daemon logs where it is, not
 what it is, so `logs/fq-run.log` never holds it — and `fingerprint`,
 the certificate's SHA-256 in hex, the pin every client and the
-dashboard verify. Pair the operator's `fq` from the host with both:
-`fq connect 127.0.0.1:9470 --token "$(cat <state>/edge/admin.token)"
---fingerprint "$(cat <state>/edge/fingerprint)"`. Without a terminal
+dashboard verify. Pair the operator's `fq` from the host with both
+(the default state dir shown; substitute `[state] directory` if set):
+`fq connect 127.0.0.1:9470 --token "$(cat ~/.local/state/factor-q/edge/admin.token)"
+--fingerprint "$(cat ~/.local/state/factor-q/edge/fingerprint)"`. Without a terminal
 `fq connect` refuses to pair unless `--fingerprint` is given
 ([#544](https://github.com/bricef/factor-q/issues/544)); from a
 terminal it shows the fingerprint and asks.
