@@ -301,7 +301,7 @@ resolves, which may be neither volume. Set it explicitly to a path under
 ```yaml
 services:
   nats:
-    image: nats:latest
+    image: nats:2.14.3
     command: ["--config", "/etc/nats/nats.conf"]
     volumes:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro
