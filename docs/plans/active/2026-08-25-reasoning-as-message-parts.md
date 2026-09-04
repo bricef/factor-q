@@ -195,12 +195,13 @@ Verified against the pinned source (`genai = "0.6"` → `0.6.5` in
 
 ### 2.4 Two of #414's proposed exit criteria are already met
 
-#78 (`runner.rs` split) is **closed** — `worker/reducer/runner/` now exists
-with `llm.rs`, `replay.rs`, `server_request.rs`, `failure.rs`, `config.rs`.
-#189 is open but `fq-cli/src/lib.rs` is **233 lines** across 18 modules; the
-6.3k-line headline is resolved even if the listener/shutdown-join extraction
-is not. Only #191 (`mcp.rs`, 1,851 lines) and the two security PoCs (#399,
-#400) remain outstanding of the five *proposed* criteria.
+Issue #78 (`runner.rs` split) is **closed** — `worker/reducer/runner/` now
+exists with `llm.rs`, `replay.rs`, `server_request.rs`, `failure.rs`,
+`config.rs`. Issue #189 is open but `fq-cli/src/lib.rs` is **233 lines**
+across 18 modules; the 6.3k-line headline is resolved even if the
+listener/shutdown-join extraction is not. Only #191 (`mcp.rs`, 1,851 lines)
+and the two security PoCs (#399 and #400) remain outstanding of the five
+*proposed* criteria.
 
 **Consequence for sequencing:** STATUS.md's deliberately-open ordering
 question — *"whether #437 lands before or after #78/#189/#191, since both
