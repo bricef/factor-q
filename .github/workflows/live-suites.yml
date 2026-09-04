@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Fail here rather than fifteen minutes in, with the fix in the
       # message. A live suite without a key is not a skip: it is this
