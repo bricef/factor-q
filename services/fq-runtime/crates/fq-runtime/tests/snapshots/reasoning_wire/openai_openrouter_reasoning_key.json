@@ -1,0 +1,136 @@
+{
+  "requests": [
+    {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "Read /work/notes.txt and report its first line.",
+          "role": "user"
+        }
+      ],
+      "model": "moonshotai/kimi-k3",
+      "reasoning_effort": "medium",
+      "stream": false,
+      "tools": [
+        {
+          "function": {
+            "description": "Read a file from the workspace.",
+            "name": "read_file",
+            "parameters": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "strict": false
+          },
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "Read /work/notes.txt and report its first line.",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "reasoning_content": "Read file.",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{\"path\":\"/work/notes.txt\"}",
+                "name": "read_file"
+              },
+              "id": "builtin__file_read:0",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "Reasoning round-trip probe: the badger is orange.\nSecond line.",
+          "role": "tool",
+          "tool_call_id": "builtin__file_read:0"
+        }
+      ],
+      "model": "moonshotai/kimi-k3",
+      "reasoning_effort": "medium",
+      "stream": false,
+      "tools": [
+        {
+          "function": {
+            "description": "Read a file from the workspace.",
+            "name": "read_file",
+            "parameters": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "strict": false
+          },
+          "type": "function"
+        }
+      ]
+    }
+  ],
+  "turns": [
+    {
+      "parts": [
+        {
+          "content": {
+            "kind": "plain",
+            "text": "Read file."
+          },
+          "kind": "reasoning",
+          "model": "moonshotai/kimi-k3"
+        },
+        {
+          "kind": "tool_call",
+          "parameters": {
+            "path": "/work/notes.txt"
+          },
+          "tool_call_id": "builtin__file_read:0",
+          "tool_name": "read_file"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 1047,
+        "output_tokens": 74,
+        "reasoning_tokens": 6
+      }
+    },
+    {
+      "parts": [
+        {
+          "kind": "text",
+          "text": "Reasoning round-trip probe: the badger is orange.\n33"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 1562,
+        "output_tokens": 26,
+        "reasoning_tokens": 3
+      }
+    }
+  ]
+}

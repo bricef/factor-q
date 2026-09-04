@@ -26,6 +26,11 @@ use super::{ChatRequest, ChatResponse, LlmClient, LlmError};
 // our parent module name.
 use ::genai as provider;
 
+/// The wire goldens: what this adapter decodes and what it sends, pinned
+/// per scenario so a dependency change cannot move either unnoticed.
+#[cfg(test)]
+mod wire_goldens;
+
 /// Production LLM client backed by the `genai` crate.
 #[derive(Clone)]
 pub struct GenAiClient {
