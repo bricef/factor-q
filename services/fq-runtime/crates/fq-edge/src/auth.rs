@@ -66,13 +66,15 @@ impl EdgeIdentity {
 
     /// Mint the admin token and write it to `<dir>/admin.token`,
     /// owner-only from the first byte and never over an existing file
-    /// (the same `write_secret` discipline as the key material).
-    /// Returns the path: the caller reports *where* the token is, never
-    /// the token, so it stays out of journald, `docker logs` and every
-    /// run log for the life of the file
-    /// (<https://github.com/bricef/factor-q/issues/545>). One trailing
-    /// newline, so `$(cat …)` and `read` both hand back the bare token.
-    pub fn write_admin_token(&self, dir: &Path) -> anyhow::Result<PathBuf> {
+    /// (the same `write_secret` discipline as the key material). Only
+    /// [`save_minted`](Self::save_minted) calls this, *before* the
+    /// certificate goes down — see there for why the order matters.
+    /// The caller reports *where* the token is, never the token, so it
+    /// stays out of journald, `docker logs` and every run log for the
+    /// life of the file (<https://github.com/bricef/factor-q/issues/545>).
+    /// One trailing newline, so `$(cat …)` and `read` both hand back
+    /// the bare token.
+    fn write_admin_token(&self, dir: &Path) -> anyhow::Result<PathBuf> {
         let token = self.mint_admin_token()?;
         let path = dir.join(ADMIN_TOKEN_FILE);
         write_secret(&path, format!("{token}\n").as_bytes())?;
@@ -116,14 +118,15 @@ impl EdgeIdentity {
 
     /// Load the identity persisted under `dir`, or provision a fresh
     /// one and persist it. The `bool` is `true` exactly when the
-    /// identity was freshly minted — the caller writes the admin token
-    /// on that run and never again.
+    /// identity was freshly minted — the run on which the admin token
+    /// is written beside it ([`save_minted`](Self::save_minted)), and
+    /// never again.
     pub fn load_or_provision(dir: &Path) -> anyhow::Result<(Self, bool)> {
         if let Some(identity) = Self::try_load(dir)? {
             return Ok((identity, false));
         }
         let identity = Self::provision()?;
-        identity.save(dir)?;
+        identity.save_minted(dir)?;
         Ok((identity, true))
     }
 
@@ -154,7 +157,7 @@ impl EdgeIdentity {
             return Ok((identity, IdentityOrigin::Adopted));
         }
         let identity = Self::provision()?;
-        identity.save(dir)?;
+        identity.save_minted(dir)?;
         Ok((identity, IdentityOrigin::Minted))
     }
 
@@ -188,12 +191,37 @@ impl EdgeIdentity {
         Ok(None)
     }
 
-    /// Persist the identity under `dir` (created 0700 on unix if
-    /// absent). Private material — the TLS key and the token root —
-    /// is written 0600 on unix, and never over an existing file:
-    /// permissions are only applied at creation, so overwriting could
-    /// silently inherit looser bits.
+    /// Persist an existing identity under `dir` (created 0700 on unix
+    /// if absent) — the adoption path (#362) and tests. Private
+    /// material — the TLS key and the token root — is written 0600 on
+    /// unix, and never over an existing file: permissions are only
+    /// applied at creation, so overwriting could silently inherit
+    /// looser bits. No admin token: one was minted when this identity
+    /// was, and a copy of an identity is not a new root.
     pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
+        self.save_private(dir)?;
+        self.mark_complete(dir)
+    }
+
+    /// Persist a freshly minted identity under `dir` *with* its admin
+    /// token, in the one order that makes a crash safe: the private
+    /// material and the fingerprint, then `admin.token`, and only then
+    /// `cert.der`, the completeness marker. A failure anywhere before
+    /// that last write leaves a partial identity — which
+    /// [`try_load`](Self::try_load) refuses on the next start — rather
+    /// than a complete identity with no token, which every later start
+    /// would load silently and nothing would ever say so. Returns the
+    /// token's path.
+    pub fn save_minted(&self, dir: &Path) -> anyhow::Result<PathBuf> {
+        self.save_private(dir)?;
+        let token_path = self.write_admin_token(dir)?;
+        self.mark_complete(dir)?;
+        Ok(token_path)
+    }
+
+    /// Everything but the certificate: the directory, the key, the
+    /// root, the fingerprint.
+    fn save_private(&self, dir: &Path) -> anyhow::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -209,10 +237,14 @@ impl EdgeIdentity {
             &dir.join(ROOT_FILE),
             self.root.private().to_bytes_hex().as_bytes(),
         )?;
-        // The fingerprint and the certificate are public. The
-        // certificate is written last so its presence marks a complete
-        // identity (`load_or_provision` keys on it).
+        // Public, derived from the certificate.
         self.write_fingerprint(dir)?;
+        Ok(())
+    }
+
+    /// The certificate — public, and written last so its presence marks
+    /// a complete identity (`try_load` keys on it).
+    fn mark_complete(&self, dir: &Path) -> anyhow::Result<()> {
         fs::write(dir.join(CERT_FILE), &self.cert_der)?;
         Ok(())
     }
@@ -241,7 +273,8 @@ pub enum IdentityOrigin {
     Loaded,
     /// Read from the legacy location and copied to the configured one.
     Adopted,
-    /// Neither location held one, so a fresh identity was provisioned.
+    /// Neither location held one, so a fresh identity was provisioned
+    /// and its admin token written beside it.
     Minted,
 }
 
