@@ -250,7 +250,12 @@ in `fqd.toml` names the environment variable the daemon reads it from
 `FQ_NATS_URL` / `--nats-url` is refused if it carries userinfo: the URL
 is printed in the banner, the log and the `system.startup` event, so a
 credential must never be part of it
-([#540](https://github.com/bricef/factor-q/issues/540)).
+([#540](https://github.com/bricef/factor-q/issues/540)). `RUST_LOG`
+cannot put it there either: the daemon caps the NATS client's own
+output below `trace`, because the client traces every protocol
+operation it writes — the `CONNECT` that carries the token included —
+so `RUST_LOG=trace` costs wire-level NATS debugging, never the
+credential.
 
 Precedence remains CLI flag > env var > config file > default. On a
 host without any of these set, factor-q falls back to:

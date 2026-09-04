@@ -9,7 +9,11 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use fq_runtime::Config;
-use tracing_subscriber::EnvFilter;
+use tracing::Level;
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 /// The daemon's config file. Named for the binary that reads it: the
 /// client has its own `fq.toml`, and one file per binary means neither
@@ -17,7 +21,10 @@ use tracing_subscriber::EnvFilter;
 /// could not work against a remote daemon anyway — the operator on
 /// another machine has no such file.
 const DEFAULT_CONFIG_PATH: &str = "fqd.toml";
-use tracing_subscriber::fmt;
+
+/// The `tracing` target prefix of the NATS client crate — `async_nats`,
+/// `async_nats::connection`, `async_nats::connector`, and so on.
+const NATS_CLIENT_TARGET: &str = "async_nats";
 
 /// How the tracing subscriber renders log lines. `Text` is the
 /// human-readable ANSI default; `Json` emits one structured JSON
@@ -41,17 +48,37 @@ pub(crate) enum LogFormat {
 /// Logs go to stderr in both modes: stdout is reserved for machine
 /// output (issue #190), and query-style commands log incidental INFO
 /// (e.g. the NATS connect) before their result is known.
+///
+/// One ceiling sits above whatever `RUST_LOG` asks for: the NATS client
+/// never logs at `trace`. `async-nats` 0.50 traces every protocol
+/// operation it writes, `CONNECT` included, and `CONNECT` carries the
+/// broker token in clear (`connection.rs`, `trace!(?connect_info, …)`);
+/// 0.38 traced no operations at all, which is why the bump would
+/// otherwise undo #540. `[nats] token_env` keeps the credential out of
+/// `Config` and the URL; this keeps it out of the log, so
+/// `RUST_LOG=trace` on a host costs wire-level NATS debugging and never
+/// the credential. The client's `debug` and above are unaffected.
 pub(crate) fn init_tracing(format: LogFormat) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let client_ceiling = filter_fn(|meta| {
+        !(*meta.level() == Level::TRACE && meta.target().starts_with(NATS_CLIENT_TARGET))
+    });
+    let registry = tracing_subscriber::registry().with(env_filter);
     match format {
-        LogFormat::Text => fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::io::stderr)
+        LogFormat::Text => registry
+            .with(
+                fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_filter(client_ceiling),
+            )
             .init(),
-        LogFormat::Json => fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::io::stderr)
-            .json()
+        LogFormat::Json => registry
+            .with(
+                fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .json()
+                    .with_filter(client_ceiling),
+            )
             .init(),
     }
 }
