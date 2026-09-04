@@ -66,7 +66,7 @@ impl EdgeIdentity {
 
     /// Mint the admin token and write it to `<dir>/admin.token`,
     /// owner-only from the first byte and never over an existing file
-    /// (the same [`write_secret`] discipline as the key material).
+    /// (the same `write_secret` discipline as the key material).
     /// Returns the path: the caller reports *where* the token is, never
     /// the token, so it stays out of journald, `docker logs` and every
     /// run log for the life of the file
