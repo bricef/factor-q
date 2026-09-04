@@ -12,12 +12,17 @@ systemd units — and retires the "no supervisor" carve-out of
 of [ADR-0022](0022-binary-distribution-and-licensing.md) stays as it is;
 images are a second artifact, not a replacement.
 
-Implementation: pending — nothing here is built. The existing
-`services/fq-runtime/Dockerfile` predates this decision and carries the
-defects the [production-readiness
-review](../../reviews/2026-09-03-production-readiness-review.md) lists as
-E3 (no state volume, no `HEALTHCHECK`, a credential-less broker URL);
-`ops/dogfood/deploy.sh` still flips symlinks and launches with `setsid`.
+Implementation: partial — the images (clauses 1, 3, 4 and the daemon's
+half of 6 and 8) are built: `services/fq-runtime/Dockerfile` holds the
+`minimal`, `dogfood`, `watcher`, `cron` and `dashboard` targets, assembled
+from the release binaries rather than compiled in-image, with one volume
+at `/var/lib/factor-q` and a `HEALTHCHECK` on the daemon
+([#587](https://github.com/bricef/factor-q/issues/587), slice 1). Not
+built: image publishing (clause 1's tag), the compose stack and the
+supervisor it is (2, 5, 7), the tag-bump `deploy.sh`, and probes on the
+adapter and dashboard images (8); `ops/dogfood/deploy.sh` still flips
+symlinks and launches with `setsid`. The tracking issue carries the
+slices.
 
 ## Context
 

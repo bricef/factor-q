@@ -113,20 +113,21 @@ jobs:
               - 'scripts/dashboard-screenshots.sh'
               - 'scripts/dashboard-pr-comment.sh'
               - '.github/workflows/ci.yml'
-            # Deliberately narrow. The image build is the slowest job here,
-            # and only two kinds of change can break it: the Dockerfile
-            # itself, and the workspace's membership or dependency graph.
-            # The failure this exists to catch is a new crate that never
-            # reached the Dockerfile's member-manifest COPY list — cargo
-            # refuses to load a workspace with a member manifest missing,
-            # so the build dies on its first cargo line. That is a
-            # `Cargo.toml` change every time.
+            # The image job (ADR-0035): the images are assembled from
+            # release binaries, never compiled in-image, so what can break
+            # them is the Dockerfile itself, the context filter, the pins
+            # the dogfood toolchain tracks, and whatever changes the release
+            # build (manifests, lockfile, toolchain, the justfile recipes).
             docker:
               - 'services/fq-runtime/Dockerfile'
+              - '.dockerignore'
+              - '.nats-version'
+              - '.nats-checksums'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'justfile'
               - 'rust-toolchain.toml'
+              - 'adapters/*/go.mod'
               - '.github/workflows/ci.yml'
 
   docs-lint:
@@ -474,21 +475,19 @@ jobs:
       - if: needs.changes.outputs.go == 'true'
         run: just go-ci
 
-  # The container image, which had been unbuildable for weeks before this
-  # job existed: `fq-agent` and `fq-daemon` were added to the workspace and
-  # never reached the Dockerfile's member-manifest COPY list, so `cargo
-  # build` failed on its first line inside the image. Nothing noticed,
-  # because `just docker-build` ran in no workflow — the image was the one
-  # deliverable with no gate at all.
+  # The container images (ADR-0035). They are assembled from the release
+  # binaries the deploy bundle ships — never compiled in-image — so this
+  # job first builds those binaries for the musl target exactly as
+  # main-artifacts.yml does, then builds every image target and runs each
+  # one's binary with --version. The build half catches a Dockerfile that
+  # no longer matches what `just docker-stage` lays out; the run half
+  # catches an image that builds but cannot start, which is not
+  # hypothetical (a `CMD ["run"]` once outlived the subcommand it named),
+  # and for the dogfood image proves the toolchain is reachable on the
+  # `exec` tool's baseline PATH with an otherwise empty environment.
   #
-  # It builds the real image rather than linting the Dockerfile: the failure
-  # mode is a manifest cargo cannot resolve, which only a build finds. The
-  # smoke check afterwards is cheap and catches the other half — an image
-  # that builds but cannot start, which is what `CMD ["run"]` left behind
-  # when the split deleted that subcommand.
-  #
-  # Path-filtered narrowly (see the `docker` filter): this is the slowest
-  # job in the file, and a docs-only or single-crate PR cannot break it.
+  # Path-filtered (see the `docker` filter): the release build is minutes
+  # even warm, and a docs-only or single-crate PR cannot break the images.
   docker:
     name: Container image
     needs: changes
@@ -498,26 +497,30 @@ jobs:
         run: echo "No Docker-relevant changes — skipping the image build."
       - if: needs.changes.outputs.docker == 'true'
         uses: actions/checkout@v7
+      # Keep in lockstep with rust-toolchain.toml and main-artifacts.yml.
+      - if: needs.changes.outputs.docker == 'true'
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-unknown-linux-musl
+      - if: needs.changes.outputs.docker == 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: needs.changes.outputs.docker == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: adapters/github-watcher/go.mod
       - if: needs.changes.outputs.docker == 'true'
         uses: extractions/setup-just@v4
-      # No layer cache: this is a cold build every time, and it compiles
-      # the workspace from scratch inside the image. That is affordable
-      # precisely because the filter above is narrow — and a cold build
-      # is also the honest test, since the failure being guarded against
-      # is a manifest cargo cannot resolve, which a warm cache could
-      # step straight over.
       - if: needs.changes.outputs.docker == 'true'
-        run: just docker-build
-      # An image that builds but cannot run is still broken, and that is
-      # not hypothetical: the entrypoint invoked a deleted subcommand and
-      # the build was perfectly happy. `fqd --version` proves the
-      # entrypoint resolves and the binary executes in the runtime stage,
-      # which is distroless and has no shell to check it any other way.
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - if: needs.changes.outputs.docker == 'true'
-        run: |
-          set -euo pipefail
-          echo "entrypoint (the daemon):"
-          docker run --rm factor-q/fq-runtime:latest --version
-          echo "the client, which ships alongside it:"
-          docker run --rm --entrypoint /usr/local/bin/fq \
-            factor-q/fq-runtime:latest --version
+        run: just build-release x86_64-unknown-linux-musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+      - if: needs.changes.outputs.docker == 'true'
+        run: just build-watcher x86_64-unknown-linux-musl
+      - if: needs.changes.outputs.docker == 'true'
+        run: just build-cron x86_64-unknown-linux-musl
+      - if: needs.changes.outputs.docker == 'true'
+        run: just docker-build x86_64-unknown-linux-musl
+      - if: needs.changes.outputs.docker == 'true'
+        run: just docker-check
