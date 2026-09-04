@@ -44,7 +44,9 @@ pub(crate) fn daemon_addr(global: &GlobalArgs) -> anyhow::Result<String> {
         1 => Ok(paired.remove(0)),
         0 => anyhow::bail!(
             "no daemon paired — run `fq connect <addr> --token <token>` first \
-             (the daemon prints the token once, on its first run)"
+             (the daemon wrote the admin token to <state>/edge/admin.token at first run — \
+             ~/.local/state/factor-q/edge/admin.token unless fqd.toml's [state] directory \
+             or FQ_STATE_DIR moved it; it is never printed)"
         ),
         _ => anyhow::bail!(
             "several daemons paired and no default — pass `--addr <one of: {}>`, \

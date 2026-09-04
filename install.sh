@@ -20,7 +20,8 @@ set -eu
 
 REPO="bricef/factor-q"
 INSTALL_DIR="${FQ_INSTALL_DIR:-$HOME/.local/bin}"
-RELEASE_BASE="${FQ_RELEASE_BASE:-https://github.com/$REPO/releases/download}"
+DEFAULT_RELEASE_BASE="https://github.com/$REPO/releases/download"
+RELEASE_BASE="${FQ_RELEASE_BASE:-$DEFAULT_RELEASE_BASE}"
 
 err() {
     echo "error: $*" >&2
@@ -84,6 +85,11 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 echo "Installing factor-q ${tag} (${target}) -> ${INSTALL_DIR}"
+if [ "$RELEASE_BASE" != "$DEFAULT_RELEASE_BASE" ]; then
+    # Say so out loud: the checksum below proves the bundle matches what
+    # THIS base published, which is only as trustworthy as the base.
+    echo "Note: fetching from $RELEASE_BASE; checksum verified against that base, not GitHub" >&2
+fi
 curl -fsSL "$url" -o "$tmp/bundle.tar.gz" || err "download failed: $url"
 
 # --- verify the checksum; every failure here aborts the install ---
@@ -103,9 +109,14 @@ echo "  checksum ok"
 
 tar -xzf "$tmp/bundle.tar.gz" -C "$tmp"
 
+# All three or nothing: checked before the install loop so a bundle
+# missing one binary never leaves the others half-installed.
+for bin in fq fqd fq-cas; do
+    [ -f "$tmp/${bin}" ] || err "archive did not contain the ${bin} binary — nothing was installed"
+done
+
 mkdir -p "$INSTALL_DIR"
 for bin in fq fqd fq-cas; do
-    [ -f "$tmp/${bin}" ] || err "archive did not contain the ${bin} binary"
     if ! install -m 0755 "$tmp/${bin}" "$INSTALL_DIR/${bin}" 2>/dev/null; then
         cp "$tmp/${bin}" "$INSTALL_DIR/${bin}"
         chmod 0755 "$INSTALL_DIR/${bin}"

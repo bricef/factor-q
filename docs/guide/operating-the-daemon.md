@@ -201,8 +201,8 @@ you would rather start from a summary.
 
 | Goal | Command |
 | --- | --- |
-| Pair a client, from a terminal (confirms the fingerprint) | `fq connect <addr> --token "$(cat <state>/edge/admin.token)"` |
-| Pair a client, from a script (no prompt; the pin is required) | `fq connect <addr> --token "$(cat <state>/edge/admin.token)" --fingerprint "$(cat <state>/edge/fingerprint)"` |
+| Pair a client, from a terminal (confirms the fingerprint) | `fq connect <addr> --token "$(cat ~/.local/state/factor-q/edge/admin.token)"` |
+| Pair a client, from a script (no prompt; the pin is required) | `fq connect <addr> --token "$(cat ~/.local/state/factor-q/edge/admin.token)" --fingerprint "$(cat ~/.local/state/factor-q/edge/fingerprint)"` |
 | Stop the daemon (clean, confirmed) | `fq down` |
 | Stop now, skip the drain | `fq down --now` |
 | Redeploy (suspend for the next binary) | `fq down` |
