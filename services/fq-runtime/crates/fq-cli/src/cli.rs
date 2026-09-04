@@ -225,9 +225,10 @@ pub(crate) enum Commands {
         /// Edge address. Defaults to `[daemon] addr` in the client's
         /// config, or to the sole paired daemon when there is only one
         addr: Option<String>,
-        /// Capability token to present and store (the daemon printed
-        /// the admin token at first run); defaults to the token
-        /// already stored for this address
+        /// Capability token to present and store (the daemon wrote the
+        /// admin token to `<state>/edge/admin.token` at first run; it is
+        /// never printed); defaults to the token already stored for
+        /// this address
         #[arg(long)]
         token: Option<String>,
         /// Pin this certificate fingerprint (64 hex chars) instead of

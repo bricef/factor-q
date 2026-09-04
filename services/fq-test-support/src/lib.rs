@@ -23,10 +23,49 @@
 //! `just install-nats`; `FQ_TEST_NATS_SERVER` overrides the path. A missing
 //! binary is a hard failure, never a skip — that is the whole point.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// The admin token a first-run daemon wrote under `state_dir`:
+/// `<state>/edge/admin.token` — the daemon's `edge_identity::identity_dir`
+/// plus `fq_edge::ADMIN_TOKEN_FILE` (named here rather than imported so
+/// fq-store's test build does not pull the edge crate in).
+///
+/// The token stopped being printed with
+/// <https://github.com/bricef/factor-q/issues/545> — a token in a log
+/// is a token in journald, `docker logs` and every run log for the life
+/// of the file — so every test that used to scrape the daemon's stdout
+/// reads the file the operator reads. That also retires the #454 flake
+/// for good: there is no banner-to-token gap for a tracing line to land
+/// in. Trimmed. Panics with the path when the file is absent, which is
+/// what a test wants to hear instead of a rejected pairing.
+pub fn admin_token(state_dir: &Path) -> String {
+    read_edge_file(state_dir, "admin.token")
+}
+
+/// The daemon's certificate fingerprint, lowercase hex, from
+/// `<state>/edge/fingerprint` — what a script hands to `fq connect
+/// --fingerprint` now that trust-on-first-use is interactive-only
+/// (<https://github.com/bricef/factor-q/issues/544>). Trimmed.
+pub fn edge_fingerprint(state_dir: &Path) -> String {
+    read_edge_file(state_dir, "fingerprint")
+}
+
+fn read_edge_file(state_dir: &Path, name: &str) -> String {
+    let path = state_dir.join("edge").join(name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| {
+            panic!(
+                "{}: {e} — a first run against a fresh FQ_STATE_DIR writes it; is the daemon \
+                 past 'Runtime ready', and is this the state dir it was given?",
+                path.display()
+            )
+        })
+        .trim()
+        .to_string()
+}
 
 /// Configure `cmd` to lead a fresh process group inherited by its descendants.
 ///

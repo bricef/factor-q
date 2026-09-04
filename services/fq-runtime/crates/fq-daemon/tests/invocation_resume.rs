@@ -198,16 +198,19 @@ impl Daemon {
     /// Pair the CLI with this daemon's edge (idempotent): the flipped
     /// read verbs (`invocation list`/`show`) speak the authenticated
     /// edge, so tests that verify through them need the stored
-    /// pairing. Only the FIRST daemon of a scratch prints the admin
-    /// token; later daemons reuse the persisted identity, and the
-    /// address pinned here keeps the stored pairing valid across
-    /// restarts.
+    /// pairing. Only the FIRST daemon of a scratch mints the identity;
+    /// later daemons reuse it, and the address pinned here keeps the
+    /// stored pairing valid across restarts.
     ///
-    /// Both values come out of the daemon log because neither exists
-    /// anywhere else — the kernel chose the address, and the token is
-    /// minted and printed exactly once — and both are matched by
-    /// content, never by line number. (`tests/smoke/smoke.sh` reads the
-    /// same two values from the same output for the same reasons.)
+    /// The address comes out of the daemon log because it exists
+    /// nowhere else — the kernel chose it — and is matched by content,
+    /// never by line number. The token and the fingerprint come from
+    /// the files the daemon wrote beside its identity (#545): the log
+    /// used to carry the token, and reading it back from there was the
+    /// #454 flake — a tracing line could land between the banner and
+    /// the token, and a positional read handed `fq connect` a log event
+    /// as a credential. (`tests/smoke/smoke.sh` reads the same values
+    /// from the same places.)
     fn pair(&self, scratch: &Scratch) {
         if scratch
             .path("xdg")
@@ -228,9 +231,17 @@ impl Daemon {
         // verb — or the restarted daemon — reads `[edge] bind` back out
         // of that file.
         scratch.pin_edge_bind(&addr);
-        let token = admin_token_from_log(&log).expect("admin token in first daemon log");
+        let token = fq_test_support::admin_token(&scratch.path("state"));
+        let fingerprint = fq_test_support::edge_fingerprint(&scratch.path("state"));
         let out = Command::new(fq_client_binary())
-            .args(["connect", &addr, "--token", &token])
+            .args([
+                "connect",
+                &addr,
+                "--token",
+                &token,
+                "--fingerprint",
+                &fingerprint,
+            ])
             .env("FQ_CLI_CONFIG", scratch.path("fq.toml"))
             .env("XDG_CONFIG_HOME", scratch.path("xdg"))
             .stdin(std::process::Stdio::piped())
@@ -284,98 +295,6 @@ impl Daemon {
         }
         let _ = self.child.kill();
     }
-}
-
-/// Extract the admin token from a first-run daemon log: from the
-/// banner, scan forward for the first line whose *shape* is a token.
-///
-/// The shape is the whole point. The obvious reading — "the line after
-/// the marker" — assumes the banner and the token it introduces are
-/// adjacent in the file, and nothing makes that true. `Daemon::spawn`
-/// points the child's stdout and stderr at one file: the banner is a
-/// `println!` on stdout, every startup tracing event is a separate
-/// write to stderr, and the banner is emitted mid-startup while a dozen
-/// tasks are announcing themselves. Nothing orders the two streams, so
-/// a tracing line can land in the gap. `lines.next()` then hands `fq
-/// connect` a log event as a credential; the daemon fails to parse it
-/// and answers "token rejected", which the CLI dresses up as an
-/// identity that may have been rotated — an error describing something
-/// that did not happen, and a diagnosis cycle away from the truth
-/// (#454).
-///
-/// A biscuit is one unbroken run of base64url alone on its line,
-/// comfortably over 40 characters. No tracing line can wear that shape:
-/// JSON records carry braces, quotes and colons, and the human format
-/// carries spaces and timestamps — all outside the charset. So the scan
-/// walks past whatever landed in the gap and stops on the token however
-/// the two streams interleaved.
-///
-/// `None` rather than a best-effort line is deliberate: an extraction
-/// that cannot find a token must fail here, where the reason is
-/// legible, instead of forwarding a non-credential and letting the
-/// daemon's rejection explain it wrongly.
-fn admin_token_from_log(log: &str) -> Option<String> {
-    let mut lines = log.lines();
-    lines.find(|l| l.contains("edge: admin token"))?;
-    lines
-        .map(str::trim)
-        .find(|l| {
-            l.len() >= 40
-                && l.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '='))
-        })
-        .map(str::to_string)
-}
-
-/// The #454 flake in miniature, without a daemon: the shape scan has to
-/// survive tracing output landing between the banner and the token, and
-/// it has to stay anchored on the banner. This is the piece most likely
-/// to regress silently — the positional read came back clean from every
-/// one of a few hundred local scratches before CI caught it once.
-#[test]
-fn admin_token_read_by_shape_not_by_position() {
-    // Biscuit shape: base64url, no internal whitespace, long.
-    let token =
-        "Ep0BCjMKCXByaW5jaXBhbAoFYWRtaW4YAyIKCggIChIDGIAIEiQIABIgQmFzZTY0VXJsX3J1bi13aXRoLXBhZD0=";
-    let token_line = format!("  {token}");
-    let banner = "edge: admin token (printed once; store it securely):";
-    let fingerprint = "edge: certificate fingerprint (clients pin this): \
-                       0adfe5f1c0ffee00deadbeef1234567890abcdef1234567890abcdef12345678";
-    // The two formats the daemon's tracing can take. Neither is
-    // token-shaped; the hex fingerprint above is long enough but rides
-    // on a line with punctuation, so it is not either.
-    let json_line = r#"{"timestamp":"2026-07-24T10:11:12.493056Z","level":"INFO","fields":{"message":"trigger dispatcher starting"}}"#;
-    let text_line = "2026-07-24T10:11:12.494128Z  INFO fq_cli: advisory watch starting";
-
-    // Adjacent — nothing landed in the gap. The common case, and the
-    // only one the positional read ever handled.
-    let clean = [fingerprint, banner, token_line.as_str(), "Runtime ready."].join("\n");
-    assert_eq!(admin_token_from_log(&clean).as_deref(), Some(token));
-
-    // Interleaved. Position picks `json_line` and the pairing fails
-    // with a message about identity rotation; shape picks the token.
-    let interleaved = [
-        fingerprint,
-        banner,
-        json_line,
-        text_line,
-        "",
-        token_line.as_str(),
-        "Runtime ready.",
-    ]
-    .join("\n");
-    assert_eq!(admin_token_from_log(&interleaved).as_deref(), Some(token));
-
-    // Nothing token-shaped after the banner: `None`, so the caller
-    // panics here rather than handing a log line to `fq connect`.
-    let truncated = [banner, json_line, text_line].join("\n");
-    assert!(admin_token_from_log(&truncated).is_none());
-
-    // A restarted daemon reuses its persisted identity and prints no
-    // banner at all. The scan starts from the marker, so it must not
-    // fall back to the first base64-ish line in the file.
-    let restarted = ["edge: identity loaded from state", token_line.as_str()].join("\n");
-    assert!(admin_token_from_log(&restarted).is_none());
 }
 
 /// Extract the invocation id from the daemon log — the single

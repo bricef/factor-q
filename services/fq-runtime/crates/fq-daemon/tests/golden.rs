@@ -1326,13 +1326,8 @@ impl EdgeFixture {
             .expect("edge addr in log")
             .trim()
             .to_string();
-        let token = {
-            let mut lines = text.lines();
-            lines
-                .find(|l| l.contains("edge: admin token"))
-                .expect("admin token marker");
-            lines.next().expect("token line").trim().to_string()
-        };
+        let token = fq_test_support::admin_token(&dir.path().join("state"));
+        let fingerprint = fq_test_support::edge_fingerprint(&dir.path().join("state"));
 
         // The daemon's startup recovery has (correctly) marked the
         // seeded in-flight row ambiguous: at boot, in-flight work
@@ -1512,10 +1507,19 @@ impl EdgeFixture {
         std::fs::write(&client_config, format!("[edge]\nbind = \"{addr}\"\n"))
             .expect("client fq.toml");
 
-        // Pair once: non-interactive TOFU auto-pins with a notice.
+        // Pair once, pinned explicitly: without a terminal there is no
+        // trust-on-first-use, so a script passes the fingerprint the
+        // daemon wrote beside its identity (#544).
         let xdg = tempfile::tempdir().expect("xdg dir");
         let connect = Command::new(fq_client_binary())
-            .args(["connect", &addr, "--token", &token])
+            .args([
+                "connect",
+                &addr,
+                "--token",
+                &token,
+                "--fingerprint",
+                &fingerprint,
+            ])
             .env("FQ_CLI_CONFIG", &client_config)
             .env("XDG_CONFIG_HOME", xdg.path())
             .env("RUST_LOG", "off")

@@ -400,13 +400,8 @@ impl World {
             &text,
             "edge: certificate fingerprint (clients pin this): ",
         ));
-        let token = {
-            let mut lines = text.lines();
-            lines
-                .find(|l| l.contains("edge: admin token"))
-                .expect("admin token marker");
-            lines.next().expect("token line").trim().to_string()
-        };
+        let token = fq_test_support::admin_token(&dir.join("state"));
+        let fingerprint_hex = fq_test_support::edge_fingerprint(&dir.join("state"));
 
         // The client's config names the daemon's actual address, so
         // the flipped verb dials it with no flags.
@@ -415,7 +410,14 @@ impl World {
 
         let xdg = tempfile::tempdir().expect("xdg dir");
         let connect = Command::new(fq_client_binary())
-            .args(["connect", &addr, "--token", &token])
+            .args([
+                "connect",
+                &addr,
+                "--token",
+                &token,
+                "--fingerprint",
+                &fingerprint_hex,
+            ])
             .env("FQ_CLI_CONFIG", dir.join("fq.toml"))
             .env("XDG_CONFIG_HOME", xdg.path())
             .env("RUST_LOG", "off")

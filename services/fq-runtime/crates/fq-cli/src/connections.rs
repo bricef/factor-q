@@ -158,8 +158,10 @@ pub(crate) async fn connect(
         .or_else(|| existing.as_ref().map(|e| e.token.clone()))
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no token for {addr}: pass --token (the daemon printed the admin token \
-                 at first run)"
+                "no token for {addr}: pass --token (the daemon wrote the admin token to \
+                 <state>/edge/admin.token at first run — ~/.local/state/factor-q/edge/admin.token \
+                 unless fqd.toml's [state] directory or FQ_STATE_DIR moved it; it is never \
+                 printed)"
             )
         })?;
 

@@ -99,12 +99,16 @@ pub(crate) fn init_project(force: bool) -> anyhow::Result<()> {
     println!("  2. Export your LLM provider API key, e.g.:");
     println!("     export ANTHROPIC_API_KEY='sk-ant-...'");
     println!("  3. Start the daemon from this directory, so it reads fqd.toml.");
-    println!("     It prints its certificate fingerprint and an admin token");
-    println!("     once, on first run:");
+    println!("     On first run it prints its certificate fingerprint and writes");
+    println!("     the admin token — once, owner-only, never to stdout — to");
+    println!("     <state>/edge/admin.token (the state dir is ~/.local/state/factor-q");
+    println!("     unless fqd.toml's [state] directory or FQ_STATE_DIR says otherwise):");
     println!("     fqd");
     println!("  4. In another shell, pair with it (the edge listens on");
-    println!("     127.0.0.1:9472 unless fqd.toml's [edge] bind says otherwise):");
-    println!("     fq connect 127.0.0.1:9472 --token <token>");
+    println!("     127.0.0.1:9472 unless fqd.toml's [edge] bind says otherwise).");
+    println!("     From a terminal it shows the fingerprint and asks you to confirm;");
+    println!("     from a script add --fingerprint \"$(cat <state>/edge/fingerprint)\":");
+    println!("     fq connect 127.0.0.1:9472 --token \"$(cat <state>/edge/admin.token)\"");
     println!("  5. Trigger the sample agent:");
     println!("     fq trigger sample-agent \"Say hello in one sentence.\"");
     Ok(())

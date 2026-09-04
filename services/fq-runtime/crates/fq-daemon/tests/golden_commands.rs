@@ -186,10 +186,11 @@ fn assert_golden(name: &str, actual: &str) {
 // Every verb below this line speaks the authenticated edge, so a broker
 // alone is no longer enough — the daemon is what answers, and the
 // client has to have been introduced to it. The pairing dance (read the
-// ephemeral bind address and the once-printed admin token out of the
-// daemon's own log, write a client config naming that address, `fq
-// connect`) is exactly what an operator does once by hand, which is why
-// the tests do it rather than reach behind the transport.
+// ephemeral bind address out of the daemon's log and the admin token
+// and fingerprint out of the files it wrote beside its identity, write
+// a client config naming that address, `fq connect --fingerprint`) is
+// exactly what an operator does once by hand, which is why the tests do
+// it rather than reach behind the transport.
 // ------------------------------------------------------------------
 
 /// A running daemon plus a client that can talk to it.
@@ -258,13 +259,8 @@ impl PairedDaemon {
             .expect("edge addr in log")
             .trim()
             .to_string();
-        let token = {
-            let mut lines = text.lines();
-            lines
-                .find(|l| l.contains("edge: admin token"))
-                .expect("admin token marker");
-            lines.next().expect("token line").trim().to_string()
-        };
+        let token = fq_test_support::admin_token(&scratch.state());
+        let fingerprint = fq_test_support::edge_fingerprint(&scratch.state());
 
         let client_config = scratch.cache().join("fq.toml");
         std::fs::write(&client_config, format!("[edge]\nbind = \"{addr}\"\n"))
@@ -272,7 +268,14 @@ impl PairedDaemon {
 
         let xdg = tempfile::tempdir().expect("xdg dir");
         let connect = Command::new(fq_client_binary())
-            .args(["connect", &addr, "--token", &token])
+            .args([
+                "connect",
+                &addr,
+                "--token",
+                &token,
+                "--fingerprint",
+                &fingerprint,
+            ])
             .env("FQ_CLI_CONFIG", &client_config)
             .env("XDG_CONFIG_HOME", xdg.path())
             .env("RUST_LOG", "off")

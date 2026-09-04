@@ -1,10 +1,11 @@
 //! The daemon hosts the authenticated operator edge (plan Phase 2,
 //! PR 2): with `[edge]` enabled, the first run provisions an identity
-//! under the state dir and prints the admin token + certificate
-//! fingerprint exactly once; a client pinning that fingerprint and
-//! presenting that token reaches `List(Operation)` end-to-end. A
-//! restart reuses the persisted identity — same fingerprint, the old
-//! token still works, and nothing secret is printed again.
+//! under the state dir, prints the certificate fingerprint and writes
+//! the admin token beside the identity — owner-only, and never to
+//! stdout (#545); a client pinning that fingerprint and presenting that
+//! token reaches `List(Operation)` end-to-end. A restart reuses the
+//! persisted identity — same fingerprint, the old token still works,
+//! and nothing is minted or announced again.
 //!
 //! And the identity survives its own relocation: a deployment whose
 //! identity still sits under the cache dir (the pre-#362 home) adopts
@@ -93,14 +94,6 @@ fn terminate(mut child: std::process::Child) {
     );
 }
 
-fn line_after<'a>(log: &'a str, needle: &str) -> &'a str {
-    let mut lines = log.lines();
-    lines
-        .find(|l| l.contains(needle))
-        .unwrap_or_else(|| panic!("log lacks {needle:?}\n--- log ---\n{log}"));
-    lines.next().expect("line after marker").trim()
-}
-
 fn suffix_of<'a>(log: &'a str, prefix: &str) -> &'a str {
     log.lines()
         .find_map(|l| l.trim().strip_prefix(prefix))
@@ -143,7 +136,7 @@ async fn first_run_provisions_and_restart_reuses_the_identity() {
     let server = fq_test_support::NatsServer::start();
     let scratch = unique_scratch();
 
-    // First run: identity provisioned, admin token printed once.
+    // First run: identity provisioned, admin token written once.
     let log1 = scratch.join("daemon-1.log");
     let mut child = spawn_daemon(&scratch, server.url(), &log1);
     let text1 = wait_for_ready(&mut child, &log1).await;
@@ -152,8 +145,34 @@ async fn first_run_provisions_and_restart_reuses_the_identity() {
         &text1,
         "edge: certificate fingerprint (clients pin this): ",
     ));
-    let token = line_after(&text1, "edge: admin token").to_string();
     let addr1 = suffix_of(&text1, "- edge is listening on ").to_string();
+
+    // #545: the token lives in `<state>/edge/admin.token`, owner-only.
+    // The daemon says where it is and never what it is — a token in
+    // the log is a token in journald and every run log for the life of
+    // the file. The fingerprint file beside it is the same pin the
+    // banner printed, so a script can pair without scraping stdout.
+    let state = scratch.join("state");
+    let token_path = state.join("edge").join("admin.token");
+    let token = fq_test_support::admin_token(&state);
+    assert!(
+        text1.contains(&format!("edge: admin token written to {}", token_path.display())),
+        "the first run must name the token file\n--- log ---\n{text1}"
+    );
+    assert!(
+        !text1.contains(&token),
+        "the admin token must never appear on stdout\n--- log ---\n{text1}"
+    );
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "admin.token must be owner-only, got {mode:o}");
+    }
+    assert_eq!(
+        parse_fingerprint(&fq_test_support::edge_fingerprint(&state)),
+        fingerprint,
+        "the fingerprint file must be the pin the banner printed"
+    );
 
     // The surface describes itself to an authenticated caller — the
     // real catalogue, carrying the Invocation view (Phase 3b).
@@ -166,13 +185,19 @@ async fn first_run_provisions_and_restart_reuses_the_identity() {
     terminate(child);
 
     // Restart on the same state dir: the identity is reused, the old
-    // token still opens the door, and no secret is printed again.
+    // token still opens the door, nothing is announced again, and the
+    // token file is untouched (a loaded identity never mints another).
     let log2 = scratch.join("daemon-2.log");
     let mut child = spawn_daemon(&scratch, server.url(), &log2);
     let text2 = wait_for_ready(&mut child, &log2).await;
     assert!(
         !text2.contains("admin token") && !text2.contains("first run"),
-        "restart must not re-provision or re-print secrets\n--- log ---\n{text2}"
+        "restart must not re-provision or announce a token\n--- log ---\n{text2}"
+    );
+    assert_eq!(
+        fq_test_support::admin_token(&state),
+        token,
+        "a restart must not rewrite admin.token"
     );
 
     let addr2 = suffix_of(&text2, "- edge is listening on ").to_string();
@@ -209,7 +234,7 @@ async fn a_legacy_cache_identity_is_adopted_and_keeps_its_fingerprint() {
         &text1,
         "edge: certificate fingerprint (clients pin this): ",
     ));
-    let token = line_after(&text1, "edge: admin token").to_string();
+    let token = fq_test_support::admin_token(&cache);
     terminate(child);
     assert!(
         cache.join("edge").join("cert.der").exists(),

@@ -78,7 +78,8 @@ struct Args {
     #[arg(long, env = "FQ_EDGE_TOKEN")]
     edge_token: Option<String>,
     /// SHA-256 of the daemon's certificate, hex — the pin. The daemon
-    /// prints it when it provisions its identity. Required.
+    /// prints it when it provisions its identity and keeps it in
+    /// `<state>/edge/fingerprint`. Required.
     #[arg(long, env = "FQ_EDGE_FINGERPRINT")]
     edge_fingerprint: Option<String>,
     /// Browser auto-refresh interval, in seconds.
@@ -316,7 +317,8 @@ async fn main() -> anyhow::Result<()> {
             anyhow::anyhow!(
                 "no edge fingerprint: set FQ_EDGE_FINGERPRINT (or pass --edge-fingerprint).\n\
                  It is the SHA-256 of the daemon's certificate, which the daemon printed \
-                 when it provisioned its identity (the `edge: certificate fingerprint` line)."
+                 when it provisioned its identity (the `edge: certificate fingerprint` line) \
+                 and keeps in <state>/edge/fingerprint."
             )
         })?;
     let edge_fingerprint = fq_edge::parse_fingerprint_hex(&edge_fingerprint)

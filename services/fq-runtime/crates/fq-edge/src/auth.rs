@@ -9,7 +9,7 @@
 //! daemon round-trip.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use biscuit_auth::datalog::RunLimits;
@@ -40,8 +40,9 @@ pub struct EdgeIdentity {
 
 impl EdgeIdentity {
     /// Mint a fresh identity: self-signed certificate + biscuit root
-    /// keypair. The caller persists the parts it wants and prints the
-    /// admin token + certificate fingerprint exactly once.
+    /// keypair. The caller persists the parts it wants, writes the
+    /// admin token beside them ([`write_admin_token`](Self::write_admin_token))
+    /// and prints the certificate fingerprint exactly once.
     pub fn provision() -> anyhow::Result<Self> {
         let cert = rcgen::generate_simple_self_signed(vec!["fqd".to_string()])?;
         Ok(EdgeIdentity {
@@ -56,10 +57,36 @@ impl EdgeIdentity {
         fingerprint(&self.cert_der)
     }
 
-    /// Mint the all-authority admin token, printed at first run. Every
-    /// narrower token is an offline attenuation of this one.
+    /// Mint the all-authority admin token — the one a first run writes
+    /// to [`ADMIN_TOKEN_FILE`]. Every narrower token is an offline
+    /// attenuation of this one.
     pub fn mint_admin_token(&self) -> anyhow::Result<String> {
         self.mint_token("admin", &[("*", "*")])
+    }
+
+    /// Mint the admin token and write it to `<dir>/admin.token`,
+    /// owner-only from the first byte and never over an existing file
+    /// (the same [`write_secret`] discipline as the key material).
+    /// Returns the path: the caller reports *where* the token is, never
+    /// the token, so it stays out of journald, `docker logs` and every
+    /// run log for the life of the file
+    /// (<https://github.com/bricef/factor-q/issues/545>). One trailing
+    /// newline, so `$(cat …)` and `read` both hand back the bare token.
+    pub fn write_admin_token(&self, dir: &Path) -> anyhow::Result<PathBuf> {
+        let token = self.mint_admin_token()?;
+        let path = dir.join(ADMIN_TOKEN_FILE);
+        write_secret(&path, format!("{token}\n").as_bytes())?;
+        Ok(path)
+    }
+
+    /// Write the certificate fingerprint, lowercase hex, to
+    /// `<dir>/fingerprint`. Public and derived from `cert.der`, so it is
+    /// plainly overwritten; it exists so a script can pin the daemon
+    /// (`fq connect --fingerprint`) without scraping its stdout.
+    pub fn write_fingerprint(&self, dir: &Path) -> anyhow::Result<PathBuf> {
+        let path = dir.join(FINGERPRINT_FILE);
+        fs::write(&path, format!("{}\n", fingerprint_hex(self.fingerprint())))?;
+        Ok(path)
     }
 
     /// Mint a token for `principal` with explicit `(verb, domain)`
@@ -89,7 +116,7 @@ impl EdgeIdentity {
 
     /// Load the identity persisted under `dir`, or provision a fresh
     /// one and persist it. The `bool` is `true` exactly when the
-    /// identity was freshly minted — the caller prints the admin token
+    /// identity was freshly minted — the caller writes the admin token
     /// on that run and never again.
     pub fn load_or_provision(dir: &Path) -> anyhow::Result<(Self, bool)> {
         if let Some(identity) = Self::try_load(dir)? {
@@ -137,7 +164,8 @@ impl EdgeIdentity {
     ///
     /// The certificate is the completeness marker ([`save`](Self::save)
     /// writes it last). A cert-less directory still holding private
-    /// material is a partial identity — provisioning over it, or
+    /// material — the key, the root, or the admin token minted under
+    /// that root — is a partial identity: provisioning over it, or
     /// skipping past it to another location, would silently rotate the
     /// root and orphan every pinned client and every issued token.
     /// Fail closed; the operator restores the missing file or deletes
@@ -146,7 +174,7 @@ impl EdgeIdentity {
         if dir.join(CERT_FILE).exists() {
             return Ok(Some(Self::load(dir)?));
         }
-        for name in [KEY_FILE, ROOT_FILE] {
+        for name in [KEY_FILE, ROOT_FILE, ADMIN_TOKEN_FILE] {
             if dir.join(name).exists() {
                 anyhow::bail!(
                     "edge identity at {} is partial: {name} exists but {CERT_FILE} is \
@@ -181,8 +209,10 @@ impl EdgeIdentity {
             &dir.join(ROOT_FILE),
             self.root.private().to_bytes_hex().as_bytes(),
         )?;
-        // The certificate is public; written last so its presence
-        // marks a complete identity (`load_or_provision` keys on it).
+        // The fingerprint and the certificate are public. The
+        // certificate is written last so its presence marks a complete
+        // identity (`load_or_provision` keys on it).
+        self.write_fingerprint(dir)?;
         fs::write(dir.join(CERT_FILE), &self.cert_der)?;
         Ok(())
     }
@@ -218,6 +248,14 @@ pub enum IdentityOrigin {
 const CERT_FILE: &str = "cert.der";
 const KEY_FILE: &str = "key.der";
 const ROOT_FILE: &str = "root.key";
+/// The admin token, beside the identity: written once at first run by
+/// [`EdgeIdentity::write_admin_token`], owner-only, never overwritten,
+/// never printed. The operator (and every test) reads it from here.
+pub const ADMIN_TOKEN_FILE: &str = "admin.token";
+/// The certificate fingerprint as lowercase hex, beside the identity —
+/// public, so a script can pass it to `fq connect --fingerprint`
+/// instead of scraping the daemon's stdout.
+pub const FINGERPRINT_FILE: &str = "fingerprint";
 
 /// Write private key material with owner-only permissions from the
 /// first byte — created 0600 rather than chmodded after, so there is

@@ -149,11 +149,7 @@ impl World {
             &text,
             "edge: certificate fingerprint (clients pin this): ",
         ));
-        let token = {
-            let mut lines = text.lines();
-            lines.find(|l| l.contains("edge: admin token")).unwrap();
-            lines.next().unwrap().trim().to_string()
-        };
+        let token = fq_test_support::admin_token(&scratch.join("state"));
         let addr = suffix_of(&text, "- edge is listening on ").to_string();
 
         let client = fq_edge::EdgeClient::connect(&addr, fingerprint, &token)

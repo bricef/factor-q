@@ -50,8 +50,9 @@ struct Pairing {
     config: std::path::PathBuf,
 }
 
-/// Read the daemon's log for its edge address and once-printed admin
-/// token, then pair with it — what an operator does by hand, once.
+/// Read the daemon's log for its edge address, its state dir for the
+/// admin token and fingerprint it wrote at first run, then pair with it
+/// — what an operator (or a script) does by hand, once.
 fn pair_with(scratch: &std::path::Path) -> Pairing {
     let text = std::fs::read_to_string(scratch.join("daemon.log")).expect("read daemon log");
     let addr = text
@@ -60,19 +61,21 @@ fn pair_with(scratch: &std::path::Path) -> Pairing {
         .expect("edge addr in the daemon log")
         .trim()
         .to_string();
-    let token = {
-        let mut lines = text.lines();
-        lines
-            .find(|l| l.contains("edge: admin token"))
-            .expect("admin token marker in the daemon log");
-        lines.next().expect("token line").trim().to_string()
-    };
+    let token = fq_test_support::admin_token(&scratch.join("state"));
+    let fingerprint = fq_test_support::edge_fingerprint(&scratch.join("state"));
 
     let config = scratch.join("client.toml");
     std::fs::write(&config, format!("[edge]\nbind = \"{addr}\"\n")).expect("client config");
     let xdg = tempfile::tempdir().expect("xdg dir");
     let connect = Command::new(fq_client_binary())
-        .args(["connect", &addr, "--token", &token])
+        .args([
+            "connect",
+            &addr,
+            "--token",
+            &token,
+            "--fingerprint",
+            &fingerprint,
+        ])
         .env("FQ_CLI_CONFIG", &config)
         .env("XDG_CONFIG_HOME", xdg.path())
         .env("RUST_LOG", "off")

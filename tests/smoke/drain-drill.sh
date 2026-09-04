@@ -136,28 +136,30 @@ start_daemon() {
     pair_with_daemon "${log}"
 }
 
-# `fq down` is an edge command: it needs an address to dial and a token
-# to present. Both are printed once, at startup — the address because
-# the bind is port 0, the token because this is a fresh state dir.
+# `fq down` is an edge command: it needs an address to dial, a token to
+# present and a fingerprint to pin. The address is printed at startup
+# and is new on every start (the bind is port 0). The token and the
+# fingerprint are files the daemon wrote beside its identity on the
+# first start against this fresh state dir — `<state>/edge/admin.token`
+# (0600, never printed; #545) and `<state>/edge/fingerprint` — and every
+# restart reuses that identity, so the files outlive the first daemon.
+# The pin is passed explicitly because there is no terminal here and
+# trust-on-first-use is interactive-only (#544).
 pair_with_daemon() {
-    local log="$1" addr token
+    local log="$1" addr token fingerprint
     wait_for 30 "edge listening" grep -q "edge is listening on" "${log}"
     addr="$(sed -n 's/.*edge is listening on \([0-9.]*:[0-9]*\).*/\1/p' "${log}" | tail -1)"
-    # The token is printed once ever — when the identity is *minted*.
-    # Every restart after the first adopts the identity from the state
-    # dir and prints nothing, so cache it. The address is not cacheable:
-    # the bind is port 0, so it is new on every start.
-    token="$(awk '/edge: admin token/ { seen = 1; next } seen && NF { print $1; exit }' "${log}")"
-    if [[ -n "${token}" ]]; then
-        printf '%s\n' "${token}" > "${TMP_ROOT}/admin-token"
-    elif [[ -r "${TMP_ROOT}/admin-token" ]]; then
-        token="$(cat "${TMP_ROOT}/admin-token")"
-    fi
-    [[ -n "${addr}" && -n "${token}" ]] || {
-        printf '%s could not read the edge address or admin token from %s\n' "$(red 'x')" "${log}"
+    [[ -n "${addr}" ]] || {
+        printf '%s could not read the edge address from %s\n' "$(red 'x')" "${log}"
         exit 1
     }
-    "${FQ_BIN}" connect "${addr}" --token "${token}" >/dev/null 2>&1 || {
+    [[ -r "${FQ_STATE_DIR}/edge/admin.token" && -r "${FQ_STATE_DIR}/edge/fingerprint" ]] || {
+        printf '%s no admin.token / fingerprint under %s/edge\n' "$(red 'x')" "${FQ_STATE_DIR}"
+        exit 1
+    }
+    token="$(<"${FQ_STATE_DIR}/edge/admin.token")"
+    fingerprint="$(<"${FQ_STATE_DIR}/edge/fingerprint")"
+    "${FQ_BIN}" connect "${addr}" --token "${token}" --fingerprint "${fingerprint}" >/dev/null 2>&1 || {
         printf '%s fq connect failed\n' "$(red 'x')"
         exit 1
     }

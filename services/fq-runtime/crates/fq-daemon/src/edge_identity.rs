@@ -10,11 +10,18 @@
 //! identity found there before ever minting a new one — an upgrade
 //! that rotated the root would deliver exactly the failure the move
 //! exists to prevent.
+//!
+//! Two files sit beside the identity for the operator's benefit
+//! (<https://github.com/bricef/factor-q/issues/545>): `admin.token`,
+//! written once at first run, owner-only, and **never printed** — a
+//! token in a log is a token in journald, `docker logs` and every run
+//! log for the life of the file — and `fingerprint`, the public pin,
+//! so a script can pair without scraping stdout.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use fq_edge::{EdgeIdentity, IdentityOrigin};
+use fq_edge::{EdgeIdentity, FINGERPRINT_FILE, IdentityOrigin};
 use fq_runtime::Config;
 
 /// Where the edge identity lives under a given root.
@@ -31,7 +38,18 @@ pub(crate) fn resolve(config: &Config) -> anyhow::Result<(EdgeIdentity, PathBuf)
     let (identity, origin) = EdgeIdentity::load_or_adopt(&dir, &legacy)
         .context("edge: failed to load or provision identity (check [state] in fqd.toml)")?;
     match origin {
-        IdentityOrigin::Loaded => {}
+        IdentityOrigin::Loaded => {
+            // An identity saved before the fingerprint file existed has
+            // none; give it one so the path the docs name is always
+            // readable. Created only when absent — a loaded identity
+            // never rewrites what sits beside it, and never mints a
+            // second admin token.
+            if !dir.join(FINGERPRINT_FILE).exists() {
+                identity
+                    .write_fingerprint(&dir)
+                    .context("edge: failed to write the fingerprint file")?;
+            }
+        }
         IdentityOrigin::Adopted => {
             tracing::warn!(
                 from = %legacy.display(),
@@ -51,9 +69,9 @@ pub(crate) fn resolve(config: &Config) -> anyhow::Result<(EdgeIdentity, PathBuf)
             );
         }
         IdentityOrigin::Minted => {
-            let admin = identity
-                .mint_admin_token()
-                .context("edge: failed to mint the admin token")?;
+            let token_path = identity
+                .write_admin_token(&dir)
+                .context("edge: failed to write the admin token")?;
             println!();
             println!(
                 "edge: first run — identity provisioned under {}",
@@ -63,8 +81,11 @@ pub(crate) fn resolve(config: &Config) -> anyhow::Result<(EdgeIdentity, PathBuf)
                 "edge: certificate fingerprint (clients pin this): {}",
                 hex(&identity.fingerprint())
             );
-            println!("edge: admin token (printed once; store it securely):");
-            println!("  {admin}");
+            println!(
+                "edge: admin token written to {} (owner-only; it is not printed — read it \
+                 from there)",
+                token_path.display()
+            );
         }
     }
     Ok((identity, dir))
@@ -77,6 +98,7 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fq_edge::ADMIN_TOKEN_FILE;
 
     fn config_with(state: &Path, cache: &Path) -> Config {
         let mut config = Config::default();
@@ -85,20 +107,79 @@ mod tests {
         config
     }
 
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     /// Nothing on disk anywhere: the identity is minted, and it lands
     /// under the *state* directory — the cache directory stays empty.
+    /// Beside it: the admin token, owner-only, and the fingerprint
+    /// (#545). A second start loads the identity and leaves both files
+    /// exactly as they were.
     #[test]
     fn fresh_install_mints_under_the_state_directory() {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
         let cache = root.path().join("cache");
-        let (_identity, dir) = resolve(&config_with(&state, &cache)).unwrap();
+        let (identity, dir) = resolve(&config_with(&state, &cache)).unwrap();
 
         assert_eq!(dir, state.join("edge"));
         assert!(dir.join("cert.der").exists(), "identity minted under state");
         assert!(
             !cache.join("edge").exists(),
             "nothing may be written to the cache directory"
+        );
+
+        let token_path = dir.join(ADMIN_TOKEN_FILE);
+        let token = std::fs::read_to_string(&token_path).expect("admin.token written");
+        fq_edge::auth::verify_token(token.trim(), identity.public_key())
+            .expect("the file holds a token the identity's root signed");
+        #[cfg(unix)]
+        assert_eq!(mode_of(&token_path), 0o600, "admin.token must be owner-only");
+
+        let fingerprint_path = dir.join(FINGERPRINT_FILE);
+        let fingerprint = std::fs::read_to_string(&fingerprint_path).expect("fingerprint written");
+        assert_eq!(
+            fingerprint.trim(),
+            hex(&identity.fingerprint()),
+            "the fingerprint file is the pin the daemon prints"
+        );
+
+        // A loaded identity never rewrites either file — and never
+        // mints a second admin token.
+        let (_again, _) = resolve(&config_with(&state, &cache)).unwrap();
+        assert_eq!(std::fs::read_to_string(&token_path).unwrap(), token);
+        assert_eq!(
+            std::fs::read_to_string(&fingerprint_path).unwrap(),
+            fingerprint
+        );
+    }
+
+    /// An identity saved before the fingerprint file existed gets one
+    /// on load; an identity with no admin token stays without one —
+    /// the token is minted at provisioning and never again.
+    #[test]
+    fn a_loaded_identity_gains_a_fingerprint_file_but_never_a_token() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let cache = root.path().join("cache");
+        let dir = state.join("edge");
+        EdgeIdentity::provision().unwrap().save(&dir).unwrap();
+        std::fs::remove_file(dir.join(FINGERPRINT_FILE)).unwrap();
+        assert!(!dir.join(ADMIN_TOKEN_FILE).exists(), "save() mints no token");
+
+        let (identity, _) = resolve(&config_with(&state, &cache)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(FINGERPRINT_FILE))
+                .unwrap()
+                .trim(),
+            hex(&identity.fingerprint())
+        );
+        assert!(
+            !dir.join(ADMIN_TOKEN_FILE).exists(),
+            "a loaded identity must not mint an admin token"
         );
     }
 
@@ -132,27 +213,30 @@ mod tests {
         assert_eq!(again.fingerprint(), pinned);
     }
 
-    /// A cert-less directory holding private material fails closed at
-    /// *either* location — including the legacy one, where skipping
-    /// past it would silently mint a new root.
+    /// A cert-less directory holding private material — the key, or a
+    /// stale admin token — fails closed at *either* location, including
+    /// the legacy one, where skipping past it would silently mint a new
+    /// root.
     #[test]
     fn partial_state_fails_closed_at_both_locations() {
         for (name, partial_at_legacy) in [("state", false), ("cache", true)] {
-            let root = tempfile::tempdir().unwrap();
-            let state = root.path().join("state");
-            let cache = root.path().join("cache");
-            let target = if partial_at_legacy { &cache } else { &state };
-            std::fs::create_dir_all(target.join("edge")).unwrap();
-            std::fs::write(target.join("edge").join("key.der"), b"stale").unwrap();
+            for leftover in ["key.der", ADMIN_TOKEN_FILE] {
+                let root = tempfile::tempdir().unwrap();
+                let state = root.path().join("state");
+                let cache = root.path().join("cache");
+                let target = if partial_at_legacy { &cache } else { &state };
+                std::fs::create_dir_all(target.join("edge")).unwrap();
+                std::fs::write(target.join("edge").join(leftover), b"stale").unwrap();
 
-            let err = match resolve(&config_with(&state, &cache)) {
-                Ok(_) => panic!("a partial identity under {name} must be refused"),
-                Err(err) => format!("{err:#}"),
-            };
-            assert!(
-                err.contains("partial"),
-                "expected the partial-identity refusal for {name}, got: {err}"
-            );
+                let err = match resolve(&config_with(&state, &cache)) {
+                    Ok(_) => panic!("a partial identity ({leftover} under {name}) must be refused"),
+                    Err(err) => format!("{err:#}"),
+                };
+                assert!(
+                    err.contains("partial") && err.contains(leftover),
+                    "expected the partial-identity refusal naming {leftover} for {name}, got: {err}"
+                );
+            }
         }
     }
 }

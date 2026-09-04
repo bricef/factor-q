@@ -214,11 +214,7 @@ async fn start_daemon(server: &fq_test_support::NatsServer) -> Daemon {
             &text,
             "edge: certificate fingerprint (clients pin this): ",
         )),
-        admin_token: {
-            let mut lines = text.lines();
-            lines.find(|l| l.contains("edge: admin token")).unwrap();
-            lines.next().unwrap().trim().to_string()
-        },
+        admin_token: fq_test_support::admin_token(&scratch.join("state")),
         process,
     }
 }

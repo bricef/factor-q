@@ -149,11 +149,7 @@ async fn the_worker_view_folds_and_filters_daemon_side() {
         &text,
         "edge: certificate fingerprint (clients pin this): ",
     ));
-    let token = {
-        let mut lines = text.lines();
-        lines.find(|l| l.contains("edge: admin token")).unwrap();
-        lines.next().unwrap().trim().to_string()
-    };
+    let token = fq_test_support::admin_token(&scratch.join("state"));
     let addr = suffix_of(&text, "- edge is listening on ").to_string();
     // The daemon self-registers its own worker at startup and the
     // sweep skips it, so it is the one row guaranteed `alive`.

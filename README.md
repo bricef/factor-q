@@ -105,9 +105,10 @@ just fq init                            # writes fqd.toml, fq.toml, agents/, sam
 export ANTHROPIC_API_KEY='sk-ant-...'
 
 just run                                # (another terminal) start the daemon —
-                                        # it prints a fingerprint and an admin
-                                        # token once, on its first run
-just fq connect 127.0.0.1:9472 --token <token>
+                                        # on its first run it prints a fingerprint
+                                        # and writes the admin token to
+                                        # ~/.local/state/factor-q/edge/admin.token
+just fq connect 127.0.0.1:9472 --token "$(cat ~/.local/state/factor-q/edge/admin.token)"
 
 just fq trigger sample-agent "Hello."   # run the agent
 just fq events tail                     # watch events
@@ -129,7 +130,7 @@ mkdir my-project && cd my-project
 just fq init                            # writes fqd.toml, fq.toml, agents/, sample
 export ANTHROPIC_API_KEY='sk-ant-...'
 just run                                # (another terminal) start the daemon
-just fq connect 127.0.0.1:9472 --token <token>   # token: printed once, at first run
+just fq connect 127.0.0.1:9472 --token "$(cat ~/.local/state/factor-q/edge/admin.token)"   # written once, at first run
 just fq trigger sample-agent "Hello."   # run the agent
 just fq events tail                     # watch events
 ```
