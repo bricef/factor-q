@@ -52,7 +52,7 @@ impl NatsConfig {
         };
         match std::env::var(name) {
             Ok(value) if !value.is_empty() => Ok(Some(value)),
-            _ => Err(ConfigError::SecretNotSet {
+            _ => Err(ConfigError::NatsTokenNotSet {
                 env_var: name.clone(),
             }),
         }

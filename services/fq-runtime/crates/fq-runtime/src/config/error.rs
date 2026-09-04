@@ -29,6 +29,17 @@ pub enum ConfigError {
     #[error("required secret not set in environment variable: {env_var}")]
     SecretNotSet { env_var: String },
 
+    /// `[nats] token_env` names a variable that is unset or empty at
+    /// startup. Its own variant rather than [`Self::SecretNotSet`] so
+    /// the message says which setting named the variable and what the
+    /// two ways out are.
+    #[error(
+        "[nats] token_env names environment variable `{env_var}`, which is unset or empty: \
+         export the broker token in it before starting the daemon, or remove token_env for a \
+         broker that requires none"
+    )]
+    NatsTokenNotSet { env_var: String },
+
     /// `[nats] url` carries a credential in its userinfo. Named without
     /// the URL on purpose: this error exists so the token never reaches
     /// a log line, and echoing the offending value would leak it.

@@ -64,16 +64,21 @@ fn resolve_nats_token_fails_loudly_when_the_variable_is_unset_or_empty() {
     let config = Config::from_toml_str(&format!("[nats]\ntoken_env = \"{env_var}\"\n")).unwrap();
     let err = config.nats.resolve_token().unwrap_err();
     assert!(
-        matches!(&err, ConfigError::SecretNotSet { env_var: name } if name == env_var),
+        matches!(&err, ConfigError::NatsTokenNotSet { env_var: name } if name == env_var),
         "{err:?}"
     );
-    assert!(err.to_string().contains(env_var), "{err}");
+    let msg = err.to_string();
+    assert!(msg.contains(env_var), "{msg}");
+    assert!(
+        msg.contains("[nats] token_env"),
+        "the message must say which setting named the variable: {msg}"
+    );
 
     // Safety: unique name, see above.
     unsafe { std::env::set_var(env_var, "") };
     assert!(matches!(
         config.nats.resolve_token(),
-        Err(ConfigError::SecretNotSet { .. })
+        Err(ConfigError::NatsTokenNotSet { .. })
     ));
     unsafe { std::env::remove_var(env_var) };
 }
