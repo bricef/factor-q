@@ -19,6 +19,7 @@ Phase 1 complete — a working single-agent runtime with event-driven execution,
 ## Scope
 
 ### 1. MCP client support
+
 factor-q becomes an MCP client, able to discover, connect to, and invoke tools from external MCP servers.
 
 - Connect to MCP servers via stdio and SSE transports
@@ -29,6 +30,7 @@ factor-q becomes an MCP client, able to discover, connect to, and invoke tools f
 - Cost and sandbox controls apply to MCP tool invocations
 
 ### 2. Vector database and embedding infrastructure
+
 Shared semantic search primitive used by both the memory and skill registry services.
 
 - Embedding generation for text content (skill descriptions, memory entries)
@@ -38,6 +40,7 @@ Shared semantic search primitive used by both the memory and skill registry serv
 - Designed as a shared library/service consumed by other MCP services, not a user-facing component
 
 ### 3. Memory MCP service
+
 A standalone MCP server providing persistent memory for agents, backed by the shared vector database.
 
 - `memory.store` — persist a memory with optional metadata and tags; auto-embedded for future search
@@ -49,6 +52,7 @@ A standalone MCP server providing persistent memory for agents, backed by the sh
 - Shared namespaces available for cross-agent memory (opt-in)
 
 ### 4. Skill registry MCP service
+
 A standalone MCP server providing skill discovery and activation, backed by the shared vector database.
 
 - `skill.search(query, [namespace])` — semantic search over skill descriptions the agent has access to
@@ -61,6 +65,7 @@ A standalone MCP server providing skill discovery and activation, backed by the 
 - CLI commands: `fq skill list`, `fq skill validate <path>`, `fq skill search <query>`
 
 ### 5. Context window management
+
 Working memory management in the executor (distinct from persistent memory).
 
 - Track context window usage per agent invocation
@@ -70,6 +75,7 @@ Working memory management in the executor (distinct from persistent memory).
 - Integration with skill deactivation — agent can drop skills it no longer needs
 
 ### 6. Agent definition extensions
+
 Extend the Markdown agent definition format to support MCP servers and skill access.
 
 ```yaml

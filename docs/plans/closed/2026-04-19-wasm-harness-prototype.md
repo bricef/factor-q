@@ -47,6 +47,7 @@ about whether to promote WASM to the default execution path.
 ## Scope
 
 In scope:
+
 - Author the WIT package for `factorq:agent-harness@0.1.0`
   capturing the `step(StepInput) -> StepOutput` guest export
   and the supporting types (`NextAction`, `CapabilityResult`,
@@ -71,6 +72,7 @@ In scope:
 - Compare behaviour against the native executor.
 
 Out of scope:
+
 - Durable state persistence across host restarts. Suspension
   and migration work structurally in the prototype (the host
   can suspend between steps in-process) but the full
@@ -197,6 +199,7 @@ an async runtime at all.
 ## Structure
 
 New crates:
+
 - `crates/fq-harness-wit/` — the WIT package, versioned as a
   standalone component interface.
 - `crates/fq-harness-guest/` — the guest harness implementation,
@@ -205,6 +208,7 @@ New crates:
   implementations, bridged to existing `fq-runtime` types.
 
 Existing crate changes:
+
 - `fq-runtime`: add feature flag `wasm-executor` selecting the
   WASM path. Default remains the native executor.
 - `fq-cli`: add `--wasm` flag to `fq trigger` for invoking the

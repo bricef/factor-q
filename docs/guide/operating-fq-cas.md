@@ -89,8 +89,8 @@ only touches files and reservations that have gone untouched for at least the
 **grace period** (`--grace`, in seconds; default **900** = 15 minutes):
 
 ```console
-$ fq-cas gc --grace 60      # 1-minute grace — more aggressive recovery
-$ fq-cas gc --grace 3600    # 1-hour grace — extra caution near heavy writers
+fq-cas gc --grace 60      # 1-minute grace — more aggressive recovery
+fq-cas gc --grace 3600    # 1-hour grace — extra caution near heavy writers
 ```
 
 Reclaiming *properly* unreferenced objects and blocks (the common case) is not
@@ -106,8 +106,8 @@ remote `--server` (that endpoint exposes only the content-addressed layer, not
 the name index). Point it at the root:
 
 ```console
-$ fq-cas --root /var/lib/fq-cas gc
-$ FQ_CAS_ROOT=/var/lib/fq-cas fq-cas gc --json
+fq-cas --root /var/lib/fq-cas gc
+FQ_CAS_ROOT=/var/lib/fq-cas fq-cas gc --json
 ```
 
 ### When to run it

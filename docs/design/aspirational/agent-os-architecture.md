@@ -80,6 +80,7 @@ new syscall-level imports. This keeps the kernel interface narrow
 and auditable.
 
 **Relevant systems to study:**
+
 - **seL4** — formally verified microkernel, capability-based.
   The gold standard for reasoning about what a process can do.
 - **KeyKOS / EROS / CapROS** — capability-based OS lineage with
@@ -111,6 +112,7 @@ disk or from a file server across the network.
 
 This maps to factor-q's tool abstraction. An agent calls a tool,
 and it doesn't know (or care) whether the implementation is:
+
 - A local function in the WASM host
 - A child-process MCP server on the same machine
 - A remote MCP server on another node
@@ -125,6 +127,7 @@ guarantees this — the guest calls an import, the host decides
 where to fulfil it.
 
 **Relevant systems to study:**
+
 - **Plan 9 from Bell Labs** — the definitive per-process
   namespace design. Everything is a file, files can be anywhere,
   the namespace is composable.
@@ -186,6 +189,7 @@ workflow version, then swap it in while the system continues to
 operate.
 
 **Relevant systems to study:**
+
 - **Erlang/OTP** — the actor model, supervision trees, hot code
   reload, distribution. The closest existing system to what
   factor-q is becoming.
@@ -204,6 +208,7 @@ leads to specific architectural decisions:
 ### The WASM host is a microkernel
 
 The host provides the minimal set of primitives:
+
 - **Capability dispatch** — route tool/MCP calls to
   implementations
 - **Message passing** — event bus send/receive
@@ -225,6 +230,7 @@ the host's primitive capabilities.
 ### The agent definition is a process descriptor
 
 It declares:
+
 - The **namespace** (sandbox: filesystem, network, env)
 - The **capabilities** (tools, MCP servers)
 - The **resource limits** (budget, timeout, memory)
@@ -257,6 +263,7 @@ harness code.
 
 Error handling belongs in the graph (supervisor), not in the agent
 (process). The runtime should provide:
+
 - Restart policies (retry count, backoff, escalation)
 - Failure propagation (parent notified when child fails)
 - Circuit breakers (stop retrying after N failures)

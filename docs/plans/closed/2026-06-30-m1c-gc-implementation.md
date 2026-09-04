@@ -16,6 +16,7 @@ taken while building, and where each is verified.
 
 **Verification leads.** The invariant oracle + DST harness (slice 1) gate every
 later slice; each slice is green on `cargo test` + `cargo clippy --all-features`
+
 + `cargo fmt --check` (the fq-store `just ci` gate) before commit.
 
 ## Slices
@@ -39,21 +40,20 @@ later slice; each slice is green on `cargo test` + `cargo clippy --all-features`
 
 The interdependent core, built and committed in order, oracle + DST after each:
 
-- **5a — index ops.** `reserve` (`UPDATE … refcount+1 WHERE hash AND available`),
++ **5a — index ops.** `reserve` (`UPDATE … refcount+1 WHERE hash AND available`),
   `mint` (conditional `INSERT … WHERE NOT EXISTS (available row)`), and `claim`
   (`UPDATE available=false WHERE … refcount=0 AND available`) as `NameIndex`
   methods. Unit test: a reserve and a claim on the same block — exactly one wins,
   the loser sees zero rows affected.
-- **5b — write path.** The `Repository` reserve → materialize → bind
++ **5b — write path.** The `Repository` reserve → materialize → bind
   orchestration + `ContentStore::write_block` (generation-aware, fsync). The bind
   hand-off / release.
-- **5c — collector.** A `Collector` trait + reference impl: claim → unlink →
++ **5c — collector.** A `Collector` trait + reference impl: claim → unlink →
   delete over `unreferenced_objects` / `unreferenced_blocks`, in small online
   batches.
-- **5d — race + fault tests.** Collector wired into the DST (interleaved GC +
++ **5d — race + fault tests.** Collector wired into the DST (interleaved GC +
   collision + resurrection); a concurrent-tasks reserve-vs-claim stress test;
   `fail`-point crash-recovery cases at the named steps; a cranked soak run.
-
 
 **Status: all four done** (through commit `3cc48ff`). 5d landed the
 generation-on-collision mint (the wait-free `reserve_or_materialize` loop), the
@@ -71,25 +71,24 @@ adoption already cover the crash paths.
 The reachability audit — the strong-fairness backstop, built as the **full**
 self-healing worker (decision below). Oracle + DST after each, as with slice 5.
 
-- **6a — seams.** An injectable `Clock` (real in prod, controllable in the DST)
++ **6a — seams.** An injectable `Clock` (real in prod, controllable in the DST)
   and file enumeration with mtimes (`(hash, generation, mtime)` for blocks,
   `(cid, mtime)` for objects), so the reaper can cross-check disk against the
   index and age files against the grace.
-- **6b — reap + finish.** The `Auditor` (mirrors `Collector`): reap orphan
++ **6b — reap + finish.** The `Auditor` (mirrors `Collector`): reap orphan
   block/object files (on disk, no index row, older than the mtime grace) and
   finish orphaned claims / dead blocks the online collector missed. A lightweight
   orphaned-claim reset at `open()` for bounded crash recovery (L4).
-- **6c — reconcile.** Block-refcount drift: for a block quiescent past the grace,
++ **6c — reconcile.** Block-refcount drift: for a block quiescent past the grace,
   reduce a *stored > derived* refcount to the oracle's recomputed truth
   (transactional, re-checked) — the leaked-reservation leak. Alarm, never
   auto-fix, on *stored < derived* (I4) and the forbidden state (S1).
-- **6d — fault DST + soak.** Inject leaked reservations / orphaned claims / stale
++ **6d — fault DST + soak.** Inject leaked reservations / orphaned claims / stale
   files and advance the clock past grace; assert the audit restores every
   invariant (L4). Cranked soak.
 
 Grace default ~15 min, configurable. A periodic scheduler is deferred — slice 7's
 CLI and the startup hook cover invocation until a daemon exists.
-
 
 **Status: all four done** (through commit `1971dde`). The `Clock` trait was
 dropped for a real clock + a `grace: Duration` — grace extremes (0 / large) are
@@ -101,40 +100,40 @@ DST injects orphan files + leaked reservations and asserts a full audit converge
 
 ## Decisions taken while building
 
-- **Hand-off / aliasing accounting.** Reserve bumps a block's refcount
++ **Hand-off / aliasing accounting.** Reserve bumps a block's refcount
   *unconditionally* (to protect it before any reliance); `bind` keeps those
   reservations as the object→block edges when the object goes live, and
   **releases** them on an alias or idempotent re-bind (the blocks are already
   held), and a failed put releases. So block refcount stays exactly *= the number
   of live objects referencing it*. `bind` branches on the object's prior refcount.
-- **`gen` is the smallest free `u32`, not a random token.** The spec allowed a
++ **`gen` is the smallest free `u32`, not a random token.** The spec allowed a
   random token (no coordination); the impl uses `next_generation` (the smallest
   generation absent for the hash) — deterministic and simpler. The mint loop
   already converges under contention: a refused conditional `INSERT` either
   reserves the peer's freshly-minted row or climbs to the next free generation,
   so no random-token PK-collision retry is needed.
-- **Block primitives on the `ContentStore` trait** — `chunk`, `write_block`,
++ **Block primitives on the `ContentStore` trait** — `chunk`, `write_block`,
   `write_object`, so the `Repository` owns the write path. The trait defaults
   *error*; only `FilesystemStore` implements them. The matching `RemoteStore`
   RPCs (the uniform in-process/remote contract, as with `remove` in slice 2) are
   deferred to M5 — the in-process `Repository<FilesystemStore>` is the only
   writer until then, so the wire methods aren't yet exercised.
-- **The race is tested with concurrent tokio tasks, not `loom`.** Reserve-vs-claim
++ **The race is tested with concurrent tokio tasks, not `loom`.** Reserve-vs-claim
   is linearised by SQLite's single writer; there is no Rust-level shared memory
   for `loom` to model, so the faithful test is concurrent tasks against a shared
   DB with the oracle as the check.
-- **Durability scope.** The block file's data fsync (slice 4) is in; the directory
++ **Durability scope.** The block file's data fsync (slice 4) is in; the directory
   fsync that would also make the rename itself crash-durable is left to the
   dedicated crash-consistency tests.
 
-- **Edges are dropped at death, not at collection.** `unbind` deletes a dead
++ **Edges are dropped at death, not at collection.** `unbind` deletes a dead
   object's `object_blocks` edges (after decrementing the block refcounts) rather
   than leaving them for `delete_object`. Found via the oracle: resurrecting a
   dead object onto a *fresh* generation (the collision case) otherwise left a
   stale edge at the old, claimed generation, reading as a live reference to a
   reclaimable block. The rule is now: an edge exists iff its object currently
   references that block.
-- **The index is a single-connection pool.** `max_connections(1)` + a busy
++ **The index is a single-connection pool.** `max_connections(1)` + a busy
   timeout, so every reserve / claim / bind / unbind linearizes exactly as the
   verified single-writer model assumes, and WAL's `BUSY_SNAPSHOT` — which a
   deferred read-then-write transaction hits under contention and a busy timeout
@@ -145,6 +144,6 @@ DST injects orphan files + leaked reservations and asserts a full audit converge
 
 ## References
 
-- [storage garbage collection](../../design/committed/storage-garbage-collection.md) — the protocol.
-- [verification](../../design/committed/storage-gc-verification.md) + `storage_gc.tla` — claims, fault map, model.
-- [storage + vector foundation](../active/2026-06-27-storage-vector-foundation.md) — the parent plan (M1–M5).
++ [storage garbage collection](../../design/committed/storage-garbage-collection.md) — the protocol.
++ [verification](../../design/committed/storage-gc-verification.md) + `storage_gc.tla` — claims, fault map, model.
++ [storage + vector foundation](../active/2026-06-27-storage-vector-foundation.md) — the parent plan (M1–M5).

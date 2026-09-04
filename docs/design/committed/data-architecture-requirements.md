@@ -457,6 +457,7 @@ named.
   will be addressed before others.
 
 The next document, when written, should:
+
 - Reference this one for the requirements baseline.
 - State decisions for the open questions in [§7](#7-open-questions-ranked).
 - Map shapes from [§1](#1-data-shapes) to specific stores.

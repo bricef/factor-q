@@ -12,6 +12,7 @@ status block for the canonical record.
 **Parent plan**:
 [`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md) — step 8.
 **Design references**:
+
 - [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) §5.3 (state retention), §5.5 (archive hand-off write order), and §9.3 (new event types).
 - Schema: §10 `invocation_archive` table is already implemented in
   `services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs`.

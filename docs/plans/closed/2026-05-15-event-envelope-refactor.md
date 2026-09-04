@@ -3,6 +3,7 @@
 **Date**: 2026-05-15
 **Status**: Closed (2026-05-16)
 **Design references**:
+
 - [`docs/design/aspirational/inter-node-contracts-and-event-layers.md`](../../design/aspirational/inter-node-contracts-and-event-layers.md) — the three-layer event model.
 - [`docs/adrs/accepted/0016-typed-operations-no-free-form-apis.md`](../../adrs/accepted/0016-typed-operations-no-free-form-apis.md) — typed-operations discipline that motivates the annotation barrier.
 - [`docs/design/committed/event-schema.md`](../../design/committed/event-schema.md) — current (v1) schema; updated to v2 in this plan.

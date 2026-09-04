@@ -21,6 +21,7 @@ This rests on a practical observation: LLMs have structural ergonomic needs that
 **What this rules out.** Designing on assumption alone. When a tool's shape or a subsystem's interface might affect how an LLM uses it, asking the LLM is not optional extra polish — it is primary requirements-gathering. Observing how agents actually use a surface, and treating that observation as a design signal, is a first-class activity.
 
 **What this demands in practice.**
+
 - Tool designs are evaluated against LLM-usability criteria (structured outputs, predictable failure modes, minimum ceremony, absence of context bloat), not only against human-readability.
 - Feedback channels that an LLM can use productively exist — structured errors, introspection, explicit uncertainty, confidence signals.
 - Documentation is as legible to an LLM reader as to a human reader. Code examples are complete and unambiguous; tables and structured formats are preferred over long prose where structure would help.
