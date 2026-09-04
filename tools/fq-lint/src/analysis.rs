@@ -243,7 +243,7 @@ fn type_head(ty: &syn::Type) -> Option<String> {
 fn impl_scope(i: &syn::ItemImpl) -> String {
     let ty = type_head(&i.self_ty).unwrap_or_else(|| "_".into());
     match &i.trait_ {
-        Some((_, path, _)) => match path.segments.last() {
+        Some((path, _)) => match path.segments.last() {
             Some(seg) => format!("{ty} as {}", seg.ident),
             None => ty,
         },
@@ -300,7 +300,7 @@ fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileF
                 // scanning the whole item here would double-count them.
                 scan_refs(i.self_ty.to_token_stream(), inside, &mut facts.module_refs);
                 scan_refs(i.generics.to_token_stream(), inside, &mut facts.module_refs);
-                if let Some((_, path, _)) = &i.trait_ {
+                if let Some((path, _)) = &i.trait_ {
                     scan_refs(path.to_token_stream(), inside, &mut facts.module_refs);
                 }
                 let inner_scope = nest(scope, &impl_scope(i));
