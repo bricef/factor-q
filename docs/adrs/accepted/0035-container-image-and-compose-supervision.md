@@ -22,11 +22,13 @@ merge to `main` pushes them to `ghcr.io/bricef/<name>` tagged with the
 twelve-hex commit the binaries report and with a moving `main-latest`
 (slice 2); `ops/dogfood/compose.yml` is the stack definition and
 supervisor of clause 2 with clause 7's network shape and the one volume
-of clause 6 (slice 3). Not built: the tag-bump `deploy.sh` of clause 5
-and probes on the adapter and dashboard images (8); `ops/dogfood/deploy.sh`
-still deploys the tarball and launches with `setsid`, so the compose
-stack is defined but not yet what runs. The tracking issue carries the
-slices.
+of clause 6 (slice 3); `ops/dogfood/deploy.sh` is clause 5's tag bump —
+pull, prove every image's binary reports the tag, `docker compose stop`
+as the drain, `up -d`, verify on the running containers — and the
+`setsid` launchers and the release tree are gone (slice 4). Not built:
+probes on the adapter and dashboard images (8), and the live instance
+has not yet been moved onto the stack (the runbook is in the ops
+README). The tracking issue carries what remains.
 
 ## Context
 

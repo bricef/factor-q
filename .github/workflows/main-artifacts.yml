@@ -4,19 +4,20 @@ name: Main artifacts
 # two artifact families from ONE build of the static x86_64 musl binaries.
 #
 #   1. The checksummed, SHA-stamped tarball (fq, fqd, fq-dashboard, fq-cas,
-#      github-watcher, fq-cron plus the four dogfood launchers) to the
-#      rolling `main-latest` pre-release — `package-main` / `publish-main`
-#      in the root justfile; fetched by ops/dogfood/deploy.sh, which never
-#      compiles. Rollback history lives on the hosts as releases/<sha>/
-#      dirs, so this channel only ever holds the newest build.
+#      github-watcher, fq-cron) to the rolling `main-latest` pre-release —
+#      `package-main` / `publish-main` in the root justfile. The
+#      binary-only channel for hosts that are not containerised; it holds
+#      only the newest build.
 #   2. The container images (fq-runtime, fq-dogfood, github-watcher,
 #      fq-cron, fq-dashboard) to ghcr.io/bricef, tagged with the
 #      twelve-hex commit the binaries inside them report and with the
 #      moving `main-latest` — `docker-build` / `docker-check` /
-#      `docker-publish`. The commit tag is what a host deploys and rolls
-#      back to; the images are assembled from the same binaries as the
-#      tarball, never compiled in-image, so both families carry the
-#      identical binary for a commit (#587).
+#      `docker-publish`. This is what the dogfood host deploys
+#      (ops/dogfood/deploy.sh, a tag bump against ops/dogfood/compose.yml)
+#      and rolls back to — the registry keeps every commit tag, so it is
+#      the deploy history. The images are assembled from the same
+#      binaries as the tarball, never compiled in-image, so both families
+#      carry the identical binary for a commit (#587).
 #
 # Like ci.yml/release.yml, every job drives its work through a `just`
 # target so the pipeline stays reproducible locally; the registry login is

@@ -243,6 +243,9 @@ connect to an authenticated broker without putting the token in its URL.
 
 ## Decisions the maintainer owns
 
+- *(Decided 2026-09-04: no systemd — [ADR-0035](../../adrs/accepted/0035-container-image-and-compose-supervision.md),
+  container images under docker compose, built out under #587; #553 is
+  closed against it.)*
 - **systemd units (Phase 1, item 9)** reverse a documented decision to
   use `setsid` launchers. The review calls it the cheapest step toward
   the 30-day bar. Decide before Phase 1 starts; the issue is filed

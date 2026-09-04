@@ -334,7 +334,10 @@ separates ([ops/dogfood](../../ops/dogfood/README.md)):
   (built by `main-artifacts.yml`, launched by a `cron.sh` launcher that
   ships *inside* the bundle like the other launchers), so it is
   versioned with each release and rolls back with the same `current`
-  symlink flip.
+  symlink flip. *(2026-09-04: superseded in mechanism, not in
+  principle — under ADR-0035 the binary ships as the `fq-cron` image,
+  tagged with its commit, and rolls back with the stack's tag; the
+  launchers are gone. The two-plane separation stands.)*
 - The **jobs file** is host-side state at `~/fq-dogfood/fq-cron.toml` —
   the same tier as `fqd.toml` and `agents/`, which deploys never touch.
   Unlike `fqd.toml` it needs no explicit reload command: editing the
