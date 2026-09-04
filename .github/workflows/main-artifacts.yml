@@ -41,7 +41,7 @@ jobs:
           targets: x86_64-unknown-linux-musl
       # Unified workspace at the repo root (#194) — rust-cache's default.
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: adapters/github-watcher/go.mod
       - uses: extractions/setup-just@v4
