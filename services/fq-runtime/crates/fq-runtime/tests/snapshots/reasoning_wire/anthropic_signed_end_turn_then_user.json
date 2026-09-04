@@ -1,0 +1,107 @@
+{
+  "requests": [
+    {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": [
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "text": "Investigate the failing deploy.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-sonnet-4-6",
+      "stream": false
+    },
+    {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "Investigate the failing deploy.",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "signature": "sig-1",
+              "thinking": "They have not said which deploy.",
+              "type": "thinking"
+            },
+            {
+              "text": "Which deploy do you mean?",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "text": "The api deploy, twenty minutes ago.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-sonnet-4-6",
+      "stream": false
+    }
+  ],
+  "turns": [
+    {
+      "parts": [
+        {
+          "content": {
+            "kind": "signed",
+            "text": "They have not said which deploy.",
+            "token": {
+              "signature": "sig-1",
+              "thinking": "They have not said which deploy.",
+              "type": "thinking"
+            }
+          },
+          "kind": "reasoning",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "kind": "text",
+          "text": "Which deploy do you mean?"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 60,
+        "output_tokens": 15,
+        "reasoning_tokens": 0
+      }
+    },
+    {
+      "parts": [
+        {
+          "kind": "text",
+          "text": "Then restart it."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 90,
+        "output_tokens": 5,
+        "reasoning_tokens": 0
+      }
+    }
+  ]
+}

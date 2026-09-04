@@ -45,7 +45,14 @@ use tokio::sync::oneshot;
 pub struct MockChoice {
     content: Option<String>,
     reasoning: Option<String>,
+    /// Which sibling field carries `reasoning`. `None` means the
+    /// `reasoning_content` key that Kimi's and DeepSeek's own APIs use;
+    /// OpenRouter serves the same models under a `reasoning` key.
+    reasoning_key: Option<&'static str>,
     tool_calls: Vec<(String, String, Value)>,
+    /// `(prompt, completion, reasoning)` token counts; `reasoning` goes
+    /// out as `completion_tokens_details.reasoning_tokens` when set.
+    usage: Option<(u64, u64, Option<u64>)>,
 }
 
 impl MockChoice {
@@ -70,6 +77,21 @@ impl MockChoice {
         self
     }
 
+    /// Attach provider reasoning under OpenRouter's `reasoning` key —
+    /// the shape kimi-k3 returned on the 2026-09-04 live run.
+    pub fn with_openrouter_reasoning(mut self, reasoning: &str) -> Self {
+        self.reasoning = Some(reasoning.to_string());
+        self.reasoning_key = Some("reasoning");
+        self
+    }
+
+    /// Report token usage, optionally with the reasoning split the
+    /// OpenAI-compatible wire carries in `completion_tokens_details`.
+    pub fn with_usage(mut self, prompt: u64, completion: u64, reasoning: Option<u64>) -> Self {
+        self.usage = Some((prompt, completion, reasoning));
+        self
+    }
+
     /// Attach a tool call, which is what makes the turn a continuation
     /// rather than the end of the conversation.
     pub fn with_tool_call(mut self, id: &str, name: &str, arguments: Value) -> Self {
@@ -85,7 +107,8 @@ impl MockChoice {
             None => Value::Null,
         };
         if let Some(reasoning) = &self.reasoning {
-            message["reasoning_content"] = json!(reasoning);
+            let key = self.reasoning_key.unwrap_or("reasoning_content");
+            message[key] = json!(reasoning);
         }
         if !self.tool_calls.is_empty() {
             message["tool_calls"] = Value::Array(
@@ -106,10 +129,21 @@ impl MockChoice {
         } else {
             "tool_calls"
         };
+        let usage = match self.usage {
+            None => json!({ "prompt_tokens": 100, "completion_tokens": 20 }),
+            Some((prompt, completion, None)) => {
+                json!({ "prompt_tokens": prompt, "completion_tokens": completion })
+            }
+            Some((prompt, completion, Some(reasoning))) => json!({
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "completion_tokens_details": { "reasoning_tokens": reasoning }
+            }),
+        };
         json!({
             "model": model,
             "choices": [{ "index": 0, "message": message, "finish_reason": finish }],
-            "usage": { "prompt_tokens": 100, "completion_tokens": 20 }
+            "usage": usage
         })
     }
 }

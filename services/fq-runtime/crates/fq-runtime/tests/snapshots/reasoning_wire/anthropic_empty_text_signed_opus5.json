@@ -1,0 +1,180 @@
+{
+  "requests": [
+    {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": [
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "text": "Read /work/notes.txt and report its first line.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5",
+      "output_config": {
+        "effort": "high"
+      },
+      "stream": false,
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are a careful assistant.",
+          "type": "text"
+        }
+      ],
+      "thinking": {
+        "type": "adaptive"
+      },
+      "tools": [
+        {
+          "description": "Read a file from the workspace.",
+          "input_schema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "name": "read_file"
+        }
+      ]
+    },
+    {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "Read /work/notes.txt and report its first line.",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "signature": "CAIShwQKjgEIERgCKkDfDyWUdRcu3hhoNHxiG0EaIauD1yH/i9EPAgEC3UnqjYz/Bke3zp709yo4w04iNlAtF553RrQqhz9lGWd8xSC3Mg1jbGF1ZGUtb3B1cy01OAFCCHRoaW5raW5nWiQ4MjdiMDk5Yy1iMGVlLTQ1ZmEtOTE3OS1jY2Y5ZDMzODc4N2aoAbP06NQGEgxVMNRnp6gkwtgprnoaDEMfTLMDP2XfCKbprSIwmPI6XqlPHUU48y+NC5PRIEU6FlSGqfoaD1oxqfqkqfpzIWkZYeHAtvR4ewx/cxWZKqUC6EuTUIiiOiT5FyL3Y4wJhf7tgAW8H84tmFhJjkYiPwQN/32Goejv6/b+yygqJdFaiS6LcYuGQKD5cWM4sCAK94iZQpOVpW3ixALbvVoRDXm4tP84upMAzJMwIzz66NWfkfIN5FkIH+DYM9xpdX96tEjWzlE8iALjUIKB3MkOpbclpXVxqtCFEEzU4OLoiHciuFoRad1wyg0ren4Fw30vWoqsAxJpmAyIn9yM52NsRCJwYl/4gRBsnV2mjHqEjmNnXmfobhDJfk3Q3wzzKpvlYDPbqTSrv3cgLbsWbzFXFSSFxA5qCMhHho3FNYUejgkrDDekzagcmxsystLG33IDEhVn7QDGplYTBXdyhrdCaBi9nyhAdoBZpj7KlktqQZ1PLbNeY84YAQ==",
+              "thinking": "",
+              "type": "thinking"
+            },
+            {
+              "id": "toolu_01T9hENsmBLpzUTZhLfyPr2u",
+              "input": {
+                "path": "/work/notes.txt"
+              },
+              "name": "read_file",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "content": "Reasoning round-trip probe: the badger is orange.\nSecond line.",
+              "tool_use_id": "toolu_01T9hENsmBLpzUTZhLfyPr2u",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5",
+      "output_config": {
+        "effort": "high"
+      },
+      "stream": false,
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are a careful assistant.",
+          "type": "text"
+        }
+      ],
+      "thinking": {
+        "type": "adaptive"
+      },
+      "tools": [
+        {
+          "description": "Read a file from the workspace.",
+          "input_schema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "name": "read_file"
+        }
+      ]
+    }
+  ],
+  "turns": [
+    {
+      "parts": [
+        {
+          "content": {
+            "kind": "signed",
+            "text": "",
+            "token": {
+              "signature": "CAIShwQKjgEIERgCKkDfDyWUdRcu3hhoNHxiG0EaIauD1yH/i9EPAgEC3UnqjYz/Bke3zp709yo4w04iNlAtF553RrQqhz9lGWd8xSC3Mg1jbGF1ZGUtb3B1cy01OAFCCHRoaW5raW5nWiQ4MjdiMDk5Yy1iMGVlLTQ1ZmEtOTE3OS1jY2Y5ZDMzODc4N2aoAbP06NQGEgxVMNRnp6gkwtgprnoaDEMfTLMDP2XfCKbprSIwmPI6XqlPHUU48y+NC5PRIEU6FlSGqfoaD1oxqfqkqfpzIWkZYeHAtvR4ewx/cxWZKqUC6EuTUIiiOiT5FyL3Y4wJhf7tgAW8H84tmFhJjkYiPwQN/32Goejv6/b+yygqJdFaiS6LcYuGQKD5cWM4sCAK94iZQpOVpW3ixALbvVoRDXm4tP84upMAzJMwIzz66NWfkfIN5FkIH+DYM9xpdX96tEjWzlE8iALjUIKB3MkOpbclpXVxqtCFEEzU4OLoiHciuFoRad1wyg0ren4Fw30vWoqsAxJpmAyIn9yM52NsRCJwYl/4gRBsnV2mjHqEjmNnXmfobhDJfk3Q3wzzKpvlYDPbqTSrv3cgLbsWbzFXFSSFxA5qCMhHho3FNYUejgkrDDekzagcmxsystLG33IDEhVn7QDGplYTBXdyhrdCaBi9nyhAdoBZpj7KlktqQZ1PLbNeY84YAQ==",
+              "thinking": "",
+              "type": "thinking"
+            }
+          },
+          "kind": "reasoning",
+          "model": "claude-opus-5"
+        },
+        {
+          "kind": "tool_call",
+          "parameters": {
+            "path": "/work/notes.txt"
+          },
+          "tool_call_id": "toolu_01T9hENsmBLpzUTZhLfyPr2u",
+          "tool_name": "read_file"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 1648,
+        "input_tokens": 1650,
+        "output_tokens": 179,
+        "reasoning_tokens": 0
+      }
+    },
+    {
+      "parts": [
+        {
+          "kind": "text",
+          "text": "Reasoning round-trip probe: the badger is orange.\n33"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "cache_read_tokens": 1648,
+        "cache_write_tokens": 246,
+        "input_tokens": 1898,
+        "output_tokens": 30,
+        "reasoning_tokens": 0
+      }
+    }
+  ]
+}
