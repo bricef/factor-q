@@ -139,7 +139,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       - run: just lint-docs
       # Relative-link integrity across all repo markdown (stdlib Python,
       # preinstalled on the runner).
@@ -162,7 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       # Keep the version ref in lockstep with rust-toolchain.toml — the
       # size ratchets parse Rust with syn (tools/fq-lint), and clippy
       # runs here, so this job needs the pinned toolchain.
@@ -198,7 +198,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       # Keep in lockstep with rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@1.95.0
       - id: versions
@@ -252,7 +252,7 @@ jobs:
         with:
           node-version: "20"
       - if: needs.changes.outputs.runtime == 'true'
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@v4
       # Install the pinned test broker (#233): tests that spawn their own
       # nats-server need the binary. Idempotent; version from .nats-version.
       - if: needs.changes.outputs.runtime == 'true'
@@ -292,7 +292,7 @@ jobs:
       - if: needs.changes.outputs.store == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
       - if: needs.changes.outputs.store == 'true'
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@v4
       # No Node toolchain needed. The grant-bus test spawns its own private
       # broker (#233); `just store-ci` provisions the pinned nats-server via
       # its `install-nats` dependency.
@@ -357,7 +357,7 @@ jobs:
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@v4
       # Hermetic — the router tests spin their own read service over a
       # temp DB; no broker, no Node.
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
@@ -394,7 +394,7 @@ jobs:
       - if: needs.changes.outputs.dashboard == 'true'
         uses: Swatinem/rust-cache@v2
       - if: needs.changes.outputs.dashboard == 'true'
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@v4
       # ubuntu-latest ships google-chrome; the script resolves it.
       - if: needs.changes.outputs.dashboard == 'true'
         run: just dashboard-screenshots
@@ -470,7 +470,7 @@ jobs:
         with:
           go-version-file: adapters/github-watcher/go.mod
       - if: needs.changes.outputs.go == 'true'
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@v4
       - if: needs.changes.outputs.go == 'true'
         run: just go-ci
 
@@ -499,7 +499,7 @@ jobs:
       - if: needs.changes.outputs.docker == 'true'
         uses: actions/checkout@v4
       - if: needs.changes.outputs.docker == 'true'
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@v4
       # No layer cache: this is a cold build every time, and it compiles
       # the workspace from scratch inside the image. That is affordable
       # precisely because the filter above is narrow — and a cold build
