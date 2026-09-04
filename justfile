@@ -410,9 +410,9 @@ dashboard-screenshots out="dist/dashboard-screenshots":
 
 # Uses markdownlint-cli2 (pinned) via npx; rules in .markdownlint.jsonc.
 # Auto-fix the mechanical rules with `just lint-docs --fix`.
-# Lint ADR markdown — the zero-error scope mandated by AGENTS.md.
+# Lint every markdown file under docs/ — zero errors, per AGENTS.md.
 lint-docs *args:
-    npx --yes markdownlint-cli2@0.22.1 {{args}} "docs/adrs/**/*.md"
+    npx --yes markdownlint-cli2@0.22.1 {{args}} "docs/**/*.md"
 
 # Links pointing outside the repo (sibling checkouts) are reported but not
 # failed.
