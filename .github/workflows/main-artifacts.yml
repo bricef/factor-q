@@ -44,7 +44,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: adapters/github-watcher/go.mod
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       # musl needs its C toolchain for the bundled SQLite.
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: just build-release x86_64-unknown-linux-musl

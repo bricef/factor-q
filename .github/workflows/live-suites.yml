@@ -71,7 +71,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
 
       # The dev broker on 4222, which both suites dial through the
       # justfile's FQ_NATS_URL and FQ_NATS_TOKEN defaults (the token

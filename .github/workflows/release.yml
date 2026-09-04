@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       - run: just check-version "${GITHUB_REF_NAME}"
 
   build:
@@ -42,7 +42,7 @@ jobs:
           targets: ${{ matrix.target }}
       # Unified workspace at the repo root (#194) — rust-cache's default.
       - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       # musl needs its C toolchain for the bundled SQLite.
       - if: contains(matrix.target, 'linux-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       - uses: actions/download-artifact@v8
         with:
           path: dist
