@@ -32,7 +32,7 @@ services/fq-dashboard/src/render.rs 1265
 services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1050
 services/fq-runtime/crates/fq-runtime/src/mcp.rs 1844
 services/fq-runtime/crates/fq-runtime/src/views.rs 815
-services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 2605
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 2599
 services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1416
 services/fq-store/src/cli.rs 842
 services/fq-store/src/index.rs 849
