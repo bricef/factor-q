@@ -1,6 +1,14 @@
 # Reasoning as a first-class message part — execution plan
 
-**Status:** active (2026-08-25). Tracking issue:
+**Status:** closed 2026-09-04. Every phase shipped: the shape, the
+provider round-trip, the operator surface and the cost split in PR #510
+(phases 0–6, merged 2026-09-04); the live verification and its harness in
+PR #538; the empty-text rendering fix in PR #561; and the move off the
+genai fork onto upstream `0.7.0-beta.21` behind wire goldens, the last row
+of §6, in the migration PR of 2026-09-04. Open by decision, tracked on
+their own issues: tool-result batching (#511), the reasoning-token split
+reaching an operator surface (#536). Originally: active (2026-08-25).
+Tracking issue:
 [#437](https://github.com/bricef/factor-q/issues/437). Contract precondition
 for [#414](https://github.com/bricef/factor-q/issues/414) (multi-node MVP,
 confirmed exit criterion) and currently drawn as a blocker for
@@ -549,6 +557,16 @@ provider, reasoning before the tool call; Anthropic accepted its own signed
 blocks back; the control carried none. The per-turn record and the harness
 live in the experiment README under *Live run through factor-q*.
 
+**Resolved upstream, 2026-09-04.** The contribution this section scoped was
+overtaken: upstream's own PR #275 landed on 2026-08-31 and shipped in
+`0.7.0-beta.21`. Its shape differs from the fork's (a signature part beside a
+reasoning part, rebuilt into a block on the way out, rather than the raw
+block as a `Custom` part), so the migration was an adapter change rather
+than a pin swap, and it was made behind wire goldens recorded on the fork
+build first — the same "oracle before the thing it judges" discipline as
+phase 2. Every golden survived the switch untouched. Row 1c below records
+the outcome; the fork is retired.
+
 ## 6. Execution plan (PR-sized)
 
 | Phase | Deliverable | Gates |
@@ -556,7 +574,7 @@ live in the experiment README under *Live run through factor-q*.
 | **0** ✅ | **Modelling session** — ran 2026-08-25. Output: [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md). | done |
 | **1** ✅ | **ADR accepted + doc amendments.** Move ADR-0034 `draft/` → `accepted/`, add its README row. Amend `inter-node-contracts-and-event-layers.md` §6/§7 (I3), and `event-schema.md` (`llm.response` shape, the annotation-barrier section, the `reasoning` key's row, and a v2→v3 changelog). **Documentation only — no code.** | ADR accepted, `check-links` green |
 | **1b** ✅ | **Migrate genai `0.6` → `=0.7.0-beta.19`.** Decided 2026-08-26: take the 0.7 line now rather than at phase 6, because upstream has already landed most of the Anthropic round-trip there (§5) and pinning a fork of 0.6 would mean redoing the work at the next upgrade. **Zero source changes** — all three of the changelog's breaking changes miss factor-q's usage. Pinned exactly (`=`), because a beta's API can move between betas. | `runtime-ci` green |
-| **1c** | **Upstream genai PR opened** (§5, now a one-line change). Runs in parallel from here. The fork exists at [bricef/rust-genai](https://github.com/bricef/rust-genai), branch `fix/anthropic-thinking-signature-roundtrip`. | PR open |
+| **1c** ✅ | **Upstream genai PR** — overtaken. Upstream landed its own fix on 2026-08-31 ([PR #275](https://github.com/jeremychone/rust-genai/pull/275), in `0.7.0-beta.21`), modelling a thinking block as a `ThoughtSignature` part beside a `ReasoningContent` part where our fork kept the raw `Custom` block. factor-q moved to the release on 2026-09-04: the adapter reads the pair and still replays the block whole, and eight wire goldens recorded on the fork build (`fq-runtime/tests/snapshots/reasoning_wire/`) were untouched by the switch. The fork at [bricef/rust-genai](https://github.com/bricef/rust-genai) is retired; no PR of ours was needed. | goldens unchanged, `runtime-ci` green |
 | **2** ✅ | **Oracle first, then the type.** Build the judge before the thing it judges (lesson 10: *"thirteen reworks with zero behavioural regressions"*). Then `Message` becomes the turn-kind enum (§4.2) and the response chain takes `Vec<AssistantPart>`, with a no-op encoder. ~30 construction sites, of which 3 are tool-role; `Message.tool_call_id` has exactly one consumer. **`SCHEMA_VERSION` 2 → 3 lands here, with the shape it describes** — bumping it in Phase 1 would have events claiming v3 while still carrying v2 payloads. Behaviour unchanged; the diff is shape only. | golden net green, `just quality` + `just runtime-ci` |
 | **3** ✅ | **OpenAI-compatible read + write.** `from_provider_response` reads `ChatResponse.reasoning_content`; `convert_message` emits `ContentPart::ReasoningContent`; `harness.rs:329` carries it into the replayed conversation. The cross-model strip (I2) lands here with its assertion. | I1, I2, I5 |
 | **4** ✅ | **The operator surface and the transcript.** `TurnAction::Assistant` gains `TurnReasoning` (§4.6) — the reduction that keeps parts internal. `TranscriptEntry` follows, then the flag in both consumers: `fq invocation transcript` and the dashboard, including its `opaque — click to see raw` affordance. Golden files move here. | I7, golden updated |

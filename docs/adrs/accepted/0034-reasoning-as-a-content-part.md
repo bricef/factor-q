@@ -7,7 +7,7 @@ Accepted (2026-08-26). Output of the co-design sessions of 2026-08-25 and
 *"the session's output is the design document itself"*. Records the maintainer
 decisions taken on [#437](https://github.com/bricef/factor-q/issues/437) on
 2026-07-28, 2026-08-25 and 2026-08-26. Execution is sequenced by
-[the plan](../../plans/active/2026-08-25-reasoning-as-message-parts.md).
+[the plan](../../plans/closed/2026-08-25-reasoning-as-message-parts.md).
 
 Implementation: complete (#510) — every decision here is built. `Message`
 is the enum (D1); the response chain carries `Vec<AssistantPart>` (D3);
@@ -20,8 +20,11 @@ record (D8). Verified live on 2026-09-04 against kimi-k3 (OpenRouter),
 `claude-opus-5` and a `gpt-4o-mini` control: every reasoning part was carried
 byte-identically into the following request, and Anthropic accepted its own
 signed blocks back (`experiments/reasoning-round-trip/`, live run section).
-One thing is open by decision, not omission: the Anthropic path depends on a
-fork of `genai` pinned to a rev until its one-line fix lands upstream.
+The Anthropic path rode a fork of `genai` from 2026-08-26 until 2026-09-04;
+upstream landed its own fix (PR #275 there, released in `0.7.0-beta.21`)
+and factor-q moved to that release with the wire goldens under
+`fq-runtime/tests/snapshots/reasoning_wire/` proving nothing the provider
+or the reducer sees changed across the switch. No fork remains.
 Tool-result batching (D1b) is representable but not yet emitted (#511), and
 the recorded `reasoning_tokens` reaches no operator surface yet (#536).
 
@@ -384,7 +387,7 @@ out of the log is a hole in that claim.
 
 - [#437](https://github.com/bricef/factor-q/issues/437) — the issue, its
   provider analysis, and the maintainer decisions of 2026-07-28.
-- [Execution plan](../../plans/active/2026-08-25-reasoning-as-message-parts.md) —
+- [Execution plan](../../plans/closed/2026-08-25-reasoning-as-message-parts.md) —
   phases, invariants, test plan, and the upstream genai scope.
 - [`experiments/reasoning-round-trip/`](../../../experiments/reasoning-round-trip/) —
   the probe that refuted the silent-disable hypothesis on Anthropic, and whose

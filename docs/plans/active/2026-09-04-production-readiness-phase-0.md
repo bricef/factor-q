@@ -28,7 +28,7 @@
 - **#510 (#437, reasoning as message parts) also merged on 2026-09-04**,
   fifteen commits including `Message` becoming an enum over turn kinds —
   a breaking change to the event wire with `SCHEMA_VERSION` 2 → 3
-  (ADR-0034, the [reasoning plan](2026-08-25-reasoning-as-message-parts.md)).
+  (ADR-0034, the [reasoning plan](../closed/2026-08-25-reasoning-as-message-parts.md)).
   It is not on the review's "what not to start" list; STATUS.md records
   why it went first. Phase 0 builds on top of it.
 - **`main` is green on every Rust job**; the nightly live suites have
