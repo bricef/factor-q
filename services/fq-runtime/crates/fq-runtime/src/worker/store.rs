@@ -451,7 +451,7 @@ impl WorkerStore {
         // unconditionally with `IF NOT EXISTS` so racing with the
         // projection store's bootstrap is safe.
         for stmt in split_sql(SCHEMA_META_SQL) {
-            sqlx::query(&stmt).execute(&self.pool).await?;
+            sqlx::query(stmt).execute(&self.pool).await?;
         }
 
         let recorded = self.read_schema_version().await?;
@@ -526,7 +526,7 @@ impl WorkerStore {
         for &(version, sql) in MIGRATIONS {
             if from < version && to >= version {
                 for stmt in split_sql(sql) {
-                    sqlx::query(&stmt).execute(&self.pool).await?;
+                    sqlx::query(stmt).execute(&self.pool).await?;
                 }
             }
         }
@@ -1290,12 +1290,11 @@ fn interrupted_result_payload(dispatched_at_ms: i64) -> String {
     .to_string()
 }
 
-fn split_sql(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+/// One statement at a time, so a failure names the statement. Slices of
+/// the `'static` script rather than copies: each is still compile-time
+/// SQL, which is what `sqlx::query` accepts without an audit marker.
+fn split_sql(sql: &'static str) -> impl Iterator<Item = &'static str> {
+    sql.split(';').map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn row_to_tool_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<ToolDispatchRow, WorkerStoreError> {

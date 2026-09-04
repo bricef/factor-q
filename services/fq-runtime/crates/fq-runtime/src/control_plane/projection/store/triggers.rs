@@ -17,9 +17,9 @@
 //! back [`TriggerView`] rows with no payload, Get and Stream hand back
 //! whole [`Trigger`]s. The atom declares that; see `trigger_command.rs`.
 
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row, Sqlite};
 
-use super::{ProjectionStore, StoreError};
+use super::{ProjectionStore, StoreError, push_filter};
 use crate::events::{Event, TriggerSource};
 use crate::trigger::{Trigger, TriggerView};
 
@@ -79,25 +79,16 @@ fn trigger_at(row: &sqlx::sqlite::SqliteRow, at: usize) -> Result<Trigger, Store
     })
 }
 
-/// Append the `agent` / `since` narrowing to a query being built.
-/// `seeded` says the query already has a `WHERE`. Bindings follow in
-/// the same order the caller supplies them.
+/// Append the `agent` / `since` narrowing to a query being built, each
+/// value bound where its clause is pushed. `seeded` says the query
+/// already has a `WHERE`.
 ///
 /// One narrowing, one function: List and Stream select the same
 /// triggers for the same filter because they run the same clauses, not
 /// because two hand-written `WHERE`s were kept in agreement.
-fn narrow(sql: &mut String, agent: Option<&str>, since: Option<&str>, seeded: bool) {
-    let mut clauses: Vec<&str> = Vec::new();
-    if agent.is_some() {
-        clauses.push("agent_id = ?");
-    }
-    if since.is_some() {
-        clauses.push("recorded_at >= ?");
-    }
-    for (i, clause) in clauses.iter().enumerate() {
-        sql.push_str(if seeded || i > 0 { " AND " } else { " WHERE " });
-        sql.push_str(clause);
-    }
+fn narrow(qb: &mut QueryBuilder<Sqlite>, agent: Option<&str>, since: Option<&str>, seeded: bool) {
+    let seeded = push_filter(qb, seeded, "agent_id = ", agent);
+    push_filter(qb, seeded, "recorded_at >= ", since);
 }
 
 impl ProjectionStore {
@@ -251,11 +242,11 @@ impl ProjectionStore {
     /// `None` is "no durable record", which is one state with several
     /// causes; the caller names them rather than collapsing them here.
     pub async fn trigger(&self, trigger_id: &str) -> Result<Option<Trigger>, StoreError> {
-        let sql = format!("SELECT {TRIGGER_COLUMNS} FROM triggers WHERE trigger_id = ?");
-        let row = sqlx::query(&sql)
-            .bind(trigger_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let mut qb = QueryBuilder::new("SELECT ");
+        qb.push(TRIGGER_COLUMNS)
+            .push(" FROM triggers WHERE trigger_id = ")
+            .push_bind(trigger_id);
+        let row = qb.build().fetch_optional(&self.pool).await?;
         row.map(|row| trigger_at(&row, 0)).transpose()
     }
 
@@ -272,21 +263,18 @@ impl ProjectionStore {
         since: Option<&str>,
         limit: i64,
     ) -> Result<Vec<TriggerView>, StoreError> {
-        let mut sql =
-            String::from("SELECT trigger_id, agent_id, recorded_at, source FROM triggers");
-        narrow(&mut sql, agent, since, false);
+        let mut qb =
+            QueryBuilder::new("SELECT trigger_id, agent_id, recorded_at, source FROM triggers");
+        narrow(&mut qb, agent, since, false);
         // The identity breaks ties, so the order is total. Timestamps
         // collide — a batch projected together shares one, to the
         // second in some sources — and a page whose tail reshuffles
         // between two identical calls is a listing an operator cannot
         // trust twice. UUIDv7 makes the tiebreak time-ordered too, so
         // it agrees with the column it is breaking ties in.
-        sql.push_str(" ORDER BY recorded_at DESC, trigger_id DESC LIMIT ?");
-        let mut q = sqlx::query(&sql);
-        for bound in [agent, since].into_iter().flatten() {
-            q = q.bind(bound);
-        }
-        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        qb.push(" ORDER BY recorded_at DESC, trigger_id DESC LIMIT ")
+            .push_bind(limit);
+        let rows = qb.build().fetch_all(&self.pool).await?;
         let column = |e: sqlx::Error| StoreError::Backend(format!("stored trigger column: {e}"));
         rows.into_iter()
             .map(|row| {
@@ -333,16 +321,13 @@ impl ProjectionStore {
         from_seq: u64,
         limit: i64,
     ) -> Result<Vec<(u64, Trigger)>, StoreError> {
-        let mut sql = format!(
-            "SELECT seq, {TRIGGER_COLUMNS} FROM triggers WHERE seq IS NOT NULL AND seq >= ?"
-        );
-        narrow(&mut sql, agent, since, true);
-        sql.push_str(" ORDER BY seq LIMIT ?");
-        let mut q = sqlx::query(&sql).bind(i64::try_from(from_seq).unwrap_or(i64::MAX));
-        for bound in [agent, since].into_iter().flatten() {
-            q = q.bind(bound);
-        }
-        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        let mut qb = QueryBuilder::new("SELECT seq, ");
+        qb.push(TRIGGER_COLUMNS)
+            .push(" FROM triggers WHERE seq IS NOT NULL AND seq >= ")
+            .push_bind(i64::try_from(from_seq).unwrap_or(i64::MAX));
+        narrow(&mut qb, agent, since, true);
+        qb.push(" ORDER BY seq LIMIT ").push_bind(limit);
+        let rows = qb.build().fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|row| Ok((row.get::<i64, _>(0) as u64, trigger_at(&row, 1)?)))
             .collect()

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Pool, Row, Sqlite};
+use sqlx::{Pool, QueryBuilder, Row, Sqlite};
 
 use super::fields::{extract_fields, summary_kind_name};
 use crate::agent::AgentId;
@@ -270,41 +270,18 @@ impl ProjectionStore {
         limit: i64,
     ) -> Result<Vec<EventRow>, StoreError> {
         // Build the WHERE clause dynamically but safely — each
-        // condition uses a placeholder.
-        let mut sql = String::from(
+        // condition is a literal fragment with its value bound to it.
+        let mut qb = QueryBuilder::new(
             "SELECT event_id, timestamp, agent_id, invocation_id, event_type, \
              model, total_cost, error_kind, error_message, duration_ms \
              FROM events",
         );
-        let mut clauses: Vec<&str> = Vec::new();
-        if filter.agent.is_some() {
-            clauses.push("agent_id = ?");
-        }
-        if filter.event_type.is_some() {
-            clauses.push("event_type = ?");
-        }
-        if filter.since.is_some() {
-            clauses.push("timestamp >= ?");
-        }
-        if !clauses.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&clauses.join(" AND "));
-        }
-        sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+        let seeded = push_filter(&mut qb, false, "agent_id = ", filter.agent);
+        let seeded = push_filter(&mut qb, seeded, "event_type = ", filter.event_type);
+        push_filter(&mut qb, seeded, "timestamp >= ", filter.since);
+        qb.push(" ORDER BY timestamp DESC LIMIT ").push_bind(limit);
 
-        let mut q = sqlx::query(&sql);
-        if let Some(agent) = filter.agent {
-            q = q.bind(agent);
-        }
-        if let Some(ty) = filter.event_type {
-            q = q.bind(ty);
-        }
-        if let Some(since) = filter.since {
-            q = q.bind(since);
-        }
-        q = q.bind(limit);
-
-        let rows = q.fetch_all(&self.pool).await?;
+        let rows = qb.build().fetch_all(&self.pool).await?;
         let events = rows
             .into_iter()
             .map(|row| EventRow {
@@ -331,19 +308,38 @@ impl ProjectionStore {
         &self,
         invocation_id: &str,
     ) -> Result<Option<String>, StoreError> {
-        let query = format!(
+        let row = sqlx::query(
             "SELECT agent_id FROM events WHERE invocation_id = ? \
-             AND agent_id NOT IN ('{}', '{}', '{}') ORDER BY timestamp LIMIT 1",
-            AgentId::SYSTEM_STR,
-            AgentId::SUMMARY_STR,
-            AgentId::OPERATOR_STR,
-        );
-        let row = sqlx::query(&query)
-            .bind(invocation_id)
-            .fetch_optional(&self.pool)
-            .await?;
+             AND agent_id NOT IN (?, ?, ?) ORDER BY timestamp LIMIT 1",
+        )
+        .bind(invocation_id)
+        .bind(AgentId::SYSTEM_STR)
+        .bind(AgentId::SUMMARY_STR)
+        .bind(AgentId::OPERATOR_STR)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| r.get::<String, _>(0)))
     }
+}
+
+/// Push `clause` with `value` bound to it when the value is set, joined
+/// with `WHERE` first and `AND` after; returns whether the query now has
+/// a `WHERE`. A filter's SQL and its argument are one step, so there is
+/// no second list of binds to keep in the same order by hand — and the
+/// SQL text stays all literals, which is what sqlx's `SqlSafeStr` asks.
+pub(super) fn push_filter(
+    qb: &mut QueryBuilder<Sqlite>,
+    seeded: bool,
+    clause: &'static str,
+    value: Option<&str>,
+) -> bool {
+    let Some(value) = value else {
+        return seeded;
+    };
+    qb.push(if seeded { " AND " } else { " WHERE " })
+        .push(clause)
+        .push_bind(value);
+    true
 }
 
 /// Where the projection says one event's payload sits in the log —

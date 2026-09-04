@@ -6,9 +6,9 @@
 //! the methods keep their paths; the row types are re-exported from
 //! `store`, so theirs are unchanged too.
 
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row};
 
-use super::{ProjectionStore, StoreError};
+use super::{ProjectionStore, StoreError, push_filter};
 
 impl ProjectionStore {
     /// Aggregate cost-bearing events into per-agent totals. Cost
@@ -34,7 +34,7 @@ impl ProjectionStore {
         agent: Option<&str>,
         since: Option<&str>,
     ) -> Result<Vec<CostSummary>, StoreError> {
-        let mut sql = String::from(
+        let mut qb = QueryBuilder::new(
             "SELECT agent_id, \
              COUNT(*) AS event_count, \
              COALESCE(SUM(total_cost), 0.0) AS total_cost, \
@@ -49,22 +49,10 @@ impl ProjectionStore {
              WHERE event_type IN ('llm_response', 'llm_failure', 'invocation_summary') \
              AND total_cost IS NOT NULL",
         );
-        if agent.is_some() {
-            sql.push_str(" AND agent_id = ?");
-        }
-        if since.is_some() {
-            sql.push_str(" AND timestamp >= ?");
-        }
-        sql.push_str(" GROUP BY agent_id ORDER BY total_cost DESC");
-
-        let mut q = sqlx::query(&sql);
-        if let Some(a) = agent {
-            q = q.bind(a);
-        }
-        if let Some(s) = since {
-            q = q.bind(s);
-        }
-        let rows = q.fetch_all(&self.pool).await?;
+        push_filter(&mut qb, true, "agent_id = ", agent);
+        push_filter(&mut qb, true, "timestamp >= ", since);
+        qb.push(" GROUP BY agent_id ORDER BY total_cost DESC");
+        let rows = qb.build().fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|row| CostSummary {
@@ -107,7 +95,7 @@ impl ProjectionStore {
         since: Option<&str>,
         limit: i64,
     ) -> Result<Vec<InvocationCostSummary>, StoreError> {
-        let mut sql = String::from(
+        let mut qb = QueryBuilder::new(
             "SELECT invocation_id, \
              MIN(timestamp) AS first_timestamp, \
              COUNT(*) AS event_count, \
@@ -118,20 +106,13 @@ impl ProjectionStore {
              COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
              FROM events \
              WHERE event_type IN ('llm_response', 'llm_failure') \
-             AND total_cost IS NOT NULL \
-             AND agent_id = ?",
+             AND total_cost IS NOT NULL",
         );
-        if since.is_some() {
-            sql.push_str(" AND timestamp >= ?");
-        }
-        sql.push_str(" GROUP BY invocation_id ORDER BY first_timestamp DESC LIMIT ?");
-
-        let mut q = sqlx::query(&sql).bind(agent);
-        if let Some(s) = since {
-            q = q.bind(s);
-        }
-        q = q.bind(limit);
-        let rows = q.fetch_all(&self.pool).await?;
+        push_filter(&mut qb, true, "agent_id = ", Some(agent));
+        push_filter(&mut qb, true, "timestamp >= ", since);
+        qb.push(" GROUP BY invocation_id ORDER BY first_timestamp DESC LIMIT ")
+            .push_bind(limit);
+        let rows = qb.build().fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|row| InvocationCostSummary {
@@ -208,24 +189,18 @@ impl ProjectionStore {
         hourly: bool,
         since: Option<&str>,
     ) -> Result<Vec<CostBucketSummary>, StoreError> {
-        let prefix_len = if hourly { 13 } else { 10 };
-        let mut sql = format!(
-            "SELECT substr(timestamp, 1, {prefix_len}) AS bucket, \
+        let prefix_len: i64 = if hourly { 13 } else { 10 };
+        let mut qb = QueryBuilder::new("SELECT substr(timestamp, 1, ");
+        qb.push_bind(prefix_len).push(
+            ") AS bucket, \
              COALESCE(SUM(total_cost), 0.0) AS total_cost \
              FROM events \
              WHERE event_type IN ('llm_response', 'llm_failure', 'invocation_summary') \
              AND total_cost IS NOT NULL",
         );
-        if since.is_some() {
-            sql.push_str(" AND timestamp >= ?");
-        }
-        sql.push_str(" GROUP BY bucket ORDER BY bucket ASC");
-
-        let mut q = sqlx::query(&sql);
-        if let Some(s) = since {
-            q = q.bind(s);
-        }
-        let rows = q.fetch_all(&self.pool).await?;
+        push_filter(&mut qb, true, "timestamp >= ", since);
+        qb.push(" GROUP BY bucket ORDER BY bucket ASC");
+        let rows = qb.build().fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|row| CostBucketSummary {
@@ -245,7 +220,7 @@ impl ProjectionStore {
         agent: Option<&str>,
         since: Option<&str>,
     ) -> Result<Vec<ModelCostSummary>, StoreError> {
-        let mut sql = String::from(
+        let mut qb = QueryBuilder::new(
             "SELECT COALESCE(model, 'unknown') AS model, \
              COUNT(*) AS event_count, \
              COALESCE(SUM(total_cost), 0.0) AS total_cost, \
@@ -255,22 +230,10 @@ impl ProjectionStore {
              WHERE event_type IN ('llm_response', 'llm_failure', 'invocation_summary') \
              AND total_cost IS NOT NULL",
         );
-        if agent.is_some() {
-            sql.push_str(" AND agent_id = ?");
-        }
-        if since.is_some() {
-            sql.push_str(" AND timestamp >= ?");
-        }
-        sql.push_str(" GROUP BY model ORDER BY total_cost DESC");
-
-        let mut q = sqlx::query(&sql);
-        if let Some(a) = agent {
-            q = q.bind(a);
-        }
-        if let Some(s) = since {
-            q = q.bind(s);
-        }
-        let rows = q.fetch_all(&self.pool).await?;
+        push_filter(&mut qb, true, "agent_id = ", agent);
+        push_filter(&mut qb, true, "timestamp >= ", since);
+        qb.push(" GROUP BY model ORDER BY total_cost DESC");
+        let rows = qb.build().fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|row| ModelCostSummary {

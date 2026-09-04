@@ -7,6 +7,8 @@
 
 use std::path::Path;
 
+use sqlx::{QueryBuilder, Sqlite};
+
 use super::{ProjectionStore, StoreError};
 
 /// Schema — migrations live inline for phase 1. When the schema
@@ -145,6 +147,36 @@ const ADDED_TRIGGER_COLUMNS: [(&str, &str); 1] = [
 ];
 
 impl ProjectionStore {
+    /// Add each of `columns` that `table` does not yet have. Existence-
+    /// checked via `pragma_table_info` (deterministic and idempotent)
+    /// rather than matching driver error text. DDL cannot take
+    /// identifiers as parameters, so the statement is composed — from
+    /// `'static` names only, which the signature enforces: nothing read
+    /// at runtime can reach it.
+    async fn add_missing_columns(
+        &self,
+        table: &'static str,
+        columns: &[(&'static str, &'static str)],
+    ) -> Result<(), StoreError> {
+        let present: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+            .bind(table)
+            .fetch_all(&self.pool)
+            .await?;
+        for &(column, ty) in columns {
+            if present.iter().any(|c| c == column) {
+                continue;
+            }
+            let mut ddl = QueryBuilder::<Sqlite>::new("ALTER TABLE ");
+            ddl.push(table)
+                .push(" ADD COLUMN ")
+                .push(column)
+                .push(' ')
+                .push(ty);
+            ddl.build().execute(&self.pool).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn run_migrations(&self) -> Result<(), StoreError> {
         // sqlx executes one statement per call; split the schema
         // string so `CREATE TABLE` and each `CREATE INDEX` are
@@ -157,9 +189,7 @@ impl ProjectionStore {
             sqlx::query(statement).execute(&self.pool).await?;
         }
         // `CREATE TABLE IF NOT EXISTS` cannot add a column to an existing
-        // table, so add these additively. Existence-checked via
-        // `pragma_table_info` (deterministic and idempotent) rather than
-        // matching driver error text.
+        // table, so add these additively.
         //
         // FORWARD-ONLY: the projection is not reprojected here, so rows
         // written before this migration read NULL (0 through the
@@ -169,28 +199,10 @@ impl ProjectionStore {
         // projection-versioning + reproject story backfills history —
         // tracked in #139 (the phase-1 inline-schema comment above is
         // now overdue).
-        let columns: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM pragma_table_info('events')")
-                .fetch_all(&self.pool)
-                .await?;
-        for (column, ty) in ADDED_EVENT_COLUMNS {
-            if !columns.iter().any(|c| c == column) {
-                sqlx::query(&format!("ALTER TABLE events ADD COLUMN {column} {ty}"))
-                    .execute(&self.pool)
-                    .await?;
-            }
-        }
-        let trigger_columns: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM pragma_table_info('triggers')")
-                .fetch_all(&self.pool)
-                .await?;
-        for (column, ty) in ADDED_TRIGGER_COLUMNS {
-            if !trigger_columns.iter().any(|c| c == column) {
-                sqlx::query(&format!("ALTER TABLE triggers ADD COLUMN {column} {ty}"))
-                    .execute(&self.pool)
-                    .await?;
-            }
-        }
+        self.add_missing_columns("events", &ADDED_EVENT_COLUMNS)
+            .await?;
+        self.add_missing_columns("triggers", &ADDED_TRIGGER_COLUMNS)
+            .await?;
         // Only now, with the column guaranteed present on old databases
         // as well as new ones — see [`TRIGGER_REQUEUE_INDEX_SQL`].
         sqlx::query(TRIGGER_REQUEUE_INDEX_SQL)

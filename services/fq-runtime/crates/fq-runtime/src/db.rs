@@ -210,6 +210,12 @@ pub enum SplitError {
         db_version: u32,
         binary_version: u32,
     },
+
+    #[error(
+        "legacy split: {legacy} has a table named {name:?}, which fq never creates. \
+         Refusing to split a file that is not ours."
+    )]
+    ForeignTable { legacy: PathBuf, name: String },
 }
 
 fn io_err(path: &Path, source: std::io::Error) -> SplitError {
@@ -217,6 +223,25 @@ fn io_err(path: &Path, source: std::io::Error) -> SplitError {
         path: path.to_path_buf(),
         source,
     }
+}
+
+/// `name` as a double-quoted SQL identifier, or [`SplitError::ForeignTable`]
+/// unless it is a plain `[A-Za-z_][A-Za-z0-9_]*` name. Table names cannot
+/// be bound, so the DDL below interpolates them; this check — not the
+/// quoting — is what makes that safe for a name read out of a database.
+fn quoted_table(legacy: &Path, name: &str) -> Result<String, SplitError> {
+    let mut chars = name.chars();
+    let plain = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !plain {
+        return Err(SplitError::ForeignTable {
+            legacy: legacy.to_path_buf(),
+            name: name.to_string(),
+        });
+    }
+    Ok(format!("\"{name}\""))
 }
 
 /// Split a v1 single-file `events.db` under `dir` into the per-store
@@ -300,8 +325,9 @@ pub async fn split_legacy_events_db(dir: &Path) -> Result<SplitOutcome, SplitErr
     ];
     for (base, keep, schema_class) in plan {
         let tmp = split_tmp_path(base);
-        let quoted = tmp.display().to_string().replace('\'', "''");
-        sqlx::query(&format!("VACUUM INTO '{quoted}'"))
+        // The target is an expression, so the path binds like any value.
+        sqlx::query("VACUUM INTO ?")
+            .bind(tmp.display().to_string())
             .execute(&mut legacy_conn)
             .await?;
         prune_copy(&tmp, keep, schema_class).await?;
@@ -422,7 +448,10 @@ async fn prune_copy(
     .await?;
     for table in tables {
         if !keep.contains(&table.as_str()) {
-            sqlx::query(&format!("DROP TABLE \"{table}\""))
+            // Identifier, not bindable: `quoted_table` has refused anything
+            // but a plain name, and this file is a copy fq itself wrote.
+            let drop = format!("DROP TABLE {}", quoted_table(path, &table)?);
+            sqlx::query(sqlx::AssertSqlSafe(drop))
                 .execute(&mut conn)
                 .await?;
         }
@@ -440,7 +469,7 @@ async fn prune_copy(
 
 /// Row count of `table` in the database at `path`, 0 when the table
 /// does not exist (a legacy file predating that table's migration).
-async fn count_rows(path: &Path, table: &str) -> Result<i64, SplitError> {
+async fn count_rows(path: &Path, table: &'static str) -> Result<i64, SplitError> {
     let mut conn = SqliteConnectOptions::new().filename(path).connect().await?;
     let exists: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -450,7 +479,10 @@ async fn count_rows(path: &Path, table: &str) -> Result<i64, SplitError> {
     let count = if exists == 0 {
         0
     } else {
-        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM \"{table}\""))
+        // Identifier, not bindable: a `'static` name from this module's
+        // own callers, checked by `quoted_table` all the same.
+        let count = format!("SELECT COUNT(*) FROM {}", quoted_table(path, table)?);
+        sqlx::query_scalar(sqlx::AssertSqlSafe(count))
             .fetch_one(&mut conn)
             .await?
     };
