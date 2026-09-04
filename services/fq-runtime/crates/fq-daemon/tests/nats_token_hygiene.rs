@@ -190,3 +190,44 @@ fn token_reaches_the_broker_but_never_the_banner_log_or_startup_event() {
         "the broker token leaked into the system.startup event: {raw}"
     );
 }
+
+/// The post-merge refusal in `GlobalArgs::resolve_config`: an
+/// `FQ_NATS_URL` override carrying userinfo is refused exactly like the
+/// file would be — the daemon does not start, the message names
+/// `token_env`, and the credential appears nowhere in its output.
+#[test]
+fn an_fq_nats_url_override_with_userinfo_is_refused_without_echoing_it() {
+    let scratch = unique_scratch();
+    std::fs::write(scratch.join("fqd.toml"), "[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fqd"))
+        .env("FQ_DAEMON_CONFIG", scratch.join("fqd.toml"))
+        // Port 1: were the refusal ever to fail, the connect would too,
+        // and the test would still finish rather than start a daemon.
+        .env("FQ_NATS_URL", "nats://s3cr3t-leak@127.0.0.1:1")
+        .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
+        .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run fqd");
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    let all = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "fqd must refuse an FQ_NATS_URL with userinfo\n--- output ---\n{all}"
+    );
+    assert!(
+        all.contains("token_env"),
+        "the refusal must name the mechanism to use instead\n--- output ---\n{all}"
+    );
+    assert!(
+        !all.contains("s3cr3t-leak"),
+        "the refused credential was echoed\n--- output ---\n{all}"
+    );
+}
