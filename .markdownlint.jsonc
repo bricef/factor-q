@@ -2,8 +2,8 @@
   // factor-q markdown house style (markdownlint).
   //
   // Starts from the default rule set, with two cosmetic rules relaxed to
-  // match the existing docs. ADR files and the ADR index MUST pass with
-  // zero errors (see AGENTS.md); run `just lint-docs`.
+  // match the existing docs. Every markdown file under docs/ MUST pass
+  // with zero errors (see AGENTS.md); run `just lint-docs`.
   "default": true,
 
   // Line length is not enforced. Prose wraps ~72 cols by convention, but
