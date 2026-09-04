@@ -121,8 +121,8 @@ no `cargo audit`/`deny`/Dependabot #406 · unpinned pricing #408 ·
 network enforcement #208/#209 · exactly-once dispatch #327 (ADR-0032 draft,
 unstarted) · `worker.orphaned` unconsumed #475 · second-SIGTERM escape #509 ·
 provider 429 handling #278 · stuck-invocation detection #37 · metrics #342 ·
-MCP dedup key #170/#523 (fix PR #521 open) · nested frontmatter strictness
-#520 (PR #527 open) · `turn.list` ceiling #465 (PR #524 open) · transcript
+MCP dedup key #170/#523 (fix PR #521 open) · nested frontmatter strictness #520
+(PR #527 open) · `turn.list` ceiling #465 (PR #524 open) · transcript
 walk from sequence 1 #525 · `runner.rs` and `mcp.rs` still over the ratchet
 cap #78/#191.
 
@@ -172,7 +172,7 @@ mirror `exec`: `env_clear()`, the pinned `PATH` baseline, the declaration's
 `infrastructure/nats/nats.conf` does). Loopback binding is the only control,
 and agent `exec` children run on the same host as the same user with ambient
 network: `bash`'s `/dev/tcp/127.0.0.1/4223` plus a `PUB fq.trigger.<agent>`
-line triggers any agent (the groomer runs with a $12 budget), forges
+line triggers any agent (the groomer runs with a \$12 budget), forges
 `fq.agent.<agent>.completed` to move an issue to in-review, or issues
 `$JS.API.STREAM.DELETE`. A token would actually hold here, because `exec`
 clears the child environment. *Fix:* token auth in `nats.conf` and the three
@@ -578,8 +578,8 @@ Two observations, both new since July. First, the security items the 25 July
 review ranked first (#399, #400, #405, #406) are all still open after 129
 commits, three of them `fleet:candidate` and none dispatched — structural
 work was the July finding, and issue-shaped security work turns out to lose
-to velocity the same way. Second, three small fix PRs from 2026-08-27 (#521,
-#524, #527) sit unmerged, and the tree has been quiet for six days; the plan
+to velocity the same way. Second, three small fix PRs from 2026-08-27
+(#521, #524, #527) sit unmerged, and the tree has been quiet for six days; the plan
 below starts by merging them because two of them close items on this list.
 Third, the coupling report that #424 made advisory has moved the wrong way:
 the `fq-runtime` import cycle is now 15 of the crate's top-level modules
