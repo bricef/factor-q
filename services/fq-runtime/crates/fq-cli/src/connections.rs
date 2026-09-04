@@ -135,10 +135,14 @@ fn store_connections(path: &Path, connections: &Connections) -> anyhow::Result<(
 
 /// `fq connect` — establish or refresh the pairing with a daemon's
 /// edge. The pin comes from, in order: `--fingerprint`, the stored
-/// entry, or TOFU (probe the server, show the fingerprint, and
-/// confirm — interactively when stdin is a terminal, automatically
-/// with a notice otherwise). A successful pinned connect proves both
-/// the fingerprint and the token before anything is stored.
+/// entry, or — from a terminal only — trust on first use (probe the
+/// server, show the fingerprint, ask). Without a terminal and without
+/// a pin it refuses before dialling: pinning whatever the network
+/// presents and then sending it the token is the interception the pin
+/// exists to prevent, and the daemon may bind non-loopback
+/// (<https://github.com/bricef/factor-q/issues/544>). A successful
+/// pinned connect proves both the fingerprint and the token before
+/// anything is stored.
 pub(crate) async fn connect(
     global: &GlobalArgs,
     addr: Option<String>,
@@ -171,28 +175,39 @@ pub(crate) async fn connect(
         parse_fingerprint_hex(&entry.fingerprint)?
     } else {
         // Trust on first use: nothing pinned yet for this address.
+        // Interactive only. A script gets no prompt, so it gets no pin
+        // either — refuse here, before any probe and before the token
+        // is sent anywhere.
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "no fingerprint pinned for {addr} and stdin is not a terminal: pass \
+                 --fingerprint <sha256-hex>. The daemon printed it at first run and keeps \
+                 it in <state>/edge/fingerprint (~/.local/state/factor-q/edge/fingerprint \
+                 unless fqd.toml's [state] directory or FQ_STATE_DIR moved it). \
+                 Trust-on-first-use — being shown the fingerprint and asked to confirm \
+                 it — is available only from a terminal: pinning whatever answered and \
+                 then sending it the token is what the pin exists to prevent"
+            );
+        }
         let probed = fq_edge::probe_fingerprint(&addr).await?;
         let hex = fingerprint_hex(probed);
         eprintln!("The daemon at {addr} presents certificate fingerprint (SHA-256):");
         eprintln!("  {hex}");
         eprintln!(
             "Compare it with the fingerprint the daemon printed when it provisioned \
-             its identity (the `edge: certificate fingerprint` line at first run)."
+             its identity (the `edge: certificate fingerprint` line at first run, also \
+             in <state>/edge/fingerprint)."
         );
-        if std::io::stdin().is_terminal() {
-            eprint!("Pin this fingerprint and continue? [y/N] ");
-            {
-                use std::io::Write;
-                std::io::stderr().flush()?;
-            }
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line)?;
-            let answer = line.trim().to_ascii_lowercase();
-            if answer != "y" && answer != "yes" {
-                anyhow::bail!("not pinned — aborted by operator");
-            }
-        } else {
-            eprintln!("non-interactive: pinning automatically");
+        eprint!("Pin this fingerprint and continue? [y/N] ");
+        {
+            use std::io::Write;
+            std::io::stderr().flush()?;
+        }
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        let answer = line.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            anyhow::bail!("not pinned — aborted by operator");
         }
         probed
     };

@@ -218,9 +218,11 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: WorkerCommands,
     },
-    /// Pair this client with a daemon's edge: pin the certificate
-    /// fingerprint (trust-on-first-use, with confirmation) and store
-    /// the capability token
+    /// Pair this client with a daemon's edge: pin its certificate
+    /// fingerprint and store the capability token. With --fingerprint
+    /// the pin is explicit; without it, and only from a terminal, the
+    /// daemon's fingerprint is shown for you to confirm
+    /// (trust-on-first-use). A script must pass --fingerprint
     Connect {
         /// Edge address. Defaults to `[daemon] addr` in the client's
         /// config, or to the sole paired daemon when there is only one
@@ -232,7 +234,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         token: Option<String>,
         /// Pin this certificate fingerprint (64 hex chars) instead of
-        /// trusting the first connection
+        /// confirming the first connection. The daemon prints it at
+        /// first run and keeps it in `<state>/edge/fingerprint`.
+        /// Required when stdin is not a terminal
         #[arg(long)]
         fingerprint: Option<String>,
     },

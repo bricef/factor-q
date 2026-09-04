@@ -1,11 +1,12 @@
 //! The client side of the edge, driven through the real `fq` binary
-//! against a live daemon (plan Phase 2, 2b): `fq connect` pairs via
-//! TOFU (auto-accepting with a notice when stdin is not a terminal),
-//! stores credentials user-side at 0600; `fq ops list` speaks the
-//! authenticated surface; a tampered pin is refused with operator
-//! guidance; `--fingerprint` re-pins explicitly; and
-//! `fq token attenuate` narrows offline to a token the daemon still
-//! honours.
+//! against a live daemon (plan Phase 2, 2b): `fq connect` without a
+//! pin refuses when stdin is not a terminal (#544 — trust-on-first-use
+//! is interactive-only), pairs with `--fingerprint` read from the file
+//! the daemon wrote beside its identity (#545), and stores credentials
+//! user-side at 0600; `fq ops list` speaks the authenticated surface; a
+//! tampered pin is refused with operator guidance; `--fingerprint`
+//! re-pins explicitly; and `fq token attenuate` narrows offline to a
+//! token the daemon still honours.
 
 #![cfg(unix)]
 
@@ -101,21 +102,52 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
     let admin_token = fq_test_support::admin_token(&scratch.join("state"));
     let addr = suffix_of(&text, "- edge is listening on ").to_string();
 
-    // --- fq connect: TOFU, non-interactive → auto-accept + notice.
+    // --- fq connect without a pin, stdin not a terminal: refused, with
+    // the daemon live and ready to answer a probe. The refusal names
+    // the flag and where the fingerprint lives, and stores nothing —
+    // in particular the token has not been sent to anyone (#544).
+    let creds_path = scratch.join("xdg/factor-q/connections.toml");
     let out = fq(&scratch, &["connect", &addr, "--token", &admin_token]);
     let err = stderr_of(&out);
-    assert!(out.status.success(), "fq connect failed:\n{err}");
     assert!(
-        err.contains(&fingerprint_hex) && err.contains("non-interactive: pinning automatically"),
-        "TOFU must show the fingerprint and say it auto-pinned:\n{err}"
+        !out.status.success(),
+        "an unpinned non-interactive connect must refuse:\n{err}"
     );
     assert!(
-        err.contains("Compare it with the fingerprint the daemon printed"),
-        "TOFU must tell the operator what to compare against:\n{err}"
+        err.contains("--fingerprint") && err.contains("edge/fingerprint"),
+        "the refusal must name the flag and the file:\n{err}"
+    );
+    assert!(
+        !err.contains("pinning automatically"),
+        "the old auto-pin notice must be gone:\n{err}"
+    );
+    assert!(!creds_path.exists(), "a refused pairing stores nothing");
+
+    // --- the fingerprint file is the pin the banner printed, and a
+    // script pairs with it and needs no terminal.
+    let file_fingerprint = fq_test_support::edge_fingerprint(&scratch.join("state"));
+    assert_eq!(
+        file_fingerprint, fingerprint_hex,
+        "<state>/edge/fingerprint must be the pin the daemon printed"
+    );
+    let out = fq(
+        &scratch,
+        &[
+            "connect",
+            &addr,
+            "--token",
+            &admin_token,
+            "--fingerprint",
+            &file_fingerprint,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "pinned connect failed:\n{}",
+        stderr_of(&out)
     );
 
     // Credentials landed user-side, owner-only.
-    let creds_path = scratch.join("xdg/factor-q/connections.toml");
     let creds = std::fs::read_to_string(&creds_path).expect("connections.toml written");
     assert!(
         creds.contains(&fingerprint_hex),
