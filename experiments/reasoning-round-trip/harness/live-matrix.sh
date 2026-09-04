@@ -16,6 +16,10 @@ OUT="${OUT:-${TMPDIR:-/tmp}/fq-live-matrix}"
 TMP_ROOT="$OUT/run"
 FQ="$W/target/debug/fq"; FQD="$W/target/debug/fqd"; NATS="$W/.tools/nats-server"
 NATS_PORT=14222; NATS_TOKEN=fq-live-token
+# The daemon reads the broker token from the variable `[nats] token_env`
+# names, never from the URL (#540). A private name, so a FQ_NATS_TOKEN
+# exported for the shared dev broker cannot leak into this run.
+export FQ_LIVE_NATS_TOKEN="$NATS_TOKEN"
 INVOCATION_TIMEOUT_S=${INVOCATION_TIMEOUT_S:-600}
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -78,7 +82,8 @@ ARMS=(kimi-k3-reasoner opus-5-thinker gpt4o-mini-control)
 write_config() { # edge bind address
   cat > "$FQ_DAEMON_CONFIG" <<EOF
 [nats]
-url = "nats://${NATS_TOKEN}@127.0.0.1:${NATS_PORT}"
+url = "nats://127.0.0.1:${NATS_PORT}"
+token_env = "FQ_LIVE_NATS_TOKEN"
 
 [agents]
 directory = "agents"
@@ -152,10 +157,15 @@ done
 if [[ -z "$ready" ]]; then log "fqd did not start"; sed -n '1,60p' "$RUN_LOG"; exit 1; fi
 
 addr="$(sed -n 's/.*edge is listening on \([0-9.]*:[0-9]*\).*/\1/p' "$RUN_LOG" | tail -1)"
-token="$(awk '/edge: admin token/ { seen = 1; next } seen { line = $0; gsub(/[[:space:]]/, "", line); if (line ~ /^[A-Za-z0-9_=-]+$/ && length(line) >= 40) { print line; exit } }' "$RUN_LOG")"
-[[ -n "$addr" && -n "$token" ]] || { log "could not read edge addr/token"; sed -n '1,60p' "$RUN_LOG"; exit 1; }
+# The admin token is never printed: a fresh state directory gets
+# `edge/admin.token` and `edge/fingerprint`, owner-only, and pairing
+# needs both (the smoke suite reads them the same way).
+EDGE_DIR="$FQ_STATE_DIR/edge"
+[[ -n "$addr" && -r "$EDGE_DIR/admin.token" && -r "$EDGE_DIR/fingerprint" ]] || { log "could not read the edge address, admin.token or fingerprint"; sed -n '1,60p' "$RUN_LOG"; exit 1; }
+token="$(<"$EDGE_DIR/admin.token")"
+fingerprint="$(<"$EDGE_DIR/fingerprint")"
 write_config "$addr"
-"$FQ" connect "$addr" --token "$token" > "$TMP_ROOT/connect.log" 2>&1 || { log "fq connect failed"; cat "$TMP_ROOT/connect.log"; exit 1; }
+"$FQ" connect "$addr" --token "$token" --fingerprint "$fingerprint" > "$TMP_ROOT/connect.log" 2>&1 || { log "fq connect failed"; cat "$TMP_ROOT/connect.log"; exit 1; }
 printf '%s\n' "$addr" > "$TMP_ROOT/edge-addr"
 fqc() { "$FQ" --addr "$addr" "$@"; }
 log "daemon up, edge $addr, paired"
