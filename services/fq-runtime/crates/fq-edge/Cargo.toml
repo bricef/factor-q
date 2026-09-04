@@ -24,7 +24,7 @@ rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 # serde-transport-json on top of the workspace baseline: the tarpc
 # session is length-delimited JSON, end to end. The token preamble
 # ahead of it is raw length-prefixed bytes and needs no tarpc format
