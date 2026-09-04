@@ -480,16 +480,24 @@ install-audit-tools:
 audit:
     #!/usr/bin/env bash
     set -euo pipefail
-    for tool in cargo-audit cargo-deny; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-            echo "$tool is not installed — run \`just install-audit-tools\`" >&2
-            exit 1
-        fi
-    done
+    # The gate is the pinned versions, which CI installs exactly; whatever
+    # else is on PATH is not it — a pre-0.16 cargo-deny cannot even parse a
+    # version-2 deny.toml, and a different advisory engine returns a
+    # different verdict on the same lockfile. A missing tool reads as an
+    # empty version and fails the same way.
+    have_audit="$(cargo audit --version 2>/dev/null | awk '{print $NF}' || true)"
+    have_deny="$(cargo deny --version 2>/dev/null | awk '{print $NF}' || true)"
+    if [ "$have_audit" != "{{cargo_audit_version}}" ] || [ "$have_deny" != "{{cargo_deny_version}}" ]; then
+        echo "audit tools are not the pinned versions — cargo-audit ${have_audit:-missing} (want {{cargo_audit_version}}), cargo-deny ${have_deny:-missing} (want {{cargo_deny_version}}); run \`just install-audit-tools\`" >&2
+        exit 1
+    fi
+    # Comment lines come off before the id grep: a `#`-disabled ignore must
+    # stop reaching cargo audit the moment deny stops honouring it, or a
+    # lockfile-only crate deny never sees (rsa today) would pass fail-open.
     ignore_flags=()
     while IFS= read -r id; do
         ignore_flags+=(--ignore "$id")
-    done < <(grep -oE 'id *= *"RUSTSEC-[0-9]{4}-[0-9]{4}"' deny.toml | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]{4}')
+    done < <(grep -vE '^\s*#' deny.toml | grep -oE 'id *= *"RUSTSEC-[0-9]{4}-[0-9]{4}"' | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]{4}')
     cargo audit --deny warnings ${ignore_flags[@]+"${ignore_flags[@]}"}
     cargo deny --locked check
 
