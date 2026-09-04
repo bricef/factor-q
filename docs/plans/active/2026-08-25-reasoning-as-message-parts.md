@@ -541,6 +541,14 @@ protocol this contribution enables. Re-run it against a build carrying the
 fork to confirm the `echo` arm is reachable through factor-q rather than only
 through a hand-rolled probe.
 
+**Done 2026-09-04.** The live matrix ran through factor-q itself — kimi-k3
+via OpenRouter, `claude-opus-5`, and `gpt-4o-mini` as the non-reasoning
+control — on a scratch daemon against a private broker. Every reasoning part
+a model produced was carried byte-identically into the next request to that
+provider, reasoning before the tool call; Anthropic accepted its own signed
+blocks back; the control carried none. The per-turn record and the harness
+live in the experiment README under *Live run through factor-q*.
+
 ## 6. Execution plan (PR-sized)
 
 | Phase | Deliverable | Gates |
@@ -553,7 +561,7 @@ through a hand-rolled probe.
 | **3** ✅ | **OpenAI-compatible read + write.** `from_provider_response` reads `ChatResponse.reasoning_content`; `convert_message` emits `ContentPart::ReasoningContent`; `harness.rs:329` carries it into the replayed conversation. The cross-model strip (I2) lands here with its assertion. | I1, I2, I5 |
 | **4** ✅ | **The operator surface and the transcript.** `TurnAction::Assistant` gains `TurnReasoning` (§4.6) — the reduction that keeps parts internal. `TranscriptEntry` follows, then the flag in both consumers: `fq invocation transcript` and the dashboard, including its `opaque — click to see raw` affordance. Golden files move here. | I7, golden updated |
 | **5** ✅ | **Cost decomposition.** `reasoning_tokens` into `TokenUsage` from `completion_tokens_details`; `convert_usage` reads it; `total_cost` provably unchanged. | I4 |
-| **6** ✅ | **Anthropic encoder** behind the resolved genai dependency (upstream or fork). Re-run the round-trip experiment's `echo` arm through factor-q. | I1 on Anthropic |
+| **6** ✅ | **Anthropic encoder** behind the resolved genai dependency (upstream or fork). Re-run the round-trip experiment's `echo` arm through factor-q — **done 2026-09-04**, live matrix in the experiment README. | I1 on Anthropic |
 
 Phase 2 is the one to hold the line on: a pure shape change with an unchanged
 golden net is the cheapest possible place to discover the model is wrong.

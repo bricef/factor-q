@@ -16,11 +16,14 @@ cross-model strip at the adapter (D5); the consumer barrier strips payload
 reasoning, not just annotations (D6); the operator surface carries
 `TurnReasoning` behind `fq invocation transcript --reasoning` and the
 dashboard's raw disclosure (D4, D7); `reasoning_tokens` rides on the cost
-record (D8). Two things are open by decision, not omission: the Anthropic
-path depends on a fork of `genai` pinned to a rev until its one-line fix
-lands upstream, and there has been no live run against a real provider —
-`experiments/reasoning-round-trip/` measures exactly that and needs a key.
-Tool-result batching (D1b) is representable but not yet emitted (#511).
+record (D8). Verified live on 2026-09-04 against kimi-k3 (OpenRouter),
+`claude-opus-5` and a `gpt-4o-mini` control: every reasoning part was carried
+byte-identically into the following request, and Anthropic accepted its own
+signed blocks back (`experiments/reasoning-round-trip/`, live run section).
+One thing is open by decision, not omission: the Anthropic path depends on a
+fork of `genai` pinned to a rev until its one-line fix lands upstream.
+Tool-result batching (D1b) is representable but not yet emitted (#511), and
+the recorded `reasoning_tokens` reaches no operator surface yet (#536).
 
 Contract precondition for [#414](https://github.com/bricef/factor-q/issues/414)
 (confirmed exit criterion). Amends
