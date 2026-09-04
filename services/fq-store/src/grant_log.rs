@@ -214,7 +214,7 @@ impl SqliteGrantLog {
         Ok(())
     }
 
-    async fn rows(&self, sql: &str) -> Result<Vec<EventRow>> {
+    async fn rows(&self, sql: &'static str) -> Result<Vec<EventRow>> {
         let rows: Vec<EventTuple> = sqlx::query_as(sql).fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
@@ -481,10 +481,10 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             let mut tx = pool.begin().await?;
             // `raw_sql` steps through multi-statement migration scripts (v2 is
             // several statements), matching the storage index's `migrate`.
-            sqlx::raw_sql(migration).execute(&mut *tx).await?;
-            sqlx::query(&format!("PRAGMA user_version = {target}"))
-                .execute(&mut *tx)
-                .await?;
+            sqlx::raw_sql(*migration).execute(&mut *tx).await?;
+            // PRAGMA values cannot be bound; `target` is this loop's integer index.
+            let bump = sqlx::AssertSqlSafe(format!("PRAGMA user_version = {target}"));
+            sqlx::query(bump).execute(&mut *tx).await?;
             tx.commit().await?;
         }
     }

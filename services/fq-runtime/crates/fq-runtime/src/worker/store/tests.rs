@@ -47,12 +47,12 @@ async fn wal_tables_are_keyed_by_invocation_id() {
         if NOT_PER_INVOCATION.contains(&table.as_str()) {
             continue;
         }
-        let columns: Vec<(String, i64)> = sqlx::query_as(&format!(
-            "SELECT name, pk FROM pragma_table_info('{table}')"
-        ))
-        .fetch_all(&store.pool)
-        .await
-        .unwrap();
+        let columns: Vec<(String, i64)> =
+            sqlx::query_as("SELECT name, pk FROM pragma_table_info(?)")
+                .bind(table.as_str())
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
         let first_pk = columns
             .iter()
             .find(|(_, pk)| *pk == 1)
@@ -155,7 +155,7 @@ async fn populated_db_at(version: u32) -> PopulatedDb {
         .unwrap();
     let store = WorkerStore { pool };
     for stmt in split_sql(SCHEMA_META_SQL) {
-        sqlx::query(&stmt).execute(&store.pool).await.unwrap();
+        sqlx::query(stmt).execute(&store.pool).await.unwrap();
     }
     store.run_migrations(0, version).await.unwrap();
     store.write_schema_version(version).await.unwrap();
@@ -181,17 +181,17 @@ async fn populated_db_at(version: u32) -> PopulatedDb {
         if exists.is_none() {
             continue;
         }
-        let old: Vec<String> =
-            sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        let old: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+            .bind(table)
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        let current: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info(?, 'sim')")
+                .bind(table)
                 .fetch_all(&store.pool)
                 .await
                 .unwrap();
-        let current: Vec<String> = sqlx::query_scalar(&format!(
-            "SELECT name FROM pragma_table_info('{table}', 'sim')"
-        ))
-        .fetch_all(&store.pool)
-        .await
-        .unwrap();
         let common: Vec<&str> = old
             .iter()
             .map(String::as_str)
@@ -199,16 +199,18 @@ async fn populated_db_at(version: u32) -> PopulatedDb {
             .collect();
         if !common.is_empty() {
             let columns = common.join(", ");
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO main.{table} ({columns}) SELECT {columns} FROM sim.{table}"
-            ))
+            )))
             .execute(&store.pool)
             .await
             .unwrap();
-            let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM main.{table}"))
-                .fetch_one(&store.pool)
-                .await
-                .unwrap();
+            let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM main.{table}"
+            )))
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
             source_counts.push((table, count));
         }
     }
@@ -244,10 +246,11 @@ async fn every_worker_migration_upgrades_populated_sim_data() {
 
         // Row preservation: nothing the old schema could hold is lost.
         for (table, expected) in &db.source_counts {
-            let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
-                .fetch_one(&store.pool)
-                .await
-                .unwrap();
+            let count: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&store.pool)
+                    .await
+                    .unwrap();
             assert_eq!(count, *expected, "v{from} lost rows in {table}");
         }
 
@@ -971,10 +974,10 @@ async fn v1_to_v2_migration_adds_is_error_column() {
         let opts = SqliteConnectOptions::from_str(&url).unwrap();
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         for stmt in split_sql(SCHEMA_META_SQL) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
         for stmt in split_sql(WORKER_TABLES_V1_SQL) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
         sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)")
             .bind(SCHEMA_CLASS)
@@ -1081,13 +1084,13 @@ async fn v2_to_v3_migration_adds_workspace_ref_column() {
         let opts = SqliteConnectOptions::from_str(&url).unwrap();
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         for stmt in split_sql(SCHEMA_META_SQL) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
         for stmt in split_sql(WORKER_TABLES_V1_SQL) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
         for stmt in split_sql(WORKER_MIGRATION_V2_SQL) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
         sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)")
             .bind(SCHEMA_CLASS)
@@ -1155,16 +1158,16 @@ async fn v3_to_v4_migration_adds_archive_columns() {
         let opts = SqliteConnectOptions::from_str(&url).unwrap();
         let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
         for stmt in split_sql(SCHEMA_META_SQL) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
         for stmt in split_sql(WORKER_TABLES_V1_SQL) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
         for stmt in split_sql(WORKER_MIGRATION_V2_SQL) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
         for stmt in split_sql(WORKER_MIGRATION_V3_SQL) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
         sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)")
             .bind(SCHEMA_CLASS)
@@ -1249,7 +1252,7 @@ async fn v6_to_v7_migration_adds_host_notice_table() {
             WORKER_MIGRATION_V6_SQL,
         ] {
             for stmt in split_sql(sql) {
-                sqlx::query(&stmt).execute(&pool).await.unwrap();
+                sqlx::query(stmt).execute(&pool).await.unwrap();
             }
         }
         sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)")
@@ -1390,10 +1393,10 @@ async fn v8_to_v9_migration_preserves_rows_and_adds_shared_sequence() {
     let opts = SqliteConnectOptions::from_str(&url).unwrap();
     let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
     for stmt in split_sql(SCHEMA_META_SQL) {
-        sqlx::query(&stmt).execute(&pool).await.unwrap();
+        sqlx::query(stmt).execute(&pool).await.unwrap();
     }
     for stmt in split_sql(WORKER_TABLES_V1_SQL) {
-        sqlx::query(&stmt).execute(&pool).await.unwrap();
+        sqlx::query(stmt).execute(&pool).await.unwrap();
     }
     for migration in [
         WORKER_MIGRATION_V2_SQL,
@@ -1405,7 +1408,7 @@ async fn v8_to_v9_migration_preserves_rows_and_adds_shared_sequence() {
         WORKER_MIGRATION_V8_SQL,
     ] {
         for stmt in split_sql(migration) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
+            sqlx::query(stmt).execute(&pool).await.unwrap();
         }
     }
     sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, 8, 0)")

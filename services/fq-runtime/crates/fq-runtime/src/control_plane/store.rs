@@ -288,7 +288,7 @@ impl ControlPlaneStore {
 
     async fn bootstrap_schema(&self) -> Result<(), ControlPlaneStoreError> {
         for stmt in split_sql(SCHEMA_META_SQL) {
-            sqlx::query(&stmt).execute(&self.pool).await?;
+            sqlx::query(stmt).execute(&self.pool).await?;
         }
 
         let recorded = self.read_schema_version().await?;
@@ -346,7 +346,7 @@ impl ControlPlaneStore {
     async fn run_migrations(&self, from: u32, to: u32) -> Result<(), ControlPlaneStoreError> {
         if from < 1 && to >= 1 {
             for stmt in split_sql(CONTROL_PLANE_TABLES_V1_SQL) {
-                sqlx::query(&stmt).execute(&self.pool).await?;
+                sqlx::query(stmt).execute(&self.pool).await?;
             }
         }
         Ok(())
@@ -942,12 +942,11 @@ pub fn check_compatibility(recorded: Option<u32>, binary: u32) -> Compatibility 
     }
 }
 
-fn split_sql(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+/// One statement at a time, so a failure names the statement. Slices of
+/// the `'static` script rather than copies: each is still compile-time
+/// SQL, which is what `sqlx::query` accepts without an audit marker.
+fn split_sql(sql: &'static str) -> impl Iterator<Item = &'static str> {
+    sql.split(';').map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn row_to_worker(row: sqlx::sqlite::SqliteRow) -> Result<WorkerRow, ControlPlaneStoreError> {

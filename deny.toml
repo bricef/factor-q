@@ -31,14 +31,6 @@ version = 2
 # A yanked release was pulled for a reason; `cargo update -p <crate>` clears it.
 yanked = "deny"
 ignore = [
-    # rsa 0.9 — Marvin timing side-channel (CVE-2023-49092). No patched
-    # release exists (RustCrypto/RSA#626). It reaches the lockfile only as an
-    # optional dependency of sqlx-mysql; the workspace enables sqlx's sqlite
-    # backend alone, so no built binary links it. Re-check on every sqlx bump.
-    # cargo-deny reports this entry as "not encountered" — that is the point:
-    # the crate is outside every built feature, so it is absent from the
-    # resolved graph. cargo audit scans the flat lockfile and needs the id.
-    { id = "RUSTSEC-2023-0071", reason = "rsa: no fixed release; lockfile-only via sqlx-mysql, no built feature reaches it" },
     # bincode 1.3 is unmaintained. tarpc 0.37's `serde-transport-bincode`
     # frames every edge request with it (tarpc → tokio-serde → bincode).
     # Leaving it is a wire-format change for the edge transport — an ADR,

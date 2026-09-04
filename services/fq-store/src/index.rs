@@ -334,11 +334,10 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         let target = i as i64 + 1;
         if version < target {
             let mut tx = pool.begin().await?;
-            sqlx::raw_sql(sql).execute(&mut *tx).await?;
-            // PRAGMA values cannot be bound; `target` is a trusted constant.
-            sqlx::query(&format!("PRAGMA user_version = {target}"))
-                .execute(&mut *tx)
-                .await?;
+            sqlx::raw_sql(*sql).execute(&mut *tx).await?;
+            // PRAGMA values cannot be bound; `target` is this loop's integer index.
+            let bump = sqlx::AssertSqlSafe(format!("PRAGMA user_version = {target}"));
+            sqlx::query(bump).execute(&mut *tx).await?;
             tx.commit().await?;
         }
     }

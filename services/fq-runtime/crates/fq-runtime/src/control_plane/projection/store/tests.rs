@@ -1467,10 +1467,12 @@ async fn read_only_open_rejects_a_database_from_an_older_build() {
             .await
             .unwrap();
         for column in ["seq", "error_message"] {
-            sqlx::query(&format!("ALTER TABLE events DROP COLUMN {column}"))
-                .execute(&writer.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE events DROP COLUMN {column}"
+            )))
+            .execute(&writer.pool)
+            .await
+            .unwrap();
         }
     }
 
