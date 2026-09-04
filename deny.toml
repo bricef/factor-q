@@ -52,11 +52,6 @@ ignore = [
     # the proc-macro half of biscuit-auth 6 — build-time only. Goes when
     # biscuit-quote migrates off it.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2: build-time dependency of biscuit-quote (biscuit-auth 6)" },
-    # rustls-pemfile is unmaintained (its API moved into rustls-pki-types).
-    # Pulled by async-nats 0.38 directly and through rustls-native-certs 0.7;
-    # async-nats 0.46+ switched to rustls-pki-types and 0.47 moved to
-    # rustls-native-certs 0.8, so the async-nats bump (#539) retires this.
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: via async-nats 0.38 / rustls-native-certs 0.7; cleared by the async-nats bump" },
 ]
 
 [licenses]
