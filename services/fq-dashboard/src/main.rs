@@ -74,8 +74,9 @@ struct Args {
     /// The dashboard's capability token — an attenuated admin token
     /// granting only the six reads it renders. Mint with
     /// `fq token attenuate` (see the startup refusal for the exact
-    /// invocation). Required.
-    #[arg(long, env = "FQ_EDGE_TOKEN")]
+    /// invocation). Required. `hide_env_values`: clap would otherwise
+    /// print the token itself in `--help` whenever the variable is set.
+    #[arg(long, env = "FQ_EDGE_TOKEN", hide_env_values = true)]
     edge_token: Option<String>,
     /// SHA-256 of the daemon's certificate, hex — the pin. The daemon
     /// prints it when it provisions its identity and keeps it in

@@ -26,11 +26,28 @@ set -eu
 FQ_DOGFOOD="${FQ_DOGFOOD:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$FQ_DOGFOOD"
 
-set -a
+# Read the declared environment; do not become it. `.secrets/env` holds
+# every secret the instance has — the provider keys, GH_TOKEN — and this
+# is the one web-facing process. The other launchers `set -a` the whole
+# file into their process; this one sources it only to read values and
+# then starts the dashboard under `env -i`, carrying exactly the
+# variables the binary reads (its three edge settings and its own
+# FQ_DASHBOARD_* tuning) plus PATH, and nothing else
+# (https://github.com/bricef/factor-q/issues/545). An attenuated token
+# in a process that also holds the admin-grade secrets would make the
+# attenuation decorative.
+# shellcheck disable=SC1091
 . ./.secrets/env
-set +a
 
-exec ./current/fq-dashboard \
-  --bind "${FQ_DASHBOARD_BIND:-127.0.0.1:9472}" \
-  --edge "${FQ_EDGE:?set it in .secrets/env to the [edge] bind — see ops/dogfood/README.md}" \
-  --refresh "${FQ_DASHBOARD_REFRESH:-5}"
+: "${FQ_EDGE:?set it in .secrets/env to the [edge] bind — see ops/dogfood/README.md}"
+: "${FQ_EDGE_TOKEN:?set it in .secrets/env — an ATTENUATED token, see env.example}"
+: "${FQ_EDGE_FINGERPRINT:?set it in .secrets/env — the certificate fingerprint the daemon printed}"
+
+exec env -i \
+  PATH="$PATH" \
+  FQ_EDGE="$FQ_EDGE" \
+  FQ_EDGE_TOKEN="$FQ_EDGE_TOKEN" \
+  FQ_EDGE_FINGERPRINT="$FQ_EDGE_FINGERPRINT" \
+  FQ_DASHBOARD_BIND="${FQ_DASHBOARD_BIND:-127.0.0.1:9472}" \
+  FQ_DASHBOARD_REFRESH="${FQ_DASHBOARD_REFRESH:-5}" \
+  ./current/fq-dashboard

@@ -80,7 +80,7 @@ pub(crate) struct GlobalArgs {
     agents_dir: Option<PathBuf>,
 
     /// Override the NATS URL from config
-    #[arg(long, env = "FQ_NATS_URL", global = true)]
+    #[arg(long, env = "FQ_NATS_URL", global = true, hide_env_values = true)]
     nats_url: Option<String>,
 
     /// Override the cache directory from config

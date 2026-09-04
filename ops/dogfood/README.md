@@ -45,7 +45,12 @@ Deploy tooling for the dogfood instance (issue #102). The contract:
 - **The environment is declared, not ambient.** All four launchers
   (`run.sh`, `watcher.sh`, `dashboard.sh`, `cron.sh`) source exactly one
   file, `.secrets/env` ([template](env.example)) — nothing else reaches
-  the processes' environment.
+  the processes' environment. The dashboard, the one web-facing
+  process, gets less than the file: `dashboard.sh` reads it and starts
+  the binary under `env -i` with only `FQ_EDGE`, `FQ_EDGE_TOKEN`,
+  `FQ_EDGE_FINGERPRINT` and its `FQ_DASHBOARD_*` tuning
+  ([#545](https://github.com/bricef/factor-q/issues/545)) — the
+  provider keys and `GH_TOKEN` never enter it.
 
 ## Host layout (`~/fq-dogfood`, override with `FQ_DOGFOOD`)
 
