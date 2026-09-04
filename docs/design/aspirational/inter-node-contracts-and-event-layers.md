@@ -84,7 +84,7 @@ Specific calls following this test:
 
 A verifier is a node with the signature:
 
-```
+```text
 (typed_artifact) -> Verdict { pass | fail | score; feedback?; route? }
 ```
 

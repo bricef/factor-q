@@ -20,9 +20,9 @@ Plus a security section: the declared security model and the operating reality o
 
 ---
 
-# Part 1 — Approach and requirements
+## Part 1 — Approach and requirements
 
-## 1.1 Q200 is load-bearing and unfalsifiable (highest-priority strategic issue)
+### 1.1 Q200 is load-bearing and unfalsifiable (highest-priority strategic issue)
 
 `VISION.md` makes Q200 the north star: *"for every day of human effort invested in factor-q, the system produces the equivalent of 200 days of work."* Every milestone, and therefore every sequencing decision, hangs off this ladder. But:
 
@@ -40,7 +40,7 @@ Plus a security section: the declared security model and the operating reality o
 
 I would take (b). The fusion metaphor is genuinely good branding and terrible instrumentation, and you can keep the name without keeping the number.
 
-## 1.2 The product identity is the unbuilt part
+### 1.2 The product identity is the unbuilt part
 
 README's first sentence sells "multi-agent systems." `VISION.md` makes graph-based composition a core principle. Design Principle 5 states *"the graph is the substrate for composition."*
 
@@ -59,7 +59,7 @@ Two things sharpen this:
 
 **Recommendation.** Time-box a deliberately crude orchestration spike — one agent invoking another, results returned, budget inherited, no graph format, no YAML, no fragment library — and put it ahead of M3. Not because the crude version is good, but because until something end-to-end exists you have no evidence about what the graph layer actually needs, and ADR-0007's design is currently unvalidated by contact with a running system. If the spike is ugly, that is Principle 6 working as intended.
 
-## 1.3 The dogfood loop is your strongest asset and your largest evidential bias
+### 1.3 The dogfood loop is your strongest asset and your largest evidential bias
 
 The autonomous loop is real and it works — 53 agent-authored commits in the history, PRs landing behind a human merge gate. That is a genuine achievement and most projects claiming this cannot show it.
 
@@ -74,7 +74,7 @@ There is currently zero evidence for either. The harness has been tuned for mont
 
 **Recommendation.** Before M1, run one non-code workload end to end. The `doc-drift` agent is close but still code-adjacent. Something like: ingest a regulatory corpus, answer a fixed question set, have a human score it. The point is not the output — it is to discover which of your primitives are actually general and which are `just ci` in disguise. My prediction is that context management and the absence of a verification oracle both bite hard, and both are currently unscheduled.
 
-## 1.4 BSL is buying protection you don't need at a price you can't afford
+### 1.4 BSL is buying protection you don't need at a price you can't afford
 
 BSL 1.1, personal non-commercial use free, organisational use requires a commercial licence via `licensing@factorq.top`, four-year Apache conversion.
 
@@ -84,7 +84,7 @@ I am not saying BSL is wrong — the Sentry/HashiCorp/MariaDB reasoning is real 
 
 **Recommendation.** Write down the specific competitive scenario BSL prevents. If you can name it concretely, keep BSL. If the honest answer is "someone might one day fork it and sell hosting," note that this requires the project to first be successful enough to be worth forking, and that Apache-2.0 until that point is a cheap option to hold.
 
-## 1.5 What the requirements layer gets right
+### 1.5 What the requirements layer gets right
 
 Worth stating explicitly because it's unusual: `design-principles.md` is genuinely excellent. Principle 3's distinction between *restriction* and *construction* — with the concrete worked example of the phase-1 shell that had a path allow-list on the file tool but not on the subprocess it could spawn — is a better articulation of capability security than most security engineering writing. Principle 2 ("no confabulation where data exists") is a real insight about LLM-as-user that I have not seen stated this clearly elsewhere. Principle 8's test ("if you would ever run the system with a different value to see what happens, it is configuration") is exactly right and is broadly honoured in the config surface.
 
@@ -92,7 +92,7 @@ The gap is not the principles. It is that principles are only load-bearing if vi
 
 ---
 
-# Part 2 — The review loop is losing to velocity
+## Part 2 — The review loop is losing to velocity
 
 This is the finding I would act on first, because it is the one that makes every other finding recur.
 
@@ -127,11 +127,11 @@ Concretely, `runner.rs` now holds the host loop, resume/replay, MCP sampling, el
 
 ---
 
-# Part 3 — Security findings
+## Part 3 — Security findings
 
 `SECURITY.md` is honest and I want to credit that: it names the unenforced `sandbox.env`/`sandbox.network`, the committed NATS token, the unauthenticated `fq-cas serve`, and the shared `GH_TOKEN`. That is more candour than most alpha projects manage. The findings below are ones it does **not** cover.
 
-## 3.1 Sandbox escape: dangling symlink defeats `check_write` — **PoC, high**
+### 3.1 Sandbox escape: dangling symlink defeats `check_write` — **PoC, high**
 
 **Location:** `fq-tools/src/sandbox.rs:289` (`canonicalise_for_write`), reached from `check_write` at `:203`, consumed by `builtin/file_write.rs:69`.
 
@@ -146,7 +146,7 @@ The result is `<workspace>/notes.txt`, which sits inside the allowed prefix, so 
 
 **Reproduced** with a faithful re-implementation of the check (POSIX semantics are identical between Rust `std::fs` and the emulation):
 
-```
+```text
 allowed write prefix : /tmp/poc/scratch/workspace
 agent creates symlink: .../workspace/notes.txt -> .../secrets/authorized_keys
 os.path.exists(link) : False   <-- dangling, so False
@@ -169,7 +169,7 @@ Every symlink test in the tree points at an **existing** target. The dangling ca
 
 Add a `write_dangling_symlink_pointing_outside_is_denied` test alongside the existing one.
 
-## 3.2 The `env` allowlist provides no confidentiality — **PoC, high in context**
+### 3.2 The `env` allowlist provides no confidentiality — **PoC, high in context**
 
 **Location:** `builtin/exec.rs:321` (`env_clear()` + baseline + allowlist), documented at `:48–54`.
 
@@ -177,7 +177,7 @@ The module doc presents this as a safeguard: *"the child does NOT inherit the pa
 
 The child runs as the same uid as `fqd` and is its direct descendant, so it can read the daemon's environment straight out of `/proc`:
 
-```
+```text
 child's own env     : ['LC_CTYPE', 'PATH']
 secret in child env : False
 read /proc/762/environ -> ['FQ_NATS_TOKEN=fq-dev-token',
@@ -194,7 +194,7 @@ This matters because `ops/dogfood/env.example` puts `ANTHROPIC_API_KEY` and `GH_
 2. Better: don't hold provider keys in the daemon's environment at all — read them from a file at call time, or from a credential process. The daemon already has a config-driven `api_key_env` indirection; extending it to `api_key_file` is small.
 3. Update the "Known gaps" list either way, since (1) does not stop a child from finding secrets by other means once it has arbitrary exec.
 
-## 3.3 The dogfood loop's only enforced control is the human merge gate — **architectural, high**
+### 3.3 The dogfood loop's only enforced control is the human merge gate — **architectural, high**
 
 This is the finding I'd most want you to sit with, because it's the point where the operating reality has diverged furthest from the stated model.
 
@@ -233,7 +233,7 @@ I don't think this happened through carelessness. It happened because **the cons
 3. **Give it its own credential.** A fine-grained PAT scoped to issues-only on one repo, distinct from the token `m0-issue-fix` uses to push. Removes the shared-blast-radius problem regardless of everything else.
 4. **Prioritise `sandbox.network` enforcement (#208/#209).** For an agent handling untrusted input with a live API token, egress control is the highest-value single control available, and it's the one currently declared-but-absent.
 
-## 3.4 Edge tokens have no expiry, no revocation, no audit — **medium-high**
+### 3.4 Edge tokens have no expiry, no revocation, no audit — **medium-high**
 
 **Location:** `fq-edge/src/auth.rs:67` (`mint_token`), `:207` (`attenuate`), `:273` (`verify_token`).
 
@@ -256,7 +256,7 @@ Biscuit supports all three (expiry facts, revocation ids, a revocation list) and
 
 Minor, same file: fingerprint comparison at `client.rs:59` is `==` on `[u8; 32]`, not constant-time. Low exploitability for a client-side check of a value the attacker would have to be the server to influence, but there's no cost to `subtle::ConstantTimeEq` and it removes the question.
 
-## 3.5 `install.sh` fails open on checksum verification — **medium, one-line fix**
+### 3.5 `install.sh` fails open on checksum verification — **medium, one-line fix**
 
 **Location:** `install.sh:72`.
 
@@ -273,7 +273,7 @@ This is the fail-open pattern Principle 3 explicitly rules out, and it's inconsi
 
 **Fix.** Fail hard if the `.sha256` cannot be fetched. Until the first release ships, this costs nothing to correct.
 
-## 3.6 No dependency vulnerability scanning; 510 crates — **medium**
+### 3.6 No dependency vulnerability scanning; 510 crates — **medium**
 
 No `cargo audit`, no `cargo deny`, no Dependabot config, no CodeQL. 510 entries in `Cargo.lock`, plus a Go toolchain across two adapters.
 
@@ -283,7 +283,7 @@ The exposure is concrete rather than theoretical: `main-artifacts.yml` builds st
 
 Related: `services/fq-dashboard/assets/datastar.js` is vendored with a `// Datastar v1.0.0` comment and no checksum, no SRI, no provenance record. You pin `nats-server` by SHA256 in a dedicated file — apply the same standard to the 34KB of third-party JavaScript you serve from the binary.
 
-## 3.7 Budget enforcement rests on unpinned third-party data — **medium**
+### 3.7 Budget enforcement rests on unpinned third-party data — **medium**
 
 **Location:** `pricing.rs:34`.
 
@@ -300,7 +300,7 @@ Credit where due: the surrounding design is careful — the startup pricing guar
 
 **Fix.** Pin to a tag or commit rather than `main`; record a checksum of the cached copy; add a sanity floor (reject a non-zero-token model priced at exactly zero) and optionally an order-of-magnitude drift warning against the previous cache. All cheap; the first two are the same pattern as `.nats-checksums`.
 
-## 3.8 The four sandbox dimensions are not independent
+### 3.8 The four sandbox dimensions are not independent
 
 Worth stating explicitly somewhere user-facing: `fs_read`, `fs_write`, `exec_cwd` and `env` read like four orthogonal grants, and the docs present them that way. They aren't. **`exec_cwd` dominates all of them.** An agent granted exec can `cat` any readable file (bypassing `fs_read`), write any writable path (bypassing `fs_write`), read the daemon's secrets via `/proc` (bypassing `env`, per 3.2), and reach any host (there being no network enforcement at all).
 
@@ -308,9 +308,9 @@ So the practical grant lattice has two levels, not four: *exec* and *not-exec*. 
 
 ---
 
-# Part 4 — Correctness and design
+## Part 4 — Correctness and design
 
-## 4.1 `SCHEMA_VERSION` is write-only, and the projection drops what it can't parse — **medium-high**
+### 4.1 `SCHEMA_VERSION` is write-only, and the projection drops what it can't parse — **medium-high**
 
 `events.rs:27` defines `SCHEMA_VERSION: u32 = 2` and stamps it into every envelope. I traced every consumer: **nothing on any read path ever inspects it.** The only occurrences outside `events.rs` are test fixtures constructing `schema_version: 1` literals.
 
@@ -332,13 +332,13 @@ The contrast is sharp and instructive: your **SQLite** stores get this right. `c
 
 This one is cheap relative to its blast radius, and the golden-corpus test is the sort of thing your verification culture is already excellent at — it's just missing here.
 
-## 4.2 Ack-after-durable-start is well-reasoned; the residual is known
+### 4.2 Ack-after-durable-start is well-reasoned; the residual is known
 
 `dispatcher.rs` has an unusually careful ack policy, with the 2026-07-06 redelivery-storm incident documented inline and the reasoning for ack-after-durable-start (rather than ack-on-dispatch or ack-on-completion) spelled out across three failure windows. The escalating NAK backoff and `max_ack_pending` sizing are both thought through. This is good work.
 
 The residual — a crash in the window between the WAL write and the ack producing both a WAL recovery and a JetStream redelivery — is correctly identified and has an active plan (`2026-07-18-exactly-once-trigger-dispatch.md`, ADR-0032 draft). No new finding; I flag it only to say I looked and agree with the framing.
 
-## 4.3 Structural notes on the execution path
+### 4.3 Structural notes on the execution path
 
 Beyond raw size (Part 2), the shape of `runner.rs` concerns me for one specific reason: `resume` (364 lines) must remain observationally equivalent to the fresh path. The 14 July review flagged that this equivalence rested on hand-copied code; `build_invocation_setup` has since been extracted, which addresses the direct duplication. But both paths still live in the fastest-growing file in the repo, and the equivalence is enforced by tests rather than by construction.
 
@@ -346,7 +346,7 @@ Given Principle 6's emphasis on verified seams, this is a candidate for making s
 
 ---
 
-# Part 5 — Code quality
+## Part 5 — Code quality
 
 Brief, because it is largely excellent and the prior review covered the structural side well.
 
@@ -373,7 +373,7 @@ Beyond the numbers: module headers cite the ADR or the specific incident that mo
 
 ---
 
-# What I'd do first
+## What I'd do first
 
 Ordered by (impact × tractability), not by severity alone:
 
@@ -391,7 +391,7 @@ Ordered by (impact × tractability), not by severity alone:
 
 ---
 
-## Closing
+### Closing
 
 The most useful thing I can tell you is that **the code is not your bottleneck.** The quality bar here is high enough that continuing to raise it has diminishing returns, and the two things that will actually determine whether factor-q succeeds are both outside the code: whether the Q ladder becomes measurable, and whether orchestration gets built before the substrate absorbs another two quarters.
 

@@ -78,7 +78,7 @@ the substrate the ADRs bet on:
 
 ## Target shape
 
-```
+```text
  fq (thin client: fq-ops types + generated wrappers, no sqlx/NATS)
   │
   │  tarpc: invoke(name, input) / next_batch(from_seq, max_wait)

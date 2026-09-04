@@ -173,7 +173,7 @@ Direct access to `event.annotations` remains available for humans, meta-agents, 
 
 Events are published to NATS subjects following this pattern:
 
-```
+```text
 fq.agent.{agent_id}.{event_type}[.{sub_type}]
 fq.worker.{worker_id}.{event_type}[.{sub_type}]
 fq.system.{event_type}
@@ -248,6 +248,7 @@ Published when an agent invocation begins. Carries a snapshot of the agent's con
 ```
 
 **Design notes:**
+
 - **`config_snapshot` is a partial capture, and the gap matters.** The intent is that the trace shows exactly what was running even after the definition changes. `ConfigSnapshot` carries eleven of `Agent`'s sixteen fields; **`max_iterations`, `effort`, `trigger`, `mcp_servers` and `static_resources` are not captured**, and every one of them changes what actually ran. Two invocations of the same agent across an `fq reload` that altered any of them produce identical snapshots. Treat the snapshot as the configuration that shaped the *conversation*, not as the full definition — closing the gap is a code change, tracked as one.
 - **`trigger_id` names the trigger this invocation came from.** UUIDv7, minted or honoured per the [trigger wire contract](trigger-wire-contract.md#trigger-identity-fq-trigger-id), where it travels as the `Fq-Trigger-Id` header. Before it existed, an invocation was linked to its trigger only by *content* — matching subject and payload — which cannot distinguish two identical triggers and cannot be keyed on. This is that link, by identity.
 - **`trigger_id` is optional on read, always written.** Every `triggered` event published since 2026-08-10 carries one; events already on the log do not, and the field deserialises as absent for them. It is optional for exactly that reason and no other — a required field would fail replay of the existing log and refuse events from older peers (invariant 11).
@@ -280,6 +281,7 @@ Published immediately before an LLM call is made.
 ```
 
 **Design notes:**
+
 - **Full message history is sent every time.** Reconstructing context from earlier events would be fragile.
 - **`tools_available` is a snapshot per call.** Tool schemas can change between calls.
 - **`call_id` correlates with the response.** It is a UUID the runtime mints for the call, not a provider identifier — unlike `tool_call_id`, which comes from the provider and is carried through verbatim in whatever shape it arrives.
@@ -297,6 +299,7 @@ WAL middle-state event for LLM calls. Emitted between `llm.request` and `llm.res
 ```
 
 **Design notes:**
+
 - **Operationally informational.** Downstream consumers can ignore it; recovery uses the `llm_dispatch.status = 'dispatched'` row in the worker store, not this event.
 - **Same call_id as the matching `llm.request` / `llm.response`.**
 
@@ -328,6 +331,7 @@ Published when an LLM call returns and the response is durably written. The enve
 ```
 
 **Design notes:**
+
 - **Cost rides on the envelope.** See [Cost metadata](#cost-metadata) above. Consumers query `WHERE event_type IN ('llm_response', 'llm_failure') AND total_cost IS NOT NULL` for cost-bearing per-call events.
 - **`tool_call_id` is assigned by the LLM.**
 - **`usage` carries raw token counts**, mirrored in `envelope.cost` along with the computed dollar values.
@@ -354,6 +358,7 @@ The other terminal outcome of an LLM call (#447): the provider errored, or retur
 ```
 
 **Design notes:**
+
 - **`usage` is optional, and `None` is not zero.** Absent means "we do not know what the provider billed" — a transport failure yields no parsed body. Present means the counts are real: an empty completion still bills for the prefill. `envelope.cost` follows the same rule and is *absent*, never zeroed, when usage is unknown.
 - **`error_kind` mirrors `LlmError`**, plus `empty_response`, which has no error counterpart and is the one failure kind that can bill. A 429 currently arrives as `request_failed` with the status in `error_message`; [#278](https://github.com/bricef/factor-q/issues/278)'s `Retry-After` work is where `rate_limited` starts being produced.
 - **A failed call is not a failed invocation.** The agent-turn case publishes `failed` separately; a failed sampling or elicitation call declines the server's request and the invocation continues (ADR-0018).
@@ -373,6 +378,7 @@ Published when the agent invokes a tool. Each tool call in a single LLM response
 ```
 
 **Design notes:**
+
 - **`round` is the initiating assistant turn's Round**, so every call and result from one model response shares a number and a reader can group them without walking the chain. It reads `0` on events written before the field existed, which is not a real Round.
 
 ### `tool.dispatched`
@@ -418,6 +424,7 @@ Error case:
 `error_kind` values: `sandbox_violation`, `invalid_parameters`, `execution_failed`, `timeout`, `permission_denied`.
 
 **Design notes:**
+
 - **`tool_name` is restated here**, even though the initiating `tool.call` already carries it, so a result renders on its own. The parameters are not restated — those stay on the call, reachable via `parent_event_id`. Empty on events written before the field existed.
 
 ### `host_notice`
@@ -432,6 +439,7 @@ Published by the runner when a queued host notice is drained into the conversati
 ```
 
 **Design notes:**
+
 - **The WAL row is the source of truth, not this event.** `queue_host_notice` persists the notice into `worker.db`'s `host_notice` table before the `StepInput` that carries it is built, and resume replays that row verbatim. A notice recorded by an incarnation that then crashed is *not* re-emitted on resume — the event is observability, the row is the channel.
 - **`body` arrives fully rendered**, `<host-notice>` sentinel included. Producers render once; replay never re-renders, so the exact string is what the model saw.
 - **The channel is wired ahead of its producers.** Nothing in the daemon queues a notice today; the only callers are the simulation harness. Expect the event on the wire when phase 2 of #88 lands, not before.
@@ -452,6 +460,7 @@ Published by the worker on startup for an invocation in recovery limbo (#64), in
 ```
 
 **Design notes:**
+
 - **Operator-triage event.** The control-plane consumes it and marks the ownership row `ambiguous`, which is what `fq invocation list --status=ambiguous` surfaces; `fq invocation resume` and `fq invocation drop` are the two ways out. The github-watcher treats it as a failed, operator-attention outcome.
 - **Full context lives in the worker's WAL**, not on the wire. This payload is the minimum needed for an operator to find the row.
 - **Once per invocation, across restarts.** Emission is guarded by the worker store's `ambiguous_reported_at` stamp, so a persistently-broken invocation does not re-fire on every daemon restart.
@@ -521,6 +530,7 @@ Published by the worker after an invocation reaches terminal state, carrying the
 ```
 
 **Design notes:**
+
 - **Canonical position:** `... → completed|failed → invocation.archived → invocation.archive_acked`. See data-architecture.md §9.3.
 - **`worker_id` rides on the payload, not the subject.** The subject is agent-scoped so the coordination consumer's existing `fq.agent.*.invocation.*` filter picks it up; the control-plane needs the `worker_id` to address the ack back at `fq.worker.{worker_id}.invocation.archive_acked`.
 - **`final_state_blob` is opaque.** The control-plane stores it as-is into `invocation_archive.state_blob`. Default serde encoding (JSON array of integers) is used today; if blob sizes start to strain the wire format, swap in `serde_bytes` here and in `InvocationStateRow`.
@@ -537,6 +547,7 @@ Published by the control-plane on the worker-scoped subject after a successful (
 ```
 
 **Design notes:**
+
 - **Worker-scoped subject.** `fq.worker.{worker_id}.invocation.archive_acked` so each worker subscribes with a single filter on its own id. The coordination consumer does not double-consume the ack.
 - **`invocation_id` rides on the envelope** — see ADR-0016 on payload vs envelope. The payload carries `worker_id` only as a defense-in-depth check on the receiving worker (the subject token already routes by `worker_id`).
 - **Emitted on every successful insert, including the idempotent no-op.** Otherwise a redelivered `invocation.archived` would never re-trigger the ack and a worker that missed the first one would never clean up.
@@ -555,6 +566,7 @@ Published by `fq invocation drop` (and any future operator-issued recovery actio
 ```
 
 **Design notes:**
+
 - **`action` is `"drop"` in v1.** The field exists so future actions (`resume`, `requeue`) can be distinguished without minting a new variant.
 - **`final_phase` is `"failed"` in v1.** A future `resume` would set `"completed"`.
 - **`reason` is operator-supplied free-form.** Audit-only; consumers must not parse it. Omitted on the wire when absent.
@@ -573,6 +585,7 @@ Published by `fq invocation resume` — the other half of the ambiguous-invocati
 ```
 
 **Design notes:**
+
 - **Audit-only, and published after the fact.** The WAL injection is the source of truth and has already committed by the time this goes out — a failed publish is warned about, never retried, because retrying it could not change what happened. That is why the resume reply carries `completed_call_ids` even when it reports failure.
 - **The coordination consumer ignores it.** No ownership status follows from a resume: the invocation is being re-driven, and its eventual `completed`/`failed` is what moves the row.
 - **`completed_call_ids` is the operator's receipt**, naming exactly the dispatches that were closed out. An empty list means the WAL held nothing stuck, which is itself worth seeing.
@@ -661,6 +674,7 @@ A log record a connected MCP server emitted (`notifications/message`), bridged o
 ```
 
 **Design notes:**
+
 - **Daemon-scoped, so it carries no agent or invocation.** Shared MCP servers outlive any one invocation and serve several agents; attributing their logs to whichever agent happened to be running when they spoke would be a fiction. This is why the event sits in the `fq.system.*` namespace rather than under `fq.agent.*`.
 - **`data` is passed through as the server sent it.** The daemon does not reshape or validate the body — it is another process's log line, and the value of forwarding it is that it arrives unedited.
 - **`level` is the MCP level name** (`"debug"` through `"emergency"`), not the runtime's own `tracing` vocabulary.

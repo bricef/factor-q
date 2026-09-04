@@ -87,6 +87,7 @@ Eight rungs. The unit of delegation grows; the human touch per unit shrinks. One
 *L1 is not a fluke, and the failures are counted.*
 
 **Gate**, over a rolling 30 days, on admitted tasks only:
+
 - ≥ 30 attempts
 - `first_pass_rate` ≥ 0.50
 - `attempts_per_accept` ≤ 2.0
@@ -105,6 +106,7 @@ This is the rung "M1: Net zero" was reaching for. It needs a real instrument, an
 **The calibration.** Every quarter, draw ≥ 10 admitted tasks. Do them yourself, timed, before any agent sees them. Compare against `touch_per_accept` for a matched sample the fleet handled. Both numbers are measured wall-clock, neither is a counterfactual guess.
 
 **Gate:**
+
 - `median(touch_per_accept)` < `median(hand_minutes)` on the paired sample
 - LLM spend per accepted unit < your chosen hourly rate × the time saved
 - calibration refreshed within the last 90 days
@@ -118,6 +120,7 @@ This is the rung "M1: Net zero" was reaching for. It needs a real instrument, an
 *The system clears heterogeneous work without per-task human setup.*
 
 **Gate**, over a 30-day window under continuous load:
+
 - `MTBI` ≥ 72 hours
 - ≥ 20 accepted units in the window
 - ≥ 3 distinct task types (e.g. feature / bugfix / test / docs)
@@ -132,6 +135,7 @@ This is the rung "M1: Net zero" was reaching for. It needs a real instrument, an
 *The system takes a goal, not a task list.*
 
 **Gate:** ≥ 5 objectives where
+
 - the system produced the decomposition into tasks,
 - ≥ 80% of resulting tasks were accepted,
 - the human did not rewrite the decomposition (a rewrite is a `respec` intervention).
@@ -146,7 +150,7 @@ This is the rung "M1: Net zero" was reaching for. It needs a real instrument, an
 
 **Gate**, over a rolling 90 days:
 
-```
+```text
 total_saved   = accepted_units × median(hand_minutes)      [from the L3 calibration]
 total_spent   = touch_minutes on all attempts
               + development hours on factor-q itself
@@ -167,6 +171,7 @@ This is the brutal one, and it is brutal on purpose. It counts the hours you spe
 *The system improves its own effectiveness without human-authored improvements.*
 
 **Gate:** a statistically meaningful improvement in `first_pass_rate` or `touch_per_accept` across two consecutive 30-day windows, where:
+
 - the changes responsible were agent-authored,
 - they were accepted without human rewrite (accept/reject only),
 - **the improvement shows on the frozen holdout set** (§5.5), not the tasks used for tuning.

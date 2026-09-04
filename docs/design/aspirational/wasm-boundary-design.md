@@ -86,6 +86,7 @@ This is the Elm/Redux pattern applied to agent execution:
 ## Scope: what runs where
 
 **In the guest (WASM):**
+
 - The `step` reducer function
 - The state enum and transition logic
 - Tool-use orchestration policy (iteration limits, error
@@ -96,6 +97,7 @@ This is the Elm/Redux pattern applied to agent execution:
   plan-and-execute patterns)
 
 **In the host (native):**
+
 - The step loop (call `step`, execute the returned action,
   call `step` again with the result, repeat)
 - State persistence (between steps, across suspension)
@@ -122,7 +124,7 @@ this agent do next" lives in the host.
 
 A single function:
 
-```
+```text
 step(input: StepInput) -> Result<StepOutput, HarnessError>
 ```
 
@@ -132,7 +134,7 @@ the same outputs, no hidden state, no side channels.
 
 ### StepInput
 
-```
+```text
 record StepInput {
     config: AgentConfig,                    // static for the invocation
     trigger: TriggerPayload,                // static for the invocation
@@ -145,6 +147,7 @@ record StepInput {
 ```
 
 Notes:
+
 - `config` and `trigger` are stable across an invocation.
   Passing them every step is cheap (WIT canonical ABI handles
   it) and keeps `step` pure.
@@ -162,7 +165,7 @@ Notes:
 
 ### StepOutput
 
-```
+```text
 record StepOutput {
     next-action: NextAction,
     state: list<u8>,                    // updated opaque state
@@ -197,7 +200,7 @@ zero imports" invariant.
 
 The host runs this loop (roughly):
 
-```
+```rust
 let mut state = vec![];
 let mut last_result = None;
 for step_index in 0.. {
@@ -319,7 +322,7 @@ aliases are reachable).
 
 ### Request shape
 
-```
+```text
 record ModelRequest {
     model: string,                     // alias from agent config
     messages: list<Message>,           // including any system message
@@ -345,7 +348,7 @@ record ModelRequest {
 
 ### Response shape
 
-```
+```text
 record ModelResponse {
     model-used: string,                // actual model the host called
                                        // (may differ if substituted)
@@ -397,7 +400,7 @@ list. The definition grants the *capability*; the per-call
 The guest is the loop *policy*, the host is the loop *driver*.
 A typical invocation looks like:
 
-```
+```text
 step 0:  state=<empty>, last-result=None
          -> CallModel(request_0), state_1
 step 1:  state=state_1, last-result=ModelResult(response_0)
@@ -506,6 +509,7 @@ This mechanism converges with several other concerns:
   bugs don't exist in this model.
 
 One mechanism, six concerns:
+
 1. Suspension & resumption
 2. Node migration
 3. Fault-tolerant recovery
@@ -619,6 +623,7 @@ or randomness — WASI clock and random imports are not
 exposed.
 
 Three consequences:
+
 - The guest is provably pure (no side channels).
 - Time and randomness are captured in the step log for audit
   and bit-exact reproducibility.

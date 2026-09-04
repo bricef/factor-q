@@ -1,6 +1,6 @@
-> **2026-07-18 note:** PR-3's `fq drain` verb was folded into `fq down` (#271). Read references below as `fq down` (drain mode); the mechanism is unchanged.
-
 # Graceful-drain deploys — execution plan for `fq drain` (ADR-0027)
+
+> **2026-07-18 note:** PR-3's `fq drain` verb was folded into `fq down` (#271). Read references below as `fq down` (drain mode); the mechanism is unchanged.
 
 **Status:** closed (2026-07-20) — executed. PR-1..3 landed (the suspend
 primitive `0d95940`, dispatcher-stops-on-drain `bc94a84`, the drain
@@ -69,9 +69,9 @@ doc-comments name the planned remote transport as **NATS**
 tarpc for its remote transport is a separate decision; the drain design below is
 specified against the _trait_, so it holds under either wire.
 
-The rule the boundary enforces: *"anything the control-plane asks of a worker
+The rule the boundary enforces: _"anything the control-plane asks of a worker
 goes through the trait; the control-plane has no other handle on worker
-internals"* (`worker/mod.rs:14-16`). The dispatcher already calls the worker
+internals"_ (`worker/mod.rs:14-16`). The dispatcher already calls the worker
 this way — `self.worker.run_invocation(...)` on an `Arc<dyn Worker>`
 (`control_plane/dispatcher.rs:243`). Drain must ride the same seam.
 
@@ -234,7 +234,7 @@ Notes:
 
 - Keep _T_ and the grace **in sync**: lower `drain_deadline_ms` and the grace
   can come down with it, and vice versa.
-- **Nomad is the gotcha** — its default kill signal is SIGINT (our *fast*
+- **Nomad is the gotcha** — its default kill signal is SIGINT (our _fast_
   stop), so it must be set to SIGTERM to drain at all.
 - The margin covers the daemon's post-drain teardown (joining the infra
   consumers, MCP shutdown, the `system.shutdown` event) — a few seconds.

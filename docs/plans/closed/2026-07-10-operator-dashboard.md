@@ -20,7 +20,7 @@ An operator dashboard is the smallest honest forcing function for the read-half 
 
 The design assumes the runtime is **not reachable from outside the host**. Only the dashboard's HTTP port is ever exposed (via SSH tunnel or similar); the runtime's own surface stays strictly localhost.
 
-```
+```text
 browser ──HTTP/HTML──▶ fq-dashboard ──tarpc/bincode(localhost)──▶ fq run (daemon)
    (meta-refresh)      (standalone bin)     (typed read RPC)      (tarpc read service)
                                                                          │

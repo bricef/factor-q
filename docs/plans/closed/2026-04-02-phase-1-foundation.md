@@ -72,7 +72,7 @@ This is a walking skeleton — breadth over depth, proving integration across al
 
 ## Architecture Overview
 
-```
+```text
                 ┌─────────────────────────────────────┐
                 │          factor-q (fq run)           │
                 │                                      │
@@ -98,6 +98,7 @@ This is a walking skeleton — breadth over depth, proving integration across al
 ## Core Scope
 
 ### 1. Configuration
+
 Runtime configuration for NATS connection, API keys, agent directories, and model pricing.
 
 - Configuration file (`fq.toml` or similar) with sensible defaults
@@ -106,6 +107,7 @@ Runtime configuration for NATS connection, API keys, agent directories, and mode
 - Clear error messages for missing or invalid configuration
 
 ### 2. NATS foundation
+
 The first thing to build. Everything else publishes to or consumes from NATS.
 
 - Connect to a NATS server with JetStream enabled
@@ -123,6 +125,7 @@ The first thing to build. Everything else publishes to or consumes from NATS.
 - Establish event schema (likely JSON, with a versioned schema)
 
 ### 3. Agent definition loader
+
 Parse agent definitions from Markdown files into the internal Rust representation.
 
 - Parse YAML frontmatter (model, tools, sandbox, budget, trigger)
@@ -132,6 +135,7 @@ Parse agent definitions from Markdown files into the internal Rust representatio
 - Report clear errors for invalid definitions
 
 ### 4. Agent executor
+
 The core agent loop, running within a sandboxed context.
 
 - Receive a trigger (NATS message or manual CLI invocation)
@@ -145,6 +149,7 @@ The core agent loop, running within a sandboxed context.
 - Support one model provider (Anthropic) with a well-defined trait interface for future providers
 
 ### 5. Basic tool set
+
 A minimal set of tools that make an agent capable of real work.
 
 - **File read** — read file contents, scoped to the agent's allowed filesystem paths
@@ -154,6 +159,7 @@ A minimal set of tools that make an agent capable of real work.
 Tools enforce sandbox boundaries — a tool call that violates the agent's declared permissions is rejected, not executed.
 
 ### 6. Basic sandboxing
+
 Enforce the "nothing by default" principle at the filesystem level.
 
 - Agent definitions declare filesystem read/write paths and allowed environment variables
@@ -162,6 +168,7 @@ Enforce the "nothing by default" principle at the filesystem level.
 - Full container isolation is deferred (ADR-0010) but the enforcement interface is designed to accommodate it later
 
 ### 7. Cost tracking
+
 Built into the executor from the first LLM call.
 
 - Track input/output token counts per LLM call
@@ -178,6 +185,7 @@ $0 with a warning per unknown model). This gives us automatic coverage
 of hundreds of models without hand-maintaining entries.
 
 ### 8. SQLite projection consumer
+
 A NATS consumer that materialises events into a queryable SQLite database.
 
 - Subscribe to `fq.>` (all factor-q events)
@@ -185,6 +193,7 @@ A NATS consumer that materialises events into a queryable SQLite database.
 - Support queries: agent history, cost breakdown, recent activity, event filtering by type/agent/time
 
 ### 9. CLI
+
 The human interface for phase 1. Communicates with the runtime and the projection store.
 
 - `fq init` — initialise a factor-q project (create directory structure, default config, sample agent)
@@ -197,6 +206,7 @@ The human interface for phase 1. Communicates with the runtime and the projectio
 - `fq costs [--agent <id>] [--since <time>]` — show cost breakdown
 
 ### 10. Structured logging
+
 Runtime diagnostics via the `tracing` crate.
 
 - Structured log output for connection failures, parse errors, LLM timeouts, and runtime lifecycle
@@ -204,6 +214,7 @@ Runtime diagnostics via the `tracing` crate.
 - Distinct from the event bus — logging is for operators debugging the runtime, events are for agent activity
 
 ### 11. Sample agent
+
 A working example agent shipped with `fq init`.
 
 - Demonstrates the agent definition format (frontmatter + prompt)
@@ -212,15 +223,19 @@ A working example agent shipped with `fq init`.
 - Serves as documentation by example
 
 ## Stretch goals
+
 Items that belong in phase 1 conceptually but can be deferred without compromising the walking skeleton.
 
 ### Daemon mode
+
 Run the runtime as a background process with `fq start` / `fq stop` instead of the foreground `fq run`. Requires process management, pidfiles, IPC between CLI and daemon, signal handling, and graceful shutdown.
 
 ### Second model provider
+
 Add OpenAI as a second provider to prove model-agnosticism in practice, not just in the trait interface. The trait design from the core scope should make this mechanical.
 
 ### Hot-reload
+
 Watch agent definition directories for file changes and reload definitions without restarting the runtime. Requires file watching, debouncing, and safe swapping of definitions while the executor may be mid-run.
 
 ## Deferred work (known phase 1 gaps)
@@ -229,6 +244,7 @@ These are pieces we know we'll need once phase 1 is in place, but they
 don't block the walking skeleton.
 
 ### Scheduled refresh of pricing data
+
 Phase 1 loads the LiteLLM pricing JSON once at startup. That's fine
 while the runtime is a foreground process that restarts often during
 development, but once factor-q is a continuously running service (per
@@ -265,6 +281,7 @@ phase 1's primary purpose is proving the walking skeleton.
 ## Success criteria
 
 A user can:
+
 1. Run `fq init` and get a working project with configuration and a sample agent
 2. Start the runtime with `fq run`, which connects to NATS and loads agent definitions
 3. Trigger the agent manually via `fq trigger`

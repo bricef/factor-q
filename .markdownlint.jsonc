@@ -1,10 +1,15 @@
 {
   // factor-q markdown house style (markdownlint).
   //
-  // Starts from the default rule set, with two cosmetic rules relaxed to
+  // Starts from the default rule set, with three cosmetic rules relaxed to
   // match the existing docs. Every markdown file under docs/ MUST pass
   // with zero errors (see AGENTS.md); run `just lint-docs`.
   "default": true,
+
+  // Duplicate headings are only an error among siblings. Plans repeat
+  // "Done when" / "Unit tests" / "Acceptance test" under every phase by
+  // design; the same text under *different* parents is fine.
+  "MD024": { "siblings_only": true },
 
   // Line length is not enforced. Prose wraps ~72 cols by convention, but
   // tables, fenced code, and link-heavy index rows routinely exceed 80 —

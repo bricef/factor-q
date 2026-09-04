@@ -12,6 +12,7 @@ live end-to-end acceptance test).
 **Parent plan**:
 [`2026-04-28-data-architecture-v1.md`](./2026-04-28-data-architecture-v1.md) — step 9.
 **Design references**:
+
 - [`docs/design/committed/data-architecture.md`](../../design/committed/data-architecture.md) §3.4 (ambiguous cases), §4.4 (operator surface), §7 (recovery).
 - [`docs/design/committed/event-schema.md`](../../design/committed/event-schema.md) — adds `invocation.operator_recovered`.
 
@@ -309,7 +310,7 @@ ambiguous-event surfacings (if any) from the projection.
 operator-relevant state alongside the runtime health
 overview. Output gains two sections:
 
-```
+```text
 Recovery state:
   Ambiguous invocations: 2
     -> `fq invocation list --status=ambiguous` to inspect

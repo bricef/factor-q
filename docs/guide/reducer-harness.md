@@ -5,6 +5,7 @@ Every factor-q invocation runs through a single execution path: a **reducer** (a
 This shape gives factor-q **suspension, migration, replay, audit logging, and determinism** as structural properties of the boundary rather than features bolted on top.
 
 This guide covers:
+
 1. [The reducer model](#the-reducer-model) (one diagram)
 2. [The Rust API](#the-rust-api) (`Reducer` trait, types, examples)
 3. [Suspend and resume](#suspend-and-resume)
@@ -16,7 +17,7 @@ For background on **why** factor-q has this shape, see [`docs/design/aspirationa
 
 ## The reducer model
 
-```
+```text
                       ┌─────────────────────────┐
                       │ host loop (ReducerRunner)│
                       └─────────┬───────────────┘
