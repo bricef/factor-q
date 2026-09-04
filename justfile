@@ -306,12 +306,12 @@ go-ci: gate-adapters
 # smoke is intentionally NOT part of `ci`: it needs a provider key and makes
 # a real, paid LLM call. Run it on its own with `just smoke`.
 #
-# `docker-build` is not part of `ci` either: a cold image build compiles the
-# whole workspace again inside the container, which is minutes for a check
-# that only a Dockerfile or workspace-membership change can break. CI runs it
-# in its own path-filtered job. So the promise below has one carve-out —
-# after changing the Dockerfile, `Cargo.toml`'s members, or the lockfile, run
-# `just docker-build` by hand, because a green `just ci` does not cover it.
+# `docker-build` is not part of `ci` either: it needs release binaries for a
+# target (a full `build-release`, minutes) and a docker daemon. CI runs it in
+# its own path-filtered job. So the promise below has one carve-out — after
+# changing the Dockerfile, run `just build-release <target>`, `build-watcher`,
+# `build-cron`, then `just docker-build <target>` and `just docker-check` by
+# hand, because a green `just ci` does not cover the images.
 #
 # The full local gate — every target CI runs bar the two carve-outs above,
 # timed, fail-fast.
@@ -338,20 +338,58 @@ ci:
     run_phase "test-support" just test-support-ci
     run_phase "go-ci"       just go-ci
 
-# Build container images for all services. Root build context — the image
-# compiles the unified workspace (#194); the Dockerfile stays with its service.
-docker-build:
-    docker build -t factor-q/fq-runtime:latest -f services/fq-runtime/Dockerfile .
+# === Container images (ADR-0035) ===
+#
+# The images are built from the binaries `build-release` / `build-watcher` /
+# `build-cron` already produced — never compiled in-image — so the tarball
+# channel and every image carry the identical binary for a commit. Root build
+# context (`.dockerignore` admits `dist/bin/` and nothing else built); the
+# Dockerfile stays with its service and holds every target.
 
-# Runs inside a disposable container with networking disabled, for extra
-# blast-radius containment while iterating on the sandbox. Mounts the repo
-# root read-only — the workspace root is what cargo needs (#194).
-# Run the exec tool's test battery in a locked-down container.
-test-shell-sandbox:
-    docker build -t factor-q/shell-test -f services/fq-runtime/Dockerfile.shell-test .
-    docker run --rm --network none \
-        -v {{justfile_directory()}}:/src:ro \
-        factor-q/shell-test
+# Copy a target's built binaries into dist/bin/, the image build's one input.
+docker-stage target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p dist/bin
+    for b in fq fqd fq-dashboard; do
+        src="target/{{target}}/release/$b"
+        [ -x "$src" ] || { echo "missing $src — run 'just build-release {{target}}' first" >&2; exit 1; }
+        cp "$src" dist/bin/
+    done
+    for spec in adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron; do
+        src="${spec%%:*}/target/{{target}}/release/${spec##*:}"
+        [ -x "$src" ] || { echo "missing $src — run 'just build-watcher {{target}}' / 'just build-cron {{target}}' first" >&2; exit 1; }
+        cp "$src" dist/bin/
+    done
+    echo "staged $(ls dist/bin | tr '\n' ' ')into dist/bin/"
+
+# Every image target, tagged factor-q/<name>:<tag> (default `latest`).
+# `minimal` is the daemon held to the bare envelope; `dogfood` is minimal's
+# binaries plus the fleet's toolchain; the rest are one static binary each.
+# Build every container image from the staged binaries.
+docker-build target tag="latest": (docker-stage target)
+    docker build --target minimal   -t factor-q/fq-runtime:{{tag}}      -f services/fq-runtime/Dockerfile .
+    docker build --target dogfood   -t factor-q/fq-dogfood:{{tag}}      -f services/fq-runtime/Dockerfile .
+    docker build --target watcher   -t factor-q/github-watcher:{{tag}}  -f services/fq-runtime/Dockerfile .
+    docker build --target cron      -t factor-q/fq-cron:{{tag}}         -f services/fq-runtime/Dockerfile .
+    docker build --target dashboard -t factor-q/fq-dashboard:{{tag}}    -f services/fq-runtime/Dockerfile .
+
+# An image that builds but cannot start is still broken (a leftover
+# `CMD ["run"]` once outlived the subcommand it named), and distroless has
+# no shell to check any other way: run each image's binary with --version.
+# Prove every built image starts: --version through each entrypoint.
+docker-check tag="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "fq-runtime (minimal) — the daemon:";  docker run --rm factor-q/fq-runtime:{{tag}} --version
+    echo "fq-runtime (minimal) — the client:";  docker run --rm --entrypoint /usr/local/bin/fq factor-q/fq-runtime:{{tag}} --version
+    echo "fq-dogfood — the daemon:";            docker run --rm factor-q/fq-dogfood:{{tag}} --version
+    echo "fq-dogfood — the toolchain on the exec baseline PATH:"
+    docker run --rm --entrypoint /usr/bin/env factor-q/fq-dogfood:{{tag}} -i PATH=/usr/local/bin:/usr/bin:/bin \
+        sh -c 'cargo --version && rustc --version && cargo fmt --version && cargo clippy --version && go version && node --version && npx --version && just --version && gh --version | head -1 && git --version && jq --version && nats-server --version && sccache --version'
+    echo "github-watcher:";                     docker run --rm factor-q/github-watcher:{{tag}} --version
+    echo "fq-cron:";                            docker run --rm factor-q/fq-cron:{{tag}} --version
+    echo "fq-dashboard:";                       docker run --rm factor-q/fq-dashboard:{{tag}} --version
 
 # Exercises the full walking skeleton: agent definitions parse, triggers
 # run, the tool-call loop drives file_read and shell built-ins against

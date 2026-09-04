@@ -132,24 +132,6 @@ recovery) and takes its key from `DRILL_API_KEY_ENV`, same default.
 Smoke is deliberately *not* part of `just ci`: it needs a provider key
 and makes a real, paid call.
 
-### Tier 4: Containerised sandbox tests
-
-The exec tool spawns child processes. Even though the test
-battery uses only safe commands (`echo`, `true`, `sleep`, etc.),
-we provide a disposable container runner that mounts the workspace
-read-only and disables networking. Use this when iterating on the
-exec tool's sandbox logic.
-
-```sh
-just test-shell-sandbox
-```
-
-This builds a Docker image on the pinned toolchain (the
-`rust-toolchain.toml` pin travels into the build context) with the
-cargo registry pre-populated, then runs the exec tests offline inside
-the container. Takes ~30s on the first run (image build), ~5s on
-subsequent runs.
-
 ### Running everything
 
 ```sh
@@ -158,15 +140,16 @@ just test                                      # every Rust suite
 just go-ci                                     # the Go adapter gate
 just infra-up                                  # shared broker for smoke tests
 just smoke                                     # end-to-end (needs a provider key)
-just test-shell-sandbox                        # containerised sandbox
 ```
 
 Or `just ci` for the full local gate in one shot — `lint-docs`,
 `check-links`, `quality`, `audit`, the four Rust suites, and `go-ci`,
 timed per phase and fail-fast. It covers everything CI runs bar two
-carve-outs it names: `smoke` (paid) and `docker-build` (minutes; run
-it by hand after changing the Dockerfile, the workspace members, or
-the lockfile).
+carve-outs it names: `smoke` (paid) and the container images
+(`docker-build` needs release binaries for a target and a docker
+daemon; after changing the Dockerfile, build them and run
+`just docker-build <target>` and `just docker-check` by hand — see the
+[runtime README](services/fq-runtime/README.md#container-images)).
 
 ## Code conventions
 
@@ -297,5 +280,5 @@ has a detailed inventory of what shipped and what was deferred.
 3. Register it in `ToolRegistry::with_builtins_exec()` in
    `services/fq-runtime/crates/fq-runtime/src/tools.rs`
 4. Add sandbox tests proving the tool respects sandbox boundaries
-5. If the tool spawns processes, add tests to the containerised
-   runner (`just test-shell-sandbox`)
+   (the exec tool's battery in `fq-tools` is the model; it runs in
+   `just runtime-ci`)

@@ -1,11 +1,13 @@
-# Docker build context = the repo root (#194): both Dockerfiles are passed
-# with `-f services/fq-runtime/Dockerfile*` from `just docker-build` /
-# `just test-shell-sandbox`. Keep the context lean — build output and
-# repo-local tooling never belong in an image.
+# Docker build context = the repo root: the Dockerfile is passed with
+# `-f services/fq-runtime/Dockerfile` from `just docker-build`. Keep the
+# context lean — nothing is compiled in-image (ADR-0035), so the only
+# thing the build reads from the context is the staged binaries in
+# dist/bin/ plus the nats-server pin and checksums.
 
-# Build output — built inside the container, never copied in.
+# Build output, except the staged binaries `just docker-stage` writes.
 **/target/
 dist/
+!dist/bin/
 
 # Repo-local tooling, scratch, and VCS.
 .git/

@@ -188,61 +188,117 @@ guide.
 
 ## Deployment
 
-### Container image
+The deployable unit is a container image
+([ADR-0035](../../docs/adrs/accepted/0035-container-image-and-compose-supervision.md)):
+one per shipped binary, tagged with the commit it was built from, run
+under docker compose. The tarball channel (`install.sh`, the
+`main-latest` bundle) stays as it is; the images are a second artifact
+built from the same binaries.
 
-A multi-stage `Dockerfile` lives alongside this README. It builds with
-the official Rust image and copies the binaries into a
-[distroless](https://github.com/GoogleContainerTools/distroless) runtime
-stage (`gcr.io/distroless/cc-debian12:nonroot`) for minimal surface
-area and a non-root user by default.
+### Container images
 
-It ships **both** binaries. `fqd` is the entrypoint and takes no
-subcommand — it is the daemon. `fq` rides along because a distroless
-image has no shell, so `docker exec`-ing the client is the only way to
-ask a daemon in a container anything.
+One `Dockerfile` beside this README holds every target. It compiles
+nothing: the binaries come from the release build the deploy bundle
+already ships, staged into `dist/bin/` by `just docker-stage`, so the
+tarball and the image for a commit carry the identical binary and an
+image build takes seconds.
+
+| Target | Image | What it is |
+|---|---|---|
+| `minimal` | `factor-q/fq-runtime` | `fqd` + `fq` on `distroless/cc`. The bare envelope the daemon is held to: no shell, no init, configuration from one file and the environment, every piece of state under one volume. |
+| `dogfood` | `factor-q/fq-dogfood` | `minimal`'s binaries (copied, never rebuilt) on Debian with the toolchain the fleet's agents run: cargo 1.95 with rustfmt and clippy, Go, Node 20, `just`, `gh`, `git`, `jq`, `nats-server`, `sccache`. |
+| `watcher`, `cron`, `dashboard` | `factor-q/github-watcher`, `factor-q/fq-cron`, `factor-q/fq-dashboard` | one static binary each on `distroless/static`. |
 
 ```sh
-# From the repository root — the build context is the workspace, not
-# this directory, because cargo needs every member manifest.
-just docker-build
+# From the repository root. Build the binaries for a target first —
+# the musl triple is what CI and the deploy bundle use; the gnu triple
+# works for a local check.
+just build-release x86_64-unknown-linux-musl   # CC_x86_64_unknown_linux_musl=musl-gcc
+just build-watcher x86_64-unknown-linux-musl
+just build-cron    x86_64-unknown-linux-musl
+just docker-build  x86_64-unknown-linux-musl   # stages dist/bin/, builds every target
+just docker-check                              # --version through every entrypoint
 ```
 
-CI builds it, but only on a Docker-relevant change. The `docker` job in
-[`ci.yml`](../../.github/workflows/ci.yml) is path-filtered to this
-Dockerfile, the workspace manifest, the lockfile, the justfile and the
-toolchain pin — nothing else — because a cold build compiles the whole
-workspace again inside the image, minutes for a check only those files
-can break. It builds the real image rather than
-linting it (the failure mode is a manifest cargo cannot resolve, which
-only a build finds) and then runs `fqd --version` inside it, because an
-image that builds but cannot start is still broken.
+`docker-check` is the half that matters: an image that builds but cannot
+start is still broken (a `CMD ["run"]` once outlived the subcommand it
+named), and distroless has no shell to find out any other way. For the
+dogfood image it also runs every toolchain binary with the `exec` tool's
+baseline `PATH` and nothing else in the environment, which is exactly
+how an agent's process will see them.
 
-That job exists because both halves had happened. Until 2026-08-25 the
-image was in no workflow at all: its member-manifest list had been
-missing `fq-agent` and `fq-daemon` since they were added, so `cargo
-build` failed on the first line it reached, and its `CMD` still named a
-subcommand the fq/fqd split had deleted. Note the filter's edge:
-`just docker-build` is deliberately **not** part of `just ci`, so a
-green local gate does not cover the image — after changing the
-Dockerfile, the root `Cargo.toml`'s members, or the lockfile, run it by
-hand.
+CI runs the same recipes in the `docker` job of
+[`ci.yml`](../../.github/workflows/ci.yml), path-filtered to the
+Dockerfile, the context filter, the pins the dogfood toolchain tracks
+and whatever changes the release build. `just docker-build` is
+deliberately **not** part of `just ci` — it needs release binaries and a
+docker daemon — so after changing the Dockerfile, run the four commands
+above by hand.
+
+**The dogfood image's toolchain is real binaries, not rustup proxies.**
+The `exec` tool starts agent processes with
+`PATH=/usr/local/bin:/usr/bin:/bin` and no inherited variable, and a
+rustup proxy with neither `RUSTUP_HOME` nor `HOME` cannot find a
+toolchain. So the image links the toolchain's own `cargo`, `rustc`,
+`rustfmt`, `clippy-driver` and friends into `/usr/local/bin`, where they
+work in an empty environment. The consequence is that
+`rust-toolchain.toml` is not consulted inside the image — only rustup
+reads it — and the compiler is whatever the image's base tag pins; keep
+`rust:<version>` in the Dockerfile in lockstep with the repo's pin. The
+same goes for the Go and Node base tags.
+
+### One volume
+
+The daemon's volume is the instance. Everything the daemon reads or
+writes that outlives the container lives under `/var/lib/factor-q`, in
+a fixed layout that mirrors the dogfood host's tree:
+
+```text
+/var/lib/factor-q/
+├── fqd.toml         daemon config (host-authored)
+├── fq.toml          client config — `[daemon] addr` for `fq status`
+├── fq-cron.toml     the schedule, if fq-cron runs beside it
+├── agents/          agent definitions
+├── state/           the edge identity; state/client/ is `fq`'s pairing store
+├── cache/           the three SQLite stores and the pricing snapshot
+├── workspace/       per-invocation working directories
+├── build/           cargo, go and sccache caches (dogfood only; prunable)
+└── home/            HOME for the dogfood image's gh and git
+```
+
+The container has no other writable path. Backing up, migrating or
+inspecting the instance is one volume, and the layout is the contract:
+a backup may skip `workspace/` and `build/` by path, and a restore is
+the tree, nothing else. The secrets file is **not** in it — compose
+reads `env_file` before any volume is mounted, and it is the one thing
+a volume copy must not carry.
+
+A named volume mounted at `/var/lib/factor-q` for the first time is
+seeded from the image's copy of the tree, ownership included: the
+directories exist and belong to uid 65532 (`nonroot` in both images)
+before the daemon starts. A bind mount is not seeded; the host directory
+must already be owned by 65532.
 
 ### Environment variables
 
-Every runtime path is configurable via an environment variable. These
-are the **daemon's** — `fqd`'s flags, not `fq`'s. The defaults baked
-into the container image are conventional Linux paths that operators can
-mount volumes at; on a fresh host they all fall through to safe
-locations.
+The image sets every directory the daemon has a setting for to a path
+under the volume, and these are environment variables, which outrank
+`fqd.toml` — an operator cannot point the edge identity or the stores
+outside the volume by editing the config. That is the point. These are
+the **daemon's** — `fqd`'s flags, not `fq`'s.
 
-| Variable          | `fqd` flag        | Default (container)          | Notes                                     |
-|-------------------|-------------------|------------------------------|-------------------------------------------|
-| `FQ_DAEMON_CONFIG`| `--config`        | `/etc/factor-q/fqd.toml`       | Optional — defaults apply if unset        |
-| `FQ_AGENTS_DIR`   | `--agents-dir`    | `/var/lib/factor-q/agents`    | Mount a volume with your agent definitions |
-| `FQ_CACHE_DIR`    | `--cache-dir`     | `/var/cache/factor-q`         | Pricing snapshot and the SQLite stores    |
-| `FQ_STATE_DIR`    | `--state-dir`     | (unset — resolves as below)   | Durable state: the edge identity          |
-| `FQ_NATS_URL`     | `--nats-url`      | `nats://nats:4222`            | Points at a NATS service on the same network |
-| `RUST_LOG`        | (n/a)             | `info`                        | Log level / filter                        |
+| Variable | `fqd` flag | Set in the image to | Notes |
+|---|---|---|---|
+| `FQ_DAEMON_CONFIG` | `--config` | `/var/lib/factor-q/fqd.toml` | Host-authored; the daemon refuses to start without one |
+| `FQ_AGENTS_DIR` | `--agents-dir` | `/var/lib/factor-q/agents` | |
+| `FQ_CACHE_DIR` | `--cache-dir` | `/var/lib/factor-q/cache` | The three SQLite stores and the pricing snapshot |
+| `FQ_STATE_DIR` | `--state-dir` | `/var/lib/factor-q/state` | The edge identity — never regenerate it |
+| `FQ_NATS_URL` | `--nats-url` | `nats://nats:4222` | The broker on the compose network; no credential, ever |
+| `RUST_LOG` | (n/a) | `info` | Log level / filter |
+| `XDG_CONFIG_HOME` | (n/a — `fq`'s) | `/var/lib/factor-q/state/client` | Where `fq connect` keeps the pairing, so it survives a recreate |
+
+`[workspace] path` has no environment form: set it to
+`/var/lib/factor-q/workspace` in `fqd.toml`.
 
 The broker token is deliberately not on this list. `[nats] token_env`
 in `fqd.toml` names the environment variable the daemon reads it from
@@ -257,8 +313,17 @@ operation it writes — the `CONNECT` that carries the token included —
 so `RUST_LOG=trace` costs wire-level NATS debugging, never the
 credential.
 
-Precedence remains CLI flag > env var > config file > default. On a
-host without any of these set, factor-q falls back to:
+The dogfood image adds the build-cache variables — `CARGO_HOME`,
+`CARGO_TARGET_DIR`, `RUSTC_WRAPPER=sccache`, `SCCACHE_DIR`, `GOCACHE`,
+`GOMODCACHE` — all under `build/`, plus `HOME` under `home/`. They reach
+an agent's processes only if its definition allowlists them
+(`sandbox.env`): the runtime clears the child environment by design.
+The image's tool list and this variable list are the compatibility
+contract every live agent definition is read against before the image
+replaces a host ([#587](https://github.com/bricef/factor-q/issues/587)).
+
+Precedence remains CLI flag > env var > config file > default. Outside
+a container, with none of these set, factor-q falls back to:
 
 - `agents/` in cwd
 - cache: `$XDG_CACHE_HOME/factor-q` → `$HOME/.cache/factor-q` → `/tmp/factor-q`
@@ -272,7 +337,8 @@ Two directories, two lifetimes (#362):
 - **cache** (`FQ_CACHE_DIR`, `[cache] directory`) — the LiteLLM pricing
   snapshot, plus (for now) the daemon's SQLite stores. Its fallback is
   temp-dir shaped because FHS §5.5 and the XDG spec both license a
-  cleaner to empty it.
+  cleaner to empty it — which is why the image pins it under the volume
+  rather than trusting the fallback.
 - **state** (`FQ_STATE_DIR`, `[state] directory`) — data factor-q must
   never regenerate. Today that is the **edge identity**: the daemon's
   self-signed certificate and its biscuit token root. Losing it orphans
@@ -289,19 +355,28 @@ only when neither location has one.
 The SQLite stores are the obvious next tenant of the state directory;
 moving them is a separate migration.
 
-### Mounted volumes
+### Health
 
-The image declares volumes at `/var/lib/factor-q` (agent definitions)
-and `/var/cache/factor-q` (pricing JSON and the SQLite stores). Mount
-persistent volumes at these paths for anything that needs to survive
-container restarts.
+Both daemon images carry a `HEALTHCHECK` that runs `fq status`. It asks
+the daemon over the authenticated edge and exits non-zero when nothing
+answers, so a healthy container is one whose daemon is *serving*, not
+merely one whose process exists. It needs a pairing: until `fq connect`
+has been run once inside the container — `state/client/` keeps it — the
+probe reports "no daemon paired" and the container shows unhealthy,
+which is an honest state for an instance nobody has paired with yet.
+The start period is generous (two minutes) so recovery at boot is not
+mistaken for a hang; compose may override the timings. The adapter and
+dashboard images have no probe yet — none of the three exposes one a
+shell-less image can run; that is a follow-up on
+[#587](https://github.com/bricef/factor-q/issues/587).
 
-The image sets no `FQ_STATE_DIR`, so the edge identity — the one thing
-that must never be regenerated — lands wherever the fallback chain above
-resolves, which may be neither volume. Set it explicitly to a path under
-`/var/lib/factor-q`.
+### Running it
 
-### Example compose stanza
+The compose stack that runs the images — the broker, the proxy, the
+daemon, the watcher, the dashboard and the scheduler, with restart
+policy, health ordering and a stop grace period longer than the drain
+deadline — is the next slice of #587 and will live in `ops/dogfood/`.
+Until it lands, the shape is:
 
 ```yaml
 services:
@@ -312,19 +387,19 @@ services:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro
       - nats-data:/data/nats
 
-  fq-runtime:
-    image: factor-q/fq-runtime
+  fqd:
+    image: factor-q/fq-dogfood:<sha>
     depends_on:
       - nats
+    stop_grace_period: 150s        # > [worker] drain_deadline_ms (120 s default)
     volumes:
-      - ./agents:/var/lib/factor-q/agents:ro
-      - fq-cache:/var/cache/factor-q
-    environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      - fq-data:/var/lib/factor-q  # the one volume; fqd.toml, agents/ and the rest live in it
+    env_file:
+      - .secrets/env               # provider keys, FQ_NATS_TOKEN, GH_TOKEN
 
 volumes:
   nats-data:
-  fq-cache:
+  fq-data:
 ```
 
 ## Status
