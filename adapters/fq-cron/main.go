@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 
 	"github.com/nats-io/nats.go"
@@ -43,7 +44,49 @@ func configFromArgs(args []string) (cliConfig, error) {
 	return c, nil
 }
 
+// buildVersion returns the git revision this binary was built from,
+// read from the VCS info Go embeds by default when building inside a
+// git tree (`-buildvcs`). Degrades to "unknown" when unavailable (e.g.
+// a build outside version control). A "-dirty" suffix marks an
+// uncommitted working tree — the same convention as `fq` and the
+// watcher, so a deploy can check every binary in a bundle reports one
+// commit (ops/dogfood/deploy.sh, `just docker-check`).
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	rev, modified := "", ""
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if rev == "" {
+		return "unknown"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if modified == "true" {
+		rev += "-dirty"
+	}
+	return rev
+}
+
 func run(args []string) error {
+	// Answered before flag parsing, like the watcher: --version must
+	// work without a --config, and the flag set would otherwise reject
+	// it as undefined.
+	for _, a := range args {
+		if a == "-version" || a == "--version" {
+			fmt.Println("fq-cron", buildVersion())
+			return nil
+		}
+	}
 	cli, err := configFromArgs(args)
 	if err != nil {
 		return err

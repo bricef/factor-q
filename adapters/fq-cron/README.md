@@ -20,6 +20,7 @@ NATS.
 | `--nats-url` | `FQCRON_NATS_URL` | `nats://127.0.0.1:4222` |
 | `--kv-bucket` | `FQCRON_KV_BUCKET` | `fq-cron-state` |
 | `--check` | — | `false` |
+| `--version` | — | prints `fq-cron <commit>` and exits; needs no config |
 
 Example `fq-cron.toml`:
 

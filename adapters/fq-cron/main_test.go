@@ -29,6 +29,24 @@ func TestConfigFlagRequired(t *testing.T) {
 	}
 }
 
+// --version answers without a config and without touching the broker:
+// the deploy script and the image check run it on a binary that has
+// neither, and the flag set would otherwise reject it as undefined
+// (which is exactly what `just docker-check` found on 2026-09-04).
+func TestVersionFlagNeedsNoConfig(t *testing.T) {
+	for _, key := range []string{"FQCRON_CONFIG", "FQCRON_NATS_URL", "FQCRON_KV_BUCKET"} {
+		os.Unsetenv(key)
+	}
+	for _, args := range [][]string{{"--version"}, {"-version"}, {"--version", "--config", "missing.toml"}} {
+		if err := run(args); err != nil {
+			t.Fatalf("run(%v) = %v, want nil", args, err)
+		}
+	}
+	if v := buildVersion(); v == "" {
+		t.Fatal("buildVersion() must never be empty")
+	}
+}
+
 func TestCheckMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jobs.toml")
 	if err := os.WriteFile(path, []byte(validConfig), 0o600); err != nil {
