@@ -31,6 +31,25 @@ use ::genai as provider;
 #[cfg(test)]
 mod wire_goldens;
 
+/// The provider client could not be built.
+///
+/// genai builds an HTTP client underneath (TLS roots, proxy settings from
+/// the environment), and since 0.7.0-beta.21 reports failure instead of
+/// panicking. That happens once, at construction — the daemon's startup —
+/// and never per request, so it is its own error rather than an
+/// [`LlmError`] variant that the event schema would then have to name.
+#[derive(Debug, thiserror::Error)]
+#[error("could not build the provider client: {cause}")]
+pub struct ClientBuildError {
+    cause: String,
+}
+
+fn client_build_error(err: provider::Error) -> ClientBuildError {
+    ClientBuildError {
+        cause: err.to_string(),
+    }
+}
+
 /// Production LLM client backed by the `genai` crate.
 #[derive(Clone)]
 pub struct GenAiClient {
@@ -40,16 +59,17 @@ pub struct GenAiClient {
 impl GenAiClient {
     /// Construct a client using `genai`'s default configuration, which
     /// resolves API keys from provider-specific environment variables.
-    pub fn new() -> Self {
-        Self {
-            client: provider::Client::default(),
-        }
+    pub fn new() -> Result<Self, ClientBuildError> {
+        let client = provider::Client::new().map_err(client_build_error)?;
+        Ok(Self { client })
     }
 
     /// Construct from the parsed `[providers.anthropic]` config. When
     /// `base_url` is set, the client is built with an endpoint
     /// override; otherwise the provider default applies.
-    pub fn from_anthropic_config(config: &crate::config::AnthropicConfig) -> Self {
+    pub fn from_anthropic_config(
+        config: &crate::config::AnthropicConfig,
+    ) -> Result<Self, ClientBuildError> {
         match &config.base_url {
             Some(url) => Self::with_base_url(url.clone()),
             None => Self::new(),
@@ -64,7 +84,7 @@ impl GenAiClient {
     /// Auth and model resolution are unchanged — the closure replaces
     /// only the endpoint on whichever `ServiceTarget` genai resolves
     /// for the requested model.
-    pub fn with_base_url(base_url: impl Into<String>) -> Self {
+    pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, ClientBuildError> {
         use ::std::sync::Arc;
         use provider::ServiceTarget;
         use provider::resolver::{Endpoint, ServiceTargetResolver};
@@ -81,8 +101,9 @@ impl GenAiClient {
         );
         let client = provider::Client::builder()
             .with_service_target_resolver(resolver)
-            .build();
-        Self { client }
+            .build()
+            .map_err(client_build_error)?;
+        Ok(Self { client })
     }
 
     /// Build a client from the whole `[providers]` config — a single
@@ -104,7 +125,9 @@ impl GenAiClient {
     /// mock server, or a Bedrock-style proxy) — no `models` list needed.
     ///
     /// When nothing needs overriding this is exactly [`Self::new`].
-    pub fn from_providers(config: &crate::config::ProvidersConfig) -> Self {
+    pub fn from_providers(
+        config: &crate::config::ProvidersConfig,
+    ) -> Result<Self, ClientBuildError> {
         use ::std::collections::HashMap;
         use ::std::sync::Arc;
         use provider::ServiceTarget;
@@ -179,8 +202,9 @@ impl GenAiClient {
         );
         let client = provider::Client::builder()
             .with_service_target_resolver(resolver)
-            .build();
-        Self { client }
+            .build()
+            .map_err(client_build_error)?;
+        Ok(Self { client })
     }
 }
 
@@ -211,12 +235,6 @@ fn ensure_trailing_slash(url: String) -> String {
         url
     } else {
         format!("{url}/")
-    }
-}
-
-impl Default for GenAiClient {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -376,17 +394,17 @@ fn convert_message(
 /// **No readable text.** `Opaque` reasoning carries its content in a
 /// provider token, and genai's `ContentPart::ReasoningContent` is a bare
 /// string with nowhere to put one. Anthropic's signed and redacted blocks
-/// round-trip through `ContentPart::Custom` instead, which is phase 6 and
-/// its upstream dependency.
+/// round-trip through `ContentPart::Custom` instead, which genai's
+/// Anthropic adapter echoes verbatim.
 ///
 /// Note what this deliberately does *not* do: branch on the provider. We
 /// hand genai the semantic part and let its adapter encode it — the
 /// OpenAI-compatible adapter hoists `ReasoningContent` into the sibling
 /// `reasoning_content` field, which is exactly the Kimi/DeepSeek
-/// round-trip, while the Anthropic adapter drops it. That drop is correct
-/// today and stays correct after phase 6: a `Plain` block has no
-/// signature, and Anthropic rejects a thinking block that lacks one, so
-/// it must never reach that wire.
+/// round-trip, while the Anthropic adapter omits an unpaired one. That
+/// omission is correct: a `Plain` block has no signature, and Anthropic
+/// rejects a thinking block that lacks one, so it must never reach that
+/// wire.
 fn encode_reasoning(
     reasoning: crate::events::Reasoning,
     target_model: &str,
@@ -417,6 +435,10 @@ fn encode_reasoning(
         // adapter echoes these blocks unchanged and its OpenAI adapter
         // ignores them, so this arm is right for both without asking
         // which one we are talking to — which this layer cannot know.
+        // genai also offers a `ThoughtSignature` + `ReasoningContent`
+        // pair that its Anthropic adapter rebuilds into a block; sending
+        // the block we hold keeps every key the provider put in it, and
+        // keeps signed and redacted blocks on one path.
         crate::events::ReasoningContent::Signed { token, .. }
         | crate::events::ReasoningContent::Opaque { token } => Some(
             provider::chat::ContentPart::Custom(provider::chat::CustomPart {
@@ -485,32 +507,67 @@ fn from_provider_response(
     // expressed in the same vocabulary.
     let model = response.model_iden.model_name.to_string();
 
-    // Anthropic's blocks arrive as `Custom` parts carrying the raw JSON,
-    // signature included — the only form that can be replayed, and what
-    // our genai fork preserves. Preferred over the flattened
-    // `reasoning_content`, which is the same reasoning with the signature
-    // stripped off.
+    // How reasoning arrives depends on the adapter, and both shapes are
+    // genai's transport rather than ours:
+    //
+    // - Anthropic: each `thinking` block is a `ThoughtSignature` part
+    //   immediately followed by a `ReasoningContent` part, in block order
+    //   (genai 0.7.0-beta.21, upstream PR #275). A `redacted_thinking`
+    //   block stays a `Custom` part carrying the raw JSON.
+    // - OpenAI-compatible: the sibling `reasoning_content` field, surfaced
+    //   as `ChatResponse::reasoning_content` and never as a part.
+    //
+    // A signed pair is joined back into the block Anthropic verifies it
+    // by, because the block is the only unit that can be replayed — not
+    // the text, and not the signature alone (ADR-0034 Appendix A). What
+    // the reducer records is therefore the same whether the block came
+    // as one part or two.
     let mut block_seen = false;
+    let mut pending_signature: Option<&str> = None;
     for part in response.content.iter() {
-        let provider::chat::ContentPart::Custom(custom) = part else {
-            continue;
-        };
-        let content = match custom.typ() {
-            Some("thinking") => crate::events::ReasoningContent::Signed {
-                text: custom
-                    .data()
-                    .get("thinking")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                token: custom.data().clone(),
+        let content = match part {
+            provider::chat::ContentPart::ThoughtSignature(signature) => {
+                if let Some(orphan) = pending_signature.replace(signature) {
+                    tracing::debug!(
+                        signature_len = orphan.len(),
+                        "dropping a thought signature that no reasoning text followed; a bare \
+                         signature cannot be replayed"
+                    );
+                }
+                continue;
+            }
+            provider::chat::ContentPart::ReasoningContent(text) => match pending_signature.take() {
+                Some(signature) => crate::events::ReasoningContent::Signed {
+                    text: text.clone(),
+                    token: serde_json::json!({
+                        "type": "thinking",
+                        "thinking": text,
+                        "signature": signature,
+                    }),
+                },
+                None => crate::events::ReasoningContent::Plain { text: text.clone() },
             },
-            Some("redacted_thinking") => crate::events::ReasoningContent::Opaque {
-                token: custom.data().clone(),
+            provider::chat::ContentPart::Custom(custom) => match custom.typ() {
+                // A raw block from a proxy or an older adapter: carried
+                // as-is, signature included.
+                Some("thinking") => crate::events::ReasoningContent::Signed {
+                    text: custom
+                        .data()
+                        .get("thinking")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    token: custom.data().clone(),
+                },
+                Some("redacted_thinking") => crate::events::ReasoningContent::Opaque {
+                    token: custom.data().clone(),
+                },
+                // Some other block type we do not model. Skipped rather
+                // than guessed at: inventing a meaning for it would be
+                // worse than not carrying it, and it is not reasoning as
+                // far as we know.
+                _ => continue,
             },
-            // Some other block type we do not model. Skipped rather than
-            // guessed at: inventing a meaning for it would be worse than
-            // not carrying it, and it is not reasoning as far as we know.
             _ => continue,
         };
         block_seen = true;
@@ -519,13 +576,20 @@ fn from_provider_response(
             content,
         }));
     }
+    if let Some(orphan) = pending_signature {
+        tracing::debug!(
+            signature_len = orphan.len(),
+            "dropping a trailing thought signature with no reasoning text; a bare signature \
+             cannot be replayed"
+        );
+    }
 
-    // Providers that report reasoning as a sibling field rather than a
-    // block: Kimi, DeepSeek, and Anthropic without our fork. genai
-    // populates `reasoning_content` unconditionally on the non-streaming
-    // path — no capture flag needed. Skipped when blocks were already
-    // captured, or the same reasoning would be recorded twice: once
-    // replayable, once not.
+    // Providers that report reasoning as a sibling field rather than as
+    // parts: Kimi, DeepSeek, and anything OpenAI-shaped. genai populates
+    // `reasoning_content` unconditionally on the non-streaming path — no
+    // capture flag needed. Skipped when parts were already captured, or
+    // the same reasoning would be recorded twice: once replayable, once
+    // not.
     if !block_seen
         && let Some(text) = response
             .reasoning_content
@@ -1256,7 +1320,7 @@ mod tests {
         });
         mock.push_response(MockResponse::text("Done.", 120, 5));
 
-        let client = GenAiClient::with_base_url(mock.base_url());
+        let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
 
         // -- Turn 1
         let first = client
@@ -1424,7 +1488,7 @@ mod tests {
         let server = MockAnthropicServer::start().await;
         server.push_response(MockResponse::text("hello", 10, 5).with_cache_usage(70, 20));
 
-        let client = GenAiClient::with_base_url(server.base_url());
+        let client = GenAiClient::with_base_url(server.base_url()).expect("client builds");
         let response = client
             .chat(request_with_system_and_user("claude-sonnet-4-5"))
             .await
@@ -1574,7 +1638,7 @@ mod tests {
             MockResponse::text("an answer cut off mid-", 10, 64).with_stop_reason("max_tokens"),
         );
 
-        let client = GenAiClient::with_base_url(server.base_url());
+        let client = GenAiClient::with_base_url(server.base_url()).expect("client builds");
         let response = client
             .chat(request_with_system_and_user("claude-sonnet-4-5"))
             .await
@@ -1659,7 +1723,7 @@ mod tests {
             return;
         }
 
-        let client = GenAiClient::new();
+        let client = GenAiClient::new().expect("client builds");
         let request = ChatRequest {
             model: "claude-haiku-4-5".to_string(),
             messages: vec![
@@ -1689,7 +1753,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_base_url_overrides_resolved_endpoint() {
-        let client = GenAiClient::with_base_url("http://127.0.0.1:9999");
+        let client = GenAiClient::with_base_url("http://127.0.0.1:9999").expect("client builds");
         let target = client
             .client
             .resolve_service_target("claude-haiku-4-5")
@@ -1701,7 +1765,7 @@ mod tests {
     #[tokio::test]
     async fn from_anthropic_config_without_base_url_uses_default_endpoint() {
         let cfg = crate::config::AnthropicConfig::default();
-        let client = GenAiClient::from_anthropic_config(&cfg);
+        let client = GenAiClient::from_anthropic_config(&cfg).expect("client builds");
         let target = client
             .client
             .resolve_service_target("claude-haiku-4-5")
@@ -1723,7 +1787,7 @@ mod tests {
             models: Vec::new(),
             pricing: Default::default(),
         };
-        let client = GenAiClient::from_anthropic_config(&cfg);
+        let client = GenAiClient::from_anthropic_config(&cfg).expect("client builds");
         let target = client
             .client
             .resolve_service_target("claude-haiku-4-5")
@@ -1761,7 +1825,7 @@ mod tests {
             anthropic: Some(AnthropicConfig::default()),
             extra,
         };
-        let client = GenAiClient::from_providers(&cfg);
+        let client = GenAiClient::from_providers(&cfg).expect("client builds");
 
         // Declared model -> provider endpoint + OpenAI adapter, and the
         // namespaced id survives intact (OpenRouter needs the full name).
@@ -1823,7 +1887,7 @@ mod tests {
             anthropic: None,
             extra,
         };
-        let client = GenAiClient::from_providers(&cfg);
+        let client = GenAiClient::from_providers(&cfg).expect("client builds");
 
         let response = client
             .chat(request_with_system_and_user("openai/gpt-4o-mini"))

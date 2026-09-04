@@ -207,7 +207,7 @@ async fn anthropic_signed_tool_loop() {
         .with_cache_usage(100, 0),
     );
     mock.push_response(MockResponse::text("Restart the deploy service.", 180, 8));
-    let client = GenAiClient::with_base_url(mock.base_url());
+    let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
 
     let mut messages = vec![
         Message::system("You are a careful assistant."),
@@ -262,7 +262,7 @@ async fn anthropic_empty_text_signed_opus5() {
         )
         .with_cache_usage(1648, 246),
     );
-    let client = GenAiClient::with_base_url(mock.base_url());
+    let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
 
     let mut messages = vec![
         Message::system("You are a careful assistant."),
@@ -320,7 +320,7 @@ async fn anthropic_redacted_thinking() {
         30,
     ));
     mock.push_response(MockResponse::text("Restart it.", 150, 6));
-    let client = GenAiClient::with_base_url(mock.base_url());
+    let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
 
     let mut messages = vec![Message::user("Investigate the failing deploy.")];
     let mut turns = Vec::new();
@@ -356,7 +356,7 @@ async fn anthropic_multi_block_turn() {
         40,
     ));
     mock.push_response(MockResponse::text("Both point at the restart.", 160, 7));
-    let client = GenAiClient::with_base_url(mock.base_url());
+    let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
 
     let mut messages = vec![Message::user("Investigate the failing deploy.")];
     let mut turns = Vec::new();
@@ -391,7 +391,7 @@ async fn anthropic_signed_end_turn_then_user() {
         15,
     ));
     mock.push_response(MockResponse::text("Then restart it.", 90, 5));
-    let client = GenAiClient::with_base_url(mock.base_url());
+    let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
 
     let mut messages = vec![Message::user("Investigate the failing deploy.")];
     let mut turns = Vec::new();
@@ -430,7 +430,7 @@ async fn anthropic_cross_model_strip() {
         20,
     ));
     mock.push_response(MockResponse::text("Restart it.", 140, 5));
-    let client = GenAiClient::with_base_url(mock.base_url());
+    let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
 
     let mut messages = vec![Message::user("Investigate the failing deploy.")];
     let mut turns = Vec::new();
