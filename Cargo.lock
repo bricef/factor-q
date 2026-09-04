@@ -956,12 +956,11 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "datastar"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0805c542838bb4c0769e26e1cdf70ff913e43e146b7e7563241fe95f32606643"
+checksum = "99474d2278201b9faf0bb49d5cdb2e0542a4f2fd6050035d13116a0796e93a96"
 dependencies = [
  "axum",
- "chrono",
  "serde",
  "serde_json",
 ]
