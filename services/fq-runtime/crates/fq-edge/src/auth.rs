@@ -40,9 +40,9 @@ pub struct EdgeIdentity {
 
 impl EdgeIdentity {
     /// Mint a fresh identity: self-signed certificate + biscuit root
-    /// keypair. The caller persists the parts it wants, writes the
-    /// admin token beside them ([`write_admin_token`](Self::write_admin_token))
-    /// and prints the certificate fingerprint exactly once.
+    /// keypair. The caller persists it with the admin token beside it
+    /// ([`save_minted`](Self::save_minted)) and prints the certificate
+    /// fingerprint exactly once.
     pub fn provision() -> anyhow::Result<Self> {
         let cert = rcgen::generate_simple_self_signed(vec!["fqd".to_string()])?;
         Ok(EdgeIdentity {
@@ -207,8 +207,8 @@ impl EdgeIdentity {
     /// token, in the one order that makes a crash safe: the private
     /// material and the fingerprint, then `admin.token`, and only then
     /// `cert.der`, the completeness marker. A failure anywhere before
-    /// that last write leaves a partial identity — which
-    /// [`try_load`](Self::try_load) refuses on the next start — rather
+    /// that last write leaves a partial identity — which `try_load`
+    /// refuses on the next start — rather
     /// than a complete identity with no token, which every later start
     /// would load silently and nothing would ever say so. Returns the
     /// token's path.
@@ -282,8 +282,8 @@ const CERT_FILE: &str = "cert.der";
 const KEY_FILE: &str = "key.der";
 const ROOT_FILE: &str = "root.key";
 /// The admin token, beside the identity: written once at first run by
-/// [`EdgeIdentity::write_admin_token`], owner-only, never overwritten,
-/// never printed. The operator (and every test) reads it from here.
+/// [`EdgeIdentity::save_minted`], owner-only, never overwritten, never
+/// printed. The operator (and every test) reads it from here.
 pub const ADMIN_TOKEN_FILE: &str = "admin.token";
 /// The certificate fingerprint as lowercase hex, beside the identity —
 /// public, so a script can pass it to `fq connect --fingerprint`
