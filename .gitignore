@@ -43,3 +43,8 @@ docs/design/committed/states/
 # Same reason as the entries above: it is reproducible scratch, and leaving it
 # untracked-but-not-ignored would make release builds stamp "<sha>-dirty".
 __pycache__/
+
+# Per-checkout agent/tool scratch (`gh` device ids and the like). One such
+# file was committed by accident (finding E4 of the 2026-09-03 review) and
+# removed in the Phase 0 work; nothing under here is ever a source.
+.local/
