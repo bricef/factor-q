@@ -108,15 +108,22 @@ misspelled `fs_writ:` used to grant no write access while reporting a
 valid definition, surfacing much later as a permission denial with
 nothing to connect it back to the missing letter.
 
-> **One level is still silent (issue #526).** A typo *inside* a
-> `sampling:` or `elicitation:` grant — `redact_secretz: true` rather
-> than `redact_secrets:` — is still accepted, and leaves redaction
-> **off**, which is the opposite of what the author wrote. The grant is
-> parsed through an untagged representation that buffers its content, so
-> closing it needs a hand-written deserializer rather than the attribute
-> used everywhere else. Until then, check the spelling of keys nested
-> under a capability grant; they are listed under
-> [Capability grants](#capability-grants).
+The check reaches one level further, into the table form of a
+`sampling:` or `elicitation:` grant, where it guards a security default:
+every key there is off unless set, so `redact_secretz: true` used to
+parse as a grant with redaction **off** — the opposite of what the
+author wrote. A typo inside a grant is now rejected, and the error names
+the key, the grant it sits in, and the keys that were expected:
+
+```text
+invalid YAML: mcp[0].sampling: unknown field `redact_secretz`, expected
+one of `redact_secrets`, `reject_sensitive_fields`, `input_validation`,
+`output_validation` at line 7 column 7
+```
+
+A grant that is neither a bool nor a table (`sampling: 42`) is refused
+the same way, with an error that says what a grant may be. The
+recognised keys are listed under [Capability grants](#capability-grants).
 
 ## Choosing the model
 
