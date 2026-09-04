@@ -118,8 +118,8 @@ client internals: the background task's result channel has capacity 1 and
 wedges when the app isn't polling, stopping renewals after two in-window
 deliveries; the third was snatched by the first post-starvation poll.)
 
-**Layer 3 — architecture: ack-on-durable-start is a timing argument.**
-#41's ack-on-durable-start (`dispatcher.rs:434-492`, `runner.rs:1503-1507`)
+**Layer 3 — architecture: ack-on-durable-start is a timing argument.** #41's
+ack-on-durable-start (`dispatcher.rs:434-492`, `runner.rs:1503-1507`)
 acks ~10ms after the dispatcher *begins processing* a delivery. It worked
 exactly as designed in the incident — each handler acked its copy — but an
 ack can neither beat a deadline that expired minutes before the app ever saw

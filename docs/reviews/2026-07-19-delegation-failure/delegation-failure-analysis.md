@@ -29,8 +29,8 @@ Three v1 claims were wrong; the evidence and the fixes:
 ## Headline numbers (corrected)
 
 54 agent-authored PRs → 48 landed; 19 needed ≥1 human corrective commit on the branch
-(every corrective commit Claude-co-authored; zero exceptions). The 6 unlanded:
-#7 (superseded by the standalone Go watcher — logic reused with credit), #251
+(every corrective commit Claude-co-authored; zero exceptions). The 6 unlanded: #7
+(superseded by the standalone Go watcher — logic reused with credit), #251
 (deliberately closed: conflicted with three landings; its two design decisions
 harvested into #201, re-refined, redispatched), #313 (superseded by an interactive
 redo: "map genai stop_reason instead of inferring"), #322–#324 (below).
