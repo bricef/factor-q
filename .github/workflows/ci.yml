@@ -245,7 +245,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
       # Installs sccache and points it at the GHA cache (reads SCCACHE_GHA_*).
       - if: needs.changes.outputs.runtime == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       # The MCP integration tests spawn the reference server via npx.
       - if: needs.changes.outputs.runtime == 'true'
         uses: actions/setup-node@v4
@@ -290,7 +290,7 @@ jobs:
       - if: needs.changes.outputs.store == 'true'
         uses: Swatinem/rust-cache@v2
       - if: needs.changes.outputs.store == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - if: needs.changes.outputs.store == 'true'
         uses: extractions/setup-just@v4
       # No Node toolchain needed. The grant-bus test spawns its own private
@@ -355,7 +355,7 @@ jobs:
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: Swatinem/rust-cache@v2
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: extractions/setup-just@v4
       # Hermetic — the router tests spin their own read service over a
