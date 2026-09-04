@@ -10,7 +10,9 @@ model** — how a stateful, durable-execution daemon is replaced without
 losing or corrupting in-flight work. The surrounding continuous-delivery
 *pipeline* (image build on merge, an auto-deploy watcher, health-gating) is
 context here and is captured separately; this ADR fixes the drain/suspend/
-resume model those depend on.
+resume model those depend on. Refined by
+[ADR-0035](0035-container-image-and-compose-supervision.md), which fixes
+the packaging and supervision around the drain.
 
 Implementation: complete, and in daily use. Drain is the default bring-down
 (#23, #24, #29, #32, then #303 folding it into `fq down` per #271), and the

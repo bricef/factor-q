@@ -334,4 +334,8 @@ Not built yet, by design (see #102): health-gate + auto-rollback after
 the flip, and any supervisor (systemd was ruled out of scope there; the
 launchers are detached with `setsid`, NATS and Caddy restart via
 docker's `restart: unless-stopped`). The production-readiness review
-reopens the systemd question as Phase 1 work (#553).
+reopened the systemd question as Phase 1 work (#553); the answer is
+[ADR-0035](../../docs/adrs/accepted/0035-container-image-and-compose-supervision.md)
+— container images under docker compose, no systemd units. Nothing of
+it is built yet, and this README describes the `setsid` shape until it
+is.
