@@ -15,7 +15,7 @@ path = "src/main.rs"
 # resolver = "2" this feature stays in the normal dependency graph and does
 # not leak into the proc-macro graph, so the workspace's derive macros are
 # unaffected.
-syn = { version = "2", features = ["full", "parsing", "extra-traits", "printing"] }
+syn = { version = "3", features = ["full", "parsing", "extra-traits", "printing"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 # `--coupling --json` is consumed by scripts/coupling-pr-comment.sh, which
