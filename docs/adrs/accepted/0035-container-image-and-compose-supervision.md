@@ -88,8 +88,8 @@ process boundary, as the daemon's user, exactly as they do now.
 3. **The daemon assumes a barebones envelope, and the minimal image is
    the gate that proves it.** `fqd` runs from a distroless image holding
    `fqd` and `fq` and nothing else, with configuration from one file and
-   the environment, and every piece of state on a mounted volume at a
-   declared path. That image stays in CI as it is today, and anything the
+   the environment, and every piece of state under one mounted volume at
+   a declared path. That image stays in CI as it is today, and anything the
    daemon turns out to need from a host beyond that is a defect in the
    daemon, not a reason to fatten the image.
 
@@ -112,14 +112,25 @@ process boundary, as the daemon's user, exactly as they do now.
    service's `stop_grace_period` must exceed the daemon's
    `drain_deadline_ms` with headroom, or a deploy is a kill.
 
-6. **State is declared volumes, and the build cache is one of them.** The
-   edge identity (`[state] directory`), the three stores (given an
-   explicit `[cache] directory` inside a volume rather than the
-   XDG cache default the config template says a cleaner may empty), the
-   invocation workspace, the JetStream store and Caddy's data each have a
-   named volume. The agents' build state — `target/` and the sccache
-   directory — is a volume too, so an image update does not cold-build
-   every invocation that follows it.
+6. **One volume per image, and the daemon's volume is the instance.**
+   Everything the daemon reads or writes that outlives the container
+   lives under a single mount, in a fixed layout that mirrors today's
+   `~/fq-dogfood` tree without `releases/` and `current`: the config
+   (`fqd.toml`, `fq-cron.toml`, `agents/`), the edge identity
+   (`[state] directory`), the three stores (given an explicit
+   `[cache] directory` under the mount rather than the XDG cache default
+   the config template says a cleaner may empty), the invocation
+   workspace, and the agents' build state — `target/` and the sccache
+   directory — so an image update does not cold-build every invocation
+   that follows it. The container has no other writable path. Backing up,
+   migrating or inspecting the instance is one volume, and the layout
+   inside it is the contract: a backup may exclude the workspace and
+   build subtrees by path, and a restore is the tree, nothing else. The
+   secrets file stays on the host as compose's `env_file`, because
+   compose reads it before any volume is mounted, and it is the one
+   thing a volume copy must not carry. The broker and the proxy keep the
+   volumes their own images define; the complete state of the instance
+   is therefore the daemon's volume plus the JetStream store.
 
 7. **The container runtime's socket is never mounted into any of our
    containers.** Agents run inside the daemon's container; a socket there
@@ -184,7 +195,8 @@ durability work are untouched by, and independent of, this decision.
 
 - Restart on crash and start on reboot come from `restart:` policy, with
   no code and no units.
-- The stack has one tracked definition, and the host holds only volumes
+- The stack has one tracked definition, and the host holds one volume
+  per image
   and the secrets file.
 - Image tag equals commit, so deploy and rollback are the same one-line
   operation, and the bundle coherence check becomes structural.
@@ -200,18 +212,27 @@ durability work are untouched by, and independent of, this decision.
 
 - The fat image is several gigabytes and must be rebuilt when a toolchain
   pin moves. The minimal image does not share this cost.
-- The build-state volume is load-bearing: without it every invocation
-  after an image update cold-builds for the better part of half an hour
-  and writes twenty gigabytes.
+- The build subtree of the daemon's volume is load-bearing: without it
+  every invocation after an image update cold-builds for the better
+  part of half an hour and writes twenty gigabytes. It is also the
+  subtree that fills the volume: build churn shares a filesystem with
+  the edge identity and the stores, so the disk-usage alert
+  [#367](https://github.com/bricef/factor-q/issues/367) asks for and a
+  pruning job in `fq-cron` are part of this shape, not extras. Every
+  directory setting the daemon has (`[state]`, `[cache]`, `[workspace]`,
+  `[agents]`) and the build-cache variables the image exports for
+  agents to allowlist (`CARGO_TARGET_DIR`, `SCCACHE_DIR`) must point
+  under the mount; one that points elsewhere is state the volume does
+  not capture.
 - The E3 defects in the existing `Dockerfile` — no `FQ_STATE_DIR` under a
   volume, no `HEALTHCHECK`, a broker URL with no token — go from review
   findings to blockers.
 - A `stop_grace_period` shorter than the drain deadline turns every deploy
   into a hard kill, silently. The compose file has to carry the daemon's
   deadline, and a change to one without the other is a defect.
-- The distroless image runs as a fixed non-root UID; volume ownership on
-  the host has to match it, and the fat image's toolchain has to be
-  installed for that user.
+- The distroless image runs as a fixed non-root UID; the volume's
+  ownership has to match it (one `chown`, since there is one volume),
+  and the fat image's toolchain has to be installed for that user.
 - The `exec` tool's baseline `PATH` is `/usr/local/bin:/usr/bin:/bin`;
   the toolchain must be installed there, not under a per-user rustup or
   nvm directory, or agents will not find it.
@@ -263,7 +284,7 @@ role.
   retention rule (the channel holds only the newest build, the host
   holds its history) applied to tags.
 - **Runtime.** Docker or podman, root or rootless. Rootless narrows the
-  blast radius of clause 7 further; whether the build-state volume's
+  blast radius of clause 7 further; whether the build subtree's
   performance survives it is untested.
 - **Adapter images.** Whether the watcher, the scheduler and the
   dashboard get one image each from the same distroless base or share a
@@ -275,4 +296,11 @@ role.
 - **Migrating the live instance.** Whether the edge identity is copied
   or rotated on the move. Rotating costs one re-pair of the operator's
   client and one re-mint of the dashboard's token, and is the
-  recommended path; copying preserves every issued token.
+  recommended path; copying preserves every issued token. Either way
+  the move is one copy of the `~/fq-dogfood` tree into the volume,
+  minus `releases/`, `current` and `.secrets/`.
+- **One volume for the whole stack.** Compose can mount subpaths of
+  one named volume into several containers, which would fold the
+  JetStream store and Caddy's data into the daemon's volume and make
+  the instance exactly one volume. The images run as different users,
+  so it costs an ownership scheme inside the volume; not decided.
