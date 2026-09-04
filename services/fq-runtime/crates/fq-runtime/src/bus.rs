@@ -230,7 +230,7 @@ impl EventBus {
     /// Connect to a NATS server, presenting `token` when the broker
     /// requires one, and ensure the event, trigger and advisory streams
     /// exist. The URL is logged as given: it carries no credential by
-    /// construction (see [`connect_options`]).
+    /// construction (see `connect_options`).
     pub async fn connect_with_token(url: &str, token: Option<&str>) -> Result<Self, BusError> {
         info!(
             nats_url = url,
