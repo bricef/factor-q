@@ -214,6 +214,45 @@ async fn first_run_provisions_and_restart_reuses_the_identity() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
+/// An identity with no `admin.token` beside it — minted before the file
+/// existed (the dogfood host), or with the file removed — is loaded as
+/// before and never re-minted, and the daemon says so once, naming the
+/// path: the pairing already stored client-side is then the only copy
+/// of the admin token.
+#[tokio::test]
+async fn a_loaded_identity_without_a_token_file_says_so_and_mints_none() {
+    let server = fq_test_support::NatsServer::start();
+    let scratch = unique_scratch();
+    let token_path = scratch.join("state").join("edge").join("admin.token");
+
+    let log1 = scratch.join("daemon-1.log");
+    let mut child = spawn_daemon(&scratch, server.url(), &log1);
+    wait_for_ready(&mut child, &log1).await;
+    terminate(child);
+    std::fs::remove_file(&token_path).expect("remove admin.token");
+
+    let log2 = scratch.join("daemon-2.log");
+    let mut child = spawn_daemon(&scratch, server.url(), &log2);
+    let text2 = wait_for_ready(&mut child, &log2).await;
+    terminate(child);
+
+    assert!(
+        text2.contains("no admin.token beside the loaded identity")
+            && text2.contains(&token_path.display().to_string()),
+        "the daemon must say the token file is absent and where it would be\n--- log ---\n{text2}"
+    );
+    assert!(
+        !token_path.exists(),
+        "a loaded identity must not mint a new admin token"
+    );
+    assert!(
+        !text2.contains("first run"),
+        "a loaded identity must not be re-provisioned\n--- log ---\n{text2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 /// #362 regression, the one that matters: a deployment already paired
 /// against an identity under the *cache* directory upgrades to a
 /// binary that keeps the identity under the *state* directory. The old

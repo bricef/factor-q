@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use fq_edge::{EdgeIdentity, FINGERPRINT_FILE, IdentityOrigin};
+use fq_edge::{ADMIN_TOKEN_FILE, EdgeIdentity, FINGERPRINT_FILE, IdentityOrigin};
 use fq_runtime::Config;
 
 /// Where the edge identity lives under a given root.
@@ -49,6 +49,19 @@ pub(crate) fn resolve(config: &Config) -> anyhow::Result<(EdgeIdentity, PathBuf)
                     .write_fingerprint(&dir)
                     .context("edge: failed to write the fingerprint file")?;
             }
+            // No token file (the identity predates #545, or the file
+            // was removed): the docs point at it, so say once that it is
+            // not there and what that means, instead of loading silently.
+            let token_path = dir.join(ADMIN_TOKEN_FILE);
+            if !token_path.exists() {
+                tracing::info!(
+                    path = %token_path.display(),
+                    "edge: no admin.token beside the loaded identity; the pairing already \
+                     stored client-side (connections.toml) is the only copy of the admin \
+                     token — rotating the identity directory mints a new identity and a \
+                     new token"
+                );
+            }
         }
         IdentityOrigin::Adopted => {
             tracing::warn!(
@@ -69,9 +82,10 @@ pub(crate) fn resolve(config: &Config) -> anyhow::Result<(EdgeIdentity, PathBuf)
             );
         }
         IdentityOrigin::Minted => {
-            let token_path = identity
-                .write_admin_token(&dir)
-                .context("edge: failed to write the admin token")?;
+            // Written by `save_minted`, before `cert.der`: a crash in
+            // the mint leaves a partial identity that fails closed, not
+            // a complete one with no token.
+            let token_path = dir.join(ADMIN_TOKEN_FILE);
             println!();
             println!(
                 "edge: first run — identity provisioned under {}",
@@ -98,7 +112,6 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fq_edge::ADMIN_TOKEN_FILE;
 
     fn config_with(state: &Path, cache: &Path) -> Config {
         let mut config = Config::default();
@@ -187,6 +200,48 @@ mod tests {
         assert!(
             !dir.join(ADMIN_TOKEN_FILE).exists(),
             "a loaded identity must not mint an admin token"
+        );
+    }
+
+    /// The write order is the crash safety: the admin token goes down
+    /// before `cert.der`, so a failure inside the mint leaves a partial
+    /// identity the next start refuses — never a complete identity with
+    /// no token, which every later start would load without a word.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_token_write_leaves_a_partial_identity_not_a_complete_one() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let cache = root.path().join("cache");
+        let dir = state.join("edge");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A dangling symlink at the token's path: `exists()` is false,
+        // so nothing looks partial beforehand, but `open(O_CREAT|O_EXCL)`
+        // on it fails — the token write dies after the key material and
+        // before the certificate.
+        std::os::unix::fs::symlink(dir.join("nowhere"), dir.join(ADMIN_TOKEN_FILE)).unwrap();
+
+        let err = match resolve(&config_with(&state, &cache)) {
+            Ok(_) => panic!("the mint must fail when the token cannot be written"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(err.contains(ADMIN_TOKEN_FILE), "{err}");
+        assert!(
+            !dir.join("cert.der").exists(),
+            "a failed mint must not be marked complete"
+        );
+        assert!(
+            dir.join("key.der").exists(),
+            "the failure must have come after the key material"
+        );
+
+        let again = match resolve(&config_with(&state, &cache)) {
+            Ok(_) => panic!("a partial identity must be refused, not loaded"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            again.contains("partial"),
+            "the next start must fail closed, got: {again}"
         );
     }
 
