@@ -8,6 +8,10 @@
   gates them)
 - Docker and Docker Compose (for NATS)
 - [just](https://github.com/casey/just) (task runner)
+- [cargo-audit](https://github.com/rustsec/rustsec/tree/main/cargo-audit)
+  and [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), for the
+  dependency gate — `just install-audit-tools` builds the pinned versions
+  (`just ci` runs the gate as its `audit` phase)
 - A provider API key for smoke tests — `OPENROUTER_API_KEY` by
   default; not needed for unit tests or the Go gate
 
@@ -158,8 +162,8 @@ just test-shell-sandbox                        # containerised sandbox
 ```
 
 Or `just ci` for the full local gate in one shot — `lint-docs`,
-`check-links`, `quality`, the four Rust suites, and `go-ci`, timed
-per phase and fail-fast. It covers everything CI runs bar two
+`check-links`, `quality`, `audit`, the four Rust suites, and `go-ci`,
+timed per phase and fail-fast. It covers everything CI runs bar two
 carve-outs it names: `smoke` (paid) and `docker-build` (minutes; run
 it by hand after changing the Dockerfile, the workspace members, or
 the lockfile).
@@ -185,6 +189,16 @@ the lockfile).
   ```
 
   Listed in the order `quality` runs them.
+
+- **Dependencies are audited, and the baseline is explicit.** `just
+  audit` runs `cargo audit` over the lockfile and `cargo deny check`
+  over the resolved graph; `deny.toml` is the reviewed baseline — the
+  licence allow-list, the one permitted git source, and one explained
+  `ignore` line per advisory that cannot be fixed yet. A red audit on
+  your PR is fixed by `cargo update -p <crate>` when a patched release
+  exists, and otherwise by one more explained line that the reviewer
+  will read — never by a blanket allow. Dependabot opens the weekly
+  update PRs (`.github/dependabot.yml`).
 
 - **Size budgets are ratcheted, not advisory.** No file may exceed
   800 production lines and no function may exceed 250 lines;

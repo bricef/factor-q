@@ -28,7 +28,9 @@ permissions:
 # Linting is one job, not a phase of each suite: `quality` ("Code quality")
 # runs every non-test gate — the include! scan, the size ratchets, fmt, and
 # clippy over every crate — so one command answers whether the tree is clean.
-# The per-suite jobs below keep doc/build/test.
+# The per-suite jobs below keep doc/build/test. `audit` ("Dependency audit")
+# is the supply-chain gate — `just audit`, cargo audit + cargo deny against
+# deny.toml — and, like `quality`, is never path-filtered.
 #
 # The Rust gate is independent per-suite jobs over the single workspace
 # (#194) — `runtime-ci` (installs the pinned nats-server the per-test brokers
@@ -169,6 +171,41 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: just quality
+
+  # The dependency gate (#406): `cargo audit` over the flat lockfile and
+  # `cargo deny check` over the resolved graph, behind `just audit` — the
+  # same command a developer runs. deny.toml is the reviewed baseline: one
+  # explained line per accepted finding, never a blanket allow.
+  #
+  # Deliberately NOT path-filtered. Advisories arrive without a commit, so
+  # the job that says "the lockfile is clean" has to run on every push and
+  # PR whatever changed — a docs-only PR can be the first to meet a new
+  # RUSTSEC id. Neither tool compiles the workspace (audit reads Cargo.lock,
+  # deny runs `cargo metadata`), so there is no rust-cache here; the pinned
+  # toolchain is only for `cargo` itself.
+  #
+  # The tools are prebuilt binaries at exactly the versions the justfile
+  # pins — read back with `just --evaluate`, so there is one place to bump
+  # — fetched by install-action, which verifies their checksums. The action
+  # is pinned to a full commit rather than a tag (production-readiness
+  # review, finding E2); Dependabot keeps the SHA and the version comment
+  # moving together.
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+      # Keep in lockstep with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - id: versions
+        run: >-
+          echo "tools=cargo-audit@$(just --evaluate cargo_audit_version),cargo-deny@$(just --evaluate cargo_deny_version)"
+          >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: ${{ steps.versions.outputs.tools }}
+      - run: just audit
 
   runtime-ci:
     name: Runtime CI
