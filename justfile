@@ -826,16 +826,18 @@ build-watcher target:
 build-cron target:
     cd adapters/fq-cron && CGO_ENABLED=0 go build -o "target/{{target}}/release/fq-cron" .
 
-# Every deployable plus the dogfood launchers, so a deployed
-# releases/<sha>/ dir is self-contained (ops/dogfood/deploy.sh extracts it
-# verbatim).
+# Every deployable, as the binary-only channel for hosts that are not
+# containerised (install.sh, a bare VM). The dogfood host deploys the
+# images instead (ADR-0035; ops/dogfood/deploy.sh), so the bundle no
+# longer carries launchers.
 # Package the rolling main-branch deploy bundle into dist/.
 package-main target:
-    bash scripts/package.sh {{target}} .:fq .:fqd .:fq-dashboard .:fq-cas adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron ops/dogfood/run.sh ops/dogfood/watcher.sh ops/dogfood/dashboard.sh ops/dogfood/cron.sh
+    bash scripts/package.sh {{target}} .:fq .:fqd .:fq-dashboard .:fq-cas adapters/github-watcher:github-watcher adapters/fq-cron:fq-cron
 
 # Recreates both the release and its tag so tag, assets, and notes always
-# point at the same commit. The channel keeps no history by design —
-# deploy hosts retain their own releases/<sha>/ dirs for rollback (#102).
+# point at the same commit. The channel keeps no history by design — the
+# image registry keeps every commit tag, and that is the rollback history
+# (ADR-0035; before it, hosts kept releases/<sha>/ dirs, #102).
 # Publish/refresh the rolling `main-latest` pre-release from dist/.
 publish-main sha:
     -gh release delete main-latest --yes
