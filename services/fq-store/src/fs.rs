@@ -272,13 +272,19 @@ impl BlockStore for FilesystemStore {
         if content.is_empty() {
             return Vec::new();
         }
-        fastcdc::v2020::FastCDC::new(content, self.params.min, self.params.avg, self.params.max)
-            .map(|c| Chunk {
-                hash: Cid::of(&content[c.offset..c.offset + c.length]),
-                offset: c.offset,
-                len: c.length,
-            })
-            .collect()
+        // fastcdc 5 takes `usize` sizes; `ChunkParams` stays `u32` (lossless widen).
+        fastcdc::v2020::FastCDC::new(
+            content,
+            self.params.min as usize,
+            self.params.avg as usize,
+            self.params.max as usize,
+        )
+        .map(|c| Chunk {
+            hash: Cid::of(&content[c.offset..c.offset + c.length]),
+            offset: c.offset,
+            len: c.length,
+        })
+        .collect()
     }
 
     async fn write_block(&self, block: &Cid, generation: u32, bytes: &[u8]) -> Result<()> {
