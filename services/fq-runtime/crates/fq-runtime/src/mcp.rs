@@ -916,7 +916,7 @@ impl Default for McpClientManager {
 }
 
 impl McpClientManager {
-    /// Stdio servers start under [`default_server_root`] (the temp dir, never the cwd).
+    /// Stdio servers start under the default root (the temp dir, never the cwd).
     pub fn new() -> Self {
         Self::with_server_root(default_server_root())
     }
