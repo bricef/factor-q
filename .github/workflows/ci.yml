@@ -190,6 +190,9 @@ jobs:
   # is pinned to a full commit rather than a tag (production-readiness
   # review, finding E2); Dependabot keeps the SHA and the version comment
   # moving together.
+  #
+  # Enforcement: this job's result is an input to the `rust-ci` aggregator
+  # below, so a red audit turns the required "Rust CI" context red.
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
@@ -300,11 +303,18 @@ jobs:
         run: sccache --show-stats
 
   # Aggregate gate: keeps the "Rust CI" required-status-check name so the
-  # runtime/store split needs no branch-protection change. Green iff both
-  # halves are green; the Actions UI still shows which half failed.
+  # runtime/store split needs no branch-protection change. Green iff every
+  # input is green; the Actions UI still shows which one failed.
+  #
+  # The dependency audit is an input too. A red audit has to block a merge,
+  # and "Rust CI" is a required context today while "Dependency audit" is
+  # not — without this edge the audit job would go red and nothing would
+  # stop the merge. Making "Dependency audit" required in its own right is
+  # a repo-settings change for the maintainer; until then this is the
+  # enforcement, and afterwards it is belt and braces.
   rust-ci:
     name: Rust CI
-    needs: [runtime-ci, store-ci, dashboard-ci]
+    needs: [runtime-ci, store-ci, dashboard-ci, audit]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -312,8 +322,9 @@ jobs:
           echo "runtime-ci:   ${{ needs.runtime-ci.result }}"
           echo "store-ci:     ${{ needs.store-ci.result }}"
           echo "dashboard-ci: ${{ needs.dashboard-ci.result }}"
-          if [ "${{ needs.runtime-ci.result }}" != "success" ] || [ "${{ needs.store-ci.result }}" != "success" ] || [ "${{ needs.dashboard-ci.result }}" != "success" ]; then
-            echo "::error::a Rust suite failed — see the Runtime CI / Store CI jobs above"
+          echo "audit:        ${{ needs.audit.result }}"
+          if [ "${{ needs.runtime-ci.result }}" != "success" ] || [ "${{ needs.store-ci.result }}" != "success" ] || [ "${{ needs.dashboard-ci.result }}" != "success" ] || [ "${{ needs.audit.result }}" != "success" ]; then
+            echo "::error::a Rust suite or the dependency audit failed — see the Runtime CI / Store CI / Dashboard CI / Dependency audit jobs above"
             exit 1
           fi
 
