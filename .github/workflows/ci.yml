@@ -166,7 +166,7 @@ jobs:
       # Keep the version ref in lockstep with rust-toolchain.toml — the
       # size ratchets parse Rust with syn (tools/fq-lint), and clippy
       # runs here, so this job needs the pinned toolchain.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -200,7 +200,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v4
       # Keep in lockstep with rust-toolchain.toml.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.120.0
       - id: versions
         run: >-
           echo "tools=cargo-audit@$(just --evaluate cargo_audit_version),cargo-deny@$(just --evaluate cargo_deny_version)"
@@ -236,7 +236,7 @@ jobs:
       # rustup enforces the pin either way; matching here avoids installing
       # a second, unused toolchain.
       - if: needs.changes.outputs.runtime == 'true'
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
       # Caches the unified workspace target/ at the repo root (#194) —
@@ -245,7 +245,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
       # Installs sccache and points it at the GHA cache (reads SCCACHE_GHA_*).
       - if: needs.changes.outputs.runtime == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       # The MCP integration tests spawn the reference server via npx.
       - if: needs.changes.outputs.runtime == 'true'
         uses: actions/setup-node@v4
@@ -283,14 +283,14 @@ jobs:
         uses: actions/checkout@v4
       # Same lockstep note as runtime-ci: match rust-toolchain.toml.
       - if: needs.changes.outputs.store == 'true'
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
       # Unified workspace at the repo root (#194) — rust-cache's default.
       - if: needs.changes.outputs.store == 'true'
         uses: Swatinem/rust-cache@v2
       - if: needs.changes.outputs.store == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - if: needs.changes.outputs.store == 'true'
         uses: extractions/setup-just@v4
       # No Node toolchain needed. The grant-bus test spawns its own private
@@ -348,14 +348,14 @@ jobs:
         uses: actions/checkout@v4
       # Keep in lockstep with rust-toolchain.toml (#102).
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
       # Unified workspace at the repo root (#194) — rust-cache's default.
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: Swatinem/rust-cache@v2
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
       - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
         uses: extractions/setup-just@v4
       # Hermetic — the router tests spin their own read service over a
@@ -389,7 +389,7 @@ jobs:
         uses: actions/checkout@v4
       # Keep in lockstep with rust-toolchain.toml (#102).
       - if: needs.changes.outputs.dashboard == 'true'
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.120.0
       # Unified workspace at the repo root (#194) — rust-cache's default.
       - if: needs.changes.outputs.dashboard == 'true'
         uses: Swatinem/rust-cache@v2
@@ -446,7 +446,7 @@ jobs:
           # it as a worktree. The default depth-1 checkout has neither.
           fetch-depth: 0
       # Keep in lockstep with rust-toolchain.toml — fq-lint parses Rust with syn.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
       - run: >-
           bash scripts/coupling-pr-comment.sh
