@@ -531,6 +531,65 @@ mod tests {
         );
     }
 
+    fn shown_with_reasoning(reasoning: fq_ops::transcript::TurnReasoning) -> String {
+        render_pretty(
+            &[assistant_with(Some(reasoning))],
+            RenderOptions {
+                truncate_bytes: Some(DEFAULT_TRUNCATE_BYTES),
+                reasoning: true,
+            },
+        )
+    }
+
+    /// #537: the empty-text signed block. `Some("")` must not become a
+    /// `reasoning:` heading over a blank — that reads as "reasoned about
+    /// nothing", when the truth is the opaque line the renderer already
+    /// has. Built with `Some("")` on purpose: the reducer no longer
+    /// produces it, and the renderer must not depend on that.
+    #[test]
+    fn empty_text_signed_reasoning_renders_as_opaque() {
+        let shown = shown_with_reasoning(fq_ops::transcript::TurnReasoning {
+            text: Some(String::new()),
+            opaque: Some(serde_json::json!({
+                "type": "thinking",
+                "thinking": "",
+                "signature": "EqQBCkYIBxgC…",
+            })),
+        });
+        assert!(
+            shown.contains("reasoning: [opaque — carried, not readable]"),
+            "an empty-text signed block is opaque, and must say so: {shown}"
+        );
+        assert!(
+            !shown.contains("reasoning:\n"),
+            "no heading over nothing: {shown}"
+        );
+        assert!(
+            !shown.contains("[+ an opaque provider token]"),
+            "the token is the whole story here, not a footnote to text: {shown}"
+        );
+    }
+
+    /// The degenerate case: a reasoning part with nothing in it. Present,
+    /// so it gets a line; not opaque, since nothing is carried, so not
+    /// *that* line. Whether it arrives as `None` or as a `Some("")` built
+    /// elsewhere makes no difference to what is printed.
+    #[test]
+    fn empty_reasoning_renders_as_empty_not_absent_and_not_opaque() {
+        for text in [None, Some(String::new())] {
+            let shown =
+                shown_with_reasoning(fq_ops::transcript::TurnReasoning { text, opaque: None });
+            assert!(
+                shown.contains("reasoning: [empty — present, nothing to read]"),
+                "a part with nothing in it is still a part: {shown}"
+            );
+            assert!(
+                !shown.contains("opaque"),
+                "nothing is carried, so nothing is opaque: {shown}"
+            );
+        }
+    }
+
     #[test]
     fn render_pretty_contains_payloads() {
         let llm = vec![llm_row(

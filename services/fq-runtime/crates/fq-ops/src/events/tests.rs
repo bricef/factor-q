@@ -666,6 +666,78 @@ fn multiple_reasoning_parts_join() {
     assert_eq!(reduced.text.as_deref(), Some("first\nsecond"));
 }
 
+/// #537: Anthropic returns `thinking` blocks whose text is the empty
+/// string but which carry a signature. That is the opaque state wearing
+/// the `Signed` shape, and the reduction must say so — no text, token
+/// carried — rather than hand every renderer a `Some("")` to draw as a
+/// heading over nothing. Whitespace is empty too.
+#[test]
+fn empty_text_signed_reasoning_reduces_to_opaque() {
+    for text in ["", "  \n\t"] {
+        let reduced = reduce_reasoning(&[AssistantPart::Reasoning(Reasoning {
+            model: "claude-opus-5".to_string(),
+            content: ReasoningContent::Signed {
+                text: text.to_string(),
+                token: serde_json::json!({
+                    "type": "thinking",
+                    "thinking": text,
+                    "signature": "EqQBCkYIBxgC…",
+                }),
+            },
+        })])
+        .expect("a signed block is present, whatever its text");
+        assert!(
+            reduced.text.is_none(),
+            "{text:?} is not working the model showed us; it must reduce to no text, got {:?}",
+            reduced.text
+        );
+        assert!(
+            reduced.has_opaque(),
+            "…and the signature is still carried, because it is the content"
+        );
+    }
+}
+
+/// The degenerate case, decided rather than left to chance. A reasoning
+/// part with no text and no token is still a part the provider returned
+/// and the log carries, so it reduces to `Some` with nothing in it — the
+/// *empty* state — not to `None`, which would say the turn never
+/// reasoned (I7).
+#[test]
+fn empty_plain_reasoning_is_present_not_absent() {
+    let reduced = reduce_reasoning(&[AssistantPart::Reasoning(Reasoning {
+        model: "m".to_string(),
+        content: ReasoningContent::Plain {
+            text: String::new(),
+        },
+    })])
+    .expect("a reasoning part with nothing in it is still a reasoning part");
+    assert_eq!(
+        reduced,
+        crate::transcript::TurnReasoning {
+            text: None,
+            opaque: None,
+        },
+        "nothing to read and nothing carried — and neither field may pretend otherwise"
+    );
+}
+
+/// An empty part beside a readable one contributes nothing to the join:
+/// the operator gets the working, not a leading blank line.
+#[test]
+fn empty_reasoning_parts_do_not_pad_the_join() {
+    let part = |text: &str| {
+        AssistantPart::Reasoning(Reasoning {
+            model: "m".to_string(),
+            content: ReasoningContent::Plain {
+                text: text.to_string(),
+            },
+        })
+    };
+    let reduced = reduce_reasoning(&[part(""), part("worked it out")]).expect("present");
+    assert_eq!(reduced.text.as_deref(), Some("worked it out"));
+}
+
 /// #447: subject leaf, schema id and projection `event_type` are three
 /// spellings of one name and are minted together. They are also easy
 /// to desync later, so they are pinned here as a triple.

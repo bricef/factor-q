@@ -188,24 +188,35 @@ pub fn assistant_text(parts: &[AssistantPart]) -> Option<String> {
 /// different fact from producing some we cannot read (D4) — that returns
 /// `Some` with no `text`.
 ///
+/// **Text is readable text.** A part whose text is empty after trimming
+/// contributes none: Anthropic returns `thinking` blocks with an empty
+/// string and a signature ([#537]), and those are opaque, not "reasoned
+/// about nothing". Presence is decided by the part existing, not by
+/// what it holds, so a part with neither text nor token still reduces
+/// to `Some` — with both fields `None`, the *empty* state — rather than
+/// to absence (I7).
+///
 /// [ADR-0034]: https://github.com/bricef/factor-q/blob/main/docs/adrs/accepted/0034-reasoning-as-a-content-part.md
+/// [#537]: https://github.com/bricef/factor-q/issues/537
 pub fn reduce_reasoning(parts: &[AssistantPart]) -> Option<crate::transcript::TurnReasoning> {
     let mut texts: Vec<&str> = Vec::new();
     let mut opaque: Vec<Value> = Vec::new();
+    let mut present = false;
     for part in parts {
         let AssistantPart::Reasoning(reasoning) = part else {
             continue;
         };
+        present = true;
         match &reasoning.content {
-            ReasoningContent::Plain { text } => texts.push(text.as_str()),
+            ReasoningContent::Plain { text } => texts.extend(readable(text)),
             ReasoningContent::Signed { text, token } => {
-                texts.push(text.as_str());
+                texts.extend(readable(text));
                 opaque.push(token.clone());
             }
             ReasoningContent::Opaque { token } => opaque.push(token.clone()),
         }
     }
-    if texts.is_empty() && opaque.is_empty() {
+    if !present {
         return None;
     }
     Some(crate::transcript::TurnReasoning {
@@ -216,6 +227,12 @@ pub fn reduce_reasoning(parts: &[AssistantPart]) -> Option<crate::transcript::Tu
             _ => Some(Value::Array(opaque)),
         },
     })
+}
+
+/// What a reasoning part's text contributes to the operator surface: the
+/// text verbatim, unless it is empty after trimming — then nothing.
+fn readable(text: &str) -> Option<&str> {
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Build an assistant turn's parts from text and tool calls — the
