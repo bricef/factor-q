@@ -9,6 +9,19 @@ decisions taken on [#437](https://github.com/bricef/factor-q/issues/437) on
 2026-07-28, 2026-08-25 and 2026-08-26. Execution is sequenced by
 [the plan](../../plans/active/2026-08-25-reasoning-as-message-parts.md).
 
+Implementation: complete (#510) — every decision here is built. `Message`
+is the enum (D1); the response chain carries `Vec<AssistantPart>` (D3);
+reasoning round-trips for OpenAI-compatible and Anthropic providers with the
+cross-model strip at the adapter (D5); the consumer barrier strips payload
+reasoning, not just annotations (D6); the operator surface carries
+`TurnReasoning` behind `fq invocation transcript --reasoning` and the
+dashboard's raw disclosure (D4, D7); `reasoning_tokens` rides on the cost
+record (D8). Two things are open by decision, not omission: the Anthropic
+path depends on a fork of `genai` pinned to a rev until its one-line fix
+lands upstream, and there has been no live run against a real provider —
+`experiments/reasoning-round-trip/` measures exactly that and needs a key.
+Tool-result batching (D1b) is representable but not yet emitted (#511).
+
 Contract precondition for [#414](https://github.com/bricef/factor-q/issues/414)
 (confirmed exit criterion). Amends
 [`inter-node-contracts-and-event-layers.md`](../../design/aspirational/inter-node-contracts-and-event-layers.md)

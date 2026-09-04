@@ -20,6 +20,6 @@
 # CODE lines, skipping comments and blanks) — tracked in #392.
 services/fq-runtime/crates/fq-daemon/src/daemon.rs::run_daemon 346
 services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 596
-services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::resume 354
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::resume 353
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 371
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_tool 314
