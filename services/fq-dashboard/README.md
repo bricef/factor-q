@@ -94,8 +94,9 @@ than defaulting into the collision.
 `FQ_EDGE_FINGERPRINT` is the SHA-256 of the daemon's self-signed
 certificate — the pin that makes it an identity rather than an
 encryption blanket. The daemon prints it when it provisions its identity
-(the `edge: certificate fingerprint` line); `fq connect` also records it
-in `~/.config/factor-q/connections.toml`. Rotating the daemon's identity
+(the `edge: certificate fingerprint` line) and keeps it in
+`<state>/edge/fingerprint`; `fq connect` also records it in
+`~/.config/factor-q/connections.toml`. Rotating the daemon's identity
 invalidates the pin, and every token issued under it.
 
 ### 3. Mint an attenuated token

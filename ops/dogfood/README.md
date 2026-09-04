@@ -134,6 +134,19 @@ it project-local like `cache/`. Either way a daemon whose state
 directory is empty adopts an identity still sitting at `cache/edge`
 rather than minting a new one, and says so on startup.
 
+Two files sit beside the identity in `<state>/edge/`
+([#545](https://github.com/bricef/factor-q/issues/545)): `admin.token`,
+the all-authority token, written once when the identity is minted,
+mode 0600 and **never printed** — the daemon logs where it is, not
+what it is, so `logs/fq-run.log` never holds it — and `fingerprint`,
+the certificate's SHA-256 in hex, the pin every client and the
+dashboard verify. Pair the operator's `fq` from the host with both:
+`fq connect 127.0.0.1:9470 --token "$(cat <state>/edge/admin.token)"
+--fingerprint "$(cat <state>/edge/fingerprint)"`. Without a terminal
+`fq connect` refuses to pair unless `--fingerprint` is given
+([#544](https://github.com/bricef/factor-q/issues/544)); from a
+terminal it shows the fingerprint and asks.
+
 ## Routine operations
 
 ```sh
@@ -182,7 +195,7 @@ commands):
    than defaulting into the collision.
 2. **Pin the daemon.** `FQ_EDGE_FINGERPRINT` is the SHA-256 the daemon
    printed when it provisioned its identity (`edge: certificate
-   fingerprint`).
+   fingerprint`) and keeps in `<state>/edge/fingerprint`.
 3. **Mint an attenuated token.** `FQ_EDGE_TOKEN` must be an
    *attenuation* of the admin token, not the admin token itself:
 

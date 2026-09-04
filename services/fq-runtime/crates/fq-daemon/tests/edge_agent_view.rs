@@ -117,11 +117,7 @@ async fn the_agent_view_answers_from_the_daemons_live_registry() {
         &text,
         "edge: certificate fingerprint (clients pin this): ",
     ));
-    let token = {
-        let mut lines = text.lines();
-        lines.find(|l| l.contains("edge: admin token")).unwrap();
-        lines.next().unwrap().trim().to_string()
-    };
+    let token = fq_test_support::admin_token(&scratch.join("state"));
     let addr = suffix_of(&text, "- edge is listening on ").to_string();
     // The daemon's own count of what it loaded, from its startup
     // banner: the view must agree with it, not merely with the files.

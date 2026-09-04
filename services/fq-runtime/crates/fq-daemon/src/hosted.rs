@@ -140,8 +140,9 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // The authenticated operator edge (ADR-0006 + ADR-0031, plan
     // Phase 2): TLS + capability tokens over tarpc
     // `invoke`/`next_batch`. Identity (certificate + token root)
-    // persists under the state dir; the first run mints it and prints
-    // the admin token exactly once — see `edge_identity`. Same
+    // persists under the state dir; the first run mints it and writes
+    // the admin token beside it, once, owner-only — see
+    // `edge_identity`. Same
     // supervision posture as the read service: outside the supervised
     // set — an operator surface dying must not take the runtime down.
     let edge_bound = if config.edge.enabled {

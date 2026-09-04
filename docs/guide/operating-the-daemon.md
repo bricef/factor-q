@@ -9,6 +9,52 @@ invocation's state is on the WAL, so stopping and restarting is a
 *controlled* crash-and-recover, not data loss (ADR-0027). The commands
 below drive that machinery cleanly and confirm what they did.
 
+## Pairing a client: where the credentials are
+
+Every `fq` verb answers over the daemon's authenticated edge, so a
+client has to be paired with the daemon before any of them work. The
+daemon provisions its identity on its first start and leaves two files
+beside it under the **state** directory — `$XDG_STATE_HOME/factor-q`
+or `~/.local/state/factor-q` by default; `FQ_STATE_DIR` or
+`[state] directory` in `fqd.toml` move it:
+
+| File | What | Mode |
+| --- | --- | --- |
+| `<state>/edge/admin.token` | the all-authority admin token, written once and **never printed** | 0600 |
+| `<state>/edge/fingerprint` | the certificate's SHA-256, lowercase hex — the pin | public |
+
+The token stays off stdout on purpose
+([#545](https://github.com/bricef/factor-q/issues/545)): a token in
+the daemon's output is a token in journald, `docker logs` and every
+run log for the life of the file. The daemon prints the *path*, and
+the fingerprint (`edge: certificate fingerprint`), so an operator at a
+terminal can compare it.
+
+Pair from a script — or from anywhere without a terminal — by naming
+both:
+
+```sh
+fq connect 127.0.0.1:9472 \
+  --token "$(cat ~/.local/state/factor-q/edge/admin.token)" \
+  --fingerprint "$(cat ~/.local/state/factor-q/edge/fingerprint)"
+```
+
+Without `--fingerprint`, `fq connect` shows the fingerprint the daemon
+presents and asks you to confirm it — trust-on-first-use — and only
+from a terminal. With stdin redirected it refuses before dialling
+([#544](https://github.com/bricef/factor-q/issues/544)): pinning
+whatever the network presents and then sending the token to it is
+exactly what the pin exists to prevent, and the daemon may bind
+non-loopback. The pairing lands in
+`$XDG_CONFIG_HOME/factor-q/connections.toml` (0600), once per daemon.
+Narrower tokens — the dashboard's, a CI job's — are attenuated from the
+admin token offline with `fq token attenuate`, never by handing the
+admin token out.
+
+Rotating the identity is deleting `<state>/edge/` and restarting: every
+pinned client and every issued token, the dashboard's included, is
+invalidated, and the next start mints and writes a fresh set.
+
 ## Stopping the daemon: `fq down`
 
 `fq down` is the operator-facing **stop** verb. Do **not** stop the
@@ -155,6 +201,8 @@ you would rather start from a summary.
 
 | Goal | Command |
 | --- | --- |
+| Pair a client, from a terminal (confirms the fingerprint) | `fq connect <addr> --token "$(cat <state>/edge/admin.token)"` |
+| Pair a client, from a script (no prompt; the pin is required) | `fq connect <addr> --token "$(cat <state>/edge/admin.token)" --fingerprint "$(cat <state>/edge/fingerprint)"` |
 | Stop the daemon (clean, confirmed) | `fq down` |
 | Stop now, skip the drain | `fq down --now` |
 | Redeploy (suspend for the next binary) | `fq down` |

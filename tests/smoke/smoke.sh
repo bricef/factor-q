@@ -44,8 +44,9 @@ TESTS_FAILED=0
 #                    model nothing declared
 #   FQ_STATE_DIR     the edge identity is durable state, and a fresh
 #                    directory is what makes this a *first* run — the
-#                    only time the daemon mints and prints the admin
-#                    token we need in order to pair
+#                    only time the daemon mints the admin token we need
+#                    in order to pair (written to <state>/edge/admin.token,
+#                    never printed; #545)
 #   XDG_CONFIG_HOME  `fq connect` writes the pairing to
 #                    $XDG_CONFIG_HOME/factor-q/connections.toml, so
 #                    without this a smoke run would overwrite the
@@ -559,16 +560,19 @@ start_fq_run() {
 # cannot read anything back — `fq events query` below depends on this
 # having happened.
 #
-# Both values come out of RUN_LOG because neither exists anywhere else:
-# the address was chosen by the kernel, and the admin token is minted
-# and printed exactly once, on a first run against a fresh state
-# directory. Both are matched by content and never by line number — the
-# daemon's stdout and its tracing output share this file, so a line can
-# land between a banner and the value it introduces. Reading "the line
-# after the marker" is the assumption that makes #454 flaky, and there
-# is no reason to repeat it here.
+# The address comes out of RUN_LOG because it exists nowhere else — the
+# kernel chose it — and is matched by content, never by line number: the
+# daemon's stdout and its tracing output share that file. The token and
+# the fingerprint are files the daemon wrote beside its identity on the
+# first run against the fresh state directory (#545): every test here
+# starts its own daemon against the *same* state directory, the identity
+# is durable, so the files outlive the first daemon and stay valid for
+# every one after it. (The token used to be scraped from the log, and a
+# tracing line landing between the banner and the token was #454.) The
+# pin is passed explicitly: there is no terminal here, and
+# trust-on-first-use is interactive-only (#544).
 pair_with_edge() {
-    local addr token
+    local addr token fingerprint edge_dir="${FQ_STATE_DIR}/edge"
     addr="$(sed -n 's/.*edge is listening on \([0-9.]*:[0-9]*\).*/\1/p' \
         "${RUN_LOG}" | tail -1)"
     if [[ -z "${addr}" ]]; then
@@ -576,41 +580,13 @@ pair_with_edge() {
         head -30 "${RUN_LOG}"
         return 1
     fi
-
-    # The token is a biscuit: one long run of base64url alone on its
-    # line. Requiring that shape means an interleaved tracing line
-    # cannot be mistaken for it, however the two streams land.
-    token="$(awk '
-        /edge: admin token/ { seen = 1; next }
-        seen {
-            line = $0
-            gsub(/[[:space:]]/, "", line)
-            if (line ~ /^[A-Za-z0-9_=-]+$/ && length(line) >= 40) {
-                print line
-                exit
-            }
-        }
-    ' "${RUN_LOG}")"
-    # Printed once, on the first run against a fresh state directory —
-    # and every test here starts its own daemon against the *same*
-    # state directory, so only the first of them sees it. The identity
-    # is durable, so the token the first run printed stays valid for
-    # every daemon after it; what changes is the address, which is why
-    # pairing still has to happen each time.
-    # Cached in a file, not a variable: most callers reach this through
-    # `$(fq_trigger ...)`, and a command substitution is a subshell —
-    # a variable set in there is gone by the time the next test needs
-    # it, which is exactly when the token is no longer being printed.
-    if [[ -n "${token}" ]]; then
-        printf '%s\n' "${token}" > "${TMP_ROOT}/admin-token"
-    elif [[ -r "${TMP_ROOT}/admin-token" ]]; then
-        token="$(cat "${TMP_ROOT}/admin-token")"
-    fi
-    if [[ -z "${token}" ]]; then
-        fail "could not read the admin token from ${RUN_LOG}"
+    if [[ ! -r "${edge_dir}/admin.token" || ! -r "${edge_dir}/fingerprint" ]]; then
+        fail "no admin.token / fingerprint under ${edge_dir}"
         head -30 "${RUN_LOG}"
         return 1
     fi
+    token="$(<"${edge_dir}/admin.token")"
+    fingerprint="$(<"${edge_dir}/fingerprint")"
 
     # Client verbs dial `[edge] bind` from config, while `fq connect`
     # stores the pairing under the address it is handed — so the two
@@ -619,7 +595,7 @@ pair_with_edge() {
     # nothing rereads it, so writing the resolved address back is safe.
     write_config "${addr}"
 
-    if ! "${FQ_BIN}" connect "${addr}" --token "${token}" \
+    if ! "${FQ_BIN}" connect "${addr}" --token "${token}" --fingerprint "${fingerprint}" \
         > "${TMP_ROOT}/connect.log" 2>&1; then
         fail "fq connect failed"
         head -20 "${TMP_ROOT}/connect.log"

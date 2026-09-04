@@ -74,13 +74,13 @@ Every `fq` verb below asks the daemon a question or gives it an order over its a
 just run
 ```
 
-It prints the address its edge is listening on and — on the very first run only — an admin token. Pair with those:
+It prints the address its edge is listening on and its certificate fingerprint, and — on the very first run only — writes the admin token to `~/.local/state/factor-q/edge/admin.token` (owner-only; it is never printed, so it never ends up in a log). Pair with those:
 
 ```sh
-just fq connect <edge-address> --token <token>
+just fq connect <edge-address> --token "$(cat ~/.local/state/factor-q/edge/admin.token)"
 ```
 
-The pairing is stored in `$XDG_CONFIG_HOME/factor-q/connections.toml` and pins the daemon's certificate, so you do this once per daemon.
+From a terminal, `fq connect` shows the fingerprint the daemon presents and asks you to confirm it matches the one the daemon printed. From a script there is no prompt: pass `--fingerprint "$(cat ~/.local/state/factor-q/edge/fingerprint)"`, or it refuses rather than trust whatever answered. The pairing is stored in `$XDG_CONFIG_HOME/factor-q/connections.toml` and pins the daemon's certificate, so you do this once per daemon.
 
 ## 5. Run an agent
 

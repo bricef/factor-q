@@ -39,18 +39,22 @@ docker compose up -d
 fq agent validate agents/sample-agent.md
 
 # Start the daemon from this directory, so it reads fqd.toml. On its
-# first run it prints a certificate fingerprint and an admin token,
-# once — keep the token.
+# first run it prints a certificate fingerprint and writes the admin
+# token — once, owner-only, never to stdout — to <state>/edge/admin.token
+# (the state dir is ~/.local/state/factor-q unless fqd.toml's [state]
+# directory or FQ_STATE_DIR says otherwise).
 fqd
 ```
 
 Then, in another shell, pair the client with it. The edge listens on
-`127.0.0.1:9472` unless `fqd.toml`'s `[edge] bind` says otherwise, and
-the first connection asks you to confirm the fingerprint the daemon
-printed:
+`127.0.0.1:9472` unless `fqd.toml`'s `[edge] bind` says otherwise. From
+a terminal the first connection shows the fingerprint the daemon
+printed and asks you to confirm it; from a script pass
+`--fingerprint "$(cat <state>/edge/fingerprint)"` — without a terminal
+`fq connect` refuses to pair on trust alone:
 
 ```sh
-fq connect 127.0.0.1:9472 --token <token>
+fq connect 127.0.0.1:9472 --token "$(cat ~/.local/state/factor-q/edge/admin.token)"
 
 # List the agents the daemon loaded
 fq agent list

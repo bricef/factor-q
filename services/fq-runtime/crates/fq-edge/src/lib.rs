@@ -26,6 +26,7 @@ pub mod wire;
 pub use auth::EdgeIdentity;
 pub use auth::IdentityOrigin;
 pub use auth::attenuate;
+pub use auth::{ADMIN_TOKEN_FILE, FINGERPRINT_FILE};
 pub use auth::{fingerprint_hex, parse_fingerprint_hex};
 pub use client::EdgeClient;
 pub use client::probe_fingerprint;

@@ -52,14 +52,6 @@ fn suffix_of<'a>(log: &'a str, prefix: &str) -> &'a str {
         .trim()
 }
 
-fn line_after<'a>(log: &'a str, needle: &str) -> &'a str {
-    let mut lines = log.lines();
-    lines
-        .find(|l| l.contains(needle))
-        .unwrap_or_else(|| panic!("log lacks {needle:?}\n--- log ---\n{log}"));
-    lines.next().expect("line after marker").trim()
-}
-
 fn parse_fingerprint(hex: &str) -> [u8; 32] {
     assert_eq!(hex.len(), 64, "fingerprint must be 32 hex bytes: {hex:?}");
     let mut out = [0u8; 32];
@@ -106,7 +98,7 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
     };
     let fingerprint_hex =
         suffix_of(&text, "edge: certificate fingerprint (clients pin this): ").to_string();
-    let admin_token = line_after(&text, "edge: admin token").to_string();
+    let admin_token = fq_test_support::admin_token(&scratch.join("state"));
     let addr = suffix_of(&text, "- edge is listening on ").to_string();
 
     // --- fq connect: TOFU, non-interactive → auto-accept + notice.

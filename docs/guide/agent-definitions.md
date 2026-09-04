@@ -41,10 +41,10 @@ of them do anything:
 fq agent validate agents/greeter.md     # offline; needs no daemon
 
 fqd                                     # (another terminal) start the daemon —
-                                        # it prints a certificate fingerprint
-                                        # and an admin token once, on its first
-                                        # run
-fq connect 127.0.0.1:9472 --token <token>
+                                        # on its first run it prints a certificate
+                                        # fingerprint and writes the admin token to
+                                        # ~/.local/state/factor-q/edge/admin.token
+fq connect 127.0.0.1:9472 --token "$(cat ~/.local/state/factor-q/edge/admin.token)"
 
 fq trigger greeter "Hello!"
 ```
