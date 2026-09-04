@@ -220,8 +220,9 @@ round-trips for OpenAI-compatible and Anthropic providers, confirmed live
 on 2026-09-04 (kimi-k3 via OpenRouter, `claude-opus-5`, `gpt-4o-mini` as
 control): every reasoning part was carried byte-for-byte into the next
 request (`experiments/reasoning-round-trip/`, live run section). The
-Anthropic path still rides a fork of `genai` pinned to a rev until its
-one-line fix lands upstream.
+Anthropic path no longer rides a fork of `genai`: upstream `0.7.0-beta.21`
+carries the signed-thinking fix, and the switch is pinned by wire goldens
+that did not move.
 
 Issue #424's block on #437 stands, but its stated premise — *"`events`
 has fan-in 10, the parts change ripples through the same ten modules"* —
