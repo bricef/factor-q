@@ -20,6 +20,19 @@ use crate::cli::GlobalArgs;
 use crate::pricing::build_validated_pricing;
 use crate::version::FQ_VERSION;
 
+/// Dial the broker. The token comes from the environment variable
+/// `[nats] token_env` names and reaches the bus as its own argument;
+/// `config.nats.url` was refused at validation if it carried userinfo,
+/// so the URL in this error context — like the banner that prints it and
+/// the `system.startup` payload that records it — is credential-free by
+/// construction rather than by redaction (#540).
+async fn connect_bus(config: &fq_runtime::Config) -> anyhow::Result<EventBus> {
+    let token = config.nats.resolve_token()?;
+    EventBus::connect_with_token(&config.nats.url, token.as_deref())
+        .await
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))
+}
+
 /// Lifecycle events are published on `fq.system.*` so operators
 /// can see from the event stream when the daemon started, why it
 /// stopped, and which hosted task (if any) failed. Nine tasks are
@@ -93,10 +106,8 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     );
     let registry = Arc::new(registry);
 
-    // Connect NATS (ensures both streams exist).
-    let bus = EventBus::connect(&config.nats.url)
-        .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    // Connect NATS (ensures the streams exist); `connect_bus` has the token.
+    let bus = connect_bus(&config).await?;
 
     // Open the three per-store databases (#262 split layout):
     // ProjectionStore (rebuildable from NATS), ControlPlaneStore

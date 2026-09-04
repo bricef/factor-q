@@ -116,6 +116,10 @@ impl GlobalArgs {
         if let Some(dir) = &self.state_dir {
             config.state.directory = dir.clone();
         }
+        // An override can carry the same mistake the file can: an
+        // `FQ_NATS_URL` with userinfo is refused here, after the merge,
+        // with the message that names `[nats] token_env` (#540).
+        config.validate()?;
         Ok(config)
     }
 }

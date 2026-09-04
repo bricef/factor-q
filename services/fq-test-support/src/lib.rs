@@ -86,6 +86,19 @@ impl NatsServer {
     /// Panics — rather than skips — if the binary is missing or never comes
     /// up. A test that cannot get a broker has not passed.
     pub fn start() -> Self {
+        Self::start_with(None)
+    }
+
+    /// Start a server that requires `token` on every connection — the shape
+    /// of the dev broker and the dogfood host — for tests that prove a
+    /// credential reaches the broker without ever entering a URL (#540).
+    /// [`url`](Self::url) is still `nats://127.0.0.1:<port>`: the token is
+    /// the caller's to present as a connect option.
+    pub fn start_with_token(token: &str) -> Self {
+        Self::start_with(Some(token))
+    }
+
+    fn start_with(token: Option<&str>) -> Self {
         let bin =
             std::env::var("FQ_TEST_NATS_SERVER").unwrap_or_else(|_| "nats-server".to_string());
 
@@ -110,11 +123,12 @@ impl NatsServer {
         // ourselves and handing the number over would be a TOCTOU race.
         //
         // `-a 127.0.0.1` because the default bind is 0.0.0.0 and the server
-        // is unauthenticated with JetStream enabled: on a box with a public
-        // interface that would expose every test broker — and any orphan a
-        // hard kill leaves behind — to the network. Loopback also pins the
-        // ports file to loopback URLs, so taking its first entry stops
-        // depending on nats-server's interface ordering.
+        // is (by default) unauthenticated with JetStream enabled: on a box
+        // with a public interface that would expose every test broker —
+        // and any orphan a hard kill leaves behind — to the network.
+        // Loopback also pins the ports file to loopback URLs, so taking
+        // its first entry stops depending on nats-server's interface
+        // ordering.
         let mut cmd = Command::new(&bin);
         cmd.arg("-a")
             .arg("127.0.0.1")
@@ -127,6 +141,9 @@ impl NatsServer {
             .arg(dir.join("js"))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(token) = token {
+            cmd.arg("--auth").arg(token);
+        }
 
         // Drop kills the server, but a SIGKILLed test runner never runs
         // Drop. On Linux the kernel delivers SIGKILL to the server when the

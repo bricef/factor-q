@@ -402,7 +402,12 @@ pub struct SystemStartupPayload {
     /// Version of the fq binary (the value of `CARGO_PKG_VERSION`
     /// at build time).
     pub version: String,
-    /// NATS URL the daemon is connected to.
+    /// The broker URL the daemon connected to — host and port only.
+    /// The credential is never part of it: `[nats] url` is refused at
+    /// validation if it carries userinfo, and the token travels through
+    /// `[nats] token_env` instead (#540). `event.get` serves this
+    /// payload whole to any `read:event` holder, which is why the
+    /// guarantee is structural rather than a redaction pass.
     pub nats_url: String,
     /// Number of agents loaded from the configured agents
     /// directory at startup.

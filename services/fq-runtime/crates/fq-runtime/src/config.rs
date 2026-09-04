@@ -18,6 +18,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+mod error;
+mod nats;
+pub use error::ConfigError;
+pub use nats::NatsConfig;
+
 /// Runtime configuration for the factor-q daemon.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -303,12 +308,6 @@ impl Default for WorkerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct NatsConfig {
-    #[serde(default = "default_nats_url")]
-    pub url: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct AgentsConfig {
     #[serde(default = "default_agents_directory")]
     pub directory: PathBuf,
@@ -578,10 +577,6 @@ fn default_summary_max_line_chars() -> usize {
     120
 }
 
-fn default_nats_url() -> String {
-    "nats://localhost:4222".to_string()
-}
-
 fn default_cache_dir_for_config() -> PathBuf {
     crate::pricing::default_cache_dir()
 }
@@ -607,14 +602,6 @@ fn default_drain_deadline_ms() -> u64 {
 
 fn default_anthropic_api_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
-}
-
-impl Default for NatsConfig {
-    fn default() -> Self {
-        Self {
-            url: default_nats_url(),
-        }
-    }
 }
 
 impl Default for AgentsConfig {
@@ -692,7 +679,16 @@ impl Config {
         if !ignored.is_empty() {
             return Err(ConfigError::UnknownKeys(ignored));
         }
+        config.validate()?;
         Ok(config)
+    }
+
+    /// The checks that must hold on the *effective* config — the
+    /// parsed file here, and again in the daemon after its flag and
+    /// environment overrides are merged, since `FQ_NATS_URL` can carry
+    /// the same mistake the file can.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.nats.validate()
     }
 
     /// Load configuration from a file, returning an error if the file is
@@ -767,32 +763,6 @@ impl Config {
         }
         Ok(value)
     }
-}
-
-/// Errors arising from configuration loading and secret resolution.
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    #[error("failed to read config file {path}: {source}")]
-    ReadFile {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    /// Keys the config does not know. Named in full, because the
-    /// point of the error is telling the operator which line of theirs
-    /// did nothing.
-    #[error("unknown setting(s) in config: {} — check the spelling and the table they are under", .0.join(", "))]
-    UnknownKeys(Vec<String>),
-
-    #[error("invalid TOML in config file: {0}")]
-    InvalidToml(String),
-
-    #[error("provider '{0}' is not configured")]
-    ProviderNotConfigured(&'static str),
-
-    #[error("required secret not set in environment variable: {env_var}")]
-    SecretNotSet { env_var: String },
 }
 
 #[cfg(test)]
