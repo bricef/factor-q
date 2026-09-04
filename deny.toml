@@ -1,0 +1,110 @@
+# cargo-deny policy — the reviewed dependency baseline for the workspace.
+#
+# `just audit` runs `cargo audit` (the RustSec view of Cargo.lock) and
+# `cargo deny check` (this policy: advisories, licences, sources, bans),
+# as a phase of `just ci` and as the "Dependency audit" CI job (#406).
+#
+# This file is the ONE list of accepted findings. Every entry in
+# `advisories.ignore` is a single advisory id with the reason it cannot be
+# fixed yet, and `just audit` hands the same ids to `cargo audit`, so the
+# two tools cannot drift apart. There is no blanket allow anywhere here, and
+# adding one is the wrong fix: fix the dependency, or add one more explained
+# line and expect it to be questioned at review.
+#
+# Semantics (cargo-deny 0.20, advisories/licences "version 2"): every
+# vulnerability, unsound and unmaintained advisory not listed below is an
+# error, and so is a yanked crate. cargo-deny has no "warn" level for
+# unsound or unmaintained any more — the only way past a finding is an
+# explained ignore, which is what makes this a reviewed baseline rather
+# than a threshold. When a dependency moves, an ignore whose crate has left
+# the graph is reported as unmatched; delete it.
+
+[graph]
+# Resolve with every workspace feature on, so a crate reachable only behind
+# an optional feature (fq-store's `bus`, `cli`, `service`) is still checked.
+# Cargo.lock is feature-independent, so this is the graph that matches what
+# cargo audit scans.
+all-features = true
+
+[advisories]
+version = 2
+# A yanked release was pulled for a reason; `cargo update -p <crate>` clears it.
+yanked = "deny"
+ignore = [
+    # rsa 0.9 — Marvin timing side-channel (CVE-2023-49092). No patched
+    # release exists (RustCrypto/RSA#626). It reaches the lockfile only as an
+    # optional dependency of sqlx-mysql; the workspace enables sqlx's sqlite
+    # backend alone, so no built binary links it. Re-check on every sqlx bump.
+    # cargo-deny reports this entry as "not encountered" — that is the point:
+    # the crate is outside every built feature, so it is absent from the
+    # resolved graph. cargo audit scans the flat lockfile and needs the id.
+    { id = "RUSTSEC-2023-0071", reason = "rsa: no fixed release; lockfile-only via sqlx-mysql, no built feature reaches it" },
+    # bincode 1.3 is unmaintained. tarpc 0.37's `serde-transport-bincode`
+    # frames every edge request with it (tarpc → tokio-serde → bincode).
+    # Leaving it is a wire-format change for the edge transport — an ADR,
+    # not a dependency bump.
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1: tarpc's serde-transport-bincode codec; replacing it is an edge wire-format change" },
+    # paste is unmaintained (archived by its author). A proc-macro dependency
+    # of the genai fork pinned by rev in Cargo.toml — build-time only, never
+    # linked into a binary. Goes when upstream genai drops it.
+    { id = "RUSTSEC-2024-0436", reason = "paste: build-time proc-macro dependency of the pinned genai fork" },
+    # proc-macro-error2 is unmaintained. Reached only through biscuit-quote,
+    # the proc-macro half of biscuit-auth 6 — build-time only. Goes when
+    # biscuit-quote migrates off it.
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2: build-time dependency of biscuit-quote (biscuit-auth 6)" },
+    # rustls-pemfile is unmaintained (its API moved into rustls-pki-types).
+    # Pulled by async-nats 0.38 directly and through rustls-native-certs 0.7;
+    # async-nats 0.46+ switched to rustls-pki-types and 0.47 moved to
+    # rustls-native-certs 0.8, so the async-nats bump (#539) retires this.
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: via async-nats 0.38 / rustls-native-certs 0.7; cleared by the async-nats bump" },
+]
+
+[licenses]
+version = 2
+# Exactly the permissive licences the dependency graph uses today — one
+# satisfied branch of each crate's SPDX expression is enough, so a crate
+# offered as "X OR MIT" needs only MIT here. cargo-deny reports an entry no
+# crate uses; remove it. Adding one is a review decision, not a build fix.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",         # the icu_* crates, unicode-ident
+    "Zlib",                # foldhash
+    "CDLA-Permissive-2.0", # webpki-roots / webpki-root-certs (Mozilla's CA bundle)
+]
+# The workspace's own crates are BUSL-1.1 (see /LICENSE). The licence is
+# accepted for them by name rather than added to `allow`, so a BUSL — or any
+# other non-permissive — *dependency* can never slip in under the project's
+# own licence. A new workspace member needs a line here, and
+# `license.workspace = true` in its manifest, which the unlicensed check
+# enforces.
+exceptions = [
+    { allow = ["BUSL-1.1"], crate = "fq-agent" },
+    { allow = ["BUSL-1.1"], crate = "fq-cli" },
+    { allow = ["BUSL-1.1"], crate = "fq-daemon" },
+    { allow = ["BUSL-1.1"], crate = "fq-dashboard" },
+    { allow = ["BUSL-1.1"], crate = "fq-edge" },
+    { allow = ["BUSL-1.1"], crate = "fq-lint" },
+    { allow = ["BUSL-1.1"], crate = "fq-ops" },
+    { allow = ["BUSL-1.1"], crate = "fq-runtime" },
+    { allow = ["BUSL-1.1"], crate = "fq-store" },
+    { allow = ["BUSL-1.1"], crate = "fq-test-support" },
+    { allow = ["BUSL-1.1"], crate = "fq-tools" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The one git dependency: the genai fork, pinned to a rev in Cargo.toml until
+# upstream lands the reasoning-parts work (#437). Exactly this repository —
+# no org-wide allow.
+allow-git = ["https://github.com/bricef/rust-genai"]
+
+[bans]
+# Duplicate major versions cost build time and binary size but are not a
+# security finding; reported, not gated.
+multiple-versions = "warn"
