@@ -8,7 +8,7 @@ pub mod report_outcome;
 mod self_inspect;
 
 pub use discovery::{FileListTool, FileSearchTool};
-pub use exec::{ExecConfig, ExecTool};
+pub use exec::{DEFAULT_CHILD_PATH, ExecConfig, ExecTool};
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
 pub use report_outcome::{REPORT_OUTCOME_TOOL_NAME, ReportOutcomeTool, TASK_STATUS_VALUES};

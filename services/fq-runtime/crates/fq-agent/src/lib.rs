@@ -67,11 +67,19 @@ pub const WORKSPACE_TOKEN: &str = "${workspace}";
 #[derive(Debug, Clone)]
 pub struct McpServerDeclaration {
     pub server: String,
-    /// Executable for the stdio transport. `None` when the server is
-    /// reached over Streamable HTTP (`url`); exactly one of `command`
-    /// or `url` is set.
+    /// Executable for the stdio transport, resolved on the daemon's
+    /// PATH. `None` when the server is reached over Streamable HTTP
+    /// (`url`); exactly one of `command` or `url` is set. The child
+    /// starts with a constructed environment — a pinned `PATH` plus the
+    /// directory `command` resolved to, then `env` — in a working
+    /// directory of its own under the daemon's state dir; it inherits
+    /// neither the daemon's environment nor its cwd (#541).
     pub command: Option<String>,
     pub args: Vec<String>,
+    /// The child's environment beyond `PATH`: exactly these pairs, and
+    /// nothing inherited. A server that needs `HOME`, a proxy setting or
+    /// a credential is given it here, where a reader of the definition
+    /// can see it.
     pub env: Vec<(String, String)>,
     /// Streamable HTTP endpoint (the 2025-11-25 remote transport). When
     /// set, `command` / `args` / `env` are unused.
