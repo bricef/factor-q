@@ -137,7 +137,11 @@ mod tests {
         fq_edge::auth::verify_token(token.trim(), identity.public_key())
             .expect("the file holds a token the identity's root signed");
         #[cfg(unix)]
-        assert_eq!(mode_of(&token_path), 0o600, "admin.token must be owner-only");
+        assert_eq!(
+            mode_of(&token_path),
+            0o600,
+            "admin.token must be owner-only"
+        );
 
         let fingerprint_path = dir.join(FINGERPRINT_FILE);
         let fingerprint = std::fs::read_to_string(&fingerprint_path).expect("fingerprint written");
@@ -168,7 +172,10 @@ mod tests {
         let dir = state.join("edge");
         EdgeIdentity::provision().unwrap().save(&dir).unwrap();
         std::fs::remove_file(dir.join(FINGERPRINT_FILE)).unwrap();
-        assert!(!dir.join(ADMIN_TOKEN_FILE).exists(), "save() mints no token");
+        assert!(
+            !dir.join(ADMIN_TOKEN_FILE).exists(),
+            "save() mints no token"
+        );
 
         let (identity, _) = resolve(&config_with(&state, &cache)).unwrap();
         assert_eq!(

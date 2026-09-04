@@ -69,7 +69,10 @@ fn non_interactive_connect_without_a_pin_refuses_before_dialing() {
         Err(e) => panic!("unexpected accept error: {e}"),
     }
     assert!(
-        !xdg.path().join("factor-q").join("connections.toml").exists(),
+        !xdg.path()
+            .join("factor-q")
+            .join("connections.toml")
+            .exists(),
         "a refused pairing must store nothing"
     );
 }
