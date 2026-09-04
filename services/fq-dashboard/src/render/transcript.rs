@@ -155,26 +155,32 @@ pub fn transcript_entry_html(entry: &TranscriptEntry, now_ms: i64) -> String {
 /// line and its raw form behind a second disclosure — "we hold this, we
 /// cannot render it, here it is" — rather than being silently dropped for
 /// having no text.
+///
+/// "Has text" means readable text: a signed block whose text is the empty
+/// string (Anthropic does return these, #537) is the opaque case wearing
+/// a `Some("")`, and gets the opaque treatment rather than a `signed`
+/// disclosure over a blank. The fourth state — nothing to read *and*
+/// nothing carried — is labelled `empty` and given no raw disclosure,
+/// because there is nothing to disclose; it is still a row, because the
+/// turn did produce a reasoning part.
 fn reasoning_html(reasoning: &fq_ops::transcript::TurnReasoning) -> String {
     let mut b = String::new();
-    let label = match (&reasoning.text, &reasoning.opaque) {
-        (Some(_), Some(_)) => "reasoning · signed",
-        (Some(_), None) => "reasoning",
-        (None, Some(_)) => "reasoning · opaque",
-        // `reduce_reasoning` never builds this, but rendering must not
-        // depend on that invariant holding elsewhere.
-        (None, None) => "reasoning",
+    let (label, body) = match (reasoning.readable_text(), &reasoning.opaque) {
+        (Some(text), Some(_)) => ("reasoning · signed", format!("<pre>{}</pre>", esc(text))),
+        (Some(text), None) => ("reasoning", format!("<pre>{}</pre>", esc(text))),
+        (None, Some(_)) => (
+            "reasoning · opaque",
+            r#"<p class="muted">No readable text — this turn's reasoning is carried as an opaque provider token.</p>"#.to_string(),
+        ),
+        (None, None) => (
+            "reasoning · empty",
+            r#"<p class="muted">Nothing to read — this turn produced a reasoning part with no text and no provider token.</p>"#.to_string(),
+        ),
     };
     b.push_str(&format!(
-        r#"<details class="reasoning"><summary>{}</summary>"#,
+        r#"<details class="reasoning"><summary>{}</summary>{body}"#,
         esc(label)
     ));
-    match &reasoning.text {
-        Some(text) => b.push_str(&format!("<pre>{}</pre>", esc(text))),
-        None => b.push_str(
-            r#"<p class="muted">No readable text — this turn's reasoning is carried as an opaque provider token.</p>"#,
-        ),
-    }
     if let Some(raw) = &reasoning.opaque {
         b.push_str(&format!(
             r#"<details class="raw"><summary>opaque — click to see raw</summary><pre>{}</pre></details>"#,

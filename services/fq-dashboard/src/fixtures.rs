@@ -260,6 +260,34 @@ fn transcript_entries() -> Vec<fq_ops::transcript::TranscriptEntry> {
             ),
             is_error: Some(false),
         },
+        TranscriptEntry::Assistant {
+            timestamp_ms: NOW_MS - 570_000,
+            model: "claude-opus-4-8".to_string(),
+            content: None,
+            // Reasoning carried but not readable: a signed thinking block
+            // whose text is empty, which Anthropic does return (#537). At
+            // the operator boundary that is the opaque state — the
+            // `opaque` label and the raw disclosure, never a heading over
+            // a blank — and the screenshot is where that is checked.
+            reasoning: Some(fq_ops::transcript::TurnReasoning {
+                text: None,
+                opaque: Some(serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": "EqQBCkYIBxgCKkDb3nJx…"
+                })),
+            }),
+            tool_calls: vec![AssistantToolCall {
+                tool_call_id: "tc-2".to_string(),
+                tool_name: "file_write".to_string(),
+                parameters: serde_json::json!({
+                    "path": "\"${workspace}/notes.md\"",
+                    "content": "# Notes\n"
+                }),
+            }],
+            cost_usd: Some(0.0127),
+            is_error: Some(false),
+        },
         TranscriptEntry::ToolResult {
             timestamp_ms: NOW_MS - 560_000,
             tool_call_id: "tc-2".to_string(),

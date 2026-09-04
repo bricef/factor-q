@@ -85,19 +85,36 @@ pub enum TranscriptEntry {
 /// present-and-opaque rather than dropped. Rendering may collapse the
 /// two; this type may not.
 ///
-/// The four honest states:
+/// The honest states:
 ///
 /// | `text` | `opaque` | meaning |
 /// |---|---|---|
 /// | — | — | *(the field is `None`; the turn had no reasoning)* |
 /// | set | none | readable working, nothing withheld (Kimi, DeepSeek) |
 /// | set | set | readable working plus a token we carry but cannot read (Anthropic `thinking`) |
-/// | none | set | no readable text at all; the token **is** the content (`redacted_thinking`) |
+/// | none | set | no readable text; the token **is** the content (`redacted_thinking`, and an Anthropic `thinking` block whose text is empty but signed — which the API does return) |
+/// | none | none | a reasoning part with nothing in it: no text, no token. Present, so not absent; renders as *empty*, never as nothing |
+///
+/// **`text` is readable text, or nothing.** A part whose text is empty
+/// after trimming reduces to `None` here, so `Some("")` never reaches a
+/// renderer to be drawn as a heading over a blank — which reads as "the
+/// model reasoned about nothing" when the truth is the fourth row, opaque.
+/// Renderers ask `readable_text()` rather than `text.is_some()`, so a
+/// value built elsewhere with `Some("")` still renders honestly.
+///
+/// The last row is the degenerate case. No provider shape the reducer
+/// knows produces it on purpose, but `Plain { text: "" }` is
+/// representable and a renderer must not decide the case by accident:
+/// the part was returned and is carried, so by I7 it is *present, not
+/// readable* — the same family as opaque, minus the token — and it says
+/// so rather than rendering as a turn that never reasoned.
 ///
 /// [ADR-0034]: https://github.com/bricef/factor-q/blob/main/docs/adrs/accepted/0034-reasoning-as-a-content-part.md
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct TurnReasoning {
-    /// Readable working, when the provider exposed any.
+    /// Readable working, when the provider exposed any. Never an empty
+    /// string: a part with nothing to read reduces to `None` here, because
+    /// an empty string is not working the model showed us.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Provider content carried but not interpretable here. `None` means
@@ -114,6 +131,20 @@ impl TurnReasoning {
     /// `Option<String>`.
     pub fn has_opaque(&self) -> bool {
         self.opaque.is_some()
+    }
+
+    /// The text worth showing, if there is any: `text` when it holds
+    /// something other than whitespace, else `None`.
+    ///
+    /// **The one place "is there anything to read?" is answered**, so the
+    /// CLI and the dashboard cannot disagree about it. Branching on
+    /// `text.is_some()` is what drew an empty `reasoning:` heading over
+    /// a signed block with no text ([#537]); an empty string is not
+    /// working the model showed us, it is working it withheld.
+    ///
+    /// [#537]: https://github.com/bricef/factor-q/issues/537
+    pub fn readable_text(&self) -> Option<&str> {
+        self.text.as_deref().filter(|text| !text.trim().is_empty())
     }
 }
 
@@ -295,20 +326,7 @@ pub fn render_pretty(entries: &[TranscriptEntry], options: RenderOptions) -> Str
                 if let Some(r) = reasoning
                     && options.reasoning
                 {
-                    match &r.text {
-                        Some(text) => {
-                            out.push_str("  reasoning:\n");
-                            out.push_str(&indent(&indent(&truncate(text, truncate_bytes))));
-                            out.push('\n');
-                        }
-                        // Present but unreadable is not the same as
-                        // absent, and a transcript that showed nothing
-                        // here would be saying the wrong one.
-                        None => out.push_str("  reasoning: [opaque — carried, not readable]\n"),
-                    }
-                    if r.has_opaque() && r.text.is_some() {
-                        out.push_str("  reasoning: [+ an opaque provider token]\n");
-                    }
+                    out.push_str(&render_reasoning(r, truncate_bytes));
                 }
                 match content {
                     Some(c) if !c.is_empty() => {
@@ -352,6 +370,40 @@ pub fn render_pretty(entries: &[TranscriptEntry], options: RenderOptions) -> Str
                 out.push_str(&format!("── run {phase} ────────────────────────────\n"));
             }
         }
+    }
+    out
+}
+
+/// One turn's reasoning as `--reasoning` prints it. Every state in the
+/// [`TurnReasoning`] table gets a line that says which one it is:
+/// readable text under a heading (plus a note when a token rides along),
+/// or a single bracketed line for the two states with nothing to read.
+///
+/// Present-but-unreadable is not absent, and a transcript that showed
+/// nothing here would be saying the wrong one. Nor is it a heading over
+/// a blank, which says "reasoned about nothing" — the empty-text signed
+/// block of [#537] is opaque and is printed as such.
+///
+/// [#537]: https://github.com/bricef/factor-q/issues/537
+fn render_reasoning(r: &TurnReasoning, truncate_bytes: Option<usize>) -> String {
+    let mut out = String::new();
+    match r.readable_text() {
+        Some(text) => {
+            out.push_str("  reasoning:\n");
+            out.push_str(&indent(&indent(&truncate(text, truncate_bytes))));
+            out.push('\n');
+            if r.has_opaque() {
+                out.push_str("  reasoning: [+ an opaque provider token]\n");
+            }
+        }
+        None if r.has_opaque() => {
+            out.push_str("  reasoning: [opaque — carried, not readable]\n");
+        }
+        // Nothing to read and nothing carried, yet the part exists. Say
+        // so — "empty" rather than "opaque", because no token is being
+        // held back; and a line rather than silence, because silence
+        // means the turn never reasoned.
+        None => out.push_str("  reasoning: [empty — present, nothing to read]\n"),
     }
     out
 }

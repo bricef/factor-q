@@ -1197,3 +1197,70 @@ fn readable_reasoning_is_collapsed_not_omitted() {
         "nothing is withheld here, so no raw disclosure: {html}"
     );
 }
+
+fn turn_with_reasoning(reasoning: fq_ops::transcript::TurnReasoning) -> String {
+    let entry = fq_ops::transcript::TranscriptEntry::Assistant {
+        timestamp_ms: 0,
+        model: "claude-opus-5".to_string(),
+        content: None,
+        reasoning: Some(reasoning),
+        tool_calls: Vec::new(),
+        cost_usd: None,
+        is_error: None,
+    };
+    super::transcript_entry_html(&entry, 1_000)
+}
+
+/// #537 on the page: a signed block whose text is the empty string is the
+/// opaque case, and gets the opaque treatment — the `opaque` label and
+/// the raw disclosure — not a `signed` disclosure over a blank `<pre>`.
+/// Built with `Some("")` on purpose: the reducer no longer produces it,
+/// and the renderer must not depend on that.
+#[test]
+fn empty_text_signed_reasoning_renders_as_opaque() {
+    let html = turn_with_reasoning(fq_ops::transcript::TurnReasoning {
+        text: Some(String::new()),
+        opaque: Some(serde_json::json!({
+            "type": "thinking",
+            "thinking": "",
+            "signature": "EqQBCkYIBxgC…",
+        })),
+    });
+    assert!(
+        html.contains("<summary>reasoning · opaque</summary>"),
+        "an empty-text signed block is opaque, and must be labelled so: {html}"
+    );
+    assert!(
+        !html.contains("reasoning · signed"),
+        "…not signed, which promises text to read: {html}"
+    );
+    assert!(!html.contains("<pre></pre>"), "no blank body: {html}");
+    assert!(
+        html.contains("click to see raw"),
+        "the token is the content, so its raw form must be reachable: {html}"
+    );
+}
+
+/// The degenerate case: nothing to read and nothing carried. Labelled
+/// `empty` — a row, because the turn produced a reasoning part; no raw
+/// disclosure, because there is nothing to disclose; and not the opaque
+/// wording, because nothing is being held back. `None` and a `Some("")`
+/// built elsewhere render the same.
+#[test]
+fn empty_reasoning_is_labelled_empty_not_opaque() {
+    for text in [None, Some(String::new())] {
+        let html = turn_with_reasoning(fq_ops::transcript::TurnReasoning { text, opaque: None });
+        assert!(
+            html.contains("<summary>reasoning · empty</summary>"),
+            "a part with nothing in it is still a part: {html}"
+        );
+        assert!(
+            !html.contains("opaque"),
+            "nothing is carried, so nothing is opaque: {html}"
+        );
+        assert!(
+            !html.contains("click to see raw"),
+            "nothing to disclose: {html}"
+        );
+    }
+}
