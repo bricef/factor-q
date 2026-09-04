@@ -1519,7 +1519,7 @@ dependencies = [
  "fq-tools",
  "futures",
  "genai",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "libc",
  "proptest",
  "reqwest 0.12.28",

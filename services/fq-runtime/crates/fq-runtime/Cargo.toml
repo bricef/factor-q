@@ -38,7 +38,7 @@ uuid = { workspace = true, features = ["serde"] }
 chrono = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 bytes = "1"
-getrandom = "0.3"
+getrandom = "0.4"
 toml = { workspace = true }
 async-trait = { workspace = true }
 # Pointed at our fork, pinned to a commit.
