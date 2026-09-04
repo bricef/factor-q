@@ -35,9 +35,14 @@ nats_bin := justfile_directory() / ".tools" / "nats-server"
 # own private broker (#233) and points the code under test at that, so
 # `just test` ignores this. Override by exporting FQ_NATS_URL before
 # invoking just.
-# The dev broker requires token auth (infrastructure/nats/nats.conf);
-# the credential rides in the URL userinfo (see bus.rs url_credentials).
-export FQ_NATS_URL := env_var_or_default("FQ_NATS_URL", "nats://fq-dev-token@127.0.0.1:4222")
+# The dev broker requires token auth (infrastructure/nats/nats.conf). The
+# token travels separately from the URL: the URL is host and port only —
+# the daemon refuses one with userinfo, because it prints the URL in its
+# banner, log and startup event (#540) — and the daemon reads the token
+# from the variable its `[nats] token_env` names. The smoke and drill
+# configs, and the `fq init` template, name FQ_NATS_TOKEN.
+export FQ_NATS_URL := env_var_or_default("FQ_NATS_URL", "nats://127.0.0.1:4222")
+export FQ_NATS_TOKEN := env_var_or_default("FQ_NATS_TOKEN", "fq-dev-token")
 
 # Tests that spawn a private broker (#233) find nats-server here — the pinned
 # binary `just install-nats` drops in .tools/, so a plain `just test` works
@@ -710,7 +715,11 @@ up: infra-up build-runtime
 # Stop infrastructure
 down: infra-down
 
-# Start the runtime in the foreground (brings up infra, builds, runs)
+# Start the runtime in the foreground (brings up infra, builds, runs).
+# Run it from a project directory whose fqd.toml names
+# `[nats] token_env = "FQ_NATS_TOKEN"` (what `fq init` writes): the dev
+# broker requires the token, and the justfile exports the value but a
+# daemon only reads the variable its config names (#540).
 [no-cd]
 run: infra-up build-runtime
     cargo run --quiet --manifest-path {{justfile_directory()}}/Cargo.toml --bin fqd --

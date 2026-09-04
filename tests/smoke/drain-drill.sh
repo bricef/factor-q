@@ -186,9 +186,15 @@ section "scratch project"
 
 mkdir -p "${TMP_ROOT}/agents" "${TMP_ROOT}/workspace" "${TMP_ROOT}/cache"
 
+# The broker token is read by the daemon from the variable the config
+# names — never from the URL, which it prints (#540). `just drill`
+# exports the dev broker's; a direct run gets the same default.
+export FQ_NATS_TOKEN="${FQ_NATS_TOKEN:-fq-dev-token}"
+
 cat > "${TMP_ROOT}/fqd.toml" <<EOF
 [nats]
-url = "${FQ_NATS_URL:-nats://fq-dev-token@127.0.0.1:4222}"
+url = "${FQ_NATS_URL:-nats://127.0.0.1:4222}"
+token_env = "FQ_NATS_TOKEN"
 
 [agents]
 directory = "agents"

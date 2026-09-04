@@ -244,6 +244,14 @@ locations.
 | `FQ_NATS_URL`     | `--nats-url`      | `nats://nats:4222`            | Points at a NATS service on the same network |
 | `RUST_LOG`        | (n/a)             | `info`                        | Log level / filter                        |
 
+The broker token is deliberately not on this list. `[nats] token_env`
+in `fqd.toml` names the environment variable the daemon reads it from
+(the `fq init` template and the dev tooling use `FQ_NATS_TOKEN`), and
+`FQ_NATS_URL` / `--nats-url` is refused if it carries userinfo: the URL
+is printed in the banner, the log and the `system.startup` event, so a
+credential must never be part of it
+([#540](https://github.com/bricef/factor-q/issues/540)).
+
 Precedence remains CLI flag > env var > config file > default. On a
 host without any of these set, factor-q falls back to:
 
