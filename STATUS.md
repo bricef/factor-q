@@ -223,12 +223,12 @@ request (`experiments/reasoning-round-trip/`, live run section). The
 Anthropic path still rides a fork of `genai` pinned to a rev until its
 one-line fix lands upstream.
 
-#424's block on #437 stands, but its stated premise — *"`events` has
-fan-in 10, the parts change ripples through the same ten modules"* — no
-longer describes the tree: that module is a 33-line re-export facade and
-the vocabulary that changed lives in `fq-ops`, outside fq-runtime's cycle
-group. The evidence, and the cheapest way to settle it, is recorded on
-#424 and #415; the decision is deliberately parked, not taken. Its
+Issue #424's block on #437 stands, but its stated premise — *"`events`
+has fan-in 10, the parts change ripples through the same ten modules"* —
+no longer describes the tree: that module is a 33-line re-export facade
+and the vocabulary that changed lives in `fq-ops`, outside fq-runtime's
+cycle group. The evidence, and the cheapest way to settle it, is recorded
+on #424 and #415; the decision is deliberately parked, not taken. Its
 advisory `just lint-coupling` phase keeps running meanwhile.
 
 The runner.rs ordering question that used to be drawn dashed here is
