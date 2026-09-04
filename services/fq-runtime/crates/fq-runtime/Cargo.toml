@@ -2,6 +2,9 @@
 name = "fq-runtime"
 version.workspace = true
 edition.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # The agent definition domain (model, parser, registry) is its own
