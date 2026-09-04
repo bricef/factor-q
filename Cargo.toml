@@ -60,7 +60,7 @@ fq-test-support = { path = "services/fq-test-support" }
 fq-tools = { path = "services/fq-runtime/crates/fq-tools" }
 # -- external --
 anyhow = "1"
-async-nats = "0.38"
+async-nats = "0.50"
 async-trait = "0.1"
 axum = "0.8"
 biscuit-auth = "6"
