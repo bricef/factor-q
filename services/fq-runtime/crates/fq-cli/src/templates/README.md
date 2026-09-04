@@ -38,6 +38,12 @@ docker compose up -d
 # linting a file before it is deployed is an offline operation.
 fq agent validate agents/sample-agent.md
 
+# The daemon reads the broker token from the environment variable
+# fqd.toml names (`[nats] token_env`, FQ_NATS_TOKEN) — never from the
+# URL, which it prints. The scaffolded compose file starts NATS with
+# the development token:
+export FQ_NATS_TOKEN=fq-dev-token
+
 # Start the daemon from this directory, so it reads fqd.toml. On its
 # first run it prints a certificate fingerprint and writes the admin
 # token — once, owner-only, never to stdout — to <state>/edge/admin.token

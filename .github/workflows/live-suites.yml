@@ -74,7 +74,8 @@ jobs:
       - uses: extractions/setup-just@v3
 
       # The dev broker on 4222, which both suites dial through the
-      # justfile's FQ_NATS_URL default. This is the shared instance from
+      # justfile's FQ_NATS_URL and FQ_NATS_TOKEN defaults (the token
+      # never rides in the URL, #540). This is the shared instance from
       # infrastructure/docker-compose.yml, not the per-test private
       # broker the unit suites spawn.
       - name: Start NATS

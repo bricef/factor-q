@@ -36,9 +36,9 @@ TESTS_FAILED=0
 # Everything this run touches lives under TMP_ROOT, including the three
 # things `fq` would otherwise reach for in the operator's own home:
 #
-#   FQ_DAEMON_CONFIG        the edge bind and the model registry, and nothing
-#                    else — the rest of the runtime runs on its
-#                    defaults. The registry has no usable default: an
+#   FQ_DAEMON_CONFIG        the edge bind, the broker token's variable
+#                    name and the model registry, and nothing else —
+#                    the rest of the runtime runs on its defaults. The registry has no usable default: an
 #                    empty one declares no models, and the daemon
 #                    refuses to start rather than run an agent whose
 #                    model nothing declared
@@ -57,6 +57,11 @@ TESTS_FAILED=0
 export FQ_DAEMON_CONFIG="${TMP_ROOT}/fqd.toml"
 export FQ_STATE_DIR="${TMP_ROOT}/state"
 export XDG_CONFIG_HOME="${TMP_ROOT}/config"
+# The broker token. The daemon reads it from the variable the scratch
+# fqd.toml names (`[nats] token_env`, #540) — never from the URL, which
+# it prints. `just smoke` exports the dev broker's token; a direct run
+# of this script gets the same default.
+export FQ_NATS_TOKEN="${FQ_NATS_TOKEN:-fq-dev-token}"
 
 # Port 0: the kernel picks a free port and the daemon reports the one it
 # got. Picking a port here instead would mean binding a socket to find a
@@ -108,6 +113,12 @@ write_config() {
     cat > "${FQ_DAEMON_CONFIG}" <<TOML
 [edge]
 bind = "${bind}"
+
+[nats]
+# The URL comes from FQ_NATS_URL (the justfile's export, or the
+# daemon's default); the token from the variable named here, exported
+# above. A token in the URL would be refused at startup (#540).
+token_env = "FQ_NATS_TOKEN"
 
 TOML
     if [[ "${SMOKE_PROVIDER}" == "anthropic" ]]; then

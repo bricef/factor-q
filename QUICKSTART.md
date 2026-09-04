@@ -25,7 +25,7 @@ cd factor-q
 just up
 ```
 
-`just up` is two things: `just infra-up` (Docker compose for NATS) and `just build-runtime` (cargo build of the runtime crates — all `just fq` needs; `just build` builds every Rust service in the single workspace). When it finishes you have a NATS server on `nats://localhost:4222` — bound to loopback, token-authenticated (the token lives in `infrastructure/nats/nats.conf` and rides in the default `FQ_NATS_URL` as URL userinfo) — and both binaries: the `fq` client behind `just fq`, and the `fqd` daemon behind `just run`.
+`just up` is two things: `just infra-up` (Docker compose for NATS) and `just build-runtime` (cargo build of the runtime crates — all `just fq` needs; `just build` builds every Rust service in the single workspace). When it finishes you have a NATS server on `nats://localhost:4222` — bound to loopback, token-authenticated (the token lives in `infrastructure/nats/nats.conf`; the justfile exports it as `FQ_NATS_TOKEN`, separately from the credential-free `FQ_NATS_URL` — a daemon reads its token from the variable `fqd.toml`'s `[nats] token_env` names, never from the URL it prints) — and both binaries: the `fq` client behind `just fq`, and the `fqd` daemon behind `just run`.
 
 Verify it:
 

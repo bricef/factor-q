@@ -654,6 +654,8 @@ Published by the daemon's summary consumer (#216) — never by an agent — unde
 }
 ```
 
+`nats_url` is host and port only. The daemon refuses a `[nats] url` that carries a credential and takes the broker token from the environment variable `[nats] token_env` names, so this payload — served whole by `event.get` to any `read:event` holder — cannot contain one ([#540](https://github.com/bricef/factor-q/issues/540)).
+
 System events share a sentinel `agent_id` of `"system"`; their envelope's `invocation_id` and `trace_id` are set to `runtime_id` so all events from a single daemon run share a correlation key. `parent_event_id` is always absent on system events.
 
 ### `system.shutdown`
