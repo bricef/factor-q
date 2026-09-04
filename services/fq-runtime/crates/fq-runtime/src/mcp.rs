@@ -1127,8 +1127,7 @@ impl McpClientManager {
         // can list/read its resources on demand.
         let advertises_resources = client
             .peer_info()
-            .and_then(|info| info.capabilities.resources.as_ref())
-            .is_some();
+            .is_some_and(|info| info.capabilities.resources.is_some());
         if advertises_resources {
             for resource_tool in [
                 McpResourceTool::list(server_name, Arc::clone(client)),
@@ -1437,9 +1436,10 @@ impl McpClientManager {
     }
 
     /// Set the minimum logging level the server should send
-    /// (`logging/setLevel`). The server filters below this level, so
-    /// only messages at or above `level` arrive on the notification
-    /// sink thereafter.
+    /// (`logging/setLevel`); only messages at or above `level` reach the
+    /// notification sink thereafter. MCP deprecated the request in
+    /// SEP-2577 (rmcp 1.8 flags it); allowed until servers drop it.
+    #[allow(deprecated)]
     pub async fn set_logging_level(
         &self,
         server: &str,
