@@ -19,6 +19,14 @@
 # `openssl rand -hex 32`), injected by docker-compose as env vars.
 {
 	auto_https disable_redirects
+	# No admin API (#543). Under host networking Caddy's default admin
+	# endpoint listened on localhost:2019, where any local process — an
+	# agent's exec child included — could GET /config/ (DASH_HASH and
+	# DASH_COOKIE substituted in) or POST /load a config with no auth at
+	# all. With it off there is no `caddy reload`: every Caddyfile or
+	# caddy.env change is a container recreate
+	# (`docker compose up -d --force-recreate caddy`).
+	admin off
 }
 
 dev.lambda.works {
