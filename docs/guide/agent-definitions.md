@@ -523,7 +523,7 @@ mcp:
   - server: filesystem          # the name you refer to it by
     command: npx                # how to launch it (a stdio child process)
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
-    env:                        # optional process environment
+    env:                        # the child's environment: exactly these
       LOG_LEVEL: info
 ```
 
@@ -537,6 +537,26 @@ mcp:
   - server: remote-tools
     url: https://tools.internal/mcp   # Streamable HTTP; no command/args/env
 ```
+
+A stdio server is started deliberately bare. `command` is resolved on
+the daemon's `PATH`; the child then gets a **constructed environment** —
+a pinned `PATH` (`/usr/local/bin:/usr/bin:/bin`, plus the directory
+`command` resolved to, which is what lets `npx` find its sibling `node`)
+and exactly the pairs in `env:`. Nothing else is inherited: not the
+daemon's provider keys, not `HOME`, not the broker token. A server that
+needs `HOME` or a credential is given it in `env:`, where a reader of the
+definition can see it. Its working directory is its own
+(`<state dir>/mcp/<server>`, created on demand), never the daemon's, and
+its stderr goes to the daemon log under the server's name
+([#541](https://github.com/bricef/factor-q/issues/541)).
+
+**The sandbox does not apply to what a server does.** `fs_read`,
+`fs_write`, `exec_cwd` and `env` govern the built-in tools; an MCP tool
+call is executed by the server, on the server's terms. In the example
+above, `/data` is what `server-filesystem` was told to serve — no
+`fs_read` narrows it, and declaring one would not. Trust is per server:
+declare a filesystem or shell server only where you would run it by hand
+with those arguments. See [MCP → Tools](mcp.md#tools).
 
 The server's **tools** become available exactly like built-ins — list
 the ones you want in `tools:` by their canonical namespaced names,
