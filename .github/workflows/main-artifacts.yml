@@ -1,17 +1,26 @@
 name: Main artifacts
 
-# Hermetic deploy artifacts (#102): every merge to main publishes a
-# checksummed, SHA-stamped bundle (fq, fqd, fq-dashboard, fq-cas,
-# github-watcher, fq-cron — static x86_64 musl — plus the four dogfood
-# launchers) to the rolling `main-latest` pre-release. The exact contents
-# are `package-main` in the root justfile; deploy.sh checks that fq, fqd,
-# fq-dashboard and github-watcher all report the same commit. Deploy hosts
-# fetch + verify + swap and never compile (ops/dogfood/deploy.sh). Rollback
-# history lives on the hosts as releases/<sha>/ dirs, so this channel only
-# ever holds the newest build.
+# Hermetic deploy artifacts (#102, ADR-0035): every merge to main publishes
+# two artifact families from ONE build of the static x86_64 musl binaries.
+#
+#   1. The checksummed, SHA-stamped tarball (fq, fqd, fq-dashboard, fq-cas,
+#      github-watcher, fq-cron plus the four dogfood launchers) to the
+#      rolling `main-latest` pre-release — `package-main` / `publish-main`
+#      in the root justfile; fetched by ops/dogfood/deploy.sh, which never
+#      compiles. Rollback history lives on the hosts as releases/<sha>/
+#      dirs, so this channel only ever holds the newest build.
+#   2. The container images (fq-runtime, fq-dogfood, github-watcher,
+#      fq-cron, fq-dashboard) to ghcr.io/bricef, tagged with the
+#      twelve-hex commit the binaries inside them report and with the
+#      moving `main-latest` — `docker-build` / `docker-check` /
+#      `docker-publish`. The commit tag is what a host deploys and rolls
+#      back to; the images are assembled from the same binaries as the
+#      tarball, never compiled in-image, so both families carry the
+#      identical binary for a commit (#587).
 #
 # Like ci.yml/release.yml, every job drives its work through a `just`
-# target so the pipeline stays reproducible locally.
+# target so the pipeline stays reproducible locally; the registry login is
+# the one piece of non-`just` glue, since it must exist before a push can.
 
 on:
   push:
@@ -25,9 +34,11 @@ concurrency:
   group: main-artifacts
   cancel-in-progress: true
 
-# Needs write access to recreate the main-latest release and its tag.
+# Needs write access to recreate the main-latest release and its tag, and
+# to push the images to the repository's container registry.
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build-publish:
@@ -56,3 +67,14 @@ jobs:
       - run: just publish-main "${GITHUB_SHA}"
         env:
           GH_TOKEN: ${{ github.token }}
+      # The images, from the binaries built above. The tag is the same
+      # twelve-hex commit `fq --version` stamps, so `docker-publish` can
+      # check the image content against the tag before anything is pushed.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - run: just docker-build x86_64-unknown-linux-musl "${GITHUB_SHA:0:12}"
+      - run: just docker-check "${GITHUB_SHA:0:12}"
+      - run: just docker-publish "${GITHUB_SHA:0:12}"

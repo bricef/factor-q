@@ -391,6 +391,45 @@ docker-check tag="latest":
     echo "fq-cron:";                            docker run --rm factor-q/fq-cron:{{tag}} --version
     echo "fq-dashboard:";                       docker run --rm factor-q/fq-dashboard:{{tag}} --version
 
+# Where `docker-publish` pushes: <registry>/<image>:<tag>. The default is
+# the repository's own container registry; override for a fork or a mirror.
+docker_registry := env("FQ_DOCKER_REGISTRY", "ghcr.io/bricef")
+# Every image `docker-build` produces, by name; publish iterates this list.
+docker_images := "fq-runtime fq-dogfood github-watcher fq-cron fq-dashboard"
+
+# Publish every built image to the registry under two tags: the twelve-hex
+# commit the binaries inside it report, and the moving `main-latest`, the
+# image-side twin of the tarball channel. The commit tag is what a host
+# deploys and rolls back to; `main-latest` only names the newest build.
+#
+# The tag is checked, not trusted: it must be the checkout's HEAD, and it
+# must be the commit `dist/bin/fq --version` was stamped with, with no
+# `-dirty` suffix — the same coherence check ops/dogfood/deploy.sh applies
+# to a bundle, moved to the publishing side so a mismatch never reaches
+# the registry. Run `docker-build <target> <sha>` and `docker-check <sha>`
+# first; this pushes what they built and proved.
+# Push every image as <registry>/<name>:<sha> and :main-latest.
+docker-publish sha:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sha="{{sha}}"
+    [[ "$sha" =~ ^[0-9a-f]{12}$ ]] || { echo "docker-publish: tag must be the twelve-hex commit, got '$sha'" >&2; exit 1; }
+    head="$(git rev-parse --short=12 HEAD)"
+    [ "$sha" = "$head" ] || { echo "docker-publish: tag $sha is not HEAD ($head) — publish only what this checkout built" >&2; exit 1; }
+    [ -x dist/bin/fq ] || { echo "docker-publish: no dist/bin/fq — run 'just docker-build <target> $sha' first" >&2; exit 1; }
+    stamped="$(dist/bin/fq --version | sed -nE 's/.*\(([0-9a-f]+(-dirty)?) .*/\1/p')"
+    [ "$stamped" = "$sha" ] || { echo "docker-publish: dist/bin/fq reports '$stamped', not $sha — stale staging or a dirty build; refusing" >&2; exit 1; }
+    for name in {{docker_images}}; do
+        local_ref="factor-q/${name}:${sha}"
+        docker image inspect "$local_ref" >/dev/null 2>&1 || { echo "docker-publish: $local_ref not built — run 'just docker-build <target> $sha' first" >&2; exit 1; }
+        for tag in "$sha" main-latest; do
+            ref="{{docker_registry}}/${name}:${tag}"
+            docker tag "$local_ref" "$ref"
+            docker push --quiet "$ref"
+            echo "pushed $ref"
+        done
+    done
+
 # Exercises the full walking skeleton: agent definitions parse, triggers
 # run, the tool-call loop drives file_read and shell built-ins against
 # Anthropic, events land in the SQLite projection, and the CLI query
