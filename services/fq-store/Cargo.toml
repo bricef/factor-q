@@ -17,7 +17,7 @@ clap = { workspace = true, optional = true }
 # and the interleaving checker turn it on to schedule and fault-inject each step.
 # See docs/design/committed/storage-concurrency-verification.md.
 fail = "0.5"
-fastcdc = "3"
+fastcdc = "5"
 futures = { workspace = true, optional = true }
 hex = "0.4"
 serde = { workspace = true }
