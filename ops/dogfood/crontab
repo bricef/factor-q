@@ -1,0 +1,17 @@
+# The dogfood host's schedule — installed for the deploy user by
+# bootstrap.sh (`crontab -u <user> ops/dogfood/crontab`). Every job is a
+# script in the instance directory that exits 0 quietly when there is
+# nothing to do, so a line in its log means something happened, and a
+# non-zero exit means something needs a human.
+#
+# Continuous delivery is deploy.sh --auto, hourly: it pulls main-latest,
+# does nothing when that build is live, defers while an invocation is in
+# flight, and rolls back by itself when a build does not come up. Hourly
+# rather than per-merge because the fleet merges its own PRs; with the
+# idle check, a merge lands on the next quiet hour.
+PATH=/usr/local/bin:/usr/bin:/bin
+FQ_DOGFOOD=/home/fq/fq-dogfood
+# m   h   dom mon dow   command
+17   *   *   *   *     $FQ_DOGFOOD/deploy.sh --auto  >> $FQ_DOGFOOD/logs/deploy.log  2>&1
+*/30 *   *   *   *     $FQ_DOGFOOD/hygiene.sh        >> $FQ_DOGFOOD/logs/hygiene.log 2>&1
+30   3   *   *   *     $FQ_DOGFOOD/backup.sh --auto  >> $FQ_DOGFOOD/logs/backup.log  2>&1

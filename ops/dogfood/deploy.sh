@@ -9,6 +9,11 @@
 #                             the images are already on this host)
 #   deploy.sh --force [...]   proceed even if already running the target
 #                             (a .env, fqd.toml or secrets change)
+#   deploy.sh --auto          unattended (cron): defer while an invocation is
+#                             in flight, and roll back by itself when the new
+#                             build does not come up — continuous delivery
+#                             with the same drain, checks and rollback as a
+#                             deploy by hand (ops/dogfood/crontab)
 #
 # The host never compiles and never fetches a tarball. Every merge to main
 # publishes one image per binary to ghcr.io/bricef (`FQ_IMAGE_REPO` in .env),
@@ -41,16 +46,26 @@ KEEP_IMAGES="${KEEP_IMAGES:-5}"      # local image tags kept per name, newest fi
 STACK_SERVICES=(fq-cron fqd github-watcher fq-dashboard)
 declare -A IMAGE_OF=([fqd]=fq-dogfood [github-watcher]=github-watcher [fq-cron]=fq-cron [fq-dashboard]=fq-dashboard)
 
-log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
-ok()  { printf '\033[1;32m    ✓ %s\033[0m\n' "$*"; }
-die() { printf '\n\033[1;31m✗ ERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+AUTO=0
+# --auto stays silent through the resolve/pull/verify preamble — an hourly
+# cron run that changes nothing should leave one line in the log, not
+# eight — and starts narrating once a deploy is actually going to happen.
+QUIET=0
+stamp() { [ "$AUTO" = 1 ] && date -u '+%Y-%m-%dT%H:%M:%SZ ' || true; }
+log() { [ "$QUIET" = 1 ] && return 0; printf '\n\033[1;36m%s==> %s\033[0m\n' "$(stamp)" "$*"; }
+ok()  { [ "$QUIET" = 1 ] && return 0; printf '\033[1;32m%s    ✓ %s\033[0m\n' "$(stamp)" "$*"; }
+die() { printf '\n\033[1;31m%s✗ ERROR: %s\033[0m\n' "$(stamp)" "$*" >&2; exit 1; }
+# A quiet exit for --auto: nothing to do, or not now. One line, exit 0, so
+# a cron run that changed nothing leaves one line in the log and no mail.
+defer() { printf '%s· %s\n' "$(stamp)" "$*"; exit 0; }
 
 FORCE=0
 WANT="latest"
 for arg in "$@"; do
     case "$arg" in
         --force) FORCE=1 ;;
-        -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --auto) AUTO=1; QUIET=1 ;;
+        -h|--help) awk 'NR>1 && !/^#/ {exit} NR>1 {sub(/^# ?/, ""); print}' "$0"; exit 0 ;;
         -*) die "unknown flag: $arg" ;;
         *) WANT="$arg" ;;
     esac
@@ -69,7 +84,10 @@ docker compose version >/dev/null 2>&1 || die "docker compose (v2) is required"
 # stack; the lock is on the instance directory, so it also covers a deploy
 # started from another checkout.
 exec 9>"$DOGFOOD/.deploy.lock"
-flock -n 9 || die "another deploy holds $DOGFOOD/.deploy.lock"
+if ! flock -n 9; then
+    [ "$AUTO" = 1 ] && defer "another deploy holds $DOGFOOD/.deploy.lock — skipping this run"
+    die "another deploy holds $DOGFOOD/.deploy.lock"
+fi
 
 REPO="$(sed -n 's/^FQ_IMAGE_REPO=\(.*\)$/\1/p' .env | tail -1)"
 REPO="${REPO:-ghcr.io/bricef}"
@@ -145,15 +163,44 @@ running_image() {  # $1 = service → the image its running container was create
     [ -n "$cid" ] || return 0
     docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null || true
 }
+# How many invocations the running daemon has in flight, or "unknown"
+# when it cannot be asked (no container, or its fq is not paired yet —
+# the README's one-time step). Asked through the container's own client
+# over the edge, like every other question to the daemon.
+in_flight() {
+    local cid out
+    cid="$(docker compose ps -q --status running fqd 2>/dev/null | head -1)"
+    [ -n "$cid" ] || { echo 0; return; }
+    out="$(docker compose exec -T fqd fq invocation list --status in_flight --json 2>/dev/null)" || { echo unknown; return; }
+    printf '%s' "$out" | { grep -o '"invocation_id"' || true; } | wc -l | tr -dc '0-9'
+}
+
 if [ "$FORCE" != 1 ] && [ "$CURRENT" = "$SHA" ]; then
     live=1
     for svc in "${STACK_SERVICES[@]}"; do
         [ "$(running_image "$svc")" = "$REPO/${IMAGE_OF[$svc]}:$SHA" ] || { live=0; break; }
     done
     if [ "$live" = 1 ]; then
+        [ "$AUTO" = 1 ] && defer "already running $SHA"
         ok "already running $SHA — nothing to do (--force to restart anyway)"
         exit 0
     fi
+fi
+
+# Unattended, a deploy waits its turn: the drain suspends in-flight work
+# at a step boundary and resumes it under the new build, but a run that is
+# mid tool-call when the deadline expires becomes ambiguous and can never
+# be resumed (the README's "before any restart"). A daemon that cannot be
+# asked is not assumed idle. The next cron run tries again.
+if [ "$AUTO" = 1 ]; then
+    busy="$(in_flight)"
+    case "$busy" in
+        0) ;;
+        unknown) defer "cannot ask the daemon whether it is idle (not paired? see README) — deferring $SHA" ;;
+        *) defer "$busy invocation(s) in flight — deferring $SHA" ;;
+    esac
+    QUIET=0
+    log "AUTO DEPLOY ${CURRENT:-<none>} → $SHA (daemon idle; images verified)"
 fi
 
 # --- 4. graceful bring-down --------------------------------------------------
@@ -168,40 +215,63 @@ for svc in "${STACK_SERVICES[@]}"; do
     fi
 done
 
-# --- 5. point the stack at the target and bring it up -------------------------
-if grep -q '^FQ_TAG=' .env; then
-    sed -i "s/^FQ_TAG=.*/FQ_TAG=$SHA/" .env
-else
-    printf 'FQ_TAG=%s\n' "$SHA" >> .env
-fi
-ok ".env: FQ_TAG=$SHA${CURRENT:+ (was ${CURRENT})}"
-
-STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-log "Bringing the stack up at $SHA"
-docker compose up -d --remove-orphans >/dev/null 2>&1 || die "docker compose up failed (docker compose logs fqd)"
-
-# --- 6. verify: the daemon says ready, and every container runs the target --
-log "Waiting for the daemon's 'Runtime ready' (up to ${READY_WAIT}s)"
-FQD_CID="$(docker compose ps -q fqd | head -1)"
-[ -n "$FQD_CID" ] || die "no fqd container after up (docker compose ps)"
-ready=0
-for _ in $(seq 1 "$READY_WAIT"); do
-    fresh="$(docker logs --since "$STARTED_AT" "$FQD_CID" 2>&1 || true)"
-    if printf '%s' "$fresh" | grep -qiE 'registry validation failed|refus(e|ing)|panicked'; then
-        die "the daemon failed to start on $SHA (docker compose logs fqd). $(rollback_hint)"
+# --- 5. point the stack at a tag, bring it up, verify --------------------------
+# One function for the deploy and for the rollback: write the tag, up, wait
+# for the daemon's "Runtime ready" since the start, then check every
+# container's image. Returns non-zero with the reason on stdout's last
+# line rather than dying, so --auto can roll back.
+bring_up() {  # $1 = sha
+    local tag="$1" started cid fresh ready svc want got
+    if grep -q '^FQ_TAG=' .env; then
+        sed -i "s/^FQ_TAG=.*/FQ_TAG=$tag/" .env
+    else
+        printf 'FQ_TAG=%s\n' "$tag" >> .env
     fi
-    if printf '%s' "$fresh" | grep -q "Runtime ready"; then ready=1; break; fi
-    sleep 1
-done
-[ "$ready" = 1 ] || die "the daemon did not log 'Runtime ready' within ${READY_WAIT}s (docker compose logs fqd). $(rollback_hint)"
-ok "daemon ready"
+    ok ".env: FQ_TAG=$tag"
+    started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    log "Bringing the stack up at $tag"
+    docker compose up -d --remove-orphans >/dev/null 2>&1 || { echo "docker compose up failed (docker compose logs fqd)"; return 1; }
 
-for svc in "${STACK_SERVICES[@]}"; do
-    want="$REPO/${IMAGE_OF[$svc]}:$SHA"
-    got="$(running_image "$svc")"
-    [ "$got" = "$want" ] || die "$svc runs '${got:-nothing}', not $want (docker compose ps)"
-done
-ok "fqd, github-watcher, fq-cron and fq-dashboard run $SHA"
+    log "Waiting for the daemon's 'Runtime ready' (up to ${READY_WAIT}s)"
+    cid="$(docker compose ps -q fqd | head -1)"
+    [ -n "$cid" ] || { echo "no fqd container after up (docker compose ps)"; return 1; }
+    ready=0
+    for _ in $(seq 1 "$READY_WAIT"); do
+        fresh="$(docker logs --since "$started" "$cid" 2>&1 || true)"
+        if printf '%s' "$fresh" | grep -qiE 'registry validation failed|refus(e|ing)|panicked'; then
+            echo "the daemon failed to start on $tag (docker compose logs fqd)"; return 1
+        fi
+        if printf '%s' "$fresh" | grep -q "Runtime ready"; then ready=1; break; fi
+        sleep 1
+    done
+    [ "$ready" = 1 ] || { echo "the daemon did not log 'Runtime ready' within ${READY_WAIT}s (docker compose logs fqd)"; return 1; }
+    ok "daemon ready"
+
+    for svc in "${STACK_SERVICES[@]}"; do
+        want="$REPO/${IMAGE_OF[$svc]}:$tag"
+        got="$(running_image "$svc")"
+        [ "$got" = "$want" ] || { echo "$svc runs '${got:-nothing}', not $want (docker compose ps)"; return 1; }
+    done
+    ok "fqd, github-watcher, fq-cron and fq-dashboard run $tag"
+}
+
+[ -n "$CURRENT" ] && [ "$CURRENT" != "$SHA" ] && ok "moving from $CURRENT"
+if ! reason="$(bring_up "$SHA")"; then
+    printf '%s\n' "$reason" | grep -v '^$' | grep -vE '^\S*(==>|✓)' || true
+    reason="$(printf '%s\n' "$reason" | tail -1)"
+    # Unattended: the previous build is known good — put it back and say so.
+    # By hand: stop here and say what to run; the operator may want to look
+    # at the failed container first.
+    if [ "$AUTO" = 1 ] && [ -n "$CURRENT" ] && [ "$CURRENT" != "$SHA" ]; then
+        log "ROLLING BACK to $CURRENT — $reason"
+        if bring_up "$CURRENT" >/dev/null; then
+            printf '\033[1;33m%s    ⟲ rolled back to %s after %s failed: %s\033[0m\n' "$(stamp)" "$CURRENT" "$SHA" "$reason" >&2
+            exit 1
+        fi
+        die "rollback to $CURRENT ALSO failed — the stack needs a human (docker compose ps; docker compose logs fqd)"
+    fi
+    die "$reason. $(rollback_hint)"
+fi
 
 # --- 7. prune local image history (the registry keeps every tag) ----------
 for name in fq-dogfood github-watcher fq-cron fq-dashboard; do
