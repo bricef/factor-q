@@ -20,10 +20,15 @@ dogfood deploy script uses it, citing this ADR by number. **Read the verb as
 `fq down`, not `fq drain`, throughout the Decision below** — see the
 Addendum. Manual rollback exists (`deploy.sh <previous-sha>`). Two of the
 Open questions have since been answered and are annotated there. Still open:
-the post-deploy health gate and automated rollback (#339), an auto-deploy
-watcher, and an operator escape from a stalled drain other than SIGKILL
-(#509 — the deadline hard-stop this ADR promises does work; a signal-based
-abort was never part of it).
+the post-deploy health gate and automated rollback (#339) and an auto-deploy
+watcher. **Resolved 2026-09-05 by [#509](https://github.com/bricef/factor-q/issues/509)
+/ [#550](https://github.com/bricef/factor-q/issues/550):** the operator escape
+from a stalled drain listed below as still open now exists. The drain holds the
+signal streams and selects on them, so a **second SIGTERM** — or a Ctrl-C, or
+`fq down --now` — ends the bounded wait and runs the same clean teardown: the
+worker is deregistered and `system.shutdown` is published, naming both the stop
+and what escalated it. SIGKILL remains the only thing that costs those
+guarantees. The original text below is left as written.
 
 ## Context
 

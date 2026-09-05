@@ -107,9 +107,28 @@ and the wording is deliberate: a drain can be escalated while `fq down`
 is still waiting — by a second SIGTERM on the daemon's host, or by
 another operator's `fq down --now` — and the client cannot see that,
 because the only channel it has is an edge that stops answering. What
-actually ran is in the daemon's `system.shutdown` event, whose reason
-is one of `down`, `down_escalated`, `sigterm`, `sigterm_escalated`,
-`down_now` or `ctrl_c`.
+actually ran is in the daemon's `system.shutdown` event.
+
+### What the `system.shutdown` reason says
+
+Every stop the daemon reaches on its own feet publishes one, and the
+reason is the whole vocabulary:
+
+| reason | what happened |
+|---|---|
+| `ctrl_c` | SIGINT — the interactive fast stop |
+| `sigterm` | a drain that ran to completion, or to its deadline |
+| `down` | `fq down`, likewise |
+| `down_now` | `fq down --now` against a daemon that was not draining |
+| `sigterm_escalated_by_…` | a SIGTERM drain cut short — the suffix is `sigterm`, `ctrl_c` or `down_now`, naming what escalated it |
+| `down_escalated_by_…` | an `fq down` drain cut short, same three suffixes |
+| `task_failed` | a supervised task died and took the runtime with it — a non-zero exit, and the worker row is deliberately left for the stale sweep |
+| `signal_error` | no signal handler could be installed; also a non-zero exit |
+
+The `clean` flag beside the reason is the short version: false for
+`task_failed` and `signal_error`, true for everything above them. A
+daemon killed with SIGKILL publishes nothing at all, which is the point
+of never reaching for it.
 
 ### Cutting a drain short
 
@@ -175,6 +194,21 @@ one that is taking too long.
 > That is the desired outcome — two daemons on one state directory is the
 > failure it prevents — but during a redeploy it means waiting for `fq down` to
 > confirm before relaunching, which is what `fq down`'s bounded wait is for.
+
+A second thing follows from the same ordering, and it looks like a hang:
+
+> **A booting daemon accepts connections it cannot answer yet.** The socket is
+> bound at the very start of startup and only begins serving once the runtime
+> behind it is up, so between those two moments the kernel completes handshakes
+> into the backlog and nobody reads them. A `fq` verb aimed at a daemon that is
+> still booting therefore **hangs until the client's own timeout** rather than
+> failing fast with a connection refusal — and a boot can be slow: a store
+> migration, a recovery scan, an unresponsive MCP server. This is the price of
+> the bind being the instance lock, and it is the right trade (the alternative
+> leaves a window where a second daemon can start), but it is worth knowing
+> before concluding a daemon is wedged. The daemon's own log says which step it
+> is on; a stop signal is answered throughout, so a boot you have given up on
+> can be stopped with `docker stop` or a plain `kill -TERM`.
 
 ## Hot-reloading agents: `fq reload`
 
