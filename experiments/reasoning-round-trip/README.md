@@ -111,6 +111,13 @@ the order Anthropic requires. No `llm.failure` was recorded in any arm: OpenRout
 accepted `reasoning_content` back for Kimi, and Anthropic accepted its own signed
 blocks back for Opus — the `echo` arm, produced by factor-q rather than the probe.
 
+**Re-run the same evening on genai `0.7.0-beta.21` (PR #592), after the fork was
+retired:** identical outcome. Kimi's plain reasoning and both of Opus's signed blocks
+(again empty text, 524- and 496-char signatures) were carried byte-identically into
+the following request, the control carried none, no `llm.failure`, $0.057 in total.
+The wire goldens recorded on the fork build had already said so; this is the provider
+agreeing.
+
 ### Where it was checked
 
 - **Transcript.** `fq invocation transcript --reasoning` shows Kimi's text, Opus's

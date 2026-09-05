@@ -5,7 +5,7 @@ provider round-trip, the operator surface and the cost split in PR #510
 (phases 0–6, merged 2026-09-04); the live verification and its harness in
 PR #538; the empty-text rendering fix in PR #561; and the move off the
 genai fork onto upstream `0.7.0-beta.21` behind wire goldens, the last row
-of §6, in the migration PR of 2026-09-04. Open by decision, tracked on
+of §6, in PR #592. Open by decision, tracked on
 their own issues: tool-result batching (#511), the reasoning-token split
 reaching an operator surface (#536). Originally: active (2026-08-25).
 Tracking issue:
