@@ -155,12 +155,46 @@ agreeing.
 just build-runtime && just install-nats        # binaries + pinned nats-server
 mise exec -- bash harness/live-matrix.sh       # needs raw TCP to localhost
 OUT=/somewhere bash harness/live-matrix.sh     # default OUT is $TMPDIR/fq-live-matrix
+TASK='Read {work}/notes.txt and {work}/checklist.txt in one turn, then …' \
+  mise exec -- bash harness/live-matrix.sh     # another task on the same matrix
 ```
 
 Keys come from the repo-root `.env` (`ENV_FILE=` overrides) and are read into the
 process only. The run writes `events.ndjson` (every payload, live), and per arm the
 transcripts, `fq invocation show`, `fq costs` and the daemon config; the databases are
 left under `$OUT/run/cache/` for inspection. Spend is well under $0.20.
+
+`TASK=` replaces the default sequential task; a `{work}` token in it expands to the
+fixture directory, which holds `notes.txt` and `checklist.txt`. The default task
+carries the "one tool call at a time" steer itself (it used to sit in the agent
+prompt), so a task that wants parallel calls is free to ask for them — which is how
+the [parallel tool-call probe](#parallel-tool-calls-through-factor-q-2026-09-05) for
+#511 ran on the same three arms.
+
+## Parallel tool calls through factor-q (2026-09-05)
+
+The live check for #511: a turn that issues two tool calls must be answered by **one**
+`tool_results` message carrying both results, in call order, and the provider must
+accept it. Same daemon, broker and three arms as above, with `TASK=` asking for both
+fixture files to be read in the same turn. Two runs, the second with the adapter's
+debug logging on (`RUST_LOG=info,fq_runtime::llm=debug`) to rule out a dropped thinking
+block; $0.082 in total.
+
+| Arm | Turn 1 response | Next `llm.request` | Accepted | Cost (run 1 / run 2) |
+|---|---|---|---|---|
+| `kimi-k3-reasoner` | reasoning + 2 `tool_call` | one `tool_results`, 2 results, call order; reasoning replayed ahead of the calls | yes — no `llm.failure` | $0.011 / $0.014 |
+| `opus-5-thinker` | 2 `tool_call`, no thinking block returned | one `tool_results`, 2 results, call order | yes — no `llm.failure` | $0.028 / $0.028 |
+| `gpt4o-mini-control` | 2 `tool_call` | one `tool_results`, 2 results, call order | yes — no `llm.failure` | $0.0005 / $0.0004 |
+
+All three parallelised on the first try, answered with both first lines verbatim, and
+ended with `report_outcome: success`. Before the fix the same conversation would have
+gone to Anthropic as two consecutive user messages of one `tool_result` each.
+
+What the run could **not** show: Opus 5 returned no thinking block on either parallel
+turn, so a signed block replayed ahead of two `tool_use` blocks was not observed live.
+The adapter dropped nothing — its debug-level "dropping a thought signature" line never
+fired — the model simply did not think on this task. That shape is pinned hermetically
+by the `anthropic_parallel_tool_calls_signed` wire golden.
 
 ## Traps this harness already hit
 
