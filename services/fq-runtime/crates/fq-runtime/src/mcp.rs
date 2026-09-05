@@ -24,7 +24,7 @@
 //! | `handles` | cloneable reader / refresher handles over running servers |
 //! | `prompt_convert` | the rmcp → factor-q prompt boundary |
 //! | `naming` | the `<server>__<tool>` identifier rules |
-//! | `progress` | per-request progress tokens |
+//! | `progress` | rendering the progress tokens rmcp mints (#605) |
 //! | `server_config` | how a server is described, and what it is deduplicated on |
 //! | `stdio` | how a stdio server's child process is started |
 
