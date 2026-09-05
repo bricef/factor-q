@@ -38,14 +38,27 @@ fn error_kind_mirrors_the_llm_error() {
     use crate::llm::LlmError;
     let cases = [
         (LlmError::Auth("x".into()), LlmErrorKind::Auth),
-        (LlmError::RateLimited, LlmErrorKind::RateLimited),
+        (
+            LlmError::RateLimited {
+                model: "x".into(),
+                retry_after: None,
+            },
+            LlmErrorKind::RateLimited,
+        ),
         (
             LlmError::InvalidResponse("x".into()),
             LlmErrorKind::InvalidResponse,
         ),
+        (LlmError::Rejected("x".into()), LlmErrorKind::Rejected),
         (
             LlmError::RequestFailed("x".into()),
             LlmErrorKind::RequestFailed,
+        ),
+        (
+            LlmError::Timeout {
+                budget: std::time::Duration::from_secs(1),
+            },
+            LlmErrorKind::Timeout,
         ),
         (
             LlmError::UnpricedModel("x".into()),
@@ -58,5 +71,14 @@ fn error_kind_mirrors_the_llm_error() {
     assert_eq!(
         serde_json::to_value(LlmErrorKind::EmptyResponse).unwrap(),
         serde_json::json!("empty_response")
+    );
+    // The two kinds #546 added, spelled as the schema doc has them.
+    assert_eq!(
+        serde_json::to_value(LlmErrorKind::Rejected).unwrap(),
+        serde_json::json!("rejected")
+    );
+    assert_eq!(
+        serde_json::to_value(LlmErrorKind::Timeout).unwrap(),
+        serde_json::json!("timeout")
     );
 }

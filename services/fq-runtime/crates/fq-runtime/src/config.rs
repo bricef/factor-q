@@ -203,11 +203,11 @@ impl Default for StateConfig {
     }
 }
 
-/// Worker-side knobs. Today only the archive hand-off retry
-/// cadence and the warn-after threshold are operator-tunable;
-/// the heartbeat cadence is a const because changing it
-/// independently of the control-plane's stale threshold would
-/// change semantics.
+/// Worker-side knobs — `[worker]` in `fqd.toml`: the archive hand-off
+/// retry cadence, the LLM retry policy and call deadlines, and the
+/// concurrency bound. The heartbeat cadence is a const because changing
+/// it independently of the control-plane's stale threshold would change
+/// semantics.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkerConfig {
     /// How often the archive retry sweeper republishes pending
@@ -230,6 +230,19 @@ pub struct WorkerConfig {
     /// (design principle 8), overridable in `fqd.toml`.
     #[serde(default)]
     pub llm_retry: crate::llm::RetryConfig,
+    /// The deadline on every model call, in seconds (#546, review
+    /// finding B1): the whole call, connect to last byte, applied on the
+    /// HTTP client and again around the call. A call past it fails as a
+    /// transient timeout that `llm_retry` retries, so a provider that
+    /// never answers holds a worker for at most `max_attempts` times
+    /// this. Default 600; [`crate::llm::LlmTimeouts`] says why so long.
+    #[serde(default = "default_llm_timeout_secs")]
+    pub llm_timeout_secs: u64,
+    /// How long establishing the connection may take, in seconds, so an
+    /// endpoint that never answers fails in seconds rather than after
+    /// the whole budget. Default 5.
+    #[serde(default = "default_llm_connect_timeout_secs")]
+    pub llm_connect_timeout_secs: u64,
     /// How many invocations one daemon runs concurrently (#70, the
     /// parallel-workers plan). Default 1 — the serial behavior — until
     /// the Phase-2 concurrent recovery/drain/shutdown gate is green.
@@ -246,6 +259,14 @@ fn default_max_concurrent_invocations() -> usize {
     1
 }
 
+fn default_llm_timeout_secs() -> u64 {
+    crate::llm::LlmTimeouts::default().request.as_secs()
+}
+
+fn default_llm_connect_timeout_secs() -> u64 {
+    crate::llm::LlmTimeouts::default().connect.as_secs()
+}
+
 fn default_archive_retry_interval_ms() -> u64 {
     crate::worker::archive_retry::DEFAULT_RETRY_INTERVAL_MS
 }
@@ -260,7 +281,19 @@ impl Default for WorkerConfig {
             archive_retry_interval_ms: default_archive_retry_interval_ms(),
             archive_warn_after_ms: default_archive_warn_after_ms(),
             llm_retry: crate::llm::RetryConfig::default(),
+            llm_timeout_secs: default_llm_timeout_secs(),
+            llm_connect_timeout_secs: default_llm_connect_timeout_secs(),
             max_concurrent_invocations: default_max_concurrent_invocations(),
+        }
+    }
+}
+
+impl WorkerConfig {
+    /// The two deadlines as the LLM client takes them.
+    pub fn llm_timeouts(&self) -> crate::llm::LlmTimeouts {
+        crate::llm::LlmTimeouts {
+            connect: Duration::from_secs(self.llm_connect_timeout_secs),
+            request: Duration::from_secs(self.llm_timeout_secs),
         }
     }
 }
@@ -735,6 +768,38 @@ mod tests {
         assert_eq!(
             config.providers.anthropic.unwrap().api_key_env,
             "ANTHROPIC_API_KEY"
+        );
+    }
+
+    /// #546: the call deadlines and the `Retry-After` cap are `[worker]`
+    /// keys with the documented defaults, and an operator's values reach
+    /// the client's own type.
+    #[test]
+    fn worker_llm_deadlines_default_and_parse() {
+        use crate::llm::LlmTimeouts;
+
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(config.worker.llm_timeout_secs, 600);
+        assert_eq!(config.worker.llm_connect_timeout_secs, 5);
+        assert_eq!(config.worker.llm_timeouts(), LlmTimeouts::default());
+        assert_eq!(config.worker.llm_retry.max_retry_after_ms, 120_000);
+
+        let config = Config::from_toml_str(
+            "[worker]\nllm_timeout_secs = 45\nllm_connect_timeout_secs = 2\n\n\
+             [worker.llm_retry]\nmax_retry_after_ms = 9000\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.worker.llm_timeouts(),
+            LlmTimeouts {
+                connect: Duration::from_secs(2),
+                request: Duration::from_secs(45),
+            }
+        );
+        assert_eq!(config.worker.llm_retry.max_retry_after_ms, 9000);
+        assert_eq!(
+            config.worker.llm_retry.max_attempts, 4,
+            "the other retry knobs keep their defaults"
         );
     }
 
