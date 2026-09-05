@@ -4,7 +4,7 @@
 //! validated [`Agent`] via the fluent builder — the intermediate
 //! deserialisation types are private to this module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 
@@ -81,6 +81,7 @@ pub fn parse_agent_with_default(
         }
     }
 
+    let mut declared_servers: HashSet<String> = HashSet::new();
     let mcp_servers: Vec<McpServerDeclaration> = frontmatter
         .mcp
         .into_iter()
@@ -90,6 +91,20 @@ pub fn parse_agent_with_default(
             if m.command.is_some() == m.url.is_some() {
                 return Err(ParseError::InvalidMcp(format!(
                     "mcp server '{}' must set exactly one of `command` or `url`",
+                    m.server
+                )));
+            }
+            // The name is a server's key everywhere downstream: grants
+            // are looked up by it, tools are namespaced `<server>__<tool>`
+            // by it, and the runner keys one inbound request channel per
+            // name. Two entries sharing a name are not two servers, they
+            // are one name meaning two things, and every one of those
+            // consumers resolves that by silently keeping one of them.
+            if !declared_servers.insert(m.server.clone()) {
+                return Err(ParseError::InvalidMcp(format!(
+                    "mcp server '{}' is declared more than once; the name keys \
+                     its grants, its tool namespace and its inbound channel, so \
+                     each server may appear only once",
                     m.server
                 )));
             }
@@ -990,6 +1005,51 @@ You are a test agent.
             second.env,
             vec![("API_KEY".to_string(), "secret".to_string())]
         );
+    }
+
+    /// A server name is the key for its grants, its `<server>__<tool>`
+    /// namespace and — since #191 put the runner's inbound channels on a
+    /// `StreamMap` — its request receiver. Declaring one twice used to
+    /// be accepted and then resolved silently by whichever consumer got
+    /// there first; the parser refuses it instead, naming the server.
+    #[test]
+    fn a_duplicate_mcp_server_name_is_refused() {
+        let content = r#"---
+name: dup-agent
+model: claude-haiku
+mcp:
+  - server: everything
+    command: npx
+  - server: everything
+    command: other-server
+---
+
+You are a test agent.
+"#;
+        let err = parse_agent(content).expect_err("a repeated server name is not two servers");
+        let rendered = err.to_string();
+        assert!(rendered.contains("everything"), "{rendered}");
+        assert!(rendered.contains("more than once"), "{rendered}");
+    }
+
+    /// Two *different* servers are still two servers — the check keys on
+    /// the name, not on the transport or the command.
+    #[test]
+    fn distinct_mcp_server_names_sharing_a_command_are_kept() {
+        let content = r#"---
+name: two-agent
+model: claude-haiku
+mcp:
+  - server: alpha
+    command: npx
+  - server: beta
+    command: npx
+---
+
+You are a test agent.
+"#;
+        let agent = parse_agent(content).expect("distinct names are distinct servers");
+        assert_eq!(agent.mcp_servers().len(), 2);
     }
 
     #[test]
