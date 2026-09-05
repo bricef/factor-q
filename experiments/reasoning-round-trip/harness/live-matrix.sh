@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Live reasoning round-trip matrix (#437 verification).
 #
-# Three agents, three models, one two-tool task each. Everything runs in
-# a scratch daemon against a private JetStream broker so nothing here can
-# touch the dogfood stack (4223) or the shared dev broker (4222).
+# Three agents, three models, one task each: by default the sequential
+# two-tool task of the 2026-09-04 run, or whatever `TASK=...` names (a
+# `{work}` token in it expands to the fixture directory) — which is how
+# the #511 parallel-tool-call probe ran on the same matrix. Everything
+# runs in a scratch daemon against a private JetStream broker so nothing
+# here can touch the dogfood stack (4223) or the shared dev broker (4222).
 #
 # Needs raw TCP to localhost (private broker + edge): run it outside any sandbox
 # that proxies HTTP only, e.g. `mise exec -- bash harness/live-matrix.sh`.
@@ -48,8 +51,21 @@ Third line: nothing else here matters, but every word is counted.
 EOF
 EXPECTED_WORDS="$(wc -w < "$WORK/notes.txt" | tr -d ' ')"
 log "fixture notes.txt has $EXPECTED_WORDS words"
+# A second file, so a task can ask for two reads in one turn (#511).
+cat > "$WORK/checklist.txt" <<'EOF'
+Parallel probe checklist: the heron is grey.
+Second line: read me in the same turn as notes.txt, not after it.
+EOF
 
-TASK="Two steps, in order. First, read the file $WORK/notes.txt with builtin__file_read. Second, run wc -w on that same file with builtin__exec, passing argv as an array. Then answer in exactly two short lines: line 1 is the first line of the file verbatim, line 2 is the word count as an integer."
+# The task. `TASK=...` substitutes another so the same daemon, agents and
+# collection serve a different probe; `{work}` in it names the fixture
+# directory, which the caller cannot know in advance. The sequencing
+# steer ("one tool call at a time") lives in the task rather than the
+# agent prompt: a task that wants parallel calls must be free to ask.
+DEFAULT_TASK="Two steps, in order, one tool call at a time. First, read the file {work}/notes.txt with builtin__file_read. Second, run wc -w on that same file with builtin__exec, passing argv as an array. Then answer in exactly two short lines: line 1 is the first line of the file verbatim, line 2 is the word count as an integer."
+TASK="${TASK:-$DEFAULT_TASK}"
+TASK="${TASK//\{work\}/$WORK}"
+log "task: $TASK"
 
 write_agent() { # name model budget effort-line
   cat > "$TMP_ROOT/agents/$1.md" <<EOF
@@ -70,8 +86,8 @@ $4
 ---
 
 You are a careful assistant that reads files and runs commands. Do
-exactly what the task says, one tool call at a time, then answer briefly.
-Pass builtin__exec commands as an argv array, e.g. ["wc", "-w", "file"].
+exactly what the task says, then answer briefly. Pass builtin__exec
+commands as an argv array, e.g. ["wc", "-w", "file"].
 EOF
 }
 write_agent kimi-k3-reasoner   "moonshotai/kimi-k3"  1.00 "effort: medium"
