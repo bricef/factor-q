@@ -9,23 +9,24 @@
 //! starting them, discovering their tools, and shutting them down.
 //!
 //! The module is one connection's worth of machinery split by
-//! responsibility (#191); this root is the public face, and everything
-//! it re-exports keeps the path it always had:
+//! responsibility (#191). This root is the public face — everything it
+//! re-exports keeps the path it always had — and the parts are private
+//! modules, so the map below names files rather than linking them:
 //!
 //! | module | what lives there |
 //! | --- | --- |
-//! | [`handler`] | the rmcp client handler and the capabilities it advertises |
-//! | [`manager`] | server lifecycle: start, discover, call, shut down |
-//! | [`tools`] | the tool adapter, [`McpTool`] |
-//! | [`resources`] | synthesized resource tools and their rendering |
-//! | [`roots`] | workspace roots (ADR-0018) and the handle that updates them |
-//! | [`notifications`] | the out-of-band notification type and the drain loop |
-//! | [`handles`] | cloneable reader / refresher handles over running servers |
-//! | [`prompt_convert`] | the rmcp → factor-q prompt boundary |
-//! | [`naming`] | the `<server>__<tool>` identifier rules |
-//! | [`progress`] | per-request progress tokens |
-//! | [`server_config`] | how a server is described, and what it is deduplicated on |
-//! | [`stdio`] | how a stdio server's child process is started |
+//! | `handler` | the rmcp client handler and the capabilities it advertises |
+//! | `manager` | server lifecycle: start, discover, call, shut down |
+//! | `tools` | the tool adapter, [`McpTool`] |
+//! | `resources` | synthesized resource tools and their rendering |
+//! | `roots` | workspace roots (ADR-0018) and the handle that updates them |
+//! | `notifications` | the out-of-band notification type and the drain loop |
+//! | `handles` | cloneable reader / refresher handles over running servers |
+//! | `prompt_convert` | the rmcp → factor-q prompt boundary |
+//! | `naming` | the `<server>__<tool>` identifier rules |
+//! | `progress` | per-request progress tokens |
+//! | `server_config` | how a server is described, and what it is deduplicated on |
+//! | `stdio` | how a stdio server's child process is started |
 
 use rmcp::service::{RoleClient, RunningService};
 
