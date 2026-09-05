@@ -804,7 +804,8 @@ Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); 
 | Assistant parts are `text` / `reasoning` / `tool_call` | The parts an assistant turn can hold. A response is an assistant turn, so it takes this part type and cannot contain a tool result. |
 | A `reasoning` part carries its producing `model` | Reasoning is model-tied; the cross-model strip keys on it. |
 | A `reasoning` part is `plain` / `signed` / `opaque` | The three shapes providers actually return. `opaque` exists so a part we cannot render is still recorded as *present*: absence and opacity are different facts. |
-| One turn's tool results are one `tool_results` message | Matches the Anthropic wire shape, where `tool_result` blocks are batched in a single turn. Makes the correct shape expressible; changing what the harness emits is [#511](https://github.com/bricef/factor-q/issues/511). |
+| One turn's tool results are one `tool_results` message | Matches the Anthropic wire shape, where `tool_result` blocks are batched in a single turn. Made the correct shape expressible; the harness kept one message per result until the row below. |
+| *(2026-09-05, [#511](https://github.com/bricef/factor-q/issues/511))* The harness emits the batched form: a parallel turn's results go out as one `tool_results` message, in the order of the calls in the assistant turn | Behaviour, not shape — v3 already carried it. Ordered by the calls rather than by the host's completion order, because the provider verifies each `tool_result` against the `tool_use` it answers and the reducer is the only party holding both; a result set that does not answer the turn's calls exactly is a host protocol error, not something to send on. |
 | `usage` gains `reasoning_tokens` (additive, defaults to 0) | Splits `output_tokens` into thought-vs-spoken. A decomposition, not a new charge — `total_cost` is unchanged. |
 
 ## Changelog: v1 → v2
