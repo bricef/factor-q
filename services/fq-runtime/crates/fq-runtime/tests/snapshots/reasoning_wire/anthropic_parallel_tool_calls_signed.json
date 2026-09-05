@@ -1,0 +1,189 @@
+{
+  "requests": [
+    {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": [
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "text": "Investigate the failing deploy.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-sonnet-4-6",
+      "stream": false,
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are a careful assistant.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "Read a file from the workspace.",
+          "input_schema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "name": "read_file"
+        }
+      ]
+    },
+    {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "Investigate the failing deploy.",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "signature": "sig-parallel",
+              "thinking": "Both files matter; read them together.",
+              "type": "thinking"
+            },
+            {
+              "id": "toolu_01",
+              "input": {
+                "path": "/runbook"
+              },
+              "name": "read_file",
+              "type": "tool_use"
+            },
+            {
+              "id": "toolu_02",
+              "input": {
+                "path": "/services"
+              },
+              "name": "read_file",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "runbook says: restart",
+              "tool_use_id": "toolu_01",
+              "type": "tool_result"
+            },
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "content": "deploy-svc",
+              "tool_use_id": "toolu_02",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-sonnet-4-6",
+      "stream": false,
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are a careful assistant.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "Read a file from the workspace.",
+          "input_schema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "name": "read_file"
+        }
+      ]
+    }
+  ],
+  "turns": [
+    {
+      "parts": [
+        {
+          "content": {
+            "kind": "signed",
+            "text": "Both files matter; read them together.",
+            "token": {
+              "signature": "sig-parallel",
+              "thinking": "Both files matter; read them together.",
+              "type": "thinking"
+            }
+          },
+          "kind": "reasoning",
+          "model": "claude-sonnet-4-6"
+        },
+        {
+          "kind": "tool_call",
+          "parameters": {
+            "path": "/runbook"
+          },
+          "tool_call_id": "toolu_01",
+          "tool_name": "read_file"
+        },
+        {
+          "kind": "tool_call",
+          "parameters": {
+            "path": "/services"
+          },
+          "tool_call_id": "toolu_02",
+          "tool_name": "read_file"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 100,
+        "output_tokens": 35,
+        "reasoning_tokens": 0
+      }
+    },
+    {
+      "parts": [
+        {
+          "kind": "text",
+          "text": "Restart the deploy service."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 190,
+        "output_tokens": 8,
+        "reasoning_tokens": 0
+      }
+    }
+  ]
+}

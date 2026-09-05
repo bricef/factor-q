@@ -26,7 +26,7 @@
 use serde_json::{Value, json};
 
 use super::GenAiClient;
-use crate::events::{Effort, Message, RequestParams, ToolSchema};
+use crate::events::{Effort, Message, RequestParams, ToolResult, ToolSchema};
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::test_support::mock_anthropic::{ContentBlock, MockAnthropicServer, MockResponse};
 use crate::test_support::mock_openai::{MockChoice, MockOpenAiServer};
@@ -99,6 +99,42 @@ fn continue_with_tool_result(messages: &mut Vec<Message>, response: &ChatRespons
         parts: response.parts.clone(),
     });
     messages.push(Message::tool_result(call_id, output));
+}
+
+/// Replay the assistant turn and answer every tool call it made, in
+/// order, as one tool-results turn — what the reducer emits for a
+/// parallel round (#511).
+fn continue_with_tool_results(
+    messages: &mut Vec<Message>,
+    response: &ChatResponse,
+    outputs: &[&str],
+) {
+    let calls = response.tool_calls();
+    assert_eq!(calls.len(), outputs.len(), "one output per scripted call");
+    messages.push(Message::Assistant {
+        parts: response.parts.clone(),
+    });
+    messages.push(Message::ToolResults {
+        results: calls
+            .iter()
+            .zip(outputs)
+            .map(|(call, output)| ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                output: output.to_string(),
+                is_error: false,
+            })
+            .collect(),
+    });
+}
+
+/// The `type` of every content block in a wire message.
+fn block_types(message: &Value) -> Vec<&str> {
+    message["content"]
+        .as_array()
+        .expect("content is a block list")
+        .iter()
+        .map(|block| block["type"].as_str().expect("every block has a type"))
+        .collect()
 }
 
 async fn anthropic_mock() -> MockAnthropicServer {
@@ -447,6 +483,77 @@ async fn anthropic_cross_model_strip() {
     pin("anthropic_cross_model_strip", turns, requests);
 }
 
+/// A signed block and two `tool_use` blocks in one turn — the parallel
+/// round #511 is about — answered by one tool-results turn carrying both.
+/// Request 2 must replay the thinking block first, then both calls, then
+/// **one** user message holding both `tool_result` blocks in call order.
+/// The shape is asserted in words before the byte-level pin, so a moved
+/// golden says what moved.
+#[tokio::test]
+async fn anthropic_parallel_tool_calls_signed() {
+    const MODEL: &str = "claude-sonnet-4-6";
+
+    let mock = anthropic_mock().await;
+    mock.push_response(anthropic_turn(
+        vec![
+            thinking("Both files matter; read them together.", "sig-parallel"),
+            tool_use("toolu_01", "/runbook"),
+            tool_use("toolu_02", "/services"),
+        ],
+        "tool_use",
+        100,
+        35,
+    ));
+    mock.push_response(MockResponse::text("Restart the deploy service.", 190, 8));
+    let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
+
+    let mut messages = vec![
+        Message::system("You are a careful assistant."),
+        Message::user("Investigate the failing deploy."),
+    ];
+    let mut turns = Vec::new();
+
+    let first = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&first));
+    continue_with_tool_results(
+        &mut messages,
+        &first,
+        &["runbook says: restart", "deploy-svc"],
+    );
+
+    let second = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&second));
+
+    let requests = mock.received_requests();
+    mock.shutdown().await;
+
+    let replayed = requests[1]["messages"]
+        .as_array()
+        .expect("request 2 carries the conversation");
+    assert_eq!(replayed.len(), 3, "user, assistant, and one answering turn");
+    assert_eq!(replayed[1]["role"], "assistant");
+    assert_eq!(
+        block_types(&replayed[1]),
+        ["thinking", "tool_use", "tool_use"],
+        "the signed block leads, then both calls"
+    );
+    assert_eq!(replayed[2]["role"], "user");
+    assert_eq!(
+        block_types(&replayed[2]),
+        ["tool_result", "tool_result"],
+        "one user message carries both results"
+    );
+    let answered: Vec<&str> = replayed[2]["content"]
+        .as_array()
+        .expect("blocks")
+        .iter()
+        .map(|block| block["tool_use_id"].as_str().expect("tool_use_id"))
+        .collect();
+    assert_eq!(answered, ["toolu_01", "toolu_02"], "in call order");
+
+    pin("anthropic_parallel_tool_calls_signed", turns, requests);
+}
+
 // endregion: anthropic
 
 // region: openai-compatible
@@ -544,6 +651,65 @@ async fn openai_openrouter_reasoning_key() {
     let requests = mock.requests();
     mock.shutdown().await;
     pin("openai_openrouter_reasoning_key", turns, requests);
+}
+
+/// Two calls in one turn, answered by one tool-results turn. This wire
+/// wants one `tool` message per result, and the adapter unfolds the
+/// single turn into exactly that, in call order — the same reducer
+/// message the Anthropic golden above batches into one user turn.
+#[tokio::test]
+async fn openai_parallel_tool_calls() {
+    const MODEL: &str = "kimi-k2";
+
+    let mock = MockOpenAiServer::start().await;
+    mock.push(
+        MockChoice::silent()
+            .with_tool_call("call_1", "read_file", json!({"path": "/runbook"}))
+            .with_tool_call("call_2", "read_file", json!({"path": "/services"}))
+            .with_usage(1047, 60, None),
+    );
+    mock.push(MockChoice::text("Restart the deploy service.").with_usage(1260, 26, None));
+    let client = mock.client(MODEL);
+
+    let mut messages = vec![
+        Message::system("You are a careful assistant."),
+        Message::user("Investigate the failing deploy."),
+    ];
+    let mut turns = Vec::new();
+
+    let first = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&first));
+    continue_with_tool_results(
+        &mut messages,
+        &first,
+        &["runbook says: restart", "deploy-svc"],
+    );
+
+    let second = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&second));
+
+    let requests = mock.requests();
+    mock.shutdown().await;
+
+    let replayed = requests[1]["messages"]
+        .as_array()
+        .expect("request 2 carries the conversation");
+    let roles: Vec<&str> = replayed
+        .iter()
+        .map(|message| message["role"].as_str().expect("role"))
+        .collect();
+    assert_eq!(
+        roles,
+        ["system", "user", "assistant", "tool", "tool"],
+        "one `tool` message per result on this wire"
+    );
+    let answered: Vec<&str> = replayed[3..]
+        .iter()
+        .map(|message| message["tool_call_id"].as_str().expect("tool_call_id"))
+        .collect();
+    assert_eq!(answered, ["call_1", "call_2"], "in call order");
+
+    pin("openai_parallel_tool_calls", turns, requests);
 }
 
 // endregion: openai-compatible

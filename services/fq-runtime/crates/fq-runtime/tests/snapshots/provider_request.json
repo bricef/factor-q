@@ -104,13 +104,7 @@
               "call_id": "call_a",
               "content": "deploy failed at step 3"
             }
-          }
-        ],
-        "options": null,
-        "role": "Tool"
-      },
-      {
-        "content": [
+          },
           {
             "ToolResponse": {
               "call_id": "call_b",
