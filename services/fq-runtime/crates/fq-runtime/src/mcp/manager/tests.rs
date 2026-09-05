@@ -10,6 +10,23 @@ use super::*;
 
 use crate::mcp::mock::{mock_tool, serve_mock};
 
+/// A manager holding one mock-backed server, for the methods that need
+/// a *registered* server rather than a bare client. Starting one the
+/// ordinary way would need a child process; the manager's own state is
+/// reachable from here, so the server is registered directly.
+async fn manager_with_mock(name: &str) -> McpClientManager {
+    let client = serve_mock(Arc::new(Mutex::new(vec![mock_tool("only")])), 10).await;
+    let (_tx, notifications) = mpsc::unbounded_channel();
+    let mut manager = McpClientManager::with_server_root(std::env::temp_dir().join("fq-mcp-unit"));
+    manager.servers.push(RunningServer {
+        name: name.to_string(),
+        client,
+        tool_names: Vec::new(),
+        notifications: Mutex::new(notifications),
+    });
+    manager
+}
+
 #[tokio::test]
 async fn discover_follows_the_pagination_cursor() {
     // 5 tools, 2 per page → 3 pages; discovery must follow the cursor.
@@ -122,4 +139,44 @@ async fn await_graceful_close_returns_once_the_service_tears_down() {
         start.elapsed()
     );
     drop(held);
+}
+
+/// #191: a `logging/setLevel` failure used to be reported as
+/// `McpError::ResourceOp`, so the operator was told "resource operation
+/// on 'x' failed" for something that never touched a resource. The mock
+/// implements no `set_level`, so rmcp's default handler answers
+/// `method_not_found` — which is exactly the commonest real cause, a
+/// server that never implemented the (SEP-2577 deprecated) request.
+#[tokio::test]
+async fn a_logging_level_failure_is_reported_as_a_logging_failure() {
+    let manager = manager_with_mock("mock").await;
+
+    let err = manager
+        .set_logging_level("mock", LoggingLevel::Debug)
+        .await
+        .expect_err("the mock server implements no logging/setLevel");
+    assert!(matches!(err, McpError::LoggingOp { .. }), "{err:?}");
+
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("logging operation on 'mock' failed: "),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("resource operation"),
+        "a logging failure must not name the resource half of the \
+         protocol: {rendered}"
+    );
+
+    // An unknown server is still the unknown-server error, not a
+    // logging one — the variant tracks what failed, not where it was
+    // called from.
+    let unknown = manager
+        .set_logging_level("absent", LoggingLevel::Debug)
+        .await
+        .expect_err("no server named 'absent' is running");
+    assert!(
+        matches!(unknown, McpError::UnknownServer { .. }),
+        "{unknown:?}"
+    );
 }

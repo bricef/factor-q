@@ -83,6 +83,14 @@ pub enum McpError {
     #[error("prompt operation on '{server}' failed: {reason}")]
     PromptOp { server: String, reason: String },
 
+    /// `logging/setLevel` failed. Its own variant because these
+    /// failures used to borrow [`Self::ResourceOp`] and told the
+    /// operator a *resource* operation had failed — pointing at the
+    /// wrong half of the protocol for the commonest cause, a server
+    /// that never implemented the (SEP-2577 deprecated) request.
+    #[error("logging operation on '{server}' failed: {reason}")]
+    LoggingOp { server: String, reason: String },
+
     #[error("roots operation on '{server}' failed: {reason}")]
     RootsOp { server: String, reason: String },
 }
