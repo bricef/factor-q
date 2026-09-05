@@ -61,7 +61,14 @@ pub struct DownSignal(Arc<tokio::sync::watch::Sender<Option<DownMode>>>);
 /// The reading half, held by the shutdown select and by the drain wait.
 pub type DownReceiver = tokio::sync::watch::Receiver<Option<DownMode>>;
 
+impl Default for DownSignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DownSignal {
+    /// A switch nobody has thrown yet.
     pub fn new() -> Self {
         Self(Arc::new(tokio::sync::watch::channel(None).0))
     }
