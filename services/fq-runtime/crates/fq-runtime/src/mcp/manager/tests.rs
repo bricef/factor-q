@@ -186,16 +186,16 @@ async fn a_logging_level_failure_is_reported_as_a_logging_failure() {
     );
 }
 
-/// #191: `call_tool_cancellable` sent no progress token, while
-/// `McpTool::execute` has always attached one — so the very calls that
-/// would benefit from progress, the long-running ones a host wants to
-/// be able to abort, were the ones that could not receive it. #547
-/// wires every tool call through this method, so the two paths have to
-/// agree before that lands.
+/// A cancellable call must reach the server carrying a progress token,
+/// or the server may not report progress on it at all — and this is the
+/// path for the long-running calls that most want it, the ones a host
+/// may need to abort. #547 wires every tool call through here.
 ///
-/// The mock records what the *server* saw, which is the only place the
-/// answer is honest: `_meta` is merged from two sources on the way out
-/// (see the note in `call_tool_cancellable`).
+/// rmcp's peer layer is what supplies the token (#605), so this asserts
+/// against the *server*: the mock records what actually arrived, which
+/// is the only place the answer is honest. It fails if rmcp ever stops
+/// minting one — the property was untested on either call path before
+/// #191.
 #[tokio::test]
 async fn a_cancellable_call_carries_a_progress_token() {
     let (client, calls) =

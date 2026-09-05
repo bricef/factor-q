@@ -5,11 +5,10 @@
 use std::sync::Arc;
 
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
-use rmcp::model::{CallToolRequestParams, Meta};
+use rmcp::model::CallToolRequestParams;
 use serde_json::Value;
 
 use super::McpClient;
-use super::progress::next_progress_token;
 
 /// A single tool from an MCP server, adapted to the fq-tools [`Tool`] trait.
 ///
@@ -52,12 +51,10 @@ impl Tool for McpTool {
             }
         };
 
-        let mut request =
+        // No `_meta` progress token: rmcp's peer layer mints one for
+        // every outbound request and overwrites any the host sets (#605).
+        let request =
             CallToolRequestParams::new(self.remote_tool_name.clone()).with_arguments(arguments);
-        // Attach a progress token so progress-capable servers can
-        // report against this call (`notifications/progress`); servers
-        // that don't support progress ignore it.
-        request.meta = Some(Meta::with_progress_token(next_progress_token()));
 
         let result = self
             .client

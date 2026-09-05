@@ -1,30 +1,21 @@
-//! Progress tokens: minted per outbound request, echoed back by the
-//! server on `notifications/progress`.
+//! Progress tokens, as they reach the host.
 //!
-//! A server may only report progress against a request that carried a
-//! `progressToken` in its `_meta`, so every outbound tool call attaches
-//! one — both the plain call ([`McpTool::execute`](super::McpTool)) and
-//! the cancellable one
-//! ([`McpClientManager::call_tool_cancellable`](super::McpClientManager)).
-
-use std::sync::atomic::{AtomicI64, Ordering};
+//! A server may only report progress against a request whose `_meta`
+//! carried a `progressToken`, and rmcp's peer layer mints one for every
+//! outbound request — so every call factor-q makes is already
+//! progress-capable and the host mints none of its own. What arrives
+//! back on `notifications/progress` is that token, which the handler
+//! renders here for the neutral
+//! [`ServerNotification::Progress`](super::ServerNotification).
+//!
+//! Correlating an inbound token with the call that caused it needs
+//! `RequestHandle::progress_token` — the token actually on the wire —
+//! and is issue #605.
 
 use rmcp::model::{NumberOrString, ProgressToken};
 
-/// Monotonic source of per-request progress tokens (Step 7). Each
-/// outbound tool call gets a fresh token so a server that supports
-/// progress can report against it via `notifications/progress`.
-static PROGRESS_TOKEN_SEQ: AtomicI64 = AtomicI64::new(1);
-
-pub(super) fn next_progress_token() -> ProgressToken {
-    ProgressToken(NumberOrString::Number(
-        PROGRESS_TOKEN_SEQ.fetch_add(1, Ordering::Relaxed),
-    ))
-}
-
-/// Render a progress token to a string for the neutral
-/// [`ServerNotification::Progress`](super::ServerNotification) (tokens
-/// are numeric here, but a server may echo a string token).
+/// Render a progress token to a string (rmcp's are numeric, but a
+/// server may echo a string token).
 pub(super) fn progress_token_string(token: &ProgressToken) -> String {
     match &token.0 {
         NumberOrString::Number(n) => n.to_string(),
