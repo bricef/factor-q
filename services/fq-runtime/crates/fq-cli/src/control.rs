@@ -59,13 +59,16 @@ pub(crate) async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Resul
         eprintln!("Requested an immediate stop (--now).");
         eprintln!(
             "The daemon will tear down cleanly, deregister its worker, and exit at once; \
-             in-flight invocations are resumed by recovery on the next start."
+             in-flight invocations are resumed by recovery on the next start. \
+             Against a daemon already draining this escalates that drain — the wait ends \
+             and the same clean teardown runs."
         );
     } else {
         eprintln!("Requested a graceful stop.");
         eprintln!(
             "The daemon will drain in-flight invocations to a step boundary, \
-             deregister its worker, and exit."
+             deregister its worker, and exit. To cut a drain short without losing the \
+             clean teardown, run `fq down --now` again, or send a second SIGTERM."
         );
     }
 
@@ -102,8 +105,20 @@ pub(crate) async fn down_daemon(global: &GlobalArgs, now: bool) -> anyhow::Resul
         // closed handshake — because none of them is a daemon serving
         // operators.
         if edge_client_for(global).await.is_err() {
-            let mode = if now { "now" } else { "drain" };
-            println!("✓ Daemon stopped (mode={mode}).");
+            // `requested`, not `mode`, and the distinction is not
+            // pedantry. A drain can be escalated to an immediate stop
+            // while this loop is polling — by a second SIGTERM on the
+            // daemon's host, or by another operator's `fq down --now`
+            // — and this client cannot learn that: the only channel it
+            // has is an edge that has, by the time the mode is
+            // settled, stopped answering. Saying `mode=drain` there
+            // would be a confident report of something that did not
+            // happen. What ran is recorded in the daemon's
+            // `system.shutdown` event, whose reason distinguishes
+            // `down` from `down_escalated` and `sigterm` from
+            // `sigterm_escalated`.
+            let requested = if now { "now" } else { "drain" };
+            println!("✓ Daemon stopped (requested mode={requested}).");
             return Ok(());
         }
         tokio::time::sleep(DOWN_POLL_INTERVAL).await;

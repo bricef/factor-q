@@ -263,9 +263,7 @@ impl Surface {
                     agents_dir: scratch.path().join("agents"),
                     default_model: None,
                     worker: runner.clone(),
-                    down: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
-                        tokio::sync::oneshot::channel::<bool>().0,
-                    ))),
+                    down: fq_daemon::DownSignal::new(),
                 },
             },
         )

@@ -322,7 +322,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
         "`fq down` failed (should exit 0 after confirming the daemon stopped):          stdout={down_out}\nstderr={down_err}"
     );
     assert!(
-        down_out.contains("Daemon stopped (mode=drain)"),
+        down_out.contains("Daemon stopped (requested mode=drain)"),
         "`fq down` did not confirm the daemon stopped:\n{down_out}"
     );
     assert!(
@@ -409,7 +409,7 @@ fn daemon_stops_now_on_fq_down_now() {
         "`fq down --now` failed: stdout={down_out}\nstderr={down_err}"
     );
     assert!(
-        down_out.contains("Daemon stopped (mode=now)"),
+        down_out.contains("Daemon stopped (requested mode=now)"),
         "`fq down --now` did not confirm the daemon stopped:\n{down_out}"
     );
     assert!(

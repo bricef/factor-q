@@ -18,8 +18,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+mod edge;
 mod error;
 mod nats;
+pub use edge::EdgeConfig;
 pub use error::ConfigError;
 pub use nats::NatsConfig;
 
@@ -60,50 +62,6 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub summary: SummaryConfig,
-}
-
-/// The authenticated operator edge (ADR-0006 + ADR-0031): the tarpc
-/// `invoke`/`next_batch` surface operator clients speak. Born
-/// authenticated — every connection presents a capability token — so
-/// a non-loopback bind is the operator's choice, not a refusal. On by default — the edge is the operator
-/// surface (plan Phase 5 retires the legacy paths); `enabled = false`
-/// disables it explicitly.
-#[derive(Debug, Clone, Deserialize)]
-pub struct EdgeConfig {
-    /// Start the edge with the daemon. Default true; set false to
-    /// disable explicitly.
-    #[serde(default = "default_edge_enabled")]
-    pub enabled: bool,
-    /// Bind address for the TLS listener.
-    #[serde(default = "default_edge_bind")]
-    pub bind: String,
-    /// Upper bound, in milliseconds, on how long a `min_seq`-gated
-    /// read waits for the projection fold to catch up before
-    /// answering `Lagging`. Config, not code (Design Principle 8).
-    #[serde(default = "default_edge_min_seq_wait_ms")]
-    pub min_seq_wait_ms: u64,
-}
-
-impl Default for EdgeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_edge_enabled(),
-            bind: default_edge_bind(),
-            min_seq_wait_ms: default_edge_min_seq_wait_ms(),
-        }
-    }
-}
-
-fn default_edge_min_seq_wait_ms() -> u64 {
-    2_000
-}
-
-fn default_edge_enabled() -> bool {
-    true
-}
-
-fn default_edge_bind() -> String {
-    "127.0.0.1:9472".to_string()
 }
 
 /// Built-in tool configuration — `[tools]` in `fqd.toml`. Today only the
@@ -781,15 +739,41 @@ mod tests {
     }
 
     #[test]
-    fn edge_is_on_by_default_and_disabled_explicitly() {
-        // The edge is the operator surface: it runs unless the
-        // operator explicitly opts out. Both the all-defaults path and
-        // an `[edge]` section that omits `enabled` must land on true.
-        assert!(Config::default().edge.enabled);
-        let omitted: Config = toml::from_str("[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
-        assert!(omitted.edge.enabled);
-        let disabled: Config = toml::from_str("[edge]\nenabled = false\n").unwrap();
-        assert!(!disabled.edge.enabled);
+    fn the_edge_cannot_be_switched_off() {
+        // `[edge] enabled` was vestigial: nothing but this test's
+        // ancestor ever set it, and a daemon without an edge cannot be
+        // inspected, reloaded or stopped by anything but a signal. The
+        // key is gone, so the strict parser refuses it — which is the
+        // point. An operator who had it in a file learns that at
+        // startup rather than by wondering where their daemon went.
+        let refused = Config::from_toml_str("[edge]\nenabled = false\n")
+            .expect_err("`[edge] enabled` must not parse");
+        assert!(
+            matches!(&refused, ConfigError::UnknownKeys(keys) if keys.iter().any(|k| k == "edge.enabled")),
+            "expected the unknown-key refusal to name edge.enabled, got: {refused}"
+        );
+    }
+
+    #[test]
+    fn the_edge_carries_its_connection_budget_with_defaults() {
+        // The caps exist so an anonymous peer cannot make the daemon
+        // allocate without bound; the defaults have to hold for a file
+        // that names none of them, which is every existing file.
+        let defaults: Config = toml::from_str("[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
+        assert_eq!(defaults.edge.max_connections, 256);
+        assert_eq!(defaults.edge.max_pre_auth_connections, 64);
+        assert_eq!(defaults.edge.max_concurrent_requests, 32);
+        assert_eq!(defaults.edge.accept_error_backoff_ms, 100);
+
+        let tuned: Config = toml::from_str(
+            "[edge]\nmax_connections = 8\nmax_pre_auth_connections = 2\n\
+             max_concurrent_requests = 4\naccept_error_backoff_ms = 25\n",
+        )
+        .unwrap();
+        assert_eq!(tuned.edge.max_connections, 8);
+        assert_eq!(tuned.edge.max_pre_auth_connections, 2);
+        assert_eq!(tuned.edge.max_concurrent_requests, 4);
+        assert_eq!(tuned.edge.accept_error_backoff_ms, 25);
     }
 
     #[test]

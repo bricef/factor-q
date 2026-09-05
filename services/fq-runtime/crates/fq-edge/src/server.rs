@@ -481,7 +481,9 @@ pub async fn bind_with_limits(
     registry: Arc<EdgeRegistry>,
     limits: EdgeLimits,
 ) -> anyhow::Result<(SocketAddr, BoxFuture<'static, ()>)> {
-    EdgeListener::bind(addr).await?.serve(identity, registry, limits)
+    EdgeListener::bind(addr)
+        .await?
+        .serve(identity, registry, limits)
 }
 
 #[cfg(test)]

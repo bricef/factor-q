@@ -23,11 +23,13 @@ mod operator_surface;
 mod pricing;
 mod recovery;
 mod resume;
+mod shared_servers;
 mod status_report;
 mod trigger_command;
 mod version;
+mod worker_registration;
 
-pub use crate::control_commands::{DownSignal, MachineryDeps};
+pub use crate::control_commands::{DownMode, DownSignal, MachineryDeps};
 pub use crate::operator_surface::{DaemonFacts, OperatorDeps, operator_registry};
 /// The resume path's handle, out here because `OperatorDeps` carries
 /// one: a caller that assembles the operator surface — this daemon, or

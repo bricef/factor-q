@@ -7,12 +7,8 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use fq_runtime::events::{Event, EventPayload};
 use fq_runtime::llm::{GenAiClient, LlmClient};
-use fq_runtime::{
-    ControlPlaneStore, EventBus, McpClientManager, McpServerConfig, PricingTable, ProjectionStore,
-    ToolRegistry,
-};
+use fq_runtime::{ControlPlaneStore, EventBus, McpClientManager, PricingTable, ProjectionStore};
 use uuid::Uuid;
 
 use crate::boot::{ensure_split_dbs, local_host_label, workspace_provider};
@@ -75,6 +71,42 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     println!("  agent directory:  {}", config.agents.directory.display());
     println!("  cache directory:  {}", config.cache.directory.display());
     println!("  state directory:  {}", config.state.directory.display());
+
+    // **The instance lock, and it is the listener itself.**
+    //
+    // Bound before anything else this process does that another
+    // process could see: before the broker connection, before the
+    // stores are opened, before the worker registers, before recovery
+    // publishes `system.recovery` and takes ownership of resumable
+    // invocations. Two daemons cannot hold one address, and a daemon
+    // without an edge is not an operable configuration — `fq` has no
+    // path to it — so the address is a proxy for the whole instance.
+    //
+    // Losing the race therefore costs nothing to clean up. Before this
+    // ordering, a bind failure (the port still held by a predecessor
+    // that had not finished draining, most often) unwound past a live
+    // worker row, cancelled resume tasks mid-step, and published no
+    // `system.shutdown`: the daemon that could not start left the mess
+    // (review B5). Now it exits here, naming the address, having
+    // touched nothing.
+    //
+    // No lock file. A file records an intention and outlives the
+    // process that wrote it; a bound socket is the fact itself and the
+    // kernel releases it.
+    let edge_listener = fq_edge::EdgeListener::bind(&config.edge.bind)
+        .await
+        .context(
+            "the edge could not take its address, so this daemon is not starting. \
+             Another `fqd` may still hold it — check `fq status`, or wait for a \
+             draining predecessor to exit — or change `[edge] bind` in fqd.toml.",
+        )?;
+    println!("  edge:             {}", edge_listener.local_addr());
+
+    // Signal handlers are installed here, once, and held for the life
+    // of the process (#509): the drain reads the same streams, so a
+    // second SIGTERM escalates it instead of falling into a
+    // registration nobody is listening to.
+    let signals = crate::signals::ShutdownSignals::install();
 
     // Load agents eagerly. A missing directory is an error: the
     // dispatcher would otherwise silently drop every trigger.
@@ -180,11 +212,86 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         .expect("runtime UUID is a valid WorkerId");
     let host_label = local_host_label();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    cp_store
-        .register_worker(worker_id.as_str(), &host_label, now_ms)
-        .await
-        .context("failed to self-register worker with control-plane")?;
+    let registration = crate::worker_registration::WorkerRegistration::register(
+        cp_store.clone(),
+        worker_id.clone(),
+        &host_label,
+        now_ms,
+    )
+    .await?;
     println!("  worker:           {} (host: {})", worker_id, host_label);
+
+    // ---- Past this line the control plane has a live row for this
+    // process, and every way out must say what became of it. The
+    // block below is that single exit path: whatever it returns,
+    // `settle_unclaimed` runs, and it is a no-op when the teardown
+    // inside already accounted for the row. Adding a fallible step
+    // anywhere in here cannot reintroduce the orphaned-worker bug,
+    // because there is no path that skips the settle. ----
+    let outcome = run_registered(Registered {
+        runtime_id,
+        version,
+        config,
+        bus,
+        db_paths,
+        store,
+        cp_store,
+        worker_store,
+        registry,
+        worker_id,
+        registration: registration.clone(),
+        edge_listener,
+        signals,
+        agents_loaded,
+        now_ms,
+    })
+    .await;
+    registration.settle_unclaimed().await;
+    outcome
+}
+
+/// Everything `run_daemon` had worked out by the time its worker row
+/// existed. One struct because the alternative is fifteen arguments,
+/// and the split exists to give the registration a single exit path
+/// rather than to give these fields a home.
+struct Registered {
+    runtime_id: Uuid,
+    version: &'static str,
+    config: fq_runtime::Config,
+    bus: EventBus,
+    db_paths: fq_runtime::RuntimeDbPaths,
+    store: Arc<ProjectionStore>,
+    cp_store: Arc<ControlPlaneStore>,
+    worker_store: Arc<fq_runtime::WorkerStore>,
+    registry: Arc<fq_runtime::AgentRegistry>,
+    worker_id: fq_runtime::worker::WorkerId,
+    registration: crate::worker_registration::WorkerRegistration,
+    edge_listener: fq_edge::EdgeListener,
+    signals: crate::signals::ShutdownSignals,
+    agents_loaded: u32,
+    now_ms: i64,
+}
+
+/// The rest of the assembly, and then the run. Everything here is
+/// fallible and every failure lands on the registration guard.
+async fn run_registered(r: Registered) -> anyhow::Result<()> {
+    let Registered {
+        runtime_id,
+        version,
+        config,
+        bus,
+        db_paths,
+        store,
+        cp_store,
+        worker_store,
+        registry,
+        worker_id,
+        registration,
+        edge_listener,
+        signals,
+        agents_loaded,
+        now_ms,
+    } = r;
 
     // Reconcile worker rows left live by operator terminal transitions made
     // before this binary was deployed. Do this before recovery classification
@@ -215,41 +322,13 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     );
 
     // Build tool registry: built-ins + MCP servers from all agents.
-    let mut tools = ToolRegistry::with_builtins_exec(config.tools.exec.to_exec_config());
     let mut mcp_manager = McpClientManager::with_server_root(config.state.directory.join("mcp"));
-    for loaded in registry.iter() {
-        for decl in loaded.agent.mcp_servers() {
-            // Grant-bearing servers run per-invocation, wired by the
-            // runner (ADR-0018) — not shared at daemon boot.
-            if loaded.agent.grants_inbound_capability(&decl.server) {
-                continue;
-            }
-            let config = McpServerConfig {
-                name: decl.server.clone(),
-                command: decl.command.clone().unwrap_or_default(),
-                args: decl.args.clone(),
-                env: decl.env.clone(),
-                url: decl.url.clone(),
-            };
-            match mcp_manager.start_server(config).await {
-                Ok(mcp_tools) => {
-                    for tool in mcp_tools {
-                        if let Err(error) = tools.register(tool) {
-                            tracing::warn!(server = %decl.server, %error, "refusing MCP tool registration");
-                        }
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        server = %decl.server,
-                        agent = %loaded.agent.id(),
-                        error = %err,
-                        "failed to start MCP server, its tools will be unavailable"
-                    );
-                }
-            }
-        }
-    }
+    let tools = crate::shared_servers::start_shared_servers(
+        &registry,
+        &mut mcp_manager,
+        config.tools.exec.to_exec_config(),
+    )
+    .await;
     let mcp_tool_count = tools.len() - fq_runtime::tools::BUILTIN_TOOL_COUNT;
     if mcp_tool_count > 0 {
         println!("  MCP tools:        {mcp_tool_count}");
@@ -312,36 +391,18 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
     // `tools/list_changed` installs a rebuilt registry into the shared
     // context so the *next* invocation picks it up. The manager keeps
     // its `&mut` lifecycle here for shutdown.
+    // Bridging a server's log record onto the event bus as a
+    // daemon-scoped event (ADR-0020 / plan B2) happens in there too.
     let notification_channels = mcp_manager.take_notifications().await;
     if !notification_channels.is_empty() {
-        let refresher = mcp_manager.tool_refresher(config.tools.exec.to_exec_config());
-        let drain_context = context.clone();
-        let log_bus = bus.clone();
-        tokio::spawn(fq_runtime::mcp::drain_server_notifications(
+        crate::shared_servers::drain_notifications(
+            &mut mcp_manager,
+            context.clone(),
+            bus.clone(),
+            runtime_id,
+            config.tools.exec.to_exec_config(),
             notification_channels,
-            refresher,
-            move |registry| drain_context.install_tools(Arc::new(registry)),
-            move |server, level, logger, data| {
-                // Bridge the server's log record onto the event bus as a
-                // daemon-scoped event (ADR-0020 / plan B2). Fire-and-forget:
-                // a failed publish is logged, never blocks the drain.
-                let bus = log_bus.clone();
-                let event = Event::system(
-                    runtime_id,
-                    EventPayload::McpServerLog(fq_runtime::events::McpServerLogPayload {
-                        server,
-                        level,
-                        logger,
-                        data,
-                    }),
-                );
-                tokio::spawn(async move {
-                    if let Err(err) = bus.publish(&event).await {
-                        tracing::warn!(error = %err, "failed to publish MCP server log event");
-                    }
-                });
-            },
-        ));
+        );
     }
 
     // Spawn auto-resume tasks for each safe-resume / safe-replay
@@ -380,6 +441,9 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         resume_runner,
         worker,
         worker_id,
+        registration,
+        edge_listener,
+        signals,
         mcp_manager,
         agents_loaded,
         pricing_entries,

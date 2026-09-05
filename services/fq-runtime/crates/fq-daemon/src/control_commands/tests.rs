@@ -59,3 +59,76 @@ async fn reload_agents_keeps_current_registry_on_load_error() {
     assert_eq!(after.len(), 1, "failed reload must keep the old registry");
     assert!(after.get(&AgentId::new("keep").unwrap()).is_some());
 }
+
+/// The escalation ladder, which the one-shot could not express:
+/// `--now` on a daemon already draining raises the mode, a repeated
+/// plain `down` changes nothing, and nothing can lower it again.
+#[test]
+fn the_stop_mode_escalates_and_never_relaxes() {
+    let signal = DownSignal::new();
+    let rx = signal.subscribe();
+    assert_eq!(*rx.borrow(), None, "no stop has been asked for yet");
+
+    assert!(signal.request(DownMode::Drain), "the first ask is a change");
+    assert!(
+        !signal.request(DownMode::Drain),
+        "a repeated plain `down` on a daemon already stopping changes nothing"
+    );
+    assert_eq!(*rx.borrow(), Some(DownMode::Drain));
+
+    assert!(
+        signal.request(DownMode::Now),
+        "`--now` against a draining daemon must escalate, not be swallowed"
+    );
+    assert_eq!(*rx.borrow(), Some(DownMode::Now));
+
+    assert!(
+        !signal.request(DownMode::Drain),
+        "a plain `down` arriving after a `--now` must not put the drain back"
+    );
+    assert_eq!(*rx.borrow(), Some(DownMode::Now));
+}
+
+/// A daemon whose edge registry has been dropped has nobody left to
+/// ask it to stop. The absence of an operator is not an instruction
+/// from one: the wait must not resolve.
+#[tokio::test]
+async fn a_dropped_sender_is_not_a_stop_request() {
+    let signal = DownSignal::new();
+    let mut rx = signal.subscribe();
+    drop(signal);
+
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        wait_for_down(&mut rx),
+    )
+    .await;
+    assert!(
+        waited.is_err(),
+        "a dropped stop switch reported a stop nobody asked for"
+    );
+}
+
+/// The drain's escalation wait fires on `Now` and only on `Now` — a
+/// plain `down` is the drain it is already running.
+#[tokio::test]
+async fn the_escalation_wait_ignores_a_plain_down() {
+    let signal = DownSignal::new();
+    let mut rx = signal.subscribe();
+    signal.request(DownMode::Drain);
+
+    let ignored = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        wait_for_down_now(&mut rx),
+    )
+    .await;
+    assert!(ignored.is_err(), "a plain `down` must not escalate itself");
+
+    signal.request(DownMode::Now);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        wait_for_down_now(&mut rx),
+    )
+    .await
+    .expect("`--now` must wake the drain's escalation wait");
+}
