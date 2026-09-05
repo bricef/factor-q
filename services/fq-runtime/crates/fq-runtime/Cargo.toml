@@ -24,6 +24,14 @@ axum = { workspace = true, optional = true }
 # below re-adds "full" for test builds. The binaries (fq-cli, fq-daemon,
 # fq-dashboard) take "full" themselves.
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
+# `StreamMap` + `UnboundedReceiverStream`, for the two places that merge
+# a set of named, per-server channels into one stream (the MCP
+# notification drain and the runner's sampling channel). Both hand-rolled
+# a poll-merge that always started at index 0, so a chatty first server
+# could starve the rest (#191). Default features off: the two types used
+# here need none of them, and `default = ["time"]` would pull a tokio
+# feature this crate's trimmed set does not owe anyone.
+tokio-stream = { version = "0.1", default-features = false }
 schemars = { workspace = true }
 serde = { workspace = true }
 # Reports the keys a parse silently dropped, which `deny_unknown_fields`
