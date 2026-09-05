@@ -170,15 +170,16 @@ seen running.
   override, the natural neighbour for `FQ_NATS_TOKEN`.
 - `services/fq-runtime/crates/fq-cli/src/events.rs:190` — renders the
   startup payload; whatever replaces the URL must still read well here.
-- `services/fq-runtime/crates/fq-runtime/src/mcp.rs:1038` — the
-  `Command::new(&config.command)` for stdio servers; `:1041` adds the
-  declared `env:` on top of the inherited environment. There is no
-  `env_clear()`.
+- `services/fq-runtime/crates/fq-runtime/src/mcp/stdio.rs:62` —
+  `stdio_command` builds the child for stdio servers. Since #541 it does
+  `env_clear()`, sets a pinned `PATH`, then adds the declared `env:` on
+  top; the child inherits nothing else.
 
 **Notes.** This is the package most likely to break something subtle.
 The redaction must be structural (the credential is never in the string)
-rather than a regex over log lines. `env_clear()` will break any MCP
-server that relied on inherited `HOME` or `PATH`; the smoke suite and
+rather than a regex over log lines. The MCP child environment is already
+cleared (#541), so any server that relied on an inherited `HOME` or
+`PATH` is already broken rather than about to be; the smoke suite and
 the `mcp_integration` tests exercise reference servers under `npx`, so
 run `just smoke` locally too, with the key from `.env` and the NATS URL
 only via `just`. The dogfood definitions in `~/fq-dogfood/agents/` are
