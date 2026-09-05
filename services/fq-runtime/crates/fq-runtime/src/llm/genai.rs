@@ -788,13 +788,15 @@ mod tests {
     /// (system, and the final message), which are easy to lose in a refactor
     /// and cost money rather than failing loudly.
     ///
-    /// One thing it records is a known defect rather than a desired shape:
-    /// the two parallel tool results arrive as **two separate `Tool`-role
-    /// messages**, where Anthropic's documented shape is one turn carrying
-    /// both `tool_result` blocks. That is
-    /// [#511](https://github.com/bricef/factor-q/issues/511), deliberately
-    /// out of scope here — phase 2 must not change behaviour, including this
-    /// behaviour. When #511 lands, this snapshot moves on purpose.
+    /// One thing here moved on purpose, once: the two parallel tool results
+    /// go out as **one `Tool`-role message carrying both** — what the
+    /// reducer emits since [#511](https://github.com/bricef/factor-q/issues/511)
+    /// closed, and Anthropic's documented shape. Until then the snapshot
+    /// pinned two separate messages, the known defect phase 2 deliberately
+    /// left alone, and it moved when #511 landed exactly as it said it
+    /// would. The conversation is built by hand, so it tracks the reducer's
+    /// output by construction, not by running it: the reducer's own tests
+    /// cover that.
     #[test]
     fn provider_request_shape_is_stable_for_a_full_conversation() {
         let request = ChatRequest {
@@ -824,14 +826,22 @@ mod tests {
                         }),
                     ],
                 },
-                Message::tool_result(
-                    crate::events::ToolCallId::new("call_a".to_string()).expect("non-empty"),
-                    "deploy failed at step 3",
-                ),
-                Message::tool_result(
-                    crate::events::ToolCallId::new("call_b".to_string()).expect("non-empty"),
-                    "agent restarted",
-                ),
+                Message::ToolResults {
+                    results: vec![
+                        crate::events::ToolResult {
+                            tool_call_id: crate::events::ToolCallId::new("call_a".to_string())
+                                .expect("non-empty"),
+                            output: "deploy failed at step 3".to_string(),
+                            is_error: false,
+                        },
+                        crate::events::ToolResult {
+                            tool_call_id: crate::events::ToolCallId::new("call_b".to_string())
+                                .expect("non-empty"),
+                            output: "agent restarted".to_string(),
+                            is_error: false,
+                        },
+                    ],
+                },
                 Message::user("Budget is 80% spent."),
             ],
             tools: vec![ToolSchema {
