@@ -121,23 +121,18 @@ impl Tool for McpResourceTool {
                     .list_all_resources()
                     .await
                     .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
-                let mut output = String::new();
-                for resource in &resources {
-                    let raw = &resource.raw;
-                    output.push_str(&raw.uri);
-                    output.push_str(" — ");
-                    output.push_str(&raw.name);
-                    if let Some(description) = raw.description.as_deref() {
-                        output.push_str(": ");
-                        output.push_str(description);
-                    }
-                    output.push('\n');
-                }
-                if output.is_empty() {
-                    output.push_str("(no resources)");
-                }
                 Ok(ToolResult {
-                    output,
+                    output: render_listing(
+                        resources.iter().map(|resource| {
+                            let raw = &resource.raw;
+                            (
+                                raw.uri.as_str(),
+                                raw.name.as_str(),
+                                raw.description.as_deref(),
+                            )
+                        }),
+                        "(no resources)",
+                    ),
                     is_error: false,
                 })
             }
@@ -163,28 +158,52 @@ impl Tool for McpResourceTool {
                     .list_all_resource_templates()
                     .await
                     .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
-                let mut output = String::new();
-                for template in &templates {
-                    let raw = &template.raw;
-                    output.push_str(&raw.uri_template);
-                    output.push_str(" — ");
-                    output.push_str(&raw.name);
-                    if let Some(description) = raw.description.as_deref() {
-                        output.push_str(": ");
-                        output.push_str(description);
-                    }
-                    output.push('\n');
-                }
-                if output.is_empty() {
-                    output.push_str("(no resource templates)");
-                }
                 Ok(ToolResult {
-                    output,
+                    output: render_listing(
+                        templates.iter().map(|template| {
+                            let raw = &template.raw;
+                            (
+                                raw.uri_template.as_str(),
+                                raw.name.as_str(),
+                                raw.description.as_deref(),
+                            )
+                        }),
+                        "(no resource templates)",
+                    ),
                     is_error: false,
                 })
             }
         }
     }
+}
+
+/// Render one `"<id> — <name>: <description>"` line per row, or
+/// `empty` when there are none.
+///
+/// The resource listing and the resource-template listing are the same
+/// listing: they differ only in what the first column holds (a URI, or
+/// a URI template) and in what "nothing here" says. Keeping them as two
+/// copies of the loop meant either could drift into a different shape
+/// while the tool descriptions promise the model one format (#191).
+fn render_listing<'a>(
+    rows: impl IntoIterator<Item = (&'a str, &'a str, Option<&'a str>)>,
+    empty: &str,
+) -> String {
+    let mut output = String::new();
+    for (id, name, description) in rows {
+        output.push_str(id);
+        output.push_str(" — ");
+        output.push_str(name);
+        if let Some(description) = description {
+            output.push_str(": ");
+            output.push_str(description);
+        }
+        output.push('\n');
+    }
+    if output.is_empty() {
+        output.push_str(empty);
+    }
+    output
 }
 
 /// Render a [`ReadResourceResult`]'s contents into a plain-text
@@ -214,3 +233,6 @@ pub fn render_resource_contents(result: &ReadResourceResult) -> String {
     }
     output
 }
+
+#[cfg(test)]
+mod tests;
