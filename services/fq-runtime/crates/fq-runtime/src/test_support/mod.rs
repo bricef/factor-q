@@ -31,6 +31,7 @@ pub use fq_test_support as nats;
 #[cfg(test)]
 pub mod events;
 pub mod mock_anthropic;
+pub mod mock_gemini;
 pub mod mock_openai;
 #[cfg(test)]
 pub mod oracle;
