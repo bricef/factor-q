@@ -63,9 +63,15 @@ pub(crate) enum DrainOutcome {
 /// force-abort — it returns here, and everything after it in the
 /// teardown still runs, so the worker is deregistered and
 /// `system.shutdown` is published exactly as on any other clean stop.
+/// `dispatcher` is `None` when the shutdown select's own dispatcher arm
+/// already consumed the handle — the dispatcher finished its drain
+/// before the stop request was polled. Joining it again would panic in
+/// the main task and skip the rest of the teardown, so there is nothing
+/// left to wait for and the drain is over as soon as the resume tasks
+/// are.
 pub(crate) async fn wait_for_drain<E: std::fmt::Display>(
     deadline: Instant,
-    dispatcher: JoinHandle<Result<(), E>>,
+    dispatcher: Option<JoinHandle<Result<(), E>>>,
     resume_handles: Vec<JoinHandle<()>>,
     signals: &mut ShutdownSignals,
     down: &mut DownReceiver,
@@ -79,9 +85,15 @@ pub(crate) async fn wait_for_drain<E: std::fmt::Display>(
             suspended.fetch_add(1, Ordering::Relaxed);
         }
     });
+    let dispatcher_join = async move {
+        match dispatcher {
+            Some(handle) => Some(handle.await),
+            None => None,
+        }
+    };
     let drained = async {
         let (dispatcher_result, _) = tokio::join!(
-            dispatcher,
+            dispatcher_join,
             futures::future::join_all(counted.collect::<Vec<_>>()),
         );
         dispatcher_result
@@ -89,7 +101,9 @@ pub(crate) async fn wait_for_drain<E: std::fmt::Display>(
 
     let outcome = tokio::select! {
         result = drained => {
-            report_dispatcher(result);
+            if let Some(result) = result {
+                report_dispatcher(result);
+            }
             DrainOutcome::Suspended
         }
         _ = tokio::time::sleep_until(deadline) => DrainOutcome::DeadlineElapsed,
@@ -140,10 +154,18 @@ fn report_dispatcher<E: std::fmt::Display>(result: Result<Result<(), E>, tokio::
 
 /// The dispatcher's join when there is no drain to wait for — a
 /// signal-driven fast stop, or a task failure.
+///
+/// `None` when the shutdown select already consumed the handle: it was
+/// the dispatcher's own exit that ended the wait, so it has been joined
+/// and re-polling it would panic here in the main task, skipping the
+/// teardown that follows.
 pub(crate) async fn join_dispatcher<E: std::fmt::Display>(
-    dispatcher: JoinHandle<Result<(), E>>,
+    dispatcher: Option<JoinHandle<Result<(), E>>>,
     deadline: Instant,
 ) {
+    let Some(dispatcher) = dispatcher else {
+        return;
+    };
     match timeout_at(deadline, dispatcher).await {
         Ok(result) => report_dispatcher(result),
         Err(_) => tracing::warn!("trigger dispatcher did not shut down in time"),

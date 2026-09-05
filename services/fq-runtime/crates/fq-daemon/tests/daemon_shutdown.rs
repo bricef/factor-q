@@ -552,6 +552,17 @@ impl ShutdownWatch {
     }
 }
 
+/// Wait for a line to appear in the daemon's log, and report how long
+/// it took.
+///
+/// **The log is read before the child is polled, and once more after
+/// the child has exited.** An idle daemon can print the line and exit
+/// inside one poll interval, and a helper that asked `try_wait` first
+/// would then report "exited before logging" about a line already
+/// sitting in the file — which is exactly how these tests went red on
+/// CI and stayed green on a slower developer box. Reaching the line is
+/// the observable; the process still being alive afterwards is not
+/// something the caller may assume.
 fn wait_for_log_line(
     child: &mut std::process::Child,
     log: &std::path::Path,
@@ -559,21 +570,28 @@ fn wait_for_log_line(
     timeout: Duration,
 ) -> Duration {
     let started = Instant::now();
-    while started.elapsed() < timeout {
-        if let Some(status) = child.try_wait().expect("poll fqd") {
-            let text = std::fs::read_to_string(log).unwrap_or_default();
-            panic!("daemon exited with {status:?} before logging {needle:?}\n--- log ---\n{text}");
-        }
+    loop {
         if std::fs::read_to_string(log)
             .unwrap_or_default()
             .contains(needle)
         {
             return started.elapsed();
         }
+        if let Some(status) = child.try_wait().expect("poll fqd") {
+            // One last read: the line may have been written between the
+            // read above and the exit observed here.
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            if text.contains(needle) {
+                return started.elapsed();
+            }
+            panic!("daemon exited with {status:?} before logging {needle:?}\n--- log ---\n{text}");
+        }
+        if started.elapsed() >= timeout {
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            panic!("daemon never logged {needle:?} within {timeout:?}\n--- log ---\n{text}");
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let text = std::fs::read_to_string(log).unwrap_or_default();
-    panic!("daemon never logged {needle:?} within {timeout:?}\n--- log ---\n{text}");
 }
 
 fn spawn_ready_daemon(
@@ -686,12 +704,17 @@ fn a_second_sigterm_never_costs_the_clean_teardown() {
 
     let pid = child.id() as i32;
     assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
-    // Send the second as soon as the drain wait is under way — what an
-    // operator does when a stop looks stuck.
+    // Send the second as soon as the first has been *observed* — the
+    // earliest point at which it can land inside the drain wait, which
+    // is what an operator watching a stuck stop does. An idle daemon's
+    // drain can still finish first; that is why the assertions below
+    // are the invariant rather than the escalation itself, and why the
+    // escalation's timing is proved in `hosted::teardown::tests`
+    // instead, with a stub that holds the drain open.
     let _ = wait_for_log_line(
         &mut child,
         &log_path,
-        "Draining — waiting up to",
+        "Received SIGTERM, draining",
         Duration::from_secs(10),
     );
     // A second SIGTERM at a process that has already exited is an
@@ -720,5 +743,76 @@ fn a_second_sigterm_never_costs_the_clean_teardown() {
             .iter()
             .any(|r| r == "sigterm" || r == "sigterm_escalated"),
         "no system.shutdown was published after a second SIGTERM: {reasons:?}"
+    );
+}
+
+/// The shutdown select's own dispatcher arm winning must still reach
+/// the end of the teardown.
+///
+/// That arm consumes the `JoinHandle`, and a `JoinHandle` polled after
+/// completion panics — in the daemon's **main** task, which would skip
+/// the MCP shutdown, the worker row's settle and the `system.shutdown`
+/// publish. The shape predates this PR but the region was rewritten
+/// here and nothing drove the arm.
+///
+/// The fault: the trigger stream is deleted out from under the running
+/// daemon, so the dispatcher's message stream ends and it returns —
+/// with no drain in progress, which is the `task_failed` variant and
+/// the one that reaches `join_dispatcher`. The event stream is a
+/// different stream, so the daemon can still publish its way out, which
+/// is what makes the assertion possible.
+///
+/// The worker row is deliberately NOT `shutdown` here: a hosted task
+/// died and took the runtime with it, and leaving the row for the stale
+/// sweep is the honest signal that this daemon did not exit cleanly.
+/// The `system.shutdown` event carrying `clean = false` is the proof
+/// that the teardown ran to its end rather than panicking through it.
+#[test]
+fn the_teardown_completes_when_the_dispatcher_arm_wins() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let watch = ShutdownWatch::start(&nats_url);
+    let scratch = unique_scratch();
+    let (mut child, log_path) = spawn_ready_daemon(&scratch, &nats_url);
+
+    // Pull the trigger stream out from under the dispatcher.
+    tokio::runtime::Runtime::new()
+        .expect("stream-delete runtime")
+        .block_on(async {
+            let bus = fq_runtime::EventBus::connect(&nats_url)
+                .await
+                .expect("connect NATS");
+            bus.jetstream()
+                .delete_stream(fq_runtime::bus::TRIGGER_STREAM_NAME)
+                .await
+                .expect("delete the trigger stream");
+        });
+
+    let status = wait_with_timeout(&mut child, Duration::from_secs(30)).unwrap_or_else(|| {
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        panic!("daemon did not exit after its dispatcher died\n--- log ---\n{log}")
+    });
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let reasons = watch.finish();
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert!(
+        !status.success(),
+        "a dead dispatcher must be a non-zero exit\n--- log ---\n{log}"
+    );
+    assert_eq!(
+        status.signal(),
+        None,
+        "the daemon died by signal rather than exiting — a panic in the main task \
+         aborts the teardown\n--- log ---\n{log}"
+    );
+    assert!(
+        reasons.iter().any(|r| r == "task_failed"),
+        "the teardown never reached its `system.shutdown` publish: {reasons:?} — the \
+         dispatcher's own JoinHandle was polled twice\n--- log ---\n{log}"
+    );
+    assert!(
+        !log.contains("JoinHandle polled after completion"),
+        "the main task panicked joining an already-consumed handle\n--- log ---\n{log}"
     );
 }

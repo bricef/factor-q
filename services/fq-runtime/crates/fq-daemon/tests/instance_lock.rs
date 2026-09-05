@@ -97,20 +97,28 @@ fn wait_for_log(
     needle: &str,
     timeout: Duration,
 ) -> String {
+    // The log is read before the child is polled: a daemon can write
+    // the line and exit inside one poll interval, and asking `try_wait`
+    // first would report "exited before logging" about a line already
+    // in the file.
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().expect("poll fqd") {
-            let text = std::fs::read_to_string(log).unwrap_or_default();
-            panic!("daemon exited with {status:?} before logging {needle:?}\n--- log ---\n{text}");
-        }
+    loop {
         let text = std::fs::read_to_string(log).unwrap_or_default();
         if text.contains(needle) {
             return text;
         }
+        if let Some(status) = child.try_wait().expect("poll fqd") {
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            if text.contains(needle) {
+                return text;
+            }
+            panic!("daemon exited with {status:?} before logging {needle:?}\n--- log ---\n{text}");
+        }
+        if Instant::now() >= deadline {
+            panic!("daemon never logged {needle:?} within {timeout:?}\n--- log ---\n{text}");
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let text = std::fs::read_to_string(log).unwrap_or_default();
-    panic!("daemon never logged {needle:?} within {timeout:?}\n--- log ---\n{text}");
 }
 
 /// Every worker row's status, read straight from the control-plane

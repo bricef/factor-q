@@ -361,6 +361,8 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         config.worker.max_concurrent_invocations,
     );
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
+    // Set by the select's own dispatcher arm, which consumes the handle.
+    let mut dispatcher_joined = false;
 
     // The edge begins serving only once everything it reports on is
     // running. Binding happened in `run_daemon`, before this process
@@ -479,6 +481,14 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             }
         }
         result = &mut dispatcher_handle => {
+            // This arm CONSUMES the handle. A `JoinHandle` polled again
+            // after it has completed panics ("JoinHandle polled after
+            // completion"), and this is the main task — the panic would
+            // skip the MCP shutdown, the worker deregistration and the
+            // `system.shutdown` publish, which is to say it would skip
+            // exactly the teardown this arm exists to reach. The flag is
+            // what stops the join below touching it again.
+            dispatcher_joined = true;
             // The dispatcher normally exits only on a fatal error. But a
             // graceful drain makes it stop consuming on its own once the
             // drain signal is set (PR-2), so if we're draining, its exit
@@ -493,6 +503,9 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             }
         }
     };
+    // Past the select the handle is only safe to join if the select did
+    // not already take it.
+    let dispatcher_handle = (!dispatcher_joined).then_some(dispatcher_handle);
     // If a task failed, publish a system.task_failed event with
     // its details before we tear everything else down.
     if let Some((task_name, error_message)) = failed_task.as_ref() {

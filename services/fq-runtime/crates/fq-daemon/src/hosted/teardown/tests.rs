@@ -34,8 +34,14 @@ fn signal_lock() -> &'static Mutex<()> {
 }
 
 /// A dispatcher that never stops: the stub that holds the drain open.
-fn a_drain_that_never_finishes() -> tokio::task::JoinHandle<Result<(), String>> {
-    tokio::spawn(std::future::pending())
+fn a_drain_that_never_finishes() -> Option<tokio::task::JoinHandle<Result<(), String>>> {
+    Some(tokio::spawn(std::future::pending()))
+}
+
+/// What the shutdown select hands over when its OWN dispatcher arm won
+/// — the handle is already consumed.
+fn an_already_joined_dispatcher() -> Option<tokio::task::JoinHandle<Result<(), String>>> {
+    None
 }
 
 fn far_future() -> Instant {
@@ -48,7 +54,8 @@ async fn a_drain_that_suspends_reports_suspended() {
     let _guard = signal_lock().lock().await;
     let mut signals = ShutdownSignals::install();
     let mut down = DownSignal::new().subscribe();
-    let dispatcher: tokio::task::JoinHandle<Result<(), String>> = tokio::spawn(async { Ok(()) });
+    let dispatcher: Option<tokio::task::JoinHandle<Result<(), String>>> =
+        Some(tokio::spawn(async { Ok(()) }));
     let resume = vec![tokio::spawn(async {}), tokio::spawn(async {})];
 
     let outcome = tokio::time::timeout(
@@ -166,4 +173,44 @@ async fn raise_sigterm_and_read(signals: &mut ShutdownSignals) -> &'static str {
     tokio::time::timeout(Duration::from_secs(5), signals.next())
         .await
         .expect("the installed handler never saw the signal")
+}
+
+/// Finding 1: the shutdown select's own dispatcher arm consumes the
+/// handle, and a `JoinHandle` polled after completion panics. That
+/// panic would land in the daemon's main task, skipping the MCP
+/// shutdown, the worker deregistration and the `system.shutdown`
+/// publish — the whole teardown. Both joins must accept a handle that
+/// is already gone.
+#[tokio::test]
+async fn a_dispatcher_the_select_already_joined_is_not_joined_again() {
+    let _guard = signal_lock().lock().await;
+    let mut signals = ShutdownSignals::install();
+    let mut down = DownSignal::new().subscribe();
+
+    // The drain path: nothing left to wait for but the resume tasks.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_drain(
+            far_future(),
+            an_already_joined_dispatcher(),
+            vec![tokio::spawn(async {})],
+            &mut signals,
+            &mut down,
+        ),
+    )
+    .await
+    .expect("re-polling a consumed dispatcher handle panicked the drain wait");
+    assert_eq!(outcome, DrainOutcome::Suspended);
+
+    // The non-drain path: a fast stop, or the task-failure exit that
+    // reaches this join precisely because the dispatcher arm won.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        join_dispatcher(
+            an_already_joined_dispatcher(),
+            Instant::now() + Duration::from_secs(1),
+        ),
+    )
+    .await
+    .expect("re-polling a consumed dispatcher handle panicked the teardown");
 }
