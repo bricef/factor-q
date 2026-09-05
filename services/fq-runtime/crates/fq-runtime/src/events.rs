@@ -22,9 +22,11 @@ impl From<&crate::llm::LlmError> for LlmErrorKind {
         use crate::llm::LlmError;
         match err {
             LlmError::Auth(_) => Self::Auth,
-            LlmError::RateLimited => Self::RateLimited,
+            LlmError::RateLimited { .. } => Self::RateLimited,
             LlmError::InvalidResponse(_) => Self::InvalidResponse,
+            LlmError::Rejected(_) => Self::Rejected,
             LlmError::RequestFailed(_) => Self::RequestFailed,
+            LlmError::Timeout { .. } => Self::Timeout,
             LlmError::UnpricedModel(_) => Self::UnpricedModel,
         }
     }
