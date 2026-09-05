@@ -25,8 +25,9 @@ upstream landed its own fix (PR #275 there, released in `0.7.0-beta.21`)
 and factor-q moved to that release with the wire goldens under
 `fq-runtime/tests/snapshots/reasoning_wire/` proving nothing the provider
 or the reducer sees changed across the switch. No fork remains.
-Tool-result batching (D1b) is representable but not yet emitted (#511), and
-the recorded `reasoning_tokens` reaches no operator surface yet (#536).
+Tool-result batching (D1b) is emitted since 2026-09-05 (#511): a parallel
+turn's results go out as one `tool_results` message, in call order. The
+recorded `reasoning_tokens` reaches no operator surface yet (#536).
 
 Contract precondition for [#414](https://github.com/bricef/factor-q/issues/414)
 (confirmed exit criterion). Amends
