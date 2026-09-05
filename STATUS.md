@@ -89,7 +89,13 @@ it is the licence to keep changing shape quickly.
   with the public static development token `fq-dev-token`. Do not expose its
   port, and replace the token for any non-local deployment. Build from source
   (`just up`, see [Quickstart](QUICKSTART.md)); `install.sh` awaits the
-  first release.
+  first release. Deployed artifacts follow
+  [ADR-0035](docs/adrs/accepted/0035-container-image-and-compose-supervision.md)
+  (accepted 2026-09-04): every merge to `main` publishes one container
+  image per binary to `ghcr.io/bricef`, tagged with the commit its binary
+  reports; `ops/dogfood/compose.yml` is the stack and its supervisor and
+  `ops/dogfood/deploy.sh` is a tag bump against it. The live dogfood
+  instance has not been moved onto the stack yet.
 
 ## Where we are
 
@@ -115,9 +121,17 @@ docs) — maintainer-confirmed per the done signal of the now-closed
 
 ## What's next
 
-M3, then M4, then M5, per the
-[storage + vector foundation plan](docs/plans/active/2026-06-27-storage-vector-foundation.md);
-Memory and Skills MVPs build on the result. On the runtime side the
+The active track is **production readiness**: the
+[2026-09-03 review](docs/reviews/2026-09-03-production-readiness-review.md)
+and its
+[Phase 0 execution plan](docs/plans/active/2026-09-04-production-readiness-phase-0.md)
+(opened 2026-09-04) sequence Phases 0–2, and their standing answer to
+"can we also…" **parks the storage M3–M5 track, Memory and Skills, and
+the multi-node vertical until Phase 2 is done**. So M3, then M4, then M5
+per the
+[storage + vector foundation plan](docs/plans/active/2026-06-27-storage-vector-foundation.md)
+— with Memory and Skills MVPs on the result — is the shape of that work
+when it resumes, not the next thing to start. On the runtime side the
 [reducer verification plan](docs/plans/closed/2026-07-05-reducer-verification.md)
 is **complete** (claims R1–R7 all oracle-backed in the hermetic CI
 path: trace oracle, state validation, sim world, resume equivalence,
