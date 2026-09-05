@@ -18,6 +18,7 @@
 # FQ_BACKUP_KEEP (default 7 sets), FQ_BACKUP_HOOK — a command run with the
 # finished set's directory as $1, for the off-host copy (rclone, scp, an
 # object-store CLI); the on-host copy alone does not survive the host.
+# hygiene.sh warns when the newest set is older than FQ_BACKUP_STALE_HOURS.
 set -euo pipefail
 
 DOGFOOD="${FQ_DOGFOOD:-$HOME/fq-dogfood}"
@@ -32,7 +33,13 @@ PROJECT="$(docker compose config --format json 2>/dev/null | sed -n 's/.*"name":
 
 now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 say() { printf '%s %s\n' "$(now)" "$*"; }
-die() { printf '%s ERROR: %s\n' "$(now)" "$*" >&2; exit 1; }
+# Unattended, a failed backup is told to a human through notify.sh
+# (FQ_NOTIFY_HOOK): a nightly that fails quietly is the same as no backup.
+die() {
+    printf '%s ERROR: %s\n' "$(now)" "$*" >&2
+    [ "$AUTO" = 1 ] && [ -x "$DOGFOOD/notify.sh" ] && { printf '%s\n' "$*" | "$DOGFOOD/notify.sh" "backup FAILED" || true; }
+    exit 1
+}
 
 # Share deploy.sh's lock: a backup and a deploy must not interleave.
 exec 9>"$DOGFOOD/.deploy.lock"

@@ -127,6 +127,57 @@ enum Command {
         #[arg(long, default_value = "dashboard-fixtures")]
         out: std::path::PathBuf,
     },
+    /// Ask the running dashboard at `--bind` (or `FQ_DASHBOARD_BIND`)
+    /// whether it is serving, and exit 0 if so — the container image's
+    /// HEALTHCHECK (ADR-0035 clause 8). The image is distroless, with
+    /// no curl and no shell, so the binary is its own probe.
+    Probe,
+}
+
+/// The liveness route. It answers `ok` whenever this process is serving
+/// and deliberately asks the daemon nothing: a dashboard whose daemon is
+/// down renders "runtime unreachable" on its own, and a probe that
+/// failed for the daemon's fault would have the supervisor restarting a
+/// healthy dashboard into the same outage. Health of the daemon is the
+/// daemon's own `HEALTHCHECK`.
+const HEALTHZ_PATH: &str = "/healthz";
+
+async fn healthz() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    ([(axum::http::header::CACHE_CONTROL, "no-store")], "ok\n")
+}
+
+/// The `probe` subcommand: one `GET /healthz` over a raw HTTP/1.0 request
+/// on a plain TCP socket (no HTTP client crate is linked here), bounded
+/// by a short timeout so a hung process reads as unhealthy rather than
+/// as a probe that never returns. Prints the status line on failure so
+/// `docker inspect` shows why.
+async fn probe(bind: &str) -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let attempt = async {
+        let mut stream = tokio::net::TcpStream::connect(bind)
+            .await
+            .with_context(|| format!("connect to {bind}"))?;
+        stream
+            .write_all(format!("GET {HEALTHZ_PATH} HTTP/1.0\r\nHost: {bind}\r\n\r\n").as_bytes())
+            .await?;
+        let mut buf = Vec::with_capacity(512);
+        stream.read_to_end(&mut buf).await?;
+        let reply = String::from_utf8_lossy(&buf);
+        let status_line = reply.lines().next().unwrap_or("").to_string();
+        anyhow::ensure!(
+            status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200"),
+            "{bind}{HEALTHZ_PATH}: {}",
+            if status_line.is_empty() {
+                "empty reply"
+            } else {
+                &status_line
+            }
+        );
+        Ok(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), attempt)
+        .await
+        .map_err(|_| anyhow::anyhow!("probe of {bind}{HEALTHZ_PATH} timed out after 3s"))?
 }
 
 /// Shared per-process state. No connection is held — see module doc —
@@ -235,6 +286,7 @@ fn extract_main_inner(html: &str) -> Option<String> {
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(health_page))
+        .route(HEALTHZ_PATH, get(healthz))
         .route("/invocations", get(invocations_page))
         .route("/invocations/{id}", get(invocation_page))
         .route("/invocations/{id}/transcript", get(transcript_page))
@@ -280,11 +332,15 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    if let Some(Command::RenderFixtures { out }) = args.command {
-        for name in fixtures::write_all(&out)? {
-            println!("{}", out.join(format!("{name}.html")).display());
+    match args.command {
+        Some(Command::RenderFixtures { out }) => {
+            for name in fixtures::write_all(&out)? {
+                println!("{}", out.join(format!("{name}.html")).display());
+            }
+            return Ok(());
         }
-        return Ok(());
+        Some(Command::Probe) => return probe(&args.bind).await,
+        None => {}
     }
 
     // Same posture as the daemon it fronts: never off-box.
@@ -637,6 +693,40 @@ mod tests {
             last_seen_ms: AtomicI64::new(0),
             daemon_version: std::sync::Mutex::new(None),
         })
+    }
+
+    /// `/healthz` is liveness only: it answers with no edge behind it
+    /// and no token in play, and the `probe` subcommand's raw request
+    /// reads it the same way a supervisor would.
+    #[tokio::test]
+    async fn healthz_answers_without_a_daemon() {
+        let state = Arc::new(AppState {
+            edge_addr: "127.0.0.1:1".to_string(),
+            edge_fingerprint: [0; 32],
+            edge_token: String::new(),
+            refresh_secs: 5,
+            last_seen_ms: AtomicI64::new(0),
+            daemon_version: std::sync::Mutex::new(None),
+        });
+        let resp = app(state.clone())
+            .oneshot(Request::get(HEALTHZ_PATH).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_string(resp).await, "ok\n");
+
+        // The probe end to end, over a real socket.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(axum::serve(listener, app(state)).into_future());
+        probe(&bind)
+            .await
+            .expect("probe against a serving dashboard");
+        server.abort();
+
+        // Nothing listening: a connection error, promptly.
+        let err = probe(&bind).await.unwrap_err();
+        assert!(err.to_string().contains("connect"), "{err}");
     }
 
     /// Spin a real edge and drive the router end to end with oneshot

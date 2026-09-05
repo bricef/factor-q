@@ -166,19 +166,19 @@ func TestPollOnceRevertsOnPublishFailure(t *testing.T) {
 // --- config validation ---
 
 func TestConfigFromArgsValidation(t *testing.T) {
-	if _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--poll", "30s"}); err == nil {
+	if _, _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--poll", "30s"}); err == nil {
 		t.Error("poll below the 60s floor should be rejected")
 	}
-	if _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "no placeholder"}); err == nil {
+	if _, _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "no placeholder"}); err == nil {
 		t.Error("a task template lacking the issue-number placeholder should be rejected")
 	}
-	if _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "fix #%d and %s"}); err == nil {
+	if _, _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "fix #%d and %s"}); err == nil {
 		t.Error("a task template with another format verb should be rejected")
 	}
-	if _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "fix 50%% of #%d"}); err == nil {
+	if _, _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "fix 50%% of #%d"}); err == nil {
 		t.Error("a task template with a literal %% should be rejected — issue-number recovery cannot match its rendering")
 	}
-	cfg, _, err := configFromArgs([]string{"--repo", "owner/repo", "--poll", "90s"})
+	cfg, _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--poll", "90s"})
 	if err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
@@ -191,9 +191,34 @@ func TestConfigFromArgsRejectsMalformedEnv(t *testing.T) {
 	for _, tc := range []struct{ key, value string }{{"GHW_POLL", "soon"}, {"GHW_MAX_PER_POLL", "many"}, {"GHW_MAX_RETRIES", "several"}} {
 		t.Run(tc.key, func(t *testing.T) {
 			t.Setenv(tc.key, tc.value)
-			if _, _, err := configFromArgs([]string{"--repo", "owner/repo"}); err == nil || !strings.Contains(err.Error(), tc.key) {
+			if _, _, _, err := configFromArgs([]string{"--repo", "owner/repo"}); err == nil || !strings.Contains(err.Error(), tc.key) {
 				t.Fatalf("error = %v, want clear %s error", err, tc.key)
 			}
 		})
+	}
+}
+
+func TestHealthBindFlagAndEnv(t *testing.T) {
+	_, _, bind, err := configFromArgs([]string{"--repo", "owner/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bind != defaultHealthBind {
+		t.Errorf("default health bind %q, want %q", bind, defaultHealthBind)
+	}
+	_, _, bind, err = configFromArgs([]string{"--repo", "owner/repo", "--health-bind", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bind != "" {
+		t.Errorf("--health-bind '' should disable the endpoint, got %q", bind)
+	}
+	t.Setenv(healthBindEnv, "127.0.0.1:1")
+	_, _, bind, err = configFromArgs([]string{"--repo", "owner/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bind != "127.0.0.1:1" {
+		t.Errorf("env health bind %q", bind)
 	}
 }

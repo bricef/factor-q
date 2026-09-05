@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -58,8 +59,14 @@ func run(args []string) error {
 			fmt.Println("github-watcher", buildVersion())
 			return nil
 		}
+		// The container's HEALTHCHECK: ask the running process, from the
+		// same environment, and exit 0 on healthy (health.go). Like
+		// --version, answered before flag parsing so it needs no --repo.
+		if a == "-probe" || a == "--probe" {
+			return probe(envOr(healthBindEnv, defaultHealthBind))
+		}
 	}
-	cfg, natsURL, err := configFromArgs(args)
+	cfg, natsURL, healthBind, err := configFromArgs(args)
 	if err != nil {
 		return err
 	}
@@ -71,6 +78,18 @@ func run(args []string) error {
 	}
 	defer pub.Close()
 
+	// Liveness for the supervisor: the broker connection, and the poll
+	// loop having completed a cycle within three intervals. Bound before
+	// anything else starts, so a taken port is a startup error.
+	health := NewHealth(pub.Conn(), 3*cfg.PollInterval)
+	var healthLn net.Listener
+	if healthBind != "" {
+		healthLn, err = listenHealth(healthBind)
+		if err != nil {
+			return err
+		}
+	}
+
 	source, err := NewGhCliIssueSource(cfg.Repo)
 	if err != nil {
 		return err
@@ -81,10 +100,19 @@ func run(args []string) error {
 		Reviewer:  source,
 		Config:    cfg,
 		Log:       log,
+		Heartbeat: health.Tick,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if healthLn != nil {
+		go func() {
+			if err := serveHealth(ctx, healthLn, health, log); err != nil && ctx.Err() == nil {
+				log.Error("health endpoint stopped", "err", err)
+			}
+		}()
+	}
 
 	// Observe the outcomes of what we trigger: subscribe to the agent's
 	// lifecycle events and drive the issue off `in-progress` on
@@ -110,20 +138,21 @@ func run(args []string) error {
 }
 
 // configFromArgs parses config from flags, each with an env fallback.
-// Returns the Config and the NATS URL.
-func configFromArgs(args []string) (Config, string, error) {
+// Returns the Config, the NATS URL and the health endpoint's bind ("" =
+// no endpoint).
+func configFromArgs(args []string) (Config, string, string, error) {
 	fs := flag.NewFlagSet("github-watcher", flag.ContinueOnError)
 	pollDefault, err := envDurationOr("GHW_POLL", 60*time.Second)
 	if err != nil {
-		return Config{}, "", err
+		return Config{}, "", "", err
 	}
 	maxPerPollDefault, err := envIntOr("GHW_MAX_PER_POLL", 3)
 	if err != nil {
-		return Config{}, "", err
+		return Config{}, "", "", err
 	}
 	maxRetriesDefault, err := envIntOr("GHW_MAX_RETRIES", 2)
 	if err != nil {
-		return Config{}, "", err
+		return Config{}, "", "", err
 	}
 	repo := fs.String("repo", envOr("GHW_REPO", ""), "GitHub repo owner/name (env GHW_REPO)")
 	agent := fs.String("agent", envOr("GHW_AGENT", "m0-issue-fix"), "target factor-q agent id (env GHW_AGENT)")
@@ -137,24 +166,25 @@ func configFromArgs(args []string) (Config, string, error) {
 	maxPerPoll := fs.Int("max-per-poll", maxPerPollDefault, "max triggers per poll, 0 = unbounded (env GHW_MAX_PER_POLL)")
 	maxRetries := fs.Int("max-retries", maxRetriesDefault, "bounded auto-retry budget for a transiently-failed issue (env GHW_MAX_RETRIES)")
 	template := fs.String("task-template", envOr("GHW_TASK_TEMPLATE", "Implement the fix described in GitHub issue #%d."), "trigger payload template; %d is the issue number (env GHW_TASK_TEMPLATE)")
+	healthBind := fs.String("health-bind", envOr(healthBindEnv, defaultHealthBind), "loopback address for GET /healthz, the probe the container's HEALTHCHECK runs; empty disables (env "+healthBindEnv+")")
 
 	if err := fs.Parse(args); err != nil {
-		return Config{}, "", err
+		return Config{}, "", "", err
 	}
 	if *repo == "" {
-		return Config{}, "", fmt.Errorf("--repo (or GHW_REPO) is required, e.g. bricef/factor-q")
+		return Config{}, "", "", fmt.Errorf("--repo (or GHW_REPO) is required, e.g. bricef/factor-q")
 	}
 	if !strings.Contains(*repo, "/") {
-		return Config{}, "", fmt.Errorf("--repo must be owner/name, got %q", *repo)
+		return Config{}, "", "", fmt.Errorf("--repo must be owner/name, got %q", *repo)
 	}
 	if *poll < MinPollInterval {
-		return Config{}, "", fmt.Errorf("--poll must be >= %s to respect GitHub rate limits, got %s", MinPollInterval, *poll)
+		return Config{}, "", "", fmt.Errorf("--poll must be >= %s to respect GitHub rate limits, got %s", MinPollInterval, *poll)
 	}
 	if *maxRetries < 0 {
-		return Config{}, "", fmt.Errorf("--max-retries must be >= 0, got %d", *maxRetries)
+		return Config{}, "", "", fmt.Errorf("--max-retries must be >= 0, got %d", *maxRetries)
 	}
 	if err := validateTaskTemplate(*template); err != nil {
-		return Config{}, "", err
+		return Config{}, "", "", err
 	}
 	return Config{
 		Repo:               *repo,
@@ -168,7 +198,7 @@ func configFromArgs(args []string) (Config, string, error) {
 		MaxTriggersPerPoll: *maxPerPoll,
 		MaxRetries:         *maxRetries,
 		TaskTemplate:       *template,
-	}, *natsURL, nil
+	}, *natsURL, *healthBind, nil
 }
 
 func envOr(key, def string) string {

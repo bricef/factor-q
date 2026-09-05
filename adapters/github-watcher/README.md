@@ -109,6 +109,16 @@ Every flag has an environment-variable fallback.
 | `--max-per-poll` | `GHW_MAX_PER_POLL` | `3` | 0 = unbounded |
 | `--max-retries` | `GHW_MAX_RETRIES` | `2` | bounded auto-retry budget per issue for transient failures |
 | `--task-template` | `GHW_TASK_TEMPLATE` | `Implement the fix described in GitHub issue #%d.` | `%d` = issue number |
+| `--health-bind` | `GHW_HEALTH_BIND` | `127.0.0.1:9473` | loopback address of `GET /healthz`; empty disables |
+| `--probe` | — | | ask the running watcher's `/healthz` and exit 0 on healthy — the container's `HEALTHCHECK`; needs no `--repo` |
+| `--version` | — | | print `github-watcher <commit>` and exit |
+
+`/healthz` answers 200 while the NATS connection is up and the poll loop
+has completed a cycle within three intervals, 503 otherwise, with a small
+JSON body saying which. It deliberately says nothing about GitHub: an
+outage there is logged per cycle and is not this process's fault. The
+bind must be loopback — the endpoint is for the supervisor on the same
+host or in the same container, not for the network.
 
 The trigger payload follows the [task-oriented payload convention](../../docs/design/committed/trigger-wire-contract.md#task-oriented-payload-convention):
 it includes `task`, `refs`, `constraints`, and `done_criteria`, plus a `github`

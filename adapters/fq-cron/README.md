@@ -20,7 +20,14 @@ NATS.
 | `--nats-url` | `FQCRON_NATS_URL` | `nats://127.0.0.1:4222` |
 | `--kv-bucket` | `FQCRON_KV_BUCKET` | `fq-cron-state` |
 | `--check` | — | `false` |
+| `--health-bind` | `FQCRON_HEALTH_BIND` | `127.0.0.1:9474` — loopback address of `GET /healthz`; empty disables |
+| `--probe` | — | asks the running scheduler's `/healthz` and exits 0 on healthy — the container's `HEALTHCHECK`; needs no config |
 | `--version` | — | prints `fq-cron <commit>` and exits; needs no config |
+
+`/healthz` answers 200 while the NATS connection is up, 503 otherwise.
+The scheduler loop is not age-checked: between fires it sleeps for as
+long as the schedule says, and a loop that exits on error ends the
+process, which the supervisor sees directly. The bind must be loopback.
 
 Example `fq-cron.toml`:
 

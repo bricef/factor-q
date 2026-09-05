@@ -46,10 +46,11 @@ fq-dogfood/
 ├── .secrets/dashboard.env   # the dashboard's three edge settings, nothing else (dashboard.env.example)
 ├── .secrets/nats-auth.conf  # authorization { token: "…" }
 ├── .secrets/caddy.env       # DASH_USER / DASH_HASH / DASH_COOKIE
-├── deploy.sh, hygiene.sh, backup.sh, restore.sh   # copied by bootstrap.sh, run by the crontab
-├── logs/                    # deploy.log, hygiene.log, backup.log — the cron jobs' output
+├── deploy.sh, hygiene.sh, backup.sh, restore.sh, notify.sh   # copied by bootstrap.sh, run by the crontab
+├── logs/                    # deploy.log, hygiene.log, backup.log — the cron jobs' output; notify.log, every message sent
 ├── backups/                 # backup.sh's sets, FQ_BACKUP_KEEP of them
-└── .deploy.lock             # the flock deploy.sh, backup.sh and restore.sh share
+├── .deploy.lock             # the flock deploy.sh, backup.sh and restore.sh share
+└── .deploy.deferred         # since when deploy.sh --auto has been deferring the same build
 
 docker volume fq-dogfood_fq-data → /var/lib/factor-q in the daemon's container:
     fqd.toml, fq.toml, fq-cron.toml, agents/, state/ (edge identity + the
@@ -192,7 +193,7 @@ out).
 ~/fq-dogfood/deploy.sh --force      # redeploy/restart the same build (a .env, fqd.toml or secrets change)
 ~/fq-dogfood/deploy.sh 1a2b3c4d5e6f # roll back / pin (a unique prefix is fine for images already on the host)
 tail -f ~/fq-dogfood/logs/deploy.log # what the hourly deploy.sh --auto did
-cd ~/fq-dogfood && docker compose ps            # every service, its state and health
+cd ~/fq-dogfood && docker compose ps            # every service, its state and health (each image probes itself)
 docker compose logs -f fqd                      # the daemon's log (rotated by the driver: 5 × 50 MB)
 docker compose exec fqd fq status               # ask the daemon; fq doctor, fq workers list likewise
 docker compose stop fqd                         # a drain (SIGTERM), within FQ_STOP_GRACE
@@ -324,10 +325,18 @@ running unattended:
   "Before any restart", and it is why a merge lands on the next quiet
   hour rather than interrupting the fleet's own builds.
 - **It rolls back by itself.** If the new build does not log `Runtime
-  ready` (or logs a startup refusal), it puts the previous tag back,
-  verifies that, and exits non-zero with a `⟲ rolled back` line — cron
-  mails it, the log shows it, and the instance is on the build it was on
-  before. A rollback that also fails says "needs a human" and stops.
+  ready` (or logs a startup refusal), or the watcher, scheduler or
+  dashboard does not come up healthy on its own probe, it puts the
+  previous tag back, verifies that, and exits non-zero with a `⟲ rolled
+  back` line — the log shows it, `notify.sh` tells you, and the instance
+  is on the build it was on before. A rollback that also fails says
+  "needs a human" and stops.
+- **It tells you what it did.** A deploy, a rollback and a failure each
+  go through [`notify.sh`](notify.sh) (below). So does a deferral that
+  has gone on for `FQ_DEFER_WARN_HOURS` (6): an invocation stuck in
+  flight, or a container nobody paired, would otherwise keep every merge
+  off the host with nothing but a quiet line an hour in the log. Reported
+  once per target build, in `.deploy.deferred`.
 
 Not Watchtower, deliberately: the five images are not published
 atomically (a poll mid-publish would recreate the daemon on one build
@@ -336,20 +345,46 @@ and a rollback is not delivery, it is roulette. The cadence is hourly
 rather than per-merge because the fleet merges its own PRs. `deploy.sh`
 by hand still works at any time; the two share a lock.
 
+## Notifications: `notify.sh`
+
+The crontab sends every script's output to a file under `logs/`, so
+cron mail never fires; without a channel of its own, a rollback or a
+full disk would sit in a log until someone looked. `notify.sh <subject>`
+(body on stdin) is that channel: it runs `FQ_NOTIFY_HOOK` from `.env` —
+a shell command given the subject as `$1` and the body on stdin — and
+appends every message to `logs/notify.log` whether or not a hook is set.
+`.env.example` has one-line hooks for ntfy, Slack and mail;
+`./notify.sh --test` proves the one you chose. A missing hook is one
+line on stderr in the calling script's log, next to the thing it could
+not deliver; a failing hook is reported the same way and never fails
+its caller.
+
+What goes through it, all unattended: `deploy.sh --auto`'s deploys,
+rollbacks, failures and long deferrals; `hygiene.sh`'s warnings, one
+message per run; a failed `backup.sh --auto`. A deploy by hand tells
+its terminal and nothing else.
+
+Machine-scrapeable metrics from the daemon itself are
+[#342](https://github.com/bricef/factor-q/issues/342), which this does
+not touch: it is the host's scripts speaking, not the runtime.
+
 ## Hygiene: `hygiene.sh`
 
-Every 30 minutes from the crontab, into `logs/hygiene.log`: the disk
-docker lives on (warns above `FQ_DISK_WARN_PCT`, 80% — a full disk has
-killed the daemon and the broker before), `docker system df`, the
-instance volume by subtree, the workspace count and how many are
-untouched for a week, and dangling images pruned. Above
+Every 30 minutes from the crontab, into `logs/hygiene.log`: the age of
+the newest backup set (warns past `FQ_BACKUP_STALE_HOURS`, 36 — a
+nightly that has quietly stopped), the disk docker lives on (warns above
+`FQ_DISK_WARN_PCT`, 80% — a full disk has killed the daemon and the
+broker before), `docker system df`, the instance volume by subtree, the
+workspace count and how many are untouched for a week, and dangling
+images pruned. Above
 `FQ_BUILD_CACHE_MAX_GB` (60) it empties the daemon's `build/` subtree —
 cargo target, sccache and go caches, all regenerable — but only while no
 invocation is in flight; the next build is cold. Workspaces are reported
 and never deleted: reclaiming a terminal invocation's directory is the
 daemon's job (#367), and the script cannot tell a suspended one from a
-dead one. A non-zero exit means a threshold was crossed; `hygiene.sh
---report` never prunes.
+dead one. A non-zero exit means a threshold was crossed, and the
+warnings go through `notify.sh` as one message; `hygiene.sh --report`
+never prunes.
 
 ## Backups and the restore drill
 
@@ -364,7 +399,9 @@ unreachable". Copying SQLite and JetStream files under a live writer
 would not be guaranteed to restore, which is the only property a backup
 has. `FQ_BACKUP_KEEP` (7) sets are kept on the host; `FQ_BACKUP_HOOK` is
 a command run with the finished set's directory, for the off-host copy
-— the on-host copy alone does not survive the host.
+— the on-host copy alone does not survive the host. Unattended, a
+failed backup goes through `notify.sh`; a backup that stops happening
+is `hygiene.sh`'s stale-set warning.
 
 `restore.sh <set> [--yes]` is the other half: it verifies the checksums,
 takes the stack down (volumes kept), refuses to overwrite a volume that

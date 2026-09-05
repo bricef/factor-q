@@ -59,6 +59,15 @@ the environment and passes nothing.
 | `--edge-fingerprint` | `FQ_EDGE_FINGERPRINT` | *(required)* | the daemon's certificate SHA-256, hex |
 | `--refresh` | `FQ_DASHBOARD_REFRESH` | `5` | poll interval, seconds |
 
+`fq-dashboard probe` asks the running dashboard's `GET /healthz` at
+`--bind` and exits 0 on 200 — the container image's `HEALTHCHECK`, so
+it links no HTTP client and needs no shell. `/healthz` is liveness
+only: it answers `ok` whenever this process is serving and asks the
+daemon nothing, because a dashboard whose daemon is down renders
+"runtime unreachable" on its own, and a probe that failed for the
+daemon's fault would have the supervisor restarting a healthy dashboard
+into the same outage.
+
 There is no unauthenticated mode to degrade into: the edge refuses a
 connection with no token, so a missing credential is a startup error
 naming the fix, not a process that runs and renders "unreachable" on

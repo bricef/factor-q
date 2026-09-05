@@ -394,10 +394,19 @@ has been run once inside the container — `state/client/` keeps it — the
 probe reports "no daemon paired" and the container shows unhealthy,
 which is an honest state for an instance nobody has paired with yet.
 The start period is generous (two minutes) so recovery at boot is not
-mistaken for a hang; compose may override the timings. The adapter and
-dashboard images have no probe yet — none of the three exposes one a
-shell-less image can run; that is a follow-up on
-[#587](https://github.com/bricef/factor-q/issues/587).
+mistaken for a hang; compose may override the timings.
+
+The adapter and dashboard images probe themselves the same way: each
+binary serves `GET /healthz` on a loopback address (`GHW_HEALTH_BIND`,
+`FQCRON_HEALTH_BIND`, the dashboard's own bind) and its `HEALTHCHECK`
+runs `--probe` (adapters) or `probe` (dashboard), which asks that address
+from the same environment and exits 0 on 200 — no shell, no curl, no
+credential. The adapters are healthy while attached to the broker (the
+watcher also while its poll loop is cycling); the dashboard while it is
+serving. None of them fails on the daemon's account: a probe that did
+would have the supervisor restarting a healthy adapter into the daemon's
+outage, and the daemon has its own. `ops/dogfood/deploy.sh` waits for
+the three to report healthy after every deploy.
 
 ### Running it
 

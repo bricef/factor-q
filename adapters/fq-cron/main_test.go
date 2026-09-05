@@ -62,3 +62,16 @@ func TestCheckMode(t *testing.T) {
 		t.Fatal("expected invalid config to fail")
 	}
 }
+
+func TestProbeFlagNeedsNoConfig(t *testing.T) {
+	// Nothing listens on this port, so the probe fails — but with a
+	// connection error, not "--config is required".
+	t.Setenv(healthBindEnv, "127.0.0.1:1")
+	err := run([]string{"--probe"})
+	if err == nil {
+		t.Fatal("expected the probe to fail against a closed port")
+	}
+	if strings.Contains(err.Error(), "--config") {
+		t.Fatalf("--probe was parsed as a normal run: %v", err)
+	}
+}
