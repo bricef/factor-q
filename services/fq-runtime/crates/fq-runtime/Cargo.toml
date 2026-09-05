@@ -56,7 +56,7 @@ async-trait = { workspace = true }
 # reducer sees changed across the switch.
 genai = "=0.7.0-beta.21"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.2", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 strum = { workspace = true }
 
 [features]
@@ -78,7 +78,7 @@ tokio = { workspace = true, features = ["full"] }
 # `CreateMessageResult` to reply to a bridged sampling request); the
 # `server` + `transport-async-rw` features let unit tests serve an
 # in-process mock MCP server over a duplex (D1: pagination / mutation).
-rmcp = { version = "1.7", default-features = false, features = ["client", "server", "transport-child-process", "transport-async-rw"] }
+rmcp = { version = "3.2", default-features = false, features = ["client", "server", "transport-child-process", "transport-async-rw"] }
 
 [lints]
 workspace = true
