@@ -741,7 +741,7 @@ fn a_second_sigterm_never_costs_the_clean_teardown() {
     assert!(
         reasons
             .iter()
-            .any(|r| r == "sigterm" || r == "sigterm_escalated"),
+            .any(|r| r == "sigterm" || r.starts_with("sigterm_escalated_by_")),
         "no system.shutdown was published after a second SIGTERM: {reasons:?}"
     );
 }

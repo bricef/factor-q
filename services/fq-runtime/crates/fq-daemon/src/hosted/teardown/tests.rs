@@ -214,3 +214,34 @@ async fn a_dispatcher_the_select_already_joined_is_not_joined_again() {
     .await
     .expect("re-polling a consumed dispatcher handle panicked the teardown");
 }
+
+/// The escalated reason names both halves, so the event log can tell a
+/// deploy's SIGTERM cut short by an operator's `fq down --now` from a
+/// Ctrl-C pressed twice.
+#[test]
+fn an_escalated_reason_names_the_stop_and_the_escalator() {
+    assert_eq!(
+        escalated_reason("sigterm", "sigterm"),
+        "sigterm_escalated_by_sigterm"
+    );
+    assert_eq!(
+        escalated_reason("sigterm", "down_now"),
+        "sigterm_escalated_by_down_now"
+    );
+    assert_eq!(
+        escalated_reason("sigterm", "ctrl_c"),
+        "sigterm_escalated_by_ctrl_c"
+    );
+    assert_eq!(
+        escalated_reason("down", "sigterm"),
+        "down_escalated_by_sigterm"
+    );
+    assert_eq!(
+        escalated_reason("down", "ctrl_c"),
+        "down_escalated_by_ctrl_c"
+    );
+    assert_eq!(
+        escalated_reason("down", "down_now"),
+        "down_escalated_by_down_now"
+    );
+}
