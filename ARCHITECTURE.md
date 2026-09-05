@@ -219,7 +219,7 @@ Seven, in the order `ToolRegistry::with_builtins_exec` registers them
 The exec tool uses argv (no shell invocation), mandatory timeout,
 output cap, and a fresh child env with only a pinned PATH.
 
-### MCP client (`fq-runtime/src/mcp.rs`)
+### MCP client (`fq-runtime/src/mcp/`)
 
 The full client described under
 [Tool and skill system](#tool-and-skill-system): stdio and Streamable
