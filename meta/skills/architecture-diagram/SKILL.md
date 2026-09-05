@@ -38,7 +38,7 @@ Do not trust the existing dot or ARCHITECTURE.md. Anchors:
 | Daemon composition (which tasks `fqd` hosts) | `run_hosted` in `services/fq-runtime/crates/fq-daemon/src/hosted.rs` |
 | CLI verbs (all of which reach the daemon over the edge) | `enum Commands` in `fq-cli/src/cli.rs` + the verb modules beside it |
 | The stores and their source-of-truth status | `fq-runtime/src/control_plane/store.rs`, the worker store, `control_plane/projection/` |
-| Edge port, TLS pinning, on/off default | `fq-runtime/crates/fq-edge/src/server.rs`, `fq-runtime/src/config.rs` (`[edge]`) |
+| Edge port, TLS pinning, connection limits (the edge is mandatory — there is no on/off) | `fq-runtime/crates/fq-edge/src/server.rs`, `fq-runtime/src/config/edge.rs` (`[edge]`) |
 | Dashboard ports and read path | `services/fq-dashboard/src/main.rs` (arg defaults) |
 | LLM / MCP / pricing integrations | `fq-runtime/src/llm/`, the worker's MCP modules, `fq-runtime/src/pricing.rs` |
 | Trigger adapters | `adapters/` (one box per adapter binary) |

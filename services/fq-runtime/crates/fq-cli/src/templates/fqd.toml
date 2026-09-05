@@ -205,3 +205,44 @@ models = ["claude-haiku-4-5"]
 # Hard ceiling on any single call. A caller-supplied `timeout_secs` above
 # this is clamped down (not rejected). Default 600.
 # max_timeout_secs = 600
+
+[edge]
+# The authenticated operator surface — every `fq` verb speaks it, so a
+# daemon without one can be neither inspected nor stopped except by a
+# signal. There is no way to switch it off, and the bound listener
+# doubles as the daemon's single-instance lock: it is taken before
+# anything else happens, so a second daemon on the same address exits at
+# once, naming it, having registered no worker and published nothing.
+#
+# Bind address for the TLS listener. Default 127.0.0.1:9472. Note the
+# dashboard's own default is the same port — move one of them if you run
+# both on one host.
+# bind = "127.0.0.1:9472"
+#
+# How long a `min_seq`-gated read waits for the projection to catch up
+# before answering `Lagging`, in ms. Default 2000.
+# min_seq_wait_ms = 2000
+#
+# The connection budget. These bound what a peer that has not
+# authenticated can make the daemon allocate — an fd and a task per
+# connection, a rustls session per handshake — and what one client that
+# has can queue. Raise them for a busy dashboard or many operators;
+# there is rarely a reason to lower them.
+#
+# Connections held at once, authenticated or not. Past this the accept
+# loop stops taking sockets off the backlog. Default 256.
+# max_connections = 256
+#
+# Connections in the pre-auth phase (TLS handshake + token read).
+# Tighter than max_connections because a handshake costs CPU where an
+# open connection costs a descriptor. Default 64.
+# max_pre_auth_connections = 64
+#
+# In-flight requests per authenticated connection. Default 32.
+# max_concurrent_requests = 32
+#
+# How long the accept loop pauses after a failed `accept`, in ms. Not a
+# nicety: tokio does not clear a listener's readiness on EMFILE, so
+# retrying immediately would spin a worker thread and starve the very
+# tasks holding the descriptors. Default 100.
+# accept_error_backoff_ms = 100
