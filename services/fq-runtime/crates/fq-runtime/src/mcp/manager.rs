@@ -18,7 +18,7 @@ use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam,
     ClientRequest, CompletionContext, CompletionInfo, GetPromptRequestParams, JsonObject,
-    LoggingLevel, Prompt, ReadResourceRequestParams, ReadResourceResult, Resource,
+    LoggingLevel, Meta, Prompt, ReadResourceRequestParams, ReadResourceResult, Resource,
     ResourceTemplate, Root, ServerCapabilities, ServerResult, SetLevelRequestParams,
     SubscribeRequestParams,
 };
@@ -29,6 +29,7 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
 use super::naming::{namespaced_tool_name, validate_server_name};
+use super::progress::next_progress_token;
 use super::prompt_convert::prompt_seed_from_rmcp;
 use super::server_config::SharedServerKey;
 use super::{
@@ -542,8 +543,28 @@ impl McpClientManager {
         let remote_tool_name = tool_name
             .strip_prefix(&canonical_prefix)
             .unwrap_or(tool_name);
-        let params =
+        let mut params =
             CallToolRequestParams::new(remote_tool_name.to_string()).with_arguments(arguments);
+        // The same progress-token `_meta` `McpTool::execute` attaches:
+        // a server may only report progress against a request that
+        // carried one, and this is the path for exactly the
+        // long-running calls that would benefit — #547 wires every tool
+        // call through here.
+        //
+        // Note what actually goes on the wire. rmcp's peer layer mints
+        // its own token for *every* outbound request
+        // (`send_request_with_option`) into the request's extensions,
+        // and serialization merges extensions over params, so the token
+        // the server sees is rmcp's, not this one (verified against the
+        // mock: a deliberately string-valued token here arrived as
+        // rmcp's `Number(0)`). This line is therefore the host stating
+        // the requirement rather than satisfying it today; the test
+        // below asserts the property that matters — that the server is
+        // given a token — against the server, not against this line.
+        // Whether to keep it or retire `PROGRESS_TOKEN_SEQ` in favour
+        // of `RequestHandle::progress_token`, which *is* the token on
+        // the wire, is a call for whoever picks up correlation.
+        params.meta = Some(Meta::with_progress_token(next_progress_token()));
         let mut handle = self
             .client_for(server)?
             .peer()
