@@ -602,7 +602,7 @@ impl McpClientManager {
             .set_level(SetLevelRequestParams::new(level))
             .await
             .map(|_| ())
-            .map_err(|err| McpError::ResourceOp {
+            .map_err(|err| McpError::LoggingOp {
                 server: server.to_string(),
                 reason: err.to_string(),
             })
