@@ -1220,6 +1220,54 @@ mod tests {
             .expect("query");
         assert!(in_flight.is_empty(), "no zombie invocation left in flight");
     }
+
+    /// #511 at the runner: two calls in one turn go out through the real
+    /// `CallToolsParallel` dispatch, and the request for the next turn
+    /// carries **one** `tool_results` message with both results, in call
+    /// order. The reducer's unit test proves the fold on a hand-built
+    /// answer; this proves the live loop feeds the fold what it expects
+    /// and that the batched turn is what reaches the client.
+    #[tokio::test]
+    async fn parallel_tool_results_reach_the_next_request_as_one_turn() {
+        let world = SimWorld::new(17, 5.0).await;
+        world.tool.push_output(ToolResult::ok("out-a"));
+        world.tool.push_output(ToolResult::ok("out-b"));
+        let llm = FixtureClient::new();
+        llm.push_response(sim_two_tool_calls("c0a", "c0b"));
+        llm.push_response(end_turn("done"));
+
+        let outcome = world.run(&llm).await.expect("sim run");
+        assert!(
+            matches!(outcome, InvocationOutcome::Completed { .. }),
+            "got {outcome:?}"
+        );
+        assert_eq!(
+            world.tool.dispatches().lock().unwrap().len(),
+            2,
+            "both calls ran"
+        );
+
+        let requests = llm.requests();
+        assert_eq!(requests.len(), 2, "two model turns");
+        let tool_turns: Vec<Vec<(&str, &str)>> = requests[1]
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                crate::events::Message::ToolResults { results } => Some(
+                    results
+                        .iter()
+                        .map(|r| (r.tool_call_id.as_str(), r.output.as_str()))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tool_turns,
+            vec![vec![("c0a", "out-a"), ("c0b", "out-b")]],
+            "one tool-results turn answers the two-call turn, in call order"
+        );
+    }
 }
 
 #[cfg(test)]

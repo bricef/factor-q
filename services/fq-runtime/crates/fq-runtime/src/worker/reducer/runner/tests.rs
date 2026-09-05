@@ -3307,3 +3307,120 @@ async fn sampling_spends_into_the_invocation_budget() {
         rows[0].cost_usd
     );
 }
+
+/// **The hermetic Anthropic-shape test #511 asked for.** The whole path
+/// — reducer, runner, the real `CallToolsParallel` dispatch, genai's
+/// Anthropic adapter — against an in-process Anthropic mock, asserting on
+/// the bytes the provider receives: after a turn with two `tool_use`
+/// blocks, the next request carries **one** user message holding both
+/// `tool_result` blocks, in call order, directly after the assistant
+/// turn. Before the fix this went out as two user messages of one block
+/// each, which is not the documented shape.
+#[tokio::test]
+async fn parallel_tool_results_reach_anthropic_as_one_user_message() {
+    use crate::test_support::mock_anthropic::MockResponse;
+    use crate::test_support::runtime::TestRuntime;
+
+    let rt = TestRuntime::start().await.expect("harness");
+    rt.push_llm_response(
+        MockResponse::tool_use(
+            "toolu_a",
+            "file_read",
+            json!({"path": "Cargo.toml"}),
+            40,
+            20,
+        )
+        .with_tool_use("toolu_b", "file_read", json!({"path": "src/lib.rs"})),
+    );
+    rt.push_llm_response(MockResponse::report_success("read both.", 60, 8));
+
+    let agent = Agent::builder()
+        .id(rt.agent_id().as_str())
+        .model("claude-haiku-4-5")
+        .system_prompt("be brief")
+        .tools(["file_read"])
+        .budget(1.0)
+        .build()
+        .unwrap();
+    let llm = rt.llm_client();
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(rt.bus().clone())
+                .pricing(test_pricing())
+                .store(rt.worker_store().clone())
+                .worker_id(rt.worker_id().clone())
+                .build(),
+        ),
+        Harness::new(),
+    );
+    let outcome = runner
+        .run(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({"input": "go"}),
+        )
+        .await
+        .expect("run completes");
+    let invocation_id = match outcome {
+        InvocationOutcome::Completed { invocation_id, .. } => invocation_id,
+        other => panic!("expected Completed, got {other:?}"),
+    };
+    rt.wait_for_archive(invocation_id, Duration::from_secs(10))
+        .await
+        .expect("archive row");
+
+    let requests = rt.mock().received_requests();
+    assert_eq!(requests.len(), 2, "two model turns reached the provider");
+    let messages = requests[1]["messages"]
+        .as_array()
+        .expect("the request carries a message list");
+    let [.., assistant, answer] = messages.as_slice() else {
+        panic!("expected the assistant turn and its answer, got {messages:?}");
+    };
+
+    assert_eq!(assistant["role"], "assistant");
+    let issued: Vec<&str> = assistant["content"]
+        .as_array()
+        .expect("assistant content is a block list")
+        .iter()
+        .filter(|block| block["type"] == "tool_use")
+        .map(|block| block["id"].as_str().expect("tool_use id"))
+        .collect();
+    assert_eq!(
+        issued,
+        ["toolu_a", "toolu_b"],
+        "both calls replayed, in order"
+    );
+
+    assert_eq!(
+        answer["role"], "user",
+        "tool results are a user turn on this wire"
+    );
+    let answered: Vec<&str> = answer["content"]
+        .as_array()
+        .expect("the answering turn is a block list")
+        .iter()
+        .map(|block| {
+            assert_eq!(
+                block["type"], "tool_result",
+                "nothing but tool results in the answering turn"
+            );
+            block["tool_use_id"].as_str().expect("tool_use_id")
+        })
+        .collect();
+    assert_eq!(
+        answered,
+        ["toolu_a", "toolu_b"],
+        "one user message carries every tool_result, in call order"
+    );
+
+    rt.shutdown().await;
+}
