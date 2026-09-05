@@ -3,6 +3,8 @@
 
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::{StreamExt, StreamMap};
 use tracing::{debug, info};
 
 use crate::tools::ToolRegistry;
@@ -56,8 +58,16 @@ pub enum ServerNotification {
 /// closed (shutdown). Log records are forwarded to `on_log` (the
 /// event-bus bridge, plan B2); progress is consumed. Everything is
 /// already folded into `tracing` at the handler.
+///
+/// The merge is a [`StreamMap`], which polls its entries from a random
+/// starting index, so no server can starve another by construction. The
+/// hand-rolled poll-merge this replaced always started at index 0 and
+/// returned the first ready channel, so one chatty server held the loop
+/// for as long as it kept a message queued and every server behind it
+/// waited (#191). `StreamMap` also drops an exhausted stream and yields
+/// `None` once the map is empty, which is the shutdown condition.
 pub async fn drain_server_notifications<F, G>(
-    mut channels: Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
+    channels: Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
     refresher: McpToolRefresher,
     on_tools_changed: F,
     on_log: G,
@@ -65,36 +75,12 @@ pub async fn drain_server_notifications<F, G>(
     F: Fn(ToolRegistry) + Send + Sync + 'static,
     G: Fn(String, String, Option<String>, Value) + Send + Sync + 'static,
 {
-    // Receive the next notification from any server, tagged with the
-    // server name; closed channels drop out (same merge shape as the
-    // runner's server-request channel).
-    async fn recv_any(
-        channels: &mut Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
-    ) -> Option<(String, ServerNotification)> {
-        std::future::poll_fn(|cx| {
-            let mut index = 0;
-            while index < channels.len() {
-                match channels[index].1.poll_recv(cx) {
-                    std::task::Poll::Ready(Some(notification)) => {
-                        let server = channels[index].0.clone();
-                        return std::task::Poll::Ready(Some((server, notification)));
-                    }
-                    std::task::Poll::Ready(None) => {
-                        channels.remove(index);
-                    }
-                    std::task::Poll::Pending => index += 1,
-                }
-            }
-            if channels.is_empty() {
-                std::task::Poll::Ready(None)
-            } else {
-                std::task::Poll::Pending
-            }
-        })
-        .await
-    }
+    let mut channels: StreamMap<String, UnboundedReceiverStream<ServerNotification>> = channels
+        .into_iter()
+        .map(|(server, rx)| (server, UnboundedReceiverStream::new(rx)))
+        .collect();
 
-    while let Some((server, notification)) = recv_any(&mut channels).await {
+    while let Some((server, notification)) = channels.next().await {
         match notification {
             ServerNotification::ToolListChanged => {
                 info!(server = %server, "tools/list_changed: rebuilding the shared registry");

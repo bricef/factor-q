@@ -38,6 +38,8 @@ use rmcp::model::{
     SamplingContent, SamplingMessage, SamplingMessageContent, StringFormat,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::{StreamExt, StreamMap};
 
 use crate::agent::{Agent, AgentId, EvaluatorSpec};
 use crate::bus::EventBus;
@@ -114,54 +116,50 @@ const HOST_STEP_BUDGET: u32 = 1_000;
 /// servers concurrently (a merged, server-tagged stream) is a
 /// follow-up; v1 wires a single channel, which is what the everything
 /// server's sampling tool exercises.
+#[derive(Default)]
 pub struct SamplingChannel {
-    /// One inbound request receiver per grant-bearing server, paired
-    /// with that server's name. [`recv`](Self::recv) selects across all
-    /// of them so more than one grant-bearing server can be serviced in
-    /// a single invocation (ADR-0018); a closed receiver is dropped.
-    channels: Vec<(String, UnboundedReceiver<ServerRequest>)>,
+    /// One inbound request receiver per grant-bearing server, keyed by
+    /// that server's name. [`recv`](Self::recv) selects across all of
+    /// them so more than one grant-bearing server can be serviced in a
+    /// single invocation (ADR-0018); a closed receiver is dropped.
+    channels: StreamMap<String, UnboundedReceiverStream<ServerRequest>>,
 }
 
 impl SamplingChannel {
     /// A channel for a single server (the direct / test path).
     pub fn new(server: impl Into<String>, rx: UnboundedReceiver<ServerRequest>) -> Self {
-        Self {
-            channels: vec![(server.into(), rx)],
-        }
+        Self::merged(vec![(server.into(), rx)])
     }
 
     /// A channel merging several servers' request receivers.
     pub fn merged(channels: Vec<(String, UnboundedReceiver<ServerRequest>)>) -> Self {
-        Self { channels }
+        Self {
+            channels: channels
+                .into_iter()
+                .map(|(server, rx)| (server, UnboundedReceiverStream::new(rx)))
+                .collect(),
+        }
+    }
+
+    /// Wire one more server as it starts; a repeated name replaces it.
+    pub fn insert(&mut self, server: impl Into<String>, rx: UnboundedReceiver<ServerRequest>) {
+        self.channels
+            .insert(server.into(), UnboundedReceiverStream::new(rx));
+    }
+
+    /// Whether any receiver is wired — `false` leaves `select!` nothing.
+    pub fn is_empty(&self) -> bool {
+        self.channels.is_empty()
     }
 
     /// Receive the next request from any server, tagged with the server
     /// name. Closed receivers are removed as they drain; returns `None`
-    /// once every server's channel is closed. Selection is biased toward
-    /// earlier servers, which is fine — requests are independent.
+    /// once every server's channel is closed. Selection starts at a
+    /// random entry, so a chatty server cannot starve a quiet one — the
+    /// index-0-biased poll-merge this replaced was the duplicate #191
+    /// removed by putting it and the MCP drain both on `StreamMap`.
     pub async fn recv(&mut self) -> Option<(String, ServerRequest)> {
-        std::future::poll_fn(|cx| {
-            let mut index = 0;
-            while index < self.channels.len() {
-                match self.channels[index].1.poll_recv(cx) {
-                    std::task::Poll::Ready(Some(request)) => {
-                        let server = self.channels[index].0.clone();
-                        return std::task::Poll::Ready(Some((server, request)));
-                    }
-                    // This server's channel closed; drop it and continue.
-                    std::task::Poll::Ready(None) => {
-                        self.channels.remove(index);
-                    }
-                    std::task::Poll::Pending => index += 1,
-                }
-            }
-            if self.channels.is_empty() {
-                std::task::Poll::Ready(None)
-            } else {
-                std::task::Poll::Pending
-            }
-        })
-        .await
+        self.channels.next().await
     }
 }
 
@@ -448,7 +446,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // path). `Some` only when a grant server will layer tools on.
         let mut invocation_tools: Option<ToolRegistry> =
             (!grant_decls.is_empty()).then(|| (*tools).clone());
-        let mut channels = sampling.map_or_else(Vec::new, |channel| channel.channels);
+        let mut sampling = sampling.unwrap_or_default();
         for decl in grant_decls {
             let capabilities = AdvertisedCapabilities {
                 sampling: agent
@@ -485,14 +483,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             warn!(server = %decl.server, %error, "refusing per-invocation MCP tool registration");
                         }
                     }
-                    channels.push((decl.server.clone(), rx));
+                    sampling.insert(decl.server.clone(), rx);
                 }
                 Err(err) => {
                     warn!(agent_id = %agent_id, server = %decl.server, error = %err, "failed to start grant-bearing MCP server per-invocation; skipping it")
                 }
             }
         }
-        let sampling = (!channels.is_empty()).then(|| SamplingChannel::merged(channels));
+        let sampling = (!sampling.is_empty()).then_some(sampling);
         // From here on, `tools` is the effective registry for this
         // invocation: the base one, or the clone with server tools
         // layered on.
