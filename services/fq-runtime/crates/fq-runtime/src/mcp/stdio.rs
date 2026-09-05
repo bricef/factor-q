@@ -35,7 +35,8 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 use tracing::info;
 
-use super::{McpError, McpServerConfig, validate_server_name};
+use super::naming::validate_server_name;
+use super::{McpError, McpServerConfig};
 
 /// The root under which servers get their working directories when the
 /// embedder names none. The daemon always names `<state dir>/mcp`

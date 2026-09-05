@@ -81,3 +81,6 @@ impl SharedServerKey {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
