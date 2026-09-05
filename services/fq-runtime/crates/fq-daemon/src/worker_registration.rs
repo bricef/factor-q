@@ -24,6 +24,31 @@
 //! honest case — a process that stopped answering without saying
 //! anything — which is why the task-failure teardown still declines to
 //! mark it (see [`WorkerRegistration::settle`]).
+//!
+//! **What this guard does not cover: a panic.** It is a sequential
+//! `.await` in `run_daemon`, not a `Drop`, so a panic anywhere under it
+//! unwinds straight past the settle and the row is left `alive` for the
+//! stale sweep. That is the correct *outcome* for a panic — a process
+//! that died mid-thought did not stop deliberately, and `stale` is
+//! exactly what it should read — but it is an accident of the shape
+//! rather than a decision the code makes, and it is worth knowing which.
+//!
+//! It is left an accident on purpose. `mark_worker_shutdown` is an
+//! `async` write to SQLite over a pool, and a `Drop` cannot await: the
+//! two ways out are spawning a task the process will not live long
+//! enough to run, and blocking a runtime thread from inside a runtime,
+//! which panics. A flag-only `Drop` that `main` acted on would work,
+//! but `main` does not hold the registration and threading it out to
+//! give a panic the same answer the stale sweep already gives is cost
+//! for no change in behaviour. `catch_unwind` around the run would let
+//! the settle happen — and would be wrong, because it would report a
+//! panicked daemon as a graceful `shutdown`.
+//!
+//! The panic that *did* matter was a `JoinHandle` polled twice in the
+//! teardown, which skipped the settle along with the MCP shutdown and
+//! the `system.shutdown` publish. That is fixed at the source in
+//! `hosted.rs`, which is where panics in the main task belong: not
+//! caught, not happening.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

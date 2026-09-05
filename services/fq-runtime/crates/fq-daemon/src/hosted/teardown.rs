@@ -144,6 +144,27 @@ pub(crate) async fn wait_for_drain<E: std::fmt::Display>(
     outcome
 }
 
+/// The `system.shutdown` reason for a drain that was cut short, naming
+/// both halves: the stop that was running, and what escalated it.
+///
+/// Six strings rather than a field on `SystemShutdownPayload`, because
+/// the payload's `reason` is already free text and the event log is
+/// where a stop is reconstructed afterwards — "the deploy's SIGTERM was
+/// escalated by an operator's `fq down --now`" is a different story
+/// from "the operator pressed Ctrl-C twice", and a reason that said
+/// only `sigterm_escalated` could not tell them apart. Spelled out
+/// rather than formatted so the whole vocabulary is greppable.
+pub(crate) fn escalated_reason(original: &str, escalator: &str) -> &'static str {
+    match (original, escalator) {
+        ("sigterm", "sigterm") => "sigterm_escalated_by_sigterm",
+        ("sigterm", "ctrl_c") => "sigterm_escalated_by_ctrl_c",
+        ("sigterm", _) => "sigterm_escalated_by_down_now",
+        (_, "sigterm") => "down_escalated_by_sigterm",
+        (_, "ctrl_c") => "down_escalated_by_ctrl_c",
+        (_, _) => "down_escalated_by_down_now",
+    }
+}
+
 fn report_dispatcher<E: std::fmt::Display>(result: Result<Result<(), E>, tokio::task::JoinError>) {
     match result {
         Ok(Ok(())) => println!("  trigger dispatcher stopped cleanly."),

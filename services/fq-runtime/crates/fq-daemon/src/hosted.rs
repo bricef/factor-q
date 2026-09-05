@@ -561,10 +561,12 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         )
         .await;
         if let DrainOutcome::Escalated { reason } = outcome {
-            shutdown_reason = match (shutdown_reason, reason) {
-                ("sigterm", _) => "sigterm_escalated",
-                _ => "down_escalated",
-            };
+            // The reason records both halves — the stop that was
+            // running and what cut it short — because a deploy's
+            // SIGTERM escalated by an operator's `fq down --now` is a
+            // different story from a Ctrl-C pressed twice, and the
+            // event log is where that is reconstructed afterwards.
+            shutdown_reason = teardown::escalated_reason(shutdown_reason, reason);
         }
     } else {
         teardown::join_dispatcher(
