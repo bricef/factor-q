@@ -956,10 +956,13 @@ async fn gemini_cross_model_strip() {
             },
         );
         unsafe { std::env::set_var("FQ_MOCK_GEMINI_KEY", "mock-key") };
-        GenAiClient::from_providers(&crate::config::ProvidersConfig {
-            anthropic: None,
-            extra,
-        })
+        GenAiClient::from_providers(
+            &crate::config::ProvidersConfig {
+                anthropic: None,
+                extra,
+            },
+            crate::llm::LlmTimeouts::default(),
+        )
         .expect("client builds")
     };
 
