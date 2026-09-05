@@ -72,6 +72,10 @@ fq down
 # Stop immediately without draining: clean teardown + deregister + exit
 # now, accepting that in-flight invocations become recoverable on the
 # next start. The proper replacement for `pkill -INT`.
+#
+# Against a daemon that is ALREADY draining, this escalates that drain:
+# the wait ends at once and the same clean teardown runs. That is what
+# to reach for when a stop is taking longer than you can wait.
 fq down --now        # alias: --no-drain
 ```
 
@@ -98,6 +102,56 @@ graceful drain (ADR-0027). `fq down` gives you the same clean paths as a
 scriptable, confirmable command from anywhere that can reach the
 daemon's edge.
 
+The confirmation reads `requested mode=drain` rather than `mode=drain`,
+and the wording is deliberate: a drain can be escalated while `fq down`
+is still waiting — by a second SIGTERM on the daemon's host, or by
+another operator's `fq down --now` — and the client cannot see that,
+because the only channel it has is an edge that stops answering. What
+actually ran is in the daemon's `system.shutdown` event, whose reason
+is one of `down`, `down_escalated`, `sigterm`, `sigterm_escalated`,
+`down_now` or `ctrl_c`.
+
+### Cutting a drain short
+
+A drain is bounded by `drain_deadline_ms` (default 120s), but you do
+not have to wait it out. **A second SIGTERM escalates it**, and so does
+`fq down --now`:
+
+```sh
+# The daemon is draining and you need it stopped now.
+fq down --now                    # over the edge, from anywhere
+
+kill -TERM <pid>                 # or a second signal, on its own host
+docker kill -s TERM fqd          # under compose, where `stop` already sent the first
+```
+
+Escalating is **not** a hard stop. The drain wait ends, but the teardown
+that follows it does not change: infrastructure tasks are joined, the
+worker is deregistered, and `system.shutdown` is published. In-flight
+invocations that had not yet reached a step boundary are resumed by
+recovery on the next start, exactly as if the deadline had elapsed.
+
+`SIGKILL` is the only thing that costs those guarantees — it leaves the
+worker row `alive` to age into `stale` and publishes nothing — so it is
+never the way to hurry a stop along.
+
+## How long a stop takes
+
+Worth knowing before setting an orchestrator's grace period. A stop is
+bounded by:
+
+- the drain wait, up to `drain_deadline_ms` (only for `fq down` and
+  SIGTERM; Ctrl-C and `--now` skip it, and a second signal ends it
+  early); plus
+- up to five seconds for the infrastructure tasks, which are stopped
+  together and joined concurrently *after* the drain — they have
+  nothing to suspend, so they never eat into the drain's deadline; plus
+- the MCP children's shutdown and two best-effort control-plane writes.
+
+The worker keeps heartbeating for the whole drain, so a daemon that is
+still executing steps is still `alive` on the roster rather than
+looking stale to the sweep.
+
 ## Redeploying with `fq down`
 
 For a **redeploy** — swap the binary and resume in-flight work under the
@@ -111,7 +165,16 @@ fqd      # recovery resumes suspended invocations without lost/re-run work
 
 The default mode is the suspend-for-handoff mechanism specified by ADR-0027.
 The same command also serves when switching the daemon off; intent is the only
-difference. Use `--now` only when the drain must be skipped.
+difference. Use `--now` only when the drain must be skipped — or to escalate
+one that is taking too long.
+
+> **Give the old daemon its port back before starting the new one.** The
+> daemon's bound edge listener is its single-instance lock: it is taken before
+> anything else happens, so a second `fqd` on the same `[edge] bind` exits at
+> once, naming the address, having registered no worker and published nothing.
+> That is the desired outcome — two daemons on one state directory is the
+> failure it prevents — but during a redeploy it means waiting for `fq down` to
+> confirm before relaunching, which is what `fq down`'s bounded wait is for.
 
 ## Hot-reloading agents: `fq reload`
 

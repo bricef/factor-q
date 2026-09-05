@@ -193,7 +193,10 @@ shared object spanning the boundary.
   deploy drain-safe with **no pre-stop _command_ hook** — just a long enough
   stop-grace period (see below). **Ctrl-C (SIGINT)** stays a fast interactive
   stop that abandons in-flight work to crash-recovery; a **second SIGTERM**
-  restores the default disposition and hard-stops (the force-abort escape).
+  escalates a running drain to the immediate but still **clean** stop `fq down
+  --now` implements — the worker is deregistered and `system.shutdown` is
+  published, which restoring the default disposition would have skipped
+  (revised 2026-09-05, [#509](https://github.com/bricef/factor-q/issues/509)).
   `fq drain` remains the NATS-transport equivalent for the cross-node /
   can't-signal case.
 - **Config on resume (for now): naive resume-with-new-config.** A drained
@@ -238,8 +241,14 @@ Notes:
   stop), so it must be set to SIGTERM to drain at all.
 - The margin covers the daemon's post-drain teardown (joining the infra
   consumers, MCP shutdown, the `system.shutdown` event) — a few seconds.
-- A **second SIGTERM** (or SIGKILL) aborts a drain immediately; the abandoned
-  in-flight work is resumed by recovery on the next start.
+- A **second SIGTERM** escalates a drain to an immediate stop; the abandoned
+  in-flight work is resumed by recovery on the next start. It is still a clean
+  stop — worker deregistered, `system.shutdown` published — so the grace period
+  above still needs the teardown margin. SIGKILL is the only thing that costs
+  those guarantees, which is why it should never be how a stop is hurried
+  along. `fq down --now` against a daemon already draining escalates the same
+  way (revised 2026-09-05,
+  [#509](https://github.com/bricef/factor-q/issues/509)).
 
 ## Deferred / open questions
 
