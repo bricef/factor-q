@@ -124,7 +124,9 @@ impl MockResponse {
     }
 
     /// Build a tool-use response carrying one `tool_use` block. Stop
-    /// reason is `"tool_use"` per Anthropic's contract.
+    /// reason is `"tool_use"` per Anthropic's contract. Chain
+    /// [`with_tool_use`](Self::with_tool_use) for a turn that requests
+    /// several tools at once.
     pub fn tool_use(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -144,6 +146,25 @@ impl MockResponse {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         }
+    }
+
+    /// Append another `tool_use` block — the parallel-call shape, where
+    /// one assistant turn requests several tools and Anthropic expects
+    /// every `tool_result` back in a single user turn (#511). Blocks keep
+    /// insertion order, which is the order the model issued the calls in
+    /// and the order the results must come back in.
+    pub fn with_tool_use(
+        mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        input: Value,
+    ) -> Self {
+        self.content.push(ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input,
+        });
+        self
     }
 
     /// Serialise to the JSON shape Anthropic returns from
@@ -363,6 +384,27 @@ mod tests {
         assert_eq!(json["content"][0]["input"]["path"], "Cargo.toml");
     }
 
+    #[test]
+    fn mock_response_parallel_tool_use_serialises_to_anthropic_shape() {
+        let r = MockResponse::tool_use(
+            "toolu_01",
+            "file_read",
+            json!({"path": "Cargo.toml"}),
+            20,
+            8,
+        )
+        .with_tool_use("toolu_02", "file_read", json!({"path": "README.md"}));
+        let json = r.to_anthropic_json("claude-haiku-4-5");
+        assert_eq!(json["stop_reason"], "tool_use");
+        let content = json["content"].as_array().expect("content is a block list");
+        assert_eq!(content.len(), 2, "one block per requested tool");
+        assert_eq!(content[0]["type"], "tool_use");
+        assert_eq!(content[0]["id"], "toolu_01");
+        assert_eq!(content[1]["type"], "tool_use");
+        assert_eq!(content[1]["id"], "toolu_02");
+        assert_eq!(content[1]["input"]["path"], "README.md");
+    }
+
     fn simple_request() -> ChatRequest {
         ChatRequest {
             model: "claude-haiku-4-5".to_string(),
@@ -421,6 +463,40 @@ mod tests {
         assert_eq!(response.tool_calls().len(), 1, "expected one tool call");
         assert_eq!(response.tool_calls()[0].tool_name, "file_read");
         assert_eq!(response.tool_calls()[0].tool_call_id.as_str(), "toolu_99");
+
+        mock.shutdown().await;
+    }
+
+    /// The parallel-call shape decodes as N tool calls in block order —
+    /// which is what makes the batched tool-results turn testable
+    /// against this provider's wire (#511).
+    #[tokio::test]
+    async fn mock_returns_parallel_tool_use_response_in_block_order() {
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+
+        let mock = MockAnthropicServer::start().await;
+        mock.push_response(
+            MockResponse::tool_use("toolu_a", "file_read", json!({"path": "a"}), 22, 6)
+                .with_tool_use("toolu_b", "file_read", json!({"path": "b"}))
+                .with_tool_use("toolu_c", "file_list", json!({"path": "."})),
+        );
+
+        let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
+        let response = client.chat(simple_request()).await.expect("chat");
+        let calls: Vec<(&str, &str)> = response
+            .tool_calls()
+            .iter()
+            .map(|c| (c.tool_call_id.as_str(), c.tool_name.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("toolu_a", "file_read"),
+                ("toolu_b", "file_read"),
+                ("toolu_c", "file_list")
+            ],
+            "every block decodes, in the order the model issued them"
+        );
 
         mock.shutdown().await;
     }
