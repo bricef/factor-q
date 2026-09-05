@@ -483,3 +483,242 @@ fn fq_down_fast_fails_when_no_daemon_running() {
 fn fq_client_binary() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_fqd")).with_file_name("fq")
 }
+
+/// Every `fq.system.shutdown` reason the broker saw, collected from a
+/// core-NATS subscription opened before the stop was asked for.
+///
+/// The projection cannot answer this: the projection consumer is
+/// stopped before the shutdown event is published, by construction —
+/// the event is the last thing the daemon does. So the assertion has to
+/// come off the wire.
+struct ShutdownWatch {
+    handle: std::thread::JoinHandle<Vec<String>>,
+    stop: std::sync::mpsc::Sender<()>,
+}
+
+impl ShutdownWatch {
+    fn start(nats_url: &str) -> Self {
+        let url = nats_url.to_string();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (stop, stop_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new()
+                .expect("watch runtime")
+                .block_on(async move {
+                    let bus = fq_runtime::EventBus::connect(&url)
+                        .await
+                        .expect("connect NATS");
+                    let mut sub = bus
+                        .subscribe("fq.system.shutdown".to_string())
+                        .await
+                        .expect("subscribe fq.system.shutdown");
+                    ready_tx.send(()).expect("signal ready");
+                    let mut reasons = Vec::new();
+                    loop {
+                        tokio::select! {
+                            msg = futures::StreamExt::next(&mut sub) => match msg {
+                                Some(Ok(event)) => {
+                                    if let fq_runtime::events::EventPayload::SystemShutdown(p) =
+                                        &event.payload
+                                    {
+                                        reasons.push(p.reason.clone());
+                                    }
+                                }
+                                Some(Err(_)) => continue,
+                                None => break,
+                            },
+                            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                                if stop_rx.try_recv().is_ok() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    reasons
+                })
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("shutdown watch never subscribed");
+        Self { handle, stop }
+    }
+
+    fn finish(self) -> Vec<String> {
+        // The event is published after the edge is gone; give the
+        // subscription a beat to see it before tearing the watch down.
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = self.stop.send(());
+        self.handle.join().expect("shutdown watch thread")
+    }
+}
+
+fn wait_for_log_line(
+    child: &mut std::process::Child,
+    log: &std::path::Path,
+    needle: &str,
+    timeout: Duration,
+) -> Duration {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if let Some(status) = child.try_wait().expect("poll fqd") {
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            panic!("daemon exited with {status:?} before logging {needle:?}\n--- log ---\n{text}");
+        }
+        if std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .contains(needle)
+        {
+            return started.elapsed();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    panic!("daemon never logged {needle:?} within {timeout:?}\n--- log ---\n{text}");
+}
+
+fn spawn_ready_daemon(
+    scratch: &std::path::Path,
+    nats_url: &str,
+) -> (std::process::Child, std::path::PathBuf) {
+    let log_path = scratch.join("daemon.log");
+    let log = std::fs::File::create(&log_path).expect("create daemon log");
+    let log_err = log.try_clone().expect("clone daemon log handle");
+    let mut child = Command::new(fqd_binary())
+        .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
+        .env("FQ_NATS_URL", nats_url)
+        .env("FQ_CACHE_DIR", scratch.join("cache"))
+        .env("FQ_STATE_DIR", scratch.join("state"))
+        .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .expect("spawn fqd");
+    wait_for_log_line(
+        &mut child,
+        &log_path,
+        "Runtime ready",
+        Duration::from_secs(30),
+    );
+    (child, log_path)
+}
+
+/// Review B9: the drain deadline is spent on the drain.
+///
+/// The observable is the ORDER of the teardown lines. The dispatcher —
+/// the only task with in-flight work to suspend — used to be joined
+/// *last*, after up to eight sequential five-second joins of consumers
+/// and sweepers that have nothing to suspend, all charged against the
+/// same deadline. It is joined first now, and the heartbeat producer
+/// stops after it, so a worker that is still executing steps is still
+/// on the roster.
+#[test]
+fn the_drain_is_joined_before_the_infrastructure_teardown() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let scratch = unique_scratch();
+    let (mut child, log_path) = spawn_ready_daemon(&scratch, &nats_url);
+
+    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    assert_eq!(rc, 0, "kill(SIGTERM) failed");
+
+    // The wait must start promptly: nothing is allowed to run ahead of
+    // it and eat the deadline.
+    let to_drain = wait_for_log_line(
+        &mut child,
+        &log_path,
+        "Draining — waiting up to",
+        Duration::from_secs(10),
+    );
+    let status = wait_with_timeout(&mut child, Duration::from_secs(20))
+        .expect("daemon did not exit within 20s of SIGTERM");
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert!(
+        status.success(),
+        "expected a clean exit\n--- log ---\n{log}"
+    );
+    assert!(
+        to_drain < Duration::from_secs(5),
+        "the drain wait started {to_drain:?} after the signal; something ran ahead of it"
+    );
+
+    let at = |needle: &str| {
+        log.find(needle)
+            .unwrap_or_else(|| panic!("teardown never logged {needle:?}\n--- log ---\n{log}"))
+    };
+    let dispatcher = at("trigger dispatcher stopped cleanly");
+    assert!(
+        dispatcher < at("projection consumer stopped cleanly"),
+        "the projection consumer was joined before the drain finished — the drain \
+         deadline is being spent on infrastructure again\n--- log ---\n{log}"
+    );
+    assert!(
+        dispatcher < at("heartbeat producer stopped cleanly"),
+        "the heartbeat producer stopped before the drain finished, so a worker still \
+         executing steps would look silent to the stale sweep\n--- log ---\n{log}"
+    );
+}
+
+/// Issue #509, end to end: a second SIGTERM during a stop never costs
+/// the clean teardown.
+///
+/// This is the promise the three doc comments used to make in the
+/// opposite direction — "a second SIGTERM is absorbed", and before
+/// that, wrongly, "restores the default disposition". Neither is what
+/// an operator needs: the first leaves SIGKILL as the only way out of a
+/// drain, and the second would skip the deregistration and the
+/// `system.shutdown` event, which are the two things the caught signal
+/// exists to guarantee. What must hold is that the daemon still exits
+/// 0, still deregisters, and still says so.
+///
+/// The escalation's own timing — a second signal ending a wait that is
+/// still running — is proved deterministically in
+/// `hosted::teardown::tests`, with a stub holding the drain open; an
+/// idle daemon's drain finishes too fast to race here.
+#[test]
+fn a_second_sigterm_never_costs_the_clean_teardown() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let watch = ShutdownWatch::start(&nats_url);
+    let scratch = unique_scratch();
+    let (mut child, log_path) = spawn_ready_daemon(&scratch, &nats_url);
+
+    let pid = child.id() as i32;
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    // Send the second as soon as the drain wait is under way — what an
+    // operator does when a stop looks stuck.
+    let _ = wait_for_log_line(
+        &mut child,
+        &log_path,
+        "Draining — waiting up to",
+        Duration::from_secs(10),
+    );
+    // A second SIGTERM at a process that has already exited is an
+    // ESRCH, not a failure of this test.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+
+    let status = wait_with_timeout(&mut child, Duration::from_secs(20))
+        .expect("daemon did not exit within 20s of the second SIGTERM");
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let workers = worker_statuses(&scratch.join("cache"));
+    let reasons = watch.finish();
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert!(
+        status.success(),
+        "a second SIGTERM must not turn a clean stop into a signal death: {status:?} \
+         (signal = {:?})\n--- log ---\n{log}",
+        status.signal(),
+    );
+    assert!(
+        workers.iter().any(|status| status == "shutdown"),
+        "the worker was not deregistered after a second SIGTERM: {workers:?}"
+    );
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r == "sigterm" || r == "sigterm_escalated"),
+        "no system.shutdown was published after a second SIGTERM: {reasons:?}"
+    );
+}

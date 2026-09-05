@@ -184,3 +184,6 @@ pub(crate) async fn join_infallible(name: &str, handle: JoinHandle<()>) {
         Err(_) => tracing::warn!(task = name, "task did not shut down within 5s"),
     }
 }
+
+#[cfg(test)]
+mod tests;
