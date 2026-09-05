@@ -216,10 +216,13 @@ impl MockGeminiServer {
         // not check it, but the resolver must find *something* or the
         // request fails before it is sent.
         unsafe { std::env::set_var("FQ_MOCK_GEMINI_KEY", "mock-key") };
-        crate::llm::GenAiClient::from_providers(&crate::config::ProvidersConfig {
-            anthropic: None,
-            extra,
-        })
+        crate::llm::GenAiClient::from_providers(
+            &crate::config::ProvidersConfig {
+                anthropic: None,
+                extra,
+            },
+            crate::llm::LlmTimeouts::default(),
+        )
         .expect("the mock's client builds")
     }
 
