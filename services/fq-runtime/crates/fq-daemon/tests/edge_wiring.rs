@@ -29,7 +29,10 @@ fn unique_scratch() -> std::path::PathBuf {
     std::fs::create_dir_all(dir.join("agents")).unwrap();
     std::fs::write(
         dir.join("fq.toml"),
-        "[edge]\nenabled = true\nbind = \"127.0.0.1:0\"\n",
+        // No `enabled`: the edge is mandatory and the strict parser
+        // refuses the key. An ephemeral port keeps parallel
+        // daemon-spawning tests off the fixed default bind.
+        "[edge]\nbind = \"127.0.0.1:0\"\n",
     )
     .unwrap();
     dir
