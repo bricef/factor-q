@@ -168,8 +168,8 @@ left under `$OUT/run/cache/` for inspection. Spend is well under $0.20.
 fixture directory, which holds `notes.txt` and `checklist.txt`. The default task
 carries the "one tool call at a time" steer itself (it used to sit in the agent
 prompt), so a task that wants parallel calls is free to ask for them — which is how
-the [parallel tool-call probe](#parallel-tool-calls-through-factor-q-2026-09-05) for
-#511 ran on the same three arms.
+the [parallel tool-call probe](#parallel-tool-calls-through-factor-q-2026-09-05)
+for issue #511 ran on the same three arms.
 
 ## Parallel tool calls through factor-q (2026-09-05)
 
@@ -195,6 +195,17 @@ turn, so a signed block replayed ahead of two `tool_use` blocks was not observed
 The adapter dropped nothing — its debug-level "dropping a thought signature" line never
 fired — the model simply did not think on this task. That shape is pinned hermetically
 by the `anthropic_parallel_tool_calls_signed` wire golden.
+
+## Gemini: hermetic only (2026-09-05)
+
+Gemini's continuity token is a `thoughtSignature` on the function-call part, with no
+readable text beside it. Since #600 factor-q records it as an opaque reasoning part and
+replays it on the call it came with; the wire goldens `gemini_*` under
+`fq-runtime/tests/snapshots/reasoning_wire/` pin both directions against an in-process
+Gemini mock. **No live run has been made**: this repository holds no Gemini key. The
+harness takes a fourth arm the moment one exists — add a `[providers.gemini]` block with
+`api_shape = "gemini"` to `write_config` and a `gemini-3-pro` agent — and the same
+per-turn check applies.
 
 ## Traps this harness already hit
 

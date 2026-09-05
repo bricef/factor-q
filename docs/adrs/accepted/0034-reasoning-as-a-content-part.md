@@ -26,8 +26,12 @@ and factor-q moved to that release with the wire goldens under
 `fq-runtime/tests/snapshots/reasoning_wire/` proving nothing the provider
 or the reducer sees changed across the switch. No fork remains.
 Tool-result batching (D1b) is emitted since 2026-09-05 (#511): a parallel
-turn's results go out as one `tool_results` message, in call order. The
-recorded `reasoning_tokens` reaches no operator surface yet (#536).
+turn's results go out as one `tool_results` message, in call order. D2's
+Gemini row is built since 2026-09-05 (#600): a bare `thoughtSignature` is
+recorded as an opaque part and replayed on the function call it came with —
+hermetically verified against a Gemini mock and wire goldens only, no live
+run, since no Gemini key is held here. The recorded `reasoning_tokens`
+reaches no operator surface yet (#536).
 
 Contract precondition for [#414](https://github.com/bricef/factor-q/issues/414)
 (confirmed exit criterion). Amends
