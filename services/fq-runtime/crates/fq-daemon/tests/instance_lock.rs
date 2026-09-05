@@ -352,3 +352,89 @@ fn a_failure_after_registration_leaves_the_worker_shutdown() {
          into `stale` and be reported as a crash: {workers:?}\n--- log ---\n{log}"
     );
 }
+
+/// A boot that will not finish must still answer a signal.
+///
+/// The signal streams are installed early — right after the bind — so
+/// that the drain can re-read them (#509). That early install is also
+/// what makes the rest of the boot *catchable* rather than a latch: the
+/// default disposition no longer applies, so a SIGTERM arriving while
+/// the daemon is dialling the broker, migrating a store, scanning for
+/// recovery, or waiting on an MCP handshake that never completes would
+/// simply sit in a stream nobody reads until the step returned — and
+/// the hung-server case never returns. SIGKILL would be the only exit,
+/// which is worse than where this started.
+///
+/// The fault injected here is that case, exactly: an agent declaring a
+/// shared MCP server whose command is `sleep`. It starts, it holds its
+/// end of the pipe open, and it never answers `initialize` — the
+/// handshake has no timeout (review B3, a separate issue), so
+/// `start_shared_servers` blocks for as long as the daemon lives.
+///
+/// The daemon must exit **cleanly** — the operator asked it to stop and
+/// it stopped, which is exit 0 here exactly as it is during the run —
+/// and the worker row it had already registered must read `shutdown`.
+#[test]
+fn a_signal_during_a_hung_boot_stops_the_daemon_cleanly() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+
+    let scratch = scratch_with_bind("hungboot", "127.0.0.1:0");
+    // The agent's model has to clear the coverage guarantee (ADR-0004),
+    // which is checked before the shared servers start — otherwise the
+    // boot fails there and never reaches the step under test.
+    std::fs::write(
+        scratch.join("fq.toml"),
+        "[edge]\nbind = \"127.0.0.1:0\"\n\n[providers.anthropic]\n\
+         models = [\"claude-haiku-4-5\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        scratch.join("agents").join("stalls.md"),
+        "---\nname: stalls\nmodel: claude-haiku-4-5\nbudget: 1.0\nmcp:\n  \
+         - server: never-answers\n    command: sleep\n    args: [\"600\"]\n---\n\nAgent.",
+    )
+    .unwrap();
+
+    let mut child = spawn_daemon(&scratch, &nats_url, "daemon.log");
+    // Wait until the boot is past registration and into the hung step.
+    // The worker line is the last thing printed before the shared
+    // servers are started.
+    wait_for_log(
+        &mut child,
+        &scratch.join("daemon.log"),
+        "worker:",
+        Duration::from_secs(60),
+    );
+    // It must not have got any further: `Runtime ready` would mean the
+    // stall did not stall, and this test would be proving nothing.
+    std::thread::sleep(Duration::from_millis(500));
+    let log = std::fs::read_to_string(scratch.join("daemon.log")).unwrap_or_default();
+    assert!(
+        !log.contains("Runtime ready"),
+        "the boot was not held open — `sleep` answered the MCP handshake?\n--- log ---\n{log}"
+    );
+
+    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    assert_eq!(rc, 0, "kill(SIGTERM) failed");
+
+    let status = wait_with_timeout(&mut child, Duration::from_secs(30))
+        .expect("a hung boot must answer SIGTERM, not need SIGKILL");
+    let log = std::fs::read_to_string(scratch.join("daemon.log")).unwrap_or_default();
+    let workers = worker_statuses(&scratch.join("cache"));
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert!(
+        status.success(),
+        "a signal during startup must be a clean stop: {status:?}\n--- log ---\n{log}"
+    );
+    assert!(
+        log.contains("during startup"),
+        "the daemon did not report stopping during startup\n--- log ---\n{log}"
+    );
+    let workers = workers.expect("the worker registered before the boot stalled");
+    assert!(
+        workers.iter().all(|status| status == "shutdown"),
+        "an interrupted boot left a row that is not `shutdown`: {workers:?}\n--- log ---\n{log}"
+    );
+}
