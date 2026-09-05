@@ -1652,7 +1652,7 @@
         "scope": "control",
         "verb": "write"
       },
-      "description": "Returns as soon as the stop is under way, not when it has finished — the daemon cannot answer a call once it has exited, so confirmation is the caller watching this edge stop answering. `now` skips the drain: clean teardown, worker deregistered, immediate exit, with in-flight invocations left for the next start's recovery. Idempotent: a second call on a daemon already stopping changes nothing. Appends no atom — the `system.shutdown` event is written after this has answered.",
+      "description": "Returns as soon as the stop is under way, not when it has finished — the daemon cannot answer a call once it has exited, so confirmation is the caller watching this edge stop answering. `now` skips the drain: clean teardown, worker deregistered, immediate exit, with in-flight invocations left for the next start's recovery. A repeated plain call on a daemon already stopping changes nothing; `now` on one already draining ESCALATES it — the bounded drain wait stops waiting and the same clean teardown runs at once. Escalation is one-way: a plain call after a `now` cannot put the drain back. Appends no atom — the `system.shutdown` event is written after this has answered, and its reason records the mode that actually ran.",
       "domain": "control",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
