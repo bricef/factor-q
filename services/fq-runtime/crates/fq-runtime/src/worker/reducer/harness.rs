@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{
     AgentConfig, CapabilityResult, HarnessError, HarnessErrorKind, LogEntry, LogLevel,
-    ModelRequest, NextAction, Reducer, StepInput, StepOutput, ToolCallRequest, TriggerPayload,
+    ModelRequest, NextAction, Reducer, StepInput, StepOutput, ToolCallRequest, ToolCallResult,
+    TriggerPayload,
 };
-use crate::events::{AssistantPart, Message, RequestParams, TaskStatus, ToolResult};
+use crate::events::{AssistantPart, Message, RequestParams, TaskStatus, ToolCallId, ToolResult};
 
 /// Built-in fallback cap on LLM turns per invocation — a backstop
 /// against a wedged agent, distinct from and well below the host's
@@ -424,23 +425,24 @@ fn tool_results_step(
         }
     };
 
-    // One message per result, not one message carrying all of them.
-    //
-    // `Message::ToolResults` can express the batched form, and Anthropic
-    // wants it — but changing what we emit is a behaviour change, and this
-    // phase is a shape change. Batching is #511, which also needs mock
-    // coverage for multi-`tool_use` responses before it can be tested.
-    // Until then this keeps the wire byte-identical, which the provider
-    // request snapshot in `llm::genai` asserts.
-    for result in results {
-        state.messages.push(Message::ToolResults {
-            results: vec![ToolResult {
+    // One turn answers one assistant turn (ADR-0034 D1b): every result of
+    // the round rides in a single `Message::ToolResults`, in the order of
+    // the calls that asked for them. That is Anthropic's documented shape
+    // — one user message carrying N `tool_result` blocks — and the
+    // OpenAI-compatible adapter unfolds the same message into its N
+    // `tool` messages, so the reducer holds one shape and each adapter
+    // renders its own (#511).
+    let results = answer_in_call_order(state, results)?;
+    state.messages.push(Message::ToolResults {
+        results: results
+            .into_iter()
+            .map(|result| ToolResult {
                 tool_call_id: result.tool_call_id,
                 output: result.output,
                 is_error: result.is_error,
-            }],
-        });
-    }
+            })
+            .collect(),
+    });
 
     // Notices carried at this boundary land after the tool results,
     // immediately before the request they are first seen in.
@@ -457,6 +459,55 @@ fn tool_results_step(
         )],
         events: vec![],
     })
+}
+
+/// Put the host's answer in the order of the calls the last assistant
+/// turn made, and refuse an answer that does not match those calls.
+///
+/// The protocol says the host returns results in request order, and the
+/// sequential host does. The reducer still orders them itself, from the
+/// assistant message it recorded, so a concurrent host — or a resume
+/// that regrouped WAL rows — cannot reorder the wire: a provider
+/// verifies each `tool_result` against the `tool_use` it answers, and
+/// the reducer is the only party holding both sides.
+///
+/// A result for a call the turn never made, or a call left without a
+/// result, is a host protocol breach of the same class as answering
+/// `CallModel` with a tool result, and fails the same way — rather than
+/// going on to a provider that would reject the request with less
+/// context.
+fn answer_in_call_order(
+    state: &HarnessState,
+    mut results: Vec<ToolCallResult>,
+) -> Result<Vec<ToolCallResult>, HarnessError> {
+    let calls: Vec<&ToolCallId> = match state.messages.last() {
+        Some(Message::Assistant { parts }) => parts
+            .iter()
+            .filter_map(|part| match part {
+                AssistantPart::ToolCall(call) => Some(&call.tool_call_id),
+                _ => None,
+            })
+            .collect(),
+        _ => {
+            return Err(internal_error(
+                "tool results arrived with no assistant turn to answer",
+            ));
+        }
+    };
+
+    let mut called: Vec<&str> = calls.iter().map(|id| id.as_str()).collect();
+    let mut answered: Vec<&str> = results.iter().map(|r| r.tool_call_id.as_str()).collect();
+    called.sort_unstable();
+    answered.sort_unstable();
+    if called != answered {
+        return Err(internal_error(&format!(
+            "tool results do not answer the turn's calls: called {called:?}, answered {answered:?}"
+        )));
+    }
+
+    // Stable, so two results for one repeated id keep their delivery order.
+    results.sort_by_key(|result| calls.iter().position(|id| *id == &result.tool_call_id));
+    Ok(results)
 }
 
 fn append_host_notices(state: &mut HarnessState, notices: &[String]) {
@@ -1138,6 +1189,194 @@ mod tests {
         match s1.next_action {
             NextAction::CallToolsParallel(calls) => assert_eq!(calls.len(), 2),
             other => panic!("expected CallToolsParallel, got {other:?}"),
+        }
+    }
+
+    // --- #511: one turn answers one assistant turn
+
+    /// A model turn calling `ids`, in that order, all on the `echo` tool.
+    fn parallel_call_response(ids: &[&str]) -> ModelResponse {
+        ModelResponse {
+            parts: crate::events::assistant_parts(
+                None,
+                ids.iter()
+                    .map(|id| MessageToolCall {
+                        tool_call_id: crate::events::ToolCallId::new(*id).unwrap(),
+                        tool_name: "echo".to_string(),
+                        parameters: json!({"call": id}),
+                    })
+                    .collect(),
+            ),
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage::default(),
+        }
+    }
+
+    fn tool_result(id: &str, output: &str) -> ToolCallResult {
+        ToolCallResult {
+            tool_call_id: crate::events::ToolCallId::new(id).unwrap(),
+            output: output.to_string(),
+            is_error: false,
+            error_kind: None,
+            duration_ms: 1,
+        }
+    }
+
+    /// Drive one round: seed, a turn calling `ids`, the host's `answer`,
+    /// and return the request the reducer builds for the next turn — or
+    /// the error it raised integrating the answer.
+    fn request_after_parallel_round(
+        ids: &[&str],
+        answer: Vec<ToolCallResult>,
+    ) -> Result<ModelRequest, HarnessError> {
+        let h = Harness::new();
+        let s0 = h.step(step_input(vec![], None, 0)).unwrap();
+        let s1 = h
+            .step(step_input(
+                s0.state,
+                Some(CapabilityResult::ModelResult(parallel_call_response(ids))),
+                1,
+            ))
+            .unwrap();
+        assert!(
+            matches!(
+                s1.next_action,
+                NextAction::CallTool(_) | NextAction::CallToolsParallel(_)
+            ),
+            "precondition: a tool-calling turn dispatches"
+        );
+        let s2 = h.step(step_input(
+            s1.state,
+            Some(CapabilityResult::ParallelToolResults(answer)),
+            2,
+        ))?;
+        match s2.next_action {
+            NextAction::CallModel(request) => Ok(request),
+            other => panic!("expected the next model turn, got {other:?}"),
+        }
+    }
+
+    /// The tool-results turns in a request: one entry per
+    /// `Message::ToolResults`, each the `(call id, output)` pairs it
+    /// carries in order.
+    fn tool_turns(request: &ModelRequest) -> Vec<Vec<(String, String)>> {
+        request
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::ToolResults { results } => Some(
+                    results
+                        .iter()
+                        .map(|r| (r.tool_call_id.to_string(), r.output.clone()))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The acceptance test for #511.** A turn that requests several
+    /// tools is answered by *one* turn carrying every result, in the
+    /// order of the calls — Anthropic's documented shape, and the one
+    /// `Message::ToolResults` exists to express (ADR-0034 D1b). The host
+    /// answers here in completion order, which is not call order: the
+    /// sequential host happens to preserve it, a concurrent one would
+    /// not, and the reducer must depend on neither.
+    #[test]
+    fn parallel_tool_results_are_one_turn_in_call_order() {
+        let request = request_after_parallel_round(
+            &["a", "b", "c"],
+            vec![
+                tool_result("c", "out-c"),
+                tool_result("a", "out-a"),
+                tool_result("b", "out-b"),
+            ],
+        )
+        .expect("a complete answer is accepted");
+
+        let pair = |id: &str, out: &str| (id.to_string(), out.to_string());
+        assert_eq!(
+            tool_turns(&request),
+            vec![vec![
+                pair("a", "out-a"),
+                pair("b", "out-b"),
+                pair("c", "out-c")
+            ]],
+            "one tool-results turn, ordered by the calls it answers"
+        );
+        // And it sits directly after the assistant turn that made the
+        // calls — nothing may come between the two.
+        let n = request.messages.len();
+        assert!(matches!(request.messages[n - 2], Message::Assistant { .. }));
+        assert!(matches!(
+            request.messages[n - 1],
+            Message::ToolResults { .. }
+        ));
+    }
+
+    /// An answer that does not match the calls — a result for a call the
+    /// turn never made, or a call left unanswered — is a host protocol
+    /// breach. It is reported as the reducer's own internal error rather
+    /// than sent on to a provider, which would reject the request with
+    /// less context.
+    #[test]
+    fn tool_results_must_answer_the_turns_calls_exactly() {
+        let stray = request_after_parallel_round(
+            &["a", "b"],
+            vec![tool_result("a", "x"), tool_result("zzz", "y")],
+        )
+        .expect_err("a result for a call the turn never made is refused");
+        assert_eq!(stray.kind, HarnessErrorKind::InternalError);
+        assert!(stray.message.contains("zzz"), "{}", stray.message);
+
+        let short = request_after_parallel_round(&["a", "b"], vec![tool_result("a", "x")])
+            .expect_err("an unanswered call is refused");
+        assert_eq!(short.kind, HarnessErrorKind::InternalError);
+        assert!(short.message.contains("\"b\""), "{}", short.message);
+    }
+
+    proptest::proptest! {
+        /// For any number of parallel calls and any order the host
+        /// completes them in, the reducer emits exactly one tool-results
+        /// turn, in call order, with every result present once and its
+        /// error flag intact.
+        #[test]
+        fn parallel_results_always_fold_to_one_ordered_turn(
+            n in 1usize..=6,
+            keys in proptest::collection::vec(proptest::num::u32::ANY, 6),
+            errors in proptest::collection::vec(proptest::bool::ANY, 6),
+        ) {
+            let ids: Vec<String> = (0..n).map(|i| format!("call-{i}")).collect();
+            let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            // The host's completion order: any permutation of the calls.
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by_key(|&i| keys[i]);
+            let answer: Vec<ToolCallResult> = order
+                .iter()
+                .map(|&i| {
+                    let mut result = tool_result(&ids[i], &format!("out-{i}"));
+                    result.is_error = errors[i];
+                    result
+                })
+                .collect();
+
+            let request = request_after_parallel_round(&id_refs, answer)
+                .expect("a complete answer is accepted");
+            let turns: Vec<&Vec<ToolResult>> = request
+                .messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::ToolResults { results } => Some(results),
+                    _ => None,
+                })
+                .collect();
+            proptest::prop_assert_eq!(turns.len(), 1, "exactly one tool-results turn");
+            proptest::prop_assert_eq!(turns[0].len(), n, "every result, once");
+            for (i, result) in turns[0].iter().enumerate() {
+                proptest::prop_assert_eq!(result.tool_call_id.as_str(), ids[i].as_str());
+                proptest::prop_assert_eq!(&result.output, &format!("out-{i}"));
+                proptest::prop_assert_eq!(result.is_error, errors[i]);
+            }
         }
     }
 

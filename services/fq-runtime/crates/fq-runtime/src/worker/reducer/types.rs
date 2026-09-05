@@ -147,6 +147,10 @@ pub enum NextAction {
 pub enum CapabilityResult {
     ModelResult(ModelResponse),
     ToolResult(ToolCallResult),
+    /// Every result of a `CallToolsParallel` round. The host contract is
+    /// request order; the reducer re-orders by the calls it made before
+    /// replaying them regardless, so a concurrent host is free to
+    /// complete them in any order (#511).
     ParallelToolResults(Vec<ToolCallResult>),
     /// Host cancelled the action (e.g. shutdown) before it
     /// completed. The reducer typically translates this to a

@@ -92,11 +92,12 @@ pub enum Message {
     Assistant { parts: Vec<AssistantPart> },
     /// Every result answering a single assistant turn's tool calls.
     ///
-    /// One message, N results — which matches the Anthropic wire shape,
-    /// where `tool_result` blocks are batched into one turn. Note the
-    /// runtime does not yet *emit* the batched form
-    /// ([#511](https://github.com/bricef/factor-q/issues/511)); this makes
-    /// it representable.
+    /// One message, N results, in the order of the calls — which matches
+    /// the Anthropic wire shape, where `tool_result` blocks are batched
+    /// into one turn, and unfolds into one `tool` message per result on
+    /// the OpenAI-compatible wire. The harness emits this form for a
+    /// parallel round since
+    /// [#511](https://github.com/bricef/factor-q/issues/511) closed.
     ToolResults { results: Vec<ToolResult> },
 }
 
@@ -119,11 +120,10 @@ impl Message {
         }
     }
 
-    /// One tool result as its own turn.
-    ///
-    /// The batched form is `Message::ToolResults` with several results;
-    /// this is the single-result convenience, which is what the runtime
-    /// emits today (see [#511](https://github.com/bricef/factor-q/issues/511)).
+    /// One tool result as its own turn: the single-call round, and the
+    /// convenience scripted conversations lean on. A parallel round is
+    /// `Message::ToolResults` with several results, in call order
+    /// ([#511](https://github.com/bricef/factor-q/issues/511)).
     pub fn tool_result(tool_call_id: ToolCallId, output: impl Into<String>) -> Self {
         Self::ToolResults {
             results: vec![ToolResult {
