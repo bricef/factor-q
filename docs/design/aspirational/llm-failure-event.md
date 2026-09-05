@@ -157,9 +157,9 @@ not reuse `ToolErrorKind` either — a different domain.
 Mirroring `LlmError` also gives [#278](https://github.com/bricef/factor-q/issues/278)
 somewhere to land: when `map_error` learns to produce `RateLimited` with a
 `Retry-After`, `error_kind: rate_limited` becomes queryable in the projection
-without another schema change. Until then a 429 arrives as `request_failed`
-with the status buried in `error_message` — a known and documented
-under-classification, not a new one.
+without another schema change. *(Landed with
+[#546](https://github.com/bricef/factor-q/issues/546): a 429 now arrives as
+`rate_limited`, and the same change added `rejected` and `timeout`.)*
 
 **Deliberately excluded**, with reasons:
 

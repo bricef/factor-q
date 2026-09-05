@@ -177,6 +177,23 @@ models = ["claude-haiku-4-5"]
 #     concurrently regardless); a fleet-level cost cap is #42.
 # max_concurrent_invocations = 1
 #
+# Deadlines on every model call (#546). Without them a provider that
+# accepts the connection and never answers parks the invocation — and,
+# at max_concurrent_invocations = 1, the daemon — until a restart.
+#
+# The whole call, connect to last byte, in seconds. Default 600 (ten
+# minutes): what the Anthropic and OpenAI SDKs default to, and enough
+# for a large extended-thinking answer, which a shorter budget would cut
+# off after the provider has billed it. A call past the deadline fails
+# as a transient `timeout` that the retry policy below retries, so a
+# provider that never answers holds a worker for at most
+# llm_retry.max_attempts times this. Trim it for fast models.
+# llm_timeout_secs = 600
+#
+# Establishing the connection, in seconds. An endpoint that never
+# answers fails here rather than after the whole budget. Default 5.
+# llm_connect_timeout_secs = 5
+#
 # Worker-side knobs for the archive hand-off retry sweeper. The
 # sweeper republishes `invocation.archived` for any terminal row
 # whose control-plane ack hasn't arrived yet.
@@ -193,6 +210,29 @@ models = ["claude-haiku-4-5"]
 # local row is never deleted automatically (correctness over
 # cleanup); operator action is required for held rows.
 # archive_warn_after_ms = 60000
+
+# Retry policy for transient model-call failures: a 429, a 5xx, a
+# connection failure, a timeout. Retrying is safe — a model call has no
+# side effect — and a retry does not consume an iteration. A 4xx other
+# than 429 is never retried: the provider has rejected the request, and
+# the same bytes would be rejected again.
+[worker.llm_retry]
+# Total attempts including the first; 1 disables retry. Default 4.
+# max_attempts = 4
+#
+# Delay before the first retry, in ms, doubling each attempt, with full
+# jitter so a fleet does not retry in lockstep. Default 500.
+# base_delay_ms = 500
+#
+# Cap on any single backoff delay, in ms. Default 30000.
+# max_delay_ms = 30000
+#
+# The longest `Retry-After` a rate-limited call is waited out in place,
+# in ms. A 429 that names a shorter wait is retried after at least that
+# long (plus the jitter above); one that asks for more fails at once as
+# rate-limited, still naming the wait, so the invocation can be deferred
+# rather than a worker parked (#278). Default 120000.
+# max_retry_after_ms = 120000
 
 [tools.exec]
 # Timeouts for the built-in `exec` tool. Raise these for agents that run

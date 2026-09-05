@@ -378,7 +378,7 @@ The other terminal outcome of an LLM call (#447): the provider errored, or retur
   "round": 4,
   "call_id": "0198f2a1-4c3b-7d21-9e88-5a0b1c2d3e4f",
   "model": "claude-haiku-4-5",
-  "error_kind": "auth | rate_limited | invalid_response | request_failed | unpriced_model | empty_response",
+  "error_kind": "auth | rate_limited | invalid_response | rejected | request_failed | timeout | unpriced_model | empty_response",
   "error_message": "rate limited",
   "duration_ms": 4200,
   "usage": {
@@ -393,7 +393,7 @@ The other terminal outcome of an LLM call (#447): the provider errored, or retur
 **Design notes:**
 
 - **`usage` is optional, and `None` is not zero.** Absent means "we do not know what the provider billed" — a transport failure yields no parsed body. Present means the counts are real: an empty completion still bills for the prefill. `envelope.cost` follows the same rule and is *absent*, never zeroed, when usage is unknown.
-- **`error_kind` mirrors `LlmError`**, plus `empty_response`, which has no error counterpart and is the one failure kind that can bill. A 429 currently arrives as `request_failed` with the status in `error_message`; [#278](https://github.com/bricef/factor-q/issues/278)'s `Retry-After` work is where `rate_limited` starts being produced.
+- **`error_kind` mirrors `LlmError`**, plus `empty_response`, which has no error counterpart and is the one failure kind that can bill. The kinds partition by what the provider said: `rate_limited` is a 429 (its `Retry-After`, when sent, is honoured below `LlmClient::chat` and named in `error_message`); `rejected` is any other 4xx the provider answered with, auth aside — the request itself was refused, and is not retried; `request_failed` is a 5xx or a transport failure; `timeout` is the runtime's own deadline on the call, `[worker] llm_timeout_secs`. Before [#546](https://github.com/bricef/factor-q/issues/546) every one of these arrived as `request_failed` with the status buried in `error_message`.
 - **A failed call is not a failed invocation.** The agent-turn case publishes `failed` separately; a failed sampling or elicitation call declines the server's request and the invocation continues (ADR-0018).
 - **`duration_ms` includes the hidden retry attempts** inside `RetryingLlmClient`, which is the tell for a rate limit that eventually gave up. The attempt count itself is not surfaced — it lives below `LlmClient::chat` and belongs with #278.
 
@@ -808,6 +808,7 @@ Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); 
 | *(2026-09-05, [#511](https://github.com/bricef/factor-q/issues/511))* The harness emits the batched form: a parallel turn's results go out as one `tool_results` message, in the order of the calls in the assistant turn | Behaviour, not shape — v3 already carried it. Ordered by the calls rather than by the host's completion order, because the provider verifies each `tool_result` against the `tool_use` it answers and the reducer is the only party holding both; a result set that does not answer the turn's calls exactly is a host protocol error, not something to send on. |
 | *(2026-09-05, [#600](https://github.com/bricef/factor-q/issues/600))* An `opaque` token may be a bare continuity token, `{"type": "thought_signature", "signature": …}`, beside the provider-block form | Behaviour, not shape — `opaque` was already any JSON token. Gemini returns its signature with no text and no surrounding block; the runtime mints this wrapper so the log says what it holds and the adapter replays it as a signature part rather than a block. |
 | `usage` gains `reasoning_tokens` (additive, defaults to 0) | Splits `output_tokens` into thought-vs-spoken. A decomposition, not a new charge — `total_cost` is unchanged. |
+| *(2026-09-05, [#546](https://github.com/bricef/factor-q/issues/546), [#278](https://github.com/bricef/factor-q/issues/278))* `llm.failure.error_kind` gains `rejected` and `timeout` (additive), and `rate_limited` is produced for a 429 | The runtime classifies a failed call by the provider's status and by its own new deadline, instead of flattening everything but auth into `request_failed`. A consumer switching on the old set sees two new strings, and one it had never received. |
 
 ## Changelog: v1 → v2
 
