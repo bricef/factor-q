@@ -426,10 +426,10 @@ fn encode_reasoning(
         crate::events::ReasoningContent::Plain { text } => {
             Some(provider::chat::ContentPart::ReasoningContent(text))
         }
-        // Signed and opaque reasoning goes back as the provider's own
-        // block, verbatim. Anthropic verifies a thinking block *against*
-        // its signature, so the block is the unit that can be replayed —
-        // not the text, and not the signature alone.
+        // Signed reasoning goes back as the provider's own block,
+        // verbatim. Anthropic verifies a thinking block *against* its
+        // signature, so the block is the unit that can be replayed — not
+        // the text, and not the signature alone.
         //
         // `Custom` rather than a provider branch: genai's Anthropic
         // adapter echoes these blocks unchanged and its OpenAI adapter
@@ -437,16 +437,62 @@ fn encode_reasoning(
         // which one we are talking to — which this layer cannot know.
         // genai also offers a `ThoughtSignature` + `ReasoningContent`
         // pair that its Anthropic adapter rebuilds into a block; sending
-        // the block we hold keeps every key the provider put in it, and
-        // keeps signed and redacted blocks on one path.
-        crate::events::ReasoningContent::Signed { token, .. }
-        | crate::events::ReasoningContent::Opaque { token } => Some(
+        // the block we hold keeps every key the provider put in it.
+        crate::events::ReasoningContent::Signed { token, .. } => Some(
             provider::chat::ContentPart::Custom(provider::chat::CustomPart {
                 model_iden: None,
                 data: token,
             }),
         ),
+        // Opaque reasoning is one of two tokens, and the token says which
+        // by construction — still not a provider branch, but a branch on
+        // what we hold:
+        //
+        // - A bare continuity token (Gemini's `thoughtSignature`) goes back
+        //   as genai's `ThoughtSignature` part, which its Gemini adapter
+        //   attaches to the next function call it meets — the part the
+        //   token came with, in the order this crate records. A `Custom`
+        //   part would be ignored on that wire.
+        // - A whole provider block (Anthropic's `redacted_thinking`) goes
+        //   back verbatim as `Custom`, like a signed block.
+        crate::events::ReasoningContent::Opaque { token } => match bare_signature_of(&token) {
+            Some(signature) => Some(provider::chat::ContentPart::ThoughtSignature(
+                signature.to_string(),
+            )),
+            None => Some(provider::chat::ContentPart::Custom(
+                provider::chat::CustomPart {
+                    model_iden: None,
+                    data: token,
+                },
+            )),
+        },
     }
+}
+
+/// The token type this crate mints for a continuity token that arrived
+/// with no readable text and no surrounding block — Gemini's
+/// `thoughtSignature`. The type is ours, so a reader of the event log
+/// can tell it from a provider block; the signature is the provider's,
+/// verbatim.
+const BARE_SIGNATURE_TYPE: &str = "thought_signature";
+
+/// An opaque reasoning part for a bare continuity token.
+fn bare_signature(signature: &str) -> crate::events::ReasoningContent {
+    crate::events::ReasoningContent::Opaque {
+        token: serde_json::json!({
+            "type": BARE_SIGNATURE_TYPE,
+            "signature": signature,
+        }),
+    }
+}
+
+/// The signature inside an opaque token minted by [`bare_signature`], or
+/// `None` for any other opaque token (a provider block, replayed whole).
+fn bare_signature_of(token: &Value) -> Option<&str> {
+    if token.get("type").and_then(Value::as_str) != Some(BARE_SIGNATURE_TYPE) {
+        return None;
+    }
+    token.get("signature").and_then(Value::as_str)
 }
 
 fn convert_tool_schema(tool: ToolSchema) -> provider::chat::Tool {
@@ -507,33 +553,42 @@ fn from_provider_response(
     // expressed in the same vocabulary.
     let model = response.model_iden.model_name.to_string();
 
-    // How reasoning arrives depends on the adapter, and both shapes are
+    // How reasoning arrives depends on the adapter, and every shape is
     // genai's transport rather than ours:
     //
     // - Anthropic: each `thinking` block is a `ThoughtSignature` part
     //   immediately followed by a `ReasoningContent` part, in block order
     //   (genai 0.7.0-beta.21, upstream PR #275). A `redacted_thinking`
     //   block stays a `Custom` part carrying the raw JSON.
+    // - Gemini: a `thoughtSignature` is a `ThoughtSignature` part with
+    //   *no* reasoning text behind it — the token is the whole content —
+    //   and a thought summary, when the API returns one, is not a part
+    //   at all but the `reasoning_content` field.
     // - OpenAI-compatible: the sibling `reasoning_content` field, surfaced
     //   as `ChatResponse::reasoning_content` and never as a part.
     //
-    // A signed pair is joined back into the block Anthropic verifies it
-    // by, because the block is the only unit that can be replayed — not
-    // the text, and not the signature alone (ADR-0034 Appendix A). What
-    // the reducer records is therefore the same whether the block came
-    // as one part or two.
-    let mut block_seen = false;
+    // So a signature is paired only with the reasoning text that
+    // immediately follows it; a signature that anything else follows
+    // stood alone, and is carried as an opaque part in its place
+    // (ADR-0034 D2's Gemini row). A signed pair is joined back into the
+    // block Anthropic verifies it by, because the block is the only unit
+    // that can be replayed — not the text, and not the signature alone
+    // (Appendix A). What the reducer records is therefore the same
+    // whether the block came as one part or two.
+    let mut text_carried = false;
     let mut pending_signature: Option<&str> = None;
     for part in response.content.iter() {
+        if !matches!(part, provider::chat::ContentPart::ReasoningContent(_))
+            && let Some(signature) = pending_signature.take()
+        {
+            parts.push(AssistantPart::Reasoning(crate::events::Reasoning {
+                model: model.clone(),
+                content: bare_signature(signature),
+            }));
+        }
         let content = match part {
             provider::chat::ContentPart::ThoughtSignature(signature) => {
-                if let Some(orphan) = pending_signature.replace(signature) {
-                    tracing::debug!(
-                        signature_len = orphan.len(),
-                        "dropping a thought signature that no reasoning text followed; a bare \
-                         signature cannot be replayed"
-                    );
-                }
+                pending_signature = Some(signature);
                 continue;
             }
             provider::chat::ContentPart::ReasoningContent(text) => match pending_signature.take() {
@@ -570,27 +625,30 @@ fn from_provider_response(
             },
             _ => continue,
         };
-        block_seen = true;
+        // Signed and plain parts carry the readable text themselves; an
+        // opaque one does not, so it says nothing about whether the
+        // sibling field below is a duplicate.
+        text_carried |= !matches!(content, crate::events::ReasoningContent::Opaque { .. });
         parts.push(AssistantPart::Reasoning(crate::events::Reasoning {
             model: model.clone(),
             content,
         }));
     }
-    if let Some(orphan) = pending_signature {
-        tracing::debug!(
-            signature_len = orphan.len(),
-            "dropping a trailing thought signature with no reasoning text; a bare signature \
-             cannot be replayed"
-        );
+    if let Some(signature) = pending_signature {
+        parts.push(AssistantPart::Reasoning(crate::events::Reasoning {
+            model: model.clone(),
+            content: bare_signature(signature),
+        }));
     }
 
-    // Providers that report reasoning as a sibling field rather than as
-    // parts: Kimi, DeepSeek, and anything OpenAI-shaped. genai populates
-    // `reasoning_content` unconditionally on the non-streaming path — no
-    // capture flag needed. Skipped when parts were already captured, or
-    // the same reasoning would be recorded twice: once replayable, once
-    // not.
-    if !block_seen
+    // Providers that report readable reasoning as a sibling field rather
+    // than as parts: Kimi, DeepSeek, anything OpenAI-shaped — and Gemini's
+    // thought summary, which sits beside its opaque signature parts. genai
+    // populates `reasoning_content` unconditionally on the non-streaming
+    // path — no capture flag needed. Skipped when a part already carried
+    // the text, or the same reasoning would be recorded twice: once
+    // replayable, once not.
+    if !text_carried
         && let Some(text) = response
             .reasoning_content
             .as_ref()
@@ -1053,6 +1111,156 @@ mod tests {
         assert!(matches!(parsed.parts[0], AssistantPart::Reasoning(_)));
         assert_eq!(parsed.text().as_deref(), Some("Answer."));
     }
+
+    // region: bare continuity tokens (#600, ADR-0034 D2's Gemini row)
+
+    fn gemini_response(
+        parts: Vec<provider::chat::ContentPart>,
+        reasoning_content: Option<&str>,
+    ) -> provider::chat::ChatResponse {
+        provider::chat::ChatResponse {
+            content: provider::chat::MessageContent::from_parts(parts),
+            reasoning_content: reasoning_content.map(str::to_string),
+            model_iden: provider::ModelIden::new(
+                provider::adapter::AdapterKind::Gemini,
+                "gemini-3-pro",
+            ),
+            provider_model_iden: provider::ModelIden::new(
+                provider::adapter::AdapterKind::Gemini,
+                "gemini-3-pro-001",
+            ),
+            stop_reason: None,
+            usage: provider::chat::Usage::default(),
+            captured_raw_body: None,
+            response_id: None,
+        }
+    }
+
+    fn gemini_call() -> provider::chat::ContentPart {
+        provider::chat::ContentPart::ToolCall(provider::chat::ToolCall {
+            call_id: "call#read_file#0".to_string(),
+            fn_name: "read_file".to_string(),
+            fn_arguments: serde_json::json!({"path": "/runbook"}),
+            thought_signatures: None,
+        })
+    }
+
+    fn reasoning_parts(parsed: &ChatResponse) -> Vec<&crate::events::Reasoning> {
+        parsed
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                AssistantPart::Reasoning(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Gemini's `thoughtSignature` reaches this adapter as a signature
+    /// part with no reasoning text behind it. It is a continuity token
+    /// and nothing else — so it is recorded as *opaque* reasoning, tagged
+    /// with the model, in the place it arrived. Dropping it (what this
+    /// adapter did before #600) recorded the turn as having no reasoning
+    /// at all, which misstates absence for opacity (I7).
+    #[test]
+    fn a_bare_thought_signature_becomes_an_opaque_part() {
+        let response = gemini_response(
+            vec![
+                provider::chat::ContentPart::ThoughtSignature("sig-1".to_string()),
+                gemini_call(),
+            ],
+            Some(""),
+        );
+
+        let parsed = from_provider_response(response).expect("parses");
+
+        let reasoning = reasoning_parts(&parsed);
+        assert_eq!(reasoning.len(), 1, "one token, one part");
+        assert_eq!(reasoning[0].model, "gemini-3-pro");
+        let crate::events::ReasoningContent::Opaque { token } = &reasoning[0].content else {
+            panic!("a bare signature is opaque, not {:?}", reasoning[0].content);
+        };
+        assert_eq!(token["type"], "thought_signature");
+        assert_eq!(token["signature"], "sig-1");
+        assert!(
+            matches!(parsed.parts[0], AssistantPart::Reasoning(_)),
+            "reasoning leads the turn"
+        );
+        assert_eq!(parsed.tool_calls().len(), 1, "the call rides along");
+    }
+
+    /// With `includeThoughts` on, Gemini also returns a readable thought
+    /// summary — which genai hands over as `reasoning_content`, beside the
+    /// signature parts. Both are recorded: the summary is not a duplicate
+    /// of anything a signature carries.
+    #[test]
+    fn a_thought_summary_is_recorded_beside_the_signature() {
+        let response = gemini_response(
+            vec![
+                provider::chat::ContentPart::ThoughtSignature("sig-1".to_string()),
+                gemini_call(),
+            ],
+            Some("Consider the runbook first."),
+        );
+
+        let parsed = from_provider_response(response).expect("parses");
+
+        let kinds: Vec<&str> = reasoning_parts(&parsed)
+            .iter()
+            .map(|r| match &r.content {
+                crate::events::ReasoningContent::Opaque { .. } => "opaque",
+                crate::events::ReasoningContent::Plain { .. } => "plain",
+                crate::events::ReasoningContent::Signed { .. } => "signed",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["opaque", "plain"],
+            "signature first, then the summary"
+        );
+    }
+
+    /// The write side: the opaque token this adapter minted goes back as
+    /// genai's `ThoughtSignature` part, which its Gemini adapter attaches
+    /// to the next function call — a `Custom` part would be ignored on
+    /// that wire. A provider block (Anthropic's `redacted_thinking`) still
+    /// goes back verbatim as `Custom`, and neither crosses a model edge.
+    #[test]
+    fn an_opaque_signature_replays_as_a_thought_signature_part() {
+        let signature = crate::events::Reasoning {
+            model: "gemini-3-pro".to_string(),
+            content: crate::events::ReasoningContent::Opaque {
+                token: serde_json::json!({"type": "thought_signature", "signature": "sig-1"}),
+            },
+        };
+        assert!(
+            matches!(
+                encode_reasoning(signature.clone(), "gemini-3-pro"),
+                Some(provider::chat::ContentPart::ThoughtSignature(s)) if s == "sig-1"
+            ),
+            "a bare token goes back as the part Gemini's adapter attaches to the call"
+        );
+        assert!(
+            encode_reasoning(signature, "gemini-3-flash").is_none(),
+            "and never to a different model"
+        );
+
+        let redacted = crate::events::Reasoning {
+            model: "claude-opus-5".to_string(),
+            content: crate::events::ReasoningContent::Opaque {
+                token: serde_json::json!({"type": "redacted_thinking", "data": "EqQB"}),
+            },
+        };
+        assert!(
+            matches!(
+                encode_reasoning(redacted, "claude-opus-5"),
+                Some(provider::chat::ContentPart::Custom(custom)) if custom.typ() == Some("redacted_thinking")
+            ),
+            "a provider block still goes back whole"
+        );
+    }
+
+    // endregion: bare continuity tokens
 
     /// A response with no reasoning must produce no reasoning part —
     /// absence stays absence, rather than becoming an empty one.

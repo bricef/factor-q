@@ -1,0 +1,153 @@
+{
+  "requests": [
+    {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Investigate the failing deploy."
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 1024
+      },
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "Read a file from the workspace.",
+              "name": "read_file",
+              "parametersJsonSchema": {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Investigate the failing deploy."
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {
+                  "path": "/runbook"
+                },
+                "name": "read_file"
+              },
+              "thoughtSignature": "skip_thought_signature_validator"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "name": "read_file",
+                "response": {
+                  "content": "runbook says: restart",
+                  "name": "read_file"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 1024
+      },
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "Read a file from the workspace.",
+              "name": "read_file",
+              "parametersJsonSchema": {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "turns": [
+    {
+      "parts": [
+        {
+          "content": {
+            "kind": "opaque",
+            "token": {
+              "signature": "sig-pro",
+              "type": "thought_signature"
+            }
+          },
+          "kind": "reasoning",
+          "model": "gemini-3-pro"
+        },
+        {
+          "kind": "tool_call",
+          "parameters": {
+            "path": "/runbook"
+          },
+          "tool_call_id": "call#read_file#0",
+          "tool_name": "read_file"
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 100,
+        "output_tokens": 25,
+        "reasoning_tokens": 5
+      }
+    },
+    {
+      "parts": [
+        {
+          "kind": "text",
+          "text": "Restart it."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 140,
+        "output_tokens": 5,
+        "reasoning_tokens": 0
+      }
+    }
+  ]
+}

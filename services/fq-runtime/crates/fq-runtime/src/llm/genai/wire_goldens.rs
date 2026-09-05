@@ -29,6 +29,7 @@ use super::GenAiClient;
 use crate::events::{Effort, Message, RequestParams, ToolResult, ToolSchema};
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::test_support::mock_anthropic::{ContentBlock, MockAnthropicServer, MockResponse};
+use crate::test_support::mock_gemini::{GeminiTurn, MockGeminiServer};
 use crate::test_support::mock_openai::{MockChoice, MockOpenAiServer};
 
 /// The thinking block `claude-opus-5` returned on turn 1 of the
@@ -713,3 +714,275 @@ async fn openai_parallel_tool_calls() {
 }
 
 // endregion: openai-compatible
+
+// region: gemini
+
+/// The model turns of a Gemini request body, each as its list of parts.
+fn model_turns(request: &Value) -> Vec<&Vec<Value>> {
+    request["contents"]
+        .as_array()
+        .expect("a Gemini request carries `contents`")
+        .iter()
+        .filter(|turn| turn["role"] == "model")
+        .map(|turn| turn["parts"].as_array().expect("a turn has parts"))
+        .collect()
+}
+
+/// The `thoughtSignature` values anywhere in a request body, in order.
+fn signatures_in(value: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match value {
+        Value::Object(map) => {
+            for (key, inner) in map {
+                if key == "thoughtSignature" {
+                    if let Some(signature) = inner.as_str() {
+                        out.push(signature.to_string());
+                    }
+                } else {
+                    out.extend(signatures_in(inner));
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                out.extend(signatures_in(item));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The kinds of the reasoning parts in a decoded turn, as
+/// `(reasoning kind, token type)` pairs.
+fn reasoning_shapes(turn: &Value) -> Vec<(String, String)> {
+    turn["parts"]
+        .as_array()
+        .expect("parts")
+        .iter()
+        .filter(|part| part["kind"] == "reasoning")
+        .map(|part| {
+            (
+                part["content"]["kind"].as_str().unwrap_or("").to_string(),
+                part["content"]["token"]["type"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// **The scenario #600 is about.** A thinking Gemini model answers with a
+/// function call carrying a `thoughtSignature` on that part. The token is
+/// Gemini's continuity token — no readable text beside it, so it is
+/// *opaque* (ADR-0034 D2) — and the next request must hand it back on the
+/// function call it came with, or a thinking model loses its continuity
+/// (and Gemini 3 rejects the call outright).
+#[tokio::test]
+async fn gemini_signed_function_call_loop() {
+    const MODEL: &str = "gemini-3-pro";
+
+    let mock = MockGeminiServer::start().await;
+    mock.push(
+        GeminiTurn::silent()
+            .with_function_call("read_file", json!({"path": "/runbook"}), Some("sig-turn-1"))
+            .with_usage(100, 20, Some(12)),
+    );
+    mock.push(GeminiTurn::text("Restart the deploy service.").with_usage(150, 8, Some(3)));
+    let client = mock.client(MODEL);
+
+    let mut messages = vec![
+        Message::system("You are a careful assistant."),
+        Message::user("Investigate the failing deploy."),
+    ];
+    let mut turns = Vec::new();
+
+    let first = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&first));
+    assert_eq!(
+        reasoning_shapes(&turns[0]),
+        [("opaque".to_string(), "thought_signature".to_string())],
+        "a bare signature is recorded as opaque reasoning, not dropped"
+    );
+    assert_eq!(
+        first.usage.reasoning_tokens, 12,
+        "thoughtsTokenCount is the split"
+    );
+    continue_with_tool_result(&mut messages, &first, "runbook says: restart");
+
+    let second = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&second));
+
+    let requests = mock.requests();
+    mock.shutdown().await;
+
+    let model_turn = model_turns(&requests[1])
+        .into_iter()
+        .next()
+        .expect("request 2 replays the model turn");
+    let call = model_turn
+        .iter()
+        .find(|part| part.get("functionCall").is_some())
+        .expect("the replayed turn carries the function call");
+    assert_eq!(
+        call["thoughtSignature"].as_str(),
+        Some("sig-turn-1"),
+        "the signature goes back on the function call it came with; model turn was {model_turn:?}"
+    );
+
+    pin("gemini_signed_function_call_loop", turns, requests);
+}
+
+/// With `includeThoughts` the API also returns a thought summary — a
+/// `text` part flagged `thought` — beside the signed call. The summary is
+/// readable (plain), the signature is not (opaque); both are recorded,
+/// and only the signature goes back, which is all Gemini wants.
+#[tokio::test]
+async fn gemini_signature_with_thought_summary() {
+    const MODEL: &str = "gemini-3-pro";
+
+    let mock = MockGeminiServer::start().await;
+    mock.push(
+        GeminiTurn::silent()
+            .with_thought("Consider the runbook before guessing.")
+            .with_function_call("read_file", json!({"path": "/runbook"}), Some("sig-a"))
+            .with_usage(100, 25, Some(40)),
+    );
+    mock.push(GeminiTurn::text("Restart it.").with_usage(160, 6, Some(2)));
+    let client = mock.client(MODEL);
+
+    let mut messages = vec![Message::user("Investigate the failing deploy.")];
+    let mut turns = Vec::new();
+
+    let first = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&first));
+    assert_eq!(
+        reasoning_shapes(&turns[0]),
+        [
+            ("opaque".to_string(), "thought_signature".to_string()),
+            ("plain".to_string(), String::new()),
+        ],
+        "the signature and the summary are both recorded, signature first"
+    );
+    continue_with_tool_result(&mut messages, &first, "runbook says: restart");
+
+    let second = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&second));
+
+    let requests = mock.requests();
+    mock.shutdown().await;
+
+    assert_eq!(
+        signatures_in(&requests[1]),
+        ["sig-a"],
+        "the signature is replayed exactly once; the summary is not sent back"
+    );
+
+    pin("gemini_signature_with_thought_summary", turns, requests);
+}
+
+/// A turn with visible text *and* a signed call. genai's Gemini adapter
+/// collects every signature ahead of the text and the calls when it
+/// decodes, and on the way back attaches a pending signature to the
+/// next part it meets — so here the token lands as a bare part before
+/// the text, and the call gets Gemini 3's `skip_thought_signature_validator`
+/// stand-in. That is upstream's approximation, pinned so that a change
+/// in it is visible; what this crate guarantees is only that the
+/// signature is carried and sent back.
+#[tokio::test]
+async fn gemini_text_and_signed_call() {
+    const MODEL: &str = "gemini-3-pro";
+
+    let mock = MockGeminiServer::start().await;
+    mock.push(
+        GeminiTurn::silent()
+            .with_text("Reading it now.")
+            .with_function_call("read_file", json!({"path": "/runbook"}), Some("sig-b"))
+            .with_usage(100, 30, Some(8)),
+    );
+    mock.push(GeminiTurn::text("Restart it.").with_usage(170, 6, None));
+    let client = mock.client(MODEL);
+
+    let mut messages = vec![Message::user("Investigate the failing deploy.")];
+    let mut turns = Vec::new();
+
+    let first = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&first));
+    continue_with_tool_result(&mut messages, &first, "runbook says: restart");
+
+    let second = send(&client, MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&second));
+
+    let requests = mock.requests();
+    mock.shutdown().await;
+
+    assert!(
+        signatures_in(&requests[1]).contains(&"sig-b".to_string()),
+        "the signature is sent back; request 2 was {}",
+        requests[1]
+    );
+
+    pin("gemini_text_and_signed_call", turns, requests);
+}
+
+/// Turn 1 on one Gemini model, turn 2 on another with the same history.
+/// The token is tied to the model that produced it (ADR-0034 D5), so it
+/// must not reach the second; what does reach it is genai's own
+/// no-signature stand-in for a Gemini 3 function call.
+#[tokio::test]
+async fn gemini_cross_model_strip() {
+    const FIRST_MODEL: &str = "gemini-3-pro";
+    const SECOND_MODEL: &str = "gemini-3-flash";
+
+    let mock = MockGeminiServer::start().await;
+    mock.push(
+        GeminiTurn::silent()
+            .with_function_call("read_file", json!({"path": "/runbook"}), Some("sig-pro"))
+            .with_usage(100, 20, Some(5)),
+    );
+    mock.push(GeminiTurn::text("Restart it.").with_usage(140, 5, None));
+    // Both models must route to the mock.
+    let client = {
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert(
+            "mock-gemini".to_string(),
+            crate::config::ProviderConfig {
+                api_shape: crate::config::ApiShape::Gemini,
+                base_url: Some(mock.base_url()),
+                api_key_env: "FQ_MOCK_GEMINI_KEY".to_string(),
+                models: vec![FIRST_MODEL.to_string(), SECOND_MODEL.to_string()],
+                pricing: std::collections::BTreeMap::new(),
+            },
+        );
+        unsafe { std::env::set_var("FQ_MOCK_GEMINI_KEY", "mock-key") };
+        GenAiClient::from_providers(&crate::config::ProvidersConfig {
+            anthropic: None,
+            extra,
+        })
+        .expect("client builds")
+    };
+
+    let mut messages = vec![Message::user("Investigate the failing deploy.")];
+    let mut turns = Vec::new();
+
+    let first = send(&client, FIRST_MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&first));
+    continue_with_tool_result(&mut messages, &first, "runbook says: restart");
+
+    let second = send(&client, SECOND_MODEL, &messages, read_file_tool(), None).await;
+    turns.push(decoded(&second));
+
+    let requests = mock.requests();
+    mock.shutdown().await;
+
+    assert!(
+        !signatures_in(&requests[1]).contains(&"sig-pro".to_string()),
+        "a signature never crosses a model edge; request 2 was {}",
+        requests[1]
+    );
+
+    pin("gemini_cross_model_strip", turns, requests);
+}
+
+// endregion: gemini
