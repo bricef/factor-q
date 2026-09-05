@@ -274,7 +274,48 @@ struct Registered {
 
 /// The rest of the assembly, and then the run. Everything here is
 /// fallible and every failure lands on the registration guard.
+///
+/// **The assembly is interruptible.** Its steps are the ones that can
+/// take arbitrarily long — the broker dial, the store migration, the
+/// recovery scan, and above all the shared MCP servers, whose start-up
+/// handshake has no timeout (review B3): one server that accepts and
+/// never answers freezes the boot. Until the streams were installed
+/// this early the default disposition killed such a process at once;
+/// installing them and reading them only in `run_hosted` would have
+/// turned that into a boot with no exit but SIGKILL, which is a worse
+/// place than where this PR found it.
+///
+/// So a second reader of the same signals races the assembly. It is a
+/// separate registration rather than a borrow of the one being
+/// assembled into `Assembled`, because that one is moved through the
+/// very future it would have to be borrowed across; two tokio
+/// registrations each see every delivered signal, so nothing is lost
+/// either way the race goes.
+///
+/// A signal here returns `Ok(())` — the operator asked it to stop and
+/// it stopped, which is exit 0 exactly as it would be during the run —
+/// and the registration guard in `run_daemon` marks the row `shutdown`
+/// on the way out. Whatever the assembly had built is dropped: the MCP
+/// children take their manager's drop-guard kill, and resume tasks
+/// already spawned are abandoned for the next start's recovery, which
+/// is the same deal the drain deadline offers.
 async fn run_registered(r: Registered) -> anyhow::Result<()> {
+    let mut boot_signals = crate::signals::ShutdownSignals::install();
+    let assembled = tokio::select! {
+        assembled = assemble(r) => assembled?,
+        reason = boot_signals.next() => {
+            println!();
+            println!(
+                "Received {reason} during startup — stopping before the runtime is up.                  Nothing was serving; the worker row is deregistered."
+            );
+            return Ok(());
+        }
+    };
+    crate::hosted::run_hosted(assembled).await
+}
+
+/// Everything between the worker row existing and the runtime running.
+async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     let Registered {
         runtime_id,
         version,
@@ -426,7 +467,7 @@ async fn run_registered(r: Registered) -> anyhow::Result<()> {
         tracing::warn!(error = %err, "workspace prune failed at startup");
     }
 
-    crate::hosted::run_hosted(crate::hosted::Assembled {
+    Ok(crate::hosted::Assembled {
         runtime_id,
         version,
         config,
@@ -449,5 +490,4 @@ async fn run_registered(r: Registered) -> anyhow::Result<()> {
         pricing_entries,
         resume_handles,
     })
-    .await
 }
