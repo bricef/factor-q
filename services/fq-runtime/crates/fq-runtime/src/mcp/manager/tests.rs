@@ -8,14 +8,14 @@
 
 use super::*;
 
-use crate::mcp::mock::{mock_tool, serve_mock};
+use crate::mcp::mock::{mock_tool, serve_mock, serve_mock_recording};
 
-/// A manager holding one mock-backed server, for the methods that need
-/// a *registered* server rather than a bare client. Starting one the
-/// ordinary way would need a child process; the manager's own state is
-/// reachable from here, so the server is registered directly.
-async fn manager_with_mock(name: &str) -> McpClientManager {
-    let client = serve_mock(Arc::new(Mutex::new(vec![mock_tool("only")])), 10).await;
+/// A manager holding `client` as a running server named `name`, for the
+/// methods that need a *registered* server rather than a bare client.
+/// Starting one the ordinary way would need a child process; the
+/// manager's own state is reachable from here, so it is registered
+/// directly.
+fn manager_holding(name: &str, client: Arc<McpClient>) -> McpClientManager {
     let (_tx, notifications) = mpsc::unbounded_channel();
     let mut manager = McpClientManager::with_server_root(std::env::temp_dir().join("fq-mcp-unit"));
     manager.servers.push(RunningServer {
@@ -25,6 +25,11 @@ async fn manager_with_mock(name: &str) -> McpClientManager {
         notifications: Mutex::new(notifications),
     });
     manager
+}
+
+async fn manager_with_mock(name: &str) -> McpClientManager {
+    let client = serve_mock(Arc::new(Mutex::new(vec![mock_tool("only")])), 10).await;
+    manager_holding(name, client)
 }
 
 #[tokio::test]
@@ -178,5 +183,47 @@ async fn a_logging_level_failure_is_reported_as_a_logging_failure() {
     assert!(
         matches!(unknown, McpError::UnknownServer { .. }),
         "{unknown:?}"
+    );
+}
+
+/// #191: `call_tool_cancellable` sent no progress token, while
+/// `McpTool::execute` has always attached one — so the very calls that
+/// would benefit from progress, the long-running ones a host wants to
+/// be able to abort, were the ones that could not receive it. #547
+/// wires every tool call through this method, so the two paths have to
+/// agree before that lands.
+///
+/// The mock records what the *server* saw, which is the only place the
+/// answer is honest: `_meta` is merged from two sources on the way out
+/// (see the note in `call_tool_cancellable`).
+#[tokio::test]
+async fn a_cancellable_call_carries_a_progress_token() {
+    let (client, calls) =
+        serve_mock_recording(Arc::new(Mutex::new(vec![mock_tool("echo")])), 10).await;
+    let manager = manager_holding("mock", client);
+
+    let result = manager
+        .call_tool_cancellable(
+            "mock",
+            // The canonical, provider-visible name; the server must be
+            // asked for the remote name behind it.
+            "mock__echo",
+            serde_json::Map::new(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect("the mock answers the call");
+    assert!(
+        result.is_some(),
+        "the call completed rather than cancelling"
+    );
+
+    let recorded = calls.lock().await.clone();
+    assert_eq!(recorded.len(), 1, "one call reached the server");
+    assert_eq!(recorded[0].name, "echo", "the `mock__` prefix is stripped");
+    assert!(
+        recorded[0].progress_token.is_some(),
+        "the server must be given a progress token, or it may not report \
+         progress at all"
     );
 }
