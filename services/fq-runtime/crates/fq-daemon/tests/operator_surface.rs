@@ -116,9 +116,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
                 agents_dir: scratch.path().join("agents"),
                 default_model: None,
                 worker: runner.clone(),
-                down: Arc::new(tokio::sync::Mutex::new(Some(
-                    tokio::sync::oneshot::channel::<bool>().0,
-                ))),
+                down: fq_daemon::DownSignal::new(),
             },
         },
     )
