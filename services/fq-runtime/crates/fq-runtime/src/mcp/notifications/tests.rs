@@ -131,7 +131,10 @@ async fn a_chatty_server_cannot_starve_a_quiet_one() {
             ("chatty".to_string(), chatty_rx),
             ("quiet".to_string(), quiet_rx),
         ],
-        McpToolRefresher::default(),
+        McpToolRefresher {
+            clients: Vec::new(),
+            exec_config: fq_tools::builtin::ExecConfig::default(),
+        },
         |_registry| unreachable!("no tools/list_changed is sent"),
         move |server, _level, _logger, _data| {
             let _ = seen_tx.send(server);
