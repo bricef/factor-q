@@ -77,14 +77,15 @@ it is the licence to keep changing shape quickly.
   TOML file and publishes their payloads to NATS subjects (typically
   `fq.trigger.<agent>` for time-driven agent runs). Durable fire state
   survives restarts in a JetStream KV bucket with a per-job missed-fire
-  policy ([design](adapters/fq-cron/DESIGN.md)). Ships as a deployed
-  binary in the dogfood bundle.
+  policy ([design](adapters/fq-cron/DESIGN.md)). Ships as the `fq-cron`
+  image and in the binary bundle.
 - **GitHub watcher (`github-watcher`)** — a standalone Go
   [trigger adapter](adapters/github-watcher/README.md): polls a repo for
   issues labelled `status:ready`, triggers an agent per issue over the
   documented wire contracts, then observes the run's lifecycle events
   and moves the issue's label onward so nothing strands mid-flight. The
-  intake side of the M0 change loop; ships in the dogfood bundle.
+  intake side of the M0 change loop; ships as the `github-watcher` image
+  and in the binary bundle.
 - **Infra** — NATS via `infrastructure/docker-compose.yml`, bound to localhost
   with the public static development token `fq-dev-token`. Do not expose its
   port, and replace the token for any non-local deployment. Build from source
@@ -93,9 +94,14 @@ it is the licence to keep changing shape quickly.
   [ADR-0035](docs/adrs/accepted/0035-container-image-and-compose-supervision.md)
   (accepted 2026-09-04): every merge to `main` publishes one container
   image per binary to `ghcr.io/bricef`, tagged with the commit its binary
-  reports; `ops/dogfood/compose.yml` is the stack and its supervisor and
-  `ops/dogfood/deploy.sh` is a tag bump against it. The live dogfood
-  instance has not been moved onto the stack yet.
+  reports; `ops/dogfood/compose.yml` is the stack and its supervisor,
+  `ops/dogfood/deploy.sh` is a tag bump against it (hourly as `--auto`,
+  with an idle check and automatic rollback), `bootstrap.sh` provisions
+  a dedicated host, and `backup.sh` / `restore.sh` make the instance's
+  one volume restorable — the build-out is
+  [#587](https://github.com/bricef/factor-q/issues/587). The live
+  dogfood instance has not been moved onto the stack yet; the runbook is
+  in [ops/dogfood](ops/dogfood/README.md).
 
 ## Where we are
 
@@ -168,7 +174,8 @@ The dogfood loop **lands PRs**: the daily `doc-drift` agent
 verify and fix, and files issues for the rest; alongside it the
 `github-watcher` adapter triggers
 an `m0-issue-fix` agent on `status:ready`-labelled issues (agent definitions in
-`~/fq-dogfood`, outside the repo); the agent makes the change in a
+the instance's own tree, outside the repo — `~/fq-dogfood` today, the
+instance volume once it moves onto the compose stack); the agent makes the change in a
 sandboxed working copy, validates with `just ci`, and opens a PR behind
 the human merge gate — the loop that met M0 (see the closed
 [M0 plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md)). Next on
@@ -260,8 +267,9 @@ memory + skills services · context compaction · container isolation
 (ADR-0010, accepted but unbuilt) · observability floor
 (JSON logs, metrics, alerting) · production-grade NATS credentials and
 rotation · tagged binary releases (the
-rolling `main-latest` deploy channel is built — see
-[ops/dogfood](ops/dogfood/README.md) — but no `v*` release has shipped).
+rolling `main-latest` channel — the tarball and the container images —
+is built, see [ops/dogfood](ops/dogfood/README.md), but no `v*` release
+has shipped).
 
 ## Pointers
 

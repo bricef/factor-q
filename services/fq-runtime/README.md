@@ -401,34 +401,20 @@ shell-less image can run; that is a follow-up on
 
 ### Running it
 
-The compose stack that runs the images — the broker, the proxy, the
-daemon, the watcher, the dashboard and the scheduler, with restart
-policy, health ordering and a stop grace period longer than the drain
-deadline — is the next slice of #587 and will live in `ops/dogfood/`.
-Until it lands, the shape is:
+The stack that runs the images is
+[`ops/dogfood/compose.yml`](../../ops/dogfood/compose.yml): the broker,
+the proxy, the daemon, the watcher, the dashboard and the scheduler,
+with restart policy, health ordering on the broker, a stop grace period
+longer than the drain deadline, resource limits on the daemon and
+rotated logs. [`ops/dogfood/README.md`](../../ops/dogfood/README.md) is
+the operator's guide to it — bootstrap of a dedicated host, the
+tag-bump `deploy.sh` and its hourly `--auto` mode, hygiene, backups and
+the restore drill, and the migration runbook. In short:
 
-```yaml
-services:
-  nats:
-    image: nats:2.14.3
-    command: ["--config", "/etc/nats/nats.conf"]
-    volumes:
-      - ./nats/nats.conf:/etc/nats/nats.conf:ro
-      - nats-data:/data/nats
-
-  fqd:
-    image: factor-q/fq-dogfood:<sha>
-    depends_on:
-      - nats
-    stop_grace_period: 150s        # > [worker] drain_deadline_ms (120 s default)
-    volumes:
-      - fq-data:/var/lib/factor-q  # the one volume; fqd.toml, agents/ and the rest live in it
-    env_file:
-      - .secrets/env               # provider keys, FQ_NATS_TOKEN, GH_TOKEN
-
-volumes:
-  nats-data:
-  fq-data:
+```sh
+sudo ops/dogfood/bootstrap.sh          # a fresh Debian/Ubuntu host: docker, the deploy user, the tree, the crontab
+~/fq-dogfood/deploy.sh                 # pull main-latest, verify, drain, up, verify — or deploy.sh <sha> to roll back
+docker compose exec fqd fq status      # ask the daemon, through the container's own client
 ```
 
 ## Status
