@@ -508,6 +508,9 @@ effort: high            # reasoning effort for each request
   default. `minimal` exists for a real failure mode rather than for
   economy — on gpt-5-family models the default reasoning scales to fill
   `max_tokens` and can return empty content on short mechanical tasks.
+  What happens to the reasoning a model produces — which providers and
+  routes carry it back on the next turn, and which do not yet — is in
+  [Reasoning models](reasoning-models.md).
 
 Both are top-level keys, so a typo in either is refused at load rather
 than ignored — see [The frontmatter is strict](#the-frontmatter-is-strict).
