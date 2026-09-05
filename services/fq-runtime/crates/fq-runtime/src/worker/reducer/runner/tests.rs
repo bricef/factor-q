@@ -3424,3 +3424,148 @@ async fn parallel_tool_results_reach_anthropic_as_one_user_message() {
 
     rt.shutdown().await;
 }
+
+/// #546, the "hung provider" wedge class (review finding B1): a
+/// provider that accepts the connection and never answers ends the
+/// invocation in a terminal event within the retry policy's attempts
+/// times the call budget, instead of parking it until a restart. The
+/// client is the daemon's own stack — `RetryingLlmClient` over
+/// `GenAiClient` — against the mock, with a one-second budget and two
+/// attempts, so the bound under test is two seconds plus slack.
+#[tokio::test]
+async fn a_hung_provider_ends_the_invocation_within_the_timeout() {
+    use crate::llm::{GenAiClient, LlmTimeouts, RetryConfig, RetryingLlmClient};
+    use crate::test_support::fault::MockFault;
+    use crate::test_support::mock_anthropic::MockAnthropicServer;
+
+    let server = crate::test_support::nats::test_nats();
+    let url = server.url().to_string();
+    // genai's auth resolver wants the variable even though the mock
+    // never reads the bearer.
+    unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+
+    let mock = MockAnthropicServer::start().await;
+    // One stall per attempt, each longer than the budget.
+    mock.push_fault(MockFault::stall(Duration::from_secs(5)));
+    mock.push_fault(MockFault::stall(Duration::from_secs(5)));
+    let budget = Duration::from_secs(1);
+    let llm = RetryingLlmClient::new(
+        GenAiClient::with_base_url_and_timeouts(
+            mock.base_url(),
+            LlmTimeouts {
+                connect: budget,
+                request: budget,
+            },
+        )
+        .expect("client builds"),
+        RetryConfig {
+            max_attempts: 2,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            max_retry_after_ms: 0,
+        },
+    );
+
+    let agent_id_str = unique_agent_id("hung-provider");
+    let agent = Agent::builder()
+        .id(&agent_id_str)
+        .model("claude-haiku-4-5")
+        .system_prompt("You are a test agent.")
+        .budget(5.0)
+        .build()
+        .unwrap();
+
+    let bus = EventBus::connect(&url).await.expect("connect to NATS");
+    let store_dir = tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&store_dir.path().join("events.db"))
+            .await
+            .expect("worker store"),
+    );
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(bus.clone())
+                .pricing(test_pricing())
+                .store(store.clone())
+                .worker_id(test_worker_id())
+                .build(),
+        ),
+        Harness::new(),
+    );
+
+    let started = std::time::Instant::now();
+    let events = crate::test_support::events::capture_events(
+        &bus,
+        &agent_id_str,
+        6,
+        Duration::from_secs(20),
+        || async {
+            let _ = runner
+                .run(
+                    &agent,
+                    &llm,
+                    TriggerSource::Manual,
+                    None,
+                    json!({"input": "go"}),
+                )
+                .await;
+        },
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < 2 * budget + Duration::from_secs(3),
+        "two hung attempts must end within two budgets plus slack; took {elapsed:?}"
+    );
+
+    crate::test_support::events::assert_kinds_in_order(
+        &events[..5],
+        &[
+            "triggered",
+            "llm_request",
+            "llm_dispatched",
+            "llm_failure",
+            "failed",
+        ],
+    );
+    crate::test_support::oracle::assert_valid_trace(&events);
+
+    let EventPayload::LlmFailure(p) = &events[3].payload else {
+        unreachable!("asserted above")
+    };
+    assert_eq!(p.error_kind, crate::events::LlmErrorKind::Timeout);
+    assert!(
+        p.error_message.contains("within 1s"),
+        "the failure names the budget: {}",
+        p.error_message
+    );
+    assert!(
+        p.usage.is_none(),
+        "an abandoned call parses no body: usage is unknown, not zero"
+    );
+    assert!(
+        p.duration_ms >= 2_000,
+        "duration_ms covers both attempts: {}",
+        p.duration_ms
+    );
+    let EventPayload::Failed(f) = &events[4].payload else {
+        unreachable!("asserted above")
+    };
+    assert!(
+        matches!(f.error_kind, FailureKind::LlmError),
+        "the invocation fails as an LLM error"
+    );
+    assert_eq!(
+        mock.received_requests().len(),
+        2,
+        "one request per attempt, and no third"
+    );
+
+    mock.shutdown().await;
+}
