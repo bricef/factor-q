@@ -34,6 +34,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "rt", "macros", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec"] }
+# The accept loop's error branch has to be visible: an edge that has run
+# out of file descriptors reports it or the condition is invisible until
+# an operator notices the daemon answering nobody. `tracing` is the
+# facade the whole tree already logs through, and a facade is not a
+# runtime — a thin client that installs no subscriber pays nothing.
+tracing = { workspace = true }
 
 [dev-dependencies]
 schemars = { workspace = true }

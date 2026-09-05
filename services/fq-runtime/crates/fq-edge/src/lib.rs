@@ -32,7 +32,10 @@ pub use client::EdgeClient;
 pub use client::probe_fingerprint;
 pub use registry::{EdgeRegistry, ReadGate};
 pub use server::DEFAULT_PREAMBLE_TIMEOUT;
+pub use server::EdgeLimits;
+pub use server::EdgeListener;
 pub use server::bind;
+pub use server::bind_with_limits;
 pub use server::bind_with_timeout;
 pub use wire::{
     InvokeRequest, InvokeResponse, NextBatchRequest, StreamBatch, StreamItem, WireError,
