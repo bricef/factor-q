@@ -7,9 +7,11 @@
 //! the real Anthropic API.
 //!
 //! Style is sequenced-response (FIFO), matching the existing
-//! `FixtureClient::push_response` ergonomics. The mock also
-//! captures each request body so tests can assert on what we
-//! sent (model, system prompt, messages, etc.) if they care.
+//! `FixtureClient::push_response` ergonomics; a [`MockFault`] takes a
+//! slot in the same queue, so a test scripts "a 429, then the answer"
+//! as two pushes. The mock also captures each request body so tests
+//! can assert on what we sent (model, system prompt, messages, etc.)
+//! if they care.
 //!
 //! See `docs/plans/closed/2026-05-18-mock-llm-test-harness.md`.
 //!
@@ -39,6 +41,8 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use super::fault::MockFault;
 
 /// One canned response served by the mock.
 ///
@@ -217,9 +221,15 @@ impl MockResponse {
     }
 }
 
+/// One queue entry: an answer, or a failure served in its place.
+enum Scripted {
+    Response(MockResponse),
+    Fault(MockFault),
+}
+
 #[derive(Default)]
 struct Inner {
-    responses: Vec<MockResponse>,
+    responses: Vec<Scripted>,
     received: Vec<Value>,
 }
 
@@ -274,7 +284,22 @@ impl MockAnthropicServer {
     /// Append a response to the FIFO queue. Each successive request
     /// to `/v1/messages` pops the next one.
     pub fn push_response(&self, r: MockResponse) {
-        self.inner.lock().unwrap().responses.push(r);
+        self.inner
+            .lock()
+            .unwrap()
+            .responses
+            .push(Scripted::Response(r));
+    }
+
+    /// Append a failure to the same queue: the next request is answered
+    /// with a status and headers of the test's choosing, or held past
+    /// the client's deadline. Interleaves with [`Self::push_response`].
+    pub fn push_fault(&self, fault: MockFault) {
+        self.inner
+            .lock()
+            .unwrap()
+            .responses
+            .push(Scripted::Fault(fault));
     }
 
     /// Snapshot of every request body the mock has received, in
@@ -321,7 +346,7 @@ async fn messages_handler(
         .unwrap_or("claude-mock")
         .to_string();
 
-    let response = {
+    let scripted = {
         let mut guard = inner.lock().unwrap();
         guard.received.push(body);
         if guard.responses.is_empty() {
@@ -331,8 +356,11 @@ async fn messages_handler(
         }
     };
 
-    match response {
-        Some(r) => (StatusCode::OK, Json(r.to_anthropic_json(&model))).into_response(),
+    match scripted {
+        Some(Scripted::Response(r)) => {
+            (StatusCode::OK, Json(r.to_anthropic_json(&model))).into_response()
+        }
+        Some(Scripted::Fault(fault)) => fault.serve(anthropic_error_body).await,
         None => (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -347,11 +375,35 @@ async fn messages_handler(
     }
 }
 
+/// The error shape Anthropic returns, typed the way its API types them.
+fn anthropic_error_body(status: u16) -> Value {
+    let kind = match status {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        529 => "overloaded_error",
+        _ => "api_error",
+    };
+    json!({
+        "type": "error",
+        "error": {
+            "type": kind,
+            "message": format!("MockAnthropicServer scripted a {status}"),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::{Message, RequestParams};
-    use crate::llm::{ChatRequest, GenAiClient, LlmClient};
+    use crate::llm::{
+        ChatRequest, GenAiClient, LlmClient, LlmError, LlmTimeouts, RetryConfig, RetryingLlmClient,
+    };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn mock_response_text_serialises_to_anthropic_shape() {
@@ -554,13 +606,182 @@ mod tests {
             .chat(simple_request())
             .await
             .expect_err("expected error");
-        // genai surfaces HTTP 400 as a provider error of some kind;
-        // we don't pin the exact variant, but it must be an error.
-        let msg = format!("{err}");
+        // A 400 is the provider rejecting the request: permanent, so a
+        // test that over-runs its script fails at once instead of
+        // burning the retry policy's attempts on it.
         assert!(
-            !msg.is_empty(),
-            "expected non-empty error message, got {msg:?}"
+            matches!(&err, LlmError::Rejected(msg) if msg.contains("400")),
+            "expected Rejected carrying the status, got {err:?}"
         );
+        assert!(!err.is_transient(), "a rejected request is not retried");
+
+        mock.shutdown().await;
+    }
+
+    /// #278: a 429 arrives as `RateLimited` carrying the provider's
+    /// `Retry-After`, read off the response headers genai keeps on the
+    /// error.
+    #[tokio::test]
+    async fn a_429_is_rate_limited_and_carries_the_retry_after() {
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+
+        let mock = MockAnthropicServer::start().await;
+        mock.push_fault(MockFault::status(429).with_retry_after("2"));
+
+        let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
+        let err = client
+            .chat(simple_request())
+            .await
+            .expect_err("a 429 is an error");
+        match &err {
+            LlmError::RateLimited { model, retry_after } => {
+                assert_eq!(model, "claude-haiku-4-5");
+                assert_eq!(*retry_after, Some(Duration::from_secs(2)));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        assert!(err.is_transient());
+
+        mock.shutdown().await;
+    }
+
+    /// A 5xx is the provider's problem, not the request's: transient.
+    #[tokio::test]
+    async fn a_503_is_a_transient_request_failure() {
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+
+        let mock = MockAnthropicServer::start().await;
+        mock.push_fault(MockFault::status(503));
+
+        let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
+        let err = client
+            .chat(simple_request())
+            .await
+            .expect_err("a 503 is an error");
+        assert!(
+            matches!(&err, LlmError::RequestFailed(msg) if msg.contains("503")),
+            "expected RequestFailed carrying the status, got {err:?}"
+        );
+        assert!(err.is_transient(), "a 5xx is retried");
+
+        mock.shutdown().await;
+    }
+
+    /// #546, review finding B1: a provider that accepts the connection
+    /// and never answers ends the call in a `Timeout` at the configured
+    /// budget — the HTTP client's own deadline, mapped — rather than
+    /// holding it until something else gives up.
+    #[tokio::test]
+    async fn a_provider_that_never_answers_times_out_within_the_budget() {
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+
+        let mock = MockAnthropicServer::start().await;
+        mock.push_fault(MockFault::stall(Duration::from_secs(5)));
+        let budget = Duration::from_secs(1);
+        let client = GenAiClient::with_base_url_and_timeouts(
+            mock.base_url(),
+            LlmTimeouts {
+                connect: budget,
+                request: budget,
+            },
+        )
+        .expect("client builds");
+
+        let started = Instant::now();
+        let err = client
+            .chat(simple_request())
+            .await
+            .expect_err("a stalled call fails");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(err, LlmError::Timeout { budget: b } if b == budget),
+            "expected Timeout at the budget, got {err:?}"
+        );
+        assert!(err.is_transient(), "a timeout is retried");
+        assert!(elapsed >= budget, "gave up before the budget: {elapsed:?}");
+        assert!(
+            elapsed < budget + Duration::from_secs(2),
+            "the budget did not bound the call: {elapsed:?}"
+        );
+
+        mock.shutdown().await;
+    }
+
+    /// #546 acceptance: the retry layer waits at least the `Retry-After`
+    /// a 429 asked for, then the same request goes out again and
+    /// succeeds — against the wire, not a fixture.
+    #[tokio::test]
+    async fn the_retry_layer_waits_out_the_retry_after_then_succeeds() {
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+
+        let mock = MockAnthropicServer::start().await;
+        mock.push_fault(MockFault::status(429).with_retry_after("1"));
+        mock.push_response(MockResponse::text("after the wait", 5, 1));
+        let client = RetryingLlmClient::new(
+            GenAiClient::with_base_url(mock.base_url()).expect("client builds"),
+            RetryConfig {
+                max_attempts: 3,
+                base_delay_ms: 0,
+                max_delay_ms: 0,
+                max_retry_after_ms: 10_000,
+            },
+        );
+
+        let started = Instant::now();
+        let response = client
+            .chat(simple_request())
+            .await
+            .expect("the retry succeeds");
+        let elapsed = started.elapsed();
+        assert_eq!(response.text().as_deref(), Some("after the wait"));
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "retried before the provider's wait was up: {elapsed:?}"
+        );
+        assert_eq!(mock.received_requests().len(), 2, "one request per attempt");
+
+        mock.shutdown().await;
+    }
+
+    /// A `Retry-After` past `max_retry_after_ms` is not waited for: the
+    /// call fails at once as rate-limited, still carrying the wait, so
+    /// the invocation can be deferred instead of a worker parked (#278).
+    #[tokio::test]
+    async fn a_retry_after_past_the_cap_is_not_waited_for() {
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+
+        let mock = MockAnthropicServer::start().await;
+        mock.push_fault(MockFault::status(429).with_retry_after("30"));
+        mock.push_response(MockResponse::text("never reached", 5, 1));
+        let client = RetryingLlmClient::new(
+            GenAiClient::with_base_url(mock.base_url()).expect("client builds"),
+            RetryConfig {
+                max_attempts: 3,
+                base_delay_ms: 0,
+                max_delay_ms: 0,
+                max_retry_after_ms: 1_000,
+            },
+        );
+
+        let started = Instant::now();
+        let err = client
+            .chat(simple_request())
+            .await
+            .expect_err("given up without waiting");
+        assert!(
+            matches!(
+                err,
+                LlmError::RateLimited { retry_after: Some(wait), .. }
+                    if wait == Duration::from_secs(30)
+            ),
+            "the error still names the wait: {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "waited anyway: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(mock.received_requests().len(), 1, "no second attempt");
 
         mock.shutdown().await;
     }

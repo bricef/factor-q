@@ -12,8 +12,9 @@
 //! and the wire is what the provider sees.
 //!
 //! Sequenced-response (FIFO), matching `MockAnthropicServer` and
-//! `FixtureClient::push_response`. Every request body is captured so a
-//! test can assert on what went out.
+//! `FixtureClient::push_response`, with a [`MockFault`] taking a slot in
+//! the same queue. Every request body is captured so a test can assert
+//! on what went out.
 //!
 //! # Example
 //!
@@ -34,11 +35,13 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::{Json as ExtractJson, State};
-use axum::response::Json;
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::post;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+
+use super::fault::MockFault;
 
 /// One canned assistant turn the mock will return.
 #[derive(Debug, Clone, Default)]
@@ -148,9 +151,15 @@ impl MockChoice {
     }
 }
 
+/// One queue entry: an answer, or a failure served in its place.
+enum Scripted {
+    Choice(MockChoice),
+    Fault(MockFault),
+}
+
 #[derive(Default)]
 struct MockState {
-    responses: Mutex<Vec<MockChoice>>,
+    responses: Mutex<Vec<Scripted>>,
     requests: Mutex<Vec<Value>>,
 }
 
@@ -193,7 +202,22 @@ impl MockOpenAiServer {
     /// over-runs its script fails on its own assertion instead of a
     /// confusing transport failure.
     pub fn push(&self, choice: MockChoice) {
-        self.state.responses.lock().unwrap().push(choice);
+        self.state
+            .responses
+            .lock()
+            .unwrap()
+            .push(Scripted::Choice(choice));
+    }
+
+    /// Queue a failure in place of the next response — a status with
+    /// headers of the test's choosing, or a request held past the
+    /// client's deadline.
+    pub fn push_fault(&self, fault: MockFault) {
+        self.state
+            .responses
+            .lock()
+            .unwrap()
+            .push(Scripted::Fault(fault));
     }
 
     /// Every request body received, in order — the bytes we actually
@@ -225,10 +249,13 @@ impl MockOpenAiServer {
         // not check it, but the resolver must find *something* or the
         // request fails before it is sent.
         unsafe { std::env::set_var("FQ_MOCK_OPENAI_KEY", "mock-key") };
-        crate::llm::GenAiClient::from_providers(&crate::config::ProvidersConfig {
-            anthropic: None,
-            extra,
-        })
+        crate::llm::GenAiClient::from_providers(
+            &crate::config::ProvidersConfig {
+                anthropic: None,
+                extra,
+            },
+            crate::llm::LlmTimeouts::default(),
+        )
         .expect("the mock's client builds")
     }
 
@@ -243,20 +270,86 @@ impl MockOpenAiServer {
 async fn completions(
     State(state): State<Arc<MockState>>,
     ExtractJson(body): ExtractJson<Value>,
-) -> Json<Value> {
+) -> Response {
     let model = body
         .get("model")
         .and_then(|m| m.as_str())
         .unwrap_or("mock-model")
         .to_string();
     state.requests.lock().unwrap().push(body);
-    let choice = {
+    let scripted = {
         let mut queued = state.responses.lock().unwrap();
         if queued.is_empty() {
-            MockChoice::text("")
+            Scripted::Choice(MockChoice::text(""))
         } else {
             queued.remove(0)
         }
     };
-    Json(choice.to_body(&model))
+    match scripted {
+        Scripted::Choice(choice) => Json(choice.to_body(&model)).into_response(),
+        Scripted::Fault(fault) => fault.serve(openai_error_body).await,
+    }
+}
+
+/// The error shape an OpenAI-compatible endpoint returns.
+fn openai_error_body(status: u16) -> Value {
+    let kind = match status {
+        429 => "rate_limit_error",
+        400..=499 => "invalid_request_error",
+        _ => "server_error",
+    };
+    json!({
+        "error": {
+            "message": format!("MockOpenAiServer scripted a {status}"),
+            "type": kind,
+            "param": Value::Null,
+            "code": Value::Null,
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::{Message, RequestParams};
+    use crate::llm::{ChatRequest, LlmClient, LlmError};
+    use std::time::Duration;
+
+    /// The OpenAI-compatible shape gets the same `Retry-After` read —
+    /// including `retry-after-ms`, which OpenAI sends and its SDK reads
+    /// first — through the adapter genai uses for every such provider.
+    #[tokio::test]
+    async fn a_429_from_an_openai_compatible_provider_carries_retry_after_ms() {
+        let mock = MockOpenAiServer::start().await;
+        mock.push_fault(
+            MockFault::status(429)
+                .with_header("retry-after-ms", "250")
+                .with_retry_after("5"),
+        );
+        let client = mock.client("kimi-k2");
+
+        let err = client
+            .chat(ChatRequest {
+                model: "kimi-k2".to_string(),
+                messages: vec![Message::user("hello".to_string())],
+                tools: vec![],
+                params: RequestParams {
+                    effort: None,
+                    temperature: None,
+                    max_tokens: None,
+                },
+            })
+            .await
+            .expect_err("a 429 is an error");
+        match &err {
+            LlmError::RateLimited { model, retry_after } => {
+                assert_eq!(model, "kimi-k2");
+                assert_eq!(*retry_after, Some(Duration::from_millis(250)));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        assert_eq!(mock.requests().len(), 1, "the request went out once");
+
+        mock.shutdown().await;
+    }
 }

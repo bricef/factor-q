@@ -1937,7 +1937,10 @@ mod crash_dst {
     async fn llm_provider_error_fails_canonically() {
         let world = SimWorld::new(31, 5.0).await;
         let llm = FixtureClient::new();
-        llm.push_error(LlmError::RateLimited);
+        llm.push_error(LlmError::RateLimited {
+            model: "sim-model".to_string(),
+            retry_after: None,
+        });
 
         let err = world.run(&llm).await.expect_err("provider error");
         assert!(matches!(err, ExecutorError::Llm(_)), "got {err:?}");
@@ -2453,7 +2456,10 @@ mod soak {
         let llm = FixtureClient::new();
         if let Some(k) = s.llm_error_at {
             load_fixture(&llm, &responses[..k]);
-            llm.push_error(LlmError::RateLimited);
+            llm.push_error(LlmError::RateLimited {
+                model: "sim-model".to_string(),
+                retry_after: None,
+            });
         } else {
             load_fixture(&llm, &responses);
         }
@@ -2542,7 +2548,10 @@ mod soak {
                             match s.llm_error_at {
                                 Some(k) if consumed < k + 1 => {
                                     load_fixture(&resume_llm, &responses[consumed..k]);
-                                    resume_llm.push_error(LlmError::RateLimited);
+                                    resume_llm.push_error(LlmError::RateLimited {
+                                        model: "sim-model".to_string(),
+                                        retry_after: None,
+                                    });
                                 }
                                 _ => load_fixture(&resume_llm, &responses[consumed..]),
                             }

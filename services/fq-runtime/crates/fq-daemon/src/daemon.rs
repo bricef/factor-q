@@ -380,7 +380,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // backoff instead of failing the whole invocation (issue #10). This is
     // the daemon path — the one the fleet actually runs on.
     let llm: Arc<dyn LlmClient> = Arc::new(fq_runtime::llm::RetryingLlmClient::new(
-        GenAiClient::from_providers(&config.providers)?,
+        GenAiClient::from_providers(&config.providers, config.worker.llm_timeouts())?,
         config.worker.llm_retry.clone(),
     ));
     // One ReducerRunner serves two roles: the dispatcher uses

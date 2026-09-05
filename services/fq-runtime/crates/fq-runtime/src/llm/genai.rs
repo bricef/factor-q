@@ -12,6 +12,8 @@
 //! per provider in `fqd.toml` and ensure it's set in the runtime
 //! environment.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -20,11 +22,15 @@ use crate::events::{
     ToolSchema,
 };
 
-use super::{ChatRequest, ChatResponse, LlmClient, LlmError};
+use super::{ChatRequest, ChatResponse, LlmClient, LlmError, LlmTimeouts};
 
 // Use the crate via its fully qualified name to avoid confusion with
 // our parent module name.
 use ::genai as provider;
+
+/// What a failed provider call means: the status-driven mapping onto
+/// [`LlmError`], and the `Retry-After` read that goes with a 429.
+mod errors;
 
 /// The wire goldens: what this adapter decodes and what it sends, pinned
 /// per scenario so a dependency change cannot move either unnoticed.
@@ -59,14 +65,23 @@ fn client_build_error(err: provider::Error) -> ClientBuildError {
 #[derive(Clone)]
 pub struct GenAiClient {
     client: provider::Client,
+    /// The per-call deadlines: set on the HTTP client in [`Self::build`]
+    /// and applied again around each call in `chat`.
+    timeouts: LlmTimeouts,
 }
+
+/// How much longer than the request budget the guard around a call
+/// waits before giving up itself. The HTTP client's own deadline is the
+/// one meant to fire — it names the cause, and it closes the connection
+/// — so the guard sits behind it and only matters if it did not.
+const CALL_GUARD_GRACE: Duration = Duration::from_secs(1);
 
 impl GenAiClient {
     /// Construct a client using `genai`'s default configuration, which
-    /// resolves API keys from provider-specific environment variables.
+    /// resolves API keys from provider-specific environment variables,
+    /// with the default [`LlmTimeouts`].
     pub fn new() -> Result<Self, ClientBuildError> {
-        let client = provider::Client::new().map_err(client_build_error)?;
-        Ok(Self { client })
+        Self::build(provider::Client::builder(), LlmTimeouts::default())
     }
 
     /// Construct from the parsed `[providers.anthropic]` config. When
@@ -88,8 +103,18 @@ impl GenAiClient {
     ///
     /// Auth and model resolution are unchanged — the closure replaces
     /// only the endpoint on whichever `ServiceTarget` genai resolves
-    /// for the requested model.
+    /// for the requested model. Deadlines are the default
+    /// [`LlmTimeouts`]; [`Self::with_base_url_and_timeouts`] sets them.
     pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, ClientBuildError> {
+        Self::with_base_url_and_timeouts(base_url, LlmTimeouts::default())
+    }
+
+    /// [`Self::with_base_url`] with explicit deadlines — how a test
+    /// points the client at a provider scripted not to answer.
+    pub fn with_base_url_and_timeouts(
+        base_url: impl Into<String>,
+        timeouts: LlmTimeouts,
+    ) -> Result<Self, ClientBuildError> {
         use ::std::sync::Arc;
         use provider::ServiceTarget;
         use provider::resolver::{Endpoint, ServiceTargetResolver};
@@ -104,11 +129,8 @@ impl GenAiClient {
                 })
             },
         );
-        let client = provider::Client::builder()
-            .with_service_target_resolver(resolver)
-            .build()
-            .map_err(client_build_error)?;
-        Ok(Self { client })
+        let builder = provider::Client::builder().with_service_target_resolver(resolver);
+        Self::build(builder, timeouts)
     }
 
     /// Build a client from the whole `[providers]` config — a single
@@ -129,9 +151,12 @@ impl GenAiClient {
     /// redirect every Anthropic-adapter request to that endpoint (the
     /// mock server, or a Bedrock-style proxy) — no `models` list needed.
     ///
-    /// When nothing needs overriding this is exactly [`Self::new`].
+    /// When nothing needs overriding this is [`Self::new`] with the
+    /// given deadlines — `[worker] llm_timeout_secs` and
+    /// `llm_connect_timeout_secs`, on the daemon path.
     pub fn from_providers(
         config: &crate::config::ProvidersConfig,
+        timeouts: LlmTimeouts,
     ) -> Result<Self, ClientBuildError> {
         use ::std::collections::HashMap;
         use ::std::sync::Arc;
@@ -171,9 +196,9 @@ impl GenAiClient {
             .and_then(|a| a.base_url.clone())
             .map(Arc::from);
 
-        // Nothing to override -> genai default (identical to `new()`).
+        // Nothing to override -> genai default, built as `new()` builds it.
         if by_model.is_empty() && anthropic_base_url.is_none() {
-            return Self::new();
+            return Self::build(provider::Client::builder(), timeouts);
         }
 
         let by_model = Arc::new(by_model);
@@ -205,11 +230,29 @@ impl GenAiClient {
                 Ok(target)
             },
         );
-        let client = provider::Client::builder()
-            .with_service_target_resolver(resolver)
+        let builder = provider::Client::builder().with_service_target_resolver(resolver);
+        Self::build(builder, timeouts)
+    }
+
+    /// Every constructor ends here: genai's own web defaults — gzip,
+    /// TCP_NODELAY, HTTP/2 keep-alive, the connection pool — plus the two
+    /// deadlines (#546). Going through genai's `WebConfig` rather than
+    /// handing it a hand-built `reqwest::Client` is what keeps those
+    /// defaults from drifting: the crate applies the same settings on
+    /// both paths, so the only difference from its default client is
+    /// the timeouts.
+    fn build(
+        builder: provider::ClientBuilder,
+        timeouts: LlmTimeouts,
+    ) -> Result<Self, ClientBuildError> {
+        let web_config = provider::WebConfig::default()
+            .with_connect_timeout(timeouts.connect)
+            .with_timeout(timeouts.request);
+        let client = builder
+            .with_web_config(web_config)
             .build()
             .map_err(client_build_error)?;
-        Ok(Self { client })
+        Ok(Self { client, timeouts })
     }
 }
 
@@ -247,11 +290,17 @@ fn ensure_trailing_slash(url: String) -> String {
 impl LlmClient for GenAiClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let (model, chat_req, options) = into_provider_request(request)?;
-        let response = self
-            .client
-            .exec_chat(&model, chat_req, Some(&options))
-            .await
-            .map_err(map_error)?;
+        let budget = self.timeouts.request;
+        // The deadline, applied twice (#546): the HTTP client built in
+        // `build` times the exchange out at `budget` and reports a
+        // timeout error, mapped below; the guard here bounds the whole
+        // call, so nothing the library does around the exchange can
+        // hold an invocation past the budget either.
+        let call = self.client.exec_chat(&model, chat_req, Some(&options));
+        let response = match tokio::time::timeout(budget + CALL_GUARD_GRACE, call).await {
+            Ok(result) => result.map_err(|err| errors::map_error(&model, budget, err))?,
+            Err(_elapsed) => return Err(LlmError::Timeout { budget }),
+        };
         from_provider_response(response)
     }
 }
@@ -674,24 +723,6 @@ fn convert_usage(usage: &provider::chat::Usage) -> TokenUsage {
         cache_read_tokens: cache_read,
         cache_write_tokens: cache_write,
         reasoning_tokens,
-    }
-}
-
-/// Map a `genai::Error` to our `LlmError` variants. Specific auth
-/// failures become [`LlmError::Auth`]; everything else is reported as
-/// [`LlmError::RequestFailed`] with the underlying message.
-///
-/// `genai::Error::Resolver` wraps the auth resolver's own error type —
-/// when the resolver fails it is almost always an auth problem (for
-/// example `ApiKeyEnvNotFound`), so we treat it as `Auth` too.
-fn map_error(err: provider::Error) -> LlmError {
-    let message = err.to_string();
-    match err {
-        provider::Error::RequiresApiKey { .. }
-        | provider::Error::NoAuthResolver { .. }
-        | provider::Error::NoAuthData { .. }
-        | provider::Error::Resolver { .. } => LlmError::Auth(message),
-        _ => LlmError::RequestFailed(message),
     }
 }
 
@@ -1934,7 +1965,8 @@ mod tests {
             anthropic: Some(AnthropicConfig::default()),
             extra,
         };
-        let client = GenAiClient::from_providers(&cfg).expect("client builds");
+        let client =
+            GenAiClient::from_providers(&cfg, LlmTimeouts::default()).expect("client builds");
 
         // Declared model -> provider endpoint + OpenAI adapter, and the
         // namespaced id survives intact (OpenRouter needs the full name).
@@ -1996,7 +2028,8 @@ mod tests {
             anthropic: None,
             extra,
         };
-        let client = GenAiClient::from_providers(&cfg).expect("client builds");
+        let client =
+            GenAiClient::from_providers(&cfg, LlmTimeouts::default()).expect("client builds");
 
         let response = client
             .chat(request_with_system_and_user("openai/gpt-4o-mini"))

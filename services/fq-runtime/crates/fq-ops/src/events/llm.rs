@@ -485,18 +485,26 @@ impl TokenUsage {
 /// indistinguishable from a transport error. It is not: it is the one
 /// failure that *bills*, because the provider did the prefill.
 ///
-/// A 429 currently arrives as `RequestFailed` with the status buried
-/// in `error_message` — under-classified, and where
-/// [#278](https://github.com/bricef/factor-q/issues/278)'s
-/// `Retry-After` rework lands, at which point `rate_limited` becomes
-/// queryable with no schema change.
+/// `rate_limited` is a 429, `rejected` any other 4xx the provider
+/// answered with (the auth statuses aside), `request_failed` a 5xx or
+/// a transport failure, and `timeout` the runtime's own deadline on the
+/// call — the split
+/// [#278](https://github.com/bricef/factor-q/issues/278) and
+/// [#546](https://github.com/bricef/factor-q/issues/546) made, so an
+/// operator can tell being throttled from the provider being down from
+/// the request being wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmErrorKind {
     Auth,
     RateLimited,
     InvalidResponse,
+    /// A 4xx other than auth and 429: the request itself was refused,
+    /// and the same bytes will be refused again.
+    Rejected,
     RequestFailed,
+    /// No answer within `[worker] llm_timeout_secs`.
+    Timeout,
     UnpricedModel,
     /// A 200 with nothing in it. Synthesised by the runner, never by
     /// a provider, and the only kind that can carry usage.

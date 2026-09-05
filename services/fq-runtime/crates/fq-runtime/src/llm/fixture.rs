@@ -67,9 +67,14 @@ impl LlmClient for FixtureClient {
 fn clone_error(err: &LlmError) -> LlmError {
     match err {
         LlmError::Auth(s) => LlmError::Auth(s.clone()),
-        LlmError::RateLimited => LlmError::RateLimited,
+        LlmError::RateLimited { model, retry_after } => LlmError::RateLimited {
+            model: model.clone(),
+            retry_after: *retry_after,
+        },
         LlmError::InvalidResponse(s) => LlmError::InvalidResponse(s.clone()),
+        LlmError::Rejected(s) => LlmError::Rejected(s.clone()),
         LlmError::RequestFailed(s) => LlmError::RequestFailed(s.clone()),
+        LlmError::Timeout { budget } => LlmError::Timeout { budget: *budget },
         LlmError::UnpricedModel(s) => LlmError::UnpricedModel(s.clone()),
     }
 }
@@ -138,10 +143,13 @@ mod tests {
     #[tokio::test]
     async fn propagates_errors() {
         let client = FixtureClient::new();
-        client.push_error(LlmError::RateLimited);
+        client.push_error(LlmError::RateLimited {
+            model: "test-model".to_string(),
+            retry_after: None,
+        });
 
         let err = client.chat(sample_request()).await.unwrap_err();
-        assert!(matches!(err, LlmError::RateLimited));
+        assert!(matches!(err, LlmError::RateLimited { .. }));
     }
 
     #[tokio::test]

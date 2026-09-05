@@ -25,11 +25,13 @@
 #[cfg(test)]
 pub use fq_test_support as nats;
 
-// Everything except the mock LLM server leans on dev-dependencies
-// (fq-test-support, tempfile, …), so only the mock is exposed through
-// the `test-support` feature; the rest stays crate-test-only.
+// Everything except the mock LLM servers leans on dev-dependencies
+// (fq-test-support, tempfile, …), so only the mocks and the faults they
+// serve are exposed through the `test-support` feature; the rest stays
+// crate-test-only.
 #[cfg(test)]
 pub mod events;
+pub mod fault;
 pub mod mock_anthropic;
 pub mod mock_gemini;
 pub mod mock_openai;
