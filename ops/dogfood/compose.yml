@@ -31,9 +31,10 @@
 #   [nats]      token_env = "FQ_NATS_TOKEN"     # the URL comes from the image
 #
 # Bring-up: `docker compose up -d` here, after `.env` names a tag. Deploy
-# and rollback are a tag change and the same command (ops/dogfood/deploy.sh
-# drives that from #587 slice 4 on; until then this file and the setsid
-# launchers coexist and must not run at once — both would bind 9470).
+# and rollback are a tag change and the same command — ops/dogfood/deploy.sh
+# drives that (and, as `--auto` from the crontab, does it hourly with an
+# idle check and automatic rollback). bootstrap.sh lays this tree out on
+# a dedicated host; backup.sh / restore.sh copy and restore the volumes.
 
 name: fq-dogfood
 

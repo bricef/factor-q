@@ -373,6 +373,29 @@ of the
 Layer 2 (extraction) and layer 3 (embedding + retrieval) are
 M3–M5, next on the active plan.
 
+### Deployment (`ops/dogfood/`)
+
+The deployable unit is a container image
+([ADR-0035](docs/adrs/accepted/0035-container-image-and-compose-supervision.md)):
+every merge to `main` publishes one image per binary to `ghcr.io/bricef`
+— `fq-runtime` (the daemon on distroless, the bare envelope it is held
+to), `fq-dogfood` (the same binaries plus the toolchain the fleet's
+agents run, the transitional shape until worker and control plane
+split), `github-watcher`, `fq-cron`, `fq-dashboard` — tagged with the
+twelve-hex commit the binary inside reports, assembled from the same
+musl binaries as the tarball channel. Docker compose is the stack
+definition and the supervisor (`ops/dogfood/compose.yml`: six services,
+restart policy, health ordering, a stop grace period above the drain
+deadline; no systemd units). Everything the daemon persists lives in one
+volume at `/var/lib/factor-q`. A deploy is a tag bump with a drain,
+verification on the running containers and rollback
+(`ops/dogfood/deploy.sh`; hourly as `--auto` with an idle check and
+automatic rollback); `bootstrap.sh` provisions a dedicated host;
+`backup.sh` / `restore.sh` copy and restore the volumes. Packaging is not
+isolation: agents run inside the daemon's container, as its user, and
+the sandbox is the process sandbox below. The
+[ops README](ops/dogfood/README.md) is the operator's guide.
+
 ### What is NOT yet built
 
 These subsystems from the vision are not implemented:
@@ -381,7 +404,7 @@ These subsystems from the vision are not implemented:
 - Memory system (the memory *servers* per ADR-0013; the MCP *client* that would consume them is implemented — see the [MCP guide](docs/guide/mcp.md))
 - Skill registry (AgentSkills format — scoped to phase 2)
 - Continuous learning
-- Container-level isolation (ADR-0010 accepted: containers by default, Kata+Firecracker upgrade path)
+- Container-level isolation (ADR-0010 accepted: containers by default, Kata+Firecracker upgrade path — the daemon is *packaged* as a container under ADR-0035, but agents run inside it; the isolation model is unbuilt)
 - Observability floor beyond `fq status` (JSON logs landed, #36;
   metrics + lag alerting tracked in
   [#342](https://github.com/bricef/factor-q/issues/342))

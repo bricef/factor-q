@@ -86,8 +86,10 @@ bind = "127.0.0.1:9470"
 
 Restart the daemon — `fqd` reads its config at startup, and `fq reload`
 re-reads the agents directory, not the config — then set `FQ_EDGE` to
-the same address. The launcher refuses to start without `FQ_EDGE` rather
-than defaulting into the collision.
+the same address. Under the dogfood compose stack the daemon's edge is
+published on host loopback as `127.0.0.1:9470` and `FQ_EDGE` lives in
+the dashboard's own `.secrets/dashboard.env`, the one file the
+dashboard's container reads.
 
 ### 2. Pin the daemon
 
@@ -133,8 +135,8 @@ ssh -L 9472:127.0.0.1:9472 <host>
 …or put a reverse proxy in front of it and let that terminate TLS and
 authenticate. The dogfood instance does the latter — see
 [`ops/dogfood/README.md`](../../ops/dogfood/README.md) for its Caddy
-setup, launcher, and how `deploy.sh` keeps the dashboard in lockstep
-with the daemon.
+setup, the dashboard's own env file (#545), and how `deploy.sh` moves
+the dashboard with the daemon so the two always run one build.
 
 ## Build skew
 
