@@ -22,6 +22,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 - [Design principles](docs/design/committed/design-principles.md) — cross-cutting rules that guide design decisions
 - [Contributing](CONTRIBUTING.md) — development setup, test tiers, code conventions
 - [Agent authoring guide](docs/guide/agent-definitions.md) — write your first agent
+- [Reasoning models](docs/guide/reasoning-models.md) — what happens to a model's reasoning per provider and route, and where it does not yet carry
 - [Reducer harness guide](docs/guide/reducer-harness.md) — the suspend/resume-capable execution path that drives every invocation
 - [Operating the daemon](docs/guide/operating-the-daemon.md) — stop and redeploy (`fq down`; relaunch after stopping to redeploy), and hot-reload (`fq reload`) a running daemon cleanly
 - [Content storage (fq-cas)](services/fq-store/README.md) — the content-addressed store CLI + library (Phase 2 pillar #2)
